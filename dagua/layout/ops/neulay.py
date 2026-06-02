@@ -356,7 +356,12 @@ def _is_old_code_fidelity(fidelity_mode: Optional[str]) -> bool:
     raise ValueError("NeuLay fidelity_mode must be None or 'old_code'.")
 
 
-def _resolve_dim(dim: Optional[int], fidelity_mode: Optional[str]) -> int:
+def _resolve_dim(
+    dim: Optional[int],
+    fidelity_mode: Optional[str],
+    gcn_steps: Optional[int] = None,
+    use_gcn: bool = True,
+) -> int:
     """Resolve the output dimension from explicit config and fidelity mode.
 
     Parameters
@@ -365,6 +370,10 @@ def _resolve_dim(dim: Optional[int], fidelity_mode: Optional[str]) -> int:
         Explicit output dimension, if supplied.
     fidelity_mode : str | None
         Optional fidelity mode name.
+    gcn_steps : int | None, default=None
+        Explicit GCN step budget, if supplied.
+    use_gcn : bool, default=True
+        Whether the GCN phase is enabled.
 
     Returns
     -------
@@ -373,7 +382,7 @@ def _resolve_dim(dim: Optional[int], fidelity_mode: Optional[str]) -> int:
     """
     if dim is not None:
         return dim
-    if _is_old_code_fidelity(fidelity_mode):
+    if _is_old_code_fidelity(fidelity_mode) and gcn_steps in {None, 0} and use_gcn:
         return _NEULAY_OLD_CODE_DIM
     return _NEULAY_DEFAULT_DIM
 
@@ -406,6 +415,7 @@ def _resolve_linear_steps(
     fdl_steps: Optional[int],
     use_gcn: bool,
     fidelity_mode: Optional[str],
+    use_old_code_default_budget: bool = False,
 ) -> int:
     """Resolve the direct refinement budget.
 
@@ -421,6 +431,9 @@ def _resolve_linear_steps(
         Whether the GCN phase is enabled.
     fidelity_mode : str | None
         Optional fidelity mode name.
+    use_old_code_default_budget : bool, default=False
+        Whether old-code fidelity should use the recovered script's standalone
+        direct-phase default instead of the caller's total-step budget.
 
     Returns
     -------
@@ -429,7 +442,7 @@ def _resolve_linear_steps(
     """
     if fdl_steps is not None:
         return fdl_steps
-    if _is_old_code_fidelity(fidelity_mode):
+    if _is_old_code_fidelity(fidelity_mode) and use_old_code_default_budget:
         return _NEULAY_OLD_CODE_FDL_STEPS
     return max(total_steps - gcn_steps, 0) if use_gcn else total_steps
 
@@ -503,7 +516,12 @@ class NeuLayPrepareState(Op):
         del ctx
 
         old_code_fidelity = _is_old_code_fidelity(self.config.fidelity_mode)
-        dim = _resolve_dim(self.config.dim, self.config.fidelity_mode)
+        dim = _resolve_dim(
+            self.config.dim,
+            self.config.fidelity_mode,
+            gcn_steps=self.config.gcn_steps,
+            use_gcn=self.config.use_gcn,
+        )
         gcn_steps = _resolve_gcn_steps(self.config.gcn_steps, self.config.fidelity_mode)
         linear_steps = _resolve_linear_steps(
             total_steps=self.config.total_steps,
@@ -511,6 +529,7 @@ class NeuLayPrepareState(Op):
             fdl_steps=self.config.fdl_steps,
             use_gcn=self.config.use_gcn,
             fidelity_mode=self.config.fidelity_mode,
+            use_old_code_default_budget=self.config.gcn_steps is None and self.config.use_gcn,
         )
         if dim <= 0:
             raise ValueError("NeuLay dim must be positive.")

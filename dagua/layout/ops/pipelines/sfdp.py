@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import sqrt
 from typing import ClassVar, Optional, Tuple, Union
 
 import torch
@@ -197,37 +198,48 @@ def _build_graphviz_matrix_coarse_graph(
     GraphData
         Coarse graph with diagonal entries removed after matrix aggregation.
     """
-    coarse_edges: dict[tuple[int, int], float] = {}
-    for edge_id in range(graph.edge_index.shape[1]):
-        source = int(graph.edge_index[0, edge_id].item())
-        target = int(graph.edge_index[1, edge_id].item())
-        coarse_source = int(fine_to_coarse[source].item())
-        coarse_target = int(fine_to_coarse[target].item())
-        if coarse_source == coarse_target:
-            continue
-        lower = min(coarse_source, coarse_target)
-        upper = max(coarse_source, coarse_target)
-        coarse_edges[(lower, upper)] = coarse_edges.get((lower, upper), 0.0) + float(
-            graph.edge_weight[edge_id].item()
-        )
+    fine_groups: list[list[int]] = [[] for _ in range(coarse_num_nodes)]
+    for fine_node, coarse_node_tensor in enumerate(fine_to_coarse.tolist()):
+        fine_groups[int(coarse_node_tensor)].append(fine_node)
 
-    if coarse_edges:
-        ordered_edges = sorted(coarse_edges.items())
-        edge_pairs = [edge for edge, _ in ordered_edges]
-        edge_weights = [weight for _, weight in ordered_edges]
+    adjacency: list[list[tuple[int, float]]] = [[] for _ in range(coarse_num_nodes)]
+    for coarse_source, fine_nodes in enumerate(fine_groups):
+        row_positions: dict[int, int] = {}
+        for fine_node in fine_nodes:
+            for neighbor, weight in graph.adjacency[fine_node]:
+                coarse_target = int(fine_to_coarse[neighbor].item())
+                if coarse_target == coarse_source:
+                    continue
+                if coarse_target not in row_positions:
+                    row_positions[coarse_target] = len(adjacency[coarse_source])
+                    adjacency[coarse_source].append((coarse_target, 0.0))
+                row_index = row_positions[coarse_target]
+                previous_target, previous_weight = adjacency[coarse_source][row_index]
+                adjacency[coarse_source][row_index] = (
+                    previous_target,
+                    previous_weight + float(weight),
+                )
+
+    edge_pairs: list[tuple[int, int]] = []
+    edge_weight_values: list[float] = []
+    seen_edges: set[tuple[int, int]] = set()
+    for source, neighbors in enumerate(adjacency):
+        for target, weight in neighbors:
+            lower = min(source, target)
+            upper = max(source, target)
+            edge = (lower, upper)
+            if edge in seen_edges:
+                continue
+            seen_edges.add(edge)
+            edge_pairs.append(edge)
+            edge_weight_values.append(float(weight))
+
+    if edge_pairs:
         edge_index = torch.tensor(edge_pairs, dtype=torch.long).transpose(0, 1).contiguous()
-        weight_tensor = torch.tensor(edge_weights, dtype=torch.float32)
+        weight_tensor = torch.tensor(edge_weight_values, dtype=torch.float32)
     else:
         edge_index = torch.empty((2, 0), dtype=torch.long)
         weight_tensor = torch.empty((0,), dtype=torch.float32)
-
-    adjacency: list[list[tuple[int, float]]] = [[] for _ in range(coarse_num_nodes)]
-    for edge_id in range(edge_index.shape[1]):
-        source = int(edge_index[0, edge_id].item())
-        target = int(edge_index[1, edge_id].item())
-        weight = float(weight_tensor[edge_id].item())
-        adjacency[source].append((target, weight))
-        adjacency[target].append((source, weight))
 
     return GraphData(
         num_nodes=coarse_num_nodes,
@@ -414,42 +426,6 @@ def _sfdp_force_scales(ideal_length: float, repulsive_exponent: float) -> tuple[
     return attractive_scale, repulsive_scale
 
 
-def _graphviz_power_law_repulsive_exponent(
-    graph: GraphData,
-    repulsive_exponent: float,
-) -> float:
-    """Return Graphviz's auto-selected SFDP repulsive exponent.
-
-    Parameters
-    ----------
-    graph : GraphData
-        Graph whose degree distribution is tested with Graphviz's
-        ``power_law_graph`` heuristic.
-    repulsive_exponent : float
-        Requested repulsive exponent. The Graphviz default arrives through the
-        Dagua fidelity selector as ``-1.0``.
-
-    Returns
-    -------
-    float
-        ``-1.8`` for Graphviz power-law graphs under the default selector,
-        otherwise the requested exponent.
-    """
-    if repulsive_exponent != _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent:
-        return repulsive_exponent
-
-    degree_counts = [0 for _ in range(graph.num_nodes + 1)]
-    max_count = 0
-    for neighbors in graph.adjacency:
-        degree = len(neighbors)
-        degree_counts[degree] += 1
-        max_count = max(max_count, degree_counts[degree])
-
-    if degree_counts[1] > 0.8 * max_count and degree_counts[1] > 0.3 * graph.num_nodes:
-        return -1.8
-    return repulsive_exponent
-
-
 @dataclass(frozen=True)
 class _SFDPGraphvizSequentialStep(Op):
     """Apply one Graphviz-style sequential spring-electrical iteration.
@@ -533,17 +509,20 @@ class _SFDPGraphvizSequentialStep(Op):
         )
 
         for node in range(self.graph.num_nodes):
-            force = torch.zeros((2,), dtype=torch.float64)
+            force_x = 0.0
+            force_y = 0.0
 
             for neighbor, _weight in self.graph.adjacency[node]:
                 if neighbor == node:
                     continue
-                delta = positions[node] - positions[neighbor]
-                distance = torch.linalg.vector_norm(delta)
-                force = force - (self.attractive_scale * delta * distance)
+                delta_x = float(positions[node, 0].item()) - float(positions[neighbor, 0].item())
+                delta_y = float(positions[node, 1].item()) - float(positions[neighbor, 1].item())
+                distance = sqrt((delta_x * delta_x) + (delta_y * delta_y))
+                force_x -= self.attractive_scale * delta_x * distance
+                force_y -= self.attractive_scale * delta_y * distance
 
             if quadtree is not None:
-                force = force + graphviz_supernode_repulsive_force(
+                repulsive_force = graphviz_supernode_repulsive_force(
                     tree=quadtree,
                     positions=positions,
                     node_index=node,
@@ -551,22 +530,31 @@ class _SFDPGraphvizSequentialStep(Op):
                     repulsive_scale=self.repulsive_scale,
                     repulsive_exponent=self.repulsive_exponent,
                 ).to(dtype=torch.float64, device="cpu")
+                force_x += float(repulsive_force[0].item())
+                force_y += float(repulsive_force[1].item())
             else:
                 for other in range(self.graph.num_nodes):
                     if other == node:
                         continue
-                    delta = positions[node] - positions[other]
+                    delta_x = float(positions[node, 0].item()) - float(positions[other, 0].item())
+                    delta_y = float(positions[node, 1].item()) - float(positions[other, 1].item())
                     distance = max(
-                        float(torch.linalg.vector_norm(delta).item()),
+                        sqrt((delta_x * delta_x) + (delta_y * delta_y)),
                         _GRAPHVIZ_MIN_DISTANCE,
                     )
                     denominator = distance ** (1.0 - self.repulsive_exponent)
-                    force = force + (self.repulsive_scale * delta / denominator)
+                    force_x += self.repulsive_scale * delta_x / denominator
+                    force_y += self.repulsive_scale * delta_y / denominator
 
-            node_force_norm = float(torch.linalg.vector_norm(force).item())
+            node_force_norm = sqrt((force_x * force_x) + (force_y * force_y))
             force_norm += node_force_norm
             if node_force_norm > 0.0:
-                positions[node] = positions[node] + (current_step * force / node_force_norm)
+                positions[node, 0] = float(positions[node, 0].item()) + (
+                    current_step * force_x / node_force_norm
+                )
+                positions[node, 1] = float(positions[node, 1].item()) + (
+                    current_step * force_y / node_force_norm
+                )
 
         state.pos = positions
         state.extras[_SFDP_FORCE_NORM_KEY] = force_norm
@@ -623,7 +611,7 @@ def _apply_graphviz_sequential_refinement(
         repulsive_exponent=repulsive_exponent,
     )
     state.extras[_SFDP_CURRENT_STEP_KEY] = _SFDP_ALGORITHM_CONFIG.default_step
-    state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = float("inf")
+    state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = 0.0
     state = Repeat(
         n=steps,
         ops=[
@@ -695,10 +683,6 @@ class _SFDPGraphvizRefineCoarsestLevel(Op):
         if state.ideal_length is None:
             raise ValueError("_SFDPGraphvizRefineCoarsestLevel requires state.ideal_length.")
         graphs: list[GraphData] = state.extras[_GRAPH_KEY]
-        effective_repulsive_exponent = _graphviz_power_law_repulsive_exponent(
-            graph=graphs[0],
-            repulsive_exponent=self.repulsive_exponent,
-        )
         return _apply_graphviz_sequential_refinement(
             problem=problem,
             state=state,
@@ -707,7 +691,7 @@ class _SFDPGraphvizRefineCoarsestLevel(Op):
             steps=self.steps,
             ideal_length=float(state.ideal_length),
             theta=self.theta,
-            repulsive_exponent=effective_repulsive_exponent,
+            repulsive_exponent=self.repulsive_exponent,
             adaptive_cooling=True,
         )
 
@@ -774,14 +758,10 @@ class _SFDPGraphvizProlongateAndRefineLevels(Op):
         generator: GraphvizRandom = state.extras[_GENERATOR_KEY]
         if state.ideal_length is None:
             raise ValueError("_SFDPGraphvizProlongateAndRefineLevels requires state.ideal_length.")
-        effective_repulsive_exponent = _graphviz_power_law_repulsive_exponent(
-            graph=graphs[0],
-            repulsive_exponent=self.repulsive_exponent,
-        )
-
         positions = state.pos
         ideal_length = float(state.ideal_length)
         for level_index in range(len(mappings) - 1, -1, -1):
+            prolongation_ideal_length = ideal_length
             ideal_length = max(
                 ideal_length * _SFDP_ALGORITHM_CONFIG.refinement_k_decay,
                 _SFDP_ALGORITHM_CONFIG.min_span,
@@ -791,7 +771,7 @@ class _SFDPGraphvizProlongateAndRefineLevels(Op):
                 graph=fine_graph,
                 fine_to_coarse=mappings[level_index],
                 coarse_positions=positions,
-                ideal_length=ideal_length,
+                ideal_length=prolongation_ideal_length,
                 generator=generator,
             )
             state.pos = positions
@@ -803,7 +783,7 @@ class _SFDPGraphvizProlongateAndRefineLevels(Op):
                 steps=self.steps,
                 ideal_length=ideal_length,
                 theta=self.theta,
-                repulsive_exponent=effective_repulsive_exponent,
+                repulsive_exponent=self.repulsive_exponent,
                 adaptive_cooling=False,
             )
             positions = state.pos
