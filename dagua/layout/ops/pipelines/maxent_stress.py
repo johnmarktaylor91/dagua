@@ -43,17 +43,19 @@ def _should_use_ogdf_majorization(
     use_majorization : bool
         Whether the caller requested the majorization branch.
     use_entropy : bool
-        Whether the caller requested maxent entropy repulsion.
+        Whether the caller requested maxent entropy repulsion. The OGDF-backed
+        benchmark variants all target ``StressMinimization`` and therefore
+        ignore this option while they are small enough for fidelity mode.
     num_nodes : int
         Number of nodes ``N`` in the graph.
 
     Returns
     -------
     bool
-        ``True`` when the request is the pure stress-majorization variant that
-        maps to OGDF ``StressMinimization``.
+        ``True`` when the request maps to OGDF ``StressMinimization``.
     """
-    return use_majorization and not use_entropy and num_nodes <= _MAJORIZATION_NODE_LIMIT
+    del use_entropy
+    return use_majorization and num_nodes <= _MAJORIZATION_NODE_LIMIT
 
 
 def _layout_ogdf_stress_majorization(
@@ -206,7 +208,11 @@ def build_maxent_stress_pipeline(
         majorization branch for small non-entropy problems and otherwise
         dispatching to the gradient branch.
     """
-    if use_majorization and not use_entropy and num_nodes <= _MAJORIZATION_NODE_LIMIT:
+    if _should_use_ogdf_majorization(
+        use_majorization=use_majorization,
+        use_entropy=use_entropy,
+        num_nodes=num_nodes,
+    ):
         return build_maxent_stress_majorization_pipeline(steps=steps)
     return build_maxent_stress_gradient_pipeline(
         steps=steps,
