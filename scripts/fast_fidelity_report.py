@@ -111,32 +111,65 @@ def main() -> int:
     skipped_no_pair = 0
     start = time.time()
 
+    def _resolve_pos(engine: str, graph: str, seed):
+        # Positions are keyed several ways depending on determinism:
+        #   stochastic:    "{graph}::{engine}::seed{N}"
+        #   deterministic: "{graph}::{engine}::deterministic"  (benchmark runs it once, seed=None)
+        # Try the most specific key first, then deterministic/seedless fallbacks.
+        candidates = []
+        if seed is not None:
+            candidates.append(f"{graph}::{engine}::seed{seed}")
+        candidates += [
+            f"{graph}::{engine}::deterministic",
+            f"{graph}::{engine}::seedNone",
+            f"{graph}::{engine}",
+        ]
+        for key in candidates:
+            pos = load_position_h5(h5, key)
+            if pos is not None:
+                return pos
+        return None
+
     for reimp, ref in pair_map.items():
-        # find graphs where both reimp and ref have ok results at matching seeds
+        # find graphs where reimp has results; pair against the reference's results.
         for graph in set(g for (e, g) in seeds_per_pair if e == reimp):
             reimp_seeds = seeds_per_pair.get((reimp, graph), set())
             ref_seeds = seeds_per_pair.get((ref, graph), set())
-            common = sorted(reimp_seeds & ref_seeds)[: args.max_seeds]
-            if not common:
+            reimp_ints = sorted(s for s in reimp_seeds if isinstance(s, int))
+            ref_ints = sorted(s for s in ref_seeds if isinstance(s, int))
+            int_common = sorted(set(reimp_ints) & set(ref_ints))[: args.max_seeds]
+            # Build (reimp_seed, ref_seed) comparison pairs.
+            if int_common:
+                # stochastic vs stochastic: match identical seeds
+                pairs = [(s, s) for s in int_common]
+            elif None in ref_seeds:
+                # DETERMINISTIC reference (ran once, seed=None): the ref output is the same for
+                # every seed, so compare each reimpl run against that single deterministic result.
+                if reimp_ints:
+                    pairs = [(s, None) for s in reimp_ints[: args.max_seeds]]
+                else:
+                    pairs = [(None, None)]
+            elif None in reimp_seeds and ref_ints:
+                # deterministic reimpl vs stochastic ref
+                pairs = [(None, s) for s in ref_ints[: args.max_seeds]]
+            else:
+                pairs = []
+            if not pairs:
                 skipped_no_pair += 1
                 continue
-            for seed in common:
-                reimp_key = f"{graph}::{reimp}::seed{seed}"
-                ref_key = f"{graph}::{ref}::seed{seed}"
-                a = load_position_h5(h5, reimp_key)
-                b = load_position_h5(h5, ref_key)
-                if a is None or b is None:
-                    # try without seed suffix
-                    a = a if a is not None else load_position_h5(h5, f"{graph}::{reimp}")
-                    b = b if b is not None else load_position_h5(h5, f"{graph}::{ref}")
+            for rseed, refseed in pairs:
+                a = _resolve_pos(reimp, graph, rseed)
+                b = _resolve_pos(ref, graph, refseed)
                 if a is None or b is None:
                     skipped_no_pos += 1
                     continue
                 rmsd = procrustes_rmsd(a, b)
+                # label the pair by the reimpl seed (or the ref seed / 0 for deterministic)
+                label = rseed if rseed is not None else (refseed if refseed is not None else 0)
                 if math.isfinite(rmsd):
-                    per_variant_rmsds[reimp].append((graph, seed, rmsd))
+                    per_variant_rmsds[reimp].append((graph, label, rmsd))
                     if rmsd >= args.bit_exact_threshold:
-                        per_variant_failures[reimp].append((graph, seed, rmsd))
+                        per_variant_failures[reimp].append((graph, label, rmsd))
                 total_pairs += 1
                 if total_pairs % 500 == 0:
                     elapsed = time.time() - start
