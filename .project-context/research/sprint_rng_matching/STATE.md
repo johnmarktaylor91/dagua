@@ -136,7 +136,17 @@ gem proved it: looked "divergent 1.15", was bit-exact 3.86e-13 at matched rounds
 - DRIVE-OR-WALL: per JMT, each engine either <1e-7 OR a precise documented irreducible reason
   (LAPACK degenerate basis, chaotic FP cascade, non-reproducible source). No flailing, no faking.
 
-## Held for wave 3 (after wave 2 + to avoid _igraph_rng.py conflict with drl)
+## Wave 3 DISPATCHED 2026-06-02 18:03 (committed wave-2 = 33d4f5b, 68 bit-exact)
+6 codexes: igraph(2842735: drl+davidson+sugiyama, owns _igraph_rng.py) | sgd2multi(2842848) |
+ogdf_finish(2843116: fmmm+maxent) | sfdp(2843316) | fr_fa2(2843528) | classical_mds(2843735 final).
+Specs W3_*.md. ACCEPTED WALLS (no codex): gem_iters2000 (chaotic FP at 2000 rounds; bit-exact at
+100/500), fcose (no python port -> flag JMT), NO_REFERENCE chains (no ref to compare).
+ON ALL 6 DONE: clean full re-verify -> commit -> classify each -> SUMMARY.md -> TEXT JMT (sprint done).
+Standing: 68 BIT_EXACT / 2 CLOSE / 41 DIVERGENT / 10 no-ref. Targets after wave3: close the
+finishable (fr_steps100 1.86e-7, sgd2_multi_batch128 9.86e-6, fmmm ~0.01, fr_steps200/fa2_linlog
+~1e-3) + crack the ports (igraph family, sgd2_multi, sfdp) OR document each wall precisely.
+
+## Held (now wave-3) -- superseded by dispatch above
 - davidson_harel, sugiyama (igraph RNG -- wait for drl to settle _igraph_rng.py).
 - fr_steps200/500 iterate (fr_steps100 already CLOSE 1.86e-7), fa2_linlog iterate (2.1e-3).
 - SQUEEZE bit-exact-but-not-floor: fa2/graphopt/lgl (~3e-8), gem (~8e-8 -> pin exact OGDF commit for ~1e-13).

@@ -97,15 +97,12 @@ class SFDPAdaptiveCoolConfig:
         Multiplicative shrink when force norm worsens.
     plateau_ratio : float, default=0.95
         Ratio above which the step is held constant.
-    growth_factor : float, default=1.1
-        Multiplicative growth when the force norm improves sufficiently.
     """
 
     adaptive_cooling: bool = True
     tolerance: float = 1.0e-3
     shrink_factor: float = 0.90
     plateau_ratio: float = 0.95
-    growth_factor: float = 1.1
 
 
 _SFDP_ALGORITHM_CONFIG = SFDPAlgorithmConfig()
@@ -1203,10 +1200,13 @@ def _update_step(
         Updated step size.
     """
     if force_norm >= previous_force_norm:
-        return step * config.shrink_factor
+        return config.shrink_factor * step
     if force_norm > config.plateau_ratio * previous_force_norm:
         return step
-    return step * config.growth_factor
+    # Graphviz computes the growth branch as ``0.99 * step / cool`` rather
+    # than using the algebraically equivalent 1.1 multiplier. The distinct
+    # rounding path matters because SFDP's force iterations are chaotic.
+    return ((config.plateau_ratio + 0.04) * step) / config.shrink_factor
 
 
 @register_op
@@ -1348,7 +1348,7 @@ class SFDPAdaptiveCool(Op):
         )
 
         if not self.config.adaptive_cooling:
-            current_step *= self.config.shrink_factor
+            current_step = self.config.shrink_factor * current_step
         elif previous_force_norm < float("inf"):
             current_step = _update_step(
                 step=current_step,

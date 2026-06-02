@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import sqrt
+from math import pow, sqrt
 from typing import ClassVar, Optional, Tuple, Union
 
 import torch
@@ -508,6 +508,51 @@ class _SFDPGraphvizSequentialStep(Op):
             else None
         )
 
+        if quadtree is None:
+            flat_positions = [float(value) for row in positions.tolist() for value in row]
+            dim = 2
+            for node in range(self.graph.num_nodes):
+                node_offset = dim * node
+                force_x = 0.0
+                force_y = 0.0
+
+                for neighbor, _weight in self.graph.adjacency[node]:
+                    if neighbor == node:
+                        continue
+                    neighbor_offset = dim * neighbor
+                    delta_x = flat_positions[node_offset] - flat_positions[neighbor_offset]
+                    delta_y = flat_positions[node_offset + 1] - flat_positions[neighbor_offset + 1]
+                    distance = sqrt((delta_x * delta_x) + (delta_y * delta_y))
+                    force_x -= self.attractive_scale * delta_x * distance
+                    force_y -= self.attractive_scale * delta_y * distance
+
+                for other in range(self.graph.num_nodes):
+                    if other == node:
+                        continue
+                    other_offset = dim * other
+                    delta_x = flat_positions[node_offset] - flat_positions[other_offset]
+                    delta_y = flat_positions[node_offset + 1] - flat_positions[other_offset + 1]
+                    distance = max(
+                        sqrt((delta_x * delta_x) + (delta_y * delta_y)),
+                        _GRAPHVIZ_MIN_DISTANCE,
+                    )
+                    denominator = pow(distance, 1.0 - self.repulsive_exponent)
+                    force_x += self.repulsive_scale * delta_x / denominator
+                    force_y += self.repulsive_scale * delta_y / denominator
+
+                node_force_norm = sqrt((force_x * force_x) + (force_y * force_y))
+                force_norm += node_force_norm
+                if node_force_norm > 0.0:
+                    flat_positions[node_offset] += current_step * force_x / node_force_norm
+                    flat_positions[node_offset + 1] += current_step * force_y / node_force_norm
+
+            state.pos = torch.tensor(flat_positions, dtype=torch.float64).reshape(
+                self.graph.num_nodes,
+                dim,
+            )
+            state.extras[_SFDP_FORCE_NORM_KEY] = force_norm
+            return state
+
         for node in range(self.graph.num_nodes):
             force_x = 0.0
             force_y = 0.0
@@ -521,30 +566,16 @@ class _SFDPGraphvizSequentialStep(Op):
                 force_x -= self.attractive_scale * delta_x * distance
                 force_y -= self.attractive_scale * delta_y * distance
 
-            if quadtree is not None:
-                repulsive_force = graphviz_supernode_repulsive_force(
-                    tree=quadtree,
-                    positions=positions,
-                    node_index=node,
-                    theta=self.theta,
-                    repulsive_scale=self.repulsive_scale,
-                    repulsive_exponent=self.repulsive_exponent,
-                ).to(dtype=torch.float64, device="cpu")
-                force_x += float(repulsive_force[0].item())
-                force_y += float(repulsive_force[1].item())
-            else:
-                for other in range(self.graph.num_nodes):
-                    if other == node:
-                        continue
-                    delta_x = float(positions[node, 0].item()) - float(positions[other, 0].item())
-                    delta_y = float(positions[node, 1].item()) - float(positions[other, 1].item())
-                    distance = max(
-                        sqrt((delta_x * delta_x) + (delta_y * delta_y)),
-                        _GRAPHVIZ_MIN_DISTANCE,
-                    )
-                    denominator = distance ** (1.0 - self.repulsive_exponent)
-                    force_x += self.repulsive_scale * delta_x / denominator
-                    force_y += self.repulsive_scale * delta_y / denominator
+            repulsive_force = graphviz_supernode_repulsive_force(
+                tree=quadtree,
+                positions=positions,
+                node_index=node,
+                theta=self.theta,
+                repulsive_scale=self.repulsive_scale,
+                repulsive_exponent=self.repulsive_exponent,
+            ).to(dtype=torch.float64, device="cpu")
+            force_x += float(repulsive_force[0].item())
+            force_y += float(repulsive_force[1].item())
 
             node_force_norm = sqrt((force_x * force_x) + (force_y * force_y))
             force_norm += node_force_norm
