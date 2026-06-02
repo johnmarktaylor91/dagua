@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 
@@ -14,8 +14,11 @@ from dagua.layout.ops.maxent_stress import (
     MaxentGradientStep,
     MaxentInitializeOptimizer,
     MaxentInitializePositions,
-    MaxentMajorizationStep,
     MaxentPrepareState,
+)
+from dagua.layout.ops.pipelines.stress_majorization import (
+    build_stress_majorization_pipeline,
+    layout_stress_majorization_pipeline,
 )
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
@@ -25,6 +28,76 @@ from dagua.layout.ops.state import (  # noqa: E402
 )
 
 _MAJORIZATION_NODE_LIMIT = 5_000
+_OGDF_FIDELITY_MODE = "ogdf"
+
+
+def _should_use_ogdf_majorization(
+    use_majorization: bool,
+    use_entropy: bool,
+    num_nodes: int,
+) -> bool:
+    """Return whether maxent-stress should use OGDF stress fidelity.
+
+    Parameters
+    ----------
+    use_majorization : bool
+        Whether the caller requested the majorization branch.
+    use_entropy : bool
+        Whether the caller requested maxent entropy repulsion.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when the request is the pure stress-majorization variant that
+        maps to OGDF ``StressMinimization``.
+    """
+    return use_majorization and not use_entropy and num_nodes <= _MAJORIZATION_NODE_LIMIT
+
+
+def _layout_ogdf_stress_majorization(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    steps: int,
+    seed: int,
+    edge_weights: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Run the OGDF-fidelity stress-majorization path used by maxent-stress.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``.
+    steps : int
+        Number of OGDF ``StressMinimization`` iterations.
+    seed : int
+        Seed passed to the OGDF runner-compatible initialization stream.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``. The OGDF fidelity path
+        intentionally ignores these because the benchmark runner uses uniform
+        edge costs for ``StressMinimization``.
+
+    Returns
+    -------
+    torch.Tensor
+        Final positions with shape ``[N, 2]``.
+    """
+    positions = layout_stress_majorization_pipeline(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        iterations=steps,
+        seed=seed,
+        edge_weights=edge_weights,
+        fidelity_mode=_OGDF_FIDELITY_MODE,
+    )
+    return cast(torch.Tensor, positions)
 
 
 def build_maxent_stress_majorization_pipeline(steps: int = 200) -> Pipeline:
@@ -43,18 +116,9 @@ def build_maxent_stress_majorization_pipeline(steps: int = 200) -> Pipeline:
         preparing stress state, applying repeated majorization updates, and
         finalizing the layout.
     """
-    return Pipeline(
-        [
-            FixedSteps(FixedStepsConfig(n=steps)),
-            MaxentInitializePositions(for_majorization=True),
-            MaxentPrepareState(for_majorization=True),
-            Repeat(
-                n=steps,
-                ops=[MaxentMajorizationStep()],
-            ),
-            MaxentFinalizePositions(for_majorization=True),
-        ],
-        name="maxent_stress_majorization_pipeline",
+    return build_stress_majorization_pipeline(
+        iterations=steps,
+        fidelity_mode=_OGDF_FIDELITY_MODE,
     )
 
 
@@ -218,6 +282,20 @@ def layout_maxent_stress_pipeline(
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
+    if _should_use_ogdf_majorization(
+        use_majorization=use_majorization,
+        use_entropy=use_entropy,
+        num_nodes=num_nodes,
+    ):
+        return _layout_ogdf_stress_majorization(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            steps=steps,
+            seed=seed,
+            edge_weights=edge_weights,
+        )
+
     pipeline = build_maxent_stress_pipeline(
         steps=steps,
         alpha=alpha,
@@ -225,7 +303,6 @@ def layout_maxent_stress_pipeline(
         use_majorization=use_majorization,
         num_nodes=num_nodes,
     )
-
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,

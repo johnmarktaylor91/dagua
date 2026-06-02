@@ -54,7 +54,6 @@ _GRAPHVIZ_FIDELITY_MODES = {_FIDELITY_MODE_GRAPHVIZ}
 _GRAPHVIZ_LAP2_KEY = "sm_graphviz_lap2_packed"
 _GRAPHVIZ_OLD_STRESS_KEY = "sm_graphviz_old_stress"
 _GRAPHVIZ_CG_TOLERANCE = 1.0e-3
-_GRAPHVIZ_MIN_DISTANCE = 1.0e-30
 _GRAPHVIZ_DRAND48_MULTIPLIER = 0x5DEECE66D
 _GRAPHVIZ_DRAND48_INCREMENT = 0xB
 _GRAPHVIZ_DRAND48_MASK = (1 << 48) - 1
@@ -185,8 +184,12 @@ def _graphviz_orthog1f(vector: np.ndarray) -> None:
     None
         The vector is modified in place.
     """
-    mean = np.float32(np.sum(vector, dtype=np.float32) / np.float32(vector.shape[0]))
-    vector -= mean
+    total = np.float32(0.0)
+    for index in range(int(vector.shape[0])):
+        total = np.float32(total + vector[index])
+    mean = np.float32(total / np.float32(vector.shape[0]))
+    for index in range(int(vector.shape[0])):
+        vector[index] = np.float32(vector[index] - mean)
 
 
 def _graphviz_inner_productf(left: np.ndarray, right: np.ndarray) -> float:
@@ -204,8 +207,53 @@ def _graphviz_inner_productf(left: np.ndarray, right: np.ndarray) -> float:
     float
         Dot product accumulated in double precision after float products.
     """
-    products = np.asarray(left * right, dtype=np.float32)
-    return float(np.sum(products, dtype=np.float64))
+    result = 0.0
+    for index in range(int(left.shape[0])):
+        result += float(np.float32(left[index] * right[index]))
+    return result
+
+
+def _graphviz_subtract_vectorsf(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Subtract two float vectors with Graphviz's sequential assignment order.
+
+    Parameters
+    ----------
+    left : numpy.ndarray
+        Left single-precision vector with shape ``[N]``.
+    right : numpy.ndarray
+        Right single-precision vector with shape ``[N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Single-precision vector containing ``left - right``.
+    """
+    result = np.empty_like(left, dtype=np.float32)
+    for index in range(int(left.shape[0])):
+        result[index] = np.float32(left[index] - right[index])
+    return result
+
+
+def _graphviz_mult_additionf(vector: np.ndarray, alpha: float, addend: np.ndarray) -> None:
+    """Apply Graphviz ``vectors_mult_additionf`` in place.
+
+    Parameters
+    ----------
+    vector : numpy.ndarray
+        Single-precision vector updated in place.
+    alpha : float
+        Scalar multiplier cast to single precision by the C caller.
+    addend : numpy.ndarray
+        Single-precision addend vector with shape matching ``vector``.
+
+    Returns
+    -------
+    None
+        ``vector`` is updated in place.
+    """
+    alpha32 = np.float32(alpha)
+    for index in range(int(vector.shape[0])):
+        vector[index] = np.float32(vector[index] + np.float32(alpha32 * addend[index]))
 
 
 def _graphviz_packed_stress_laplacian(target_distances: np.ndarray) -> np.ndarray:
@@ -360,7 +408,12 @@ def _graphviz_random_initialize_positions(
         start = node * dimensions
         initialized[node, :] = values[start : start + dimensions]
     for axis in range(dimensions):
-        initialized[:, axis] -= initialized[:, axis].mean()
+        total = 0.0
+        for node in range(num_nodes):
+            total += float(initialized[node, axis])
+        mean = total / float(num_nodes)
+        for node in range(num_nodes):
+            initialized[node, axis] = float(initialized[node, axis]) - mean
     return initialized.astype(np.float32)
 
 
@@ -402,7 +455,7 @@ def _graphviz_conjugate_gradient_packed(
     ax_vector = _graphviz_packed_matvec(packed_matrix=packed_matrix, vector=x)
     _graphviz_orthog1f(ax_vector)
 
-    residual[:] = b - ax_vector
+    residual[:] = _graphviz_subtract_vectorsf(b, ax_vector)
     direction[:] = residual
     residual_norm = _graphviz_inner_productf(residual, residual)
 
@@ -419,16 +472,20 @@ def _graphviz_conjugate_gradient_packed(
         if p_ap == 0.0:
             break
         alpha = residual_norm / p_ap
-        x[:] = x + np.float32(alpha) * direction
+        _graphviz_mult_additionf(x, float(np.float32(alpha)), direction)
 
         if iteration < max_iterations - 1:
-            residual[:] = residual + np.float32(-alpha) * ap_vector
+            _graphviz_mult_additionf(residual, float(np.float32(-alpha)), ap_vector)
             new_residual_norm = _graphviz_inner_productf(residual, residual)
             if residual_norm == 0.0:
                 return 1
             beta = new_residual_norm / residual_norm
             residual_norm = new_residual_norm
-            direction[:] = np.float32(beta) * direction + residual
+            beta32 = np.float32(beta)
+            for index in range(size):
+                direction[index] = np.float32(
+                    np.float32(beta32 * direction[index]) + residual[index]
+                )
         iteration += 1
 
     return 0
@@ -777,13 +834,10 @@ class GraphvizCgSmacofStep(Op):
                     inverse_distance = np.float32(1.0) / np.float32(np.sqrt(squared_distance))
                 if inverse_distance >= np.finfo(np.float32).max or inverse_distance < 0:
                     inverse_distance = np.float32(0.0)
-                target = np.float32(target_distances[row, col])
                 scale = np.float32(0.0)
-                if target > np.float32(0.0):
-                    scale = np.float32(1.0) / target
+                if lap2[index] >= np.float32(0.0):
+                    scale = np.float32(np.sqrt(lap2[index]))
                 value = np.float32(scale * inverse_distance)
-                if squared_distance <= np.float32(_GRAPHVIZ_MIN_DISTANCE):
-                    value = np.float32(0.0)
                 lap1[index] = value
                 degrees[row] -= np.longdouble(value)
                 degrees[col] -= np.longdouble(value)

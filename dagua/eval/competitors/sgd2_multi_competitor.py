@@ -30,8 +30,15 @@ _SGD2_BRANCH = "sgd"
 
 
 def _sgd2_multi_available() -> bool:
-    """Check if the upstream (SGD)^2 code is available."""
-    return (_SGD2_REPO / "gd2.py").exists() and (_SGD2_REPO / "criteria.py").exists()
+    """Check if the upstream (SGD)^2 code is available.
+
+    Returns
+    -------
+    bool
+        ``True`` when the required upstream modules are already importable or
+        can be recovered into the expected checkout path.
+    """
+    return not _ensure_sgd2_multi_sources()
 
 
 def _missing_sgd2_multi_sources() -> list[str]:
@@ -95,7 +102,25 @@ def _ensure_sgd2_multi_sources() -> list[str]:
     if not missing_sources:
         return []
     if not (_SGD2_REPO / ".git").exists():
-        return missing_sources
+        try:
+            _SGD2_REPO.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return missing_sources
+        clone_ok, _ = _run_sgd2_source_command(
+            [
+                "git",
+                "clone",
+                "--branch",
+                _SGD2_BRANCH,
+                "--single-branch",
+                _SGD2_REMOTE_URL,
+                str(_SGD2_REPO),
+            ],
+            cwd=_SGD2_REPO.parent,
+        )
+        if not clone_ok:
+            return _missing_sgd2_multi_sources()
+        return _missing_sgd2_multi_sources()
 
     # The paper points at /tree/sgd, while the default branch only contains
     # notebooks and the TensorFlow.js demo. Refresh that branch when the local
