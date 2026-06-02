@@ -468,8 +468,12 @@ class _DensityGrid:
         self.kernel = np.zeros((diameter, diameter), dtype=np.float32)
         for row, offset_y in enumerate(range(-config.radius, config.radius + 1)):
             for col, offset_x in enumerate(range(-config.radius, config.radius + 1)):
-                falloff_y = (config.radius - abs(float(offset_y))) / float(config.radius)
-                falloff_x = (config.radius - abs(float(offset_x))) / float(config.radius)
+                falloff_y = np.float32(
+                    (config.radius - abs(float(np.float32(offset_y)))) / config.radius
+                )
+                falloff_x = np.float32(
+                    (config.radius - abs(float(np.float32(offset_x)))) / config.radius
+                )
                 self.kernel[row, col] = np.float32(falloff_y * falloff_x)
 
     def _cell_index(self, position: torch.Tensor) -> tuple[int, int]:
@@ -633,8 +637,8 @@ class _DensityGrid:
             or cell_y < _DENSITY_BOUNDARY_CELLS
         ):
             return _DENSITY_EDGE_PENALTY
-        value = float(self.density[cell_y, cell_x])
-        return value * value
+        value = float(np.float32(self.density[cell_y, cell_x]))
+        return _as_float32(value * value)
 
     def fine_density(
         self,
@@ -677,13 +681,17 @@ class _DensityGrid:
                 if not bucket:
                     continue
                 for other, other_x, other_y in bucket:
-                    if other == node:
-                        continue
-                    x_dist = float(np.float32(position[0].item())) - other_x
-                    y_dist = float(np.float32(position[1].item())) - other_y
-                    distance_sq = (x_dist * x_dist) + (y_dist * y_dist)
-                    density += config.fine_repulsion_scale / (distance_sq + _FINE_DENSITY_EPSILON)
-        return density
+                    del other
+                    x_dist = _as_float32(float(np.float32(position[0].item())) - other_x)
+                    y_dist = _as_float32(float(np.float32(position[1].item())) - other_y)
+                    distance_sq = _as_float32(
+                        _as_float32(x_dist * x_dist) + _as_float32(y_dist * y_dist)
+                    )
+                    density = _as_float32(
+                        density
+                        + (config.fine_repulsion_scale / (distance_sq + _FINE_DENSITY_EPSILON))
+                    )
+        return _as_float32(density)
 
 
 def _stage_power(phase_name: str) -> int:
@@ -1345,7 +1353,8 @@ def _run_reference_drl(
     fine_first_add = True
     fine_density = False
 
-    cut_end = _as_float32(40_000.0 * _as_float32(1.0 - params.edge_cut))
+    edge_cut = _as_float32(params.edge_cut)
+    cut_end = _as_float32(40_000.0 * (1.0 - edge_cut))
     cut_length_end = cut_end
     if cut_length_end <= 1.0:
         cut_length_end = _as_float32(1.0)

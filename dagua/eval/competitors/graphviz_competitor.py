@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set
 
 import torch
 
@@ -253,7 +253,29 @@ def _graph_to_dot(graph: DaguaGraph) -> str:
     return "\n".join(lines)
 
 
-def _layout_with_dot(graph: DaguaGraph, timeout: float) -> torch.Tensor:
+def _graphviz_attribute_value(value: Any) -> str:
+    """Convert a Python value to a Graphviz command-line attribute value.
+
+    Parameters
+    ----------
+    value : Any
+        Python scalar from variant parameters.
+
+    Returns
+    -------
+    str
+        String value suitable for ``-Gkey=value``.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _layout_with_dot(
+    graph: DaguaGraph,
+    timeout: float,
+    graph_attributes: Optional[Mapping[str, Any]] = None,
+) -> torch.Tensor:
     """Run Graphviz `dot` on a graph and parse the resulting positions.
 
     Parameters
@@ -262,6 +284,9 @@ def _layout_with_dot(graph: DaguaGraph, timeout: float) -> torch.Tensor:
         Graph to lay out.
     timeout : float
         Maximum runtime in seconds.
+    graph_attributes : Mapping[str, Any] | None, default=None
+        Optional Graphviz graph attributes passed as ``-G`` command-line
+        overrides.
 
     Returns
     -------
@@ -280,8 +305,14 @@ def _layout_with_dot(graph: DaguaGraph, timeout: float) -> torch.Tensor:
         dot_path = Path(handle.name)
 
     try:
+        command = ["dot", "-Tjson"]
+        if graph_attributes is not None:
+            for key, value in graph_attributes.items():
+                if value is None:
+                    continue
+                command.append(f"-G{key}={_graphviz_attribute_value(value)}")
         result = subprocess.run(
-            ["dot", "-Tjson", str(dot_path)],
+            [*command, str(dot_path)],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -352,6 +383,7 @@ def _layout_with_graphviz_engine(
     engine: str,
     timeout: float,
     seed: Optional[int],
+    graph_attributes: Optional[Mapping[str, Any]] = None,
 ) -> torch.Tensor:
     """Run a Graphviz engine and parse the resulting positions.
 
@@ -367,6 +399,9 @@ def _layout_with_graphviz_engine(
         Optional stochastic seed. When provided, both ``seed`` and ``start``
         graph attributes are passed because fdp reads ``seed`` while neato and
         sfdp read ``start``.
+    graph_attributes : Mapping[str, Any] | None, default=None
+        Optional Graphviz graph attributes passed as ``-G`` command-line
+        overrides.
 
     Returns
     -------
@@ -378,6 +413,11 @@ def _layout_with_graphviz_engine(
     command = ["dot", "-Tjson", f"-K{engine}"]
     if seed is not None:
         command.extend([f"-Gseed={int(seed)}", f"-Gstart={int(seed)}"])
+    if graph_attributes is not None:
+        for key, value in graph_attributes.items():
+            if value is None:
+                continue
+            command.append(f"-G{key}={_graphviz_attribute_value(value)}")
 
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -460,7 +500,67 @@ class _GraphvizBase(CompetitorBase):
                 error=str(exc),
             )
 
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run the configured Graphviz engine with variant graph attributes.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+        seed : int | None, default=None
+            Optional Graphviz stochastic seed.
+        variant_params : Mapping[str, Any] | None, default=None
+            Graphviz graph attributes forwarded as ``-G`` flags.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and timing information.
+        """
+        start = time.perf_counter()
+        try:
+            pos = _layout_with_graphviz_engine(
+                graph=graph,
+                engine=self.engine,
+                timeout=timeout,
+                seed=seed,
+                graph_attributes=variant_params,
+            )
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error="timeout",
+            )
+        except Exception as exc:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error=str(exc),
+            )
+
     def available(self) -> bool:
+        """Report whether Graphviz is available.
+
+        Returns
+        -------
+        bool
+            ``True`` when the ``dot`` executable can be resolved.
+        """
         return _graphviz_available()
 
 
@@ -520,12 +620,77 @@ class GraphvizDot(_GraphvizBase):
                 error=str(error),
             )
 
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run Graphviz dot with variant graph attributes.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+        seed : int | None, default=None
+            Accepted for interface consistency. Graphviz ``dot`` is
+            deterministic and does not use stochastic seed attributes.
+        variant_params : Mapping[str, Any] | None, default=None
+            Graphviz graph attributes forwarded as ``-G`` flags.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and timing information.
+        """
+        del seed
+
+        graph_attributes: dict[str, Any] = {}
+        if variant_params is not None:
+            for key, value in dict(variant_params).items():
+                if key == "vgap":
+                    graph_attributes["ranksep"] = value
+                elif key == "hgap":
+                    graph_attributes["nodesep"] = value
+                else:
+                    graph_attributes[key] = value
+
+        start = time.perf_counter()
+        try:
+            pos = _layout_with_dot(
+                graph,
+                timeout=timeout,
+                graph_attributes=graph_attributes or None,
+            )
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error="timeout",
+            )
+        except Exception as error:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error=str(error),
+            )
+
 
 @register
 class GraphvizSfdp(_GraphvizBase):
     name = "graphviz_sfdp"
     engine = "sfdp"
     max_nodes = 100_000
+    variant_param_names = frozenset({"K", "maxiter", "repulsiveforce", "theta"})
 
 
 @register
@@ -533,6 +698,7 @@ class GraphvizNeato(_GraphvizBase):
     name = "graphviz_neato"
     engine = "neato"
     max_nodes = 2_000
+    variant_param_names = frozenset({"K", "epsilon", "maxiter", "pack"})
 
 
 @register
@@ -540,3 +706,4 @@ class GraphvizFdp(_GraphvizBase):
     name = "graphviz_fdp"
     engine = "fdp"
     max_nodes = 5_000
+    variant_param_names = frozenset({"K", "maxiter"})

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import random
 from typing import Optional
 
 import numpy as np
@@ -20,6 +19,7 @@ from dagua.layout.ops.davidson_harel import (
     PrepareDHState,
 )
 from dagua.layout.ops.pipelines import resolve_fidelity_dtype
+from dagua.layout.ops.pipelines._igraph_rng import IgraphPythonRNG
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
     LayoutProblem,
@@ -29,74 +29,6 @@ from dagua.layout.ops.state import (  # noqa: E402
 
 _MOVE_TRIES = 30
 _FINE_TUNING_FACTOR = 0.01
-
-
-def _uint32_bounded(rng: random.Random, range_value: int) -> int:
-    """Generate igraph's bounded 32-bit integer.
-
-    Parameters
-    ----------
-    rng : random.Random
-        Python RNG backing the python-igraph external RNG bridge.
-    range_value : int
-        Exclusive upper bound for the generated integer.
-
-    Returns
-    -------
-    int
-        Uniform integer in ``[0, range_value)``.
-    """
-    threshold = ((1 << 32) - range_value) % range_value
-    while True:
-        value = rng.getrandbits(32)
-        product = value * range_value
-        low_word = product & 0xFFFFFFFF
-        if low_word >= threshold:
-            return product >> 32
-
-
-def _igraph_integer(rng: random.Random, low: int, high: int) -> int:
-    """Return an igraph-style random integer in ``[low, high]``.
-
-    Parameters
-    ----------
-    rng : random.Random
-        Python RNG backing the python-igraph external RNG bridge.
-    low : int
-        Inclusive lower bound.
-    high : int
-        Inclusive upper bound.
-
-    Returns
-    -------
-    int
-        Random integer generated with igraph's C bounded-integer path.
-    """
-    if high <= low:
-        return low
-    return low + _uint32_bounded(rng, high - low + 1)
-
-
-def _shuffle_igraph(values: list[int], rng: random.Random) -> None:
-    """Shuffle values in place with igraph's Fisher-Yates loop.
-
-    Parameters
-    ----------
-    values : list[int]
-        Mutable vector to shuffle.
-    rng : random.Random
-        Python RNG backing the python-igraph external RNG bridge.
-
-    Returns
-    -------
-    None
-        The input list is modified in place.
-    """
-    size = len(values)
-    while size > 1:
-        swap_index = _igraph_integer(rng, 0, size - 1)
-        size -= 1
-        values[size], values[swap_index] = values[swap_index], values[size]
 
 
 def _segments_intersect_igraph(
@@ -433,10 +365,10 @@ def _pure_igraph_davidson_harel_positions(
     move_y = [math.sin((2.0 * math.pi / _MOVE_TRIES) * index) for index in range(_MOVE_TRIES)]
     permutation = list(range(num_nodes))
     try_order = list(range(_MOVE_TRIES))
-    rng = random.Random(seed)
+    rng = IgraphPythonRNG(seed)
 
     for round_id in range(rounds + resolved_fineiter):
-        _shuffle_igraph(permutation, rng)
+        rng.shuffle(permutation)
         fine_tuning = round_id >= rounds
         if fine_tuning:
             fine_x = _FINE_TUNING_FACTOR * (max_x - min_x)
@@ -444,7 +376,7 @@ def _pure_igraph_davidson_harel_positions(
             move_radius = fine_x if fine_x < fine_y else fine_y
 
         for node in permutation:
-            _shuffle_igraph(try_order, rng)
+            rng.shuffle(try_order)
             for try_id in try_order:
                 old_x = positions[node][0]
                 old_y = positions[node][1]
