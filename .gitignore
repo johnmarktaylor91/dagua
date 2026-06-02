@@ -113,3 +113,4 @@ private-notes/private/
 
 # Codex CLI tooling marker (empty file dropped by codex exec)
 .codex
+private-notes/research/sprint_rng_matching/status.json
