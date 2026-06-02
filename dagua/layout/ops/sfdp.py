@@ -1396,18 +1396,40 @@ def _prolongate_positions(
     if graph.num_nodes == 0:
         return positions
 
-    smoothed = positions.clone()
-    for node in range(graph.num_nodes):
-        neighbors = graph.adjacency[node]
-        if not neighbors:
-            continue
-        neighbor_indices = torch.tensor([neighbor for neighbor, _ in neighbors], dtype=torch.long)
-        neighbor_mean = positions[neighbor_indices].mean(dim=0)
-        # Coarse coordinates provide the anchor; neighbor smoothing just breaks
-        # ties among siblings before fine-level relaxation starts.
-        smoothed[node] = (_SFDP_ALGORITHM_CONFIG.prolongation_smoothing * positions[node]) + (
-            (1.0 - _SFDP_ALGORITHM_CONFIG.prolongation_smoothing) * neighbor_mean
-        )
+    if isinstance(generator, GraphvizRandom):
+        for node in range(graph.num_nodes):
+            neighbors = graph.adjacency[node]
+            if not neighbors:
+                continue
+            neighbor_sum_x = 0.0
+            neighbor_sum_y = 0.0
+            neighbor_count = 0
+            for neighbor, _weight in neighbors:
+                neighbor_sum_x += float(positions[neighbor, 0].item())
+                neighbor_sum_y += float(positions[neighbor, 1].item())
+                neighbor_count += 1
+            beta = (1.0 - _SFDP_ALGORITHM_CONFIG.prolongation_smoothing) / float(neighbor_count)
+            positions[node, 0] = (
+                _SFDP_ALGORITHM_CONFIG.prolongation_smoothing * float(positions[node, 0].item())
+            ) + (beta * neighbor_sum_x)
+            positions[node, 1] = (
+                _SFDP_ALGORITHM_CONFIG.prolongation_smoothing * float(positions[node, 1].item())
+            ) + (beta * neighbor_sum_y)
+    else:
+        smoothed = positions.clone()
+        for node in range(graph.num_nodes):
+            neighbors = graph.adjacency[node]
+            if not neighbors:
+                continue
+            neighbor_indices = torch.tensor(
+                [neighbor for neighbor, _ in neighbors],
+                dtype=torch.long,
+            )
+            neighbor_mean = positions[neighbor_indices].mean(dim=0)
+            smoothed[node] = (_SFDP_ALGORITHM_CONFIG.prolongation_smoothing * positions[node]) + (
+                (1.0 - _SFDP_ALGORITHM_CONFIG.prolongation_smoothing) * neighbor_mean
+            )
+        positions = smoothed
 
     groups: dict[int, List[int]] = {}
     for fine_index, coarse_index in enumerate(fine_to_coarse.tolist()):
@@ -1419,14 +1441,14 @@ def _prolongate_positions(
             if isinstance(generator, GraphvizRandom):
                 noise = torch.tensor(
                     [generator.drand() - 0.5, generator.drand() - 0.5],
-                    dtype=torch.float32,
+                    dtype=positions.dtype,
                 )
             else:
                 noise = torch.rand((2,), generator=generator, dtype=torch.float32) - 0.5
             noise = noise * noise_scale
-            smoothed[fine_index] = smoothed[fine_index] + noise
+            positions[fine_index] = positions[fine_index] + noise
 
-    return smoothed
+    return positions
 
 
 @register_op
