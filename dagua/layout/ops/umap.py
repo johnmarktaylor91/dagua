@@ -296,9 +296,9 @@ def _smooth_knn_dist(
 
     sigmas = torch.empty((num_nodes,), dtype=torch.float32)
     rhos = torch.empty((num_nodes,), dtype=torch.float32)
-    target = log2(float(max(n_neighbors, 2)))
+    target = np.float32(log2(float(max(n_neighbors, 2))))
     distances_np = knn_distances.detach().to(device="cpu", dtype=torch.float32).numpy()
-    mean_distances = float(np.mean(distances_np)) if distances_np.size > 0 else 0.0
+    mean_distances = np.float32(np.mean(distances_np)) if distances_np.size > 0 else np.float32(0.0)
 
     for index in range(num_nodes):
         finite = distances_np[index][np.isfinite(distances_np[index])]
@@ -308,33 +308,101 @@ def _smooth_knn_dist(
             continue
 
         positive = finite[finite > 0.0]
-        rho = float(positive[0]) if positive.shape[0] > 0 else 0.0
-        rhos[index] = rho
+        rho = np.float32(positive[0]) if positive.shape[0] > 0 else np.float32(0.0)
+        rhos[index] = float(rho)
 
-        lower = 0.0
-        upper = np.inf
-        sigma = 1.0
+        lower = np.float32(0.0)
+        upper = np.float32(np.inf)
+        sigma = np.float32(1.0)
         for _ in range(_SMOOTH_K_BINARY_SEARCH_STEPS):
-            estimate = 0.0
+            estimate = np.float32(0.0)
             for distance in finite[1:]:
-                shifted = float(distance) - rho
-                estimate += float(np.exp(-(shifted / sigma))) if shifted > 0.0 else 1.0
+                shifted = np.float32(distance - rho)
+                if shifted > 0.0:
+                    estimate += np.float32(np.exp(np.float32(-(shifted / sigma))))
+                else:
+                    estimate += np.float32(1.0)
             if abs(estimate - target) <= _SMOOTH_K_TOLERANCE:
                 break
             if estimate > target:
                 upper = sigma
-                sigma = 0.5 * (lower + upper)
+                sigma = np.float32((lower + upper) / np.float32(2.0))
             else:
                 lower = sigma
-                sigma = sigma * 2.0 if np.isinf(upper) else 0.5 * (lower + upper)
+                if upper == np.float32(np.inf):
+                    sigma = np.float32(sigma * np.float32(2.0))
+                else:
+                    sigma = np.float32((lower + upper) / np.float32(2.0))
 
         if rho > 0.0:
-            sigma_floor = _MIN_SIGMA_SCALE * float(np.mean(finite))
+            sigma_floor = np.float32(_MIN_SIGMA_SCALE) * np.float32(np.mean(finite))
         else:
-            sigma_floor = _MIN_SIGMA_SCALE * mean_distances
-        sigmas[index] = max(float(sigma), sigma_floor)
+            sigma_floor = np.float32(_MIN_SIGMA_SCALE) * mean_distances
+        sigmas[index] = float(max(sigma, sigma_floor))
 
     return sigmas, rhos
+
+
+def _native_compute_membership_strengths(
+    knn_indices: np.ndarray,
+    knn_distances: np.ndarray,
+    sigmas: np.ndarray,
+    rhos: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Construct local fuzzy-set membership strengths.
+
+    Parameters
+    ----------
+    knn_indices : numpy.ndarray
+        Neighbor indices with shape ``[N, K]`` and dtype ``int64`` or
+        ``int32``.
+    knn_distances : numpy.ndarray
+        Neighbor distances with shape ``[N, K]`` and dtype ``float32``.
+    sigmas : numpy.ndarray
+        Smooth-kNN bandwidths with shape ``[N]`` and dtype ``float32``.
+    rhos : numpy.ndarray
+        Local connectivity radii with shape ``[N]`` and dtype ``float32``.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+        COO rows, columns, and float32 membership values. The arithmetic
+        mirrors ``umap-learn``'s numba ``compute_membership_strengths`` kernel.
+    """
+    n_samples = knn_indices.shape[0]
+    n_neighbors = knn_indices.shape[1]
+    rows = np.zeros(knn_indices.size, dtype=np.int32)
+    cols = np.zeros(knn_indices.size, dtype=np.int32)
+    vals = np.zeros(knn_indices.size, dtype=np.float32)
+
+    for row in range(n_samples):
+        for column in range(n_neighbors):
+            if knn_indices[row, column] == -1:
+                continue
+            if knn_indices[row, column] == row:
+                val = 0.0
+            elif knn_distances[row, column] - rhos[row] <= 0.0 or sigmas[row] == 0.0:
+                val = 1.0
+            else:
+                val = np.exp(-((knn_distances[row, column] - rhos[row]) / sigmas[row]))
+
+            offset = row * n_neighbors + column
+            rows[offset] = row
+            cols[offset] = knn_indices[row, column]
+            vals[offset] = val
+
+    return rows, cols, vals
+
+
+_UMAP_COMPUTE_MEMBERSHIP = (
+    _numba_njit(
+        locals={"val": _numba_types.float32},
+        parallel=True,
+        fastmath=True,
+    )(_native_compute_membership_strengths)
+    if _numba_njit is not None and _numba_types is not None
+    else _native_compute_membership_strengths
+)
 
 
 def _symmetrized_fuzzy_graph(
@@ -364,42 +432,22 @@ def _symmetrized_fuzzy_graph(
         after fuzzy union, not a collapsed undirected edge list.
     """
     num_nodes, num_neighbors = knn_indices.shape
-    rows = np.zeros(num_nodes * num_neighbors, dtype=np.int32)
-    cols = np.zeros(num_nodes * num_neighbors, dtype=np.int32)
-    vals = np.zeros(num_nodes * num_neighbors, dtype=np.float32)
     indices_np = knn_indices.detach().to(device="cpu", dtype=torch.long).numpy()
     distances_np = knn_distances.detach().to(device="cpu", dtype=torch.float32).numpy()
     sigmas_np = sigmas.detach().to(device="cpu", dtype=torch.float32).numpy()
     rhos_np = rhos.detach().to(device="cpu", dtype=torch.float32).numpy()
-
-    offset = 0
-    for row in range(num_nodes):
-        sigma = float(sigmas_np[row])
-        rho = float(rhos_np[row])
-        for column in range(num_neighbors):
-            neighbor = int(indices_np[row, column])
-            distance = float(distances_np[row, column])
-            if neighbor < 0:
-                neighbor = 0
-                weight = 0.0
-            elif neighbor == row:
-                weight = 0.0
-            elif not np.isfinite(distance):
-                weight = 0.0
-            elif distance - rho <= 0.0 or sigma == 0.0:
-                weight = 1.0
-            else:
-                weight = float(np.exp(-(distance - rho) / sigma))
-            rows[offset] = row
-            cols[offset] = neighbor
-            vals[offset] = weight
-            offset += 1
+    rows, cols, vals = _UMAP_COMPUTE_MEMBERSHIP(
+        indices_np,
+        distances_np,
+        sigmas_np,
+        rhos_np,
+    )
 
     result = sparse.coo_matrix((vals, (rows, cols)), shape=(num_nodes, num_nodes))
     result.eliminate_zeros()
     transpose = result.transpose()
     product = result.multiply(transpose)
-    result = result + transpose - product
+    result = 1.0 * (result + transpose - product) + 0.0 * product
     result.eliminate_zeros()
     coo = result.tocoo()
 
@@ -639,8 +687,8 @@ def _multi_component_spectral_embedding(
 def _scale_umap_initial_coordinates(
     coordinates: np.ndarray,
     rng: np.random.RandomState,
-) -> torch.Tensor:
-    """Apply UMAP's noisy max-abs scale and per-axis ``[0, 10]`` rescale.
+) -> np.ndarray:
+    """Apply UMAP's noisy max-abs scale before the final embedding rescale.
 
     Parameters
     ----------
@@ -651,8 +699,11 @@ def _scale_umap_initial_coordinates(
 
     Returns
     -------
-    torch.Tensor
-        Rescaled initial embedding with shape ``[N, 2]``.
+    numpy.ndarray
+        Noisy max-abs-scaled embedding with shape ``[N, 2]`` and dtype
+        ``float32``. ``umap-learn`` draws the optimizer RNG state before the
+        later per-axis ``[0, 10]`` rescale, so that final rescale happens in
+        :class:`SpectralInitialization`.
     """
     max_abs = float(np.max(np.abs(coordinates))) if coordinates.size > 0 else 0.0
     if max_abs > _MIN_SPAN:
@@ -661,22 +712,16 @@ def _scale_umap_initial_coordinates(
         coords = coordinates.astype(np.float32, copy=True)
 
     noise = rng.normal(scale=_SPECTRAL_NOISE_SCALE, size=coords.shape).astype(np.float32)
-    coords = coords + noise
-
-    axis_min = coords.min(axis=0)
-    axis_span = coords.max(axis=0) - axis_min
-    safe_span = np.maximum(axis_span, _MIN_SPAN)
-    coords = _UMAP_INIT_MAX_COORD * (coords - axis_min) / safe_span
-    return torch.from_numpy(coords.astype(np.float32, copy=False))
+    return (coords + noise).astype(np.float32, copy=False)
 
 
-def _rescale_umap_random_initial_coordinates(coordinates: np.ndarray) -> torch.Tensor:
-    """Apply UMAP's unconditional per-axis ``[0, 10]`` rescale to random init.
+def _rescale_umap_embedding(coordinates: np.ndarray) -> torch.Tensor:
+    """Apply UMAP's unconditional per-axis ``[0, 10]`` embedding rescale.
 
     Parameters
     ----------
     coordinates : numpy.ndarray
-        Random initial coordinates with shape ``[N, 2]``.
+        Initial coordinates with shape ``[N, 2]``.
 
     Returns
     -------
@@ -686,12 +731,12 @@ def _rescale_umap_random_initial_coordinates(coordinates: np.ndarray) -> torch.T
     coords = coordinates.astype(np.float32, copy=True)
     axis_min = coords.min(axis=0)
     axis_span = coords.max(axis=0) - axis_min
-    safe_span = np.maximum(axis_span, _MIN_SPAN)
+    safe_span = np.where(axis_span > 0.0, axis_span, _MIN_SPAN)
     coords = _UMAP_INIT_MAX_COORD * (coords - axis_min) / safe_span
     return torch.from_numpy(coords.astype(np.float32, copy=False))
 
 
-def _spectral_initialization(
+def _raw_spectral_initialization(
     num_nodes: int,
     head: torch.Tensor,
     tail: torch.Tensor,
@@ -699,8 +744,8 @@ def _spectral_initialization(
     seed: int,
     distance_matrix: Optional[torch.Tensor] = None,
     rng: Optional[np.random.RandomState] = None,
-) -> torch.Tensor:
-    """Compute the normalized-Laplacian spectral initialization.
+) -> np.ndarray:
+    """Compute UMAP initialization before the final affine embedding rescale.
 
     Parameters
     ----------
@@ -723,15 +768,16 @@ def _spectral_initialization(
 
     Returns
     -------
-    torch.Tensor
-        Initial embedding with shape ``[N, 2]``.
+    numpy.ndarray
+        Initial embedding with shape ``[N, 2]`` before UMAP's final affine
+        embedding rescale.
     """
     if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32)
+        return np.empty((0, 2), dtype=np.float32)
     if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32)
+        return np.zeros((1, 2), dtype=np.float32)
     if num_nodes == 2:
-        return torch.tensor([[-10.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+        return np.array([[-10.0, 0.0], [10.0, 0.0]], dtype=np.float32)
 
     random_state = rng if rng is not None else np.random.RandomState(seed)
     if num_nodes < 10:
@@ -739,13 +785,15 @@ def _spectral_initialization(
             low=-_UMAP_INIT_MAX_COORD,
             high=_UMAP_INIT_MAX_COORD,
             size=(num_nodes, _SPECTRAL_DIMENSIONS),
-        )
-        return _rescale_umap_random_initial_coordinates(coordinates=coordinates)
+        ).astype(np.float32)
+        return coordinates
 
     rows = head.detach().to(device="cpu", dtype=torch.long).numpy()
     cols = tail.detach().to(device="cpu", dtype=torch.long).numpy()
     data = weight.detach().to(device="cpu", dtype=torch.float32).numpy()
     graph = sparse.coo_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
+    graph.sum_duplicates()
+    graph.eliminate_zeros()
 
     n_components, component_labels = csgraph.connected_components(graph)
     if n_components > 1:
@@ -767,13 +815,60 @@ def _spectral_initialization(
     return _scale_umap_initial_coordinates(coordinates=coordinates, rng=random_state)
 
 
+def _spectral_initialization(
+    num_nodes: int,
+    head: torch.Tensor,
+    tail: torch.Tensor,
+    weight: torch.Tensor,
+    seed: int,
+    distance_matrix: Optional[torch.Tensor] = None,
+    rng: Optional[np.random.RandomState] = None,
+) -> torch.Tensor:
+    """Compute UMAP spectral initialization in its public ``[0, 10]`` frame.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    head : torch.Tensor
+        Fuzzy-graph edge heads with shape ``[E]``.
+    tail : torch.Tensor
+        Fuzzy-graph edge tails with shape ``[E]``.
+    weight : torch.Tensor
+        Fuzzy-graph edge weights with shape ``[E]``.
+    seed : int
+        Seed for initialization noise and small-component placement.
+    distance_matrix : torch.Tensor | None, optional
+        Dense graph-distance matrix with shape ``[N, N]`` used to place
+        disconnected fuzzy-graph components.
+    rng : numpy.random.RandomState, optional
+        Mutable random state used by initialization.
+
+    Returns
+    -------
+    torch.Tensor
+        Rescaled initial embedding with shape ``[N, 2]`` and dtype
+        ``torch.float32``.
+    """
+    raw_embedding = _raw_spectral_initialization(
+        num_nodes=num_nodes,
+        head=head,
+        tail=tail,
+        weight=weight,
+        seed=seed,
+        distance_matrix=distance_matrix,
+        rng=rng,
+    )
+    return _rescale_umap_embedding(coordinates=raw_embedding)
+
+
 def _select_positive_edges(
     head: torch.Tensor,
     tail: torch.Tensor,
     weight: torch.Tensor,
     n_epochs: int,
     default_epochs: int = 500,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prune weak edges and build epoch sampling intervals.
 
     Parameters
@@ -791,13 +886,14 @@ def _select_positive_edges(
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        Pruned source indices, target indices, and positive sample intervals.
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        Pruned source indices, target indices, pruned fuzzy weights, and
+        positive sample intervals.
     """
     if weight.numel() == 0:
         empty_long = torch.empty((0,), dtype=torch.long)
         empty_float = torch.empty((0,), dtype=torch.float64)
-        return empty_long, empty_long, empty_float
+        return empty_long, empty_long, empty_float.to(dtype=torch.float32), empty_float
 
     max_weight = float(weight.max().item())
     prune_epochs = n_epochs if n_epochs > 10 else default_epochs
@@ -807,7 +903,7 @@ def _select_positive_edges(
     kept_tail = tail[keep]
     kept_weight = weight[keep]
     epochs_per_sample = max_weight / kept_weight.to(dtype=torch.float64)
-    return kept_head, kept_tail, epochs_per_sample
+    return kept_head, kept_tail, kept_weight, epochs_per_sample
 
 
 def _positive_gradient(
@@ -1664,7 +1760,7 @@ class SpectralInitialization(Op):
         tail = state.extras[_FUZZY_TAIL_KEY]
         weight = state.extras[_FUZZY_WEIGHT_KEY]
         rng = np.random.RandomState(problem.seed)
-        state.pos = _spectral_initialization(
+        initial_embedding = _raw_spectral_initialization(
             num_nodes=problem.num_nodes,
             head=head,
             tail=tail,
@@ -1678,6 +1774,7 @@ class SpectralInitialization(Op):
             _INT32_MAX,
             3,
         ).astype(np.int64)
+        state.pos = _rescale_umap_embedding(coordinates=initial_embedding)
         return state
 
 
@@ -1730,6 +1827,9 @@ class SelectPositiveEdges(Op):
         f"extras.{_N_EPOCHS_KEY}",
     )
     writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_FUZZY_HEAD_KEY}",
+        f"extras.{_FUZZY_TAIL_KEY}",
+        f"extras.{_FUZZY_WEIGHT_KEY}",
         f"extras.{_POSITIVE_HEAD_KEY}",
         f"extras.{_POSITIVE_TAIL_KEY}",
         f"extras.{_EPOCHS_PER_SAMPLE_KEY}",
@@ -1755,13 +1855,16 @@ class SelectPositiveEdges(Op):
         weight = state.extras[_FUZZY_WEIGHT_KEY]
         n_epochs = state.extras[_N_EPOCHS_KEY]
         default_epochs = 500 if problem.num_nodes <= 10_000 else 200
-        positive_head, positive_tail, epochs_per_sample = _select_positive_edges(
+        positive_head, positive_tail, positive_weight, epochs_per_sample = _select_positive_edges(
             head=head,
             tail=tail,
             weight=weight,
             n_epochs=n_epochs,
             default_epochs=default_epochs,
         )
+        state.extras[_FUZZY_HEAD_KEY] = positive_head
+        state.extras[_FUZZY_TAIL_KEY] = positive_tail
+        state.extras[_FUZZY_WEIGHT_KEY] = positive_weight
         state.extras[_POSITIVE_HEAD_KEY] = positive_head
         state.extras[_POSITIVE_TAIL_KEY] = positive_tail
         state.extras[_EPOCHS_PER_SAMPLE_KEY] = epochs_per_sample

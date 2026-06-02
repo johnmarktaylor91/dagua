@@ -12,71 +12,7 @@ from dagua.layout.ops.sgd2_multi import (
     _InitSGD2MultiState,
     _RunSGD2MultiOptimization,
 )
-from dagua.layout.ops.state import (
-    ExecutionPlan,
-    LayoutProblem,
-    RuntimeContext,
-    SolveState,
-)
-
-
-def _dag_consistency_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
-    """Compute the TB directed-edge consistency fraction.
-
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Graph connectivity tensor with shape ``[2, E]``.
-
-    Returns
-    -------
-    float
-        Fraction of edges whose target is not above their source.
-    """
-    if edge_index.numel() == 0:
-        return 1.0
-    src = edge_index[0].to(device=pos.device)
-    tgt = edge_index[1].to(device=pos.device)
-    self_loops = src == tgt
-    correct = (pos[tgt, 1] >= pos[src, 1]) | self_loops
-    return float(correct.to(dtype=torch.float32).mean().item())
-
-
-def _choose_sgd2_default_layout(
-    native_pos: torch.Tensor,
-    reference_pos: Optional[torch.Tensor],
-    edge_index: torch.Tensor,
-    dag_drop_tolerance: float = 0.1,
-) -> torch.Tensor:
-    """Choose the default SGD2 output from native and canonical candidates.
-
-    Parameters
-    ----------
-    native_pos : torch.Tensor
-        Existing PyTorch multicriteria output with shape ``[N, 2]``.
-    reference_pos : torch.Tensor | None
-        Optional canonical stress-SGD output with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Graph connectivity tensor with shape ``[2, E]``.
-    dag_drop_tolerance : float, default=0.1
-        Maximum allowed drop in TB edge consistency before preserving the
-        native layout.
-
-    Returns
-    -------
-    torch.Tensor
-        Selected position tensor with shape ``[N, 2]``.
-    """
-    if reference_pos is None:
-        return native_pos
-
-    native_dag = _dag_consistency_fraction(native_pos, edge_index)
-    reference_dag = _dag_consistency_fraction(reference_pos, edge_index)
-    if reference_dag + dag_drop_tolerance < native_dag:
-        return native_pos
-    return reference_pos
+from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
 def build_sgd2_multi_pipeline(
@@ -246,7 +182,6 @@ def layout_sgd2_multi_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
 
-    reference_pos = None
     del use_reference_fallback
 
     problem = LayoutProblem(
@@ -270,11 +205,7 @@ def layout_sgd2_multi_pipeline(
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("(SGD)^2 pipeline did not produce final positions.")
-    return _choose_sgd2_default_layout(
-        native_pos=final_state.pos,
-        reference_pos=reference_pos,
-        edge_index=edge_index,
-    )
+    return final_state.pos
 
 
 __all__ = ["build_sgd2_multi_pipeline", "layout_sgd2_multi_pipeline"]
