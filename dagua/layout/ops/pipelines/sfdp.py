@@ -32,6 +32,7 @@ from dagua.layout.ops.sfdp import (
     SFDPHierarchyConfig,
     SFDPProlongateAndRefineLevels,
     SFDPRefineCoarsestLevel,
+    _build_graph,
     _prolongate_positions,
 )
 from dagua.layout.ops.state import (
@@ -233,6 +234,7 @@ def _build_graphviz_matrix_coarse_graph(
         edge_index=edge_index,
         edge_weight=weight_tensor,
         adjacency=adjacency,
+        graphviz_average=True,
     )
 
 
@@ -329,7 +331,13 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
         del ctx
         permutation_generator = GraphvizRandom(seed=1)
 
-        base_graph: GraphData = state.extras[_BASE_GRAPH_KEY]
+        base_graph = _build_graph(
+            edge_index=problem.edge_index,
+            num_nodes=problem.num_nodes,
+            edge_weights=problem.edge_weights,
+            graphviz_order=True,
+        )
+        state.extras[_BASE_GRAPH_KEY] = base_graph
         graphs: list[GraphData] = [base_graph]
         mappings: list[torch.Tensor] = []
         current_graph = base_graph
@@ -404,6 +412,42 @@ def _sfdp_force_scales(ideal_length: float, repulsive_exponent: float) -> tuple[
     ) / bounded_ideal_length
     repulsive_scale = bounded_ideal_length ** (1.0 - repulsive_exponent)
     return attractive_scale, repulsive_scale
+
+
+def _graphviz_power_law_repulsive_exponent(
+    graph: GraphData,
+    repulsive_exponent: float,
+) -> float:
+    """Return Graphviz's auto-selected SFDP repulsive exponent.
+
+    Parameters
+    ----------
+    graph : GraphData
+        Graph whose degree distribution is tested with Graphviz's
+        ``power_law_graph`` heuristic.
+    repulsive_exponent : float
+        Requested repulsive exponent. The Graphviz default arrives through the
+        Dagua fidelity selector as ``-1.0``.
+
+    Returns
+    -------
+    float
+        ``-1.8`` for Graphviz power-law graphs under the default selector,
+        otherwise the requested exponent.
+    """
+    if repulsive_exponent != _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent:
+        return repulsive_exponent
+
+    degree_counts = [0 for _ in range(graph.num_nodes + 1)]
+    max_count = 0
+    for neighbors in graph.adjacency:
+        degree = len(neighbors)
+        degree_counts[degree] += 1
+        max_count = max(max_count, degree_counts[degree])
+
+    if degree_counts[1] > 0.8 * max_count and degree_counts[1] > 0.3 * graph.num_nodes:
+        return -1.8
+    return repulsive_exponent
 
 
 @dataclass(frozen=True)
@@ -651,6 +695,10 @@ class _SFDPGraphvizRefineCoarsestLevel(Op):
         if state.ideal_length is None:
             raise ValueError("_SFDPGraphvizRefineCoarsestLevel requires state.ideal_length.")
         graphs: list[GraphData] = state.extras[_GRAPH_KEY]
+        effective_repulsive_exponent = _graphviz_power_law_repulsive_exponent(
+            graph=graphs[0],
+            repulsive_exponent=self.repulsive_exponent,
+        )
         return _apply_graphviz_sequential_refinement(
             problem=problem,
             state=state,
@@ -659,7 +707,7 @@ class _SFDPGraphvizRefineCoarsestLevel(Op):
             steps=self.steps,
             ideal_length=float(state.ideal_length),
             theta=self.theta,
-            repulsive_exponent=self.repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
             adaptive_cooling=True,
         )
 
@@ -726,6 +774,10 @@ class _SFDPGraphvizProlongateAndRefineLevels(Op):
         generator: GraphvizRandom = state.extras[_GENERATOR_KEY]
         if state.ideal_length is None:
             raise ValueError("_SFDPGraphvizProlongateAndRefineLevels requires state.ideal_length.")
+        effective_repulsive_exponent = _graphviz_power_law_repulsive_exponent(
+            graph=graphs[0],
+            repulsive_exponent=self.repulsive_exponent,
+        )
 
         positions = state.pos
         ideal_length = float(state.ideal_length)
@@ -751,7 +803,7 @@ class _SFDPGraphvizProlongateAndRefineLevels(Op):
                 steps=self.steps,
                 ideal_length=ideal_length,
                 theta=self.theta,
-                repulsive_exponent=self.repulsive_exponent,
+                repulsive_exponent=effective_repulsive_exponent,
                 adaptive_cooling=False,
             )
             positions = state.pos

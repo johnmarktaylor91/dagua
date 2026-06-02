@@ -25,10 +25,14 @@ struct RunnerOptions {
 	std::string inputPath;
 	std::string outputPath;
 	int seed = 42;
+	int gemRounds = 0;
+	int fmmmFixedIterations = 0;
 	int stressIterations = 0;
 	int numberOfPivots = 0;
 	bool hasAlgorithm = false;
 	bool hasSeed = false;
+	bool hasGemRounds = false;
+	bool hasFmmmFixedIterations = false;
 	bool hasStressIterations = false;
 	bool hasNumberOfPivots = false;
 };
@@ -198,9 +202,11 @@ int requiredIntegerValue(const int argc, char** argv, int& index) {
 void printHelp() {
 	std::cout
 		<< "Usage: ogdf_runner [--algorithm NAME] [--seed N] [--input PATH] [--output PATH]\n"
+		<< "                   [--gem-rounds N] [--fmmm-fixed-iterations N]\n"
 		<< "                   [--iterations N] [--number-of-pivots N]\n\n"
 		<< "Reads JSON from stdin or --input with keys: nodes, edges, algorithm, seed,\n"
-		<< "iterations, numberOfPivots. Writes JSON positions to stdout or --output.\n"
+		<< "gemRounds, fmmmFixedIterations, iterations, numberOfPivots. Writes JSON\n"
+		<< "positions to stdout or --output.\n"
 		<< "Algorithms: gem, fmmm, stress, pivot_mds, davidson_harel, sugiyama.\n";
 }
 
@@ -228,6 +234,18 @@ RunnerOptions parseArguments(const int argc, char** argv) {
 		}
 		if (argument == "--output") {
 			options.outputPath = requiredStringValue(argc, argv, index);
+			continue;
+		}
+		if (argument == "--gem-rounds" || argument == "--gemRounds"
+			|| argument == "--rounds") {
+			options.gemRounds = requiredIntegerValue(argc, argv, index);
+			options.hasGemRounds = true;
+			continue;
+		}
+		if (argument == "--fmmm-fixed-iterations" || argument == "--fmmmFixedIterations"
+			|| argument == "--fixed-iterations" || argument == "--steps") {
+			options.fmmmFixedIterations = requiredIntegerValue(argc, argv, index);
+			options.hasFmmmFixedIterations = true;
 			continue;
 		}
 		if (argument == "--iterations") {
@@ -282,6 +300,8 @@ void writeOutput(const std::string& outputPath, const std::string& payload) {
 void runLayout(
 	const std::string& algorithm,
 	ogdf::GraphAttributes& graphAttributes,
+	const int gemRounds,
+	const int fmmmFixedIterations,
 	const int stressIterations,
 	const int numberOfPivots,
 	const int seed
@@ -291,12 +311,19 @@ void runLayout(
 	if (algorithm == "gem") {
 		ogdf::setSeed(seed);
 		ogdf::GEMLayout layout;
+		if (gemRounds > 0) {
+			layout.numberOfRounds(gemRounds);
+		}
 		layout.call(graphAttributes);
 		return;
 	}
 	if (algorithm == "fmmm") {
 		ogdf::FMMMLayout layout;
 		layout.randSeed(seed);
+		if (fmmmFixedIterations > 0) {
+			layout.stopCriterion(ogdf::FMMMOptions::StopCriterion::FixedIterations);
+			layout.fixedIterations(fmmmFixedIterations);
+		}
 		layout.call(graphAttributes);
 		return;
 	}
@@ -352,6 +379,15 @@ int main(int argc, char** argv) {
 		const int seed = cliOptions.hasSeed
 			? cliOptions.seed
 			: parseOptionalInteger(input, "seed", 42);
+		const int gemRounds = cliOptions.hasGemRounds
+			? cliOptions.gemRounds
+			: parseOptionalInteger(input, "gemRounds",
+				parseOptionalInteger(input, "rounds", 0));
+		const int fmmmFixedIterations = cliOptions.hasFmmmFixedIterations
+			? cliOptions.fmmmFixedIterations
+			: parseOptionalInteger(input, "fmmmFixedIterations",
+				parseOptionalInteger(input, "fixed_iterations",
+					parseOptionalInteger(input, "steps", 0)));
 		const int stressIterations = cliOptions.hasStressIterations
 			? cliOptions.stressIterations
 			: parseOptionalInteger(input, "iterations", 0);
@@ -386,7 +422,14 @@ int main(int argc, char** argv) {
 				static_cast<double>(std::rand() % 1000) / 10.0;
 		}
 
-		runLayout(algorithm, graphAttributes, stressIterations, numberOfPivots, seed);
+		runLayout(
+			algorithm,
+			graphAttributes,
+			gemRounds,
+			fmmmFixedIterations,
+			stressIterations,
+			numberOfPivots,
+			seed);
 
 		std::ostringstream output;
 		output << std::setprecision(17);

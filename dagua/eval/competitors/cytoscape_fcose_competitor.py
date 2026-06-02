@@ -132,7 +132,14 @@ class CytoscapeFcose(CompetitorBase):
     name = "cytoscape_fcose"
     max_nodes = 10_000
     variant_param_names = frozenset(
-        {"quality", "nodeSeparation", "idealEdgeLength", "nodeRepulsion"}
+        {
+            "idealEdgeLength",
+            "nodeRepulsion",
+            "nodeSeparation",
+            "numIter",
+            "quality",
+            "randomize",
+        }
     )
 
     def layout(

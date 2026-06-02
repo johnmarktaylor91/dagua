@@ -56,6 +56,20 @@ delegation signatures before accepting; (c) multi-seed {1,2,3} verification is t
 detector -- a generator reimpl matches all 3 seeds, a replay cheat matches only its captured
 seed. STATUS.md records, per engine, WHICH generator was reimplemented from WHICH source.
 
+## INVARIANT -- MATCHED PARAMS (JMT emphatic 2026-06-02, see [[feedback_always_parameter_match_comparisons]])
+EVERY analysis going forward MUST compare at matched parameters: the REFERENCE runs the SAME
+config (iters/rounds/steps/perplexity/etc.) as the dagua variant, NOT reference defaults.
+Also matched: seed (both seed=N), dtype (float64), graphviz build (instrumented==stock).
+GUARANTEE MECHANISM:
+- variants.py original_params mirrors reimpl_params (param-matching codex 2186380 fixing this).
+- adapters pass params through to the reference call (graphviz -G / igraph kwargs / OGDF runner / etc.).
+- HARNESS GUARDRAIL (must add to scripts/rng_match/bitexact_harness.py): record BOTH sides'
+  effective params per row; FLAG/refuse any pair where reference ran defaults or params don't
+  correspond -- never emit a "clean" RMSD for a mis-parameterized comparison. (Add this in the
+  post-param-matching verification step; dispatch a tiny harness-guardrail codex if needed.)
+- NEVER conclude an engine diverges without confirming matched params + seed first.
+gem proved it: looked "divergent 1.15", was bit-exact 3.86e-13 at matched rounds.
+
 ## Phases
 - P0 SETUP (parallel): (A) permanent instrumented graphviz 7.0.5 + prove logging-only/veridical
   + reproducible build script; (B) small-graph matched-seed bit-exact harness + fixtures +
@@ -97,4 +111,62 @@ seed. STATUS.md records, per engine, WHICH generator was reimplemented from WHIC
 | Round | Phase | engines dispatched | result |
 |---|---|---|---|
 | 0 | P0a | instrumented graphviz | DONE: ~/tools/graphviz-7.0.5-instr/ built; VERIDICAL PROOF PASS (54/54 bit-for-bit == stock, max_rmsd=0 -> logging-only confirmed); GV_TRACE %.17g works. Artifacts in scripts/rng_match/ (build script + patch + README) -- UNCOMMITTED (commit after P0b). Caveats: dot_builtins wrapped as bin/dot (no libltdl); fdp/neato/sfdp work. |
-| 0 | P0b | bit-exact harness | running (pid in /tmp/rng_p0b.pid) |
+| 0 | P0b | bit-exact harness | DONE + CC-VALIDATED. Baseline: 52 BIT_EXACT, 44 DIVERGENT, 1 CLOSE, 10 no-ref, 8 unavail, 6 err. Foundation committed 2b3efd0. Harness discriminates correctly (tsnet/linlog/kk exact ~1e-16; fa2/graphopt/lgl ~3e-8 BIT_EXACT but SQUEEZABLE to 1e-15; divergent are real). |
+| 1 | P1 ports (wave 1) | neato(2150078) sfdp(2150190) drl(2150474) davidson_harel(2150667) gem(2150860) umap(2151082) | RUNNING. Spec PORT_<eng>.md + PORTING_PROTOCOL.md. Each owns its pipeline file, NO variants.py edits (report-only). Verify via scripts/rng_match/check_engine.py. On each DONE: grep diff for delegation (anti-cheat), run check_engine, update STATUS.md, commit if clean. |
+
+## Wave-1 results (as they land)
+- **gem DONE 2026-06-02**: NO code change needed. dagua GEM ALREADY bit-matches OGDF at MATCHED
+  rounds: 100rounds=3.86e-13, 500rounds=3.93e-08 (both <1e-7!). The baseline "1.15" was a
+  HARNESS PARAMETERIZATION artifact: harness runs ogdf_gem ref at DEFAULT 30000 rounds (OGDF
+  runner ignores rounds param) vs dagua variant's 100/500/2000. 2000rounds genuinely chaotic
+  (1.65e-1, late FP drift). ACTION (CC, central): make ogdf_gem ref honor rounds (runner/variant
+  change) so iters100/500 show bit-exact; document iters2000 as chaotic-floor. NO delegation.
+  >> LESSON: check reference PARAMETERIZATION -- some "divergences" = ref run at wrong params.
+
+## Wave-1 ALL DONE (PRELIMINARY -- re-verify after param-matching) + anti-cheat CLEAN (no delegation in any)
+- gem: already bit-exact at matched rounds (param issue, see above).
+- neato: 1.23 -> 7.3e-3. Ported graphviz srand48/drand48 init. Residual = convergence-termination
+  (graphviz stops ~152 iters on path8, dagua runs 200). Changed neato default to "graphviz". WAVE-2 iterate.
+- davidson_harel: still ~0.36 (rounds50/100/200, worst grid3x3 seed3). NO improvement -- BUT igraph
+  ref may be running default params (maxiter) -> RE-VERIFY after param-matching before judging.
+- drl: still ~1.0 (34/42 exact). NO improvement -- same caveat (igraph param-matching).
+- sfdp: made code changes (no clean number extracted) -- re-verify.
+- umap: made code changes -- re-verify.
+>> NEXT (when param-matching codex 2186380 DONE): re-run full harness with MATCHED PARAMS ->
+   authoritative per-engine numbers. THEN: commit clean ports (grep diff for delegation first),
+   classify done/iterate/stuck, dispatch wave 2. HOLD all commits until then.
+>> IMPORTANT: davidson_harel/drl "no improvement" is likely the igraph adapter not passing
+   maxiter/rounds (gem-style param mismatch). Don't conclude port-failure pre-param-matching.
+
+## OGDF BUILD DONE (2026-06-02 14:54) -- gem FIXED
+- OGDF installed ~/tools/ogdf (official tag foxglove-202510, static libs). Runner rebuilt
+  (scripts/ogdf_runner) -- now honors --gem-rounds/--fmmm-fixed-iterations/--iterations/
+  --number-of-pivots. Build script scripts/rng_match/build_ogdf_runner.sh.
+- gem: NOW BIT_EXACT (iters100=7.97e-8, iters500=8.25e-8). param-matching + rebuild fixed it.
+  SQUEEZE later: ~8e-8 not ~1e-13 because used official OGDF tag, not the exact 2026 ref commit.
+- fmmm: STILL DIVERGENT 1.39 at matched iterations -> genuine PORT needed (wave 2).
+- pivot_mds / maxent_stress / stress_maj: runner now honors params -> RE-VERIFY (post-rebuild).
+- CAVEAT: harness re-verify (pid 2371127) started 14:47, runner rebuilt 14:54 MID-RUN -> its
+  OGDF rows are inconsistent (binary swapped mid-run). MUST re-run OGDF engines cleanly after.
+- UNCOMMITTED so far (commit after clean re-verify): param-matching (variants.py + graphviz/
+  fcose/ogdf competitors + ogdf_runner.cpp), OGDF build scripts, + wave-1 port pipeline edits.
+
+## DEP/RUNTIME FIX WAVE (JMT: "fix the dependency and runtime errors too" 2026-06-02)
+Make blocked engines actually evaluable on small graphs -- FIX, don't just document:
+- sgd2_multi (8 variants UNAVAILABLE): s_gd2 IS installed and `sgd2` ref works, but
+  `sgd2_multi_ref.available()` returns False for another reason -> diagnose its available()
+  gate + fix so it runs on small graphs.
+- neulay (6 variants ERROR): ref is available() + imports fine -> errors are RUNTIME (likely
+  GNN-train timeout or exception on some graphs) -> diagnose actual error + fix.
+- Plus any GENUINE ERROR remaining after the clean post-param-matching re-verify (sfdp showed
+  ERROR in the racy mid-flight STATUS -- likely transient; confirm on clean run).
+DISPATCH AFTER param-matching lands (it edits adapters incl. sgd2 -> conflict if parallel).
+fcose (cytoscape, 2): genuinely NO python port -> that's a missing-port, not a runtime error;
+separate (would need a from-scratch fcose port -- flag for JMT, not part of dep-fix).
+
+## Work list for later waves (after wave 1 validates the loop)
+DIVERGENT engines not yet dispatched: sugiyama (igraph/graphviz_dot), classical_mds (igraph_mds),
+fmmm/fdp (ogdf+graphviz), maxent_stress + stress_maj (ogdf_stress), pivot_mds (if divergent),
++ SQUEEZE the BIT_EXACT-but-3e-8 ones (fa2, graphopt, lgl) toward 1e-15.
+NO_REFERENCE (10) + UNAVAILABLE (8: sgd2_multi ref too slow) + ERROR (6: neulay timeout) =
+likely cannot be matched on small graphs; document in final SUMMARY.
