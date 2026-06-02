@@ -350,10 +350,19 @@ def _pure_igraph_davidson_harel_positions(
     move_radius = half_width
     initial = np.random.RandomState(seed).uniform(-1.0, 1.0, size=(num_nodes, 2))
     positions = [[float(initial[node, 0]), float(initial[node, 1])] for node in range(num_nodes)]
-    min_x = min(position[0] for position in positions)
-    max_x = max(position[0] for position in positions)
-    min_y = min(position[1] for position in positions)
-    max_y = max(position[1] for position in positions)
+    min_x = math.inf
+    max_x = -math.inf
+    min_y = math.inf
+    max_y = -math.inf
+    for x_value, y_value in positions:
+        if x_value < min_x:
+            min_x = x_value
+        elif x_value > max_x:
+            max_x = x_value
+        if y_value < min_y:
+            min_y = y_value
+        elif y_value > max_y:
+            max_y = y_value
     edges = _edge_list(edge_index, num_nodes)
     neighbors, incident_edges = _neighbors_and_incidents(edges, num_nodes)
     w_node_dist, w_border, w_edge_lengths, w_crossings, w_node_edge = _resolve_weights(

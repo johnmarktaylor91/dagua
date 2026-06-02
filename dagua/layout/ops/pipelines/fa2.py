@@ -179,7 +179,7 @@ def _layout_fa2_reference_exact(
                 distance = math.sqrt((x_dist * x_dist) + (y_dist * y_dist))
                 if distance <= 0.0:
                     continue
-                factor = -outbound_compensation * edge_factor * math.log1p(distance) / distance
+                factor = -outbound_compensation * edge_factor * math.log(1.0 + distance) / distance
             else:
                 factor = -outbound_compensation * edge_factor
             if outbound_attraction_distribution:
@@ -606,7 +606,7 @@ def _apply_reference_attraction(
             distance = math.sqrt((x_dist * x_dist) + (y_dist * y_dist))
             if distance <= 0.0:
                 continue
-            log_factor = math.log1p(distance) / distance
+            log_factor = math.log(1.0 + distance) / distance
             if outbound_attraction_distribution:
                 factor = -outbound_compensation * edge_factor * log_factor / node1.mass
             else:
