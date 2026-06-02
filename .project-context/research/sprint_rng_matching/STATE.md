@@ -112,7 +112,36 @@ gem proved it: looked "divergent 1.15", was bit-exact 3.86e-13 at matched rounds
 |---|---|---|---|
 | 0 | P0a | instrumented graphviz | DONE: ~/tools/graphviz-7.0.5-instr/ built; VERIDICAL PROOF PASS (54/54 bit-for-bit == stock, max_rmsd=0 -> logging-only confirmed); GV_TRACE %.17g works. Artifacts in scripts/rng_match/ (build script + patch + README) -- UNCOMMITTED (commit after P0b). Caveats: dot_builtins wrapped as bin/dot (no libltdl); fdp/neato/sfdp work. |
 | 0 | P0b | bit-exact harness | DONE + CC-VALIDATED. Baseline: 52 BIT_EXACT, 44 DIVERGENT, 1 CLOSE, 10 no-ref, 8 unavail, 6 err. Foundation committed 2b3efd0. Harness discriminates correctly (tsnet/linlog/kk exact ~1e-16; fa2/graphopt/lgl ~3e-8 BIT_EXACT but SQUEEZABLE to 1e-15; divergent are real). |
-| 1 | P1 ports (wave 1) | neato(2150078) sfdp(2150190) drl(2150474) davidson_harel(2150667) gem(2150860) umap(2151082) | RUNNING. Spec PORT_<eng>.md + PORTING_PROTOCOL.md. Each owns its pipeline file, NO variants.py edits (report-only). Verify via scripts/rng_match/check_engine.py. On each DONE: grep diff for delegation (anti-cheat), run check_engine, update STATUS.md, commit if clean. |
+| 1 | P1 wave1 + param-match + OGDF | (done) | COMMITTED f60944e. Matched-params authoritative baseline: 60 BIT_EXACT / 36 DIVERGENT / 6 neulay-ERROR / 8 sgd2-UNAVAILABLE / 10 no-ref / 1 CLOSE. Newly bit-exact: gem, pivot_mds, stress_maj, umap. Anti-cheat clean. |
+| 2 | P1 wave2 (ports+iterate+depfix) | neato(2440040) sfdp(2440141) fmmm(2440413) maxent(2440612) classical_mds(2440803) drl(2440989) sgd2multi(2441175) neulay(2441364) | RUNNING. Specs PORT2_*/FIX_*.md. Each owns distinct file (drl owns _igraph_rng.py; classical_mds deterministic-no-RNG). On each DONE: anti-cheat grep + check_engine + update STATUS + commit clean. |
+
+## Wave-2 results (partial -- batch-assess when all 8 done; anti-cheat clean so far)
+- drl: igraph RNG MOSTLY matched -> 35/42 fixtures bit-exact, 7 diverge (max 1.0). Likely
+  chaotic-anneal minority OR a residual RNG-draw-order case. Candidate for 1 targeted retry then accept.
+- classical_mds: 1.09 -> 0.77. Bit-exact on non-degenerate fixtures (numerical floor); STUCK on
+  igraph vendored-LAPACK dsyevr eigenvector basis for REPEATED eigenvalues (degenerate-eigenvector
+  convention) -- genuine numerical wall, NOT RNG. Strong "documented can't-go-further" candidate.
+- sgd2multi, neato, sfdp, fmmm, maxent, neulay: DONE (narrative; clean re-verify pid 2481689 running):
+  * neato BIT_EXACT 6.07e-16 (42/42) -- convergence-stop fix WORKED.
+  * maxent_stress BIT_EXACT 4.78e-16 (42/42).
+  * neulay BIT_EXACT 6.63e-16 (42/42) + dep-fix made it RUN (old-code dim/budget bug, not missing PyG).
+  * sgd2_multi: dep-fix -> now RUNS (was UNAVAILABLE) -> 0.141 DIVERGENT (needs a PORT next, wave 3).
+  * fmmm 1.39->2.08e-2 (35/42 exact; residual = 1-unit integer-coord drift in OGDF final packing).
+  * sfdp 0.81->0.44 (partial, multilevel hard). drl 35/42 (partial). classical_mds STUCK (LAPACK degenerate basis).
+  * NOTE: status.json got CORRUPTED by 8 concurrent codex check_engine writes -> the single-writer
+    re-verify (2481689) regenerates it clean. Anti-cheat grep clean across all wave-2 changes.
+- ENDGAME: when all done -> clean full re-verify + anti-cheat grep ALL + commit + classify each
+  engine (BIT_EXACT / STUCK-with-documented-reason / dep-fixed). Then wave 3 (davidson_harel +
+  sugiyama using drl's _igraph_rng work; squeeze fa2/graphopt/lgl/gem to floor). Then SUMMARY + text JMT.
+- DRIVE-OR-WALL: per JMT, each engine either <1e-7 OR a precise documented irreducible reason
+  (LAPACK degenerate basis, chaotic FP cascade, non-reproducible source). No flailing, no faking.
+
+## Held for wave 3 (after wave 2 + to avoid _igraph_rng.py conflict with drl)
+- davidson_harel, sugiyama (igraph RNG -- wait for drl to settle _igraph_rng.py).
+- fr_steps200/500 iterate (fr_steps100 already CLOSE 1.86e-7), fa2_linlog iterate (2.1e-3).
+- SQUEEZE bit-exact-but-not-floor: fa2/graphopt/lgl (~3e-8), gem (~8e-8 -> pin exact OGDF commit for ~1e-13).
+- fcose (NO python port -- flag to JMT, not a quick fix). NO_REFERENCE chains (fr_kk etc -- can't compare).
+- FINAL: clean full re-verify (OGDF rows were mid-rebuild in the f60944e baseline -> refresh), then SUMMARY + text JMT.
 
 ## Wave-1 results (as they land)
 - **gem DONE 2026-06-02**: NO code change needed. dagua GEM ALREADY bit-matches OGDF at MATCHED
