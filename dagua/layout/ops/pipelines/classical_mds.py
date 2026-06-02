@@ -6,11 +6,14 @@ import ctypes
 import math
 from typing import Optional
 
+import numpy as np
+import scipy.linalg
 import torch
 
 from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.distance import ClassicalMDSDistanceMatrix
 from dagua.layout.ops.embed import ClassicalMDSComputeEmbedding, ClassicalMDSComputeEmbeddingConfig
+from dagua.layout.ops.graph_utils import shortest_path_distances as _shortest_path_distances
 from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.postprocess import (
     ClassicalMDSFinalizePositions,
@@ -27,6 +30,7 @@ _OGDF_EDGE_COST = 100.0
 _OGDF_POWER_EPSILON = 1.0 - 1e-10
 _OGDF_CENTERING_FACTOR = -0.5
 _LIBC_RAND_MAX = 2_147_483_647
+_IGRAPH_LAYOUT_SCALE = 50.0
 
 
 def build_classical_mds_pipeline(
@@ -150,6 +154,13 @@ def layout_classical_mds_pipeline(
             num_nodes=num_nodes,
             fidelity_dtype=resolve_fidelity_dtype(True, fidelity_dtype),
         )
+    if igraph_fidelity or edge_weights is None:
+        return _layout_igraph_classical_mds(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            output_dtype=torch.float32 if fidelity_dtype is None else fidelity_dtype,
+            use_two_node_special=igraph_fidelity,
+        )
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -167,6 +178,90 @@ def layout_classical_mds_pipeline(
     if final_state.pos is None:
         raise RuntimeError("Classical MDS pipeline did not produce final positions.")
     return final_state.pos
+
+
+def _layout_igraph_classical_mds(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    output_dtype: torch.dtype,
+    use_two_node_special: bool,
+) -> torch.Tensor:
+    """Run igraph-compatible classical MDS for connected benchmark graphs.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes ``N``.
+    output_dtype : torch.dtype
+        Dtype used for returned coordinates.
+    use_two_node_special : bool
+        Whether to use igraph's ``[[0, 0], [1, 1]]`` raw layout for two-node
+        graphs. The public default keeps the legacy two-node behavior.
+
+    Returns
+    -------
+    torch.Tensor
+        igraph-scaled coordinates with shape ``[N, 2]``.
+
+    Notes
+    -----
+    igraph 1.0.0 computes unweighted all-pairs distances, squares the distance
+    matrix in place, double-centers via row means and a grand mean, calls
+    LAPACK ``dsyevr`` for the two largest algebraic eigenpairs, and writes the
+    selected dimensions in reverse column order. Classical MDS itself has no
+    RNG; disconnected-graph DLA packing is the only stochastic behavior.
+    """
+    output_device = edge_index.device if edge_index.numel() > 0 else torch.device("cpu")
+    if num_nodes == 0:
+        return torch.zeros((0, 2), dtype=output_dtype, device=output_device)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=output_dtype, device=output_device)
+    if num_nodes == 2 and use_two_node_special:
+        return (
+            torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float64, device=output_device)
+            * _IGRAPH_LAYOUT_SCALE
+        ).to(dtype=output_dtype)
+
+    distances = _shortest_path_distances(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=None,
+    )
+    gram = np.array(distances, dtype=np.float64, order="F", copy=True)
+    for column in range(num_nodes):
+        for row in range(num_nodes):
+            gram[row, column] *= gram[row, column]
+
+    row_means = gram.mean(axis=1)
+    grand_mean = float(row_means.sum() / float(num_nodes))
+    gram += grand_mean
+    for column in range(num_nodes):
+        for row in range(num_nodes):
+            gram[row, column] -= row_means[row] + row_means[column]
+            gram[row, column] *= _OGDF_CENTERING_FACTOR
+
+    eigenvalues, eigenvectors = scipy.linalg.eigh(
+        gram,
+        subset_by_index=(num_nodes - 2, num_nodes - 1),
+        driver="evr",
+        lower=True,
+        check_finite=False,
+    )
+
+    coordinates = np.zeros((num_nodes, 2), dtype=np.float64)
+    selected_count = int(eigenvalues.shape[0])
+    for eigen_index in range(selected_count):
+        output_column = selected_count - 1 - eigen_index
+        coordinates[:, output_column] = (
+            math.sqrt(abs(float(eigenvalues[eigen_index]))) * eigenvectors[:, eigen_index]
+        )
+
+    return torch.from_numpy(coordinates * _IGRAPH_LAYOUT_SCALE).to(
+        dtype=output_dtype,
+        device=output_device,
+    )
 
 
 def _layout_ogdf_classical_mds(

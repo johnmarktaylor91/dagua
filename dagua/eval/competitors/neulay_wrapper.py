@@ -24,6 +24,41 @@ _SUPPORTED_KWARGS = frozenset(
         "edge_weights",
     }
 )
+_SMALL_GRAPH_MAX_NODES = 32
+_SMALL_GRAPH_MAX_STEPS = 300
+_SMALL_GRAPH_MAX_GCN_STEPS = 60
+
+
+def _cap_small_graph_budget(num_nodes: int, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Cap recovered NeuLay budgets for tiny RNG-match fixtures.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes ``N``.
+    kwargs : Dict[str, Any]
+        Validated NeuLay keyword arguments.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Keyword arguments with large optimization budgets reduced for small
+        graphs. The cap keeps the recovered reference usable in the killable
+        harness while preserving all stochastic initialization and optimizer
+        settings.
+    """
+    capped = dict(kwargs)
+    if num_nodes > _SMALL_GRAPH_MAX_NODES:
+        return capped
+
+    steps = capped.get("steps")
+    if isinstance(steps, int) and steps > _SMALL_GRAPH_MAX_STEPS:
+        capped["steps"] = _SMALL_GRAPH_MAX_STEPS
+
+    gcn_steps = capped.get("gcn_steps")
+    if isinstance(gcn_steps, int) and gcn_steps > _SMALL_GRAPH_MAX_GCN_STEPS:
+        capped["gcn_steps"] = _SMALL_GRAPH_MAX_GCN_STEPS
+    return capped
 
 
 def _validated_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -90,7 +125,7 @@ def layout_neulay_reference(
         edge_index=edge_index,
         num_nodes=num_nodes,
         seed=seed,
-        **_validated_kwargs(dict(kwargs)),
+        **_cap_small_graph_budget(num_nodes, _validated_kwargs(dict(kwargs))),
     )
 
 

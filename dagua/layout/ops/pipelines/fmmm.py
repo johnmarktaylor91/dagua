@@ -33,8 +33,804 @@ _FDP_COMPOUND_CLUSTER_OBSTACLES_KEY = "fmmm_fdp_compound_cluster_obstacles"
 _FDP_COMPOUND_NODE_OBSTACLES_KEY = "fmmm_fdp_compound_node_obstacles"
 _FDP_EPSILON = 1.0e-9
 _FDP_TRACE_PATH = "/tmp/dagua_fdp_trace.log"
+_OGDF_FMMM_UNIT_EDGE_LENGTH = 20.0
+_OGDF_FMMM_DEFAULT_NODE_WIDTH = 20.0
+_OGDF_FMMM_DEFAULT_NODE_HEIGHT = 20.0
+_OGDF_FMMM_MIN_NODE_SIZE = 10.0
+_OGDF_FMMM_BOX_SCALING_FACTOR = 1.1
+_OGDF_FMMM_FORCE_SCALING_FACTOR = 0.05
+_OGDF_FMMM_FINE_TUNING_ITERATIONS = 20
+_OGDF_FMMM_FINE_TUNE_SCALAR = 0.2
+_OGDF_FMMM_POST_SPRING_STRENGTH = 2.0
+_OGDF_FMMM_EPSILON = 0.1
+_OGDF_FMMM_BILLION = 1_000_000_000
+_OGDF_FMMM_IDEAL_EDGE_LENGTH = _OGDF_FMMM_UNIT_EDGE_LENGTH + 2.0 * math.sqrt(
+    (_OGDF_FMMM_DEFAULT_NODE_WIDTH / 2.0) ** 2 + (_OGDF_FMMM_DEFAULT_NODE_HEIGHT / 2.0) ** 2
+)
 
 _ObjectKey = Tuple[str, Union[int, str]]
+
+
+class _OgdfMt19937:
+    """OGDF ``randomNumber`` generator backed by C++ ``std::mt19937``.
+
+    Parameters
+    ----------
+    seed : int
+        Seed passed to OGDF ``setSeed``. OGDF stores a process-global
+        ``std::mt19937`` and ``FMMMLayout`` reseeds it before random placement.
+    """
+
+    def __init__(self, seed: int) -> None:
+        self._index = 624
+        self._state = [0] * 624
+        self._state[0] = int(seed) & 0xFFFFFFFF
+        for index in range(1, 624):
+            previous = self._state[index - 1]
+            self._state[index] = (1812433253 * (previous ^ (previous >> 30)) + index) & 0xFFFFFFFF
+
+    def _twist(self) -> None:
+        """Regenerate the MT19937 state array.
+
+        Returns
+        -------
+        None
+            Updates the generator state in place.
+        """
+        for index in range(624):
+            value = (self._state[index] & 0x80000000) + (
+                self._state[(index + 1) % 624] & 0x7FFFFFFF
+            )
+            twisted = self._state[(index + 397) % 624] ^ (value >> 1)
+            if value & 1:
+                twisted ^= 0x9908B0DF
+            self._state[index] = twisted & 0xFFFFFFFF
+        self._index = 0
+
+    def raw(self) -> int:
+        """Return the next raw ``std::mt19937`` 32-bit value.
+
+        Returns
+        -------
+        int
+            Unsigned integer in ``[0, 2**32 - 1]``.
+        """
+        if self._index >= 624:
+            self._twist()
+        value = self._state[self._index]
+        self._index += 1
+        value ^= value >> 11
+        value ^= (value << 7) & 0x9D2C5680
+        value ^= (value << 15) & 0xEFC60000
+        value ^= value >> 18
+        return value & 0xFFFFFFFF
+
+    def randint(self, low: int, high: int) -> int:
+        """Return libstdc++ ``uniform_int_distribution`` output.
+
+        Parameters
+        ----------
+        low : int
+            Inclusive lower bound.
+        high : int
+            Inclusive upper bound.
+
+        Returns
+        -------
+        int
+            Uniform integer in ``[low, high]`` matching OGDF's libstdc++
+            ``randomNumber`` stream for ranges used by FMMM.
+        """
+        if low > high:
+            raise ValueError("low must be <= high.")
+        urng_range = 0xFFFFFFFF
+        urange = int(high) - int(low)
+        if urange == urng_range:
+            return int(low) + self.raw()
+        if urng_range > urange:
+            scaling = urng_range // (urange + 1)
+            past = (urange + 1) * scaling
+            value = self.raw()
+            while value >= past:
+                value = self.raw()
+            return int(low) + (value // scaling)
+        raise ValueError("OGDF FMMM port only supports 32-bit or smaller ranges.")
+
+
+def _ogdf_fmmm_norm(point: Tuple[float, float]) -> float:
+    """Return the Euclidean norm of a two-dimensional point.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Vector components.
+
+    Returns
+    -------
+    float
+        Euclidean length.
+    """
+    return math.sqrt(point[0] * point[0] + point[1] * point[1])
+
+
+def _ogdf_fmmm_angle(
+    center: Tuple[float, float],
+    first: Tuple[float, float],
+    second: Tuple[float, float],
+) -> float:
+    """Return OGDF ``DPoint::angle`` equivalent for two rays.
+
+    Parameters
+    ----------
+    center : tuple[float, float]
+        Common ray origin.
+    first : tuple[float, float]
+        First ray endpoint.
+    second : tuple[float, float]
+        Second ray endpoint.
+
+    Returns
+    -------
+    float
+        Counter-clockwise angle in radians in ``[0, 2*pi]``.
+    """
+    ax = first[0] - center[0]
+    ay = first[1] - center[1]
+    bx = second[0] - center[0]
+    by = second[1] - center[1]
+    angle = math.atan2(ax * by - ay * bx, ax * bx + ay * by)
+    if angle < 0.0:
+        angle += 2.0 * math.pi
+    return angle
+
+
+def _ogdf_fmmm_initial_box(num_nodes: int) -> Tuple[float, Tuple[float, float]]:
+    """Return OGDF initial computational box for default runner nodes.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the component.
+
+    Returns
+    -------
+    tuple[float, tuple[float, float]]
+        ``(boxlength, down_left_corner)``.
+    """
+    boxlength = math.ceil(
+        max(
+            num_nodes * max(_OGDF_FMMM_DEFAULT_NODE_WIDTH, _OGDF_FMMM_MIN_NODE_SIZE),
+            num_nodes * max(_OGDF_FMMM_DEFAULT_NODE_HEIGHT, _OGDF_FMMM_MIN_NODE_SIZE),
+        )
+        * _OGDF_FMMM_BOX_SCALING_FACTOR
+    )
+    return float(boxlength), (0.0, 0.0)
+
+
+def _ogdf_fmmm_update_box(positions: list[list[float]]) -> Tuple[float, Tuple[float, float]]:
+    """Return OGDF tight computational box for current positions.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Mutable node coordinates.
+
+    Returns
+    -------
+    tuple[float, tuple[float, float]]
+        ``(boxlength, down_left_corner)``.
+    """
+    x_values = [point[0] for point in positions]
+    y_values = [point[1] for point in positions]
+    xmin = min(x_values)
+    xmax = max(x_values)
+    ymin = min(y_values)
+    ymax = max(y_values)
+    down_left = (float(math.floor(xmin - 1.0)), float(math.floor(ymin - 1.0)))
+    boxlength = float(math.ceil(max(ymax - ymin, xmax - xmin) * 1.01 + 2.0))
+    if boxlength <= 2.0:
+        boxlength = float(len(positions) * 20)
+        down_left = (
+            float(math.floor(xmin) - (boxlength / 2.0)),
+            float(math.floor(ymin) - (boxlength / 2.0)),
+        )
+    return boxlength, down_left
+
+
+def _ogdf_fmmm_random_placement(num_nodes: int, seed: int) -> list[list[float]]:
+    """Create OGDF FMMM random initial positions.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes to place.
+    seed : int
+        OGDF ``randSeed`` value.
+
+    Returns
+    -------
+    list[list[float]]
+        Mutable coordinates in OGDF output units.
+    """
+    rng = _OgdfMt19937(seed)
+    boxlength, _ = _ogdf_fmmm_initial_box(num_nodes)
+    positions: list[list[float]] = []
+    for _ in range(num_nodes):
+        rand_x = float(rng.randint(0, _OGDF_FMMM_BILLION)) / _OGDF_FMMM_BILLION
+        rand_y = float(rng.randint(0, _OGDF_FMMM_BILLION)) / _OGDF_FMMM_BILLION
+        positions.append([rand_x * (boxlength - 2.0) + 1.0, rand_y * (boxlength - 2.0) + 1.0])
+    return positions
+
+
+def _ogdf_fmmm_adjust_positions(
+    positions: list[list[float]],
+    average_ideal_edge_length: float,
+    down_left_corner: Tuple[float, float],
+    boxlength: float,
+    final_floor: bool = True,
+) -> Tuple[float, Tuple[float, float]]:
+    """Apply OGDF integer-position adjustment.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Mutable coordinates.
+    average_ideal_edge_length : float
+        Average edge length used by OGDF to set the integer boundary.
+    down_left_corner : tuple[float, float]
+        Current computational box lower-left corner.
+    boxlength : float
+        Current computational box side length.
+    final_floor : bool, default=True
+        Whether to apply the integer ``floor`` step. OGDF calls this before
+        every force iteration and once after the solver before export.
+
+    Returns
+    -------
+    tuple[float, tuple[float, float]]
+        Possibly updated ``(boxlength, down_left_corner)``.
+    """
+    max_integer_position = 100.0 * average_ideal_edge_length * len(positions) * len(positions)
+    for point in positions:
+        point[0] = min(max(point[0], -max_integer_position), max_integer_position)
+        point[1] = min(max(point[1], -max_integer_position), max_integer_position)
+
+    if not final_floor:
+        return boxlength, down_left_corner
+
+    down_x, down_y = down_left_corner
+    for point in positions:
+        new_x = math.floor(point[0])
+        new_y = math.floor(point[1])
+        if new_x < down_x:
+            boxlength += 2.0
+            down_x -= 2.0
+        if new_y < down_y:
+            boxlength += 2.0
+            down_y -= 2.0
+        point[0] = float(new_x)
+        point[1] = float(new_y)
+    return boxlength, (down_x, down_y)
+
+
+def _ogdf_fmmm_repulsive_forces(positions: list[list[float]]) -> list[list[float]]:
+    """Calculate exact OGDF FMMM repulsive forces.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Current node coordinates.
+
+    Returns
+    -------
+    list[list[float]]
+        Repulsive force vectors.
+    """
+    forces = [[0.0, 0.0] for _ in positions]
+    for source in range(len(positions) - 1):
+        for target in range(source + 1, len(positions)):
+            dx = positions[target][0] - positions[source][0]
+            dy = positions[target][1] - positions[source][1]
+            distance = math.sqrt(dx * dx + dy * dy)
+            if distance == 0.0:
+                continue
+            scalar = (1.0 / distance) / distance
+            fx = scalar * dx
+            fy = scalar * dy
+            forces[target][0] += fx
+            forces[target][1] += fy
+            forces[source][0] -= fx
+            forces[source][1] -= fy
+    return forces
+
+
+def _ogdf_fmmm_attractive_forces(
+    positions: list[list[float]],
+    edges: Sequence[Tuple[int, int]],
+) -> list[list[float]]:
+    """Calculate OGDF FMMM ``ForceModel::New`` attractive forces.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Current node coordinates.
+    edges : Sequence[tuple[int, int]]
+        Simple loop-free edge list.
+
+    Returns
+    -------
+    list[list[float]]
+        Attractive force vectors.
+    """
+    forces = [[0.0, 0.0] for _ in positions]
+    ideal_length = _OGDF_FMMM_IDEAL_EDGE_LENGTH
+    ideal_cubed = ideal_length * ideal_length * ideal_length
+    for source, target in edges:
+        dx = positions[target][0] - positions[source][0]
+        dy = positions[target][1] - positions[source][1]
+        distance = math.sqrt(dx * dx + dy * dy)
+        if dx == 0.0 and dy == 0.0:
+            fx = 0.0
+            fy = 0.0
+        else:
+            scalar = math.log2(distance / ideal_length) * distance * distance / ideal_cubed
+            scalar /= distance
+            fx = scalar * dx
+            fy = scalar * dy
+        forces[target][0] -= fx
+        forces[target][1] -= fy
+        forces[source][0] += fx
+        forces[source][1] += fy
+    return forces
+
+
+def _ogdf_fmmm_combined_forces(
+    attr: list[list[float]],
+    rep: list[list[float]],
+    boxlength: float,
+    iter_index: int,
+    fine_tuning_step: int,
+    cool_factor: float,
+) -> Tuple[list[list[float]], float]:
+    """Combine OGDF attractive and repulsive forces.
+
+    Parameters
+    ----------
+    attr : list[list[float]]
+        Attractive force vectors.
+    rep : list[list[float]]
+        Repulsive force vectors.
+    boxlength : float
+        Current computational box side length.
+    iter_index : int
+        One-based OGDF iteration number for this phase.
+    fine_tuning_step : int
+        OGDF phase selector: ``0`` main, ``1`` post cooldown, ``2`` fine tune.
+    cool_factor : float
+        Incoming OGDF cool factor state.
+
+    Returns
+    -------
+    tuple[list[list[float]], float]
+        Combined movement vectors and updated cool factor.
+    """
+    if fine_tuning_step == 1:
+        cool_factor /= 10.0
+    elif fine_tuning_step == 2:
+        if iter_index <= _OGDF_FMMM_FINE_TUNING_ITERATIONS - 5:
+            cool_factor = _OGDF_FMMM_FINE_TUNE_SCALAR
+        else:
+            cool_factor = _OGDF_FMMM_FINE_TUNE_SCALAR / 10.0
+
+    spring_strength = 1.0 if fine_tuning_step <= 1 else _OGDF_FMMM_POST_SPRING_STRENGTH
+    rep_strength = 1.0 if fine_tuning_step <= 1 else min(0.2, 400.0 / float(len(attr)))
+    max_radius = boxlength / 1000.0 if iter_index == 1 else boxlength / 5.0
+    average_sq = _OGDF_FMMM_IDEAL_EDGE_LENGTH * _OGDF_FMMM_IDEAL_EDGE_LENGTH
+    forces: list[list[float]] = []
+    for node_index in range(len(attr)):
+        fx = spring_strength * attr[node_index][0] + rep_strength * rep[node_index][0]
+        fy = spring_strength * attr[node_index][1] + rep_strength * rep[node_index][1]
+        fx *= average_sq
+        fy *= average_sq
+        norm = math.sqrt(fx * fx + fy * fy)
+        if norm == 0.0:
+            forces.append([0.0, 0.0])
+        else:
+            scalar = min(norm * cool_factor * _OGDF_FMMM_FORCE_SCALING_FACTOR, max_radius) / norm
+            forces.append([scalar * fx, scalar * fy])
+    return forces, cool_factor
+
+
+def _ogdf_fmmm_prevent_oscillations(
+    forces: list[list[float]],
+    last_movement: list[list[float]],
+    iter_index: int,
+) -> list[list[float]]:
+    """Apply OGDF oscillation damping.
+
+    Parameters
+    ----------
+    forces : list[list[float]]
+        Proposed movement vectors.
+    last_movement : list[list[float]]
+        Previous movement vectors, updated in place.
+    iter_index : int
+        One-based OGDF phase iteration.
+
+    Returns
+    -------
+    list[list[float]]
+        Damped movement vectors.
+    """
+    if iter_index == 1:
+        for node_index, force in enumerate(forces):
+            last_movement[node_index][0] = force[0]
+            last_movement[node_index][1] = force[1]
+        return forces
+
+    factors = (
+        2.0,
+        2.0,
+        1.5,
+        1.0,
+        0.66666666,
+        0.5,
+        0.33333333,
+        0.33333333,
+        0.5,
+        0.66666666,
+        1.0,
+        1.5,
+        2.0,
+        2.0,
+    )
+    pi_times_one_over_six = 0.52359878
+    for node_index, force in enumerate(forces):
+        old = last_movement[node_index]
+        norm_new = _ogdf_fmmm_norm((force[0], force[1]))
+        norm_old = _ogdf_fmmm_norm((old[0], old[1]))
+        if norm_new > 0.0 and norm_old > 0.0:
+            angle = _ogdf_fmmm_angle((0.0, 0.0), (old[0], old[1]), (force[0], force[1]))
+            factor = factors[int(math.ceil(angle / pi_times_one_over_six))]
+            quotient = norm_old * factor / norm_new
+            if quotient < 1.0:
+                force[0] *= quotient
+                force[1] *= quotient
+        old[0] = force[0]
+        old[1] = force[1]
+    return forces
+
+
+def _ogdf_fmmm_force_iteration(
+    positions: list[list[float]],
+    edges: Sequence[Tuple[int, int]],
+    last_movement: list[list[float]],
+    boxlength: float,
+    down_left_corner: Tuple[float, float],
+    iter_index: int,
+    fine_tuning_step: int,
+    cool_factor: float,
+) -> Tuple[float, Tuple[float, float], float]:
+    """Execute one OGDF FMMM force iteration.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Mutable node coordinates.
+    edges : Sequence[tuple[int, int]]
+        Simple loop-free edge list.
+    last_movement : list[list[float]]
+        Previous movement vectors, updated in place.
+    boxlength : float
+        Current computational box side length.
+    down_left_corner : tuple[float, float]
+        Current computational box lower-left corner.
+    iter_index : int
+        One-based OGDF phase iteration.
+    fine_tuning_step : int
+        OGDF phase selector.
+    cool_factor : float
+        Incoming cool factor.
+
+    Returns
+    -------
+    tuple[float, tuple[float, float], float]
+        Updated ``boxlength``, ``down_left_corner``, and ``cool_factor``.
+    """
+    boxlength, down_left_corner = _ogdf_fmmm_adjust_positions(
+        positions,
+        _OGDF_FMMM_IDEAL_EDGE_LENGTH,
+        down_left_corner,
+        boxlength,
+    )
+    attr = _ogdf_fmmm_attractive_forces(positions, edges)
+    rep = _ogdf_fmmm_repulsive_forces(positions)
+    forces, cool_factor = _ogdf_fmmm_combined_forces(
+        attr,
+        rep,
+        boxlength,
+        iter_index,
+        fine_tuning_step,
+        cool_factor,
+    )
+    forces = _ogdf_fmmm_prevent_oscillations(forces, last_movement, iter_index)
+    for node_index, force in enumerate(forces):
+        positions[node_index][0] += force[0]
+        positions[node_index][1] += force[1]
+    boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+    return boxlength, down_left_corner, cool_factor
+
+
+def _ogdf_fmmm_adapt_to_ideal_edge_length(
+    positions: list[list[float]],
+    edges: Sequence[Tuple[int, int]],
+) -> None:
+    """Scale drawing to OGDF's ideal average edge length.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Mutable node coordinates.
+    edges : Sequence[tuple[int, int]]
+        Simple loop-free edge list.
+
+    Returns
+    -------
+    None
+        Mutates ``positions`` in place.
+    """
+    sum_real = 0.0
+    for source, target in edges:
+        dx = positions[source][0] - positions[target][0]
+        dy = positions[source][1] - positions[target][1]
+        sum_real += math.sqrt(dx * dx + dy * dy)
+    scale = 1.0 if sum_real == 0.0 else (_OGDF_FMMM_IDEAL_EDGE_LENGTH * len(edges)) / sum_real
+    for point in positions:
+        point[0] *= scale
+        point[1] *= scale
+
+
+def _ogdf_fmmm_component_rectangle(
+    positions: list[list[float]],
+) -> Tuple[float, float, Tuple[float, float]]:
+    """Return OGDF component rectangle for default node dimensions.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Component node coordinates.
+
+    Returns
+    -------
+    tuple[float, float, tuple[float, float]]
+        Rectangle ``(width, height, old_down_left_corner)``.
+    """
+    max_boundary = max(_OGDF_FMMM_DEFAULT_NODE_WIDTH / 2.0, _OGDF_FMMM_DEFAULT_NODE_HEIGHT / 2.0)
+    x_min = positions[0][0] - max_boundary
+    x_max = positions[0][0] + max_boundary
+    y_min = positions[0][1] - max_boundary
+    y_max = positions[0][1] + max_boundary
+    for point in positions[1:]:
+        x_min = min(x_min, point[0] - max_boundary)
+        x_max = max(x_max, point[0] + max_boundary)
+        y_min = min(y_min, point[1] - max_boundary)
+        y_max = max(y_max, point[1] + max_boundary)
+    x_min -= 15.0
+    x_max += 15.0
+    y_min -= 15.0
+    y_max += 15.0
+    return x_max - x_min, y_max - y_min, (x_min, y_min)
+
+
+def _ogdf_fmmm_square_aspect_area(width: float, height: float) -> float:
+    """Return OGDF one-component square aspect-ratio area.
+
+    Parameters
+    ----------
+    width : float
+        Rectangle width.
+    height : float
+        Rectangle height.
+
+    Returns
+    -------
+    float
+        Aspect-ratio adjusted area for ``pageRatio() == 1``.
+    """
+    ratio = width / height
+    scaling = (1.0 / ratio) if ratio < 1.0 else ratio
+    return width * height * scaling
+
+
+def _ogdf_fmmm_rotate_positions(
+    positions: list[list[float]],
+    angle: float,
+) -> list[list[float]]:
+    """Rotate positions around the origin like OGDF component packing.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Source coordinates.
+    angle : float
+        Rotation angle in radians.
+
+    Returns
+    -------
+    list[list[float]]
+        Rotated coordinate copy.
+    """
+    sin_angle = math.sin(angle)
+    cos_angle = math.cos(angle)
+    return [
+        [
+            cos_angle * point[0] - sin_angle * point[1],
+            sin_angle * point[0] + cos_angle * point[1],
+        ]
+        for point in positions
+    ]
+
+
+def _ogdf_fmmm_pack_single_component(positions: list[list[float]]) -> None:
+    """Apply OGDF single-component rotation and packing translation.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Mutable coordinates after the subgraph force calculation.
+
+    Returns
+    -------
+    None
+        Mutates ``positions`` in place.
+    """
+    best_positions = [point.copy() for point in positions]
+    best_width, best_height, best_old_dlc = _ogdf_fmmm_component_rectangle(best_positions)
+    best_area = _ogdf_fmmm_square_aspect_area(best_width, best_height)
+    old_positions = [point.copy() for point in positions]
+    for step in range(1, 11):
+        angle = (math.pi / 2.0) * (float(step) / 11.0)
+        candidate = _ogdf_fmmm_rotate_positions(old_positions, angle)
+        width, height, old_dlc = _ogdf_fmmm_component_rectangle(candidate)
+        area = _ogdf_fmmm_square_aspect_area(width, height)
+        area_pi_half_rotated = _ogdf_fmmm_square_aspect_area(height, width)
+        if area < best_area:
+            best_positions = candidate
+            best_width = width
+            best_height = height
+            best_old_dlc = old_dlc
+            best_area = area
+        elif area_pi_half_rotated < best_area:
+            best_positions = candidate
+            best_width = width
+            best_height = height
+            best_old_dlc = old_dlc
+            best_area = area_pi_half_rotated
+
+    if best_width / best_height < 1.0:
+        best_positions = [[-point[1], point[0]] for point in best_positions]
+        best_old_dlc = (-best_old_dlc[1] - best_height, best_old_dlc[0])
+
+    for node_index, point in enumerate(best_positions):
+        positions[node_index][0] = point[0] - best_old_dlc[0]
+        positions[node_index][1] = point[1] - best_old_dlc[1]
+
+
+def _ogdf_fmmm_simple_edges(edge_index: torch.Tensor) -> list[Tuple[int, int]]:
+    """Return OGDF's simple loop-free edge set in input order.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        First representative of each undirected non-loop edge.
+    """
+    edges: list[Tuple[int, int]] = []
+    seen: set[Tuple[int, int]] = set()
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    for edge_pos in range(int(cpu_edges.shape[1])):
+        source = int(cpu_edges[0, edge_pos].item())
+        target = int(cpu_edges[1, edge_pos].item())
+        if source == target:
+            continue
+        key = (source, target) if source <= target else (target, source)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append((source, target))
+    return edges
+
+
+def _layout_ogdf_fmmm_small_fidelity(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    steps: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Run the OGDF FMMM single-level fidelity path used by small fixtures.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    steps : int
+        OGDF ``fixedIterations`` value.
+    seed : int
+        OGDF ``randSeed`` value.
+    device : torch.device
+        Output tensor device.
+
+    Returns
+    -------
+    torch.Tensor
+        Final OGDF-coordinate positions with shape ``[N, 2]``.
+    """
+    positions = _ogdf_fmmm_random_placement(num_nodes, seed)
+    edges = _ogdf_fmmm_simple_edges(edge_index)
+    boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+    last_movement = [[0.0, 0.0] for _ in range(num_nodes)]
+    cool_factor = 1.0
+
+    max_iterations = max(100, 10 * int(steps))
+    for iter_index in range(1, max_iterations + 1):
+        boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
+            positions,
+            edges,
+            last_movement,
+            boxlength,
+            down_left_corner,
+            iter_index,
+            0,
+            cool_factor,
+        )
+
+    for iter_index in range(1, 11):
+        boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
+            positions,
+            edges,
+            last_movement,
+            boxlength,
+            down_left_corner,
+            iter_index,
+            1,
+            cool_factor,
+        )
+
+    if edges:
+        _ogdf_fmmm_adapt_to_ideal_edge_length(positions, edges)
+        boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+
+    for iter_index in range(1, _OGDF_FMMM_FINE_TUNING_ITERATIONS + 1):
+        boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
+            positions,
+            edges,
+            last_movement,
+            boxlength,
+            down_left_corner,
+            iter_index,
+            2,
+            cool_factor,
+        )
+
+    if edges:
+        _ogdf_fmmm_adapt_to_ideal_edge_length(positions, edges)
+    _ogdf_fmmm_pack_single_component(positions)
+    boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+    boxlength, down_left_corner = _ogdf_fmmm_adjust_positions(
+        positions,
+        _OGDF_FMMM_IDEAL_EDGE_LENGTH,
+        down_left_corner,
+        boxlength,
+    )
+    del boxlength, down_left_corner
+    return torch.tensor(positions, dtype=torch.float64, device=device)
 
 
 def _fdp_trace_positions(
@@ -4797,20 +5593,13 @@ def layout_fmmm_pipeline(
 
     effective_reference_mode = reference_mode or fidelity_mode
     if effective_reference_mode:
-        components = _weak_components(edge_index=edge_index, num_nodes=num_nodes)
-        return _layout_fmmm_fidelity_components(
+        return _layout_ogdf_fmmm_small_fidelity(
             edge_index=edge_index,
-            components=components,
             num_nodes=num_nodes,
-            node_sizes=node_sizes,
             steps=steps,
             seed=seed,
-            edge_weights=edge_weights,
-            force_model=force_model,
-            reference_mode=reference_mode,
-            fidelity_mode=fidelity_mode,
-            fidelity_dtype=fidelity_dtype,
-        )
+            device=device,
+        ).to(dtype=torch.float32)
 
     return _run_fmmm_pipeline_once(
         edge_index=edge_index,

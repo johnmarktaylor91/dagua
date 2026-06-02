@@ -11,6 +11,8 @@ from dagua.layout.ops.pipelines.stress_majorization import layout_stress_majoriz
 
 _GRAPHVIZ_VPSC_DEFAULT_GAP = 1.0 / 9.0
 _GRAPHVIZ_VPSC_X_SCALE = 1.0001
+_GRAPHVIZ_POINTS_PER_INCH = 72.0
+_GRAPHVIZ_DEFAULT_NODE_SIZE = (0.75, 0.5)
 _VPSC_FEASIBILITY_TOLERANCE = 1.0e-9
 
 
@@ -188,6 +190,46 @@ def _pack_component_positions(
             y_cursor += row_height + gap
             row_height = 0.0
     return packed - packed.mean(dim=0, keepdim=True)
+
+
+def _graphviz_observable_positions(
+    positions: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Return positions as Graphviz JSON exposes neato coordinates.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Graphviz internal neato coordinates in inches with shape ``[N, 2]``.
+    node_sizes : torch.Tensor, optional
+        Node-size tensor in inches with shape ``[N, 2]``. When absent, Graphviz
+        default node dimensions are used.
+
+    Returns
+    -------
+    torch.Tensor
+        Point coordinates with shape ``[N, 2]`` after Graphviz's bbox
+        translation, y-down conversion, and observable ``%.5g`` formatting.
+    """
+    if positions.shape[0] == 0:
+        return positions
+    working = positions.detach().to(device="cpu", dtype=torch.float64)
+    if node_sizes is None:
+        sizes = torch.empty_like(working)
+        sizes[:, 0] = _GRAPHVIZ_DEFAULT_NODE_SIZE[0]
+        sizes[:, 1] = _GRAPHVIZ_DEFAULT_NODE_SIZE[1]
+    else:
+        sizes = node_sizes.detach().to(device="cpu", dtype=torch.float64)
+    half_sizes = sizes / 2.0
+    lower_left = (working - half_sizes).min(dim=0).values
+    observable = (working - lower_left) * _GRAPHVIZ_POINTS_PER_INCH
+    observable[:, 1] *= -1.0
+    rounded = torch.empty_like(observable)
+    for row in range(observable.shape[0]):
+        for axis in range(observable.shape[1]):
+            rounded[row, axis] = float(f"{float(observable[row, axis].item()):.5g}")
+    return rounded.to(device=positions.device, dtype=positions.dtype)
 
 
 def _rectangles_from_positions(
@@ -837,6 +879,8 @@ def layout_neato_pipeline(
         )
         if trace_every > 0:
             direct_pos, traces = direct_result
+            if use_graphviz_solver:
+                direct_pos = _graphviz_observable_positions(direct_pos, node_sizes)
             if postprocess_fidelity and overlap_removal:
                 direct_pos = remove_neato_overlap_fidelity(
                     positions=direct_pos,
@@ -845,6 +889,8 @@ def layout_neato_pipeline(
                     overlap_gap=overlap_gap,
                 )
             return direct_pos, traces
+        if use_graphviz_solver:
+            direct_result = _graphviz_observable_positions(direct_result, node_sizes)
         if postprocess_fidelity and overlap_removal:
             direct_result = remove_neato_overlap_fidelity(
                 positions=direct_result,
@@ -869,6 +915,8 @@ def layout_neato_pipeline(
         )
         if trace_every > 0:
             connected_pos, traces = connected_result
+            if use_graphviz_solver:
+                connected_pos = _graphviz_observable_positions(connected_pos, node_sizes)
             if postprocess_fidelity and overlap_removal:
                 connected_pos = remove_neato_overlap_fidelity(
                     positions=connected_pos,
@@ -877,6 +925,8 @@ def layout_neato_pipeline(
                     overlap_gap=overlap_gap,
                 )
             return connected_pos, traces
+        if use_graphviz_solver:
+            connected_result = _graphviz_observable_positions(connected_result, node_sizes)
         if postprocess_fidelity and overlap_removal:
             connected_result = remove_neato_overlap_fidelity(
                 positions=connected_result,
@@ -918,6 +968,8 @@ def layout_neato_pipeline(
             overlap_method=overlap_method,
             overlap_gap=overlap_gap,
         )
+    if use_graphviz_solver:
+        packed = _graphviz_observable_positions(packed, node_sizes)
     return (packed, []) if trace_every > 0 else packed
 
 
