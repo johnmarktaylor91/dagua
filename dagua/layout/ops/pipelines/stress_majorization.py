@@ -224,7 +224,7 @@ def _graphviz_packed_stress_laplacian(target_distances: np.ndarray) -> np.ndarra
     """
     size = int(target_distances.shape[0])
     packed = np.zeros(size * (size + 1) // 2, dtype=np.float32)
-    degrees = np.zeros(size, dtype=np.float64)
+    degrees = np.zeros(size, dtype=np.longdouble)
     index = 0
     for row in range(size):
         index += 1
@@ -234,8 +234,8 @@ def _graphviz_packed_stress_laplacian(target_distances: np.ndarray) -> np.ndarra
             if distance != np.float32(0.0):
                 value = np.float32(1.0) / np.float32(distance * distance)
             packed[index] = value
-            degrees[row] -= float(value)
-            degrees[col] -= float(value)
+            degrees[row] -= np.longdouble(value)
+            degrees[col] -= np.longdouble(value)
             index += 1
     for row in range(size):
         packed[_graphviz_packed_index(row, row, size)] = np.float32(degrees[row])
@@ -761,13 +761,17 @@ class GraphvizCgSmacofStep(Op):
         """
         size = int(coordinates.shape[0])
         lap1 = np.zeros_like(lap2, dtype=np.float32)
-        degrees = np.zeros(size, dtype=np.float64)
+        degrees = np.zeros(size, dtype=np.longdouble)
         index = 0
         for row in range(size):
             index += 1
             for col in range(row + 1, size):
-                diff = coordinates[row] - coordinates[col]
-                squared_distance = np.float32(np.sum(diff * diff, dtype=np.float32))
+                squared_distance = np.float32(0.0)
+                for axis in range(coordinates.shape[1]):
+                    delta = np.float32(
+                        coordinates[row, axis] + np.float32(-1.0) * coordinates[col, axis]
+                    )
+                    squared_distance = np.float32(squared_distance + delta * delta)
                 inverse_distance = np.float32(0.0)
                 if squared_distance > np.float32(0.0):
                     inverse_distance = np.float32(1.0) / np.float32(np.sqrt(squared_distance))
@@ -781,8 +785,8 @@ class GraphvizCgSmacofStep(Op):
                 if squared_distance <= np.float32(_GRAPHVIZ_MIN_DISTANCE):
                     value = np.float32(0.0)
                 lap1[index] = value
-                degrees[row] -= float(value)
-                degrees[col] -= float(value)
+                degrees[row] -= np.longdouble(value)
+                degrees[col] -= np.longdouble(value)
                 index += 1
         for row in range(size):
             lap1[_graphviz_packed_index(row, row, size)] = np.float32(degrees[row])

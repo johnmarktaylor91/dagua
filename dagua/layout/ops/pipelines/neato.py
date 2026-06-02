@@ -746,7 +746,7 @@ def layout_neato_pipeline(
     model: str = "shortpath",
     pack: bool = True,
     trace_every: int = 0,
-    fidelity_mode: Union[bool, str] = False,
+    fidelity_mode: Union[bool, str] = "graphviz",
     fidelity_dtype: torch.dtype = torch.float32,
     overlap_removal: bool = True,
     overlap_method: str = "vpsc",
@@ -793,7 +793,7 @@ def layout_neato_pipeline(
         Whether to pack disconnected components independently.
     trace_every : int, default=0
         If positive, return periodic position snapshots.
-    fidelity_mode : bool or str, default=False
+    fidelity_mode : bool or str, default="graphviz"
         Whether to enable opt-in Graphviz post-processing fidelity behavior.
         Passing ``"graphviz"`` also enables the Graphviz PCA initialization
         and packed conjugate-gradient stress solver.
