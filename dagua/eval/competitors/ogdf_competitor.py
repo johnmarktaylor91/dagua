@@ -271,10 +271,10 @@ class _OGDFBase(CompetitorBase):
         seed : int | None, default=None
             Optional seed forwarded to the helper binary.
         variant_params : Mapping[str, Any] | None, default=None
-            Optional runner parameters. For ``ogdf_stress``, ``iterations``
-            selects the stress-majorization sweep count. For
-            ``ogdf_pivot_mds``, ``n_pivots`` selects the Pivot-MDS landmark
-            count.
+            Optional runner parameters. ``ogdf_gem`` accepts ``rounds`` or
+            ``max_iters``. ``ogdf_fmmm`` accepts ``fixed_iterations`` or
+            ``steps``. ``ogdf_stress`` accepts ``iterations``. ``ogdf_pivot_mds``
+            accepts ``n_pivots``.
 
         Returns
         -------
@@ -283,14 +283,24 @@ class _OGDFBase(CompetitorBase):
             payload if execution fails.
         """
         options: dict[str, Any] = {}
-        if variant_params is not None and self.algorithm == "stress":
-            iterations = variant_params.get("iterations")
-            if iterations is not None:
-                options["iterations"] = int(iterations)
-        if variant_params is not None and self.algorithm == "pivot_mds":
-            n_pivots = variant_params.get("n_pivots")
-            if n_pivots is not None:
-                options["numberOfPivots"] = int(n_pivots)
+        if variant_params is not None:
+            params = dict(variant_params)
+            if self.algorithm == "gem":
+                rounds = params.get("rounds", params.get("max_iters"))
+                if rounds is not None:
+                    options["gemRounds"] = int(rounds)
+            if self.algorithm == "fmmm":
+                fixed_iterations = params.get("fixed_iterations", params.get("steps"))
+                if fixed_iterations is not None:
+                    options["fmmmFixedIterations"] = int(fixed_iterations)
+            if self.algorithm == "stress":
+                iterations = params.get("iterations", params.get("steps"))
+                if iterations is not None:
+                    options["iterations"] = int(iterations)
+            if self.algorithm == "pivot_mds":
+                n_pivots = params.get("n_pivots")
+                if n_pivots is not None:
+                    options["numberOfPivots"] = int(n_pivots)
 
         start = time.perf_counter()
         try:
@@ -336,6 +346,7 @@ class OGDFGem(_OGDFBase):
     name = "ogdf_gem"
     algorithm = "gem"
     max_nodes = 20_000
+    variant_param_names = frozenset({"max_iters", "rounds"})
 
 
 @register
@@ -345,6 +356,7 @@ class OGDFFMMM(_OGDFBase):
     name = "ogdf_fmmm"
     algorithm = "fmmm"
     max_nodes = 100_000
+    variant_param_names = frozenset({"fixed_iterations", "steps"})
 
 
 @register
@@ -354,6 +366,7 @@ class OGDFStress(_OGDFBase):
     name = "ogdf_stress"
     algorithm = "stress"
     max_nodes = 10_000
+    variant_param_names = frozenset({"iterations", "steps"})
 
 
 @register
@@ -363,6 +376,7 @@ class OGDFPivotMDS(_OGDFBase):
     name = "ogdf_pivot_mds"
     algorithm = "pivot_mds"
     max_nodes = 100_000
+    variant_param_names = frozenset({"n_pivots"})
 
 
 @register

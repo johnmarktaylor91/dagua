@@ -231,7 +231,7 @@ class GraphvizRandom:
         return random_value % bound
 
     def permutation(self, bound: int) -> list[int]:
-        """Return Graphviz ``gv_permutation(bound)`` order.
+        """Return Graphviz sparse ``random_permutation(bound)`` order.
 
         Parameters
         ----------
@@ -241,15 +241,18 @@ class GraphvizRandom:
         Returns
         -------
         list[int]
-            Fisher-Yates permutation of ``range(bound)`` using
-            :meth:`random` for each swap index.
+            Fisher-Yates permutation of ``range(bound)`` using Graphviz
+            ``irand(len)`` for each swap index.
         """
         if bound <= 0:
             return []
 
         values = list(range(bound))
         for index in range(bound - 1, 0, -1):
-            swap_index = self.random(index + 1)
+            # lib/sparse/general.c::random_permutation calls irand(len),
+            # which is a raw rand() modulo rather than common/gv_random's
+            # rejection-sampled bounded integer.
+            swap_index = self.rand() % (index + 1)
             values[index], values[swap_index] = values[swap_index], values[index]
         return values
 
@@ -271,12 +274,16 @@ class GraphData:
         Non-negative edge weights with shape ``[E]`` on CPU.
     adjacency : list[list[tuple[int, float]]]
         Per-node neighbor lists storing ``(neighbor, weight)`` tuples.
+    graphviz_average : bool, default=False
+        Whether average edge length should use Graphviz 7.0.5's indexed
+        distance quirk.
     """
 
     num_nodes: int
     edge_index: torch.Tensor
     edge_weight: torch.Tensor
     adjacency: List[List[Tuple[int, float]]] = field(default_factory=list)
+    graphviz_average: bool = False
 
 
 @dataclass
@@ -489,6 +496,7 @@ def _build_graph(
     edge_index: torch.Tensor,
     num_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
+    graphviz_order: bool = False,
 ) -> GraphData:
     """Build an undirected weighted graph from a directed edge list.
 
@@ -500,13 +508,62 @@ def _build_graph(
         Number of graph nodes.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    graphviz_order : bool, default=False
+        Preserve Graphviz's directed symmetrization row order when ``True``.
 
     Returns
     -------
     GraphData
         CPU resident weighted graph representation.
     """
-    adjacency: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
+    if not graphviz_order:
+        adjacency: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
+        if edge_index.numel() > 0:
+            edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+            weights_cpu = (
+                torch.ones((edge_index.shape[1],), dtype=torch.float32)
+                if edge_weights is None
+                else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+            )
+            for edge_id, (source, target) in enumerate(
+                zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+            ):
+                if source == target:
+                    continue
+                lower = min(source, target)
+                upper = max(source, target)
+                adjacency[lower][upper] = adjacency[lower].get(upper, 0.0) + float(
+                    weights_cpu[edge_id].item()
+                )
+
+        edge_pairs: List[Tuple[int, int]] = []
+        edge_weight_values: List[float] = []
+        adjacency_lists: List[List[Tuple[int, float]]] = [[] for _ in range(num_nodes)]
+        for source in range(num_nodes):
+            for target, weight in sorted(adjacency[source].items()):
+                edge_pairs.append((source, target))
+                edge_weight_values.append(weight)
+                adjacency_lists[source].append((target, weight))
+                adjacency_lists[target].append((source, weight))
+
+        if edge_pairs:
+            edge_tensor = torch.tensor(edge_pairs, dtype=torch.long).transpose(0, 1).contiguous()
+            weight_tensor = torch.tensor(edge_weight_values, dtype=torch.float32)
+        else:
+            edge_tensor = torch.empty((2, 0), dtype=torch.long)
+            weight_tensor = torch.empty((0,), dtype=torch.float32)
+
+        return GraphData(
+            num_nodes=num_nodes,
+            edge_index=edge_tensor,
+            edge_weight=weight_tensor,
+            adjacency=adjacency_lists,
+        )
+
+    edge_weights_by_pair: dict[tuple[int, int], float] = {}
+    outgoing_order: list[list[int]] = [[] for _ in range(num_nodes)]
+    incoming_order: list[list[int]] = [[] for _ in range(num_nodes)]
+    adjacency_weights: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() > 0:
         edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
         weights_cpu = (
@@ -521,19 +578,29 @@ def _build_graph(
                 continue
             lower = min(source, target)
             upper = max(source, target)
-            adjacency[lower][upper] = adjacency[lower].get(upper, 0.0) + float(
-                weights_cpu[edge_id].item()
+            weight = float(weights_cpu[edge_id].item())
+            edge_weights_by_pair[(lower, upper)] = (
+                edge_weights_by_pair.get((lower, upper), 0.0) + weight
             )
+
+            if target not in adjacency_weights[source]:
+                outgoing_order[source].append(target)
+            if source not in adjacency_weights[target]:
+                incoming_order[target].append(source)
+            adjacency_weights[source][target] = adjacency_weights[source].get(target, 0.0) + weight
+            adjacency_weights[target][source] = adjacency_weights[target].get(source, 0.0) + weight
 
     edge_pairs: List[Tuple[int, int]] = []
     edge_weight_values: List[float] = []
     adjacency_lists: List[List[Tuple[int, float]]] = [[] for _ in range(num_nodes)]
+    for (source, target), weight in sorted(edge_weights_by_pair.items()):
+        edge_pairs.append((source, target))
+        edge_weight_values.append(weight)
     for source in range(num_nodes):
-        for target, weight in sorted(adjacency[source].items()):
-            edge_pairs.append((source, target))
-            edge_weight_values.append(weight)
-            adjacency_lists[source].append((target, weight))
-            adjacency_lists[target].append((source, weight))
+        ordered_neighbors = outgoing_order[source] + incoming_order[source]
+        adjacency_lists[source] = [
+            (target, adjacency_weights[source][target]) for target in ordered_neighbors
+        ]
 
     if edge_pairs:
         edge_tensor = torch.tensor(edge_pairs, dtype=torch.long).transpose(0, 1).contiguous()
@@ -547,6 +614,7 @@ def _build_graph(
         edge_index=edge_tensor,
         edge_weight=weight_tensor,
         adjacency=adjacency_lists,
+        graphviz_average=True,
     )
 
 
@@ -717,7 +785,7 @@ def _graphviz_random_positions(num_nodes: int, generator: GraphvizRandom) -> tor
 
 
 def _average_edge_length(graph: GraphData, positions: torch.Tensor) -> float:
-    """Compute the average current edge length for a graph.
+    """Compute Graphviz SFDP's average current edge length for a graph.
 
     Parameters
     ----------
@@ -734,9 +802,30 @@ def _average_edge_length(graph: GraphData, positions: torch.Tensor) -> float:
     if graph.edge_index.numel() == 0:
         return _SFDP_ALGORITHM_CONFIG.fallback_edge_length
 
-    delta = positions[graph.edge_index[0]] - positions[graph.edge_index[1]]
-    lengths = torch.linalg.vector_norm(delta, dim=1)
-    mean_length = float(lengths.mean().item())
+    if not graph.graphviz_average:
+        delta = positions[graph.edge_index[0]] - positions[graph.edge_index[1]]
+        lengths = torch.linalg.vector_norm(delta, dim=1)
+        mean_length = float(lengths.mean().item())
+        return max(mean_length, _SFDP_ALGORITHM_CONFIG.min_span)
+
+    edge_count = sum(len(neighbors) for neighbors in graph.adjacency)
+    total = 0.0
+    coords = positions.to(dtype=torch.float64, device="cpu")
+    for source, neighbors in enumerate(graph.adjacency):
+        source_position = coords[source]
+        for target, _weight in neighbors:
+            # Graphviz 7.0.5 spring_electrical.c::average_edge_length indexes
+            # coord[dim * ja[j]] without adding k, so every dimension compares
+            # against the neighbor x-coordinate. Port the quirk exactly because
+            # it seeds K for all subsequent SFDP force updates.
+            target_x = float(coords[target, 0].item())
+            squared_distance = 0.0
+            for axis in range(coords.shape[1]):
+                delta = float(source_position[axis].item()) - target_x
+                squared_distance += delta * delta
+            total += squared_distance**0.5
+
+    mean_length = total / float(edge_count)
     return max(mean_length, _SFDP_ALGORITHM_CONFIG.min_span)
 
 
