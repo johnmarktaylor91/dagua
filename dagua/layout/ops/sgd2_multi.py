@@ -514,7 +514,7 @@ def _all_pairs_shortest_paths(
         cleaned = cleaned.copy()
         cleaned[cleaned < 0] = np.inf
 
-    return torch.tensor(cleaned, dtype=torch.float32, device=device)
+    return torch.tensor(cleaned, dtype=torch.float64, device=device)
 
 
 def _build_stress_terms(
@@ -965,7 +965,15 @@ class _CyclicSampler:
         if self._total <= 0:
             return torch.empty((0,), dtype=torch.long, device=self._device)
         if self._perm.numel() == 0 or self._offset >= self._total:
-            self._perm = torch.randperm(self._total, device=self._device)
+            # PyTorch's DataLoader(shuffle=True) uses RandomSampler without an
+            # explicit generator: it first draws a base seed from the global
+            # CPU RNG, then uses a fresh local generator for that epoch's
+            # randperm.  Matching this two-stage stream keeps all criterion
+            # samplers aligned with upstream GD2.
+            base_seed = int(torch.empty((), dtype=torch.int64).random_().item())
+            generator = torch.Generator()
+            generator.manual_seed(base_seed)
+            self._perm = torch.randperm(self._total, generator=generator).to(device=self._device)
             self._offset = 0
         bs = min(batch_size, self._total - self._offset)
         out = self._perm[self._offset : self._offset + bs]

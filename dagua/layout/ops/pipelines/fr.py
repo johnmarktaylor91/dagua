@@ -492,6 +492,143 @@ def _igraph_fr_reference_positions(
     return torch.from_numpy(positions * _IGRAPH_ADAPTER_SCALE).to(dtype=output_dtype)
 
 
+def _networkx_adjacency_matrix(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor],
+) -> np.ndarray:
+    """Build NetworkX ``DiGraph`` adjacency data with summed duplicate edges.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Dense float64 adjacency matrix with shape ``[N, N]`` matching the
+        NetworkX competitor adapter's simple ``DiGraph`` duplicate handling.
+    """
+    adjacency = np.zeros((num_nodes, num_nodes), dtype=np.float64)
+    edge_array = edge_index.detach().to(device="cpu", dtype=torch.long).numpy()
+    weight_array = None if edge_weights is None else edge_weights.detach().cpu().numpy()
+    for edge_offset in range(edge_array.shape[1]):
+        source = int(edge_array[0, edge_offset])
+        target = int(edge_array[1, edge_offset])
+        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
+            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+        weight = 1.0 if weight_array is None else float(weight_array[edge_offset])
+        adjacency[source, target] += weight
+    return adjacency
+
+
+def _networkx_fr_reference_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    steps: int,
+    seed: int,
+    edge_weights: Optional[torch.Tensor] = None,
+    pos: Optional[torch.Tensor] = None,
+    k: Optional[float] = None,
+    fixed: tuple[int, ...] = (),
+    output_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Run NetworkX 3.6.1's dense Fruchterman-Reingold loop locally.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    steps : int
+        NetworkX ``iterations`` value.
+    seed : int
+        Seed forwarded to NetworkX's ``np_random_state`` wrapper.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    pos : torch.Tensor, optional
+        Optional initial positions with shape ``[N, 2]``.
+    k : float, optional
+        Optimal node distance. ``None`` uses ``sqrt(1 / N)``.
+    fixed : tuple[int, ...], default=()
+        Node indices whose displacement is zeroed each iteration.
+    output_dtype : torch.dtype, default=torch.float32
+        Floating dtype for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        NetworkX-adapter-scaled positions with shape ``[N, 2]``.
+    """
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=output_dtype)
+
+    adjacency = _networkx_adjacency_matrix(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
+    if pos is None:
+        rng = np.random.RandomState(seed)
+        positions = np.asarray(rng.rand(num_nodes, 2), dtype=adjacency.dtype)
+    else:
+        positions = (
+            pos.detach()
+            .to(device="cpu", dtype=torch.float64)
+            .numpy()
+            .astype(
+                adjacency.dtype,
+                copy=True,
+            )
+        )
+
+    optimal_distance = math.sqrt(1.0 / num_nodes) if k is None else float(k)
+    temperature = (
+        max(
+            max(positions.T[0]) - min(positions.T[0]),
+            max(positions.T[1]) - min(positions.T[1]),
+        )
+        * 0.1
+    )
+    cooling_delta = temperature / (steps + 1)
+    fixed_array = np.asarray(fixed, dtype=np.int64) if fixed else None
+
+    for _ in range(steps):
+        delta = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
+        distance = np.linalg.norm(delta, axis=-1)
+        np.clip(distance, 0.01, None, out=distance)
+        displacement = np.einsum(
+            "ijk,ij->ik",
+            delta,
+            (optimal_distance * optimal_distance / distance**2)
+            - (adjacency * distance / optimal_distance),
+        )
+        length = np.linalg.norm(displacement, axis=-1)
+        np.clip(length, a_min=0.01, a_max=None, out=length)
+        delta_pos = np.einsum("ij,i->ij", displacement, temperature / length)
+        if fixed_array is not None:
+            delta_pos[fixed_array] = 0.0
+        positions += delta_pos
+        temperature -= cooling_delta
+        if (np.linalg.norm(delta_pos) / num_nodes) < 1.0e-4:
+            break
+
+    if fixed_array is None:
+        positions = positions - positions.mean(axis=0)
+        lim = np.abs(positions).max()
+        if lim > 0.0:
+            positions = positions * (1.0 / lim)
+
+    output_scale = 1.0 if fixed_array is not None else 500.0
+    return torch.from_numpy(positions * output_scale).to(dtype=output_dtype)
+
+
 def build_fr_pipeline(
     steps: int = 50,
     networkx_compat: bool = False,
@@ -682,6 +819,26 @@ def layout_fr_pipeline(
             seed=seed,
             edge_weights=edge_weights,
             pos=pos,
+            output_dtype=fidelity_dtype,
+        ).to(device=output_device)
+
+    if networkx_compat:
+        output_device = (
+            edge_index.device
+            if edge_index.numel() > 0
+            else node_sizes.device
+            if node_sizes is not None
+            else torch.device("cpu")
+        )
+        return _networkx_fr_reference_positions(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            steps=steps,
+            seed=seed,
+            edge_weights=edge_weights,
+            pos=pos,
+            k=k,
+            fixed=fixed_indices,
             output_dtype=fidelity_dtype,
         ).to(device=output_device)
 

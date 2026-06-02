@@ -50,6 +50,17 @@ def build_classical_mds_pipeline(
     Known divergences:
         - Graph distances are prepared in Dagua tensor ops rather than through
           igraph's C path.
+        - Repeated top eigenvalues are irreducible for bit-exact matching
+          without porting igraph's vendored LAPACK 3.4.2 ``dsyevr`` path:
+          igraph asks ``dsyevr`` for the largest algebraic dimensions with
+          ``range='I'``, ``uplo='U'``, and ``abstol=1e-14``. When the largest
+          eigenvalue multiplicity exceeds the requested two layout dimensions,
+          LAPACK returns an implementation-dependent 2D basis from that larger
+          eigenspace. The chosen basis depends on the tridiagonal reduction and
+          inverse-iteration details inside igraph's vendored LAPACK, so SciPy's
+          exposed ``evr``/``evx`` drivers can match the eigenspace but not the
+          selected basis on symmetric fixtures such as Petersen and complete
+          graphs.
         - Disconnected-graph behavior follows the benchmark distance matrix
           contract, not arbitrary user-provided dissimilarities.
 
