@@ -98,6 +98,23 @@
     tree -> tree. (Mirrors Graphviz: dot for directed, neato/fdp for undirected.)
   - Reconcile with the removed force_directed auto-route -- settle the default-routing policy.
   - This is a design CONSIDERATION (discuss before building); fold into the default-algorithm tuning work.
+- [ ] [HIGH] [v1] **Per-edge mixed directedness (mixed graphs / PDAG support).** JMT 2026-06-03: this is
+  v1 scope, so design the directedness model PER-EDGE-CAPABLE FROM THE START -- graph-level
+  directed/undirected (the friendly-interface TODO above) becomes the convenience special case
+  (all-edges-directed / all-edges-undirected) of a per-edge model, NOT a separate retrofit.
+  - Per-edge `directed: bool` attribute -- some arcs directed, some undirected in ONE graph. Edges already
+    store source->target; add per-edge direction *semantics* + render arrowheads only on directed edges
+    (per-edge edge-style, already feasible -- wire it to the flag).
+  - Motivating use case (potential HERO graph / differentiator): causal graphs -- **PDAGs / CPDAGs** from
+    causal discovery (some edges oriented because the causal direction is known, others undirected within
+    a Markov-equivalence class). Scientific/ML audience, TorchLens-adjacent. Also one-way/two-way road
+    networks, mixed dependency graphs (asymmetric depends-on + symmetric sibling/co-occurs).
+  - LAYOUT POLICY PER ALGORITHM (required -- no undefined behavior on a mixed graph): force/stress/
+    undirected-native IGNORE direction (mixed trivially fine); hierarchical (sugiyama) uses the DIRECTED
+    edges to set the layering and treats undirected edges as flexible/symmetric within-layer constraints
+    (= proper PDAG layout). Document each algorithm's rule explicitly.
+  - Rendering: arrowheads per-edge from the flag; tests: mixed-graph round-trip + a PDAG laying out
+    sensibly under both a hierarchical and a force layout.
 
 ## Roadmap -- completing the dagua vision (strategic, post-sprint)
 The coherent identity: a rigorous, measurable, *differentiable* layout engine -- reproduce any classical
