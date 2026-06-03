@@ -86,6 +86,12 @@ strong as the supporting cast + add the gradient-native capabilities Graphviz st
     convergence, and animate graph-edit transitions (old layout -> perturb -> resolve).
   - Mental model: positions are persistent learnable state; graph edits = perturb + re-solve. Use cases:
     evolving graphs, interactive pin-and-resolve, training-time NN graph evolution (TorchLens consumer).
+  - **Interactive RE-LAYOUT API (locked 2026-06-03):** this pillar is what serves "interactive" for dagua --
+    a FAST, callable-in-a-loop `layout(g, init_from=prev_pos, pins={...})` the host app hits on each user
+    interaction (drag/pin/add/remove -> re-solve). dagua never renders the widget, but it MUST be callable
+    in the interaction loop. This is the unique-to-a-differentiable-engine interactive capability; pure
+    data-export (below) cannot provide it. KEY DISTINCTION: interactive *rendering* (pan/zoom/explore a
+    fixed layout) -> punted to export/ecosystem; interactive *re-layout* (drag-to-re-solve) -> THIS.
 - [ ] [MED] **Edges as learnable parameters** (completes "everything is a differentiable parameter").
   - Make edge control points (bezier/polyline) first-class differentiable params with their own losses:
     bundling (group near-parallel edges), node/obstacle avoidance (route around nodes), curvature
@@ -95,7 +101,11 @@ strong as the supporting cast + add the gradient-native capabilities Graphviz st
 - [ ] [MED] **Reasonable EXPORT options** (serve the interactivity crowd via data export, NOT by building
   an interactive framework -- keep the headless-engine identity; JMT 2026-06-03).
   - Principle: dagua computes the layout; export lets ANY downstream tool (incl. interactive web) consume
-    it. dagua does not render widgets.
+    it. dagua does not render widgets. Serves interactive *rendering* (pan/zoom/explore a FIXED layout);
+    interactive *re-layout* (drag-to-re-solve) is the dynamic-layout pillar's interactive-loop API, NOT export.
+  - **Optional notebook bridge (80/20 for the ML/Jupyter audience):** a one-liner `dagua.show(g)` that
+    DELEGATES to an existing widget lib (ipycytoscape / similar) fed by the export -- a convenience wrapper,
+    NOT a custom framework. Optional extra; stays true to the no-interactive-framework decision.
   - `dagua.export(g, pos, format=..., output=...)` supporting:
     - **SVG** (vector, editable -- confirm/polish existing).
     - **Structured layout JSON** (tool-agnostic: nodes [id,x,y,style,bbox], edges [endpoints,route,style],
