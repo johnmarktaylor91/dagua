@@ -75,6 +75,29 @@
     holdouts -- classical_mds, pivot_mds, spectral_random_walk -- to see if their divergence is likewise
     confined to specific input structure (degenerate eigenvalues / symmetric graphs) rather than general.
     Purpose: complete our own mental model of exactly when/why each deterministic engine diverges.
+- [ ] [MED] **Friendly directed/undirected interface on the graph object.** Today: DaguaGraph stores edges
+  directed always; `is_semantically_directed: Optional[bool]` (default None = unspecified) flags whether
+  the direction is *meaningful*. Gaps: technical name, NOT surfaced in the public `dagua.*` API, no
+  auto-inference. Audit + improve:
+  - Clean, discoverable public way to declare it: e.g. `DaguaGraph(..., directed=bool)` / a `g.directed`
+    property / `dagua.draw(g, directed=...)`, with clear docs. (Keep `is_semantically_directed` as the
+    internal field if desired.)
+  - Default/inference policy: should None auto-infer (reciprocal-edge heuristic, or default-directed since
+    dagua is DAG-oriented)? Decide + document.
+  - Make sure the flag FLOWS THROUGH to: (a) native-algo routing (see next TODO), (b) rendering
+    (arrowheads only when semantically directed), (c) the fidelity-report graph classification (the
+    directed/undirected report dimension we just added).
+  - "etc.": consider exposing related type metadata cleanly too (is_dag / is_tree / is_cyclic / weighted)
+    where it helps routing + reporting.
+- [ ] [MED] **Consider native-algo forking on directed vs undirected** (ties into "perfect the default
+  algorithm"). The native engine ALREADY structurally auto-routes (tree / layered_dag / force_directed /
+  hybrid / planar in dagua_native.py), but on structural inference, and auto-route-to-force_directed was
+  removed. Consider:
+  - Explicitly use the DECLARED directedness (is_semantically_directed) as a first-class routing signal,
+    not only structural detection: undirected -> force_directed/stress; directed-DAG -> layered_dag;
+    tree -> tree. (Mirrors Graphviz: dot for directed, neato/fdp for undirected.)
+  - Reconcile with the removed force_directed auto-route -- settle the default-routing policy.
+  - This is a design CONSIDERATION (discuss before building); fold into the default-algorithm tuning work.
 
 ## Roadmap -- completing the dagua vision (strategic, post-sprint)
 The coherent identity: a rigorous, measurable, *differentiable* layout engine -- reproduce any classical
