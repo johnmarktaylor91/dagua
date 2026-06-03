@@ -57,10 +57,13 @@ def build_classical_mds_pipeline(
           eigenvalue multiplicity exceeds the requested two layout dimensions,
           LAPACK returns an implementation-dependent 2D basis from that larger
           eigenspace. The chosen basis depends on the tridiagonal reduction and
-          inverse-iteration details inside igraph's vendored LAPACK, so SciPy's
-          exposed ``evr``/``evx`` drivers can match the eigenspace but not the
-          selected basis on symmetric fixtures such as Petersen and complete
-          graphs.
+          inverse-iteration details inside igraph's vendored LAPACK. A direct
+          ``scipy.linalg.lapack.dsyevr`` call with igraph's parameters
+          (``range='I'``, ``uplo='U'``, ``abstol=1e-14``, same eigenvalue
+          index range) was tested and still chose a different basis, so SciPy's
+          exposed ``evr``/``evx``/``dsyevr`` drivers can match the eigenspace
+          but not the selected basis on symmetric fixtures such as Petersen
+          and complete graphs.
         - Disconnected-graph behavior follows the benchmark distance matrix
           contract, not arbitrary user-provided dissimilarities.
 

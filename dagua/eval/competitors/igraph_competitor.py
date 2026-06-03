@@ -106,6 +106,7 @@ class _IgraphBase(CompetitorBase):
     layout_kwargs: dict[str, Any] = {}
     accepts_seed_matrix: bool = False
     uses_igraph_rng: bool = False
+    horizontal_output: bool = False
 
     def layout(
         self,
@@ -167,6 +168,7 @@ class _IgraphBase(CompetitorBase):
             kwargs = dict(self.layout_kwargs)
             if variant_params is not None:
                 kwargs.update(dict(variant_params))
+            horizontal_output = bool(kwargs.pop("horizontal", self.horizontal_output))
             if seed is not None and self.accepts_seed_matrix:
                 # igraph FR's "seed" param is an initial position matrix, not an int.
                 # Generate random initial positions from the integer seed instead.
@@ -178,6 +180,8 @@ class _IgraphBase(CompetitorBase):
                 ig_layout = ig.layout(self.layout_algo, **kwargs)
             elapsed = time.perf_counter() - start
             pos = _igraph_pos_to_tensor(ig_layout, graph.num_nodes)
+            if horizontal_output:
+                pos = pos[:, [1, 0]]
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except Exception as e:
             elapsed = time.perf_counter() - start
@@ -218,7 +222,19 @@ class IgraphRT(_IgraphBase):
     max_nodes = 10_000
     layout_algo = "reingold_tilford"
     layout_kwargs = {"mode": "out"}
-    variant_param_names = frozenset({"mode", "root", "rootlevel"})
+    variant_param_names = frozenset({"horizontal", "mode", "root", "rootlevel"})
+
+
+@register
+class IgraphRTHorizontal(_IgraphBase):
+    """Reingold-Tilford reference adapter with horizontal axis orientation."""
+
+    name = "igraph_rt_horizontal"
+    max_nodes = 10_000
+    layout_algo = "reingold_tilford"
+    layout_kwargs = {"mode": "out"}
+    horizontal_output = True
+    variant_param_names = frozenset({"horizontal", "mode", "root", "rootlevel"})
 
 
 @register

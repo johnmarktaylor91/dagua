@@ -1,4 +1,4 @@
-"""NetworkX competitor adapters — spring_layout and kamada_kawai_layout."""
+"""NetworkX competitor adapters for selected graph layouts."""
 
 from __future__ import annotations
 
@@ -120,6 +120,129 @@ def _nx_pos_to_tensor(
             pos[node_id, 0] = float(x) * output_scale
             pos[node_id, 1] = float(y) * output_scale
     return pos
+
+
+def _networkx_center(dim: int) -> Any:
+    """Return NetworkX's default spectral-layout center vector.
+
+    Parameters
+    ----------
+    dim : int
+        Layout dimensionality.
+
+    Returns
+    -------
+    Any
+        NumPy zero vector with shape ``[dim]``.
+    """
+    import numpy as np
+
+    return np.zeros(dim, dtype=float)
+
+
+def _networkx_spectral_edge_case_positions(G: Any, dim: int) -> Optional[dict[int, Any]]:
+    """Return NetworkX spectral special-case positions when applicable.
+
+    Parameters
+    ----------
+    G : Any
+        NetworkX graph.
+    dim : int
+        Layout dimensionality.
+
+    Returns
+    -------
+    dict[int, Any] | None
+        Position mapping for graphs with at most two nodes, otherwise ``None``.
+    """
+    import numpy as np
+
+    center = _networkx_center(dim)
+    if len(G) > 2:
+        return None
+    if len(G) == 0:
+        pos = np.array([])
+    elif len(G) == 1:
+        pos = np.array([center])
+    else:
+        pos = np.array([np.zeros(dim), center * 2.0])
+    return dict(zip(G, pos))
+
+
+def _spectral_laplacian_matrix(A: Any, normalization: str) -> tuple[Any, bool]:
+    """Build a NetworkX-style spectral Laplacian.
+
+    Parameters
+    ----------
+    A : Any
+        Symmetric SciPy sparse adjacency matrix.
+    normalization : str
+        Laplacian normalization mode: ``"unnormalized"`` or ``"random_walk"``.
+
+    Returns
+    -------
+    tuple[Any, bool]
+        Sparse Laplacian matrix and whether it is symmetric.
+
+    Raises
+    ------
+    ValueError
+        If ``normalization`` is not supported by this adapter.
+    """
+    import numpy as np
+    import scipy as sp
+
+    degrees = np.asarray(A.sum(axis=1)).reshape(-1).astype(float, copy=False)
+    if normalization == "unnormalized":
+        degree_matrix = sp.sparse.dia_array((degrees, 0), shape=A.shape).tocsr()
+        return degree_matrix - A, True
+    if normalization == "random_walk":
+        inv_degree = np.zeros_like(degrees)
+        nonzero_mask = degrees > 0.0
+        inv_degree[nonzero_mask] = 1.0 / degrees[nonzero_mask]
+        normalized = sp.sparse.diags(inv_degree, offsets=0, format="csr")
+        identity = sp.sparse.identity(A.shape[0], format="csr", dtype=float)
+        return identity - (normalized @ A), False
+    raise ValueError("normalization must be one of 'unnormalized' or 'random_walk'.")
+
+
+def _networkx_laplacian_spectral_array(A: Any, dim: int, normalization: str) -> Any:
+    """Compute spectral coordinates from a NetworkX adjacency matrix.
+
+    Parameters
+    ----------
+    A : Any
+        Symmetric SciPy sparse adjacency matrix with shape ``[N, N]``.
+    dim : int
+        Output dimensionality.
+    normalization : str
+        Laplacian normalization mode.
+
+    Returns
+    -------
+    Any
+        NumPy coordinate array with shape ``[N, dim]``.
+    """
+    import numpy as np
+    import scipy as sp
+
+    laplacian, symmetric = _spectral_laplacian_matrix(A, normalization=normalization)
+    num_nodes = int(A.shape[0])
+    if num_nodes < 500:
+        dense_laplacian = laplacian.toarray()
+        if symmetric:
+            eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
+        else:
+            eigenvalues, eigenvectors = np.linalg.eig(dense_laplacian)
+    else:
+        k = dim + 1
+        ncv = max((2 * k) + 1, int(np.sqrt(num_nodes)))
+        if symmetric:
+            eigenvalues, eigenvectors = sp.sparse.linalg.eigsh(laplacian, k, which="SM", ncv=ncv)
+        else:
+            eigenvalues, eigenvectors = sp.sparse.linalg.eigs(laplacian, k, which="SR", ncv=ncv)
+    index = np.argsort(np.real(eigenvalues))[1 : dim + 1]
+    return np.real(eigenvectors[:, index])
 
 
 class _NetworkXBase(CompetitorBase):
@@ -251,3 +374,86 @@ class NetworkXSpectral(_NetworkXBase):
     variant_param_names = frozenset({"dim", "scale"})
     output_scale = 1.0
     duplicate_policy = "last"
+
+
+@register
+class NetworkXLaplacianSpectral(_NetworkXBase):
+    """Competitor adapter for NetworkX-backed Laplacian spectral variants."""
+
+    name = "nx_spectral_random_walk"
+    max_nodes = 10_000
+    layout_kwargs = {"dim": 2, "normalization": "random_walk", "scale": 1.0}
+    variant_param_names = frozenset(
+        {"dim", "normalization", "output_dtype", "output_scale", "scale"}
+    )
+    output_scale = 1.0
+    duplicate_policy = "last"
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run the configured Laplacian spectral layout.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility timeout parameter.
+        seed : int | None, default=None
+            Unused deterministic-layout seed.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional parameters forwarded from ``AlgorithmVariant.original_params``.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        del timeout, seed
+
+        import networkx as nx
+
+        G = _graph_to_nx(graph, duplicate_policy=self.duplicate_policy)
+
+        start = time.perf_counter()
+        try:
+            layout_kwargs = dict(self.layout_kwargs)
+            if variant_params is not None:
+                layout_kwargs.update(dict(variant_params))
+            output_scale = float(layout_kwargs.pop("output_scale", self.output_scale))
+            output_dtype = _normalize_output_dtype(
+                layout_kwargs.pop("output_dtype", self.output_dtype)
+            )
+            dim = int(layout_kwargs.pop("dim", 2))
+            scale = float(layout_kwargs.pop("scale", 1.0))
+            normalization = str(layout_kwargs.pop("normalization", "random_walk"))
+            edge_case_pos = _networkx_spectral_edge_case_positions(G, dim=dim)
+            if edge_case_pos is None:
+                A = nx.to_scipy_sparse_array(G, weight="weight", dtype="d")
+                if G.is_directed():
+                    A = A + A.T
+                pos_array = _networkx_laplacian_spectral_array(
+                    A,
+                    dim=dim,
+                    normalization=normalization,
+                )
+                pos_array = nx.drawing.layout.rescale_layout(pos_array, scale=scale)
+                nx_pos = dict(zip(G, pos_array))
+            else:
+                nx_pos = edge_case_pos
+            elapsed = time.perf_counter() - start
+            pos = _nx_pos_to_tensor(
+                nx_pos,
+                graph.num_nodes,
+                output_scale=output_scale,
+                output_dtype=output_dtype,
+            )
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except Exception as e:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
