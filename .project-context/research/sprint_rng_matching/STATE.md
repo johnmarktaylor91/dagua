@@ -1,13 +1,75 @@
 ---
 run: sprint_rng_matching
 created: 2026-06-02
-state: DONE
+state: CLOSING_WAVE_RUNNING
 goal: RNG-stream-match dagua's fidelity ports to their references so SMALL graphs are
       bit-identical (per-seed Procrustes RMSD < 1e-7) at MATCHED seeds, for as many of the
       24 algorithms as physically possible. Stop at <1e-7-all OR documented can't-go-further.
       Then TEXT JMT to talk. Do NOT run the full all-graphs sweep (that's a later, separate
       spot-check JMT will direct).
 ---
+
+## OVERNIGHT CHAIN (JMT 2026-06-02 ~23:27 "do this autonomously overnight so I can sleep")
+JMT directive: cancel the all-graphs sweep (DONE -- killed pid 3291157 clean), run ONE more
+targeted "close what's closable" wave, then RE-LAUNCH the all-graphs sweep, all autonomously.
+TEXT JMT only at meaningful boundaries (closing wave done + relaunch; all-graphs done). Let him sleep.
+
+### Phase ladder (this is the authoritative wake-up routing for THIS run)
+PHASE 1 = CLOSING_WAVE_RUNNING  <-- current
+  6 codexes (medium effort), each owns DISTINCT files, dispatched 23:28, watchers armed:
+    sgd2multi 3358698 (sgd2_multi.py -- real epoch-shuffle RNG, the one REAL closable gap)
+    clmds     3358821 (classical_mds.py -- cheap scipy dsyevr try, else document metric-artifact)
+    sugiyama  3359112 (sugiyama.py -- deterministic tie-break ordering)
+    fmmm      3359317 (fmmm.py -- deterministic OGDF integer-packing)
+    anneal    3359529 (_igraph_rng.py + drl.py + davidson_harel.py -- trace diverging cases)
+    refs      3359733 (eval/competitors/* + variants.py -- add missing spectral/rt references)
+  Logs: /tmp/rngc_<name>.log. Specs: ./C_<name>.md.
+  WAKE-UP ROUTING while in PHASE 1:
+    - CODEX_DONE for one codex -> ack mentally, do NOT act until ALL 6 terminal. Just note rc/commit.
+    - CODEX_FAILED/TIMEOUT -> note it; that engine keeps its prior status (anti-flail: do NOT redispatch
+      more than ONCE, and only if the failure is a trivial/recoverable error, not a documented wall).
+    - When ALL 6 are terminal -> go to PHASE 2.
+
+PHASE 2 = RE-VERIFY + COMMIT (do this yourself, inline -- it's mechanical)
+  a. Re-run the small-graph bit-exact harness to measure what actually closed:
+     export LD_LIBRARY_PATH=/home/jtaylor/anaconda3/envs/py311/lib:$LD_LIBRARY_PATH
+     python scripts/rng_match/check_engine.py <engine>  for each touched engine
+     (sgd2_multi_default/batch128/lr001, classical_mds_default, sugiyama_default,
+      fmmm_steps100, drl_default, davidson_harel_rounds100, spectral_random_walk, ...).
+     OR the full harness: python scripts/rng_match/bitexact_harness.py (regenerates STATUS.md).
+  b. ANTI-CHEAT grep each touched pipeline diff for delegation (import igraph / subprocess dot /
+     fa2util / eval.competitors). Reject + note any that delegate (do NOT commit a cheat).
+  c. Update STATUS.md + SUMMARY.md headline counts with the NEW bit-exact total.
+  d. Commit (one commit, conventional, NO AI attribution). Use SKIP=detect-secrets only if the
+     ONLY diff is generated_at timestamp churn (verified benign). status.json/binaries gitignored.
+  e. TEXT JMT: "closing wave done: was 74 bit-exact, now N. Closed: <list>. Walls confirmed: <list>.
+     Relaunching all-graphs now." via ~/.claude/scripts/send-to-jmt.sh
+  f. -> go to PHASE 3.
+
+PHASE 3 = RELAUNCH ALL-GRAPHS (the final classification sweep, now with closed gaps)
+  bash scripts/rng_match/final_allgraphs_5seed.sh   (run via bg-watch.sh, NOT pgrep -f)
+    -> wrapper writes /tmp/rng_final_allgraphs.log ; --resume reuses completed benchmark rows.
+    capture wrapper PID, arm bg-watch.sh <PID> /tmp/rng_final_allgraphs.log --label rng-final2.
+  state -> FINAL_ALLGRAPHS_RUNNING_v2.
+  The script itself sends a completion text (line 48) + writes eval_output/fidelity_report_final/report.md.
+
+PHASE 4 = ALL-GRAPHS DONE (wake on rng-final2 DONE)
+  a. Verify it truly finished (eval_output/fidelity_report_final/report.md exists + non-empty).
+     If watcher fired on a kill/crash not completion, check log tail; redispatch with --resume once.
+  b. Classify every (graph,algo): confirm hypothesis -- matched-seed bit-exact engines stay
+     bit-exact except chaotic-FP-cascade on big graphs; the 36 walls diverge regardless.
+  c. Write the all-graphs summary (which graphs/algos diverge + why) into SUMMARY.md / a new
+     ALLGRAPHS_SUMMARY.md. File the report for review if human-worthy.
+  d. TEXT JMT the final result. state -> DONE.
+
+### Anti-flail / fallback (overnight)
+- A codex failing its engine is FINE -- that engine keeps prior status, document the wall, move on.
+  Do NOT chase the documented ceilings (sfdp libm-chaos, gem_iters2000) -- they were NOT dispatched.
+- Codex quota exhaustion mid-wave -> the already-running codexes finish; for any not-yet-run work,
+  pivot to an Agent (general-purpose, model opus) OR just proceed with what closed. Don't block the chain.
+- 3 rounds same un-closeable -> accept residual (we already documented these walls once).
+- Session pause/restart -> re-read THIS block, check `ps -C codex` + git log + the logs, resume at the
+  right phase. Watchers: bzkz0s7lo bznmp6kzm bvadr6qdq bwia1efqo bnb826zlm b22likc8y (phase-1 codexes).
 
 # RNG-Stream-Matching Sprint -- State (single source of truth lives in STATUS.md)
 
@@ -146,7 +208,18 @@ Standing: 68 BIT_EXACT / 2 CLOSE / 41 DIVERGENT / 10 no-ref. Targets after wave3
 finishable (fr_steps100 1.86e-7, sgd2_multi_batch128 9.86e-6, fmmm ~0.01, fr_steps200/fa2_linlog
 ~1e-3) + crack the ports (igraph family, sgd2_multi, sfdp) OR document each wall precisely.
 
-## FINALIZATION (wave-3 committed 51d7ebf; final re-verify pid 2879837, watcher br4ut2mvd, ~90min/neulay)
+## FINAL ALL-GRAPHS 5-SEED SWEEP (JMT go 2026-06-02 21:40) -- THE comprehensive run
+Small-graph sprint DONE: 74/121 bit-exact (SUMMARY.md). Now: 5 seeds x ALL graphs x ALL engines,
+current matched-params+RNG-ported+OGDF code -> classify every (graph,algo) combo bit-exact-or-not.
+Script scripts/rng_match/final_allgraphs_5seed.sh -> eval_output/benchmark_5seed_final +
+eval_output/fidelity_report_final. Wrapper pid 3291157 (NOT 3291150 = transient setsid parent that
+gave a false-DONE), watcher btslceav1 (360min, re-arm as needed -- multi-hour run). bg PID gotcha:
+setsid spawns a transient parent that exits instantly; the REAL wrapper is the log's PID=$$ -- watch THAT.
+ON DONE (fidelity_report_final/report.md): classify per (graph,algo); CONFIRM hypothesis (the 74
+small-bit-exact engines stay bit-exact on most graphs, diverge only via chaotic FP cascade on big/
+chaotic graphs; the 36 walls diverge regardless). Write final all-graphs summary + TEXT JMT.
+
+## FINALIZATION (small-graph sprint -- wave-3 committed 51d7ebf, SUMMARY.md done, 74/121 bit-exact)
 ON re-verify3 DONE (writes STATUS.md): read final verdict counts -> write SUMMARY.md -> TEXT JMT.
 NOTE: commits skip detect-secrets via SKIP= (verified TIMESTAMP-ONLY churn, NO real secret; all
 other hooks run; NOT --no-verify). status.json gitignored; ogdf_runner binary gitignored.
