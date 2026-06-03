@@ -1,7 +1,107 @@
 ---
 run: sprint_rng_matching
 created: 2026-06-02
-state: CLOSING_WAVE_RUNNING
+state: FINAL_ALLGRAPHS_RUNNING_v2
+# PHASE 1 (closing wave) + PHASE 2 (verify+commit efe6290) DONE. PHASE 3 launched:
+# all-graphs relaunch wrapper PID=3453115, log=/tmp/rng_final_allgraphs.log, watcher=bg0s0apvi
+# (bg-watch label rng-final2, re-armed --max-runtime-min 300 after a benign 2h watcher-cap TIMEOUT;
+# run was 65.8% at 02:16 and progressing fine). --resume reuses ~58,973 valid rows. On its DONE -> PHASE 4:
+# NOTE: drl on big graphs (ba_500 etc.) hits per-combo layout timeouts -> recorded as ERROR/skip, benign.
+#
+# 2026-06-03 ~07:00 UPDATE -- GIANT-GRAPH TAIL BOTTLENECK:
+# The all-graphs run slowed hard in its tail: 65.8% (02:16) -> 71.6% (06:59), ~1.2%/hr. Remaining
+# ~28% is concentrated in 3-4 GIANT graphs (ba_5000, small_world_2000, grid_50x50: ~194/777 rows;
+# the 2000-node graphs are nearly done). At this rate the tail is ~20h -- NOT "overnight", and it is
+# the LEAST informative part (every engine cascades on 2000-5000 node graphs via chaotic FP; that's
+# the EXPECTED result, already known). The informative classification (105 graphs up to 2000 nodes)
+# is essentially complete.
+# ACTION TAKEN: launched a PARTIAL classification (does not disturb the live run): consolidate current
+# .pt -> positions_partial.h5 + report -> eval_output/fidelity_report_partial (watcher bihxeyqu0).
+# Main benchmark left RUNNING (watcher b2z07vfdf). DECISION FOR JMT (morning): (a) let giant tail
+# finish ~20h, (b) kill giant graphs + finalize on the 105 done graphs now, or (c) cap graph size.
+# Do NOT unilaterally kill the run (valid data) -- present the partial classification + ask.
+#
+# 2026-06-03 ~07:06 -- PARTIAL CLASSIFICATION DELIVERED + TEXTED JMT. Wrote ALLGRAPHS_SUMMARY.md
+# (3-tier result: ~28 SCALE-ROBUST machine-eps incl 2000-node / TIER-2 small-exact-cascade-at-scale /
+# TIER-3 walls). report at eval_output/fidelity_report_partial/report.md. Main run STILL RUNNING
+# (watcher b2z07vfdf; giant-graph tail ~20h). AWAITING JMT DECISION (kill tail / let finish / cap size).
+# WAKE-UP ROUTING from here:
+#   - JMT says kill/done -> kill wrapper 3453115 process-group, finalize ALLGRAPHS_SUMMARY as final
+#     (drop "partial" caveat), optionally file-for-review, state=DONE.
+#   - JMT says let finish / cap -> act accordingly; on b2z07vfdf DONE, run final report, refresh summary.
+#   - b2z07vfdf fires DONE before JMT replies -> run final consolidate+report (script does this itself),
+#     refresh ALLGRAPHS_SUMMARY with full-data numbers, text JMT, state=DONE.
+#   - Also still TODO whenever convenient: regenerate small-graph STATUS.md cleanly (was clobbered;
+#     restored to HEAD pre-commit) so it shows 76 -- low priority, SUMMARY.md is authoritative.
+#
+# ============================================================================================
+# FULL 4-TIER PIPELINE (JMT directive 2026-06-03 ~mid-morning -- the home stretch)
+# JMT: "keep cooking the 5 seeds; when finished do the 100 seed for all (graph/algo) combos that
+#       are NEITHER a perfect match NOR a timeout, then fidelity analysis with TOST -> four-tier
+#       categorization of all algos."
+# This is PHASE 5-8, triggered when the 5-seed sweep (watcher b2z07vfdf) completes. The 5-seed run
+# writes eval_output/benchmark_5seed_final + eval_output/fidelity_report_final/report.md.
+#
+# THE FOUR TIERS (per (graph,algo) combo; aggregate to per-algo after):
+#   Tier 1 BIT_IDENTICAL          -- 5-seed max per-seed RMSD < 1e-3 (really <1e-7; bit-exact). DONE, no 100-seed.
+#   Tier 2 TIMEOUT                -- combo dominated by timeout/error (no ok pairs to verdict). Excluded.
+#   Tier 3 STATISTICALLY_EQUIVALENT -- not bit-identical, ran, STOCHASTIC, 100-seed TOST PASSES (equivalent).
+#   Tier 4 STATISTICALLY_DIFFERENT  -- not bit-identical, ran, and EITHER 100-seed TOST FAILS (stochastic)
+#                                      OR the engine is DETERMINISTIC (no seed distribution -> TOST N/A ->
+#                                      a deterministic difference is simply tier 4; do NOT waste 100 seeds
+#                                      on deterministic engines -- classical_mds/sugiyama/spectral/pivot_mds/rt).
+#
+# *** SCOPING RULE (HARD-LEARNED -- the P3 over-escalation incident, JMT was furious) ***
+#   The 100-seed runs ONLY on the specific (engine, graph) combos that are non-bit-identical AND
+#   non-timeout AND stochastic. NOT whole engines on all graphs. NOT all combos. Per-engine, restricted
+#   to THAT engine's failing graphs. scripts/r69_p3b_targeted.py already does exactly this (reads
+#   /tmp/r69_failing_map.json = {engine:{"ref":refname,"graphs":[failing...]}}). USE p3b, NOT
+#   r69_p3_100seed_tost.sh (that one runs escalation engines on all graphs = the bug).
+#
+# PHASE 5 = TRIAGE (when b2z07vfdf DONE): adapt scripts/r69_triage.py to read the _final dirs
+#   (benchmark_5seed_final/results.json + fidelity_report_final/per_variant.json + variant registry
+#   is_stochastic+reference). Output: per-(graph,algo) tier1/tier2/escalate/tier4-deterministic, AND
+#   the failing-map JSON for p3b ({engine:{ref,graphs}} for the stochastic-non-bitexact-non-timeout set).
+#   SANITY-GATE before launching 100-seed: print the escalation combo COUNT + the engine x #graphs
+#   breakdown; if it looks like "all graphs" or thousands of combos, STOP and recheck the scoping.
+# PHASE 6 = TARGETED 100-SEED: scripts/r69_p3b_targeted.py against the failing map (escalation output
+#   dir e.g. eval_output/benchmark_100seed_escalation_final). MATCHED PARAMS + MATCHED SEEDS + NO
+#   DELEGATION still apply (see [[feedback_always_parameter_match_comparisons]],
+#   [[feedback_no_runtime_delegation_to_reference]]). These complete fast (they finish, just differ by basin).
+#   Run via bg-watch (NOT pgrep -f). Watch for completion.
+# PHASE 7 = TOST: fidelity_analysis.py / r68_tost_followup.py on the 100-seed data -> per-combo TOST
+#   verdict (equivalent vs different) at matched params. -> tier 3 vs tier 4.
+# PHASE 8 = ASSEMBLE 4-TIER: combine tier1 (5-seed bit-exact) + tier2 (timeouts) + tier3 (TOST-equiv) +
+#   tier4 (TOST-diff + deterministic-diff) into the final categorization. Write FOUR_TIER_CATEGORIZATION.md
+#   (per-algo + per-(graph,algo)), refresh ALLGRAPHS_SUMMARY, file-for-review if human-worthy, TEXT JMT
+#   the four-tier result. state=DONE.
+# Anti-flail: if triage scoping looks wrong, FIX scoping before running -- never re-run the over-escalation.
+#
+# ============================================================================================
+# PARALLEL WORKSTREAM (JMT 2026-06-03): EQUIVALENCE METRICS for the Tier-4 deterministic group.
+# JMT chose "full trio": automorphism-aligned Procrustes + stress-equivalence + spectrum/distance
+# diagnostic -- to SHOW practical equivalence where coordinate-RMSD over-penalizes deterministic/
+# symmetric holdouts (sugiyama, classical_mds, pivot_mds, spectral_random_walk).
+# Dispatched codex pid=3672824 (watcher bzphktmpf, log /tmp/equiv_metrics.log), spec at
+# ./SPEC_equivalence_metrics.md. Builds dagua/eval/equivalence_metrics.py + scripts/equivalence_report.py
+# + tests. NEW files only -- does NOT touch run_benchmark/competitors/variants (the live 5-seed run).
+# ON CODEX DONE: review (key result = sugiyama/classical_mds plain-rmsd vs aut-rmsd / dist-corr before-
+# after), verify numbers + anti-cheat (igraph for automorphism-analysis is OK; no LAYOUT delegation),
+# ruff/mypy/pytest, COMMIT (no AI attribution). This metric becomes the equivalence verdict for the
+# Tier-4-DETERMINISTIC engines in PHASE 8 (they skip 100-seed; equivalence shown via this trio instead).
+# Idea credit: JMT proposed label-permutation -> I refined to AUTOMORPHISM-group-restricted (free perm
+# = NP-hard QAP + over-permissive false-equivalences).
+#
+# EXTENSION QUEUED (JMT 2026-06-03): after the trio codex (bzphktmpf) completes + I commit it, dispatch
+# a SECOND codex (sequential -- SAME module, NO concurrency) to add the final two invariances:
+#   (4) per-connected-component rigid placement, (5) per-axis anisotropic scaling OPT-IN for free-aspect
+#   engines (allowlist default {classic_sugiyama}). Spec = the "FOLLOW-UP ADDITIONS" section of
+#   ./SPEC_equivalence_metrics.md. These COMPLETE the invariance criteria (principled ceiling:
+#   rigid + automorphism + degenerate-eigenspace + per-component + per-axis-optin; anything further
+#   launders real differences). Then commit. THIS is the final equivalence toolkit for PHASE 8 Tier-4.
+# verify report.md non-empty, classify (graph,algo), write ALLGRAPHS_SUMMARY, text JMT, state=DONE.
+# Closing-wave outcome: 74->76 bit-exact (spectral_unnormalized + rt_horizontal refs); sugiyama
+# 0.93->0.37; classical_mds/drl/davidson ceilings confirmed; fmmm+sgd2 reverted (no gain).
 goal: RNG-stream-match dagua's fidelity ports to their references so SMALL graphs are
       bit-identical (per-seed Procrustes RMSD < 1e-7) at MATCHED seeds, for as many of the
       24 algorithms as physically possible. Stop at <1e-7-all OR documented can't-go-further.
