@@ -99,6 +99,17 @@ state: FINAL_ALLGRAPHS_RUNNING_v2
 #   ./SPEC_equivalence_metrics.md. These COMPLETE the invariance criteria (principled ceiling:
 #   rigid + automorphism + degenerate-eigenspace + per-component + per-axis-optin; anything further
 #   launders real differences). Then commit. THIS is the final equivalence toolkit for PHASE 8 Tier-4.
+#
+# 2026-06-03 -- EQUIVALENCE TOOLKIT COMPLETE. Trio f9d18e1; extension (per-component + per-axis opt-in)
+# committed [this commit]. 6/6 tests, ruff/mypy/anti-cheat clean. All five invariances live in
+# dagua/eval/equivalence_metrics.py + scripts/equivalence_report.py.
+# KEY FINDING (for PHASE 8): sugiyama/petersen does NOT collapse under ANY invariance (plain 0.845,
+# automorphism 0.600, anisotropic 0.667, rotation floor ~0.53) -> genuinely different valid layerings,
+# NOT an invariance artifact. This is the case the QUALITY axis (stress/crossings = equally-good drawing)
+# is for. So PHASE 8: Tier-4 deterministic engines get an equivalence verdict from EITHER axis --
+# invariance-equivalent (pivot_mds: collapses) OR quality-equivalent (sugiyama: equal stress).
+# CAVEAT: benchmark_5seed_final sugiyama positions are STALE pre-closing-wave (--resume reused them) ->
+# re-run equivalence_report on FRESH post-wave sugiyama positions before the final Tier-4 verdict.
 # verify report.md non-empty, classify (graph,algo), write ALLGRAPHS_SUMMARY, text JMT, state=DONE.
 # Closing-wave outcome: 74->76 bit-exact (spectral_unnormalized + rt_horizontal refs); sugiyama
 # 0.93->0.37; classical_mds/drl/davidson ceilings confirmed; fmmm+sgd2 reverted (no gain).
