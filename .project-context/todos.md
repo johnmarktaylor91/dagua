@@ -59,6 +59,22 @@
   - [ ] Reimplement YifanHu (Gephi force-directed) in PyTorch
   - [ ] Fix LinLog original pairing -- OGDF says "unsupported"
 - [ ] [LOW] Fix UMAP on disconnected graphs: replace inf shortest-path distances with 2*max(finite_distances)
+- [ ] [LOW] **Diagnostic (for our own understanding, not blocking): characterize the deterministic-engine
+  divergences by INPUT TYPE.** Established 2026-06-03 for sugiyama; generalize + confirm.
+  - FINDING (sugiyama, post-closing-wave, vs igraph): bit-exact (~1e-16) on every graph with a
+    determinable layering -- DAGs (small_dag_10 1.6e-16, balanced_tree_2x3 1.4e-16), bipartite, path,
+    cycle, star, grid, two_triangles_bridge. Diverges (~0.2-0.37) ONLY on dense undirected graphs with
+    NO natural hierarchy (complete5 0.22, small_random_12 0.30, wheel7 0.32, petersen_10 0.37), where a
+    layered algorithm must INVENT a hierarchy (arbitrary edge-orientation + cycle-breaking) and dagua vs
+    igraph invent different (both valid) ones. Conclusion: NOT a port bug -- bit-exact on sugiyama's
+    intended domain; off-domain divergence is benign "which invented hierarchy" arbitrariness (deeper
+    than a within-layer swap, so no geometric invariance bridges it -- it's a quality-axis equivalence).
+  - TODO-LATER: (a) confirm dagua's invented layering on petersen/K5/wheel is a LEGAL sugiyama layering
+    (compare the actual node->layer maps + within-layer order dagua vs igraph; it should be valid-just-
+    different, not malformed); (b) run the SAME input-confinement analysis on the other deterministic
+    holdouts -- classical_mds, pivot_mds, spectral_random_walk -- to see if their divergence is likewise
+    confined to specific input structure (degenerate eigenvalues / symmetric graphs) rather than general.
+    Purpose: complete our own mental model of exactly when/why each deterministic engine diverges.
 
 ## Roadmap -- completing the dagua vision (strategic, post-sprint)
 The coherent identity: a rigorous, measurable, *differentiable* layout engine -- reproduce any classical
