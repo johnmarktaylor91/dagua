@@ -75,6 +75,14 @@ state: FINAL_ALLGRAPHS_RUNNING_v2
 #   tier4 (TOST-diff + deterministic-diff) into the final categorization. Write FOUR_TIER_CATEGORIZATION.md
 #   (per-algo + per-(graph,algo)), refresh ALLGRAPHS_SUMMARY, file-for-review if human-worthy, TEXT JMT
 #   the four-tier result. state=DONE.
+#   REPORT DIMENSION (JMT 2026-06-03): tag each GRAPH directed/undirected (+ DAG/tree vs cyclic, i.e.
+#   "has a natural hierarchy") and each ALGORITHM hierarchy-requiring (sugiyama, reingold_tilford) vs
+#   undirected-native (force/stress/spectral/MDS). For every DIVERGENT (algo,graph) combo, annotate
+#   whether it is a DOMAIN MISMATCH -- a hierarchy-requiring algo run on a no-natural-hierarchy
+#   (undirected/cyclic/dense) graph, where the algorithm must INVENT an arbitrary layering -> expected,
+#   benign divergence (e.g. sugiyama on petersen/K5/wheel; sugiyama is bit-exact 1e-16 on DAGs/trees).
+#   This separates "expected out-of-domain divergence" from "genuine divergence" in the final tables, so
+#   a reader sees WHY a combo diverges, not just that it does.
 # Anti-flail: if triage scoping looks wrong, FIX scoping before running -- never re-run the over-escalation.
 #
 # ============================================================================================
