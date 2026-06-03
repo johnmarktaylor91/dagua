@@ -1,6 +1,35 @@
 # Task & Bug Tracker
 
 ## Active Tasks
+- [ ] [HIGH] **First-class `dagua.quality` + `dagua.compare` modules (productize the layout comparators).**
+  JMT greenlit 2026-06-03: promote the layout-equivalence/quality metrics from internal eval utilities
+  (`dagua/eval/equivalence_metrics.py`, committed f9d18e1 + per-component/per-axis extension) into a
+  first-class public "measure & compare" pillar alongside layout + render. Do NOT rewrite -- GRADUATE the
+  validated core after the RNG-matching sprint has exercised it.
+  - **`dagua.quality(pos, graph) -> QualityMetrics`** -- measure ONE layout: normalized stress, edge
+    crossings, neighborhood preservation (trustworthiness), distance correlation. Pure-torch, no new deps.
+    (Several already exist as differentiable losses internally -- reuse, don't duplicate.)
+  - **`dagua.compare(pos_a, pos_b, graph, invariances=(...)) -> ComparisonResult`** -- how-equivalent, via
+    the FIVE principled invariances (the agreed ceiling; anything beyond launders real differences):
+    1 rigid Procrustes, 2 graph automorphisms, 3 degenerate-eigenspace (spectrum/distance diagnostic),
+    4 per-connected-component rigid placement, 5 per-axis anisotropic scaling (OPT-IN per free-aspect
+    engine, default {sugiyama}). Emits all raw signals + a combined PRACTICALLY_EQUIVALENT verdict.
+  - **Dependency boundary (respect PyTorch-only principle):** pure-torch invariances (rigid, per-axis,
+    per-component decomposition can be torch/SciPy, distance/spectrum) + all quality metrics go in CORE,
+    zero new required deps. The AUTOMORPHISM-aware comparison needs igraph (BLISS) -> OPTIONAL extra
+    `pip install dagua[compare]`, degrade gracefully (skip automorphism signal) when absent. NEVER pull
+    igraph into core.
+  - **The differentiating feature -- differentiability:** the differentiable subset (stress, orthogonal
+    SVD-Procrustes) doubles as LOSSES/OBJECTIVES. Expose a **`MatchTarget` loss / `LayoutConfig(match_target=...)`**
+    -> "lay out this graph to MATCH this reference layout" as a differentiable target. Uniquely dagua (ties
+    into the "constraints are loss functions" principle). Automorphism-min / component-align have discrete
+    argmin -> evaluation-only (document which metrics can serve as objectives vs eval-only).
+  - **Architecture:** clean third pillar `dagua/quality/` + `dagua/compare/` (or `dagua/metrics/`); keep
+    cohesive, don't sprawl. Reproducibility use case (CPU-vs-CUDA layout equivalence) is a headline demo.
+  - **GATES:** (a) public-API surface needs JMT sign-off before building (API design = discuss-first);
+    (b) promote only the SPRINT-VALIDATED core, not untested code; (c) docs + glossary + a notebook example.
+  - NEXT STEP when ready: CC drafts the public API design doc (signatures, differentiable-vs-eval split,
+    optional-dep boundary, MatchTarget loss) for JMT to react to, THEN implement.
 - [ ] [HIGH] **Sprint B -- Cairo opt-in (post-data-coord sprint).** Add cairo as a matplotlib backend option:
   - `pyproject.toml` optional dep: `[project.optional-dependencies] cairo = ["mplcairo>=0.6"]`
   - Auto-detect default per `feedback_cairo_default_policy.md`: try `import mplcairo` -> use cairo; else fall back to Agg. NO explicit user config required for default selection. `pip install dagua` -> Agg; `pip install 'dagua[cairo]'` -> cairo.
@@ -57,6 +86,7 @@
 ## Roadmap (Post-Benchmark)
 
 ### Architecture
+- [ ] [HIGH] **Fidelity vs Performance modes**: every fidelity-mode pipeline currently uses sequential Python scalar loops to match the C/C++ reference arithmetic order bit-for-bit. This is correct for the "23-of-24 bit-exact against reference" claim but 50-100x slower than the references for algorithms with many inner iterations (davidson_harel_rounds200, sgd2_multi, lgl_iter300, drl simmer, etc.). Add an explicit `mode='fast'` opt-out that runs the same algorithm via torch reductions / numba JIT / C extension, sacrificing literal arithmetic-order match for speed. Document that `mode='fidelity'` (default for benchmark fidelity_mode) is reproducibility-first while `mode='fast'` is throughput-first. Both should produce GEOMETRICALLY equivalent layouts (RMSD < 1e-3) but only fidelity matches reference bit-for-bit. Discovered post-R66: R66 spent hours on the slow tail of those specific variants.
 - [ ] [HIGH] Original algorithm backend: `dagua.layout(g, algorithm="fr", backend="original")` -- user-facing transparency, runs literal originals via competitor adapters
 - [ ] [HIGH] Pixel-unit overrides as OPT-IN OVERRIDE: "2pt" / "1.5px" syntax for fixed-size elements (NodeStyle.stroke_width_override, EdgeStyle.width_override, NodeStyle.font_size_override). Default path stays data-coord (per `feedback_data_coord_everything_strict.md`); override values bypass data-coord and route directly to display-points. Document loud and clear that override values are NOT differentiable and break the calibrate-once invariant. Useful when users want literal point-perfect typography for paper figures.
 - [ ] [HIGH] Expose text rendering in style fields: text_background, text_underline, text_strikethrough, label_outline
