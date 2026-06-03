@@ -7,6 +7,7 @@ the composable pipeline entrypoint.
 from __future__ import annotations
 
 import heapq
+import math
 from dataclasses import dataclass
 from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -320,6 +321,316 @@ def _graphviz_layer_assignments(
     )
     layers = [int(ranks.get(node, 0)) for node in range(num_nodes)]
     return torch.tensor(layers, dtype=torch.long), virtual_edges
+
+
+def _igraph_glpk_layer_assignments(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> torch.Tensor:
+    """Assign layers using igraph 1.0.0's GLPK Sugiyama formulation.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized layer ids with shape ``[N]``.
+
+    Notes
+    -----
+    igraph 1.0.0 first finds Eades feedback edges, then uses a GLPK LP whose
+    objective is effectively zero in the released source. SciPy's HiGHS
+    feasible point matches the small fixtures except cases where GLPK simplex
+    pivot choice selects another equally feasible layer vector.
+    """
+    if num_nodes == 0 or edge_index.numel() == 0:
+        return torch.zeros((num_nodes,), dtype=torch.long)
+
+    feedback_edges = set(_igraph_eades_feedback_edges(edge_index=edge_index, num_nodes=num_nodes))
+    try:
+        from scipy.optimize import linprog
+    except ImportError:
+        return _igraph_eades_layer_assignments(edge_index=edge_index, num_nodes=num_nodes)
+
+    constraints: List[List[float]] = []
+    bounds: List[float] = []
+    for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        if source == target:
+            continue
+        row = [0.0] * num_nodes
+        if edge_id in feedback_edges:
+            row[source] = -1.0
+            row[target] = 1.0
+        else:
+            row[source] = 1.0
+            row[target] = -1.0
+        constraints.append(row)
+        bounds.append(-1.0)
+
+    if not constraints:
+        return torch.zeros((num_nodes,), dtype=torch.long)
+
+    result = linprog(
+        [0.0] * num_nodes,
+        A_ub=constraints,
+        b_ub=bounds,
+        bounds=[(0.0, None)] * num_nodes,
+        method="highs",
+    )
+    if not result.success:
+        return _igraph_eades_layer_assignments(edge_index=edge_index, num_nodes=num_nodes)
+
+    raw_layers = [int(math.floor(float(value))) for value in result.x]
+    return torch.tensor(_normalize_igraph_layers(raw_layers), dtype=torch.long)
+
+
+def _igraph_eades_layer_assignments(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Assign longest-path layers from igraph's Eades feedback ordering.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized layer ids with shape ``[N]``.
+    """
+    ordering = _igraph_eades_ordering(edge_index=edge_index, num_nodes=num_nodes)
+    ranks = _igraph_sort_indices([float(value) for value in ordering])
+    layers = [0] * num_nodes
+    sources = edge_index[0].tolist()
+    targets = edge_index[1].tolist()
+    outgoing: List[List[int]] = [[] for _ in range(num_nodes)]
+    for edge_id, source in enumerate(sources):
+        outgoing[source].append(edge_id)
+
+    for source in ranks:
+        for edge_id in outgoing[source]:
+            target = targets[edge_id]
+            if source == target or ordering[source] > ordering[target]:
+                continue
+            layers[target] = max(layers[target], layers[source] + 1)
+    return torch.tensor(_normalize_igraph_layers(layers), dtype=torch.long)
+
+
+def _igraph_eades_feedback_edges(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+    """Return feedback edge ids from igraph's Eades ordering.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    list[int]
+        Edge ids whose source appears after their target in the Eades order.
+    """
+    ordering = _igraph_eades_ordering(edge_index=edge_index, num_nodes=num_nodes)
+    feedback_edges: List[int] = []
+    for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        if source == target or ordering[source] > ordering[target]:
+            feedback_edges.append(edge_id)
+    return feedback_edges
+
+
+def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+    """Return igraph's deterministic Eades vertex ordering.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    list[int]
+        Ordering rank for each vertex.
+    """
+    sources = edge_index[0].tolist()
+    targets = edge_index[1].tolist()
+    incoming_edges: List[List[int]] = [[] for _ in range(num_nodes)]
+    outgoing_edges: List[List[int]] = [[] for _ in range(num_nodes)]
+    in_degrees = [0] * num_nodes
+    out_degrees = [0] * num_nodes
+    for edge_id, (source, target) in enumerate(zip(sources, targets)):
+        if source == target:
+            continue
+        outgoing_edges[source].append(edge_id)
+        incoming_edges[target].append(edge_id)
+        out_degrees[source] += 1
+        in_degrees[target] += 1
+
+    in_strengths = [float(value) for value in in_degrees]
+    out_strengths = [float(value) for value in out_degrees]
+    sources_queue: List[int] = []
+    sinks_queue: List[int] = []
+    ordering = [0] * num_nodes
+    order_next_pos = 0
+    order_next_neg = -1
+    nodes_left = num_nodes
+
+    for node in range(num_nodes):
+        if in_degrees[node] == 0:
+            if out_degrees[node] == 0:
+                nodes_left -= 1
+                ordering[node] = order_next_pos
+                order_next_pos += 1
+                in_degrees[node] = out_degrees[node] = -1
+            else:
+                sources_queue.append(node)
+        elif out_degrees[node] == 0:
+            sinks_queue.append(node)
+
+    source_head = 0
+    sink_head = 0
+    while nodes_left > 0:
+        while source_head < len(sources_queue):
+            node = sources_queue[source_head]
+            source_head += 1
+            ordering[node] = order_next_pos
+            order_next_pos += 1
+            in_degrees[node] = out_degrees[node] = -1
+            for edge_id in outgoing_edges[node]:
+                target = targets[edge_id]
+                if in_degrees[target] <= 0:
+                    continue
+                in_degrees[target] -= 1
+                in_strengths[target] -= 1.0
+                if in_degrees[target] == 0:
+                    sources_queue.append(target)
+            nodes_left -= 1
+
+        while sink_head < len(sinks_queue):
+            node = sinks_queue[sink_head]
+            sink_head += 1
+            if in_degrees[node] < 0:
+                continue
+            ordering[node] = order_next_neg
+            order_next_neg -= 1
+            in_degrees[node] = out_degrees[node] = -1
+            for edge_id in incoming_edges[node]:
+                source = sources[edge_id]
+                if out_degrees[source] <= 0:
+                    continue
+                out_degrees[source] -= 1
+                out_strengths[source] -= 1.0
+                if out_degrees[source] == 0:
+                    sinks_queue.append(source)
+            nodes_left -= 1
+
+        best_node = -1
+        best_diff = -math.inf
+        for node in range(num_nodes):
+            if out_degrees[node] < 0:
+                continue
+            diff = out_strengths[node] - in_strengths[node]
+            if diff > best_diff:
+                best_diff = diff
+                best_node = node
+        if best_node < 0:
+            break
+
+        ordering[best_node] = order_next_pos
+        order_next_pos += 1
+        for edge_id in outgoing_edges[best_node]:
+            target = targets[edge_id]
+            if in_degrees[target] <= 0:
+                continue
+            in_degrees[target] -= 1
+            in_strengths[target] -= 1.0
+            if in_degrees[target] == 0:
+                sources_queue.append(target)
+        for edge_id in incoming_edges[best_node]:
+            source = sources[edge_id]
+            if out_degrees[source] <= 0:
+                continue
+            out_degrees[source] -= 1
+            out_strengths[source] -= 1.0
+            if out_degrees[source] == 0 and in_degrees[source] > 0:
+                sinks_queue.append(source)
+        out_degrees[best_node] = -1
+        in_degrees[best_node] = -1
+        nodes_left -= 1
+
+    return [value + num_nodes if value < 0 else value for value in ordering]
+
+
+def _normalize_igraph_layers(raw_layers: Sequence[int]) -> List[int]:
+    """Normalize possibly sparse layer ids to contiguous zero-based ids.
+
+    Parameters
+    ----------
+    raw_layers : sequence[int]
+        Raw layer memberships.
+
+    Returns
+    -------
+    list[int]
+        Contiguous layer ids preserving ascending raw layer order.
+    """
+    mapping = {value: index for index, value in enumerate(sorted(set(raw_layers)))}
+    return [mapping[value] for value in raw_layers]
+
+
+def _orient_edges_by_layers(
+    edge_index: torch.Tensor,
+    layer_assignments: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    """Orient original edges downward according to igraph layer memberships.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    layer_assignments : torch.Tensor
+        Layer id per original vertex with shape ``[N]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights aligned to ``edge_index``.
+
+    Returns
+    -------
+    tuple
+        Downward edge list, aligned weights, and reversal mask for retained
+        non-horizontal edges.
+    """
+    sources: List[int] = []
+    targets: List[int] = []
+    weights: List[float] = []
+    reversed_values: List[bool] = []
+    for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        source_layer = int(layer_assignments[source].item())
+        target_layer = int(layer_assignments[target].item())
+        if source_layer == target_layer:
+            continue
+        if source_layer > target_layer:
+            source, target = target, source
+            reversed_values.append(True)
+        else:
+            reversed_values.append(False)
+        sources.append(source)
+        targets.append(target)
+        if edge_weights is not None:
+            weights.append(float(edge_weights[edge_id].item()))
+
+    oriented_edges = torch.tensor([sources, targets], dtype=torch.long)
+    oriented_weights = None if edge_weights is None else torch.tensor(weights, dtype=torch.float32)
+    reversed_mask = torch.tensor(reversed_values, dtype=torch.bool)
+    return oriented_edges, oriented_weights, reversed_mask
 
 
 def _group_nodes_by_layer(layer_assignments: torch.Tensor, num_nodes: int) -> List[List[int]]:
@@ -711,7 +1022,11 @@ def _barycenter_ordering(
                 use_incidence_barycenters=use_incidence_barycenters,
             )
             previous_order = list(ordered_layers[layer_idx])
-            ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
+            ordered_layers[layer_idx] = _sort_nodes_by_scores(
+                nodes=ordered_layers[layer_idx],
+                scores=barycenters,
+                use_igraph_sort=use_incidence_barycenters,
+            )
             changed = changed or ordered_layers[layer_idx] != previous_order
             order_index = _node_order_map(ordered_layers)
 
@@ -724,7 +1039,11 @@ def _barycenter_ordering(
                 use_incidence_barycenters=use_incidence_barycenters,
             )
             previous_order = list(ordered_layers[layer_idx])
-            ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
+            ordered_layers[layer_idx] = _sort_nodes_by_scores(
+                nodes=ordered_layers[layer_idx],
+                scores=barycenters,
+                use_igraph_sort=use_incidence_barycenters,
+            )
             changed = changed or ordered_layers[layer_idx] != previous_order
             order_index = _node_order_map(ordered_layers)
 
@@ -803,7 +1122,7 @@ def _neighbor_barycenters(
         Mapping from node id to barycenter score.
     """
     barycenters: Dict[int, float] = {}
-    for node in nodes:
+    for layer_position, node in enumerate(nodes):
         neighbor_positions = [order_index[neighbor] for neighbor in neighbors_by_node[node]]
         if neighbor_positions:
             if use_incidence_barycenters:
@@ -820,8 +1139,241 @@ def _neighbor_barycenters(
             else:
                 barycenters[node] = sum(neighbor_positions) / float(len(neighbor_positions))
         else:
-            barycenters[node] = order_index[node]
+            if use_incidence_barycenters:
+                barycenters[node] = order_index.get(layer_position, float(layer_position))
+            else:
+                barycenters[node] = order_index[node]
     return barycenters
+
+
+def _sort_nodes_by_scores(
+    nodes: Sequence[int],
+    scores: Dict[int, float],
+    use_igraph_sort: bool,
+) -> List[int]:
+    """Return nodes sorted by score with the requested tie behavior.
+
+    Parameters
+    ----------
+    nodes : sequence[int]
+        Current layer order.
+    scores : dict[int, float]
+        Sort score for every node.
+    use_igraph_sort : bool
+        Whether to mirror igraph's ``igraph_vector_sort_ind`` tie behavior.
+
+    Returns
+    -------
+    list[int]
+        Reordered nodes.
+    """
+    if use_igraph_sort:
+        indices = _igraph_sort_indices([scores[node] for node in nodes])
+        return [nodes[index] for index in indices]
+    return sorted(nodes, key=lambda node: scores[node])
+
+
+def _igraph_sort_indices(values: Sequence[float]) -> List[int]:
+    """Return indices sorted like igraph 1.0.0 ``vector_sort_ind``.
+
+    Parameters
+    ----------
+    values : sequence[float]
+        Values to sort in ascending order.
+
+    Returns
+    -------
+    list[int]
+        Permutation of indices whose values are in ascending order.
+    """
+    indices = list(range(len(values)))
+    _igraph_qsort_indices(indices=indices, values=values, start=0, count=len(indices))
+    return indices
+
+
+def _igraph_qsort_indices(
+    indices: List[int],
+    values: Sequence[float],
+    start: int,
+    count: int,
+) -> None:
+    """Sort an index slice using igraph's bundled Bentley-McIlroy qsort.
+
+    Parameters
+    ----------
+    indices : list[int]
+        Mutable index array.
+    values : sequence[float]
+        Sort keys referenced by ``indices``.
+    start : int
+        Start offset in ``indices``.
+    count : int
+        Number of items to sort.
+    """
+    if count < 2:
+        return
+
+    while True:
+        swap_count = 0
+        if count < 7:
+            for pm in range(start + 1, start + count):
+                pl = pm
+                while pl > start and _igraph_sort_compare(indices[pl - 1], indices[pl], values) > 0:
+                    indices[pl], indices[pl - 1] = indices[pl - 1], indices[pl]
+                    pl -= 1
+            return
+
+        pm = start + count // 2
+        if count > 7:
+            pl = start
+            pn = start + count - 1
+            if count > 40:
+                step = count // 8
+                pl = _igraph_median_of_three(indices, values, pl, pl + step, pl + 2 * step)
+                pm = _igraph_median_of_three(indices, values, pm - step, pm, pm + step)
+                pn = _igraph_median_of_three(indices, values, pn - 2 * step, pn - step, pn)
+            pm = _igraph_median_of_three(indices, values, pl, pm, pn)
+
+        indices[start], indices[pm] = indices[pm], indices[start]
+        pa = pb = start + 1
+        pc = pd = start + count - 1
+        while True:
+            while pb <= pc:
+                compare_result = _igraph_sort_compare(indices[pb], indices[start], values)
+                if compare_result > 0:
+                    break
+                if compare_result == 0:
+                    swap_count = 1
+                    indices[pa], indices[pb] = indices[pb], indices[pa]
+                    pa += 1
+                pb += 1
+            while pb <= pc:
+                compare_result = _igraph_sort_compare(indices[pc], indices[start], values)
+                if compare_result < 0:
+                    break
+                if compare_result == 0:
+                    swap_count = 1
+                    indices[pc], indices[pd] = indices[pd], indices[pc]
+                    pd -= 1
+                pc -= 1
+            if pb > pc:
+                break
+            indices[pb], indices[pc] = indices[pc], indices[pb]
+            swap_count = 1
+            pb += 1
+            pc -= 1
+
+        if swap_count == 0:
+            for pm in range(start + 1, start + count):
+                pl = pm
+                while pl > start and _igraph_sort_compare(indices[pl - 1], indices[pl], values) > 0:
+                    indices[pl], indices[pl - 1] = indices[pl - 1], indices[pl]
+                    pl -= 1
+            return
+
+        pn = start + count
+        left_equal = min(pa - start, pb - pa)
+        _swap_ranges(indices, start, pb - left_equal, left_equal)
+        right_equal = min(pd - pc, pn - pd - 1)
+        _swap_ranges(indices, pb, pn - right_equal, right_equal)
+
+        left_count = pb - pa
+        right_count = pd - pc
+        if left_count <= right_count:
+            if left_count > 1:
+                _igraph_qsort_indices(indices, values, start, left_count)
+            if right_count <= 1:
+                return
+            start = pn - right_count
+            count = right_count
+        else:
+            if right_count > 1:
+                _igraph_qsort_indices(indices, values, pn - right_count, right_count)
+            if left_count <= 1:
+                return
+            count = left_count
+
+
+def _igraph_sort_compare(left: int, right: int, values: Sequence[float]) -> int:
+    """Compare two sort indices by value only, as igraph does.
+
+    Parameters
+    ----------
+    left : int
+        Left index.
+    right : int
+        Right index.
+    values : sequence[float]
+        Values being sorted.
+
+    Returns
+    -------
+    int
+        ``-1``, ``0``, or ``1`` according to ascending value order.
+    """
+    left_value = values[left]
+    right_value = values[right]
+    return int(left_value > right_value) - int(left_value < right_value)
+
+
+def _igraph_median_of_three(
+    indices: Sequence[int],
+    values: Sequence[float],
+    first: int,
+    second: int,
+    third: int,
+) -> int:
+    """Return the qsort median-of-three position.
+
+    Parameters
+    ----------
+    indices : sequence[int]
+        Current index array.
+    values : sequence[float]
+        Values referenced by ``indices``.
+    first : int
+        First candidate position.
+    second : int
+        Second candidate position.
+    third : int
+        Third candidate position.
+
+    Returns
+    -------
+    int
+        Position selected by igraph's ``med3`` helper.
+    """
+    if _igraph_sort_compare(indices[first], indices[second], values) < 0:
+        if _igraph_sort_compare(indices[second], indices[third], values) < 0:
+            return second
+        if _igraph_sort_compare(indices[first], indices[third], values) < 0:
+            return third
+        return first
+    if _igraph_sort_compare(indices[second], indices[third], values) > 0:
+        return second
+    if _igraph_sort_compare(indices[first], indices[third], values) < 0:
+        return first
+    return third
+
+
+def _swap_ranges(values: List[int], first: int, second: int, count: int) -> None:
+    """Swap two adjacent qsort ranges in place.
+
+    Parameters
+    ----------
+    values : list[int]
+        Mutable array.
+    first : int
+        Start of the first range.
+    second : int
+        Start of the second range.
+    count : int
+        Number of entries to swap.
+    """
+    for offset in range(count):
+        left = first + offset
+        right = second + offset
+        values[left], values[right] = values[right], values[left]
 
 
 def _node_order_map(layers: Sequence[Sequence[int]]) -> Dict[int, float]:
@@ -1695,7 +2247,30 @@ class _AssignLayers(Op):
         del ctx
 
         acyclic_edges = state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY]
-        if self.fidelity_mode == "graphviz":
+        if self.fidelity_mode == "igraph":
+            original_edges = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+            non_loop_mask = original_edges[0] != original_edges[1]
+            original_edges = original_edges[:, non_loop_mask]
+            original_weights: Optional[torch.Tensor] = None
+            if problem.edge_weights is not None:
+                original_weights = problem.edge_weights.detach().to(
+                    device="cpu",
+                    dtype=torch.float32,
+                )[non_loop_mask]
+            layer_assignments = _igraph_glpk_layer_assignments(
+                edge_index=original_edges,
+                num_nodes=problem.num_nodes,
+            )
+            oriented_edges, oriented_weights, reversed_mask = _orient_edges_by_layers(
+                edge_index=original_edges,
+                layer_assignments=layer_assignments,
+                edge_weights=original_weights,
+            )
+            state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY] = oriented_edges
+            state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY] = oriented_weights
+            state.extras[_SUGIYAMA_REVERSED_MASK_KEY] = reversed_mask
+            state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = []
+        elif self.fidelity_mode == "graphviz":
             layer_assignments, virtual_edges = _graphviz_layer_assignments(
                 edge_index=acyclic_edges,
                 edge_weights=state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY],
@@ -2005,7 +2580,6 @@ class _CoordinateAssignment(Op):
         center_coordinates : bool, default=True
             Whether to translate the final horizontal span to be centered at
             zero.
-
         Returns
         -------
         None
