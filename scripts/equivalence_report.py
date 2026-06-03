@@ -279,20 +279,24 @@ def write_reports(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "# Layout Equivalence Report",
         "",
         (
-            "| Graph | Engine | Seed | Plain RMSD | Aut RMSD | Aut Group | Stress Delta | "
-            "Dist Corr | Gram Eig Diff | Verdict |"
+            "| Graph | Engine | Seed | Plain RMSD | Aut RMSD | Component RMSD | Components | "
+            "Aniso RMSD | Aut Group | Stress Delta | Dist Corr | Gram Eig Diff | Verdict |"
         ),
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         lines.append(
-            "| {graph} | {engine} | {seed} | {plain:.6g} | {aut:.6g} | {group} | "
-            "{stress:.6g} | {corr:.6g} | {eig:.6g} | {verdict} |".format(
+            "| {graph} | {engine} | {seed} | {plain:.6g} | {aut:.6g} | {component:.6g} | "
+            "{components} | {anisotropic} | {group} | {stress:.6g} | {corr:.6g} | "
+            "{eig:.6g} | {verdict} |".format(
                 graph=row["graph"],
                 engine=row["engine"],
                 seed="det" if row["seed"] is None else row["seed"],
                 plain=row["plain_procrustes_rmsd"],
                 aut=row["aut_procrustes_rmsd"],
+                component=row["component_aligned_rmsd"],
+                components=row["n_components"],
+                anisotropic=_format_optional_float(row["anisotropic_rmsd"]),
                 group=row["aut_group_size"],
                 stress=row["stress_rel_delta"],
                 corr=row["dist_matrix_corr"],
@@ -344,6 +348,7 @@ def main() -> int:
                 reference_pos,
                 graph_edges[pair.graph],
                 max_automorphisms=args.max_automorphisms,
+                engine_name=pair.engine,
             )
             rows.append(_row_from_metrics(pair, metrics))
     finally:
@@ -434,6 +439,24 @@ def _optional_int(value: Any) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def _format_optional_float(value: Any) -> str:
+    """Format nullable numeric report fields.
+
+    Parameters
+    ----------
+    value : Any
+        Raw metric value.
+
+    Returns
+    -------
+    str
+        Compact decimal string, or ``"N/A"`` for missing values.
+    """
+    if value is None:
+        return "N/A"
+    return f"{float(value):.6g}"
 
 
 if __name__ == "__main__":
