@@ -168,7 +168,7 @@ class TestLGLPipelineFidelity:
     """Bit-exact regression coverage for the LGL pipeline."""
 
     def test_lgl_fidelity_root_uses_igraph_rng(self) -> None:
-        """LGL fidelity root selection should draw from igraph's default RNG."""
+        """LGL fidelity root selection should match python-igraph's RNG bridge."""
         edge_index = _path_edge_index(10)
         problem = LayoutProblem(edge_index=edge_index, num_nodes=10, seed=42)
         state = SolveState()
@@ -178,7 +178,7 @@ class TestLGLPipelineFidelity:
             problem, state, ctx
         )
 
-        assert updated.extras["lgl_root"] == 1
+        assert updated.extras["lgl_root"] == 6
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
