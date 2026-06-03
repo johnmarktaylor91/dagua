@@ -51,20 +51,24 @@ def _pipeline_step_names(steps: int, use_entropy: bool) -> list[str]:
 
 
 def test_maxent_non_entropy_step_variants_use_majorization() -> None:
-    """Non-entropy step variants should remain stress-majorization layouts."""
+    """Non-entropy step variants should route through OGDF stress majorization."""
     for steps in (50, 400):
         op_names = _pipeline_step_names(steps=steps, use_entropy=False)
 
-        assert "maxent_majorization_step" in op_names
+        assert "sm_ogdf_prepare_state" in op_names
+        assert "sm_ogdf_initialize_positions" in op_names
+        assert "sm_smacof_step" in op_names
         assert "maxent_gradient_step" not in op_names
 
 
-def test_maxent_entropy_variant_still_uses_gradient_branch() -> None:
-    """Entropy has no OGDF stress equivalent and should keep the Adam branch."""
+def test_maxent_entropy_variant_uses_ogdf_stress_fidelity_branch() -> None:
+    """Entropy variants paired to OGDF stress should use the fidelity branch."""
     op_names = _pipeline_step_names(steps=200, use_entropy=True)
 
-    assert "maxent_gradient_step" in op_names
-    assert "maxent_majorization_step" not in op_names
+    assert "sm_ogdf_prepare_state" in op_names
+    assert "sm_ogdf_initialize_positions" in op_names
+    assert "sm_smacof_step" in op_names
+    assert "maxent_gradient_step" not in op_names
 
 
 def test_maxent_majorization_distances_stay_float64() -> None:
