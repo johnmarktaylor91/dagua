@@ -60,6 +60,52 @@
   - [ ] Fix LinLog original pairing -- OGDF says "unsupported"
 - [ ] [LOW] Fix UMAP on disconnected graphs: replace inf shortest-path distances with 2*max(finite_distances)
 
+## Roadmap -- completing the dagua vision (strategic, post-sprint)
+The coherent identity: a rigorous, measurable, *differentiable* layout engine -- reproduce any classical
+algorithm, then bend it with custom loss functions, on GPU. The bit-exact algo reproduction is parity
+(table stakes); the MOAT is the differentiable custom-objective layer. These items make the star as
+strong as the supporting cast + add the gradient-native capabilities Graphviz structurally can't offer.
+(Companion: the first-class `dagua.quality` + `dagua.compare` task under Active Tasks is part of this vision.)
+
+- [ ] [HIGH] **Make the constraint/objective layer the HEADLINE pillar.** It is dagua's differentiator and
+  must be at least as first-class/polished/documented as the algos and renderer.
+  - Audit current maturity: Flex (pin/align), LayoutFlex (firm/soft), the custom-loss API, the existing
+    loss library (see memory/loss_functions.md). What exists vs what's missing/rough.
+  - Stock a reusable, named constraint/loss LIBRARY: pin, align(axis), distribute/equal-spacing,
+    group/cluster containment, flow-direction (DAG top-down), orthogonality, edge-length uniformity,
+    label-non-overlap, symmetry, soft-crossing-minimization, MatchTarget (from the compare work).
+  - Ergonomics: confirm + document the "custom constraint in 3 lines" promise with real examples;
+    composition with weights/Flex; clear docs/guide + notebook + glossary entries.
+  - Positioning: foreground this as THE reason to use dagua over Graphviz (README/docs/tutorial).
+  - GATE: this is the soul -- prioritize once the RNG-matching/4-tier sprint lands.
+- [ ] [MED] **Dynamic / incremental layout** (uniquely enabled by the stateful gradient formulation).
+  - Warm-start: `layout(g2, init_from=prev_pos)` -- when the graph changes slightly (add/remove
+    nodes/edges), initialize from the previous layout + re-optimize -> STABLE layouts under edits (a
+    known-hard problem classical engines handle badly).
+  - Animation: expose the optimization trajectory (per-step intermediate positions) so users can animate
+    convergence, and animate graph-edit transitions (old layout -> perturb -> resolve).
+  - Mental model: positions are persistent learnable state; graph edits = perturb + re-solve. Use cases:
+    evolving graphs, interactive pin-and-resolve, training-time NN graph evolution (TorchLens consumer).
+- [ ] [MED] **Edges as learnable parameters** (completes "everything is a differentiable parameter").
+  - Make edge control points (bezier/polyline) first-class differentiable params with their own losses:
+    bundling (group near-parallel edges), node/obstacle avoidance (route around nodes), curvature
+    smoothness, length penalty, crossing-angle maximization.
+  - Ties into the existing in-flux "edge optimization" + the weighted-edges TODO. Jointly-optimized or
+    as a post-pass over fixed node positions.
+- [ ] [MED] **Reasonable EXPORT options** (serve the interactivity crowd via data export, NOT by building
+  an interactive framework -- keep the headless-engine identity; JMT 2026-06-03).
+  - Principle: dagua computes the layout; export lets ANY downstream tool (incl. interactive web) consume
+    it. dagua does not render widgets.
+  - `dagua.export(g, pos, format=..., output=...)` supporting:
+    - **SVG** (vector, editable -- confirm/polish existing).
+    - **Structured layout JSON** (tool-agnostic: nodes [id,x,y,style,bbox], edges [endpoints,route,style],
+      graph bounds) -- consumable by d3.js / Observable / custom viewers.
+    - **Cytoscape.js JSON** (popular interactive web graph lib).
+    - **GraphML / GEXF with coordinates** (Gephi / yEd / standard interchange).
+    - **DOT with fixed `pos=`** (Graphviz-ecosystem interop).
+    - Plain positions (array / DataFrame / .pt) for programmatic use.
+  - PyTorch-only core; pull heavy format libs only as optional extras. Data export, not a render framework.
+
 ## Bugs
 - [ ] [HIGH] Arrowheads placed INSIDE target node boundary instead of OUTSIDE. Root cause: edge router computes endpoint at node boundary, arrowhead extends backward into gap but tip overlaps node surface.
 - [ ] [HIGH] Cluster API overhaul -- clusters as first-class members with auto-detected nesting, strict tree validation, auto-propagated membership
