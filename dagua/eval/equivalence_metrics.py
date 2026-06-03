@@ -19,6 +19,7 @@ from dagua.metrics import count_crossings
 EPSILON: float = 1.0e-12
 DEFAULT_MAX_AUTOMORPHISMS: int = 20_000
 DEFAULT_NEIGHBORHOOD_K: int = 10
+FREE_ASPECT_ENGINES: set[str] = {"classic_sugiyama"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,11 @@ class EquivalenceMetrics:
 
     plain_procrustes_rmsd: float
     aut_procrustes_rmsd: float
+    component_aligned_rmsd: float
+    n_components: int
+    anisotropic_rmsd: Optional[float]
+    anisotropic_scale_x: Optional[float]
+    anisotropic_scale_y: Optional[float]
     aut_group_size: int
     aut_capped: bool
     stress_dagua: float
@@ -43,12 +49,12 @@ class EquivalenceMetrics:
     gram_eig_max_absdiff: float
     verdict: str
 
-    def to_dict(self) -> dict[str, float | int | bool | str]:
+    def to_dict(self) -> dict[str, float | int | bool | str | None]:
         """Return a JSON-serializable dictionary.
 
         Returns
         -------
-        dict[str, float | int | bool | str]
+        dict[str, float | int | bool | str | None]
             Metric fields keyed by their public report names.
         """
         return asdict(self)
@@ -262,6 +268,119 @@ def automorphism_aligned_procrustes(
     }
 
 
+def component_aligned_procrustes(
+    positions_dagua: np.ndarray | torch.Tensor | Sequence[Sequence[float]],
+    positions_reference: np.ndarray | torch.Tensor | Sequence[Sequence[float]],
+    edge_index: np.ndarray | torch.Tensor | Sequence[Sequence[int]],
+) -> dict[str, float | int]:
+    """Align connected components independently under one global scale.
+
+    Parameters
+    ----------
+    positions_dagua : numpy.ndarray | torch.Tensor | Sequence[Sequence[float]]
+        Reimplementation coordinates with shape ``[N, 2]``.
+    positions_reference : numpy.ndarray | torch.Tensor | Sequence[Sequence[float]]
+        Reference coordinates with shape ``[N, 2]``.
+    edge_index : numpy.ndarray | torch.Tensor | Sequence[Sequence[int]]
+        Graph edges with shape ``[2, E]`` or ``[E, 2]``.
+
+    Returns
+    -------
+    dict[str, float | int]
+        ``component_aligned_rmsd`` and ``n_components``.  Connected graphs
+        return the same normalized residual as ``procrustes_rmsd``.
+    """
+    dagua = as_float64_positions(positions_dagua)
+    reference = as_float64_positions(positions_reference)
+    _validate_pair_shapes(dagua, reference)
+    components = _connected_components(edge_index, dagua.shape[0])
+    if len(components) <= 1:
+        return {
+            "component_aligned_rmsd": procrustes_rmsd(dagua, reference),
+            "n_components": len(components),
+        }
+
+    aligned_parts: list[np.ndarray] = []
+    reference_parts: list[np.ndarray] = []
+    for component in components:
+        component_index = np.asarray(component, dtype=np.int64)
+        dagua_centered = dagua[component_index] - dagua[component_index].mean(axis=0)
+        reference_centered = reference[component_index] - reference[component_index].mean(axis=0)
+        rotation = _orthogonal_alignment(dagua_centered, reference_centered)
+        aligned_parts.append(dagua_centered @ rotation)
+        reference_parts.append(reference_centered)
+
+    aligned = np.vstack(aligned_parts)
+    reference_centered_all = np.vstack(reference_parts)
+    aligned_norm_sq = float(np.sum(np.square(aligned)))
+    reference_norm = float(np.linalg.norm(reference_centered_all))
+    if aligned_norm_sq < EPSILON or reference_norm < EPSILON:
+        residual = 0.0 if aligned_norm_sq < EPSILON and reference_norm < EPSILON else reference_norm
+    else:
+        scale = float(np.sum(aligned * reference_centered_all) / aligned_norm_sq)
+        residual = float(np.linalg.norm((scale * aligned) - reference_centered_all))
+    return {
+        "component_aligned_rmsd": residual / max(reference_norm, EPSILON),
+        "n_components": len(components),
+    }
+
+
+def anisotropic_procrustes(
+    positions_dagua: np.ndarray | torch.Tensor | Sequence[Sequence[float]],
+    positions_reference: np.ndarray | torch.Tensor | Sequence[Sequence[float]],
+) -> dict[str, float]:
+    """Align layouts with rotation/reflection/translation and per-axis scale.
+
+    Parameters
+    ----------
+    positions_dagua : numpy.ndarray | torch.Tensor | Sequence[Sequence[float]]
+        Reimplementation coordinates with shape ``[N, 2]``.
+    positions_reference : numpy.ndarray | torch.Tensor | Sequence[Sequence[float]]
+        Reference coordinates with shape ``[N, 2]``.
+
+    Returns
+    -------
+    dict[str, float]
+        ``anisotropic_rmsd`` plus fitted ``anisotropic_scale_x`` and
+        ``anisotropic_scale_y``.  The residual uses the same reference-cloud
+        normalization as ``procrustes_rmsd``.
+    """
+    dagua = as_float64_positions(positions_dagua)
+    reference = as_float64_positions(positions_reference)
+    _validate_pair_shapes(dagua, reference)
+    dagua_centered = dagua - dagua.mean(axis=0)
+    reference_centered = reference - reference.mean(axis=0)
+    reference_norm = float(np.linalg.norm(reference_centered))
+    if reference_norm < EPSILON:
+        dagua_norm = float(np.linalg.norm(dagua_centered))
+        residual = 0.0 if dagua_norm < EPSILON else dagua_norm
+        return {
+            "anisotropic_rmsd": residual,
+            "anisotropic_scale_x": 1.0,
+            "anisotropic_scale_y": 1.0,
+        }
+
+    candidates = [
+        np.eye(2, dtype=np.float64),
+        np.array([[-1.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+        np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.float64),
+        np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float64),
+        _orthogonal_alignment(dagua_centered, reference_centered),
+    ]
+    residual, scales = min(
+        (
+            _anisotropic_residual_for_rotation(dagua_centered, reference_centered, rotation)
+            for rotation in candidates
+        ),
+        key=lambda result: result[0],
+    )
+    return {
+        "anisotropic_rmsd": residual / reference_norm,
+        "anisotropic_scale_x": float(scales[0]),
+        "anisotropic_scale_y": float(scales[1]),
+    }
+
+
 def normalized_stress(
     positions: np.ndarray | torch.Tensor | Sequence[Sequence[float]],
     edge_index: np.ndarray | torch.Tensor | Sequence[Sequence[int]],
@@ -448,29 +567,47 @@ def spectrum_distance_diagnostic(
     }
 
 
-def equivalence_verdict(metrics: dict[str, float | int | bool | str]) -> str:
+def equivalence_verdict(
+    metrics: dict[str, float | int | bool | str | None],
+    *,
+    engine_name: Optional[str] = None,
+) -> str:
     """Classify a layout pair from its raw equivalence metrics.
 
     Parameters
     ----------
-    metrics : dict[str, float | int | bool | str]
+    metrics : dict[str, float | int | bool | str | None]
         Metric dictionary containing the public equivalence fields.
+    engine_name : str, optional
+        Benchmark engine name used for opt-in free-aspect invariance.
 
     Returns
     -------
     str
         ``"PRACTICALLY_EQUIVALENT"`` or ``"NOT_EQUIVALENT"``.
     """
-    aut_ok = float(metrics["aut_procrustes_rmsd"]) < 1.0e-3
+    aut_ok = _required_float(metrics["aut_procrustes_rmsd"]) < 1.0e-3
     spectrum_ok = (
-        float(metrics["dist_matrix_corr"]) > 0.999
-        and float(metrics["gram_eig_max_absdiff"]) < 1.0e-3
+        _required_float(metrics["dist_matrix_corr"]) > 0.999
+        and _required_float(metrics["gram_eig_max_absdiff"]) < 1.0e-3
     )
     quality_ok = (
-        float(metrics["stress_rel_delta"]) < 0.02
-        and float(metrics["neighborhood_preservation_delta"]) < 0.02
+        _required_float(metrics["stress_rel_delta"]) < 0.02
+        and _required_float(metrics["neighborhood_preservation_delta"]) < 0.02
     )
-    return "PRACTICALLY_EQUIVALENT" if (aut_ok or spectrum_ok or quality_ok) else "NOT_EQUIVALENT"
+    component_ok = _required_float(metrics["component_aligned_rmsd"]) < 1.0e-3
+    anisotropic_value = metrics.get("anisotropic_rmsd")
+    anisotropic_ok = (
+        engine_name is not None
+        and _engine_allows_free_aspect(engine_name)
+        and anisotropic_value is not None
+        and float(anisotropic_value) < 1.0e-3
+    )
+    return (
+        "PRACTICALLY_EQUIVALENT"
+        if (aut_ok or spectrum_ok or quality_ok or component_ok or anisotropic_ok)
+        else "NOT_EQUIVALENT"
+    )
 
 
 def compute_equivalence_metrics(
@@ -481,6 +618,7 @@ def compute_equivalence_metrics(
     directed_automorphisms: bool = False,
     max_automorphisms: int = DEFAULT_MAX_AUTOMORPHISMS,
     neighborhood_k: int = DEFAULT_NEIGHBORHOOD_K,
+    engine_name: Optional[str] = None,
 ) -> EquivalenceMetrics:
     """Compute all layout-equivalence metrics for one layout pair.
 
@@ -498,6 +636,9 @@ def compute_equivalence_metrics(
         Maximum full automorphism group size to enumerate.
     neighborhood_k : int, default=10
         Neighborhood size for graph/layout nearest-neighbor overlap.
+    engine_name : str, optional
+        Benchmark engine name.  Anisotropic scaling is computed only for
+        engines allowed by ``FREE_ASPECT_ENGINES``.
 
     Returns
     -------
@@ -516,6 +657,17 @@ def compute_equivalence_metrics(
         directed=directed_automorphisms,
         max_automorphisms=max_automorphisms,
     )
+    component_metrics = component_aligned_procrustes(dagua, reference, edge_array)
+    if engine_name is not None and _engine_allows_free_aspect(engine_name):
+        anisotropic_metrics: dict[str, float | None] = dict(
+            anisotropic_procrustes(dagua, reference)
+        )
+    else:
+        anisotropic_metrics = {
+            "anisotropic_rmsd": None,
+            "anisotropic_scale_x": None,
+            "anisotropic_scale_y": None,
+        }
     quality_metrics = stress_quality_equivalence(
         dagua,
         reference,
@@ -524,28 +676,41 @@ def compute_equivalence_metrics(
         all_pairs_distances=graph_dist,
     )
     diagnostic_metrics = spectrum_distance_diagnostic(dagua, reference)
-    combined: dict[str, float | int | bool | str] = {}
+    combined: dict[str, float | int | bool | str | None] = {}
     combined.update(aut_metrics)
+    combined.update(component_metrics)
+    combined.update(anisotropic_metrics)
     combined.update(quality_metrics)
     combined.update(diagnostic_metrics)
-    combined["verdict"] = equivalence_verdict(combined)
+    combined["verdict"] = equivalence_verdict(combined, engine_name=engine_name)
     return EquivalenceMetrics(
-        plain_procrustes_rmsd=float(combined["plain_procrustes_rmsd"]),
-        aut_procrustes_rmsd=float(combined["aut_procrustes_rmsd"]),
-        aut_group_size=int(combined["aut_group_size"]),
+        plain_procrustes_rmsd=_required_float(combined["plain_procrustes_rmsd"]),
+        aut_procrustes_rmsd=_required_float(combined["aut_procrustes_rmsd"]),
+        component_aligned_rmsd=_required_float(combined["component_aligned_rmsd"]),
+        n_components=_required_int(combined["n_components"]),
+        anisotropic_rmsd=_optional_float(combined["anisotropic_rmsd"]),
+        anisotropic_scale_x=_optional_float(combined["anisotropic_scale_x"]),
+        anisotropic_scale_y=_optional_float(combined["anisotropic_scale_y"]),
+        aut_group_size=_required_int(combined["aut_group_size"]),
         aut_capped=bool(combined["aut_capped"]),
-        stress_dagua=float(combined["stress_dagua"]),
-        stress_reference=float(combined["stress_reference"]),
-        stress_rel_delta=float(combined["stress_rel_delta"]),
-        crossings_dagua=int(combined["crossings_dagua"]),
-        crossings_reference=int(combined["crossings_reference"]),
-        crossings_delta=int(combined["crossings_delta"]),
-        neighborhood_preservation_dagua=float(combined["neighborhood_preservation_dagua"]),
-        neighborhood_preservation_reference=float(combined["neighborhood_preservation_reference"]),
-        neighborhood_preservation_delta=float(combined["neighborhood_preservation_delta"]),
-        dist_matrix_corr=float(combined["dist_matrix_corr"]),
-        dist_matrix_rel_frob=float(combined["dist_matrix_rel_frob"]),
-        gram_eig_max_absdiff=float(combined["gram_eig_max_absdiff"]),
+        stress_dagua=_required_float(combined["stress_dagua"]),
+        stress_reference=_required_float(combined["stress_reference"]),
+        stress_rel_delta=_required_float(combined["stress_rel_delta"]),
+        crossings_dagua=_required_int(combined["crossings_dagua"]),
+        crossings_reference=_required_int(combined["crossings_reference"]),
+        crossings_delta=_required_int(combined["crossings_delta"]),
+        neighborhood_preservation_dagua=_required_float(
+            combined["neighborhood_preservation_dagua"]
+        ),
+        neighborhood_preservation_reference=_required_float(
+            combined["neighborhood_preservation_reference"]
+        ),
+        neighborhood_preservation_delta=_required_float(
+            combined["neighborhood_preservation_delta"]
+        ),
+        dist_matrix_corr=_required_float(combined["dist_matrix_corr"]),
+        dist_matrix_rel_frob=_required_float(combined["dist_matrix_rel_frob"]),
+        gram_eig_max_absdiff=_required_float(combined["gram_eig_max_absdiff"]),
         verdict=str(combined["verdict"]),
     )
 
@@ -567,6 +732,172 @@ def _edge_tuples(
     """
     edge_array = as_edge_index(edge_index)
     return [(int(src), int(tgt)) for src, tgt in edge_array.T.tolist() if int(src) != int(tgt)]
+
+
+def _connected_components(
+    edge_index: np.ndarray | torch.Tensor | Sequence[Sequence[int]],
+    num_nodes: int,
+) -> list[list[int]]:
+    """Return undirected connected components.
+
+    Parameters
+    ----------
+    edge_index : numpy.ndarray | torch.Tensor | Sequence[Sequence[int]]
+        Graph edges with shape ``[2, E]`` or ``[E, 2]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Connected components as node-index lists, including isolates.
+    """
+    try:
+        import igraph as ig
+    except ImportError:
+        return [list(range(num_nodes))]
+    graph = ig.Graph(n=num_nodes, edges=_edge_tuples(edge_index), directed=False)
+    return [list(map(int, component)) for component in graph.connected_components()]
+
+
+def _orthogonal_alignment(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Fit the reflection-allowing orthogonal map from source to target.
+
+    Parameters
+    ----------
+    source : numpy.ndarray
+        Centered source coordinates with shape ``[N, 2]``.
+    target : numpy.ndarray
+        Centered target coordinates with shape ``[N, 2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Orthogonal matrix with shape ``[2, 2]``.
+    """
+    if source.size == 0 or float(np.linalg.norm(source)) < EPSILON:
+        return np.eye(2, dtype=np.float64)
+    u_matrix, _singular_values, vt_matrix = np.linalg.svd(source.T @ target)
+    return u_matrix @ vt_matrix
+
+
+def _anisotropic_residual_for_rotation(
+    source: np.ndarray,
+    target: np.ndarray,
+    rotation: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    """Fit per-axis scales for a fixed orthogonal alignment.
+
+    Parameters
+    ----------
+    source : numpy.ndarray
+        Centered source coordinates with shape ``[N, 2]``.
+    target : numpy.ndarray
+        Centered target coordinates with shape ``[N, 2]``.
+    rotation : numpy.ndarray
+        Orthogonal candidate matrix with shape ``[2, 2]``.
+
+    Returns
+    -------
+    tuple[float, numpy.ndarray]
+        Raw residual norm and fitted x/y scales.
+    """
+    aligned = source @ rotation
+    scales = np.ones(2, dtype=np.float64)
+    for axis in range(2):
+        denominator = float(np.sum(np.square(aligned[:, axis])))
+        if denominator >= EPSILON:
+            scales[axis] = float(np.sum(aligned[:, axis] * target[:, axis]) / denominator)
+    return float(np.linalg.norm((aligned * scales[None, :]) - target)), scales
+
+
+def _engine_allows_free_aspect(engine_name: str) -> bool:
+    """Return whether an engine owns free-aspect layout invariance.
+
+    Parameters
+    ----------
+    engine_name : str
+        Benchmark engine name.
+
+    Returns
+    -------
+    bool
+        ``True`` for exact allowlist entries and their named variants.
+
+    Notes
+    -----
+    The allowlist stores conservative engine families, currently only
+    ``classic_sugiyama``.  Benchmark variants append suffixes such as
+    ``_default`` or ``_wide``, so those inherit the family-level justification.
+    """
+    return any(
+        engine_name == allowed_engine or engine_name.startswith(f"{allowed_engine}_")
+        for allowed_engine in FREE_ASPECT_ENGINES
+    )
+
+
+def _optional_float(value: float | int | bool | str | None) -> Optional[float]:
+    """Convert optional metric values to optional floats.
+
+    Parameters
+    ----------
+    value : float | int | bool | str | None
+        Raw metric value.
+
+    Returns
+    -------
+    float | None
+        ``None`` when the metric is not applicable, otherwise ``float(value)``.
+    """
+    if value is None:
+        return None
+    return float(value)
+
+
+def _required_float(value: float | int | bool | str | None) -> float:
+    """Convert a required metric value to ``float``.
+
+    Parameters
+    ----------
+    value : float | int | bool | str | None
+        Raw metric value.
+
+    Returns
+    -------
+    float
+        Converted metric value.
+
+    Raises
+    ------
+    ValueError
+        Raised when a required metric is unexpectedly missing.
+    """
+    if value is None:
+        raise ValueError("Required metric value is missing.")
+    return float(value)
+
+
+def _required_int(value: float | int | bool | str | None) -> int:
+    """Convert a required metric value to ``int``.
+
+    Parameters
+    ----------
+    value : float | int | bool | str | None
+        Raw metric value.
+
+    Returns
+    -------
+    int
+        Converted metric value.
+
+    Raises
+    ------
+    ValueError
+        Raised when a required metric is unexpectedly missing.
+    """
+    if value is None:
+        raise ValueError("Required metric value is missing.")
+    return int(value)
 
 
 def _automorphism_generators(graph: Any, num_nodes: int) -> list[list[int]]:
