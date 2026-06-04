@@ -16,6 +16,7 @@ RUNNER="${1:?runner pid}"
 RESULTS="eval_output/benchmark_100seed_escalation_final/results.json"
 STALL_S="${2:-900}"   # 15 min; >> 420s combo watchdog so legit slow combos don't trip it
 POLL=120
+KLOG="/tmp/r69_stall_killer_events.log"   # routine reap/done events -> here (not stdout) to cut notify noise
 
 # Reap orphaned multiprocessing workers: any python3 with PPID=1 + "multiprocessing.forks" is an
 # orphan by definition (legit workers are always children of a LIVE run_benchmark; the runner itself
@@ -27,7 +28,7 @@ reap_orphans() {
   o=$(ps -C python3 -o pid=,ppid=,args= 2>/dev/null | awk '$2==1 && /multiprocessing.forks/{print $1}')
   if [ -n "$o" ]; then
     kill -KILL $o 2>/dev/null
-    echo "$(date -Iseconds) ORPHAN_REAP killed=[$(echo $o | tr '\n' ' ')]"
+    echo "$(date -Iseconds) ORPHAN_REAP killed=[$(echo $o | tr '\n' ' ')]" >> "$KLOG"
   fi
 }
 
@@ -43,9 +44,10 @@ while kill -0 "$RUNNER" 2>/dev/null; do
   if [ "$age" -gt "$STALL_S" ]; then
     echo "$(date -Iseconds) STALL_KILL results_age=${age}s killing run_benchmark=[$RB]"
     kill -KILL $RB 2>/dev/null
-    sleep 6; reap_orphans      # immediate sweep; the every-cycle reap above catches late stragglers
-    echo "$(date -Iseconds) STALL_KILL_DONE -- runner will retry/advance"
-    sleep 90                                     # let the runner spawn its retry before re-checking
+    # workers reparent to PID 1 a few seconds AFTER the main dies -> reap repeatedly over ~90s to catch
+    # late stragglers promptly (instead of waiting for the next 120s poll). Routine reaps go to KLOG.
+    for _ in $(seq 1 9); do sleep 10; reap_orphans; done
+    echo "$(date -Iseconds) STALL_KILL_DONE -- runner will retry/advance" >> "$KLOG"
   fi
 done
 echo "$(date -Iseconds) STALL_KILLER_EXIT runner gone"
