@@ -55,3 +55,16 @@
 ## Port Indicator Rendering (2026-03-26)
 - [RENDER] FIXED: Port indicators used _points_to_data_units() which made them microscopic at gallery DPI. Fix: switched to ax.plot() with markersize in points (DPI-independent). Three rounds of "increase the constant" failed because the conversion pipeline was the root cause, not the size value. Lesson: when a visual element vanishes at different DPIs, check if its size is being converted to data coordinates.
 - [RENDER] Bevel effect needs intensity >= 0.5 and highlight_alpha >= 0.55 to be clearly visible. Band count 8 gives smoother gradient than 6. Subtle bevel (intensity 0.3) is indistinguishable from no bevel at typical rendering sizes.
+
+## run_benchmark worker-join-hang after "Done" (2026-06-04)
+On igraph-based engines (drl, davidson, sugiyama, classical_mds) over big graphs, run_benchmark can
+print its "Done: N total..." summary and write results.json, then HANG indefinitely: a multiprocessing
+worker stuck in an uninterruptible igraph C call never terminates, so the pool join blocks forever. The
+per-combo --timeout/--watchdog-timeout do NOT catch it (it's post-work, in shutdown). A caller using
+subprocess.run() waits forever.
+- DETECT: run_benchmark alive but results.json mtime stale >15min (>> the 420s combo watchdog).
+- FIX: SIGKILL the run_benchmark main AND its workers. CRUCIAL: killing only the main REPARENTS the ~18
+  workers to PID 1 (PPID=1, args contain "multiprocessing.forks") where they keep spinning at 99% CPU.
+  Must also `kill -KILL` those orphans: `ps -C python3 -o pid=,ppid=,args= | awk '$2==1 && /multiprocessing.forks/{print $1}'`.
+- SELF-HEAL: scripts/r69_stall_killer.sh (watchdog) auto-kills a stalled run_benchmark + orphans so a
+  --resume runner retries/advances. Bounds each hang to ~15min instead of indefinite.
