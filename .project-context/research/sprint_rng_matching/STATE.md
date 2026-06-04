@@ -1,7 +1,19 @@
 ---
 run: sprint_rng_matching
 created: 2026-06-02
-state: FINAL_ALLGRAPHS_RUNNING_v2
+state: LAYOUTS_100SEED_RUNNING
+# 2026-06-03 22:40 -- 5-seed all-graphs DONE (38 machine-eps / 70 partial, full data). Triage done
+# (scripts/r69_triage_final.py -> 39 BIT_IDENTICAL, 8 DETERMINISTIC_DIFFERENT->Tier4, 64 ESCALATE).
+# JMT DECISION: cast the FULL net -- 100-seed LAYOUTS ONLY on all 3,955 non-bit-exact/non-timeout combos
+# (~3 days, ~71h est). NO fidelity analysis yet -- JMT will choose the analysis approach AFTER layouts land.
+# RUNNING: scripts/r69_p3b_layouts_only.py (runner pid 4065157, log /tmp/r69_100seed_layouts.log,
+# out-dir eval_output/benchmark_100seed_escalation_final, --resume, per-engine loop, disk-floor guard 15GB).
+# Watcher: bb5t1f34b (until-loop). Runner ALSO texts JMT on completion. Failing map persisted at
+# ./failing_map_final.json (3,955 combos / 64 engines).
+# ON DONE (PHASE 7): text confirmed -> WAIT for JMT to choose the fidelity analysis (TOST? quality-axis?
+# equivalence toolkit? the directed/undirected domain-fit annotation?). Do NOT auto-run analysis.
+# IF ABORTED (disk<15GB): cleanup old eval_output rounds, re-run r69_p3b_layouts_only.py (--resume).
+# IF runner dies / reboot: re-run r69_p3b_layouts_only.py (resumes via --resume per engine).
 # PHASE 1 (closing wave) + PHASE 2 (verify+commit efe6290) DONE. PHASE 3 launched:
 # all-graphs relaunch wrapper PID=3453115, log=/tmp/rng_final_allgraphs.log, watcher=bg0s0apvi
 # (bg-watch label rng-final2, re-armed --max-runtime-min 300 after a benign 2h watcher-cap TIMEOUT;
