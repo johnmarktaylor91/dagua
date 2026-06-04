@@ -17,21 +17,34 @@ RESULTS="eval_output/benchmark_100seed_escalation_final/results.json"
 STALL_S="${2:-900}"   # 15 min; >> 420s combo watchdog so legit slow combos don't trip it
 POLL=120
 
+# Reap orphaned multiprocessing workers: any python3 with PPID=1 + "multiprocessing.forks" is an
+# orphan by definition (legit workers are always children of a LIVE run_benchmark; the runner itself
+# is PPID=1 but its args are the runner script, not multiprocessing.forks -> excluded). Safe to kill
+# every cycle, unconditionally -- this closes the gap where workers reparent to init AFTER a stall-kill's
+# one-shot sweep and then spin at 99% CPU forever.
+reap_orphans() {
+  local o
+  o=$(ps -C python3 -o pid=,ppid=,args= 2>/dev/null | awk '$2==1 && /multiprocessing.forks/{print $1}')
+  if [ -n "$o" ]; then
+    kill -KILL $o 2>/dev/null
+    echo "$(date -Iseconds) ORPHAN_REAP killed=[$(echo $o | tr '\n' ' ')]"
+  fi
+}
+
 echo "$(date -Iseconds) STALL_KILLER_STARTED runner=$RUNNER stall=${STALL_S}s"
 while kill -0 "$RUNNER" 2>/dev/null; do
   sleep "$POLL"
+  reap_orphans                                  # every cycle -- orphans are always PPID=1 multiprocessing
   RB=$(ps -C python3 -o pid=,args= 2>/dev/null | awk '/run_benchmark\.py/{print $1}')
   [ -z "$RB" ] && continue                      # between engines / not running -> nothing to watch
   now=$(date +%s)
   m=$(stat -c %Y "$RESULTS" 2>/dev/null || echo "$now")
   age=$(( now - m ))
   if [ "$age" -gt "$STALL_S" ]; then
-    echo "$(date -Iseconds) STALL_KILL results_age=${age}s killing run_benchmark=[$RB] + orphan workers"
+    echo "$(date -Iseconds) STALL_KILL results_age=${age}s killing run_benchmark=[$RB]"
     kill -KILL $RB 2>/dev/null
-    sleep 5
-    ORPH=$(ps -C python3 -o pid=,ppid=,args= 2>/dev/null | awk '$2==1 && /multiprocessing.forks/{print $1}')
-    [ -n "$ORPH" ] && kill -KILL $ORPH 2>/dev/null
-    echo "$(date -Iseconds) STALL_KILL_DONE orphans=[$ORPH] -- runner will retry/advance"
+    sleep 6; reap_orphans      # immediate sweep; the every-cycle reap above catches late stragglers
+    echo "$(date -Iseconds) STALL_KILL_DONE -- runner will retry/advance"
     sleep 90                                     # let the runner spawn its retry before re-checking
   fi
 done
