@@ -12,6 +12,11 @@ state: LAYOUTS_100SEED_RUNNING
 # ./failing_map_final.json (3,955 combos / 64 engines).
 # ON DONE (PHASE 7): text confirmed -> WAIT for JMT to choose the fidelity analysis (TOST? quality-axis?
 # equivalence toolkit? the directed/undirected domain-fit annotation?). Do NOT auto-run analysis.
+# DRAFT analysis plan captured (JMT+CC riff 2026-06-03): ./FIDELITY_ANALYSIS_PLAN.md -- energy-distance
+# (= "reimpl as similar to each other as to originals") as PRIMARY distributional-equivalence test, +
+# seed-tracking diagonal (matched-seed bonus) + quality-axis fallback; all on invariance-aware distances;
+# framed as equivalence not difference. Has OPEN QUESTIONS (esp. the equivalence margin delta -- best
+# candidate = calibrate from known-equivalent Tier-1 engines). REVIEW that doc with JMT when layouts land.
 # IF ABORTED (disk<15GB): cleanup old eval_output rounds, re-run r69_p3b_layouts_only.py (--resume).
 # IF runner dies / reboot: re-run r69_p3b_layouts_only.py (resumes via --resume per engine).
 # PHASE 1 (closing wave) + PHASE 2 (verify+commit efe6290) DONE. PHASE 3 launched:
