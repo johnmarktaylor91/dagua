@@ -10,6 +10,14 @@ state: LAYOUTS_100SEED_RUNNING
 # out-dir eval_output/benchmark_100seed_escalation_final, --resume, per-engine loop, disk-floor guard 15GB).
 # Watcher: bb5t1f34b (until-loop). Runner ALSO texts JMT on completion. Failing map persisted at
 # ./failing_map_final.json (3,955 combos / 64 engines).
+# 2026-06-04 16:45 INCIDENT + SELF-HEAL: engine 9 (drl_final, igraph) hung ~2h -- run_benchmark printed
+# "Done" + wrote results, but a multiprocessing WORKER stuck in an uninterruptible igraph C call never
+# joined -> pool shutdown hung -> runner waited forever. Fixed: killed the run_benchmark + (CRUCIAL) its
+# orphaned workers (PPID=1 multiprocessing.forks -- killing the main REPARENTS workers to init, they keep
+# spinning at 99% CPU; must kill them too). Runner retried --resume -> instant -> advanced to engine 10.
+# Added scripts/r69_stall_killer.sh (watchdog bue75sjp1): if a run_benchmark is alive but results.json
+# is >15min stale, SIGKILL it + orphan workers so the runner retries/advances. Bounds each join-hang to
+# ~15min instead of indefinite. Risk recurs on remaining igraph engines (sugiyama x6, classical_mds_igraph).
 # ON DONE (PHASE 7): text confirmed -> WAIT for JMT to choose the fidelity analysis (TOST? quality-axis?
 # equivalence toolkit? the directed/undirected domain-fit annotation?). Do NOT auto-run analysis.
 # DRAFT analysis plan captured (JMT+CC riff 2026-06-03): ./FIDELITY_ANALYSIS_PLAN.md -- energy-distance
