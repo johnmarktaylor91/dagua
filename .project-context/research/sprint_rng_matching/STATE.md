@@ -15,7 +15,7 @@ state: LAYOUTS_100SEED_RUNNING
 # joined -> pool shutdown hung -> runner waited forever. Fixed: killed the run_benchmark + (CRUCIAL) its
 # orphaned workers (PPID=1 multiprocessing.forks -- killing the main REPARENTS workers to init, they keep
 # spinning at 99% CPU; must kill them too). Runner retried --resume -> instant -> advanced to engine 10.
-# Added scripts/r69_stall_killer.sh (watchdog bz0lnbfkl (v2: per-cycle orphan reap)): if a run_benchmark is alive but results.json
+# Added scripts/r69_stall_killer.sh (watchdog by8moc42f (v3: fast reap + quiet)): if a run_benchmark is alive but results.json
 # is >15min stale, SIGKILL it + orphan workers so the runner retries/advances. Bounds each join-hang to
 # ~15min instead of indefinite. Risk recurs on remaining igraph engines (sugiyama x6, classical_mds_igraph).
 # ON DONE (PHASE 7): text confirmed -> WAIT for JMT to choose the fidelity analysis (TOST? quality-axis?
