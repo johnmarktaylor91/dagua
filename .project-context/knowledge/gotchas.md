@@ -68,3 +68,12 @@ subprocess.run() waits forever.
   Must also `kill -KILL` those orphans: `ps -C python3 -o pid=,ppid=,args= | awk '$2==1 && /multiprocessing.forks/{print $1}'`.
 - SELF-HEAL: scripts/r69_stall_killer.sh (watchdog) auto-kills a stalled run_benchmark + orphans so a
   --resume runner retries/advances. Bounds each hang to ~15min instead of indefinite.
+
+## fmmm.py fdp-fidelity trace = unbounded /tmp disk bomb (2026-06-04)
+ALL fmmm fidelity-mode variants (graphviz_fdp_fidelity AND steps10/100/200) run the Graphviz-fidelity
+FDP trace, which appended one line per node per phase per iteration to /tmp/dagua_fdp_trace.log -- ~6MB/s,
+ballooning to 20.5GB during the 100-seed escalation and nearly tripping the disk guard. It was
+UNGATED (fired whenever node_ids was set). Fixed: env-gated behind DAGUA_FDP_TRACE (default OFF;
+purely logging, zero layout effect). NOTE: a running benchmark imports fmmm.py per-engine, so a code
+gate only takes effect when the next run_benchmark RE-IMPORTS -- to force it mid-run, kill the current
+engine's run_benchmark (its --resume retry re-imports the gated code).
