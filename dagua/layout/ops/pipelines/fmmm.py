@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -33,6 +34,10 @@ _FDP_COMPOUND_CLUSTER_OBSTACLES_KEY = "fmmm_fdp_compound_cluster_obstacles"
 _FDP_COMPOUND_NODE_OBSTACLES_KEY = "fmmm_fdp_compound_node_obstacles"
 _FDP_EPSILON = 1.0e-9
 _FDP_TRACE_PATH = "/tmp/dagua_fdp_trace.log"
+# Debug-only Graphviz-fidelity FDP trace: appends one line per node per phase per iteration and can
+# balloon to tens of GB during a benchmark (observed 20.5 GB, 2026-06-04). Default OFF; opt in with
+# DAGUA_FDP_TRACE=1. Purely logging -- gating it off has zero effect on layout output.
+_FDP_TRACE_ENABLED = bool(os.environ.get("DAGUA_FDP_TRACE"))
 _OGDF_FMMM_UNIT_EDGE_LENGTH = 20.0
 _OGDF_FMMM_DEFAULT_NODE_WIDTH = 20.0
 _OGDF_FMMM_DEFAULT_NODE_HEIGHT = 20.0
@@ -854,6 +859,8 @@ def _fdp_trace_positions(
     None
         Appends trace lines to ``/tmp/dagua_fdp_trace.log``.
     """
+    if not _FDP_TRACE_ENABLED:
+        return
     cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
     with open(_FDP_TRACE_PATH, "a", encoding="utf-8") as handle:
         for node_index, node_id in enumerate(node_ids):
@@ -907,6 +914,8 @@ def _fdp_trace_xlayout_event(
     None
         Appends trace lines to ``/tmp/dagua_fdp_trace.log``.
     """
+    if not _FDP_TRACE_ENABLED:
+        return
     cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
     cpu_sizes = sizes_in_inches.detach().to(device="cpu", dtype=torch.float64)
     lower = (cpu_positions - cpu_sizes / 2.0).min(dim=0).values
