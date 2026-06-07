@@ -13,7 +13,7 @@
 # Bounds each hang to ~STALL_S instead of indefinite. Exits when the runner exits.
 set -u
 RUNNER="${1:?runner pid}"
-RESULTS="eval_output/benchmark_100seed_escalation_final/results.json"
+RESULTS="${3:-eval_output/benchmark_100seed_escalation_final/results.json}"  # 3rd arg overrides (e.g. umap rerun dir)
 STALL_S="${2:-900}"   # 15 min; >> 420s combo watchdog so legit slow combos don't trip it
 POLL=120
 KLOG="/tmp/r69_stall_killer_events.log"   # routine reap/done events -> here (not stdout) to cut notify noise
