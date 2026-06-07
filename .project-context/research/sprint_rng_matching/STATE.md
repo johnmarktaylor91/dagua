@@ -1,7 +1,15 @@
 ---
 run: sprint_rng_matching
 created: 2026-06-02
-state: LAYOUTS_100SEED_DONE_awaiting_analysis_decision
+state: DATASET_CLEAN_ready_for_analysis
+# 2026-06-07 05:10 UMAP RECOVERED + MERGED. Rerun (workers=1, nn30 at workers=4 + numba=1) fixed the
+# BrokenProcessPool: 5/6 umap variants 100% ok, nn30 2134 ok (1166 err = n_neighbors=30 > n_nodes
+# degenerate tiny graphs, unfixable/correct). Merged into main via scripts/merge_umap_rerun.py
+# (backup results.json.prebumap.bak, atomic write): main umap 2800 -> 25634 ok. FULL DATASET NOW
+# 3751/3955 combos usable (94%); umap 128/139 (92%). Remaining 6% = nn30-degenerate + chaotic
+# big-graph OOM/timeout (acceptable). DATASET IS CLEAN. AWAITING JMT: pick the fidelity analysis
+# (FIDELITY_ANALYSIS_PLAN.md: energy-distance + seed-tracking + invariance toolkit). Do NOT auto-run.
+
 # 2026-06-06 20:30 LAYOUTS COMPLETE: all 64/64 engines, 541,124 rows, 0 FAILED-after-3, runner
 # exited clean + texted JMT. ~70h total. DATA QUALITY: 3,639/3,955 combos (92%) usable (>=30 ok
 # seeds). Gaps: (a) chaotic engines (drl/fr/sgd2/davidson) errors are BIG-GRAPH-concentrated
@@ -9,6 +17,15 @@ state: LAYOUTS_100SEED_DONE_awaiting_analysis_decision
 # all 6 umap variants ~82-91% BrokenProcessPool errors, only ~16 usable combos (tiny graphs only)
 # -- umap-learn/numba vs multiprocessing nested-parallelism conflict (or OOM). umap escalation data
 # effectively MISSING. FIX OPTION: re-run only the 6 umap variants with --workers 1 (or
+# 2026-06-07 02:21 UMAP RERUN: re-running the 6 umap variants (139 combos) that BrokenProcessPool'd,
+# with --workers 1 + NUMBA_NUM_THREADS=1 (root cause: umap-learn numba x 18 workers nested-parallelism).
+# Into a SEPARATE dir eval_output/benchmark_100seed_umap_rerun (main 541k dataset untouched). runner
+# pid 3048099, watchers be73mn4hr (stall-killer) + b5ugyt1nh (completion). ON DONE: validate umap now
+# mostly-ok, then MERGE (backup main results.json first) the umap-rerun ok results + .pt into the main
+# escalation dir, validate counts, THEN proceed to fidelity analysis (FIDELITY_ANALYSIS_PLAN.md).
+# IMPORTANT: --resume SKIPS errored records (run_benchmark.py:1208 status!='ok' -> skip), which is why
+# the rerun goes to a fresh dir + merge, NOT --resume into the main dir.
+
 # NUMBA_NUM_THREADS=1) -- ~130 combos x100 seeds, fast. AWAITING JMT: (1) re-run umap? (2) which
 # fidelity analysis (FIDELITY_ANALYSIS_PLAN.md: energy-distance + seed-tracking). Do NOT auto-run.
 
