@@ -1,7 +1,17 @@
 ---
 run: sprint_rng_matching
 created: 2026-06-02
-state: LAYOUTS_100SEED_RUNNING
+state: LAYOUTS_100SEED_DONE_awaiting_analysis_decision
+# 2026-06-06 20:30 LAYOUTS COMPLETE: all 64/64 engines, 541,124 rows, 0 FAILED-after-3, runner
+# exited clean + texted JMT. ~70h total. DATA QUALITY: 3,639/3,955 combos (92%) usable (>=30 ok
+# seeds). Gaps: (a) chaotic engines (drl/fr/sgd2/davidson) errors are BIG-GRAPH-concentrated
+# (OOM/timeout) -- acceptable, small/medium combos have data. (b) UMAP FAMILY SYSTEMIC FAILURE:
+# all 6 umap variants ~82-91% BrokenProcessPool errors, only ~16 usable combos (tiny graphs only)
+# -- umap-learn/numba vs multiprocessing nested-parallelism conflict (or OOM). umap escalation data
+# effectively MISSING. FIX OPTION: re-run only the 6 umap variants with --workers 1 (or
+# NUMBA_NUM_THREADS=1) -- ~130 combos x100 seeds, fast. AWAITING JMT: (1) re-run umap? (2) which
+# fidelity analysis (FIDELITY_ANALYSIS_PLAN.md: energy-distance + seed-tracking). Do NOT auto-run.
+
 # 2026-06-03 22:40 -- 5-seed all-graphs DONE (38 machine-eps / 70 partial, full data). Triage done
 # (scripts/r69_triage_final.py -> 39 BIT_IDENTICAL, 8 DETERMINISTIC_DIFFERENT->Tier4, 64 ESCALATE).
 # JMT DECISION: cast the FULL net -- 100-seed LAYOUTS ONLY on all 3,955 non-bit-exact/non-timeout combos
@@ -10,6 +20,11 @@ state: LAYOUTS_100SEED_RUNNING
 # out-dir eval_output/benchmark_100seed_escalation_final, --resume, per-engine loop, disk-floor guard 15GB).
 # Watcher: bb5t1f34b (until-loop). Runner ALSO texts JMT on completion. Failing map persisted at
 # ./failing_map_final.json (3,955 combos / 64 engines).
+# 2026-06-04 21:40 DISK INCIDENT (resolved): /tmp/dagua_fdp_trace.log hit 20.5GB -- ALL fmmm
+# fidelity variants (engines 11-14) ran an UNGATED Graphviz-fidelity FDP trace (~6MB/s). Reclaimed
+# + env-gated it OFF (commit 641c9ad, DAGUA_FDP_TRACE default off; fmmm.py edited mid-run -- safe,
+# fdp engines re-import gated code on --resume retry). Disk back to 41G. Run continues at engine 14.
+
 # 2026-06-04 16:45 INCIDENT + SELF-HEAL: engine 9 (drl_final, igraph) hung ~2h -- run_benchmark printed
 # "Done" + wrote results, but a multiprocessing WORKER stuck in an uninterruptible igraph C call never
 # joined -> pool shutdown hung -> runner waited forever. Fixed: killed the run_benchmark + (CRUCIAL) its
