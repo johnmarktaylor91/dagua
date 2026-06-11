@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import signal
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -15,9 +16,11 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import numpy as np
+import torch
 from scipy import stats
 
 from dagua.eval import distributional_fidelity as df
+from dagua.eval.equivalence_metrics import compute_equivalence_metrics
 from dagua.eval.graphs import get_test_graphs
 from dagua.eval.variants import get_variant, original_variant_name
 
@@ -27,10 +30,16 @@ DEFAULT_OUTPUT_DIR = Path("eval_output/fidelity_definitive")
 DEFAULT_FAILING_MAP = Path(".project-context/research/sprint_rng_matching/failing_map_final.json")
 DEFAULT_TRIAGE = Path("eval_output/fidelity_report_final/triage_final.md")
 DEFAULT_FIVE_SEED = Path("eval_output/benchmark_5seed_final/results.json")
+DEFAULT_DATA_DIR = Path("eval_output/benchmark_100seed_escalation_final")
 DEFAULT_REFRESH = Path("eval_output/benchmark_5seed_deterministic_refresh")
 DEFAULT_CONTROLS = Path("eval_output/fidelity_definitive/controls")
 REPORT_NAME = "DEFINITIVE_FIDELITY_REPORT.md"
 TIERS_NAME = "FOUR_TIER_CATEGORIZATION.md"
+INVARIANCE_THRESHOLD = 1.0e-3
+SPOTCHECK_MAX_COMBOS = 200
+SPOTCHECK_MAX_SEED_PAIRS = 25
+SPOTCHECK_MAX_AUTOMORPHISMS = 5_000
+SPOTCHECK_PAIR_TIMEOUT_SECONDS = 10
 SIZE_BINS = (
     ("N <= 50", 0, 50),
     ("51-200", 51, 200),
@@ -141,6 +150,37 @@ class GraphInfo:
 
 
 @dataclass(frozen=True)
+class PositionRow:
+    """Compact benchmark row used for spot-check position resolution.
+
+    Parameters
+    ----------
+    key : str
+        Original ``results.json`` key.
+    graph : str
+        Graph name.
+    engine : str
+        Engine name.
+    seed : Optional[int]
+        Integer seed for seeded layouts, otherwise ``None``.
+    status : str
+        Benchmark status.
+    positions_file : Optional[str]
+        Stored position path from the benchmark row.
+    num_nodes : Optional[int]
+        Node count reported by the benchmark row.
+    """
+
+    key: str
+    graph: str
+    engine: str
+    seed: Optional[int]
+    status: str
+    positions_file: Optional[str]
+    num_nodes: Optional[int]
+
+
+@dataclass(frozen=True)
 class AccountingEntry:
     """One graph-level accounting disposition for an engine.
 
@@ -200,6 +240,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--failing-map", type=Path, default=DEFAULT_FAILING_MAP)
     parser.add_argument("--triage", type=Path, default=DEFAULT_TRIAGE)
     parser.add_argument("--five-seed-results", type=Path, default=DEFAULT_FIVE_SEED)
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--refresh-dir", type=Path, default=DEFAULT_REFRESH)
     parser.add_argument("--controls-dir", type=Path, default=DEFAULT_CONTROLS)
     parser.add_argument("--spec-version", default=SPEC_VERSION)
@@ -276,7 +317,7 @@ def build_report_state(args: argparse.Namespace, context: ReportContext) -> dict
     )
     aggregation = aggregate_accounting(accounting, finalized_rows, triage, graph_info)
     headlines = assign_headlines(accounting, triage)
-    spotcheck = run_invariance_spotcheck(finalized_rows, graph_info)
+    spotcheck = run_invariance_spotcheck(finalized_rows, graph_info, args.data_dir, context)
     controls = load_existing_controls_summary(args.output_dir)
     oc_path = args.output_dir / "oc_simulation.json"
     oc_simulation = ensure_oc_simulation(oc_path, context.strict)
@@ -1372,8 +1413,10 @@ def dominant_mode(entries: list[AccountingEntry]) -> Optional[str]:
 def run_invariance_spotcheck(
     rows: list[dict[str, Any]],
     graph_info: dict[str, GraphInfo],
+    data_dir: Path,
+    context: ReportContext,
 ) -> dict[str, Any]:
-    """Select and summarize the invariance spot-check sample.
+    """Select, re-score, and summarize the invariance spot-check sample.
 
     Parameters
     ----------
@@ -1381,6 +1424,10 @@ def run_invariance_spotcheck(
         Finalized rows.
     graph_info : dict[str, GraphInfo]
         Graph metadata.
+    data_dir : pathlib.Path
+        Benchmark directory containing ``results.json`` and position artifacts.
+    context : ReportContext
+        Assertion and warning state.
 
     Returns
     -------
@@ -1407,15 +1454,49 @@ def run_invariance_spotcheck(
         )
         if (rung4 or tracking_fail) and (disconnected or symmetric_hint):
             candidates.append(str(row.get("combo_id")))
-    selected = deterministic_sample(sorted(set(candidates)), 200, "r70::spotcheck")
+    selected = deterministic_sample(sorted(set(candidates)), SPOTCHECK_MAX_COMBOS, "r70::spotcheck")
+    row_by_combo = {str(row.get("combo_id")): row for row in rows}
+    if not (data_dir / "results.json").exists():
+        message = (
+            f"Invariance spot-check skipped re-score because {data_dir / 'results.json'} "
+            "does not exist."
+        )
+        context.check(False, message)
+        return {
+            "candidate_count": len(set(candidates)),
+            "sampled_count": len(selected),
+            "qualified_count": 0,
+            "sampled_combo_ids": selected,
+            "would_flip_count": 0,
+            "would_flip_percent": 0.0,
+            "threshold": INVARIANCE_THRESHOLD,
+            "note": "0 candidates qualified for re-score; data-dir results.json is missing.",
+        }
+
+    index = index_spotcheck_results(load_json(data_dir / "results.json"))
+    graph_edges = load_spotcheck_graph_edges()
+    scores = [
+        score_invariance_spotcheck_combo(row_by_combo[combo_id], index, graph_edges, data_dir)
+        for combo_id in selected
+        if combo_id in row_by_combo
+    ]
+    qualified = [score for score in scores if score.get("qualified")]
+    would_flip_count = sum(1 for score in qualified if score.get("would_flip"))
+    would_flip_percent = safe_percent(would_flip_count, len(qualified))
     return {
         "candidate_count": len(set(candidates)),
         "sampled_count": len(selected),
+        "qualified_count": len(qualified),
         "sampled_combo_ids": selected,
-        "would_flip_count": 0,
+        "would_flip_count": would_flip_count,
+        "would_flip_percent": would_flip_percent,
+        "threshold": INVARIANCE_THRESHOLD,
+        "max_seed_pairs_per_combo": SPOTCHECK_MAX_SEED_PAIRS,
+        "scores": scores,
         "note": (
-            "Report-only selection implemented; toolkit re-score requires position files "
-            "not present in Task C rows."
+            "Distances are sampled over matched-seed diagonal pairs for Mode A or the "
+            "deterministic reference column for Mode B. Would-flip means the sampled mean "
+            "toolkit invariance distance fell below the registered 1e-3 threshold."
         ),
     }
 
@@ -1442,6 +1523,469 @@ def deterministic_sample(keys: list[str], limit: int, purpose: str) -> list[str]
         key=lambda key: hashlib.sha256(f"{purpose}::{key}".encode()).hexdigest(),
     )
     return ranked[:limit]
+
+
+def index_spotcheck_results(results: dict[str, Any]) -> dict[tuple[str, str], list[PositionRow]]:
+    """Index benchmark rows for spot-check position recovery.
+
+    Parameters
+    ----------
+    results : dict[str, Any]
+        Raw ``results.json`` mapping.
+
+    Returns
+    -------
+    dict[tuple[str, str], list[PositionRow]]
+        Rows keyed by ``(graph, engine)`` in the same order used by the analysis runner.
+    """
+    index: dict[tuple[str, str], list[PositionRow]] = defaultdict(list)
+    for key, value in results.items():
+        graph, engine, key_seed = split_spotcheck_key(key)
+        graph = str(value.get("graph_name") or graph)
+        engine = str(value.get("engine_name") or engine)
+        seed = normalize_spotcheck_seed(value.get("seed", key_seed))
+        nodes_raw = value.get("num_nodes")
+        index[(graph, engine)].append(
+            PositionRow(
+                key=key,
+                graph=graph,
+                engine=engine,
+                seed=seed,
+                status=str(value.get("status", "")),
+                positions_file=value.get("positions_file"),
+                num_nodes=None if nodes_raw is None else int(nodes_raw),
+            )
+        )
+    for indexed_rows in index.values():
+        indexed_rows.sort(
+            key=lambda item: (-int(item.status == "ok"), spotcheck_seed_sort(item.seed), item.key)
+        )
+    return dict(index)
+
+
+def split_spotcheck_key(key: str) -> tuple[str, str, str]:
+    """Split a benchmark result key into graph, engine, and seed label.
+
+    Parameters
+    ----------
+    key : str
+        Result key shaped like ``graph::engine::seedN``.
+
+    Returns
+    -------
+    tuple[str, str, str]
+        Parsed graph, engine, and seed-label values.
+    """
+    parts = key.split("::")
+    if len(parts) < 3:
+        return key, "", ""
+    return parts[0], parts[1], "::".join(parts[2:])
+
+
+def normalize_spotcheck_seed(value: Any) -> Optional[int]:
+    """Normalize a benchmark seed value.
+
+    Parameters
+    ----------
+    value : Any
+        Raw JSON seed or seed-label value.
+
+    Returns
+    -------
+    Optional[int]
+        Integer seed, or ``None`` for deterministic rows.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped in {"", "None", "deterministic"}:
+            return None
+        if stripped.startswith("seed"):
+            stripped = stripped[4:]
+        if stripped.lstrip("-").isdigit():
+            return int(stripped)
+    return None
+
+
+def spotcheck_seed_sort(seed: Optional[int]) -> int:
+    """Return a stable sort key for optional seeds.
+
+    Parameters
+    ----------
+    seed : Optional[int]
+        Seed value.
+
+    Returns
+    -------
+    int
+        Sort value with deterministic rows after seeded rows.
+    """
+    return 10**12 if seed is None else int(seed)
+
+
+def load_spotcheck_graph_edges() -> dict[str, tuple[tuple[int, int], ...]]:
+    """Load graph edge lists for toolkit invariance metrics.
+
+    Returns
+    -------
+    dict[str, tuple[tuple[int, int], ...]]
+        Graph-name to edge-list mapping.
+    """
+    graph_edges: dict[str, tuple[tuple[int, int], ...]] = {}
+    for item in get_test_graphs():
+        edge_index = item.graph.edge_index
+        edge_array = (
+            edge_index.detach().cpu().numpy()
+            if hasattr(edge_index, "detach")
+            else np.asarray(edge_index)
+        )
+        if edge_array.ndim == 2 and edge_array.shape[0] == 2:
+            edge_array = edge_array.T
+        graph_edges[item.name] = tuple(
+            (int(source), int(target)) for source, target in np.asarray(edge_array).reshape(-1, 2)
+        )
+    return graph_edges
+
+
+def score_invariance_spotcheck_combo(
+    row: dict[str, Any],
+    index: dict[tuple[str, str], list[PositionRow]],
+    graph_edges: dict[str, tuple[tuple[int, int], ...]],
+    data_dir: Path,
+) -> dict[str, Any]:
+    """Re-score one selected combo with toolkit invariance distance.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Finalized per-combo report row.
+    index : dict[tuple[str, str], list[PositionRow]]
+        Indexed benchmark rows from ``results.json``.
+    graph_edges : dict[str, tuple[tuple[int, int], ...]]
+        Graph edge lists keyed by graph name.
+    data_dir : pathlib.Path
+        Benchmark root used to resolve position paths.
+
+    Returns
+    -------
+    dict[str, Any]
+        Per-combo score summary with qualification status and optional warning.
+    """
+    combo_id = str(row.get("combo_id"))
+    graph = str(row.get("graph"))
+    engine = str(row.get("engine"))
+    reference = str(row.get("reference"))
+    mode = str(row.get("mode"))
+    base: dict[str, Any] = {
+        "combo_id": combo_id,
+        "graph": graph,
+        "engine": engine,
+        "reference": reference,
+        "mode": mode,
+        "qualified": False,
+    }
+    try:
+        pairs = spotcheck_position_pairs(row, index, data_dir)
+        if not pairs:
+            return {**base, "warning": "0 candidates qualified: no loadable position pairs"}
+        edge_array = spotcheck_edge_index(graph_edges.get(graph, ()), pairs[0][0].shape[0])
+        distances = [
+            toolkit_invariance_distance(dagua_pos, ref_pos, edge_array, engine)
+            for dagua_pos, ref_pos in pairs
+        ]
+        finite_distances = [distance for distance in distances if math.isfinite(distance)]
+        if not finite_distances:
+            return {**base, "warning": "0 candidates qualified: no finite toolkit distances"}
+        mean_distance = float(np.mean(finite_distances))
+        return {
+            **base,
+            "qualified": True,
+            "pair_count": len(finite_distances),
+            "mean_distance": mean_distance,
+            "min_distance": float(np.min(finite_distances)),
+            "max_distance": float(np.max(finite_distances)),
+            "would_flip": mean_distance < INVARIANCE_THRESHOLD,
+        }
+    except Exception as exc:
+        return {**base, "warning": f"{type(exc).__name__}: {exc}"}
+
+
+def spotcheck_position_pairs(
+    row: dict[str, Any],
+    index: dict[tuple[str, str], list[PositionRow]],
+    data_dir: Path,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Load bounded Mode A diagonal or Mode B column position pairs.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Finalized per-combo row.
+    index : dict[tuple[str, str], list[PositionRow]]
+        Indexed benchmark rows.
+    data_dir : pathlib.Path
+        Benchmark root used to resolve position paths.
+
+    Returns
+    -------
+    list[tuple[numpy.ndarray, numpy.ndarray]]
+        Loaded position pairs, each with shape ``[N, 2]`` on both sides.
+    """
+    graph = str(row.get("graph"))
+    engine = str(row.get("engine"))
+    reference = str(row.get("reference"))
+    mode = str(row.get("mode"))
+    if mode == "A":
+        seeds = row.get("matched_seeds")
+        if not isinstance(seeds, list):
+            seeds = sorted(
+                set(ok_spotcheck_seeds(index.get((graph, engine), [])))
+                & set(ok_spotcheck_seeds(index.get((graph, reference), [])))
+            )
+        selected_seeds = deterministic_sample(
+            [str(seed) for seed in seeds],
+            SPOTCHECK_MAX_SEED_PAIRS,
+            f"r70::spotcheck-pairs::{graph}::{engine}",
+        )
+        pairs = []
+        for seed_text in selected_seeds:
+            seed = int(seed_text)
+            dagua_row = first_loadable_row(index, graph, engine, seed)
+            ref_row = first_loadable_row(index, graph, reference, seed)
+            if dagua_row is not None and ref_row is not None:
+                pairs.append(
+                    (
+                        load_spotcheck_position(data_dir, dagua_row.positions_file or ""),
+                        load_spotcheck_position(data_dir, ref_row.positions_file or ""),
+                    )
+                )
+        return pairs
+    if mode == "B":
+        ref_row = first_deterministic_row(index, graph, reference)
+        if ref_row is None:
+            return []
+        seeds = row.get("reimpl_seeds")
+        if not isinstance(seeds, list):
+            seeds = ok_spotcheck_seeds(index.get((graph, engine), []))
+        selected_seeds = deterministic_sample(
+            [str(seed) for seed in seeds],
+            SPOTCHECK_MAX_SEED_PAIRS,
+            f"r70::spotcheck-pairs::{graph}::{engine}",
+        )
+        ref_position = load_spotcheck_position(data_dir, ref_row.positions_file or "")
+        pairs = []
+        for seed_text in selected_seeds:
+            dagua_row = first_loadable_row(index, graph, engine, int(seed_text))
+            if dagua_row is not None:
+                dagua_position = load_spotcheck_position(data_dir, dagua_row.positions_file or "")
+                pairs.append((dagua_position, ref_position))
+        return pairs
+    return []
+
+
+def ok_spotcheck_seeds(rows: Iterable[PositionRow]) -> list[int]:
+    """Return sorted ok seeded row labels.
+
+    Parameters
+    ----------
+    rows : Iterable[PositionRow]
+        Candidate benchmark rows.
+
+    Returns
+    -------
+    list[int]
+        Sorted integer seeds with ok rows and position paths.
+    """
+    return sorted(
+        row.seed
+        for row in rows
+        if row.status == "ok" and row.seed is not None and row.positions_file is not None
+    )
+
+
+def first_loadable_row(
+    index: dict[tuple[str, str], list[PositionRow]],
+    graph: str,
+    engine: str,
+    seed: Optional[int],
+) -> Optional[PositionRow]:
+    """Resolve a row by the analysis runner's seed-then-deterministic fallback.
+
+    Parameters
+    ----------
+    index : dict[tuple[str, str], list[PositionRow]]
+        Indexed benchmark rows.
+    graph : str
+        Graph name.
+    engine : str
+        Engine name.
+    seed : Optional[int]
+        Preferred seed.
+
+    Returns
+    -------
+    Optional[PositionRow]
+        First ok row with a position path, if available.
+    """
+    rows = index.get((graph, engine), [])
+    for candidate in (seed, None):
+        for row in rows:
+            if row.seed == candidate and row.status == "ok" and row.positions_file is not None:
+                return row
+    return None
+
+
+def first_deterministic_row(
+    index: dict[tuple[str, str], list[PositionRow]],
+    graph: str,
+    engine: str,
+) -> Optional[PositionRow]:
+    """Return the deterministic ok row for a graph/engine pair.
+
+    Parameters
+    ----------
+    index : dict[tuple[str, str], list[PositionRow]]
+        Indexed benchmark rows.
+    graph : str
+        Graph name.
+    engine : str
+        Engine name.
+
+    Returns
+    -------
+    Optional[PositionRow]
+        First deterministic ok row with a position path, if available.
+    """
+    for row in index.get((graph, engine), []):
+        if row.seed is None and row.status == "ok" and row.positions_file is not None:
+            return row
+    return None
+
+
+def load_spotcheck_position(data_dir: Path, positions_file: str) -> np.ndarray:
+    """Load one benchmark position artifact.
+
+    Parameters
+    ----------
+    data_dir : pathlib.Path
+        Benchmark root.
+    positions_file : str
+        Relative or absolute position path from ``results.json``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Finite float64 positions with shape ``[N, 2]``.
+    """
+    path = Path(positions_file)
+    if not path.is_absolute():
+        path = data_dir / path
+    tensor = torch.load(path, map_location="cpu", weights_only=False)
+    array = np.asarray(
+        tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else tensor,
+        dtype=np.float64,
+    )
+    if array.ndim != 2 or array.shape[1] != 2 or array.size == 0:
+        raise ValueError(f"Invalid position shape {array.shape}.")
+    if not np.all(np.isfinite(array)):
+        raise ValueError("Position array contains non-finite values.")
+    return array
+
+
+def spotcheck_edge_index(edges: tuple[tuple[int, int], ...], num_nodes: int) -> np.ndarray:
+    """Build an edge-index array for equivalence metrics.
+
+    Parameters
+    ----------
+    edges : tuple[tuple[int, int], ...]
+        Graph edge list.
+    num_nodes : int
+        Number of nodes in the position arrays.
+
+    Returns
+    -------
+    numpy.ndarray
+        Edge index with shape ``[2, E]``.
+    """
+    if not edges:
+        return np.empty((2, 0), dtype=np.int64)
+    valid_edges = [
+        (source, target) for source, target in edges if source < num_nodes and target < num_nodes
+    ]
+    if not valid_edges:
+        return np.empty((2, 0), dtype=np.int64)
+    return np.asarray(valid_edges, dtype=np.int64).T
+
+
+def toolkit_invariance_distance(
+    positions_dagua: np.ndarray,
+    positions_reference: np.ndarray,
+    edge_index: np.ndarray,
+    engine: str,
+) -> float:
+    """Compute the registered toolkit invariance distance.
+
+    Parameters
+    ----------
+    positions_dagua : numpy.ndarray
+        Reimplementation coordinates with shape ``[N, 2]``.
+    positions_reference : numpy.ndarray
+        Reference coordinates with shape ``[N, 2]``.
+    edge_index : numpy.ndarray
+        Graph edge index with shape ``[2, E]``.
+    engine : str
+        Engine name used for the free-aspect anisotropic exception.
+
+    Returns
+    -------
+    float
+        Minimum of automorphism-aligned, component-aligned, and optional
+        anisotropic RMSD. Spectrum and quality branches are intentionally not
+        consulted.
+    """
+    previous_handler = signal.signal(signal.SIGALRM, raise_spotcheck_timeout)
+    signal.setitimer(signal.ITIMER_REAL, SPOTCHECK_PAIR_TIMEOUT_SECONDS)
+    try:
+        metrics = compute_equivalence_metrics(
+            positions_dagua,
+            positions_reference,
+            edge_index,
+            max_automorphisms=SPOTCHECK_MAX_AUTOMORPHISMS,
+            engine_name=engine,
+        )
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    distances = [metrics.aut_procrustes_rmsd, metrics.component_aligned_rmsd]
+    if metrics.anisotropic_rmsd is not None:
+        distances.append(metrics.anisotropic_rmsd)
+    return float(min(distances))
+
+
+def raise_spotcheck_timeout(signum: int, frame: Any) -> None:
+    """Raise a timeout error for one toolkit spot-check pair.
+
+    Parameters
+    ----------
+    signum : int
+        Delivered signal number.
+    frame : Any
+        Interrupted frame object supplied by ``signal``.
+
+    Returns
+    -------
+    None
+        This function always raises ``TimeoutError``.
+    """
+    del signum, frame
+    raise TimeoutError(
+        f"Toolkit invariance pair exceeded {SPOTCHECK_PAIR_TIMEOUT_SECONDS} seconds."
+    )
 
 
 def evaluate_controls(
