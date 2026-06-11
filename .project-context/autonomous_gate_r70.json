@@ -1,0 +1,16 @@
+{
+  "mode": "autonomous",
+  "run": "r70_definitive_fidelity",
+  "started": "2026-06-11T00:00:00-04:00",
+  "user_directive": "write a spec, do at most five rounds adversarial review with a fable or until it passes, dispatch codexes to code it up, then kick off the analysis. do it all autonomously plz and text me when done. definitive fidelity analysis, superseding previous analyses, clearly document everything. q95.",
+  "exit_criteria": [
+    {"criterion": "spec_adversarial_review", "target": "Fable reviewer verdict PASS within 5 rounds (or 5 rounds done with residuals documented)", "status": "pass", "measured_value": "PASS on round 5; 51 findings over rounds 1-4 all incorporated; spec v6 approved", "measurement_source": "Agent reviewer verdict, recorded in r70 STATE iteration log"},
+    {"criterion": "implementation_committed", "target": "distributional_fidelity.py + runner + report committed; pytest green incl. complex-Gram vs procrustes_rmsd agreement test", "status": "untested", "measured_value": "", "measurement_source": "git log + pytest output"},
+    {"criterion": "positive_control", "target": ">=95% of Tier-1 control combos verdict rung<=2 (DIST_EQUIVALENT or better)", "status": "untested", "measured_value": "", "measurement_source": "controls section of definitive report"},
+    {"criterion": "negative_control", "target": ">=95% of deliberately-mismatched combos verdict DIFFERENT", "status": "untested", "measured_value": "", "measurement_source": "controls section of definitive report"},
+    {"criterion": "chance_control", "target": "shuffled-seed p_track uniform (KS p>0.01); recovery@1 within 3x of 1/n", "status": "untested", "measured_value": "", "measurement_source": "controls section of definitive report"},
+    {"criterion": "full_run_coverage", "target": "100% of 3,955 escalation combos dispositioned (verdict or INSUFFICIENT_DATA with n reported); all 118 variants in exactly one final category", "status": "untested", "measured_value": "", "measurement_source": "per_combo.jsonl + FOUR_TIER_CATEGORIZATION.md"},
+    {"criterion": "report_and_supersession", "target": "DEFINITIVE_FIDELITY_REPORT.md written with full methodology + controls + decisions log; superseded docs annotated; committed; filed for review", "status": "untested", "measured_value": "", "measurement_source": "git log + file-for-review"},
+    {"criterion": "jmt_notified", "target": "final iMessage sent with headline + report path", "status": "untested", "measured_value": "", "measurement_source": "send-to-jmt.sh exit 0"}
+  ]
+}
