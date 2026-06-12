@@ -1,0 +1,15 @@
+{
+  "mode": "autonomous",
+  "run": "r71_fidelity_completion",
+  "started": "2026-06-12T15:00:00-04:00",
+  "user_directive": "make a plan for investigating and fixing the failures, do up to three rounds of adversarial fable critique, then execute the plan. the goal is 100% fidelity. bigger compute budget is fine. do the sugiyama thing. verify seeded originals, if absent kick off running as many seeds as you need. autonomous to end of pipeline.",
+  "exit_criteria": [
+    {"criterion": "plan_adversarial_review", "target": "Fable PASS within 3 rounds (or 3 rounds done, residuals documented)", "status": "untested", "measured_value": "", "measurement_source": "r71 STATE log"},
+    {"criterion": "w4_toolkit_rerun", "target": "133 timeout combos recomputed at 1200s; flips counted", "status": "untested", "measured_value": "", "measurement_source": "deterministic_verdicts.jsonl"},
+    {"criterion": "w5_sugiyama_reclass", "target": "5 stale rung-0 residual_block combos reclassified out of unconditional Tier 1", "status": "untested", "measured_value": "", "measurement_source": "report v2"},
+    {"criterion": "p1_seeded_references", "target": "every seedable reference upgraded to 100-seed Mode A data + re-analysis; unseedable proven + documented", "status": "untested", "measured_value": "", "measurement_source": "probe table + benchmark_100seed_seeded_refs + per_combo v2"},
+    {"criterion": "p2_root_cause_complete", "target": "every surviving Tier-4 combo carries a closed-set root-cause label with evidence; fixes verified by bit-exact harness / re-analysis", "status": "untested", "measured_value": "", "measurement_source": "root-cause appendix in report v2"},
+    {"criterion": "p3_data_gaps", "target": "zero UNDETERMINED engines; INSUFFICIENT only as STRUCTURAL_NA/documented", "status": "untested", "measured_value": "", "measurement_source": "report v2 headlines"},
+    {"criterion": "p4_report_v2", "target": "r70 archived; v2 rendered strict with r70->r71 deltas; committed; filed; JMT texted", "status": "untested", "measured_value": "", "measurement_source": "git log + send-to-jmt"}
+  ]
+}
