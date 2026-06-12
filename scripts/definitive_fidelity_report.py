@@ -1337,9 +1337,18 @@ def assign_headlines(
             }
             continue
         if category == "DETERMINISTIC_DIFFERENT":
+            inv_rate = safe_percent(
+                sum(1 for entry in usable if entry.final_rung == "INVARIANCE_EQUIVALENT"),
+                len(usable),
+            )
             headlines[engine] = {
-                "headline": "DETERMINISTIC_REFRESH_VERDICT",
+                "headline": (
+                    "TIER_1B_INVARIANCE_EXACT"
+                    if inv_rate >= 90.0
+                    else "DETERMINISTIC_REFRESH_VERDICT"
+                ),
                 "usable": len(usable),
+                "invariance_equivalent_percent": inv_rate,
                 "coverage_ok": coverage_ok,
             }
             continue
@@ -2339,8 +2348,9 @@ def render_report(state: dict[str, Any]) -> str:
         "## Deterministic Sub-Verdicts",
         (
             "Deterministic-different variants use refresh-dir invariance verdicts. "
-            "INVARIANCE_EQUIVALENT is Tier-3 with a Tier-1-adjacent note, not silently "
-            "upgraded."
+            "INVARIANCE_EQUIVALENT is **Tier 1b** (bit-exact modulo documented invariances; "
+            "basically faithful) -- formalized by JMT decision 2026-06-12 after r70 surfaced "
+            "the choice; originally reported as a Tier-3 sub-rung."
         ),
         render_deterministic_rows(state["accounting"]),
         "",
@@ -2388,8 +2398,12 @@ def render_tiers(state: dict[str, Any]) -> str:
         "",
         "## Tier Definitions",
         "- Tier 1: rung 0 bit-exact.",
+        "- Tier 1b: deterministic INVARIANCE_EQUIVALENT -- coordinates within 1e-3 after",
+        "  aligning ONLY over documented nuisances (automorphism relabeling, per-component",
+        "  placement, free-aspect scaling). Exact equality up to symmetry; basically faithful.",
+        "  (JMT decision 2026-06-12; previously reported as a Tier-3 sub-rung.)",
         "- Tier 2: TIMEOUT only.",
-        "- Tier 3: rungs 1, 2, 2', 3, and deterministic INVARIANCE_EQUIVALENT sub-verdicts.",
+        "- Tier 3: rungs 1, 2, 2', 3 (statistical/quality equivalence).",
         "- Tier 4: rung 4 DIFFERENT.",
         "- NO_DATA: ERROR_NO_DATA, REF_NO_DATA, and INSUFFICIENT_DATA.",
         "",
