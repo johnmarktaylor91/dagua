@@ -202,6 +202,7 @@ class IgraphSugiyama(_IgraphBase):
     max_nodes = 5_000
     layout_algo = "sugiyama"
     layout_kwargs = {}
+    uses_igraph_rng = True
     variant_param_names = frozenset({"hgap", "maxiter", "vgap"})
 
 
