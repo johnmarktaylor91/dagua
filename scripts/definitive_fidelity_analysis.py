@@ -177,7 +177,13 @@ def parse_args() -> argparse.Namespace:
         Parsed runner options.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        action="append",
+        default=None,
+        help="Benchmark root; repeatable -- later dirs override earlier per record key.",
+    )
     parser.add_argument("--refresh-dir", type=Path, default=DEFAULT_REFRESH_DIR)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=12)
@@ -222,7 +228,9 @@ def main() -> int:
         return 0
 
     failing_map = load_failing_map(FAILING_MAP_PATH)
-    results = load_results(args.data_dir)
+    data_dirs = args.data_dir or [DEFAULT_DATA_DIR]
+    args.data_dir = data_dirs[0]
+    results = load_results_multi(data_dirs)
     index = index_results(results)
     graph_data = load_graph_data()
     combo_pairs = load_combo_pairs(failing_map, args.combos_file)
@@ -338,6 +346,38 @@ def load_results(data_dir: Path) -> dict[str, Any]:
     """
     with (data_dir / "results.json").open() as file_obj:
         return json.load(file_obj)
+
+
+def load_results_multi(data_dirs: list[Path]) -> dict[str, Any]:
+    """Load and overlay results from multiple benchmark roots.
+
+    Later directories override earlier ones PER RECORD KEY (r71 union-store
+    semantics: e.g. post-fix umap rows supersede pre-fix rows without mutating
+    either store). positions_file paths are absolutized against their own root
+    and rows are tagged with source_dir.
+
+    Parameters
+    ----------
+    data_dirs : list[pathlib.Path]
+        Benchmark roots in precedence order (last wins).
+
+    Returns
+    -------
+    dict[str, Any]
+        Merged result mapping.
+    """
+    merged: dict[str, Any] = {}
+    for data_dir in data_dirs:
+        rows = load_results(data_dir)
+        for key, row in rows.items():
+            if isinstance(row, dict):
+                row = dict(row)
+                pos = row.get("positions_file")
+                if pos and not Path(pos).is_absolute():
+                    row["positions_file"] = str((data_dir / pos).resolve())
+                row.setdefault("source_dir", data_dir.name)
+            merged[key] = row
+    return merged
 
 
 def index_results(results: dict[str, Any]) -> dict[tuple[str, str], list[PositionRow]]:
