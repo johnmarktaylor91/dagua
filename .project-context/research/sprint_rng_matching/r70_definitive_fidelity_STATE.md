@@ -1,11 +1,25 @@
 ---
 run: r70_definitive_fidelity
 created: 2026-06-11
-state: PHASE_IA_CODEX_STATS_CORE
-current_phase: I-A
+state: DONE
+completed: 2026-06-12
+current_phase: G_complete
 max_adversarial_rounds: 5
 gate_file: .project-context/autonomous_gate_r70.json
 ---
+
+> **DONE 2026-06-12.** Canonical outputs: eval_output/fidelity_definitive/
+> {DEFINITIVE_FIDELITY_REPORT.md, FOUR_TIER_CATEGORIZATION.md, per_combo.json,
+> controls/gate_results.json, oc_simulation.json}. Engine headlines (111 + 7 appendix =
+> 118): 39 BIT_EXACT, 28 DISTRIBUTIONALLY_MATCHED (13 also SEED_FAITHFUL),
+> 14 REF_COMPATIBLE, 8 deterministic-verdict (721/840 combos invariance-equivalent),
+> 22 UNDETERMINED (honest: low coverage / informative floors / domain-mismatch-dominated,
+> e.g. sugiyama). Per-combo (3,955): rung1 883, rung2 299, rung2' 1,503, rung3 318,
+> rung4 705, insufficient 247 -> Tier 3 = 3,003/3,708 scored (81%), Tier 4 = 705 (19%).
+> Controls: gates 1/2/4 PASS; gate 3 deviation documented (spec Appendix E).
+> Post-mortems worth remembering: BLISS automorphism search uninterruptible + intractable
+> on twin-heavy graphs (hard-killed subprocess pattern is the fix); ref layouts stored
+> float32; deterministic refs keyed ::deterministic broke three naive pairing assumptions.
 
 # r70 -- Definitive Distributional Fidelity Analysis (autonomous run)
 
@@ -102,6 +116,7 @@ Liveness checks: kill -0 PID / ps -C python3. NEVER pgrep -f (self-match).
 | 5 | R | 2026-06-11 | Fable round 5: **PASS** (0 HIGH/CRIT; 6 MED/LOW clarifications, all applied inline -> spec v6 APPROVED). Reviewer id a1e624f31003d95ac. Gate criterion 1 PASS. -> Phase I-A: codex Task A (stats core), prompt at PROMPT_R70_taskA.md. |
 | 6 | I-A + CB | 2026-06-11 | PARALLEL: (a) codex Task A dispatched pid 3370325, log /tmp/r70_taskA.log, watcher b990dt4yv, spec committed 1531bb1. (b) Phase CB benchmarks launched pid 3385252 (NOT 3385247 -- setsid parent PID trap, watcher re-armed bq89pxet3), log /tmp/r70_phase_cb.log: CB1 tier1-controls (8 pre-screened graphs: center_port_backedge_hub, clustered_medium_5x20, heavy_tail_weights_50, planar_60, real_lesmis_77, sbm_5x50, sparse_pair_50, weighted_clusters_3x10; 10 of 10 qualifying, draw seeded; ctl_graphs.json written) -> CB2 deterministic refresh (8 det engines + refs) -> CB3 sugiyama reverify. ON CODEX_DONE: verify per PROMPT (pytest, ruff, import, only 2 files), commit, dispatch Task B (write PROMPT_R70_taskB.md first). ON R70_CB_DONE: verify 3 dirs complete. |
 | 7 | I-A DONE -> I-B | 2026-06-11 | Task A VERIFIED (18 tests pass independently; max fast-vs-oracle delta 6.7e-16 on 900 random pairs; hybrid fallback exact at d~1e-8) + committed 9cb2082. Task B (runner) dispatched pid 3409479, log /tmp/r70_taskB.log, watcher be623wihi, prompt PROMPT_R70_taskB.md. Task C prompt pre-written (PROMPT_R70_taskC.md). ON TASK B CODEX_DONE: verify (--help, smoke jsonl rows spec-conformant: fr=ModeA small diag, classical_mds=ModeB near_det, gem=UNINFORMATIVE, sugiyama=free_aspect; ruff; 1 file), commit, dispatch Task C. |
+| 12 | det saga | 2026-06-12 | Deterministic mode wedged TWICE: (a) serial+uncapped 10h on giants -> parallel+incremental+size-cap (104898d); (b) STILL wedged 2h42m on chung_lu_150 etc -- ROOT CAUSE: igraph/BLISS automorphism SEARCH (single C call, >490s, signal-immune) intractable on twin-heavy random graphs; cap irrelevant. FIX a79316e: hard subprocess kill at 90s + conservative plain-Procrustes fallback (sound: toolkit<=plain so plain<1e-3 still proves INVARIANCE_EQUIVALENT; else flag toolkit_timeout -> quality axis) + resume (72 rows kept). Verified on pathological combo (kills at budget; plain d=1.5e-16 resolves it anyway). Relaunched pid 182133, log /tmp/r70_det_rerun2.log, watcher b3vcz5n1c. Worst case ~2.4h, expected <1h. ON R70_DET2 DONE: verify 840 det rows + 206 rung0 rows sane -> strict report + --controls -> phase G. |
 | 11 | F DONE | 2026-06-11 | FULL RUN COMPLETE: 3,955/3,955 unique combos, 0 missing/extra. Modes A=1,258 B=2,450 INSUF=247 (matched_seeds_lt_30 78, reimpl_seeds_lt_30 70, ref_seeds_lt_30 14, no_reference_rows 85). Pre-FDR signal: ModeA 1,182/1,258 dist_equivalent (94%), 898 strong-track; ModeB 488 near_det + 204 uninformative + 1,662 typical. Gate criterion 6 satisfied pending report assertions. CB3 sugiyama reverify at 93%. ON CB DONE: --mode deterministic + --mode rung0-reverify -> then report strict + --controls -> phase G. |
 | 10 | V DONE -> F | 2026-06-11 | GATE 4 **PASS** (KS p=0.82, recovery 21 in [8,33]). GATE 3 **FORMAL FAIL 90%** -> diagnosed (NO harness bug): ModeA sub-gate 12/12 + 0 false-track; 2 ModeB escapes geometrically explained (sfdp p_typ=0.069 near-miss d_R=2.3x spread; gem ref INSIDE cloud d_R 0.171 < W_D 0.206) = pre-registered ModeB power limit. DEVIATION documented spec Appendix E (proceed; ModeB false-typicality 2/8=25% MUST appear in report's Mode B disclosure). Token map signed off (15 tokens, no mismaps). PHASE F LAUNCHED: full run pid 3539853, log /tmp/r70_fullrun.log, watcher bs94lrxri, --resume, workers 12. CB2/CB3 still running (pid 3385252). ON R70_FULL DONE: verify jsonl coverage 3,955; ON CB done: run --mode deterministic + --mode rung0-reverify; THEN Task C report (strict) + controls eval + phase G. |
 | 9 | V (controls) | 2026-06-11 | Spot-check fixup VERIFIED (re-scores; clmds 0.81 no-flip) committed cb823e5. CB1 DONE: 7900/8000 ok; sole failure = classic_lgl_default/sbm_5x50 watchdog x100 -> INSUFFICIENT (excluded per gate rules). GATE 1 **PASS** (39/39 scored dist_equivalent + tracking; file controls/gate1_modea_positive.jsonl; combos file /tmp/r70_ctl_combos.txt uses graph::engine\tref form -- control engines not in failing_map). GATE 2 **PASS** (39/39 informative REF_TYPICAL; controls/gate2_modeb_positive.jsonl). GATE 3 (negative) running bg task byglhjiic -> controls/gate3_negative.jsonl; GATE 4 (chance) bg task bihrcwcdk -> controls/gate4_chance.jsonl. CB2/CB3 (det refresh + sugiyama reverify) still running pid 3385252. ON gate3 done: sign off controls/token_map.json + evaluate (>=95% NOT rungs 0/1/2/2'; p_track sub-gate aggregated). ON gate4: KS uniformity + Poisson band [8,33]. ALL 4 PASS + CB2/CB3 done -> phase F: full run (--mode full, all 3,955, workers 12, bg-watch) + --mode deterministic + --mode rung0-reverify. |
