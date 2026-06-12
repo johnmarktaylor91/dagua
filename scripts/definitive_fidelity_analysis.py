@@ -1596,16 +1596,28 @@ def run_deterministic_mode(
     list[dict[str, Any]]
         Rows written.
     """
-    failing_map = load_failing_map(FAILING_MAP_PATH)
     index = index_results(load_results(refresh_dir))
     graph_data = load_graph_data()
-    pairs = load_combo_pairs(failing_map, combos_file)
-    pairs = [
-        (graph, engine) for graph, engine in pairs if engine in DETERMINISTIC_DIFFERENT_ENGINES
-    ]
+    # The 8 DETERMINISTIC_DIFFERENT engines are NOT in the failing map (that is what made
+    # them deterministic-different) -- enumerate their combos from the refresh data itself,
+    # and resolve each reference as the co-benchmarked "<ref>__for__<engine>" entry.
+    ref_by_engine: dict[str, str] = {}
+    for _graph, idx_engine in index:
+        if "__for__" in idx_engine:
+            target = idx_engine.split("__for__", 1)[1]
+            if target in DETERMINISTIC_DIFFERENT_ENGINES:
+                ref_by_engine.setdefault(target, idx_engine)
+    pairs = sorted(
+        (graph, engine) for graph, engine in index if engine in DETERMINISTIC_DIFFERENT_ENGINES
+    )
+    if combos_file is not None:
+        requested = set(load_combo_pairs({}, combos_file))
+        pairs = [pair for pair in pairs if pair in requested]
     rows = []
     for graph, engine in pairs:
-        reference = reference_for_engine(engine, failing_map)
+        reference = ref_by_engine.get(engine)
+        if reference is None:
+            continue
         row = deterministic_row(refresh_dir, index, graph_data, graph, engine, reference, git_sha)
         rows.append(row)
     write_rows(output_path, rows)
@@ -1793,12 +1805,29 @@ def rung0_row(
         if row.status == "ok" and row.seed is not None
     }
     distances = []
-    for seed in sorted(set(d_rows) & set(r_rows)):
-        if d_rows[seed].positions_file is None or r_rows[seed].positions_file is None:
-            continue
-        d_layout = load_position(refresh_dir, d_rows[seed].positions_file or "")
-        r_layout = load_position(refresh_dir, r_rows[seed].positions_file or "")
-        distances.append(float(df.pairwise_procrustes_matrix([d_layout, r_layout])[0, 1]))
+    if r_rows:
+        for seed in sorted(set(d_rows) & set(r_rows)):
+            if d_rows[seed].positions_file is None or r_rows[seed].positions_file is None:
+                continue
+            d_layout = load_position(refresh_dir, d_rows[seed].positions_file or "")
+            r_layout = load_position(refresh_dir, r_rows[seed].positions_file or "")
+            distances.append(float(df.pairwise_procrustes_matrix([d_layout, r_layout])[0, 1]))
+    else:
+        # Deterministic reference (e.g. igraph_sugiyama): a single seed-None row. Compare
+        # every seeded reimpl layout against that one layout -- the same pairing the 5-seed
+        # triage used for these combos.
+        det_rows = [
+            row
+            for row in index.get((graph, reference), [])
+            if row.status == "ok" and row.seed is None and row.positions_file
+        ]
+        if det_rows:
+            r_layout = load_position(refresh_dir, det_rows[0].positions_file or "")
+            for seed in sorted(d_rows):
+                if d_rows[seed].positions_file is None:
+                    continue
+                d_layout = load_position(refresh_dir, d_rows[seed].positions_file or "")
+                distances.append(float(df.pairwise_procrustes_matrix([d_layout, r_layout])[0, 1]))
     max_rmsd = max(distances) if distances else float("nan")
     return {
         "spec_version": SPEC_VERSION,
