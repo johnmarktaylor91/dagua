@@ -1,5 +1,10 @@
 # All-Graphs Fidelity Classification (2026-06-03)
 
+> **SUPERSEDED (2026-06-12) by the r70 DEFINITIVE fidelity analysis:**
+> `eval_output/fidelity_definitive/DEFINITIVE_FIDELITY_REPORT.md` +
+> `FOUR_TIER_CATEGORIZATION.md`. This 5-seed classification remains the SCOPING input
+> (rung-0 complement / escalation sets) but is no longer the verdict source.
+
 Source: `eval_output/fidelity_report_partial/report.md` (partial -- 71.7% of the 5-seed all-graphs
 sweep; 105 graphs up to 2000 nodes substantially complete; 35,920 reimpl-vs-reference Procrustes
 pairs). The remaining ~28% is 3-4 GIANT graphs (ba_5000, small_world_2000, grid_50x50) -- slow and
