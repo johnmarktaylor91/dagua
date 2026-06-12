@@ -8,7 +8,6 @@ import hashlib
 import json
 import math
 import re
-import signal
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -405,7 +404,9 @@ def load_failing_map(path: Path) -> dict[str, dict[str, Any]]:
     return {str(engine): dict(value) for engine, value in payload.items()}
 
 
-def finalize_rows(rows: list[dict[str, Any]], spec_version: str) -> list[dict[str, Any]]:
+def finalize_rows(
+    rows: list[dict[str, Any]], spec_version: str, include_controls: bool = False
+) -> list[dict[str, Any]]:
     """Apply full-run FDR families and final rung assignment.
 
     Parameters
@@ -420,7 +421,9 @@ def finalize_rows(rows: list[dict[str, Any]], spec_version: str) -> list[dict[st
     list[dict[str, Any]]
         Rows with q-values, final rungs, and annotations.
     """
-    eligible = [dict(row) for row in rows if row.get("control_kind") in (None, "")]
+    eligible = [
+        dict(row) for row in rows if include_controls or row.get("control_kind") in (None, "")
+    ]
     for row in eligible:
         row.setdefault("q_track", None)
         row.setdefault("q_tost", None)
@@ -1948,8 +1951,42 @@ def toolkit_invariance_distance(
         anisotropic RMSD. Spectrum and quality branches are intentionally not
         consulted.
     """
-    previous_handler = signal.signal(signal.SIGALRM, raise_spotcheck_timeout)
-    signal.setitimer(signal.ITIMER_REAL, SPOTCHECK_PAIR_TIMEOUT_SECONDS)
+    # SIGALRM cannot preempt the single igraph/BLISS C call (measured >490s on twin-heavy
+    # graphs) -- compute in a hard-killed child process instead. inf on timeout/failure;
+    # the caller's finite-distance filter handles it.
+    import multiprocessing as mp
+
+    ctx = mp.get_context("fork")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+
+    proc = ctx.Process(
+        target=_spotcheck_toolkit_child,
+        args=(child_conn, positions_dagua, positions_reference, edge_index, engine),
+    )
+    proc.start()
+    child_conn.close()
+    result: Optional[float] = None
+    if parent_conn.poll(SPOTCHECK_PAIR_TIMEOUT_SECONDS):
+        try:
+            result = parent_conn.recv()
+        except EOFError:
+            result = None
+    proc.join(timeout=1.0)
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+    parent_conn.close()
+    return float("inf") if result is None else float(result)
+
+
+def _spotcheck_toolkit_child(
+    conn: Any,
+    positions_dagua: np.ndarray,
+    positions_reference: np.ndarray,
+    edge_index: np.ndarray,
+    engine: str,
+) -> None:
+    """Killable child computing the toolkit invariance distance."""
     try:
         metrics = compute_equivalence_metrics(
             positions_dagua,
@@ -1958,13 +1995,14 @@ def toolkit_invariance_distance(
             max_automorphisms=SPOTCHECK_MAX_AUTOMORPHISMS,
             engine_name=engine,
         )
+        distances = [metrics.aut_procrustes_rmsd, metrics.component_aligned_rmsd]
+        if metrics.anisotropic_rmsd is not None:
+            distances.append(metrics.anisotropic_rmsd)
+        conn.send(float(min(distances)))
+    except Exception:  # pragma: no cover - defensive
+        conn.send(None)
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0.0)
-        signal.signal(signal.SIGALRM, previous_handler)
-    distances = [metrics.aut_procrustes_rmsd, metrics.component_aligned_rmsd]
-    if metrics.anisotropic_rmsd is not None:
-        distances.append(metrics.anisotropic_rmsd)
-    return float(min(distances))
+        conn.close()
 
 
 def raise_spotcheck_timeout(signum: int, frame: Any) -> None:
@@ -2014,7 +2052,10 @@ def evaluate_controls(
         for row in rows:
             kind = str(row.get("control_kind") or path.stem)
             grouped[kind].append(row)
-    finalized = {kind: finalize_rows(rows, SPEC_VERSION) for kind, rows in grouped.items()}
+    finalized = {
+        kind: finalize_rows(rows, SPEC_VERSION, include_controls=True)
+        for kind, rows in grouped.items()
+    }
     gates = {
         "gate_1_positive_mode_a": evaluate_gate_positive_mode_a(finalized),
         "gate_2_positive_mode_b": evaluate_gate_positive_mode_b(finalized),
@@ -2153,7 +2194,14 @@ def evaluate_gate_chance(finalized: dict[str, list[dict[str, Any]]]) -> dict[str
     rows = control_rows(finalized, ("chance",))
     p_values = values_for(rows, "p_track")
     ks_p = float(stats.kstest(p_values, "uniform").pvalue) if p_values else 0.0
-    recovery_count = int(sum(as_float(row.get("recovery_at_1")) or 0.0 for row in rows))
+    recovery_count = int(
+        round(
+            sum(
+                (as_float(row.get("recovery_at_1")) or 0.0) * (as_float(row.get("n")) or 0.0)
+                for row in rows
+            )
+        )
+    )
     passed = bool(rows) and ks_p > 0.01 and 8 <= recovery_count <= 33
     return {"passed": passed, "n": len(rows), "ks_p": ks_p, "recovery_count": recovery_count}
 
