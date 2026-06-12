@@ -28,6 +28,7 @@ import re
 import resource
 import signal
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
@@ -205,6 +206,8 @@ class WorkItem:
         Root benchmark output directory.
     save_positions : bool
         Whether worker results should persist ``[N, 2]`` tensors.
+    git_sha : str
+        Git commit SHA captured once by the parent benchmark process.
     """
 
     graph_name: str
@@ -213,6 +216,7 @@ class WorkItem:
     timeout_seconds: float
     output_dir: str
     save_positions: bool
+    git_sha: str
 
     @property
     def key(self) -> str:
@@ -260,6 +264,8 @@ class BenchmarkRecord:
         Reimplementation engines for which this engine is a reference.
     reimpl_of : list[str]
         Original engines that this engine reimplements.
+    git_sha : str | None
+        Git commit SHA for the code state that generated this row.
     """
 
     graph_name: str
@@ -275,6 +281,7 @@ class BenchmarkRecord:
     skip_reason: Optional[str]
     original_for: list[str]
     reimpl_of: list[str]
+    git_sha: Optional[str]
 
     @property
     def key(self) -> str:
@@ -325,6 +332,7 @@ class BenchmarkRecord:
             skip_reason=_optional_str(payload.get("skip_reason")),
             original_for=_string_list(payload.get("original_for")),
             reimpl_of=_string_list(payload.get("reimpl_of")),
+            git_sha=_optional_str(payload.get("git_sha")),
         )
 
     def detail(self) -> str:
@@ -427,6 +435,28 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value]
+
+
+def git_rev_parse_head() -> str:
+    """Return the current Git ``HEAD`` SHA, or ``"unknown"`` if unavailable.
+
+    Returns
+    -------
+    str
+        Full Git commit SHA for the current checkout, or ``"unknown"`` when
+        the repository metadata cannot be read.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    sha = completed.stdout.strip()
+    return sha or "unknown"
 
 
 def build_record_key(graph_name: str, engine_name: str, seed: Optional[int]) -> str:
@@ -1142,6 +1172,26 @@ def save_results(path: Path, results: dict[str, BenchmarkRecord]) -> None:
     _save_json_atomic(path, payload)
 
 
+def stamp_record_git_sha(record: BenchmarkRecord, git_sha: str) -> BenchmarkRecord:
+    """Ensure a newly produced benchmark record carries run provenance.
+
+    Parameters
+    ----------
+    record : BenchmarkRecord
+        Record produced by the current benchmark process.
+    git_sha : str
+        Git commit SHA captured once at benchmark startup.
+
+    Returns
+    -------
+    BenchmarkRecord
+        The same record with ``git_sha`` populated when it was absent.
+    """
+    if record.git_sha is None:
+        record.git_sha = git_sha
+    return record
+
+
 def recover_results_from_positions(
     output_dir: Path,
     graphs: Sequence[Any],
@@ -1149,6 +1199,7 @@ def recover_results_from_positions(
     seed_count: int,
     seed_start: int,
     seed_refs: set[str],
+    git_sha: str,
 ) -> dict[str, BenchmarkRecord]:
     """Rebuild best-effort successful records from saved position tensors.
 
@@ -1167,6 +1218,8 @@ def recover_results_from_positions(
     seed_refs : set[str]
         Run-scoped reference engine names to treat as stochastic while
         enumerating expected position filenames.
+    git_sha : str
+        Git commit SHA to stamp on recovered rows written by this run.
 
     Returns
     -------
@@ -1216,6 +1269,7 @@ def recover_results_from_positions(
             error=None,
             positions_file=str(Path(POSITION_DIRNAME) / path.name),
             skip_reason=None,
+            git_sha=git_sha,
         )
         recovered[record.key] = record
     return recovered
@@ -1422,6 +1476,7 @@ def _record_with_pairings(
     error: Optional[str],
     positions_file: Optional[str],
     skip_reason: Optional[str],
+    git_sha: Optional[str] = None,
 ) -> BenchmarkRecord:
     """Build a ``BenchmarkRecord`` enriched with pairing metadata.
 
@@ -1447,6 +1502,8 @@ def _record_with_pairings(
         Relative path to the saved position tensor.
     skip_reason : str | None
         Human-readable skip reason.
+    git_sha : str | None
+        Git commit SHA for the code state that generated this row.
 
     Returns
     -------
@@ -1468,6 +1525,7 @@ def _record_with_pairings(
         skip_reason=skip_reason,
         original_for=original_for,
         reimpl_of=reimpl_of,
+        git_sha=git_sha,
     )
 
 
@@ -1734,6 +1792,7 @@ def _run_work_group(work_group: Sequence[WorkItem]) -> list[dict[str, Any]]:
                         f"skipped after {CONSECUTIVE_FAILURE_SKIP_THRESHOLD} "
                         f"consecutive {last_failure_error}"
                     ),
+                    git_sha=work_item.git_sha,
                 ).to_dict()
             )
             continue
@@ -1754,6 +1813,7 @@ def running_record(
     seed: Optional[int],
     num_nodes: int,
     num_edges: int,
+    git_sha: str,
 ) -> BenchmarkRecord:
     """Build a placeholder record used while a task is in flight.
 
@@ -1769,6 +1829,8 @@ def running_record(
         Number of graph nodes.
     num_edges : int
         Number of graph edges.
+    git_sha : str
+        Git commit SHA captured once by the parent benchmark process.
 
     Returns
     -------
@@ -1786,6 +1848,7 @@ def running_record(
         error=None,
         positions_file=None,
         skip_reason=None,
+        git_sha=git_sha,
     )
 
 
@@ -2082,6 +2145,7 @@ def manifest_payload(
     original_to_reimpl = reverse_pairings(use_variants=use_variants)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git_sha": str(getattr(args, "git_sha", "unknown")),
         "config": {
             "workers": str(args.workers),
             "resolved_workers": int(args.resolved_workers),
@@ -2163,6 +2227,8 @@ def main() -> int:
     args = parse_args()
     validate_args(args)
     args.resolved_workers = resolve_worker_count(args.workers)
+    git_sha = git_rev_parse_head()
+    args.git_sha = git_sha
     seed_refs = parse_seed_refs(str(args.seed_refs))
     watchdog_timeout = (
         args.watchdog_timeout if args.watchdog_timeout is not None else WATCHDOG_TIMEOUT
@@ -2200,6 +2266,7 @@ def main() -> int:
             seed_count=args.seeds,
             seed_start=args.seed_start,
             seed_refs=seed_refs,
+            git_sha=git_sha,
         )
     )
     existing_results = merge_recovered_results(disk_results, recovered_results)
@@ -2258,6 +2325,7 @@ def main() -> int:
                         error=None,
                         positions_file=None,
                         skip_reason="not installed",
+                        git_sha=git_sha,
                     )
                     results[key] = record
                     immediate_records.append(record)
@@ -2277,6 +2345,7 @@ def main() -> int:
                         error=None,
                         positions_file=None,
                         skip_reason=f"exceeds max_nodes={competitor.max_nodes}",
+                        git_sha=git_sha,
                     )
                     results[key] = record
                     immediate_records.append(record)
@@ -2295,6 +2364,7 @@ def main() -> int:
                         timeout_seconds=timeout_seconds,
                         output_dir=str(output_dir),
                         save_positions=not args.no_positions,
+                        git_sha=git_sha,
                     )
                 )
 
@@ -2342,6 +2412,7 @@ def main() -> int:
     def _process_record(record: BenchmarkRecord) -> None:
         """Handle bookkeeping after one work item completes."""
         nonlocal completed_scope
+        stamp_record_git_sha(record, git_sha)
         results[record.key] = record
         completed_scope += 1
         graph_completion_counts[record.graph_name] = (
@@ -2379,6 +2450,7 @@ def main() -> int:
                 seed=work_item.seed,
                 num_nodes=summary_record.num_nodes,
                 num_edges=summary_record.num_edges,
+                git_sha=git_sha,
             )
 
     # ── SIGINT handler: stop accepting new work, drain inflight, save. ──
