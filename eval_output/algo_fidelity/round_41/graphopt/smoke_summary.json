@@ -1,13 +1,13 @@
 {
-  "overall_max_full_rmsd": 9.950840347330515e-09,
-  "overall_mean_full_rmsd": 7.089731185828302e-09,
+  "overall_max_full_rmsd": 1.5782075254015783e-16,
+  "overall_mean_full_rmsd": 9.776592121361287e-17,
   "rows": 12,
   "threshold": 0.005,
   "topology_mean_full_rmsd": {
-    "clustered": 7.035760874545845e-09,
-    "grid": 6.903189589412268e-09,
-    "path": 6.7942804891681745e-09,
-    "star": 7.62569379018692e-09
+    "clustered": 1.0726808540222593e-16,
+    "grid": 9.081909316467702e-17,
+    "path": 1.1478045905088275e-16,
+    "star": 7.81960472366658e-17
   },
   "verdict": "pass"
 }
