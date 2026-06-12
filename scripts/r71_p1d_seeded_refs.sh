@@ -41,7 +41,7 @@ while IFS=$'\t' read -r ENGINE GRAPHS; do
   python3 scripts/run_benchmark.py --seeds 100 --seed-start 42 --variants \
     --engines "$ENGINE" --graphs "$GRAPHS" \
     --seed-refs "$SEEDABLE_BASES" \
-    --output-dir "$OUT" --resume --workers 10 --timeout 300 --watchdog-timeout 600 \
+    --output-dir "$OUT" --resume --workers 4 --timeout 300 --watchdog-timeout 600 \
     || echo "P1D_ENGINE_FAILED $ENGINE rc=$?"
 done < /tmp/r71_p1d_worklist.tsv
 echo "P1D_COMPLETE"
