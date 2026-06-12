@@ -1613,14 +1613,49 @@ def run_deterministic_mode(
     if combos_file is not None:
         requested = set(load_combo_pairs({}, combos_file))
         pairs = [pair for pair in pairs if pair in requested]
-    rows = []
-    for graph, engine in pairs:
-        reference = ref_by_engine.get(engine)
-        if reference is None:
-            continue
-        row = deterministic_row(refresh_dir, index, graph_data, graph, engine, reference, git_sha)
-        rows.append(row)
-    write_rows(output_path, rows)
+    done: set[tuple[str, str]] = set()
+    rows: list[dict[str, Any]] = []
+    if output_path.exists():
+        for line in output_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("spec_version") == SPEC_VERSION and not row.get("toolkit_timeout"):
+                done.add((row["graph"], row["engine"]))
+                rows.append(row)
+    work = [
+        (graph, engine, ref_by_engine[engine])
+        for graph, engine in pairs
+        if engine in ref_by_engine and (graph, engine) not in done
+    ]
+    print(f"[deterministic] resume: {len(done)} done, {len(work)} to run", flush=True)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(
+                deterministic_row, refresh_dir, index, graph_data, graph, engine, ref, git_sha
+            ): (graph, engine)
+            for graph, engine, ref in work
+        }
+        with output_path.open("a") as handle:
+            for future in concurrent.futures.as_completed(futures):
+                graph, engine = futures[future]
+                try:
+                    row = future.result()
+                except Exception as exc:  # pragma: no cover - defensive
+                    row = {
+                        "spec_version": SPEC_VERSION,
+                        "git_sha": git_sha,
+                        "combo_id": f"{graph}::{engine}",
+                        "graph": graph,
+                        "engine": engine,
+                        "mode": "deterministic",
+                        "error": str(exc)[:300],
+                    }
+                rows.append(row)
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+                handle.flush()
+                if len(rows) % PROGRESS_EVERY == 0:
+                    print(f"[deterministic] {len(rows)}/{len(work)}", flush=True)
     return rows
 
 
@@ -1673,11 +1708,28 @@ def deterministic_row(
         return base
     n_nodes, edges = graph_data.get(graph, (d_layout.shape[0], ()))
     edge_array = np.asarray(edges, dtype=np.int64)
-    metrics = compute_equivalence_metrics(d_layout, r_layout, edge_array, engine_name=engine)
-    toolkit_values = [metrics.aut_procrustes_rmsd, metrics.component_aligned_rmsd]
-    if is_free_aspect(engine) and metrics.anisotropic_rmsd is not None:
-        toolkit_values.append(metrics.anisotropic_rmsd)
-    toolkit_distance = float(min(toolkit_values))
+    # The automorphism SEARCH (single igraph/BLISS C call) is intractable on twin-heavy
+    # graphs (chung_lu_150 measured >490s) and cannot be interrupted by signals -- run the
+    # toolkit in a hard-killed subprocess. On timeout, plain Procrustes is a sound
+    # CONSERVATIVE substitute: toolkit_distance = min(aligned variants) <= plain, so
+    # plain < 1e-3 still proves INVARIANCE_EQUIVALENT; plain >= 1e-3 is flagged
+    # toolkit_timeout and falls through to the quality axis.
+    metrics = toolkit_metrics_with_timeout(d_layout, r_layout, edge_array, engine, 90.0)
+    plain_distance = float(df.pairwise_procrustes_matrix([d_layout, r_layout])[0, 1])
+    toolkit_timeout = metrics is None
+    if metrics is None:
+        aut_rmsd: Optional[float] = None
+        component_rmsd: Optional[float] = None
+        anisotropic_rmsd: Optional[float] = None
+        toolkit_distance = plain_distance
+    else:
+        aut_rmsd = metrics.aut_procrustes_rmsd
+        component_rmsd = metrics.component_aligned_rmsd
+        anisotropic_rmsd = metrics.anisotropic_rmsd
+        toolkit_values = [aut_rmsd, component_rmsd]
+        if is_free_aspect(engine) and anisotropic_rmsd is not None:
+            toolkit_values.append(anisotropic_rmsd)
+        toolkit_distance = float(min(v for v in toolkit_values if v is not None))
     dists = df.prepare_graph_distances(edge_array.reshape(-1, 2), n_nodes)
     pairs = df.sample_pairs(dists, graph)
     stress_d = df.stress_per_layout(d_layout, pairs, dists)
@@ -1686,9 +1738,11 @@ def deterministic_row(
     base.update(
         {
             "toolkit_distance": toolkit_distance,
-            "aut_procrustes_rmsd": metrics.aut_procrustes_rmsd,
-            "component_aligned_rmsd": metrics.component_aligned_rmsd,
-            "anisotropic_rmsd": metrics.anisotropic_rmsd,
+            "plain_distance": plain_distance,
+            "toolkit_timeout": toolkit_timeout,
+            "aut_procrustes_rmsd": aut_rmsd,
+            "component_aligned_rmsd": component_rmsd,
+            "anisotropic_rmsd": anisotropic_rmsd,
             "stress_D": stress_d,
             "stress_R": stress_r,
             "stress_delta_abs": abs(stress_d - stress_r),
@@ -1697,6 +1751,58 @@ def deterministic_row(
         }
     )
     return base
+
+
+def _toolkit_child(conn, d_layout, r_layout, edge_array, engine: str) -> None:
+    """Compute toolkit metrics in a killable child process."""
+    try:
+        metrics = compute_equivalence_metrics(d_layout, r_layout, edge_array, engine_name=engine)
+        conn.send(
+            (
+                metrics.aut_procrustes_rmsd,
+                metrics.component_aligned_rmsd,
+                metrics.anisotropic_rmsd,
+            )
+        )
+    except Exception:  # pragma: no cover - defensive
+        conn.send(None)
+    finally:
+        conn.close()
+
+
+def toolkit_metrics_with_timeout(d_layout, r_layout, edge_array, engine: str, budget_s: float):
+    """Run compute_equivalence_metrics with a hard subprocess kill at ``budget_s``.
+
+    Returns a small namespace-like object or None on timeout/failure.
+    """
+    import multiprocessing as mp
+    from types import SimpleNamespace
+
+    ctx = mp.get_context("fork")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(
+        target=_toolkit_child, args=(child_conn, d_layout, r_layout, edge_array, engine)
+    )
+    proc.start()
+    child_conn.close()
+    result = None
+    if parent_conn.poll(budget_s):
+        try:
+            result = parent_conn.recv()
+        except EOFError:
+            result = None
+    proc.join(timeout=1.0)
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+    parent_conn.close()
+    if result is None:
+        return None
+    return SimpleNamespace(
+        aut_procrustes_rmsd=result[0],
+        component_aligned_rmsd=result[1],
+        anisotropic_rmsd=result[2],
+    )
 
 
 def deterministic_verdict(toolkit_distance: float, stress_d: float, stress_r: float) -> str:
