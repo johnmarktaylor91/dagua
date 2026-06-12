@@ -101,3 +101,10 @@ non-default counts deliberately.
   runtime diff; `dagua/layout/ops/fr.py` is absent.
 - Runtime delegation grep: no new `igraph`, `subprocess`, or external runtime
   delegation was added in FR code.
+- `ruff check . --fix`: passed.
+- `mypy --follow-imports=silent dagua/cli.py`: passed.
+- `pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q`: passed,
+  `435 passed, 8 warnings in 1449.21s`.
+- `pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"`:
+  failed during collection on the existing `ImportError: cannot import name
+  'layout_drl' from 'dagua.layout.classic'` in `tests/test_classic_drl.py`.

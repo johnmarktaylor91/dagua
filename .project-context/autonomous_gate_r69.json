@@ -1,0 +1,16 @@
+{
+  "mode": "autonomous",
+  "started": "2026-05-31T17:25:00-04:00",
+  "run": "r69_4tier_fidelity",
+  "user_directive": "cook autonomously all the way through: at the end we should know exactly which algos/layouts are 1) bit-identical, 2) time-outs, 3) not bit-identical but statistically the same across 100 seeds, or 4) statistically different across 100 seeds. text me at the end of each phase. all on the fidelity-matched algo versions. Python-only (sklearn/scipy/numpy fine); no separate non-python program; no fidelity-output delegation to reference.",
+  "state_file": ".project-context/research/sprint_algo_fidelity/r69_4tier_fidelity_STATE.md",
+  "exit_criteria": [
+    {"criterion": "All 118 classic_* variants opt into fidelity_mode (or explicitly recorded no-port)", "target": "mapping report enumerates all 118; grep -c rises from 9 to ~110+", "status": "untested", "measured_value": "", "measurement_source": "dagua/eval/variants.py + eval_output/fidelity_report_r69/p1_variant_fidelity_mapping.md"},
+    {"criterion": "Zero fidelity pipelines shell out to a non-Python binary", "target": "grep -E 'subprocess|os.system|Popen|check_output|pygraphviz' dagua/layout/ops/pipelines/ == empty", "status": "untested", "measured_value": "", "measurement_source": "grep over dagua/layout/ops/pipelines/"},
+    {"criterion": "No fidelity path delegates layout OUTPUT to the reference", "target": "no reference layout()/binary call producing positions", "status": "untested", "measured_value": "", "measurement_source": "P1 codex audit + diff review"},
+    {"criterion": "Stage-1 5-seed benchmark complete on matched versions, all combos", "target": "5 seeds x all stochastic variants; stage1/per_variant.json exists", "status": "untested", "measured_value": "", "measurement_source": "eval_output/benchmark_5seed_fidelity/ + fidelity_report_r69/stage1/"},
+    {"criterion": "100-seed escalation run complete for non-bit-identical non-timeout subset", "target": "100 seeds for every escalated variant", "status": "untested", "measured_value": "", "measurement_source": "eval_output/benchmark_100seed_escalation/"},
+    {"criterion": "Every classic_* variant classified into EXACTLY ONE of 4 tiers", "target": "sum of tier counts == 118 minus documented no-port; none unclassified or double-counted", "status": "untested", "measured_value": "", "measurement_source": "eval_output/fidelity_report_r69/report.md"},
+    {"criterion": "JMT texted at end of each phase + final summary", "target": "4 phase iMessages + final result iMessage sent", "status": "untested", "measured_value": "", "measurement_source": "send-to-jmt history"}
+  ]
+}
