@@ -1636,7 +1636,11 @@ def run_deterministic_mode(
             ): (graph, engine)
             for graph, engine, ref in work
         }
-        with output_path.open("a") as handle:
+        # Rewrite kept rows first so recomputed timeout rows do not duplicate.
+        with output_path.open("w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.flush()
             for future in concurrent.futures.as_completed(futures):
                 graph, engine = futures[future]
                 try:
@@ -1714,7 +1718,8 @@ def deterministic_row(
     # CONSERVATIVE substitute: toolkit_distance = min(aligned variants) <= plain, so
     # plain < 1e-3 still proves INVARIANCE_EQUIVALENT; plain >= 1e-3 is flagged
     # toolkit_timeout and falls through to the quality axis.
-    metrics = toolkit_metrics_with_timeout(d_layout, r_layout, edge_array, engine, 90.0)
+    budget = float(os.environ.get("DAGUA_R70_TOOLKIT_BUDGET_S", "90"))
+    metrics = toolkit_metrics_with_timeout(d_layout, r_layout, edge_array, engine, budget)
     plain_distance = float(df.pairwise_procrustes_matrix([d_layout, r_layout])[0, 1])
     toolkit_timeout = metrics is None
     if metrics is None:
