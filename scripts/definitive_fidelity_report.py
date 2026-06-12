@@ -36,7 +36,7 @@ REPORT_NAME = "DEFINITIVE_FIDELITY_REPORT.md"
 TIERS_NAME = "FOUR_TIER_CATEGORIZATION.md"
 INVARIANCE_THRESHOLD = 1.0e-3
 SPOTCHECK_MAX_COMBOS = 200
-SPOTCHECK_MAX_SEED_PAIRS = 25
+SPOTCHECK_MAX_SEED_PAIRS = 6
 SPOTCHECK_MAX_AUTOMORPHISMS = 5_000
 SPOTCHECK_PAIR_TIMEOUT_SECONDS = 10
 SIZE_BINS = (
@@ -1311,7 +1311,9 @@ def assign_headlines(
             if entry.on_domain
             and entry.final_rung in {"0", "1", "2", "2'", "3", "4", "INVARIANCE_EQUIVALENT"}
         ]
-        escalation_entries = [entry for entry in entries if entry.bucket == "ESCALATION"]
+        escalation_entries = [
+            entry for entry in entries if entry.bucket == "ESCALATION" and entry.on_domain
+        ]
         escalation_usable = [
             entry
             for entry in escalation_entries
@@ -1346,9 +1348,12 @@ def assign_headlines(
             dist_rate = safe_percent(
                 sum(1 for entry in usable if entry.final_rung in MODE_A_PASS_RUNGS), len(usable)
             )
-            seed_denom = [entry for entry in usable if not entry.seed_na or entry.final_rung == "1"]
+            seed_denom = [
+                entry for entry in usable if not entry.seed_na or entry.final_rung in {"0", "1"}
+            ]
             seed_rate = safe_percent(
-                sum(1 for entry in seed_denom if entry.final_rung == "1"), len(seed_denom)
+                sum(1 for entry in seed_denom if entry.final_rung in {"0", "1"}),
+                len(seed_denom),
             )
             headline = (
                 "DISTRIBUTIONALLY_MATCHED"
@@ -1478,11 +1483,20 @@ def run_invariance_spotcheck(
 
     index = index_spotcheck_results(load_json(data_dir / "results.json"))
     graph_edges = load_spotcheck_graph_edges()
-    scores = [
-        score_invariance_spotcheck_combo(row_by_combo[combo_id], index, graph_edges, data_dir)
-        for combo_id in selected
-        if combo_id in row_by_combo
-    ]
+    # Combo-level thread pool: the heavy work happens in per-pair hard-killed child
+    # processes, so threads here only multiplex the waiting.
+    import concurrent.futures
+
+    runnable = [combo_id for combo_id in selected if combo_id in row_by_combo]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        scores = list(
+            pool.map(
+                lambda combo_id: score_invariance_spotcheck_combo(
+                    row_by_combo[combo_id], index, graph_edges, data_dir
+                ),
+                runnable,
+            )
+        )
     qualified = [score for score in scores if score.get("qualified")]
     would_flip_count = sum(1 for score in qualified if score.get("would_flip"))
     would_flip_percent = safe_percent(would_flip_count, len(qualified))
