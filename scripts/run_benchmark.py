@@ -536,6 +536,15 @@ def parse_args() -> argparse.Namespace:
         help="First seed for stochastic engines",
     )
     parser.add_argument(
+        "--seed-refs",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated reference engine names to treat as stochastic for this run. "
+            "Base names also apply to their __for__ synthetic original variants."
+        ),
+    )
+    parser.add_argument(
         "--max-nodes",
         type=int,
         default=0,
@@ -638,7 +647,60 @@ def reverse_pairings(use_variants: bool) -> dict[str, list[str]]:
     return reversed_map
 
 
-def seeds_for_engine(engine_name: str, seed_count: int, seed_start: int) -> list[Optional[int]]:
+def parse_seed_refs(seed_refs: str) -> set[str]:
+    """Parse the run-scoped seeded-reference override list.
+
+    Parameters
+    ----------
+    seed_refs : str
+        Comma-separated engine names from ``--seed-refs``.
+
+    Returns
+    -------
+    set[str]
+        Non-empty engine names requested for seeded reference enumeration.
+    """
+    return {name.strip() for name in seed_refs.split(",") if name.strip()}
+
+
+def engine_is_stochastic_for_run(engine_name: str, seed_refs: set[str]) -> bool:
+    """Return whether an engine should use stochastic seeds in this run.
+
+    Parameters
+    ----------
+    engine_name : str
+        Registered competitor adapter name, including synthetic original-side
+        variant names.
+    seed_refs : set[str]
+        Run-scoped reference engine overrides from ``--seed-refs``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the global registry marks the engine stochastic or the
+        run-scoped reference override names the engine. For synthetic
+        ``__for__`` original variants, naming the base original engine applies
+        to all of its synthetic variants.
+    """
+    if engine_is_stochastic(engine_name):
+        return True
+    if engine_name in seed_refs:
+        return True
+
+    original_variant = get_variant_for_original_name(engine_name)
+    return (
+        original_variant is not None
+        and original_variant.original_engine is not None
+        and original_variant.original_engine in seed_refs
+    )
+
+
+def seeds_for_engine(
+    engine_name: str,
+    seed_count: int,
+    seed_start: int,
+    seed_refs: Optional[set[str]] = None,
+) -> list[Optional[int]]:
     """Return the benchmark seeds for one engine.
 
     Parameters
@@ -649,13 +711,16 @@ def seeds_for_engine(engine_name: str, seed_count: int, seed_start: int) -> list
         Number of seeds requested for stochastic engines.
     seed_start : int
         First seed in the requested stochastic range.
+    seed_refs : set[str] | None, default=None
+        Run-scoped reference engine names to treat as stochastic without
+        modifying the global stochasticity registry.
 
     Returns
     -------
     list[int | None]
         One deterministic ``None`` entry or a contiguous stochastic seed range.
     """
-    if not engine_is_stochastic(engine_name):
+    if not engine_is_stochastic_for_run(engine_name, seed_refs or set()):
         return [None]
     return list(range(seed_start, seed_start + seed_count))
 
@@ -1083,6 +1148,7 @@ def recover_results_from_positions(
     engines: Sequence[Any],
     seed_count: int,
     seed_start: int,
+    seed_refs: set[str],
 ) -> dict[str, BenchmarkRecord]:
     """Rebuild best-effort successful records from saved position tensors.
 
@@ -1098,6 +1164,9 @@ def recover_results_from_positions(
         Seed count requested for stochastic engines.
     seed_start : int
         First seed in the requested stochastic range.
+    seed_refs : set[str]
+        Run-scoped reference engine names to treat as stochastic while
+        enumerating expected position filenames.
 
     Returns
     -------
@@ -1112,7 +1181,7 @@ def recover_results_from_positions(
     for test_graph in graphs:
         summary = graph_summary(test_graph)
         for competitor in engines:
-            for seed in seeds_for_engine(competitor.name, seed_count, seed_start):
+            for seed in seeds_for_engine(competitor.name, seed_count, seed_start, seed_refs):
                 relative_path = position_relative_path(summary.name, competitor.name, seed)
                 expected_by_filename[relative_path.name] = (
                     summary.name,
@@ -2008,6 +2077,7 @@ def manifest_payload(
         JSON-serializable manifest payload.
     """
     use_variants = bool(args.variants)
+    seed_refs = parse_seed_refs(str(args.seed_refs))
     pairings = variant_pairings() if use_variants else base_pairings()
     original_to_reimpl = reverse_pairings(use_variants=use_variants)
     return {
@@ -2018,6 +2088,7 @@ def manifest_payload(
             "timeout": int(args.timeout),
             "seeds": int(args.seeds),
             "seed_start": int(args.seed_start),
+            "seed_refs": sorted(seed_refs),
             "max_nodes": int(args.max_nodes),
             "engines": str(args.engines),
             "graphs": args.graphs,
@@ -2028,7 +2099,9 @@ def manifest_payload(
         },
         "seed_values": list(range(int(args.seed_start), int(args.seed_start) + int(args.seeds))),
         "stochastic_engines": sorted(
-            competitor.name for competitor in engines if engine_is_stochastic(competitor.name)
+            competitor.name
+            for competitor in engines
+            if engine_is_stochastic_for_run(competitor.name, seed_refs)
         ),
         "pairings": {
             "reimpl_to_original": pairings,
@@ -2040,7 +2113,7 @@ def manifest_payload(
                 "name": competitor.name,
                 "max_nodes": int(getattr(competitor, "max_nodes", 0)),
                 "available": bool(competitor.available()),
-                "is_stochastic": engine_is_stochastic(competitor.name),
+                "is_stochastic": engine_is_stochastic_for_run(competitor.name, seed_refs),
                 "is_heavy": engine_is_heavy(competitor.name),
                 "original_for": original_to_reimpl.get(competitor.name, []),
                 "reimpl_of": pairings.get(competitor.name, []),
@@ -2090,6 +2163,7 @@ def main() -> int:
     args = parse_args()
     validate_args(args)
     args.resolved_workers = resolve_worker_count(args.workers)
+    seed_refs = parse_seed_refs(str(args.seed_refs))
     watchdog_timeout = (
         args.watchdog_timeout if args.watchdog_timeout is not None else WATCHDOG_TIMEOUT
     )
@@ -2125,6 +2199,7 @@ def main() -> int:
             engines=selected_engines,
             seed_count=args.seeds,
             seed_start=args.seed_start,
+            seed_refs=seed_refs,
         )
     )
     existing_results = merge_recovered_results(disk_results, recovered_results)
@@ -2155,7 +2230,7 @@ def main() -> int:
     for test_graph in selected_graphs:
         summary = graph_summaries[test_graph.name]
         for competitor in selected_engines:
-            for seed in seeds_for_engine(competitor.name, args.seeds, args.seed_start):
+            for seed in seeds_for_engine(competitor.name, args.seeds, args.seed_start, seed_refs):
                 key = build_record_key(summary.name, competitor.name, seed)
                 scoped_keys.append(key)
                 total_scope += 1
@@ -2235,7 +2310,9 @@ def main() -> int:
         ),
     )
 
-    stochastic_engine_count = sum(engine_is_stochastic(name) for name in engine_names)
+    stochastic_engine_count = sum(
+        engine_is_stochastic_for_run(name, seed_refs) for name in engine_names
+    )
     print(
         "[benchmark] Starting: "
         f"{len(graph_names)} graphs x {len(engine_names)} engines, "
