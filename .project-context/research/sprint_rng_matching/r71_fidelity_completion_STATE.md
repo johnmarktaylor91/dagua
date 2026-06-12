@@ -1,12 +1,27 @@
 ---
 run: r71_fidelity_completion
 created: 2026-06-12
-state: PHASE_PLAN_REVIEW
+state: PAUSED_CLAUDE_TOKENS (compute continues unattended)
 current_round: 0
 max_adversarial_rounds: 3
 gate_file: .project-context/autonomous_gate_r71.json
 plan: PLAN_r71_fidelity_completion.md
 ---
+
+> **PAUSED 2026-06-12 ~19:30 (JMT: short on Claude tokens).** All CC watchers STOPPED to
+> prevent wake-up turns. The FREE compute keeps running unattended:
+>   - P1d seeded-ref bench: wrapper pid 1110197, log /tmp/r71_p1d.log, nice 19, resume-safe.
+>   - W4 toolkit rerun: pid 531430, log /tmp/r71_w4_toolkit.log (then rung0 in same wrapper).
+>   - umap ROUND-2 codex (OpenAI sub, not Claude): pid 1303355, log /tmp/r71_umap_r2.log.
+>   - disk archive: log /tmp/r71_disk_archive.log.
+> NO Fable subagents planned anywhere in the remaining pipeline (reviews done; remaining
+> dispatches are codex). RESUME PROCEDURE (one consolidated batch pass): (1) check each
+> log tail + `kill -0` the pids; (2) verify umap r2 result per its prompt contract
+> (/tmp/PROMPT_r71_umap_round2.md), commit if good; (3) count W4 DIFFERENT->INVARIANCE
+> flips; (4) if P1d complete: run P1e re-analysis (definitive_fidelity_analysis --mode full
+> --data-dir escalation_final --data-dir benchmark_100seed_seeded_refs --combos-file
+> <ModeB combos of seedable engines>); (5) re-cluster, continue plan sec. 7 sequencing.
+> If a run died: every launcher is --resume-safe; relaunch per row-6/8 commands.
 
 # r71 -- Fidelity Completion (autonomous run)
 
@@ -59,4 +74,5 @@ watcher b40wvbbg6; W5 queued) / "feel free to go autonomous until end of the pip
 | 5 | P1a-i/P1b done | 2026-06-12 | P1a(i) VERIFIED+committed 38a1bc4 (--seed-refs both call sites, igraph_sugiyama seed fix, 5 tests). P1a(ii) provenance codex RUNNING pid 757606 watcher bytb7r0jq. **P1b PROBE COMPLETE** (positive control GREEN; committed bc5847b; table eval_output/fidelity_definitive/r71_seedability_probe.json with upstream evidence): SEEDABLE = neato, sfdp, ogdf_fmmm, ogdf_gem, ogdf_stress, igraph_mds (SURPRISE: classical_mds upgrades! cross 1.3); fdp = UNSTABLE_WITHIN_SEED_ENSEMBLE_OK (dist test valid, tracking N/A); DETERMINISTIC-with-evidence = graphviz_dot, ogdf_pivot_mds, igraph_sugiyama (flat 5e-20 even post-fix). P1d launcher READY scripts/r71_p1d_seeded_refs.sh -- **LAUNCH ONLY AFTER P1a(ii) CODEX_DONE** (it edits run_benchmark.py; avoid import race). ON P1a(ii) DONE: verify, commit, smoke 1 engine x 2 seeds, then launch P1d via setsid + correct-PID bg-watch. |
 | 6 | P1d LAUNCHED | 2026-06-12 | P1a(ii) VERIFIED+committed 7b909a0 (git_sha in rows+manifest; source_dir merge tags; fixed_engines.json report assertion -- smoke: synthetic config FAILS strict, absent config passes). Seeded-path smoke GREEN (sfdp synthetic ref -> ::seed42/::seed43 keys, cross-seed 0.074). **P1D RUNNING**: pid 813746, watcher biyanbvbb, log /tmp/r71_p1d.log, 24 ref engines x failing-map graphs x seeds 42-141 -> eval_output/benchmark_100seed_seeded_refs (disk floor guard 15G; disk 42G free, archive still moving). ON P1D DONE: merge into union store (CC = serialized merge owner; merge_benchmark_datasets with source_dir tags) -> P1e re-analysis of upgraded combos -> re-cluster -> Mode-B fix loop. Still in flight: W4 toolkit (b40wvbbg6), disk archive (b62ud6wv6), P2c umap codex (bcehgdim0). |
 | 7 | P2c umap FIXED | 2026-06-12 | umap diagnosis: weight ROUTING existed (ops/umap.py, not pipeline file); root cause = preprocessing semantics mismatch vs adapter (distance/cost + duplicate-edge coalescing). Fix committed 0766227 (+tests, 25 green). Matched-seed before/after: weighted_clusters 0.067->0.000000 BIT-EXACT; heavy_tail 0.105->0.058; plain control unchanged. fixed_engines.json registered (6 umap variants, pre_fix_dirs = escalation_final + umap_rerun). UMAP POST-FIX RE-RUN launched: pid 831545, watcher b47tv2aiy, log /tmp/r71_umap_rerun.log -> eval_output/benchmark_100seed_umap_postfix (full failing map, 100 seeds, 4 workers alongside P1d's 10). NOTE: check_engine.py hung on umap (no fixtures) -- codex used direct 5-seed fallback; fine. NEXT fix targets after P1e: drl weighted (15), sgd2 TBS triage (18). |
+| 9 | umap r1 FALSE FIX + merge to main | 2026-06-12 | UMAP RE-RUN done (13,836 ok, sha 0766227) + multi --data-dir overlay shipped (a0f9399) + re-analysis ran: VERDICTS UNCHANGED (38 still FAIL_DIST). ROOT CAUSE OF FALSE FIX: post-fix benchmark layouts BYTE-IDENTICAL to pre-fix (0.0000 on 3 weighted graphs) -- codex r1 verified OFF the benchmark path (its 'before/after' = weights-off vs weights-on in CURRENT code, params not benchmark-matched; its 0.058 != benchmark's 0.71 gap). Weights DO flow end-to-end (graphs carry tensors; _quick_classic forwards; pipeline accepts) -> divergence is in HOW weights are used (suspect: distance-vs-affinity inversion vs umap_graph's SciPy cost semantics). UMAP ROUND 2 of 3 dispatched pid 1303355 watcher b3b9hcdqa effort HIGH, prompt /tmp/PROMPT_r71_umap_round2.md with MANDATORY benchmark-path anchor (must reproduce 0.71 before diagnosing; regression lock unweighted to 1e-12). LESSON for all P2 dispatches: anchor verification to get_competitor() path, never direct pipeline calls. ALSO: develop MERGED TO MAIN + pushed (76d535a; 13 stale test modules removed, 3,092 tests collect clean) per JMT visibility request. fixed_engines.json umap entry stays (provenance accurate; postfix rows valid, identical layouts). |
 | 8 | LOAD REDUCED (JMT request) | 2026-06-12 | JMT wants the machine for other work; analysis may chug into the weekend. P1d + umap reruns STOPPED cleanly and RELAUNCHED resume-safe at nice 19 / ionice idle with reduced workers (P1d 10->4 pid 1110197 watcher buqtkqtix; umap 4->2 pid 1110196 watcher be5w2cx0q; watcher ceilings 2880min). W4 + workers reniced 19. Total analysis cores ~10 at IDLE priority -- JMT's interactive work preempts everything. ETAs stretch ~2-3x: P1d ~10-16h, umap ~3-6h, W4 ~4-8h. Routing unchanged: ON P1D2 DONE -> merge -> P1e. |
