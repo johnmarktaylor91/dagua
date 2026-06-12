@@ -77,3 +77,17 @@ UNGATED (fired whenever node_ids was set). Fixed: env-gated behind DAGUA_FDP_TRA
 purely logging, zero layout effect). NOTE: a running benchmark imports fmmm.py per-engine, so a code
 gate only takes effect when the next run_benchmark RE-IMPORTS -- to force it mid-run, kill the current
 engine's run_benchmark (its --resume retry re-imports the gated code).
+
+## r70 definitive fidelity run (2026-06-12)
+- igraph/BLISS automorphism search in equivalence_metrics is a SINGLE C call: uninterruptible
+  by SIGALRM and intractable (>490s) on twin-heavy random graphs (chung_lu etc) even with
+  max_automorphisms=1 (cap applies to enumeration, not the search). ONLY safe pattern: run in
+  a fork-child with hard kill (see toolkit_metrics_with_timeout in
+  scripts/definitive_fidelity_analysis.py). Plain Procrustes is a sound conservative fallback
+  (toolkit distance <= plain).
+- Benchmark reference rows for graphviz/igraph/ogdf deterministic refs are keyed
+  `graph::engine::deterministic` with seed=None and stored FLOAT32 (~2-3e-8 Procrustes floor).
+  Any pairing logic that assumes seeded rows on both sides silently produces zero pairs.
+- bg-watch.sh can die spuriously (exit 144) early; a plain `while kill -0 PID` Monitor loop is
+  a reliable fallback. setsid+& PID capture: grep can catch the transient setsid parent --
+  verify with kill -0 + expected child args.
