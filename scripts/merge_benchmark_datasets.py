@@ -38,7 +38,7 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 def _timestamp() -> str:
@@ -58,6 +58,29 @@ def _save_json_atomic(path: Path, payload: dict) -> None:
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, default=str)
     tmp.replace(path)
+
+
+def _with_source_dir(record: Any, source_dir: str) -> Any:
+    """Return a record tagged with its originating benchmark directory.
+
+    Parameters
+    ----------
+    record : Any
+        JSON-decoded benchmark record.
+    source_dir : str
+        Directory name for the benchmark store that supplied ``record``.
+
+    Returns
+    -------
+    Any
+        Copy of ``record`` with ``source_dir`` populated when it is a mapping;
+        non-mapping payloads are returned unchanged.
+    """
+    if not isinstance(record, dict):
+        return record
+    tagged = dict(record)
+    tagged.setdefault("source_dir", source_dir)
+    return tagged
 
 
 def _prefer(record_bf: dict, record_vbf: dict) -> dict:
@@ -215,6 +238,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"  target records:  {len(dst_records):>10}")
 
     # Merge records.
+    src_source_dir = args.source.name
+    dst_source_dir = args.target.name
+    src_records = {
+        key: _with_source_dir(record, src_source_dir) for key, record in src_records.items()
+    }
+    dst_records = {
+        key: _with_source_dir(record, dst_source_dir) for key, record in dst_records.items()
+    }
     collisions = 0
     new_from_source = 0
     source_preferred = 0
