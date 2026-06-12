@@ -522,6 +522,29 @@ disclosure per Mode B engine [MED] -> sec. 5. (11) reimpl_seeds_lt_30 reason cod
 zero-ref-rows statement [LOW] -> sec. 2. (12) U-stat mean conventions, odd-n split, typo
 [LOW] -> secs. 4.1/4.3.
 
+## Appendix E -- PRE-REGISTRATION DEVIATION: gate 3 outcome (2026-06-11, phase V)
+
+Measured: gate 1 PASS (39/39 scored combos rung<=2, 100%); gate 2 PASS (39/39 informative
+REF_TYPICAL); gate 4 PASS (KS p=0.82; aggregate recovery 21 in [8,33]). Gate 3: 18/20 =
+90% vs the pre-registered >=95% -- FORMAL FAIL. Sub-structure: Mode A mispairs 12/12
+rejected (100%), 0/12 false-tracking (budget 3); Mode B mispairs 6/8 rejected. The two
+escapes, diagnosed:
+- sfdp_default/hierarchical_residual_stage vs fmmm ref: p_typ=0.069 (near-miss at
+  alpha=0.05), d_R=0.226 vs cloud spread W_D=0.096 -- the test nearly rejected a foreign
+  ref 2.3x the cloud spread away.
+- gem_iters2000/small_label_storm vs neato ref: p_typ=0.396, d_R=0.171 < W_D=0.206 -- the
+  foreign layout sits INSIDE the reimpl cloud; no one-sample test can refute this.
+DECISION (documented deviation, not silent re-roll): proceed to the full pass. Rationale:
+the gate exists to catch HARNESS bugs (pairing, keys, loading); the Mode A sub-gate and
+gates 1/2/4 demonstrate the harness correct; the two escapes are geometrically explained
+manifestations of Mode B typicality's PRE-REGISTERED, sec.-11-disclosed power limit.
+IMPACT statement for the record: the measured Mode B false-typicality rate on
+cross-algorithm references is 2/8 = 25% (exact binomial 95% CI ~3-65%, n small) -- a
+REF_TYPICAL verdict is weak evidence and must be read with this calibration; the
+DEFINITIVE_FIDELITY_REPORT's Mode B disclosure MUST carry this number next to the
+REF_COMPATIBLE headlines. The >=95% criterion was mis-calibrated for the Mode B subset at
+design time; the Mode A 100% + tracking sub-gate is the operative harness check.
+
 ## Appendix D -- adversarial round 4 resolutions (2026-06-11)
 
 8 findings (2 HIGH, 3 MEDIUM, 3 LOW), all accepted:
