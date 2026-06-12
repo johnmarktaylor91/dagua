@@ -125,7 +125,26 @@ def _build_undirected_adjacency(
     num_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> list[list[tuple[int, float]]]:
-    """Build an undirected adjacency list from ``edge_index``."""
+    """Build an undirected weighted adjacency list from graph edges.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    edge_weights : torch.Tensor | None, optional
+        Optional edge-cost tensor with shape ``[E]``. The UMAP benchmark
+        reference feeds these values into SciPy shortest paths as distances,
+        so larger values lengthen graph paths here instead of strengthening
+        attractive forces.
+
+    Returns
+    -------
+    list[list[tuple[int, float]]]
+        Sorted undirected adjacency list. Parallel edge costs are summed to
+        mirror SciPy CSR duplicate coalescing in the reference adapter.
+    """
     if edge_weights is None:
         adjacency_sets: list[set[int]] = [set() for _ in range(num_nodes)]
         if edge_index.numel() == 0:
@@ -729,6 +748,9 @@ def _rescale_umap_embedding(coordinates: np.ndarray) -> torch.Tensor:
         Rescaled initial embedding with shape ``[N, 2]``.
     """
     coords = coordinates.astype(np.float32, copy=True)
+    if coords.shape[0] == 0:
+        return torch.empty((0, 2), dtype=torch.float32)
+
     axis_min = coords.min(axis=0)
     axis_span = coords.max(axis=0) - axis_min
     safe_span = np.where(axis_span > 0.0, axis_span, _MIN_SPAN)
