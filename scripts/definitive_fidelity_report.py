@@ -32,6 +32,7 @@ DEFAULT_FIVE_SEED = Path("eval_output/benchmark_5seed_final/results.json")
 DEFAULT_DATA_DIR = Path("eval_output/benchmark_100seed_escalation_final")
 DEFAULT_REFRESH = Path("eval_output/benchmark_5seed_deterministic_refresh")
 DEFAULT_CONTROLS = Path("eval_output/fidelity_definitive/controls")
+FIXED_ENGINES_NAME = "fixed_engines.json"
 REPORT_NAME = "DEFINITIVE_FIDELITY_REPORT.md"
 TIERS_NAME = "FOUR_TIER_CATEGORIZATION.md"
 INVARIANCE_THRESHOLD = 1.0e-3
@@ -302,6 +303,7 @@ def build_report_state(args: argparse.Namespace, context: ReportContext) -> dict
     finalized_rows = finalize_rows(rows, args.spec_version)
     check_completeness(finalized_rows, failing_map, args.spec_version, context)
     check_no_mixed_modes(finalized_rows, context)
+    check_fixed_engine_provenance(finalized_rows, args.output_dir / FIXED_ENGINES_NAME, context)
     deterministic_rows = read_jsonl(args.refresh_dir / "deterministic.jsonl")
     rung0_reverify_rows = read_jsonl(args.refresh_dir / "rung0-reverify.jsonl")
     accounting = build_accounting(
@@ -539,6 +541,92 @@ def check_no_mixed_modes(rows: list[dict[str, Any]], context: ReportContext) -> 
             modes[str(row.get("engine"))].add(str(mode))
     mixed = {engine: sorted(values) for engine, values in modes.items() if len(values) > 1}
     context.check(not mixed, f"Mixed reference modes detected: {mixed}")
+
+
+def load_fixed_engine_config(path: Path) -> dict[str, dict[str, Any]]:
+    """Load fixed-engine provenance requirements if the config exists.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Optional ``fixed_engines.json`` path.
+
+    Returns
+    -------
+    dict[str, dict[str, Any]]
+        Mapping from engine name to normalized ``fixed_sha`` and
+        ``pre_fix_dirs`` fields. An absent file returns an empty mapping.
+    """
+    if not path.exists():
+        return {}
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Fixed-engine config must be a JSON object: {path}")
+    config: dict[str, dict[str, Any]] = {}
+    for engine, raw_rule in payload.items():
+        if not isinstance(raw_rule, dict):
+            raise ValueError(f"Fixed-engine rule for {engine!r} must be a JSON object.")
+        pre_fix_dirs = raw_rule.get("pre_fix_dirs", [])
+        if not isinstance(pre_fix_dirs, list):
+            raise ValueError(f"pre_fix_dirs for {engine!r} must be a list.")
+        config[str(engine)] = {
+            "fixed_sha": str(raw_rule.get("fixed_sha", "")),
+            "pre_fix_dirs": [str(item) for item in pre_fix_dirs],
+        }
+    return config
+
+
+def check_fixed_engine_provenance(
+    rows: list[dict[str, Any]],
+    config_path: Path,
+    context: ReportContext,
+) -> None:
+    """Assert fixed engines are not reported from pre-fix benchmark rows.
+
+    Parameters
+    ----------
+    rows : list[dict[str, Any]]
+        Finalized report rows consumed by the definitive report.
+    config_path : pathlib.Path
+        Optional fixed-engine provenance config path.
+    context : ReportContext
+        Assertion and warning state.
+
+    Returns
+    -------
+    None
+        Raises or records assertion failures.
+    """
+    config = load_fixed_engine_config(config_path)
+    if not config:
+        return
+
+    violations: dict[str, list[str]] = defaultdict(list)
+    for row in rows:
+        engine = str(row.get("engine", ""))
+        rule = config.get(engine)
+        if rule is None:
+            continue
+        git_sha = row.get("git_sha")
+        source_dir = row.get("source_dir")
+        reasons: list[str] = []
+        if not git_sha:
+            reasons.append("missing git_sha")
+        if source_dir is not None and str(source_dir) in set(rule["pre_fix_dirs"]):
+            reasons.append(f"pre-fix source_dir={source_dir}")
+        if reasons:
+            combo = str(row.get("combo_id") or f"{row.get('graph')}::{engine}")
+            fixed_sha = rule.get("fixed_sha") or "unspecified"
+            violations[engine].append(f"{combo} ({'; '.join(reasons)}; fixed_sha={fixed_sha})")
+
+    if not violations:
+        return
+    preview = {engine: examples[:5] for engine, examples in sorted(violations.items())}
+    total = sum(len(examples) for examples in violations.values())
+    context.check(
+        False,
+        f"Fixed-engine provenance check failed for {total} row(s): {preview}",
+    )
 
 
 def parse_triage(path: Path) -> TriageInventory:
