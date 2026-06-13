@@ -13,7 +13,12 @@ from dagua.layout.ops.fmmm import (
     _RandomNodeSet,
     _unique_edges_with_lengths,
 )
-from dagua.layout.ops.pipelines.fmmm import _graphviz_tile_pack_offsets, layout_fmmm_pipeline
+from dagua.layout.ops.pipelines.fmmm import (
+    _graphviz_tile_pack_offsets,
+    _layout_ogdf_fmmm_small_fidelity,
+    _ogdf_fmmm_max_mult_iter,
+    layout_fmmm_pipeline,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 
@@ -152,6 +157,55 @@ def test_fmmm_fidelity_mode_alias_returns_finite_positions() -> None:
 
     assert positions.shape == (3, 2)
     assert torch.isfinite(positions).all()
+
+
+def test_fmmm_ogdf_max_mult_iter_matches_linearly_decreasing_reference() -> None:
+    """Verify OGDF linearly decreasing multilevel iteration budgets.
+
+    Returns
+    -------
+    None
+        The assertion checks coarsest, middle, finest, and small-level floors.
+    """
+    assert _ogdf_fmmm_max_mult_iter(0, 0, 1000, 20) == 200
+    assert _ogdf_fmmm_max_mult_iter(2, 2, 1000, 20) == 200
+    assert _ogdf_fmmm_max_mult_iter(1, 2, 1000, 20) == 110
+    assert _ogdf_fmmm_max_mult_iter(0, 2, 1000, 20) == 20
+    assert _ogdf_fmmm_max_mult_iter(0, 2, 500, 20) == 100
+
+
+def test_fmmm_fidelity_mode_uses_multilevel_driver_above_coarse_target() -> None:
+    """Verify fidelity dispatch no longer uses the single-level path for large graphs.
+
+    Returns
+    -------
+    None
+        The assertion validates finite output and a different result from the
+        legacy helper on a graph that crosses OGDF's coarsening threshold.
+    """
+    edge_index = torch.tensor(
+        [[node for node in range(59)], [node + 1 for node in range(59)]],
+        dtype=torch.long,
+    )
+
+    positions = layout_fmmm_pipeline(
+        edge_index=edge_index,
+        num_nodes=60,
+        steps=4,
+        seed=7,
+        fidelity_mode=True,
+    )
+    legacy_positions = _layout_ogdf_fmmm_small_fidelity(
+        edge_index=edge_index,
+        num_nodes=60,
+        steps=4,
+        seed=7,
+        device=torch.device("cpu"),
+    ).to(dtype=torch.float32)
+
+    assert positions.shape == (60, 2)
+    assert torch.isfinite(positions).all()
+    assert not torch.allclose(positions, legacy_positions)
 
 
 def test_fmmm_graphviz_tile_pack_offsets_match_pack_c_golden_vectors() -> None:
