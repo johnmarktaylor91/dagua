@@ -28,8 +28,13 @@ import psutil
 import torch
 
 from dagua.eval import distributional_fidelity as df
-from dagua.eval.equivalence_metrics import compute_equivalence_metrics
+from dagua.eval.equivalence_metrics import (
+    compute_equivalence_metrics,
+    neighborhood_preservation,
+    normalized_stress,
+)
 from dagua.eval.graphs import get_test_graphs
+from dagua.metrics import count_crossings
 
 SPEC_VERSION = "r70-v6"
 DEFAULT_DATA_DIR = Path("eval_output/benchmark_100seed_escalation_final")
@@ -41,6 +46,11 @@ PROGRESS_EVERY = 25
 RSS_WARN_FRACTION = 0.70
 RSS_ABORT_FRACTION = 0.85
 MIN_MODE_SEEDS = 30
+QUALITY_BATTERY_MAX_SEEDS = 60
+QUALITY_STRESS_REL_MARGIN = 0.02
+QUALITY_NP_ABS_MARGIN = 0.02
+QUALITY_CROSS_REL_MARGIN = 0.02
+QUALITY_CROSS_ABS_FLOOR = 0.5
 FREE_ASPECT_PREFIX = "classic_sugiyama"
 DETERMINISTIC_DIFFERENT_ENGINES = {
     "classic_kk_steps100",
@@ -754,20 +764,24 @@ def analyze_payload(payload: ComboPayload) -> dict[str, Any]:
     if mode_info["insufficient_data"]:
         return base
     free_aspect = is_free_aspect(payload.engine)
+    pairs, dists, disconnected = stress_pairs(payload)
     if mode_info["mode"] == "A":
         seeds = mode_info["matched_seeds"]
         d_layouts = [reimpl["seeded"][seed] for seed in seeds]
         r_layouts = [reference["seeded"][seed] for seed in seeds]
         analysis = df.analyze_mode_a(d_layouts, r_layouts, rng, free_aspect=free_aspect)
-        stress = compute_mode_a_stress(payload, d_layouts, r_layouts)
+        stress = compute_mode_a_stress(d_layouts, r_layouts, pairs, dists, disconnected)
+        battery = compute_mode_a_quality_battery(payload, d_layouts, r_layouts, dists)
     else:
         seeds = mode_info["reimpl_seeds"]
         d_layouts = [reimpl["seeded"][seed] for seed in seeds]
         r_layout = reference["deterministic"]
         analysis = df.analyze_mode_b(d_layouts, r_layout, rng, free_aspect=free_aspect)
-        stress = compute_mode_b_stress(payload, d_layouts, r_layout)
+        stress = compute_mode_b_stress(d_layouts, r_layout, pairs, dists, disconnected)
+        battery = compute_mode_b_quality_battery(payload, d_layouts, r_layout, dists)
     base.update(analysis)
     base.update(stress)
+    base.update(battery)
     base.update(runtime_ratio(payload.reimpl_rows, payload.ref_rows))
     base["flags"] = collect_flags(base)
     return base
@@ -983,27 +997,32 @@ def permute_reference_labels(reference: dict[Any, Any], combo_id: str) -> dict[A
 
 
 def compute_mode_a_stress(
-    payload: ComboPayload,
     d_layouts: list[np.ndarray],
     r_layouts: list[np.ndarray],
+    pairs: np.ndarray,
+    dists: np.ndarray,
+    disconnected: bool,
 ) -> dict[str, Any]:
     """Compute paired stress diagnostics and raw TOST for Mode A.
 
     Parameters
     ----------
-    payload : ComboPayload
-        Combo work item.
     d_layouts : list[numpy.ndarray]
         Reimplementation layouts.
     r_layouts : list[numpy.ndarray]
         Reference layouts.
+    pairs : numpy.ndarray
+        Finite graph-distance pair sample with shape ``[P, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+    disconnected : bool
+        Whether graph distances include disconnected components.
 
     Returns
     -------
     dict[str, Any]
         Stress values, raw p-values, and direct-branch verdict fields.
     """
-    pairs, dists, disconnected = stress_pairs(payload)
     stress_d = np.asarray([df.stress_per_layout(layout, pairs, dists) for layout in d_layouts])
     stress_r = np.asarray([df.stress_per_layout(layout, pairs, dists) for layout in r_layouts])
     margin = max(0.05 * float(np.mean(stress_r)), 1.0e-6)
@@ -1012,27 +1031,32 @@ def compute_mode_a_stress(
 
 
 def compute_mode_b_stress(
-    payload: ComboPayload,
     d_layouts: list[np.ndarray],
     r_layout: np.ndarray,
+    pairs: np.ndarray,
+    dists: np.ndarray,
+    disconnected: bool,
 ) -> dict[str, Any]:
     """Compute one-sample stress diagnostics and raw TOST for Mode B.
 
     Parameters
     ----------
-    payload : ComboPayload
-        Combo work item.
     d_layouts : list[numpy.ndarray]
         Reimplementation layouts.
     r_layout : numpy.ndarray
         Deterministic reference layout.
+    pairs : numpy.ndarray
+        Finite graph-distance pair sample with shape ``[P, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+    disconnected : bool
+        Whether graph distances include disconnected components.
 
     Returns
     -------
     dict[str, Any]
         Stress values, raw p-values, and direct-branch verdict fields.
     """
-    pairs, dists, disconnected = stress_pairs(payload)
     stress_d = np.asarray([df.stress_per_layout(layout, pairs, dists) for layout in d_layouts])
     stress_r = float(df.stress_per_layout(r_layout, pairs, dists))
     margin = max(0.05 * stress_r, 1.0e-6)
@@ -1097,7 +1121,7 @@ def stress_record(
         "stress_p_tost": tost.get("p_tost"),
         "stress_wilcoxon_p_tost": tost.get("wilcoxon_p_tost"),
         "stress_degenerate_sd": tost.get("degenerate_sd", False),
-        "stress_direct_equivalent": tost.get("direct_equivalent"),
+        "stress_direct_equivalent": tost.get("equivalent_direct", tost.get("direct_equivalent")),
         "disconnected": disconnected,
     }
     # SPEC-INTERPRETATION: Task C applies BH to q_tost; raw direct decisions are
@@ -1110,6 +1134,368 @@ def stress_record(
         )
     )
     return record
+
+
+def compute_mode_a_quality_battery(
+    payload: ComboPayload,
+    d_layouts: list[np.ndarray],
+    r_layouts: list[np.ndarray],
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Compute strict drawing-quality equivalence diagnostics for Mode A.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item.
+    d_layouts : list[numpy.ndarray]
+        Reimplementation layouts with shape ``[N, 2]``.
+    r_layouts : list[numpy.ndarray]
+        Matched reference layouts with shape ``[N, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Strict stress, crossing, neighborhood-preservation, and IUT battery fields.
+    """
+    indices = quality_battery_indices(payload, len(d_layouts))
+    selected_d = [d_layouts[index] for index in indices]
+    selected_r = [r_layouts[index] for index in indices]
+    metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
+    stress_tost = df.paired_tost(
+        metrics["stress_d"] - metrics["stress_r"],
+        quality_stress_margin(metrics["stress_r"]),
+    )
+    cross_tost = df.paired_tost(
+        metrics["cross_d"] - metrics["cross_r"],
+        quality_cross_margin(metrics["cross_r"]),
+    )
+    np_tost = df.paired_tost(
+        metrics["np_d"] - metrics["np_r"],
+        QUALITY_NP_ABS_MARGIN,
+    )
+    return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
+
+
+def compute_mode_b_quality_battery(
+    payload: ComboPayload,
+    d_layouts: list[np.ndarray],
+    r_layout: np.ndarray,
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Compute strict drawing-quality equivalence diagnostics for Mode B.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item.
+    d_layouts : list[numpy.ndarray]
+        Reimplementation layouts with shape ``[N, 2]``.
+    r_layout : numpy.ndarray
+        Single deterministic reference layout with shape ``[N, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Strict stress, crossing, neighborhood-preservation, and IUT battery fields.
+    """
+    indices = quality_battery_indices(payload, len(d_layouts))
+    selected_d = [d_layouts[index] for index in indices]
+    selected_r = [r_layout for _index in indices]
+    metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
+    stress_target = float(metrics["stress_r"][0]) if metrics["stress_r"].size else float("nan")
+    cross_target = float(metrics["cross_r"][0]) if metrics["cross_r"].size else float("nan")
+    np_target = float(metrics["np_r"][0]) if metrics["np_r"].size else float("nan")
+    stress_tost = df.one_sample_tost(
+        metrics["stress_d"],
+        stress_target,
+        quality_stress_margin(np.asarray([stress_target])),
+    )
+    cross_tost = df.one_sample_tost(
+        metrics["cross_d"],
+        cross_target,
+        quality_cross_margin(np.asarray([cross_target])),
+    )
+    np_tost = df.one_sample_tost(metrics["np_d"], np_target, QUALITY_NP_ABS_MARGIN)
+    return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
+
+
+def quality_battery_indices(payload: ComboPayload, n_layouts: int) -> np.ndarray:
+    """Select the capped deterministic seed subset for the quality battery.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item used for deterministic seeding.
+    n_layouts : int
+        Number of available paired layouts.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sorted integer indices with length ``min(60, n_layouts)``.
+    """
+    if n_layouts <= QUALITY_BATTERY_MAX_SEEDS:
+        return np.arange(n_layouts, dtype=np.int64)
+    rng = purpose_rng(f"{payload.combo_id}::r70::quality_battery")
+    return np.sort(rng.choice(n_layouts, size=QUALITY_BATTERY_MAX_SEEDS, replace=False))
+
+
+def quality_metric_samples(
+    payload: ComboPayload,
+    d_layouts: list[np.ndarray],
+    r_layouts: list[np.ndarray],
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Compute per-layout quality metric samples for the strict battery.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item.
+    d_layouts : list[numpy.ndarray]
+        Reimplementation layouts with shape ``[N, 2]``.
+    r_layouts : list[numpy.ndarray]
+        Reference layouts with shape ``[N, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Per-side metric arrays and deterministic crossing metadata.
+    """
+    edge_index = edge_index_array(payload.graph_edges)
+    edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
+    cross_seed = stable_int_seed(f"{payload.combo_id}::r70::crossings")
+    stress_d = np.asarray(
+        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in d_layouts],
+        dtype=np.float64,
+    )
+    stress_r = np.asarray(
+        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in r_layouts],
+        dtype=np.float64,
+    )
+    np_d = np.asarray(
+        [neighborhood_preservation(layout, dists, k=10) for layout in d_layouts],
+        dtype=np.float64,
+    )
+    np_r = np.asarray(
+        [neighborhood_preservation(layout, dists, k=10) for layout in r_layouts],
+        dtype=np.float64,
+    )
+    cross_d = np.asarray(
+        [crossing_count(layout, edge_tensor, cross_seed) for layout in d_layouts],
+        dtype=np.float64,
+    )
+    cross_r = np.asarray(
+        [crossing_count(layout, edge_tensor, cross_seed) for layout in r_layouts],
+        dtype=np.float64,
+    )
+    return {
+        "stress_d": stress_d,
+        "stress_r": stress_r,
+        "cross_d": cross_d,
+        "cross_r": cross_r,
+        "np_d": np_d,
+        "np_r": np_r,
+        "battery_n": len(d_layouts),
+        "cross_sampled": edge_index.shape[1] > 500,
+        "cross_seed": cross_seed,
+    }
+
+
+def quality_battery_record(
+    metrics: dict[str, Any],
+    stress_tost: dict[str, Any],
+    cross_tost: dict[str, Any],
+    np_tost: dict[str, Any],
+) -> dict[str, Any]:
+    """Build JSON-ready strict quality battery fields.
+
+    Parameters
+    ----------
+    metrics : dict[str, Any]
+        Per-side metric arrays from :func:`quality_metric_samples`.
+    stress_tost : dict[str, Any]
+        Strict normalized-stress TOST result.
+    cross_tost : dict[str, Any]
+        Edge-crossing TOST result.
+    np_tost : dict[str, Any]
+        Neighborhood-preservation TOST result.
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-ready fields consumed by the report-stage 3Q rung.
+    """
+    stress_margin = quality_stress_margin(metrics["stress_r"])
+    cross_margin = quality_cross_margin(metrics["cross_r"])
+    stress_p = float(stress_tost.get("p_tost", float("nan")))
+    cross_p = float(cross_tost.get("p_tost", float("nan")))
+    np_p = float(np_tost.get("p_tost", float("nan")))
+    stress_direct = bool(stress_tost.get("equivalent_direct", False))
+    cross_direct = bool(cross_tost.get("equivalent_direct", False))
+    np_direct = bool(np_tost.get("equivalent_direct", False))
+    stress_ok = metric_equivalent(stress_tost)
+    cross_ok = metric_equivalent(cross_tost)
+    np_ok = metric_equivalent(np_tost)
+    finite_p = [value for value in (stress_p, cross_p, np_p) if math.isfinite(value)]
+    # The battery is an intersection-union test: all three metric-specific equivalence
+    # tests must reject.  No within-battery multiplicity correction is applied because
+    # the max-p conjunction is already level-alpha and conservative (Berger-Hsu 1996).
+    battery_p_iut = max(finite_p) if len(finite_p) == 3 else float("nan")
+    return {
+        "battery_n": int(metrics["battery_n"]),
+        "battery_p_iut": battery_p_iut,
+        "quality_identical_raw": bool(stress_ok and cross_ok and np_ok),
+        "battery_stress_D_mean": metric_mean(metrics["stress_d"]),
+        "battery_stress_R_mean": metric_mean(metrics["stress_r"]),
+        "battery_stress_margin": stress_margin,
+        "battery_stress_p_tost": stress_p,
+        "battery_stress_direct_equivalent": stress_direct,
+        "cross_D_mean": metric_mean(metrics["cross_d"]),
+        "cross_R_mean": metric_mean(metrics["cross_r"]),
+        "cross_margin": cross_margin,
+        "cross_p_tost": cross_p,
+        "cross_direct_equivalent": cross_direct,
+        "cross_sampled": bool(metrics["cross_sampled"]),
+        "cross_seed": int(metrics["cross_seed"]),
+        "np_D_mean": metric_mean(metrics["np_d"]),
+        "np_R_mean": metric_mean(metrics["np_r"]),
+        "np_margin": QUALITY_NP_ABS_MARGIN,
+        "np_p_tost": np_p,
+        "np_direct_equivalent": np_direct,
+    }
+
+
+def quality_stress_margin(stress_r: np.ndarray) -> float:
+    """Return the strict normalized-stress battery margin.
+
+    Parameters
+    ----------
+    stress_r : numpy.ndarray
+        Reference normalized-stress values.
+
+    Returns
+    -------
+    float
+        ``max(2% * mean(reference), 1e-6)``.
+    """
+    return max(QUALITY_STRESS_REL_MARGIN * float(np.mean(stress_r)), 1.0e-6)
+
+
+def quality_cross_margin(cross_r: np.ndarray) -> float:
+    """Return the strict crossing-count battery margin.
+
+    Parameters
+    ----------
+    cross_r : numpy.ndarray
+        Reference crossing counts or estimates.
+
+    Returns
+    -------
+    float
+        ``max(2% * mean(reference), 0.5)``.
+    """
+    return max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
+
+
+def metric_equivalent(tost: dict[str, Any]) -> bool:
+    """Return the raw alpha decision for one battery TOST.
+
+    Parameters
+    ----------
+    tost : dict[str, Any]
+        TOST result.
+
+    Returns
+    -------
+    bool
+        ``True`` for a direct degenerate-SD pass or finite ``p_tost < 0.05``.
+    """
+    if bool(tost.get("degenerate_sd", False)):
+        return bool(tost.get("equivalent_direct", False))
+    p_tost = float(tost.get("p_tost", float("nan")))
+    return math.isfinite(p_tost) and p_tost < 0.05
+
+
+def metric_mean(values: np.ndarray) -> float:
+    """Return a JSON-ready mean for a metric sample.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Numeric metric values.
+
+    Returns
+    -------
+    float
+        Mean value, or ``nan`` for an empty sample.
+    """
+    return float(np.mean(values)) if values.size else float("nan")
+
+
+def edge_index_array(edges: Iterable[tuple[int, int]]) -> np.ndarray:
+    """Build an edge-index array from payload edge tuples.
+
+    Parameters
+    ----------
+    edges : Iterable[tuple[int, int]]
+        Graph edge list.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer edge index with shape ``[2, E]``.
+    """
+    edge_list = np.asarray(tuple(edges), dtype=np.int64)
+    if edge_list.size == 0:
+        return np.empty((2, 0), dtype=np.int64)
+    return edge_list.reshape(-1, 2).T.copy()
+
+
+def crossing_count(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> int:
+    """Count or estimate crossings with deterministic large-edge sampling.
+
+    Parameters
+    ----------
+    layout : numpy.ndarray
+        Layout coordinates with shape ``[N, 2]``.
+    edge_tensor : torch.Tensor
+        Edge index with shape ``[2, E]``.
+    seed : int
+        Fixed seed for the sampled ``E > 500`` path.
+
+    Returns
+    -------
+    int
+        Exact crossing count for ``E <= 500`` or fixed-seed sampled estimate for
+        larger edge sets.
+    """
+    pos_tensor = torch.as_tensor(layout, dtype=torch.float64)
+    return int(count_crossings(pos_tensor, edge_tensor, seed=seed))
+
+
+def stable_int_seed(purpose: str) -> int:
+    """Return a stable 63-bit integer seed for a purpose string.
+
+    Parameters
+    ----------
+    purpose : str
+        Seed purpose.
+
+    Returns
+    -------
+    int
+        Non-negative integer suitable for torch and NumPy generators.
+    """
+    digest = hashlib.sha256(purpose.encode()).digest()
+    return int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
 
 
 def runtime_ratio(
@@ -1780,6 +2166,7 @@ def deterministic_row(
     stress_d = df.stress_per_layout(d_layout, pairs, dists)
     stress_r = df.stress_per_layout(r_layout, pairs, dists)
     stress_margin = 0.05 * stress_r
+    quality = deterministic_quality_metrics(f"{graph}::{engine}", d_layout, r_layout, edges, dists)
     base.update(
         {
             "toolkit_distance": toolkit_distance,
@@ -1795,7 +2182,66 @@ def deterministic_row(
             "deterministic_verdict": deterministic_verdict(toolkit_distance, stress_d, stress_r),
         }
     )
+    base.update(quality)
     return base
+
+
+def deterministic_quality_metrics(
+    combo_id: str,
+    d_layout: np.ndarray,
+    r_layout: np.ndarray,
+    edges: Iterable[tuple[int, int]],
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Compute the single-pair strict quality battery for deterministic rows.
+
+    Parameters
+    ----------
+    combo_id : str
+        Stable combo identifier.
+    d_layout : numpy.ndarray
+        Reimplementation layout with shape ``[N, 2]``.
+    r_layout : numpy.ndarray
+        Reference layout with shape ``[N, 2]``.
+    edges : Iterable[tuple[int, int]]
+        Graph edge list.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Single-pair stress, crossing, and neighborhood deltas for deterministic
+        3Q assignment.
+    """
+    edge_index = edge_index_array(edges)
+    edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
+    cross_seed = stable_int_seed(f"{combo_id}::r70::crossings")
+    stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists)
+    stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists)
+    cross_d = crossing_count(d_layout, edge_tensor, cross_seed)
+    cross_r = crossing_count(r_layout, edge_tensor, cross_seed)
+    np_d = neighborhood_preservation(d_layout, dists, k=10)
+    np_r = neighborhood_preservation(r_layout, dists, k=10)
+    stress_rel_delta = abs(stress_d - stress_r) / max(stress_r, df.EPSILON)
+    crossings_delta = abs(cross_d - cross_r)
+    neighborhood_delta = abs(np_d - np_r)
+    return {
+        "battery_n": 1,
+        "battery_stress_D_mean": stress_d,
+        "battery_stress_R_mean": stress_r,
+        "stress_rel_delta": stress_rel_delta,
+        "cross_D_mean": float(cross_d),
+        "cross_R_mean": float(cross_r),
+        "crossings_delta": crossings_delta,
+        "cross_margin": max(QUALITY_CROSS_REL_MARGIN * float(cross_r), QUALITY_CROSS_ABS_FLOOR),
+        "cross_sampled": edge_index.shape[1] > 500,
+        "cross_seed": cross_seed,
+        "np_D_mean": np_d,
+        "np_R_mean": np_r,
+        "neighborhood_preservation_delta": neighborhood_delta,
+        "np_margin": QUALITY_NP_ABS_MARGIN,
+    }
 
 
 def _toolkit_child(conn, d_layout, r_layout, edge_array, engine: str) -> None:
