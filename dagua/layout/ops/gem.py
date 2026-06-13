@@ -210,6 +210,32 @@ def _is_ogdf_fidelity_mode(fidelity_mode: GEMFidelityMode) -> bool:
     raise ValueError("GEM fidelity_mode must be None, False, True, or 'ogdf'.")
 
 
+def _resolve_ogdf_gem_update_budget(
+    requested_rounds: int,
+    num_nodes: int,
+    max_rounds: int,
+) -> int:
+    """Translate OGDF ``numberOfRounds`` into node-update iterations.
+
+    Parameters
+    ----------
+    requested_rounds : int
+        Value passed to OGDF ``GEMLayout::numberOfRounds``.
+    num_nodes : int
+        Number of nodes in the component-owning graph.
+    max_rounds : int
+        Dagua's safety cap for exact scalar node updates.
+
+    Returns
+    -------
+    int
+        Maximum scalar node-update count for the native OGDF-fidelity loop.
+    """
+    if requested_rounds <= 0 or num_nodes <= 0:
+        return 0
+    return min(int(requested_rounds) * int(num_nodes), int(max_rounds))
+
+
 def _mt19937_first_uint32(seed: int) -> int:
     """Return the first C++ ``std::mt19937`` output after ``seed``.
 
@@ -1261,8 +1287,15 @@ class GEMPrepareState(Op):
 
         ogdf_fidelity = _is_ogdf_fidelity_mode(self.fidelity_mode)
         extent = layout_extent(problem.num_nodes, problem.node_sizes)
-        capped_iters = min(int(state.total_steps), self.config.max_rounds)
         is_sequential = problem.num_nodes <= self.config.sequential_node_limit
+        if ogdf_fidelity and is_sequential:
+            capped_iters = _resolve_ogdf_gem_update_budget(
+                requested_rounds=int(state.total_steps),
+                num_nodes=problem.num_nodes,
+                max_rounds=self.config.max_rounds,
+            )
+        else:
+            capped_iters = min(int(state.total_steps), self.config.max_rounds)
         state.extras["gem_extent"] = extent
         state.extras["gem_capped_iters"] = capped_iters
         state.extras["gem_device"] = layout_device(problem.edge_index, problem.node_sizes)
