@@ -16,13 +16,13 @@ from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext,
 
 
 def build_sgd2_multi_pipeline(
-    steps: int = 10_000,
+    steps: int = 2_000,
     criteria: Optional[Dict[str, float]] = None,
     criteria_schedules: Optional[Dict[str, SmoothSteps]] = None,
     lr: float = 1.0,
     momentum: float = 0.7,
-    grad_clamp: float = 4.0,
-    batch_size: int = 16,
+    grad_clamp: float = 5.0,
+    batch_size: int = 128,
     fidelity_mode: bool = False,
 ) -> Pipeline:
     """Build an ``(SGD)^2`` multicriteria layout pipeline.
@@ -41,7 +41,7 @@ def build_sgd2_multi_pipeline(
 
     Parameters
     ----------
-    steps : int, default=10000
+    steps : int, default=2000
         Maximum number of SGD iterations.
     criteria : dict[str, float] | None, default=None
         Static per-criterion weights.
@@ -51,10 +51,11 @@ def build_sgd2_multi_pipeline(
         SGD learning rate.
     momentum : float, default=0.7
         SGD momentum.
-    grad_clamp : float, default=4.0
+    grad_clamp : float, default=5.0
         Symmetric gradient clamp.
-    batch_size : int, default=16
-        Global mini-batch size.
+    batch_size : int, default=128
+        Global mini-batch size matching the reference adapter's default
+        per-criterion sample size.
     fidelity_mode : bool, default=False
         Accepted for interface parity with ``layout_sgd2_multi_pipeline``.
 
@@ -105,13 +106,13 @@ def layout_sgd2_multi_pipeline(
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 42,
-    steps: int = 10_000,
+    steps: int = 2_000,
     criteria: Optional[Dict[str, float]] = None,
     criteria_schedules: Optional[Dict[str, SmoothSteps]] = None,
     lr: float = 1.0,
     momentum: float = 0.7,
-    grad_clamp: float = 4.0,
-    batch_size: int = 16,
+    grad_clamp: float = 5.0,
+    batch_size: int = 128,
     edge_weights: Optional[torch.Tensor] = None,
     use_reference_fallback: bool = False,
     fidelity_mode: bool = False,
@@ -129,7 +130,7 @@ def layout_sgd2_multi_pipeline(
         kept for interface compatibility.
     seed : int, default=42
         Random seed.
-    steps : int, default=10000
+    steps : int, default=2000
         Maximum SGD iterations.
     criteria : dict[str, float] | None, default=None
         Static criterion weights.
@@ -139,10 +140,11 @@ def layout_sgd2_multi_pipeline(
         SGD learning rate.
     momentum : float, default=0.7
         SGD momentum.
-    grad_clamp : float, default=4.0
+    grad_clamp : float, default=5.0
         Symmetric gradient clamp.
-    batch_size : int, default=16
-        Mini-batch size.
+    batch_size : int, default=128
+        Mini-batch size matching the reference adapter's default
+        per-criterion sample size.
     edge_weights : torch.Tensor, optional
         Optional per-edge weights with shape ``[E]``.
     use_reference_fallback : bool, default=False
