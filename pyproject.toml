@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dagua"
-version = "0.2.0"
+version = "0.3.0"
 description = "GPU-accelerated differentiable graph layout engine built on PyTorch"
 readme = "README.md"
 license = "MIT"
@@ -67,6 +67,7 @@ Issues = "https://github.com/johnmarktaylor91/dagua/issues"
 
 [project.scripts]
 dagua = "dagua.cli:main"
+
 
 
 [tool.setuptools.packages.find]
