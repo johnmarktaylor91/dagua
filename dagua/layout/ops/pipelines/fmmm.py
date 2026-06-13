@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -12,10 +13,13 @@ import torch
 from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.cluster_geometry import ClusterTree
 from dagua.layout.ops.fmmm import (
+    _GALAXY_CHOICE_LOWER,
+    _build_hierarchy,
     _FinalizeFMMMPositions,
     _InitializeCoarsestLevel,
     _InitializeFMMMState,
     _InitializeFMMMStateConfig,
+    _prolong_positions,
     _RefineCoarsestLevel,
     _SingleLevelFallback,
     _UncoarsenLoop,
@@ -352,6 +356,7 @@ def _ogdf_fmmm_repulsive_forces(positions: list[list[float]]) -> list[list[float
 def _ogdf_fmmm_attractive_forces(
     positions: list[list[float]],
     edges: Sequence[Tuple[int, int]],
+    ideal_edge_lengths: Optional[Sequence[float]] = None,
 ) -> list[list[float]]:
     """Calculate OGDF FMMM ``ForceModel::New`` attractive forces.
 
@@ -361,16 +366,32 @@ def _ogdf_fmmm_attractive_forces(
         Current node coordinates.
     edges : Sequence[tuple[int, int]]
         Simple loop-free edge list.
+    ideal_edge_lengths : Sequence[float], optional
+        Desired edge lengths aligned with ``edges``. If omitted, the default
+        single-level ideal edge length is used for all edges.
 
     Returns
     -------
     list[list[float]]
         Attractive force vectors.
+
+    Raises
+    ------
+    ValueError
+        If ``ideal_edge_lengths`` is provided with the wrong length.
     """
+    if ideal_edge_lengths is not None and len(ideal_edge_lengths) != len(edges):
+        raise ValueError("ideal_edge_lengths must have one value per edge.")
+
     forces = [[0.0, 0.0] for _ in positions]
-    ideal_length = _OGDF_FMMM_IDEAL_EDGE_LENGTH
-    ideal_cubed = ideal_length * ideal_length * ideal_length
-    for source, target in edges:
+    for edge_pos, (source, target) in enumerate(edges):
+        ideal_length = (
+            _OGDF_FMMM_IDEAL_EDGE_LENGTH
+            if ideal_edge_lengths is None
+            else float(ideal_edge_lengths[edge_pos])
+        )
+        ideal_length = max(ideal_length, _OGDF_FMMM_EPSILON)
+        ideal_cubed = ideal_length * ideal_length * ideal_length
         dx = positions[target][0] - positions[source][0]
         dy = positions[target][1] - positions[source][1]
         distance = math.sqrt(dx * dx + dy * dy)
@@ -396,6 +417,7 @@ def _ogdf_fmmm_combined_forces(
     iter_index: int,
     fine_tuning_step: int,
     cool_factor: float,
+    average_ideal_edge_length: float = _OGDF_FMMM_IDEAL_EDGE_LENGTH,
 ) -> Tuple[list[list[float]], float]:
     """Combine OGDF attractive and repulsive forces.
 
@@ -413,6 +435,8 @@ def _ogdf_fmmm_combined_forces(
         OGDF phase selector: ``0`` main, ``1`` post cooldown, ``2`` fine tune.
     cool_factor : float
         Incoming OGDF cool factor state.
+    average_ideal_edge_length : float, default=_OGDF_FMMM_IDEAL_EDGE_LENGTH
+        Average desired edge length for the current multilevel graph.
 
     Returns
     -------
@@ -430,7 +454,7 @@ def _ogdf_fmmm_combined_forces(
     spring_strength = 1.0 if fine_tuning_step <= 1 else _OGDF_FMMM_POST_SPRING_STRENGTH
     rep_strength = 1.0 if fine_tuning_step <= 1 else min(0.2, 400.0 / float(len(attr)))
     max_radius = boxlength / 1000.0 if iter_index == 1 else boxlength / 5.0
-    average_sq = _OGDF_FMMM_IDEAL_EDGE_LENGTH * _OGDF_FMMM_IDEAL_EDGE_LENGTH
+    average_sq = average_ideal_edge_length * average_ideal_edge_length
     forces: list[list[float]] = []
     for node_index in range(len(attr)):
         fx = spring_strength * attr[node_index][0] + rep_strength * rep[node_index][0]
@@ -506,6 +530,32 @@ def _ogdf_fmmm_prevent_oscillations(
     return forces
 
 
+def _ogdf_fmmm_average_ideal_edge_length(
+    ideal_edge_lengths: Optional[Sequence[float]],
+    has_edges: bool,
+) -> float:
+    """Return OGDF's average desired edge length for a force level.
+
+    Parameters
+    ----------
+    ideal_edge_lengths : Sequence[float], optional
+        Desired edge lengths for the current level. ``None`` keeps the legacy
+        single-level default.
+    has_edges : bool
+        Whether the current level has at least one edge.
+
+    Returns
+    -------
+    float
+        Average desired edge length. OGDF uses ``50`` for edgeless levels.
+    """
+    if ideal_edge_lengths is None:
+        return _OGDF_FMMM_IDEAL_EDGE_LENGTH
+    if not has_edges:
+        return 50.0
+    return sum(float(length) for length in ideal_edge_lengths) / float(len(ideal_edge_lengths))
+
+
 def _ogdf_fmmm_force_iteration(
     positions: list[list[float]],
     edges: Sequence[Tuple[int, int]],
@@ -515,6 +565,7 @@ def _ogdf_fmmm_force_iteration(
     iter_index: int,
     fine_tuning_step: int,
     cool_factor: float,
+    ideal_edge_lengths: Optional[Sequence[float]] = None,
 ) -> Tuple[float, Tuple[float, float], float]:
     """Execute one OGDF FMMM force iteration.
 
@@ -536,19 +587,25 @@ def _ogdf_fmmm_force_iteration(
         OGDF phase selector.
     cool_factor : float
         Incoming cool factor.
+    ideal_edge_lengths : Sequence[float], optional
+        Desired edge lengths aligned with ``edges`` for multilevel fidelity.
 
     Returns
     -------
     tuple[float, tuple[float, float], float]
         Updated ``boxlength``, ``down_left_corner``, and ``cool_factor``.
     """
+    average_ideal_edge_length = _ogdf_fmmm_average_ideal_edge_length(
+        ideal_edge_lengths,
+        has_edges=bool(edges),
+    )
     boxlength, down_left_corner = _ogdf_fmmm_adjust_positions(
         positions,
-        _OGDF_FMMM_IDEAL_EDGE_LENGTH,
+        average_ideal_edge_length,
         down_left_corner,
         boxlength,
     )
-    attr = _ogdf_fmmm_attractive_forces(positions, edges)
+    attr = _ogdf_fmmm_attractive_forces(positions, edges, ideal_edge_lengths)
     rep = _ogdf_fmmm_repulsive_forces(positions)
     forces, cool_factor = _ogdf_fmmm_combined_forces(
         attr,
@@ -557,6 +614,7 @@ def _ogdf_fmmm_force_iteration(
         iter_index,
         fine_tuning_step,
         cool_factor,
+        average_ideal_edge_length,
     )
     forces = _ogdf_fmmm_prevent_oscillations(forces, last_movement, iter_index)
     for node_index, force in enumerate(forces):
@@ -569,6 +627,7 @@ def _ogdf_fmmm_force_iteration(
 def _ogdf_fmmm_adapt_to_ideal_edge_length(
     positions: list[list[float]],
     edges: Sequence[Tuple[int, int]],
+    ideal_edge_lengths: Optional[Sequence[float]] = None,
 ) -> None:
     """Scale drawing to OGDF's ideal average edge length.
 
@@ -578,18 +637,30 @@ def _ogdf_fmmm_adapt_to_ideal_edge_length(
         Mutable node coordinates.
     edges : Sequence[tuple[int, int]]
         Simple loop-free edge list.
+    ideal_edge_lengths : Sequence[float], optional
+        Desired edge lengths aligned with ``edges``. If omitted, all edges use
+        the default single-level desired length.
 
     Returns
     -------
     None
         Mutates ``positions`` in place.
     """
+    if ideal_edge_lengths is not None and len(ideal_edge_lengths) != len(edges):
+        raise ValueError("ideal_edge_lengths must have one value per edge.")
+
     sum_real = 0.0
-    for source, target in edges:
+    sum_ideal = 0.0
+    for edge_pos, (source, target) in enumerate(edges):
         dx = positions[source][0] - positions[target][0]
         dy = positions[source][1] - positions[target][1]
         sum_real += math.sqrt(dx * dx + dy * dy)
-    scale = 1.0 if sum_real == 0.0 else (_OGDF_FMMM_IDEAL_EDGE_LENGTH * len(edges)) / sum_real
+        sum_ideal += (
+            _OGDF_FMMM_IDEAL_EDGE_LENGTH
+            if ideal_edge_lengths is None
+            else float(ideal_edge_lengths[edge_pos])
+        )
+    scale = 1.0 if sum_real == 0.0 else sum_ideal / sum_real
     for point in positions:
         point[0] *= scale
         point[1] *= scale
@@ -750,6 +821,280 @@ def _ogdf_fmmm_simple_edges(edge_index: torch.Tensor) -> list[Tuple[int, int]]:
     return edges
 
 
+def _ogdf_fmmm_level_edges(edge_index: torch.Tensor) -> list[Tuple[int, int]]:
+    """Return a level graph edge list from a unique edge tensor.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Unique level edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Edges in tensor order.
+    """
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    return [
+        (int(cpu_edges[0, edge_pos].item()), int(cpu_edges[1, edge_pos].item()))
+        for edge_pos in range(int(cpu_edges.shape[1]))
+    ]
+
+
+def _ogdf_fmmm_level_edge_lengths(edge_lengths: torch.Tensor) -> list[float]:
+    """Return hierarchy edge lengths as Python floats.
+
+    Parameters
+    ----------
+    edge_lengths : torch.Tensor
+        Per-edge desired lengths with shape ``[E]`` from the native hierarchy.
+
+    Returns
+    -------
+    list[float]
+        Desired edge lengths in OGDF coordinates as Python floats.
+    """
+    return [float(length) for length in edge_lengths.detach().to(device="cpu").tolist()]
+
+
+def _ogdf_fmmm_scale_hierarchy_lengths(
+    levels: Sequence[Any],
+    hierarchy_steps: Sequence[Any],
+) -> None:
+    """Scale native hierarchy length factors into OGDF coordinate units.
+
+    Parameters
+    ----------
+    levels : Sequence[Any]
+        FM^3 hierarchy levels returned by ``_build_hierarchy``.
+    hierarchy_steps : Sequence[Any]
+        Prolongation metadata returned by ``_build_hierarchy``.
+
+    Returns
+    -------
+    None
+        Mutates the private hierarchy objects in place.
+    """
+    for level in levels:
+        level.edge_lengths = level.edge_lengths * _OGDF_FMMM_IDEAL_EDGE_LENGTH
+    for step in hierarchy_steps:
+        step.dedicated_sun_distance = [
+            float(distance) * _OGDF_FMMM_IDEAL_EDGE_LENGTH
+            for distance in step.dedicated_sun_distance
+        ]
+
+
+def _ogdf_fmmm_max_mult_iter(
+    act_level: int,
+    max_level: int,
+    node_nr: int,
+    fixed_iterations: int,
+) -> int:
+    """Return OGDF ``get_max_mult_iter`` for linearly decreasing iterations.
+
+    Parameters
+    ----------
+    act_level : int
+        Current hierarchy level, where ``0`` is finest and ``max_level`` is
+        coarsest.
+    max_level : int
+        Coarsest hierarchy level index.
+    node_nr : int
+        Node count for the current level.
+    fixed_iterations : int
+        OGDF ``fixedIterations`` option.
+
+    Returns
+    -------
+    int
+        Number of force iterations for this level.
+    """
+    max_iter_factor = 10
+    if max_level == 0:
+        iterations = max_iter_factor * int(fixed_iterations)
+    else:
+        iterations = int(fixed_iterations) + int(
+            (float(act_level) / float(max_level))
+            * float(max_iter_factor - 1)
+            * float(fixed_iterations)
+        )
+    if node_nr <= 500 and iterations < 100:
+        return 100
+    return iterations
+
+
+def _ogdf_fmmm_postprocess_fidelity(
+    positions: list[list[float]],
+    edges: Sequence[Tuple[int, int]],
+    ideal_edge_lengths: Optional[Sequence[float]],
+    last_movement: list[list[float]],
+    boxlength: float,
+    down_left_corner: Tuple[float, float],
+    cool_factor: float,
+) -> Tuple[float, Tuple[float, float], float]:
+    """Run OGDF FMMM level-0 cooldown, fine-tune, resize, pack, and floor.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Mutable node coordinates.
+    edges : Sequence[tuple[int, int]]
+        Simple loop-free edge list.
+    ideal_edge_lengths : Sequence[float], optional
+        Desired edge lengths aligned with ``edges``.
+    last_movement : list[list[float]]
+        Last movement vectors from the main force loop.
+    boxlength : float
+        Current computational box side length.
+    down_left_corner : tuple[float, float]
+        Current computational box lower-left corner.
+    cool_factor : float
+        Current OGDF cool factor.
+
+    Returns
+    -------
+    tuple[float, tuple[float, float], float]
+        Updated ``boxlength``, ``down_left_corner``, and ``cool_factor``.
+    """
+    average_ideal_edge_length = _ogdf_fmmm_average_ideal_edge_length(
+        ideal_edge_lengths,
+        has_edges=bool(edges),
+    )
+    for iter_index in range(1, 11):
+        boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
+            positions,
+            edges,
+            last_movement,
+            boxlength,
+            down_left_corner,
+            iter_index,
+            1,
+            cool_factor,
+            ideal_edge_lengths,
+        )
+
+    if edges:
+        _ogdf_fmmm_adapt_to_ideal_edge_length(positions, edges, ideal_edge_lengths)
+        boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+
+    for iter_index in range(1, _OGDF_FMMM_FINE_TUNING_ITERATIONS + 1):
+        boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
+            positions,
+            edges,
+            last_movement,
+            boxlength,
+            down_left_corner,
+            iter_index,
+            2,
+            cool_factor,
+            ideal_edge_lengths,
+        )
+
+    if edges:
+        _ogdf_fmmm_adapt_to_ideal_edge_length(positions, edges, ideal_edge_lengths)
+    _ogdf_fmmm_pack_single_component(positions)
+    boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+    return _ogdf_fmmm_adjust_positions(
+        positions,
+        average_ideal_edge_length,
+        down_left_corner,
+        boxlength,
+    ) + (cool_factor,)
+
+
+def _layout_ogdf_fmmm_multilevel_fidelity(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    fixed_iterations: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Run OGDF FMMM's multilevel fidelity scheme on a single component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    fixed_iterations : int
+        OGDF ``fixedIterations`` value.
+    seed : int
+        OGDF ``randSeed`` value.
+    device : torch.device
+        Output tensor device.
+
+    Returns
+    -------
+    torch.Tensor
+        Final OGDF-coordinate positions with shape ``[N, 2]``.
+    """
+    levels, hierarchy_steps = _build_hierarchy(
+        edge_index,
+        num_nodes,
+        seed=seed,
+        edge_weights=None,
+        galaxy_choice=_GALAXY_CHOICE_LOWER,
+        sum_parallel_weights=False,
+    )
+    _ogdf_fmmm_scale_hierarchy_lengths(levels, hierarchy_steps)
+    max_level = len(levels) - 1
+    positions = _ogdf_fmmm_random_placement(levels[max_level].num_nodes, seed)
+    boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+    prolong_rng = random.Random(seed)
+
+    for act_level in range(max_level, -1, -1):
+        if act_level < max_level:
+            coarse_positions = torch.tensor(positions, dtype=torch.float64)
+            fine_positions = _prolong_positions(
+                coarse_positions,
+                hierarchy_steps[act_level],
+                prolong_rng,
+            )
+            positions = [
+                [float(point[0].item()), float(point[1].item())] for point in fine_positions
+            ]
+            boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+
+        level = levels[act_level]
+        edges = _ogdf_fmmm_level_edges(level.edge_index)
+        ideal_edge_lengths = _ogdf_fmmm_level_edge_lengths(level.edge_lengths)
+        last_movement = [[0.0, 0.0] for _ in range(level.num_nodes)]
+        cool_factor = 1.0
+        max_iterations = _ogdf_fmmm_max_mult_iter(
+            act_level,
+            max_level,
+            level.num_nodes,
+            fixed_iterations,
+        )
+        for iter_index in range(1, max_iterations + 1):
+            boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
+                positions,
+                edges,
+                last_movement,
+                boxlength,
+                down_left_corner,
+                iter_index,
+                0,
+                cool_factor,
+                ideal_edge_lengths,
+            )
+
+        if act_level == 0:
+            boxlength, down_left_corner, cool_factor = _ogdf_fmmm_postprocess_fidelity(
+                positions,
+                edges,
+                ideal_edge_lengths,
+                last_movement,
+                boxlength,
+                down_left_corner,
+                cool_factor,
+            )
+
+    del boxlength, down_left_corner, cool_factor
+    return torch.tensor(positions, dtype=torch.float64, device=device)
+
+
 def _layout_ogdf_fmmm_small_fidelity(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -796,44 +1141,16 @@ def _layout_ogdf_fmmm_small_fidelity(
             cool_factor,
         )
 
-    for iter_index in range(1, 11):
-        boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
-            positions,
-            edges,
-            last_movement,
-            boxlength,
-            down_left_corner,
-            iter_index,
-            1,
-            cool_factor,
-        )
-
-    if edges:
-        _ogdf_fmmm_adapt_to_ideal_edge_length(positions, edges)
-        boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
-
-    for iter_index in range(1, _OGDF_FMMM_FINE_TUNING_ITERATIONS + 1):
-        boxlength, down_left_corner, cool_factor = _ogdf_fmmm_force_iteration(
-            positions,
-            edges,
-            last_movement,
-            boxlength,
-            down_left_corner,
-            iter_index,
-            2,
-            cool_factor,
-        )
-
-    if edges:
-        _ogdf_fmmm_adapt_to_ideal_edge_length(positions, edges)
-    _ogdf_fmmm_pack_single_component(positions)
-    boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
-    boxlength, down_left_corner = _ogdf_fmmm_adjust_positions(
+    boxlength, down_left_corner, cool_factor = _ogdf_fmmm_postprocess_fidelity(
         positions,
-        _OGDF_FMMM_IDEAL_EDGE_LENGTH,
-        down_left_corner,
+        edges,
+        None,
+        last_movement,
         boxlength,
+        down_left_corner,
+        cool_factor,
     )
+    del cool_factor
     del boxlength, down_left_corner
     return torch.tensor(positions, dtype=torch.float64, device=device)
 
@@ -5602,6 +5919,14 @@ def layout_fmmm_pipeline(
 
     effective_reference_mode = reference_mode or fidelity_mode
     if effective_reference_mode:
+        if num_nodes > 50:
+            return _layout_ogdf_fmmm_multilevel_fidelity(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                fixed_iterations=steps,
+                seed=seed,
+                device=device,
+            ).to(dtype=torch.float32)
         return _layout_ogdf_fmmm_small_fidelity(
             edge_index=edge_index,
             num_nodes=num_nodes,
