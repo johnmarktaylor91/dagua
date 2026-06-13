@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from dagua.eval.competitors.classic_competitor import _quick_classic
+from dagua.eval.competitors.igraph_competitor import IgraphDRL
 from dagua.eval.competitors.networkx_competitor import _graph_to_nx
 from dagua.eval.competitors.sgd2_competitor import (
     _build_condensed_distances,
@@ -148,6 +149,135 @@ class TestClassicAdapterWeightForwarding:
 
 class TestExternalAdapterWeightEncoding:
     """Coverage for non-classic adapter preprocessing helpers."""
+
+    def test_igraph_drl_forwards_weight_attribute_name(self, monkeypatch: Any) -> None:
+        """The igraph DrL adapter should pass weighted graphs via ``weights``."""
+        graph = _weighted_path_graph()
+        seen: dict[str, Any] = {}
+
+        class _FakeEdgeSeq:
+            """Minimal edge-sequence stand-in that stores edge attributes."""
+
+            def __init__(self) -> None:
+                """Create empty edge-attribute storage."""
+                self._attrs: dict[str, list[float]] = {}
+
+            def __setitem__(self, key: str, value: list[float]) -> None:
+                """Store an edge attribute list.
+
+                Parameters
+                ----------
+                key : str
+                    Attribute name.
+                value : list[float]
+                    Attribute values aligned with graph edges.
+
+                Returns
+                -------
+                None
+                    The attribute store is updated in place.
+                """
+                self._attrs[key] = value
+
+            def attribute_names(self) -> list[str]:
+                """Return stored edge-attribute names.
+
+                Returns
+                -------
+                list[str]
+                    Attribute names assigned by the adapter.
+                """
+                return list(self._attrs)
+
+        class _FakeGraph:
+            """Minimal igraph.Graph replacement for adapter keyword capture."""
+
+            def __init__(self, directed: bool = True) -> None:
+                """Create a fake graph.
+
+                Parameters
+                ----------
+                directed : bool, default=True
+                    Whether the graph should be treated as directed.
+                """
+                self.directed = directed
+                self.es = _FakeEdgeSeq()
+
+            def add_vertices(self, count: int) -> None:
+                """Record the requested vertex count.
+
+                Parameters
+                ----------
+                count : int
+                    Number of vertices to add.
+
+                Returns
+                -------
+                None
+                    The count is stored for inspection.
+                """
+                seen["vertices"] = count
+
+            def add_edges(self, edges: list[tuple[int, int]]) -> None:
+                """Record the requested edge list.
+
+                Parameters
+                ----------
+                edges : list[tuple[int, int]]
+                    Edges to add.
+
+                Returns
+                -------
+                None
+                    The edge list is stored for inspection.
+                """
+                seen["edges"] = edges
+
+            def layout(self, algo: str, **kwargs: Any) -> list[list[float]]:
+                """Capture layout kwargs and return trivial coordinates.
+
+                Parameters
+                ----------
+                algo : str
+                    igraph layout algorithm name.
+                **kwargs : Any
+                    Layout keyword arguments forwarded by the adapter.
+
+                Returns
+                -------
+                list[list[float]]
+                    Coordinates shaped ``[N, 2]``.
+                """
+                seen["algo"] = algo
+                seen["kwargs"] = kwargs
+                return [[0.0, 0.0] for _ in range(seen["vertices"])]
+
+        def _set_random_number_generator(generator: object) -> None:
+            """Capture igraph RNG hook calls.
+
+            Parameters
+            ----------
+            generator : object
+                RNG object or ``None`` requested by the adapter.
+
+            Returns
+            -------
+            None
+                The call count is tracked in ``seen``.
+            """
+            seen["rng_calls"] = int(seen.get("rng_calls", 0)) + 1
+
+        fake_igraph = types.SimpleNamespace(
+            Graph=_FakeGraph,
+            set_random_number_generator=_set_random_number_generator,
+        )
+        monkeypatch.setitem(sys.modules, "igraph", fake_igraph)
+
+        result = IgraphDRL().layout(graph, seed=42)
+
+        assert result.error is None
+        assert seen["algo"] == "drl"
+        assert seen["kwargs"]["weights"] == "weight"
 
     def test_graph_to_nx_sets_weight_attribute(self) -> None:
         """NetworkX conversion copies edge weights to the ``weight`` attribute."""
