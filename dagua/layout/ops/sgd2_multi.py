@@ -965,20 +965,50 @@ class _CyclicSampler:
         if self._total <= 0:
             return torch.empty((0,), dtype=torch.long, device=self._device)
         if self._perm.numel() == 0 or self._offset >= self._total:
-            # PyTorch's DataLoader(shuffle=True) uses RandomSampler without an
-            # explicit generator: it first draws a base seed from the global
-            # CPU RNG, then uses a fresh local generator for that epoch's
-            # randperm.  Matching this two-stage stream keeps all criterion
-            # samplers aligned with upstream GD2.
-            base_seed = int(torch.empty((), dtype=torch.int64).random_().item())
+            # A fresh DataLoader iterator consumes one worker base seed before
+            # RandomSampler draws the local-generator seed used for randperm.
+            # Upstream GD2 recreates the iterator at each exhausted epoch.
+            torch.empty((), dtype=torch.int64).random_()
+            sampler_seed = int(torch.empty((), dtype=torch.int64).random_().item())
             generator = torch.Generator()
-            generator.manual_seed(base_seed)
+            generator.manual_seed(sampler_seed)
             self._perm = torch.randperm(self._total, generator=generator).to(device=self._device)
             self._offset = 0
         bs = min(batch_size, self._total - self._offset)
         out = self._perm[self._offset : self._offset + bs]
         self._offset += bs
         return out
+
+
+def _reference_ideal_edge_indices(
+    edge_count: int,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Sample ideal-edge indices with upstream GD2's Python RNG path.
+
+    Parameters
+    ----------
+    edge_count : int
+        Number of unique undirected edges available for sampling.
+    batch_size : int
+        Requested mini-batch size.
+    device : torch.device
+        Device used for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge-index tensor with shape ``[B]``. The sample is without
+        replacement and uses Python ``random.sample`` to match the reference
+        ``criteria.ideal_edge_length`` implementation.
+    """
+    if edge_count <= 0:
+        return torch.empty((0,), dtype=torch.long, device=device)
+
+    sample_size = min(batch_size, edge_count)
+    sampled = random.sample(list(range(edge_count)), sample_size)
+    return torch.tensor(sampled, dtype=torch.long, device=device)
 
 
 def _stress_loss(
@@ -1706,10 +1736,16 @@ def _criterion_loss(
         )
     if name == "ideal_edge_length":
         if sampler is not None:
-            idx = sampler.sample(batch_size)
-            edge_batch = state.edges[:, idx]
-        else:
-            edge_batch = _sample_edges(state.edges, batch_size=batch_size)
+            # The reference loop advances the shuffled DataLoader for
+            # ideal-edge length, then the criterion ignores that batch and
+            # samples edges again via Python's random module.
+            sampler.sample(batch_size)
+        idx = _reference_ideal_edge_indices(
+            edge_count=state.edges.shape[1],
+            batch_size=batch_size,
+            device=state.device,
+        )
+        edge_batch = state.edges[:, idx]
         return _ideal_edge_length_loss(
             pos=pos,
             edge_batch=edge_batch,
@@ -2046,11 +2082,11 @@ class _InitSGD2MultiState(Op):
 
     def __init__(
         self,
-        steps: int = 10_000,
+        steps: int = 2_000,
         lr: float = 1.0,
         momentum: float = 0.7,
-        grad_clamp: float = 4.0,
-        batch_size: int = 16,
+        grad_clamp: float = 5.0,
+        batch_size: int = 128,
         criteria: Optional[Dict[str, float]] = None,
         criteria_schedules: Optional[Dict[str, SmoothSteps]] = None,
     ) -> None:
@@ -2185,11 +2221,11 @@ class _RunSGD2MultiOptimization(Op):
 
     def __init__(
         self,
-        steps: int = 10_000,
+        steps: int = 2_000,
         lr: float = 1.0,
         momentum: float = 0.7,
-        grad_clamp: float = 4.0,
-        batch_size: int = 16,
+        grad_clamp: float = 5.0,
+        batch_size: int = 128,
         scheduler_factor: float = 0.9,
         scheduler_patience: int = 20_000,
         scheduler_min_lr: float = 1.0e-5,

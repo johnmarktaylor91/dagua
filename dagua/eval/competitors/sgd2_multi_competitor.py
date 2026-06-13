@@ -462,14 +462,14 @@ class SGD2MultiRef(CompetitorBase):
                 if s != t:
                     G_nx.add_edge(s, t)
 
-            # Run GD2 with stress criterion
+            # Run GD2 with the benchmark's native multicriteria objective.
             if seed is not None:
                 torch.manual_seed(seed)
                 np.random.seed(seed)
                 random.seed(seed)
 
             optimize_kwargs: dict[str, Any] = {
-                "criteria_weights": {"stress": 1.0},
+                "criteria_weights": {"stress": 1.0, "ideal_edge_length": 1.0},
                 "max_iter": 2000,
                 "optimizer_kwargs": {"lr": 0.01},
             }
