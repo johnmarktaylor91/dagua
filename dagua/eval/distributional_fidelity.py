@@ -360,6 +360,9 @@ def assign_rung(record: dict[str, Any]) -> tuple[str, list[str]]:
         return "INSUFFICIENT_DATA", annotations
     mode = str(record.get("mode", ""))
     quality = bool(record.get("quality_equivalent", False) or _q_lt(record.get("q_tost"), 0.05))
+    quality_identical = bool(
+        record.get("quality_identical", False) or _q_lt(record.get("q_battery"), 0.05)
+    )
     if mode == "A":
         tracking = bool(record.get("seed_tracking", False)) or (
             _q_lt(record.get("q_track"), 0.05) and float(record.get("track_ratio", math.inf)) <= 0.5
@@ -370,8 +373,12 @@ def assign_rung(record: dict[str, Any]) -> tuple[str, list[str]]:
             diag = float(record.get("mean_diag_B", math.inf))
             if diag < NEAR_DETERMINISTIC_DISTANCE:
                 return "1", annotations
+            if quality_identical:
+                return "3Q", annotations
             return ("3", annotations) if quality else ("4", annotations)
         if bool(record.get("one_sided_degenerate", False)):
+            if quality_identical:
+                return "3Q", annotations
             return ("3", annotations) if quality else ("4", annotations)
         if dist_equiv and tracking:
             return "1", annotations
@@ -379,13 +386,19 @@ def assign_rung(record: dict[str, Any]) -> tuple[str, list[str]]:
             annotations.append("TRACKING_BUT_SHIFTED")
         if dist_equiv:
             return "2", annotations
+        if quality_identical:
+            return "3Q", annotations
         return ("3", annotations) if quality else ("4", annotations)
     if mode == "B":
         if bool(record.get("near_deterministic", False)):
             return (
                 ("2'", annotations)
                 if float(record.get("d_R", math.inf)) < 1.0e-3
-                else (("3", annotations) if quality else ("4", annotations))
+                else (
+                    ("3Q", annotations)
+                    if quality_identical
+                    else (("3", annotations) if quality else ("4", annotations))
+                )
             )
         informative = not bool(record.get("typicality_uninformative", False))
         ref_typical = bool(record.get("ref_typical", False)) or (
@@ -393,6 +406,8 @@ def assign_rung(record: dict[str, Any]) -> tuple[str, list[str]]:
         )
         if informative and ref_typical:
             return "2'", annotations
+        if quality_identical:
+            return "3Q", annotations
         return ("3", annotations) if quality else ("4", annotations)
     return "4", annotations
 

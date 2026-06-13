@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the r70 definitive fidelity report and four-tier categorization."""
+"""Assemble the r70 definitive fidelity report and five-tier categorization."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ SIZE_BINS = (
     ("201-1000", 201, 1000),
     (">1000", 1001, None),
 )
-PASSING_RUNGS = {"0", "1", "2", "2'", "3"}
+PASSING_RUNGS = {"0", "1", "2", "2'", "3", "3Q"}
 MODE_A_PASS_RUNGS = {"0", "1", "2"}
 MODE_B_PASS_RUNGS = {"0", "2'"}
 TIMEOUT_RE = re.compile("timeout", re.IGNORECASE)
@@ -320,6 +320,7 @@ def build_report_state(args: argparse.Namespace, context: ReportContext) -> dict
     headlines = assign_headlines(accounting, triage)
     spotcheck = run_invariance_spotcheck(finalized_rows, graph_info, args.data_dir, context)
     controls = load_existing_controls_summary(args.output_dir)
+    check_quality_identical_gate(controls, context)
     oc_path = args.output_dir / "oc_simulation.json"
     oc_simulation = ensure_oc_simulation(oc_path, context.strict)
     per_combo_json = args.output_dir / "per_combo.json"
@@ -429,8 +430,10 @@ def finalize_rows(
     for row in eligible:
         row.setdefault("q_track", None)
         row.setdefault("q_tost", None)
+        row.setdefault("q_battery", None)
     apply_bh_family(eligible, "p_track", "q_track")
     apply_bh_family(eligible, "stress_p_tost", "q_tost")
+    apply_bh_family(eligible, "battery_p_iut", "q_battery")
     typ_count = 0
     typ_raw_fail = 0
     for row in eligible:
@@ -443,6 +446,7 @@ def finalize_rows(
             typ_count += 1
             typ_raw_fail += int(p_typ <= 0.05)
             row["not_typical_raw"] = bool(p_typ <= 0.05)
+        row["quality_identical"] = bool(row.get("quality_identical_raw", False))
         rung, annotations = df.assign_rung(row)
         row["final_rung"] = rung
         row["final_annotations"] = annotations
@@ -1132,7 +1136,7 @@ def deterministic_rung(row: dict[str, Any]) -> str:
     Returns
     -------
     str
-        ``INVARIANCE_EQUIVALENT``, ``3``, ``4``, or ``INSUFFICIENT_DATA``.
+        ``INVARIANCE_EQUIVALENT``, ``3Q``, ``3``, ``4``, or ``INSUFFICIENT_DATA``.
     """
     if row.get("insufficient_data", False):
         return "INSUFFICIENT_DATA"
@@ -1141,9 +1145,35 @@ def deterministic_rung(row: dict[str, Any]) -> str:
         return "INVARIANCE_EQUIVALENT"
     if row.get("invariance_equivalent", False):
         return "INVARIANCE_EQUIVALENT"
+    if deterministic_quality_identical(row):
+        return "3Q"
     if row.get("quality_equivalent", False):
         return "3"
     return "4"
+
+
+def deterministic_quality_identical(row: dict[str, Any]) -> bool:
+    """Return whether a deterministic-different row earns strict 3Q.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Deterministic refresh row with single-pair quality metrics.
+
+    Returns
+    -------
+    bool
+        ``True`` when stress, crossings, and neighborhood preservation all meet
+        the strict battery margins.
+    """
+    stress_rel = as_float(row.get("stress_rel_delta"))
+    np_delta = as_float(row.get("neighborhood_preservation_delta"))
+    crossings_delta = as_float(row.get("crossings_delta"))
+    cross_r = as_float(row.get("cross_R_mean"))
+    if stress_rel is None or np_delta is None or crossings_delta is None or cross_r is None:
+        return False
+    cross_margin = max(0.02 * cross_r, 0.5)
+    return stress_rel < 0.02 and np_delta < 0.02 and crossings_delta <= cross_margin
 
 
 def is_informative(row: Optional[dict[str, Any]], final_rung: Optional[str]) -> bool:
@@ -1397,7 +1427,7 @@ def assign_headlines(
             entry
             for entry in entries
             if entry.on_domain
-            and entry.final_rung in {"0", "1", "2", "2'", "3", "4", "INVARIANCE_EQUIVALENT"}
+            and entry.final_rung in {"0", "1", "2", "2'", "3", "3Q", "4", "INVARIANCE_EQUIVALENT"}
         ]
         escalation_entries = [
             entry for entry in entries if entry.bucket == "ESCALATION" and entry.on_domain
@@ -2172,6 +2202,9 @@ def evaluate_controls(
         "gate_2_positive_mode_b": evaluate_gate_positive_mode_b(finalized),
         "gate_3_negative": evaluate_gate_negative(finalized),
         "gate_4_chance": evaluate_gate_chance(finalized),
+        "gate_5_quality_identical_laundering": evaluate_gate_quality_identical_laundering(
+            finalized
+        ),
     }
     all_passed = all(gate["passed"] for gate in gates.values())
     payload = {"all_passed": all_passed, "gates": gates, "summary": {"all_passed": all_passed}}
@@ -2317,8 +2350,43 @@ def evaluate_gate_chance(finalized: dict[str, list[dict[str, Any]]]) -> dict[str
     return {"passed": passed, "n": len(rows), "ks_p": ks_p, "recovery_count": recovery_count}
 
 
+def evaluate_gate_quality_identical_laundering(
+    finalized: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Evaluate the hard 3Q anti-laundering control gate.
+
+    Parameters
+    ----------
+    finalized : dict[str, list[dict[str, Any]]]
+        Finalized control rows by kind.
+
+    Returns
+    -------
+    dict[str, Any]
+        PASS/FAIL and measured 3Q rate on negative plus chance controls.
+    """
+    rows = control_rows(finalized, ("negative", "negref", "chance"))
+    scored = [row for row in rows if row.get("final_rung") != "INSUFFICIENT_DATA"]
+    missing_battery = sum(
+        1
+        for row in scored
+        if as_float(row.get("battery_p_iut")) is None and row.get("quality_identical_raw") is None
+    )
+    three_q = sum(1 for row in scored if str(row.get("final_rung")) == "3Q")
+    rate = safe_percent(three_q, len(scored))
+    passed = bool(scored) and missing_battery == 0 and rate <= 5.0
+    return {
+        "passed": passed,
+        "scored": len(scored),
+        "missing_battery_count": missing_battery,
+        "three_q_count": three_q,
+        "three_q_percent": rate,
+        "limit_percent": 5.0,
+    }
+
+
 def write_outputs(state: dict[str, Any], output_dir: Path) -> None:
-    """Write the definitive report and four-tier categorization.
+    """Write the definitive report and five-tier categorization.
 
     Parameters
     ----------
@@ -2376,6 +2444,11 @@ def render_report(state: dict[str, Any]) -> str:
         ),
         "- Stress margins: max(5% of reference stress, 1e-6).",
         (
+            "- 3Q quality-identical battery: normalized stress at 2%, edge crossings at "
+            "2%/0.5 floor, and k-NN neighborhood preservation at 0.02 absolute; the "
+            "battery p-value is the IUT max-p conjunction."
+        ),
+        (
             "- Mode B design: REF_TYPICAL is a non-refutation against a single "
             "deterministic reference draw."
         ),
@@ -2398,6 +2471,16 @@ def render_report(state: dict[str, Any]) -> str:
         "",
         "## Per-Family Tables",
         render_family_tables(aggregation["family_tables"]),
+        "",
+        "## Rung 3 And 3Q Definitions",
+        "- Rung 3: stress-only-equivalent, loose 5% fallback.",
+        (
+            "- Rung 3Q: quality-identical, strict battery across stress, crossings, "
+            "and k-NN preservation."
+        ),
+        "",
+        "## Quality-Identical Breakdown",
+        render_quality_identical_breakdown(rows),
         "",
         "## Degradation Curves",
         render_degradation_curves(aggregation["size_curves"]),
@@ -2467,7 +2550,7 @@ def render_report(state: dict[str, Any]) -> str:
 
 
 def render_tiers(state: dict[str, Any]) -> str:
-    """Render the four-tier Markdown categorization.
+    """Render the five-tier Markdown categorization.
 
     Parameters
     ----------
@@ -2482,7 +2565,7 @@ def render_tiers(state: dict[str, Any]) -> str:
     accounting: list[AccountingEntry] = state["accounting"]
     triage: TriageInventory = state["triage"]
     lines = [
-        "# Four-Tier Categorization (r70)",
+        "# Five-Tier Categorization (r70)",
         "",
         "## Tier Definitions",
         "- Tier 1: rung 0 bit-exact.",
@@ -2491,7 +2574,9 @@ def render_tiers(state: dict[str, Any]) -> str:
         "  placement, free-aspect scaling). Exact equality up to symmetry; basically faithful.",
         "  (JMT decision 2026-06-12; previously reported as a Tier-3 sub-rung.)",
         "- Tier 2: TIMEOUT only.",
-        "- Tier 3: rungs 1, 2, 2', 3 (statistical/quality equivalence).",
+        "- Tier 3: rungs 1, 2, 2' plus rung 3 stress-only-equivalent loose 5% fallback.",
+        "- Tier 3Q: quality-identical strict battery, statistically different but drawing-quality",
+        "  indistinguishable by normalized stress, edge crossings, and k-NN preservation.",
         "- Tier 4: rung 4 DIFFERENT.",
         "- NO_DATA: ERROR_NO_DATA, REF_NO_DATA, and INSUFFICIENT_DATA.",
         "",
@@ -2568,10 +2653,12 @@ def render_fdr_summary(rows: list[dict[str, Any]]) -> str:
     expected = float(rows[0].get("expected_false_atypicality", 0.0)) if rows else 0.0
     q_track = len(values_for(rows, "q_track"))
     q_tost = len(values_for(rows, "q_tost"))
+    q_battery = len(values_for(rows, "q_battery"))
     return "\n".join(
         [
             f"- p_track BH family size: {q_track}",
             f"- p_tost BH family size: {q_tost}",
+            f"- battery_p_iut BH family size: {q_battery}",
             f"- p_typ raw family size: {typ_family}",
             f"- p_typ raw fail count: {typ_fail}",
             f"- expected false-atypicality count at alpha=0.05: {expected:.2f}",
@@ -2650,6 +2737,68 @@ def render_family_tables(family_tables: dict[str, Any]) -> str:
     for family, counts in sorted(family_tables.items()):
         lines.append(f"| `{family}` | `{json.dumps(counts, sort_keys=True)}` |")
     return "\n".join(lines)
+
+
+def render_quality_identical_breakdown(rows: list[dict[str, Any]]) -> str:
+    """Render per-family strict 3Q accounting.
+
+    Parameters
+    ----------
+    rows : list[dict[str, Any]]
+        Finalized per-combo rows.
+
+    Returns
+    -------
+    str
+        Markdown table separating strict 3Q from loose rung 3.
+    """
+    by_family: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("final_rung") in {"3Q", "4"}:
+            by_family[engine_family(str(row.get("engine")))].append(row)
+    if not by_family:
+        return "No would-be-rung-4 or 3Q rows were available."
+    lines = [
+        "| Family | Would-Be Rung 4 | 3Q Count | 3Q % | Stress Pass % | Cross Pass % | NP Pass % |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for family, family_rows in sorted(by_family.items()):
+        three_q = sum(1 for row in family_rows if row.get("final_rung") == "3Q")
+        lines.append(
+            f"| `{family}` | {len(family_rows)} | {three_q} | "
+            f"{safe_percent(three_q, len(family_rows)):.2f} | "
+            f"{quality_metric_pass_percent(family_rows, 'battery_stress'):.2f} | "
+            f"{quality_metric_pass_percent(family_rows, 'cross'):.2f} | "
+            f"{quality_metric_pass_percent(family_rows, 'np'):.2f} |"
+        )
+    return "\n".join(lines)
+
+
+def quality_metric_pass_percent(rows: list[dict[str, Any]], prefix: str) -> float:
+    """Return raw pass percentage for one strict battery metric.
+
+    Parameters
+    ----------
+    rows : list[dict[str, Any]]
+        Finalized per-combo rows.
+    prefix : str
+        Metric field prefix: ``battery_stress``, ``cross``, or ``np``.
+
+    Returns
+    -------
+    float
+        Percent of rows passing the raw/direct metric-specific TOST.
+    """
+    passed = 0
+    scored = 0
+    for row in rows:
+        p_value = as_float(row.get(f"{prefix}_p_tost"))
+        direct = bool(row.get(f"{prefix}_direct_equivalent", False))
+        if p_value is None and not direct:
+            continue
+        scored += 1
+        passed += int(direct or (p_value is not None and p_value < 0.05))
+    return safe_percent(passed, scored)
 
 
 def render_degradation_curves(size_curves: dict[str, Any]) -> str:
@@ -2920,6 +3069,33 @@ def load_existing_controls_summary(output_dir: Path) -> Optional[dict[str, Any]]
     """
     path = output_dir / "controls" / "gate_results.json"
     return load_json(path) if path.exists() else None
+
+
+def check_quality_identical_gate(
+    controls: Optional[dict[str, Any]], context: ReportContext
+) -> None:
+    """Block report rendering when the persisted 3Q control gate failed.
+
+    Parameters
+    ----------
+    controls : Optional[dict[str, Any]]
+        Parsed ``controls/gate_results.json`` payload.
+    context : ReportContext
+        Assertion and warning state.
+
+    Returns
+    -------
+    None
+        Raises in strict mode or records a warning in non-strict mode.
+    """
+    if not controls:
+        context.check(False, "3Q anti-laundering gate missing; run report --controls first.")
+        return
+    gate = (controls.get("gates") or {}).get("gate_5_quality_identical_laundering")
+    context.check(
+        bool(gate and gate.get("passed", False)),
+        "3Q anti-laundering gate failed or is missing; blocking quality-identical tier.",
+    )
 
 
 def ensure_oc_simulation(path: Path, strict: bool) -> dict[str, Any]:
