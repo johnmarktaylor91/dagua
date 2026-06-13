@@ -151,6 +151,8 @@ class _IgraphBase(CompetitorBase):
         seed : int | None, default=None
             Random seed forwarded as a seeded starting matrix and/or temporary
             igraph RNG override for stochastic igraph layouts.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional layout keyword overrides from the benchmark variant layer.
 
         Returns
         -------
@@ -168,6 +170,8 @@ class _IgraphBase(CompetitorBase):
             kwargs = dict(self.layout_kwargs)
             if variant_params is not None:
                 kwargs.update(dict(variant_params))
+            if graph.edge_weights is not None and "weights" in self.variant_param_names:
+                kwargs.setdefault("weights", "weight")
             horizontal_output = bool(kwargs.pop("horizontal", self.horizontal_output))
             if seed is not None and self.accepts_seed_matrix:
                 # igraph FR's "seed" param is an initial position matrix, not an int.
