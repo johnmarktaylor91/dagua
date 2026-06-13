@@ -1,0 +1,27 @@
+{
+ "escalation_equiv": 3244,
+ "escalation_divergent": 463,
+ "insufficient": 248,
+ "deterministic_equiv": 761,
+ "deterministic_divergent": 71,
+ "divergent_pct_escalation": 12.5,
+ "divergent_pct_esc_plus_det": 11.8,
+ "divergent_pct_all_pairs_est": 6.3,
+ "r70_baseline_escalation_divergent": 705,
+ "divergent_by_family": {
+  "fmmm": 133,
+  "sfdp": 90,
+  "sfdp_p": 74,
+  "fmmm_graphviz_fdp": 61,
+  "umap": 25,
+  "gem": 23,
+  "sfdp_graphviz": 21,
+  "neato": 7,
+  "sgd2_multi": 7,
+  "sgd2_multi_stress": 6,
+  "sgd2_multi_with": 5,
+  "drl": 5,
+  "maxent_stress": 4,
+  "stress_maj": 2
+ }
+}
