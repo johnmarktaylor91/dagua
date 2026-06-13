@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import subprocess
-from typing import Any
+import sys
+import types
+from typing import Any, Optional
 
 import pytest
 import torch
@@ -11,8 +13,12 @@ import torch
 from dagua.eval.competitors import classic_competitor, get_available_competitors
 from dagua.eval.competitors.classic_competitor import (
     ClassicFR,
+    ClassicMaxentStress,
+    ClassicNeato,
     ClassicNeuLay,
     ClassicSGD2Multi,
+    ClassicStressMajorization,
+    ClassicStressSGD,
     ClassicTsNET,
     ClassicUMAP,
 )
@@ -87,6 +93,83 @@ def _make_clustered_graph() -> DaguaGraph:
     if graph.node_sizes is None:
         raise AssertionError("node sizes should be available after compute_node_sizes()")
     return graph
+
+
+def _make_weighted_path_graph() -> DaguaGraph:
+    """Create a small weighted path graph for adapter forwarding tests.
+
+    Returns
+    -------
+    DaguaGraph
+        Three-node path with edge weights ``[2.0, 3.0]``.
+    """
+    graph = DaguaGraph()
+    graph.add_edge(0, 1, weight=2.0)
+    graph.add_edge(1, 2, weight=3.0)
+    _ = graph.edge_index
+    graph.compute_node_sizes()
+    return graph
+
+
+def _install_classic_layout_spy(
+    monkeypatch: pytest.MonkeyPatch,
+    module_name: str,
+    fn_name: str,
+    seen: dict[str, dict[str, Any]],
+) -> None:
+    """Install a fake classic layout module that captures forwarded kwargs.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Fixture used to replace the imported layout module.
+    module_name : str
+        Fully qualified module path imported by the adapter.
+    fn_name : str
+        Layout function name to expose on the fake module.
+    seen : dict[str, dict[str, Any]]
+        Mutable capture dictionary populated with the received kwargs.
+
+    Returns
+    -------
+    None
+        The fake module is registered in ``sys.modules``.
+    """
+    fake_module = types.ModuleType(module_name)
+
+    def _layout_spy(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: Optional[torch.Tensor] = None,
+        seed: int = 42,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        """Capture classic layout kwargs and return zero coordinates.
+
+        Parameters
+        ----------
+        edge_index : torch.Tensor
+            Edge tensor shaped ``[2, E]``.
+        num_nodes : int
+            Number of nodes in the graph.
+        node_sizes : torch.Tensor | None, default=None
+            Node-size tensor forwarded by the adapter.
+        seed : int, default=42
+            Seed forwarded by the adapter.
+        **kwargs : Any
+            Additional layout parameters forwarded by the adapter.
+
+        Returns
+        -------
+        torch.Tensor
+            Zero coordinates shaped ``[N, 2]``.
+        """
+        del edge_index, node_sizes, seed
+        seen["kwargs"] = dict(kwargs)
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    setattr(fake_module, fn_name, _layout_spy)
+    monkeypatch.setitem(sys.modules, module_name, fake_module)
 
 
 def test_classic_competitors_are_discoverable() -> None:
@@ -274,13 +357,86 @@ def test_classic_sgd2_multi_enables_multiple_criteria(
 
     assert result is not None
     assert observed["name"] == "classic_sgd2_multi"
-    assert observed["import_path"] == "dagua.layout.classic.sgd2_multi"
-    assert observed["fn_name"] == "layout_sgd2_multi"
+    assert observed["import_path"] == "dagua.layout.ops.pipelines.sgd2_multi"
+    assert observed["fn_name"] == "layout_sgd2_multi_pipeline"
     assert observed["seed"] == 17
     assert observed["extra_kwargs"] == {
         "criteria": {"stress": 1.0, "ideal_edge_length": 1.0},
         "lr": 0.01,
     }
+
+
+@pytest.mark.parametrize(
+    ("competitor_factory", "module_name", "fn_name"),
+    [
+        (
+            ClassicSGD2Multi,
+            "dagua.layout.ops.pipelines.sgd2_multi",
+            "layout_sgd2_multi_pipeline",
+        ),
+        (
+            ClassicNeato,
+            "dagua.layout.ops.pipelines.neato",
+            "layout_neato_pipeline",
+        ),
+    ],
+)
+def test_reference_unweighted_classic_adapters_skip_edge_weights(
+    monkeypatch: pytest.MonkeyPatch,
+    competitor_factory: type[ClassicSGD2Multi] | type[ClassicNeato],
+    module_name: str,
+    fn_name: str,
+) -> None:
+    """Reference-unweighted classic adapters should not forward edge weights."""
+    graph = _make_weighted_path_graph()
+    seen: dict[str, dict[str, Any]] = {}
+    _install_classic_layout_spy(monkeypatch, module_name, fn_name, seen)
+
+    result = competitor_factory().layout(graph, seed=7)
+
+    assert result.error is None
+    assert result.pos is not None
+    assert "edge_weights" not in seen["kwargs"]
+
+
+@pytest.mark.parametrize(
+    ("competitor_factory", "module_name", "fn_name"),
+    [
+        (
+            ClassicStressSGD,
+            "dagua.layout.ops.pipelines.stress_sgd",
+            "layout_stress_sgd_pipeline",
+        ),
+        (
+            ClassicStressMajorization,
+            "dagua.layout.ops.pipelines.stress_majorization",
+            "layout_stress_majorization_pipeline",
+        ),
+        (
+            ClassicMaxentStress,
+            "dagua.layout.ops.pipelines.maxent_stress",
+            "layout_maxent_stress_pipeline",
+        ),
+    ],
+)
+def test_stress_classic_adapters_still_forward_edge_weights(
+    monkeypatch: pytest.MonkeyPatch,
+    competitor_factory: type[ClassicStressSGD]
+    | type[ClassicStressMajorization]
+    | type[ClassicMaxentStress],
+    module_name: str,
+    fn_name: str,
+) -> None:
+    """Stress-family classic adapters should keep forwarding edge weights."""
+    graph = _make_weighted_path_graph()
+    seen: dict[str, dict[str, Any]] = {}
+    _install_classic_layout_spy(monkeypatch, module_name, fn_name, seen)
+
+    result = competitor_factory().layout(graph, seed=7)
+
+    assert result.error is None
+    assert result.pos is not None
+    assert seen["kwargs"]["edge_weights"] is graph.edge_weights
 
 
 def test_graphviz_dot_with_clusters() -> None:
