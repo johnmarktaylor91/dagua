@@ -204,22 +204,35 @@ def _dijkstra_distances(
     adjacency: list[list[tuple[int, float]]],
     start: int,
 ) -> torch.Tensor:
-    """Compute weighted shortest-path distances from one source."""
+    """Compute weighted shortest-path distances from one source.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list where each entry is ``(neighbor, cost)``.
+    start : int
+        Source node for the single-source shortest-path solve.
+
+    Returns
+    -------
+    torch.Tensor
+        Distance vector with shape ``[N]`` and dtype ``torch.float32``.
+    """
     num_nodes = len(adjacency)
-    distances = torch.full((num_nodes,), float("inf"), dtype=torch.float32)
+    distances = [float("inf")] * num_nodes
     distances[start] = 0.0
     heap: list[tuple[float, int]] = [(0.0, start)]
     while heap:
         distance, node = heapq.heappop(heap)
-        if distance > float(distances[node].item()):
+        if distance > distances[node]:
             continue
         for neighbor, cost in adjacency[node]:
             candidate = distance + cost
-            if candidate >= float(distances[neighbor].item()):
+            if candidate >= distances[neighbor]:
                 continue
             distances[neighbor] = candidate
             heapq.heappush(heap, (candidate, neighbor))
-    return distances
+    return torch.tensor(distances, dtype=torch.float32)
 
 
 def _all_pairs_shortest_paths(
