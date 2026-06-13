@@ -116,6 +116,12 @@ class _ClassicLayoutSpec:
     default_params: dict[str, Any]
 
 
+# Fidelity adapters match each reference's weight semantics. Graphviz neato writes
+# no ``len=`` attributes, and the (SGD)^2 multi reference builds unit-edge distances,
+# so weighted support for these would need a separate dagua-specific variant.
+_UNWEIGHTED_REFERENCE_LAYOUTS = frozenset({"layout_sgd2_multi_pipeline", "layout_neato_pipeline"})
+
+
 def _warn_on_unrecognized_variant_params(
     competitor_name: str,
     variant_params: Mapping[str, Any],
@@ -1699,7 +1705,7 @@ def _quick_classic(
     edge_index = graph.edge_index
     start = time.perf_counter()
     try:
-        if graph.edge_weights is not None:
+        if graph.edge_weights is not None and fn_name not in _UNWEIGHTED_REFERENCE_LAYOUTS:
             extra_kwargs.setdefault("edge_weights", graph.edge_weights)
         if fn_name == "layout_fmmm_pipeline" and graph.clusters:
             extra_kwargs.setdefault("clusters", graph.clusters)
