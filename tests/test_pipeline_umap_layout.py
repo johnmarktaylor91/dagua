@@ -283,6 +283,28 @@ class TestUMAPPipelineFidelity:
             ),
         )
 
+    def test_layout_umap_pipeline_weighted_dijkstra_keeps_long_paths_finite(self) -> None:
+        """Weighted Dijkstra should not truncate paths after float32 rounding."""
+        edge_index = _path_edge_index(20)
+        edge_weights = torch.tensor(
+            [1.0 + (4.0 * float(index) / 18.0) for index in range(19)],
+            dtype=torch.float32,
+        )
+        problem = LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=20,
+            edge_weights=edge_weights,
+            seed=42,
+        )
+        state = BuildUMAPAdjacency().apply(problem, SolveState(), RuntimeContext())
+
+        state = ComputeAllPairsShortestPaths().apply(problem, state, RuntimeContext())
+
+        assert state.distance_matrix is not None
+        assert torch.all(torch.isfinite(state.distance_matrix))
+        assert state.distance_matrix[0, 4].item() == pytest.approx(5.333333, abs=1.0e-5)
+        assert state.distance_matrix[0, 19].item() == pytest.approx(57.0, abs=1.0e-5)
+
     def test_layout_umap_pipeline_matches_classic_on_disconnected_graph(self) -> None:
         """Disconnected components and isolated nodes should remain finite."""
         edge_index = _disconnected_edge_index()
