@@ -208,6 +208,36 @@ def test_fmmm_fidelity_mode_uses_multilevel_driver_above_coarse_target() -> None
     assert not torch.allclose(positions, legacy_positions)
 
 
+def test_fmmm_fidelity_mode_decomposes_disconnected_large_graphs() -> None:
+    """Verify OGDF fidelity mode lays out disconnected graphs component-wise.
+
+    Returns
+    -------
+    None
+        The assertion guards the benchmark ``random_dag_50`` shape, where many
+        isolated nodes previously forced one edgeless coarse graph and produced
+        coordinates orders of magnitude larger than OGDF's packed output.
+    """
+    edge_index = torch.tensor(
+        [[node for node in range(50, 96)], [node + 1 for node in range(50, 96)]],
+        dtype=torch.long,
+    )
+
+    positions = layout_fmmm_pipeline(
+        edge_index=edge_index,
+        num_nodes=97,
+        steps=4,
+        seed=7,
+        fidelity_mode=True,
+    )
+    centered = positions.to(dtype=torch.float64) - positions.to(dtype=torch.float64).mean(dim=0)
+    dispersion = torch.sqrt(centered.square().sum(dim=1).mean())
+
+    assert positions.shape == (97, 2)
+    assert torch.isfinite(positions).all()
+    assert float(dispersion.item()) < 1_000.0
+
+
 def test_fmmm_graphviz_tile_pack_offsets_match_pack_c_golden_vectors() -> None:
     """Verify the bbox tile packer against hand-captured pack.c vectors.
 
