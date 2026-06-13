@@ -556,6 +556,228 @@ def _ogdf_fmmm_average_ideal_edge_length(
     return sum(float(length) for length in ideal_edge_lengths) / float(len(ideal_edge_lengths))
 
 
+def _ogdf_fmmm_tensor_repulsive_forces(positions: torch.Tensor) -> torch.Tensor:
+    """Calculate exact OGDF FMMM repulsive forces with tensor operations.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current node coordinates with shape ``[N, 2]`` in OGDF coordinate
+        units.
+
+    Returns
+    -------
+    torch.Tensor
+        Repulsive force vectors with shape ``[N, 2]``.
+    """
+    if positions.shape[0] <= 1:
+        return torch.zeros_like(positions)
+
+    delta = positions.unsqueeze(1) - positions.unsqueeze(0)
+    distances = torch.linalg.norm(delta, dim=2)
+    factor = torch.zeros_like(distances)
+    nonzero = distances > 0.0
+    factor[nonzero] = 1.0 / distances[nonzero].square()
+    factor.fill_diagonal_(0.0)
+    return (delta * factor.unsqueeze(2)).sum(dim=1)
+
+
+def _ogdf_fmmm_tensor_attractive_forces(
+    positions: torch.Tensor,
+    edges: Sequence[Tuple[int, int]],
+    ideal_edge_lengths: Optional[Sequence[float]],
+) -> torch.Tensor:
+    """Calculate exact OGDF FMMM attractive forces with tensor operations.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current node coordinates with shape ``[N, 2]`` in OGDF coordinate
+        units.
+    edges : Sequence[tuple[int, int]]
+        Simple loop-free edge list.
+    ideal_edge_lengths : Sequence[float], optional
+        Desired edge lengths aligned with ``edges``. If omitted, all edges use
+        OGDF's default single-level desired length.
+
+    Returns
+    -------
+    torch.Tensor
+        Attractive force vectors with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``ideal_edge_lengths`` is provided with the wrong length.
+    """
+    if ideal_edge_lengths is not None and len(ideal_edge_lengths) != len(edges):
+        raise ValueError("ideal_edge_lengths must have one value per edge.")
+
+    forces = torch.zeros_like(positions)
+    if not edges:
+        return forces
+
+    edge_tensor = torch.tensor(edges, dtype=torch.long, device=positions.device)
+    sources = edge_tensor[:, 0]
+    targets = edge_tensor[:, 1]
+    if ideal_edge_lengths is None:
+        desired_lengths = torch.full(
+            (len(edges),),
+            _OGDF_FMMM_IDEAL_EDGE_LENGTH,
+            dtype=positions.dtype,
+            device=positions.device,
+        )
+    else:
+        desired_lengths = torch.tensor(
+            [max(float(length), _OGDF_FMMM_EPSILON) for length in ideal_edge_lengths],
+            dtype=positions.dtype,
+            device=positions.device,
+        )
+
+    delta = positions[targets] - positions[sources]
+    distances = torch.linalg.norm(delta, dim=1)
+    force_scale = torch.zeros_like(distances)
+    nonzero = distances > 0.0
+    force_scale[nonzero] = (
+        torch.log2(distances[nonzero] / desired_lengths[nonzero])
+        * distances[nonzero]
+        / desired_lengths[nonzero].pow(3)
+    )
+    edge_forces = delta * force_scale.unsqueeze(1)
+    forces.index_add_(0, sources, edge_forces)
+    forces.index_add_(0, targets, -edge_forces)
+    return forces
+
+
+def _ogdf_fmmm_tensor_combined_forces(
+    attr: torch.Tensor,
+    rep: torch.Tensor,
+    boxlength: float,
+    iter_index: int,
+    fine_tuning_step: int,
+    cool_factor: float,
+    average_ideal_edge_length: float,
+) -> Tuple[torch.Tensor, float]:
+    """Combine attractive and repulsive force tensors like OGDF.
+
+    Parameters
+    ----------
+    attr : torch.Tensor
+        Attractive force vectors with shape ``[N, 2]``.
+    rep : torch.Tensor
+        Repulsive force vectors with shape ``[N, 2]``.
+    boxlength : float
+        Current computational box side length.
+    iter_index : int
+        One-based OGDF iteration number for this phase.
+    fine_tuning_step : int
+        OGDF phase selector: ``0`` main, ``1`` post cooldown, ``2`` fine tune.
+    cool_factor : float
+        Incoming OGDF cool factor state.
+    average_ideal_edge_length : float
+        Average desired edge length for the current multilevel graph.
+
+    Returns
+    -------
+    tuple[torch.Tensor, float]
+        Combined movement vectors with shape ``[N, 2]`` and updated cool
+        factor.
+    """
+    if fine_tuning_step == 1:
+        cool_factor /= 10.0
+    elif fine_tuning_step == 2:
+        if iter_index <= _OGDF_FMMM_FINE_TUNING_ITERATIONS - 5:
+            cool_factor = _OGDF_FMMM_FINE_TUNE_SCALAR
+        else:
+            cool_factor = _OGDF_FMMM_FINE_TUNE_SCALAR / 10.0
+
+    spring_strength = 1.0 if fine_tuning_step <= 1 else _OGDF_FMMM_POST_SPRING_STRENGTH
+    rep_strength = 1.0 if fine_tuning_step <= 1 else min(0.2, 400.0 / float(attr.shape[0]))
+    max_radius = boxlength / 1000.0 if iter_index == 1 else boxlength / 5.0
+    forces = (spring_strength * attr + rep_strength * rep) * (
+        average_ideal_edge_length * average_ideal_edge_length
+    )
+    norms = torch.linalg.norm(forces, dim=1, keepdim=True)
+    limited = torch.minimum(
+        norms * cool_factor * _OGDF_FMMM_FORCE_SCALING_FACTOR,
+        torch.full_like(norms, max_radius),
+    )
+    scale = torch.zeros_like(norms)
+    nonzero = norms > 0.0
+    scale[nonzero] = limited[nonzero] / norms[nonzero]
+    return forces * scale, cool_factor
+
+
+def _ogdf_fmmm_tensor_prevent_oscillations(
+    forces: torch.Tensor,
+    last_movement: list[list[float]],
+    iter_index: int,
+) -> torch.Tensor:
+    """Apply OGDF oscillation damping to a force tensor.
+
+    Parameters
+    ----------
+    forces : torch.Tensor
+        Proposed movement vectors with shape ``[N, 2]``.
+    last_movement : list[list[float]]
+        Previous movement vectors, updated in place.
+    iter_index : int
+        One-based OGDF phase iteration.
+
+    Returns
+    -------
+    torch.Tensor
+        Damped movement vectors with shape ``[N, 2]``.
+    """
+    if iter_index == 1:
+        updated = forces.detach().cpu().tolist()
+        for node_index, force in enumerate(updated):
+            last_movement[node_index][0] = float(force[0])
+            last_movement[node_index][1] = float(force[1])
+        return forces
+
+    previous = torch.tensor(last_movement, dtype=forces.dtype, device=forces.device)
+    norm_new = torch.linalg.norm(forces, dim=1)
+    norm_old = torch.linalg.norm(previous, dim=1)
+    damped = forces.clone()
+    active = (norm_new > 0.0) & (norm_old > 0.0)
+    if active.any():
+        cross = previous[:, 0] * forces[:, 1] - previous[:, 1] * forces[:, 0]
+        dot = (previous * forces).sum(dim=1)
+        angles = torch.atan2(cross, dot)
+        angles = torch.where(angles < 0.0, angles + 2.0 * math.pi, angles)
+        buckets = torch.ceil(angles / 0.52359878).to(dtype=torch.long).clamp(0, 13)
+        factors = torch.tensor(
+            [
+                2.0,
+                2.0,
+                1.5,
+                1.0,
+                0.66666666,
+                0.5,
+                0.33333333,
+                0.33333333,
+                0.5,
+                0.66666666,
+                1.0,
+                1.5,
+                2.0,
+                2.0,
+            ],
+            dtype=forces.dtype,
+            device=forces.device,
+        )
+        quotient = norm_old * factors[buckets] / norm_new.clamp(min=torch.finfo(forces.dtype).tiny)
+        damping = torch.minimum(torch.ones_like(quotient), quotient)
+        damped[active] = forces[active] * damping[active].unsqueeze(1)
+
+    updated = damped.detach().cpu().tolist()
+    for node_index, force in enumerate(updated):
+        last_movement[node_index][0] = float(force[0])
+        last_movement[node_index][1] = float(force[1])
+    return damped
+
+
 def _ogdf_fmmm_force_iteration(
     positions: list[list[float]],
     edges: Sequence[Tuple[int, int]],
@@ -605,9 +827,10 @@ def _ogdf_fmmm_force_iteration(
         down_left_corner,
         boxlength,
     )
-    attr = _ogdf_fmmm_attractive_forces(positions, edges, ideal_edge_lengths)
-    rep = _ogdf_fmmm_repulsive_forces(positions)
-    forces, cool_factor = _ogdf_fmmm_combined_forces(
+    position_tensor = torch.tensor(positions, dtype=torch.float64)
+    attr = _ogdf_fmmm_tensor_attractive_forces(position_tensor, edges, ideal_edge_lengths)
+    rep = _ogdf_fmmm_tensor_repulsive_forces(position_tensor)
+    forces, cool_factor = _ogdf_fmmm_tensor_combined_forces(
         attr,
         rep,
         boxlength,
@@ -616,10 +839,11 @@ def _ogdf_fmmm_force_iteration(
         cool_factor,
         average_ideal_edge_length,
     )
-    forces = _ogdf_fmmm_prevent_oscillations(forces, last_movement, iter_index)
-    for node_index, force in enumerate(forces):
-        positions[node_index][0] += force[0]
-        positions[node_index][1] += force[1]
+    forces = _ogdf_fmmm_tensor_prevent_oscillations(forces, last_movement, iter_index)
+    updated_positions = (position_tensor + forces).detach().cpu().tolist()
+    for node_index, point in enumerate(updated_positions):
+        positions[node_index][0] = float(point[0])
+        positions[node_index][1] = float(point[1])
     boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
     return boxlength, down_left_corner, cool_factor
 
@@ -1093,6 +1317,180 @@ def _layout_ogdf_fmmm_multilevel_fidelity(
 
     del boxlength, down_left_corner, cool_factor
     return torch.tensor(positions, dtype=torch.float64, device=device)
+
+
+def _ogdf_fmmm_connected_components(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> list[list[int]]:
+    """Return undirected connected components in node-index order.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    list[list[int]]
+        Connected components as sorted node-index lists.
+    """
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    if edge_index.numel() > 0:
+        edges_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+        for source, target in zip(edges_cpu[0].tolist(), edges_cpu[1].tolist()):
+            if source == target:
+                continue
+            adjacency[int(source)].append(int(target))
+            adjacency[int(target)].append(int(source))
+
+    components: list[list[int]] = []
+    visited = [False for _ in range(num_nodes)]
+    for start in range(num_nodes):
+        if visited[start]:
+            continue
+        stack = [start]
+        visited[start] = True
+        component: list[int] = []
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in sorted(adjacency[node], reverse=True):
+                if not visited[neighbor]:
+                    visited[neighbor] = True
+                    stack.append(neighbor)
+        components.append(sorted(component))
+    return components
+
+
+def _ogdf_fmmm_component_edge_index(
+    edge_index: torch.Tensor,
+    component: Sequence[int],
+) -> torch.Tensor:
+    """Build a local edge tensor for one connected component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Global edge tensor with shape ``[2, E]``.
+    component : Sequence[int]
+        Global node indices in the component.
+
+    Returns
+    -------
+    torch.Tensor
+        Local edge tensor with shape ``[2, E_c]``.
+    """
+    local_index = {int(node): index for index, node in enumerate(component)}
+    local_edges: list[tuple[int, int]] = []
+    if edge_index.numel() > 0:
+        edges_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+        for source, target in zip(edges_cpu[0].tolist(), edges_cpu[1].tolist()):
+            if int(source) in local_index and int(target) in local_index:
+                local_edges.append((local_index[int(source)], local_index[int(target)]))
+    if not local_edges:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.tensor(local_edges, dtype=torch.long).transpose(0, 1).contiguous()
+
+
+def _layout_ogdf_fmmm_component_fidelity(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    fixed_iterations: int,
+    seed: int,
+    device: torch.device,
+    node_sizes: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Run OGDF FMMM fidelity layout with connected-component decomposition.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    fixed_iterations : int
+        OGDF ``fixedIterations`` value.
+    seed : int
+        OGDF ``randSeed`` value.
+    device : torch.device
+        Output tensor device.
+    node_sizes : torch.Tensor, optional
+        Optional global node sizes with shape ``[N, 2]`` used for component
+        packing.
+
+    Returns
+    -------
+    torch.Tensor
+        Final OGDF-coordinate positions with shape ``[N, 2]``.
+    """
+    components = _ogdf_fmmm_connected_components(edge_index, num_nodes)
+    if len(components) <= 1:
+        if num_nodes > 50:
+            return _layout_ogdf_fmmm_multilevel_fidelity(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                fixed_iterations=fixed_iterations,
+                seed=seed,
+                device=device,
+            )
+        return _layout_ogdf_fmmm_small_fidelity(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            steps=fixed_iterations,
+            seed=seed,
+            device=device,
+        )
+
+    packed = torch.empty((num_nodes, 2), dtype=torch.float64, device=device)
+    component_positions: list[torch.Tensor] = []
+    component_sizes: list[Optional[torch.Tensor]] = []
+    component_boxes: list[tuple[float, float, float, float]] = []
+    for component in components:
+        local_edges = _ogdf_fmmm_component_edge_index(edge_index, component)
+        local_nodes = len(component)
+        if local_nodes == 1:
+            local_positions = torch.zeros((1, 2), dtype=torch.float64, device=device)
+        elif local_nodes > 50:
+            local_positions = _layout_ogdf_fmmm_multilevel_fidelity(
+                edge_index=local_edges,
+                num_nodes=local_nodes,
+                fixed_iterations=fixed_iterations,
+                seed=seed,
+                device=device,
+            )
+        else:
+            local_positions = _layout_ogdf_fmmm_small_fidelity(
+                edge_index=local_edges,
+                num_nodes=local_nodes,
+                steps=fixed_iterations,
+                seed=seed,
+                device=device,
+            )
+        local_sizes = (
+            None
+            if node_sizes is None
+            else node_sizes[torch.tensor(component, dtype=torch.long)].to(
+                device=device,
+                dtype=torch.float64,
+            )
+        )
+        component_positions.append(local_positions)
+        component_sizes.append(local_sizes)
+        component_boxes.append(_component_box(local_positions, local_sizes))
+
+    offsets = _graphviz_tile_pack_offsets(component_boxes)
+    for component, local_positions, offset in zip(components, component_positions, offsets):
+        offset_tensor = torch.tensor(offset, dtype=torch.float64, device=device)
+        global_indices = torch.tensor(component, dtype=torch.long, device=device)
+        packed[global_indices] = local_positions + offset_tensor.unsqueeze(0)
+
+    sizes_for_origin = (
+        None if node_sizes is None else node_sizes.to(device=device, dtype=torch.float64)
+    )
+    return _translate_packed_components_to_origin(packed, sizes_for_origin)
 
 
 def _layout_ogdf_fmmm_small_fidelity(
@@ -5919,20 +6317,13 @@ def layout_fmmm_pipeline(
 
     effective_reference_mode = reference_mode or fidelity_mode
     if effective_reference_mode:
-        if num_nodes > 50:
-            return _layout_ogdf_fmmm_multilevel_fidelity(
-                edge_index=edge_index,
-                num_nodes=num_nodes,
-                fixed_iterations=steps,
-                seed=seed,
-                device=device,
-            ).to(dtype=torch.float32)
-        return _layout_ogdf_fmmm_small_fidelity(
+        return _layout_ogdf_fmmm_component_fidelity(
             edge_index=edge_index,
             num_nodes=num_nodes,
-            steps=steps,
+            fixed_iterations=steps,
             seed=seed,
             device=device,
+            node_sizes=node_sizes,
         ).to(dtype=torch.float32)
 
     return _run_fmmm_pipeline_once(
