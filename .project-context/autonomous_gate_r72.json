@@ -1,0 +1,19 @@
+{
+  "mode": "autonomous",
+  "run": "r72_convergence_push",
+  "started": "2026-06-13T12:00:00-04:00",
+  "user_directive": "another sprint pushing as close to full convergence as possible -- full research agents, plan, codex-iterate to convergence, dispatch, execute. Add a 'statistically different but quality-identical' tier for small directional chaotic divergences that don't affect quality. Push hard to get as identical as possible. Leave nothing on the table unless STRONG principled reasons.",
+  "jmt_decisions": {
+    "new_tier_bar": "quality battery {normalized stress + edge crossings + k-NN neighborhood preservation} all equal within tight ~1-2% tolerance (stricter than existing 5% quality-equivalent)",
+    "fp_push": "port-level FP parity hard (init, coarsening, force model, summation order, same libm if linkable); true libm bit-emulation = principled stop -> remainder to quality-identical tier"
+  },
+  "exit_criteria": [
+    {"criterion": "research_synthesis", "target": "5 research threads delivered + synthesized into plan", "status": "pass", "measured_value": "FMMM port tractable, umap already bit-exact, sgd2/neato fixable, sfdp irreducible, tier spec complete, P3 196 structural", "measurement_source": "r72 STATE log"},
+    {"criterion": "plan_review", "target": "adversarial review PASS (or findings incorporated)", "status": "pass", "measured_value": "1 round, 10 findings (2 CRIT) all incorporated -> plan v2", "measurement_source": "PLAN_r72 Appendix R"},
+    {"criterion": "fmmm_multilevel", "target": "FMMM multilevel port: dispersion + distributional match on 4 anchors, rgg_100 not over-corrected, no regression", "status": "untested", "measured_value": "", "measurement_source": "I-A codex + re-benchmark"},
+    {"criterion": "quality_tier", "target": "3Q tier implemented, anti-laundering gate passes (<=5% on neg/chance controls), all rung-set sites updated", "status": "untested", "measured_value": "", "measurement_source": "I-B codex + controls gate"},
+    {"criterion": "weight_fix", "target": "sgd2_multi/neato weight exclusion (17 combos), stress_maj/maxent unaffected", "status": "untested", "measured_value": "", "measurement_source": "I-C codex + re-benchmark"},
+    {"criterion": "union_reanalysis_complete", "target": "all non-insufficient non-bit-exact combos have finite q_battery; 5-tier report v3", "status": "untested", "measured_value": "", "measurement_source": "Phase A"},
+    {"criterion": "report_v3", "target": "report v3 + scorecard + supersession (r71->r72) + file-for-review + text JMT", "status": "untested", "measured_value": "", "measurement_source": "git log + send-to-jmt"}
+  ]
+}
