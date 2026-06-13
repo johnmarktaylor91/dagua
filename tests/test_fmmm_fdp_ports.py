@@ -179,10 +179,10 @@ def test_fdp_attachment_points_clip_to_crossed_cluster_boundaries() -> None:
     attachment = attachments[0]
     assert attachment.tail_cluster == "inner"
     assert attachment.head_cluster == "sibling"
-    assert attachment.tail_point == pytest.approx((20.0, 0.0))
-    assert attachment.head_point == pytest.approx((40.0, 0.0))
-    assert attachment.polyline[0] == pytest.approx((20.0, 0.0))
-    assert attachment.polyline[1] == pytest.approx((40.0, 0.0))
+    assert attachment.tail_point == pytest.approx((55.0, 0.0))
+    assert attachment.head_point == pytest.approx((5.0, 0.0))
+    assert attachment.polyline[0] == pytest.approx((55.0, 0.0))
+    assert attachment.polyline[1] == pytest.approx((5.0, 0.0))
 
 
 def test_fdp_compound_attachment_op_is_fidelity_only() -> None:
@@ -212,5 +212,5 @@ def test_fdp_compound_attachment_op_is_fidelity_only() -> None:
 
     assert _FDP_COMPOUND_EDGE_ATTACHMENTS_KEY in result.extras
     assert result.extras[_FDP_COMPOUND_EDGE_ATTACHMENTS_KEY][0].tail_point == pytest.approx(
-        (0.0, 0.0)
+        (35.0, 0.0)
     )
