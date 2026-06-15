@@ -117,9 +117,16 @@ class _ClassicLayoutSpec:
 
 
 # Fidelity adapters match each reference's weight semantics. Graphviz neato writes
-# no ``len=`` attributes, and the (SGD)^2 multi reference builds unit-edge distances,
-# so weighted support for these would need a separate dagua-specific variant.
-_UNWEIGHTED_REFERENCE_LAYOUTS = frozenset({"layout_sgd2_multi_pipeline", "layout_neato_pipeline"})
+# no ``len=`` attributes, (SGD)^2 multi builds unit-edge distances, and igraph
+# MDS always uses unweighted shortest-path distances, so weighted support would
+# need separate dagua-specific variants.
+_UNWEIGHTED_REFERENCE_LAYOUTS = frozenset(
+    {
+        "layout_classical_mds_pipeline",
+        "layout_neato_pipeline",
+        "layout_sgd2_multi_pipeline",
+    }
+)
 
 
 def _warn_on_unrecognized_variant_params(
