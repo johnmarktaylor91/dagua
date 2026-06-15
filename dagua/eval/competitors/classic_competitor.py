@@ -359,11 +359,14 @@ class VariantCompetitor(CompetitorBase):
         CompetitorResult
             Layout result from the wrapped competitor.
         """
+        variant_params = dict(self._variant_params)
+        if self.name == "classic_fmmm_graphviz_fdp_fidelity":
+            variant_params["fidelity_mode"] = "graphviz_fdp"
         return self._base.layout_with_variant(
             graph,
             timeout=timeout,
             seed=seed,
-            variant_params=self._variant_params,
+            variant_params=variant_params,
         )
 
     def layout_with_variant(
@@ -1707,7 +1710,11 @@ def _quick_classic(
     try:
         if graph.edge_weights is not None and fn_name not in _UNWEIGHTED_REFERENCE_LAYOUTS:
             extra_kwargs.setdefault("edge_weights", graph.edge_weights)
-        if fn_name == "layout_fmmm_pipeline" and graph.clusters:
+        if (
+            fn_name == "layout_fmmm_pipeline"
+            and graph.clusters
+            and extra_kwargs.get("fidelity_mode") == "graphviz_fdp"
+        ):
             extra_kwargs.setdefault("clusters", graph.clusters)
             extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
         if fn_name == "layout_graphopt_pipeline" and bool(extra_kwargs.get("fidelity_mode")):
