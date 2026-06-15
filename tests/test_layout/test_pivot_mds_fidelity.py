@@ -100,6 +100,42 @@ def test_pivot_mds_ogdf_path_special_case_returns_raw_line() -> None:
     assert pos.tolist() == [[0.0, 0.0], [100.0, 0.0], [200.0, 0.0], [300.0, 0.0]]
 
 
+def test_pivot_mds_ogdf_fidelity_path_keeps_raw_scale() -> None:
+    """Confirm the OGDF fidelity pipeline skips dagua extent normalization."""
+    from dagua.layout.ops.pipelines.pivot_mds import layout_pivot_mds_pipeline
+
+    edge_index = torch.tensor(
+        [
+            [0, 1, 1, 2, 2, 3, 3, 0, 0, 2],
+            [1, 0, 2, 1, 3, 2, 0, 3, 2, 0],
+        ],
+        dtype=torch.long,
+    )
+    raw_pos = layout_pivot_mds_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        n_pivots=4,
+        first_pivot="first_node",
+        compute_dtype=torch.float64,
+        distance_scale=100.0,
+        ogdf_path_special_case=True,
+    )
+    normalized_pos = layout_pivot_mds_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        n_pivots=4,
+        seed=42,
+    )
+
+    raw_extent = float(torch.max(raw_pos.max(dim=0).values - raw_pos.min(dim=0).values).item())
+    normalized_extent = float(
+        torch.max(normalized_pos.max(dim=0).values - normalized_pos.min(dim=0).values).item()
+    )
+
+    assert raw_extent > 20.0
+    assert normalized_extent <= 20.0 + 1.0e-5
+
+
 def test_pivot_mds_coordinates_use_ogdf_sqrt_singular_scale() -> None:
     """Confirm Pivot-MDS coordinate recovery matches OGDF's final SVD scale."""
     distance_matrix = torch.tensor(

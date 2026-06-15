@@ -17,6 +17,7 @@ from dagua.eval.competitors.classic_competitor import (
     ClassicMaxentStress,
     ClassicNeato,
     ClassicNeuLay,
+    ClassicPivotMDS,
     ClassicSGD2Multi,
     ClassicStressMajorization,
     ClassicStressSGD,
@@ -364,6 +365,41 @@ def test_classic_sgd2_multi_enables_multiple_criteria(
     assert observed["extra_kwargs"] == {
         "criteria": {"stress": 1.0, "ideal_edge_length": 1.0},
         "lr": 0.01,
+    }
+
+
+def test_classic_pivot_mds_variant_does_not_forward_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Classic Pivot-MDS fidelity dispatch should match OGDF's unweighted BFS."""
+    graph = _make_weighted_path_graph()
+    seen: dict[str, dict[str, Any]] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.pivot_mds",
+        fn_name="layout_pivot_mds_pipeline",
+        seen=seen,
+    )
+
+    result = ClassicPivotMDS().layout_with_variant(
+        graph,
+        seed=17,
+        variant_params={
+            "n_pivots": 2,
+            "first_pivot": "first_node",
+            "compute_dtype": "float64",
+            "distance_scale": 100.0,
+            "ogdf_path_special_case": True,
+        },
+    )
+
+    assert result.error is None
+    assert seen["kwargs"] == {
+        "n_pivots": 2,
+        "first_pivot": "first_node",
+        "compute_dtype": "float64",
+        "distance_scale": 100.0,
+        "ogdf_path_special_case": True,
     }
 
 
