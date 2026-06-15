@@ -146,7 +146,7 @@ def _build_undirected_adjacency(
         mirror SciPy CSR duplicate coalescing in the reference adapter.
     """
     if edge_weights is None:
-        adjacency_sets: list[set[int]] = [set() for _ in range(num_nodes)]
+        adjacency_maps: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
         if edge_index.numel() == 0:
             return [[] for _ in range(num_nodes)]
 
@@ -154,10 +154,14 @@ def _build_undirected_adjacency(
         for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
             if source == target:
                 continue
-            adjacency_sets[source].add(target)
-            adjacency_sets[target].add(source)
+            # SciPy CSR coalesces duplicate entries by summing them; count
+            # parallel unweighted edges so benchmark distances see the same cost.
+            previous = adjacency_maps[source].get(target)
+            adjacency_maps[source][target] = previous + 1.0 if previous is not None else 1.0
+            previous = adjacency_maps[target].get(source)
+            adjacency_maps[target][source] = previous + 1.0 if previous is not None else 1.0
 
-        return [[(neighbor, 1.0) for neighbor in sorted(neighbors)] for neighbors in adjacency_sets]
+        return [sorted(neighbors.items()) for neighbors in adjacency_maps]
 
     adjacency_maps: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() == 0:
