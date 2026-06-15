@@ -132,7 +132,7 @@ def test_fdp_expand_cluster_ports_matches_reference_edge_order_and_angles() -> N
 
 
 def test_fdp_recursion_guard_keeps_default_fmmm_behavior_unchanged() -> None:
-    """Cluster metadata should be ignored unless ``fidelity_mode`` is enabled.
+    """Cluster metadata should be ignored unless Graphviz FDP fidelity is requested.
 
     Returns
     -------
@@ -154,6 +154,67 @@ def test_fdp_recursion_guard_keeps_default_fmmm_behavior_unchanged() -> None:
     )
 
     assert torch.equal(without_clusters, with_clusters)
+
+
+def test_ogdf_fmmm_fidelity_ignores_cluster_metadata() -> None:
+    """OGDF FMMM fidelity should match OGDF's plain-graph cluster behavior.
+
+    Returns
+    -------
+    None
+        Assertion validates that clustered benchmark graphs no longer take the
+        Graphviz FDP recursion route when targeting OGDF FMMM.
+    """
+    edge_index = _edge_index([(0, 2), (1, 2), (1, 3)])
+    node_sizes = torch.ones((4, 2), dtype=torch.float32)
+
+    without_clusters = layout_fmmm_pipeline(
+        edge_index,
+        4,
+        node_sizes=node_sizes,
+        steps=4,
+        seed=9,
+        fidelity_mode=True,
+    )
+    with_clusters = layout_fmmm_pipeline(
+        edge_index,
+        4,
+        node_sizes=node_sizes,
+        steps=4,
+        seed=9,
+        fidelity_mode=True,
+        clusters={"cluster_A": [0, 1]},
+        cluster_parents={"cluster_A": None},
+    )
+
+    assert torch.equal(without_clusters, with_clusters)
+
+
+def test_fmmm_graphviz_fdp_mode_accepts_cluster_metadata() -> None:
+    """Explicit Graphviz FDP fidelity should keep the cluster recursion route.
+
+    Returns
+    -------
+    None
+        Assertion validates that the separate Graphviz-FDP target remains
+        available after OGDF FMMM cluster metadata is ignored.
+    """
+    edge_index = _edge_index([(0, 2), (1, 2), (1, 3)])
+    node_sizes = torch.ones((4, 2), dtype=torch.float32)
+
+    positions = layout_fmmm_pipeline(
+        edge_index,
+        4,
+        node_sizes=node_sizes,
+        steps=4,
+        seed=9,
+        fidelity_mode="graphviz_fdp",
+        clusters={"cluster_A": [0, 1]},
+        cluster_parents={"cluster_A": None},
+    )
+
+    assert positions.shape == (4, 2)
+    assert torch.isfinite(positions).all()
 
 
 def test_graphviz_fdp_fidelity_returns_finite_clustered_positions() -> None:
