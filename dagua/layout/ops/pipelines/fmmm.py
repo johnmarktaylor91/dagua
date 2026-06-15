@@ -3279,6 +3279,7 @@ def _graphviz_fdp_tlayout_with_ports(
     num_nodes: int,
     seed: int,
     port_alphas: Mapping[int, float],
+    max_iters: int = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS,
     node_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[torch.Tensor, Tuple[float, float, float, int, int]]:
     """Run Graphviz ``fdp_tLayout`` for a component with boundary ports.
@@ -3293,6 +3294,8 @@ def _graphviz_fdp_tlayout_with_ports(
         Graphviz ``seed`` attribute value.
     port_alphas : Mapping[int, float]
         Local port node index to boundary angle in radians.
+    max_iters : int, default=_GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
+        Graphviz ``maxiter`` budget for the temperature schedule.
     node_ids : Sequence[str], optional
         Trace node identifiers. When provided, per-iteration positions are
         appended in Graphviz trace format.
@@ -3313,7 +3316,6 @@ def _graphviz_fdp_tlayout_with_ports(
     x_displacements = [0.0] * num_nodes
     y_displacements = [0.0] * num_nodes
     outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, None)
-    max_iters = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
     pass1 = _GRAPHVIZ_FDP_DEFAULT_UNSCALED * max_iters // 100
     t0 = _GRAPHVIZ_FDP_DEFAULT_TFACT * _GRAPHVIZ_FDP_DEFAULT_K * math.sqrt(num_nodes) / 5.0
     loop_count = pass1
@@ -3415,6 +3417,7 @@ def _fdp_recursion_tlayout_component(
     derived: _FdpDerivedGraph,
     component: Sequence[int],
     seed: int,
+    max_iters: int = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS,
 ) -> Tuple[torch.Tensor, Tuple[float, float, float, int, int]]:
     """Run Graphviz fdp ``tLayout`` for one recursive derived component.
 
@@ -3426,6 +3429,8 @@ def _fdp_recursion_tlayout_component(
         Derived component node indices.
     seed : int
         Deterministic seed.
+    max_iters : int, default=_GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
+        Graphviz ``maxiter`` budget for the temperature schedule.
 
     Returns
     -------
@@ -3450,6 +3455,7 @@ def _fdp_recursion_tlayout_component(
             num_nodes=len(component),
             seed=seed,
             port_alphas=port_alphas,
+            max_iters=max_iters,
             node_ids=node_ids,
         )
     else:
@@ -3458,6 +3464,7 @@ def _fdp_recursion_tlayout_component(
             num_nodes=len(component),
             seed=seed,
             edge_weights=None,
+            max_iters=max_iters,
             node_ids=node_ids,
         )
     return (positions * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(dtype=torch.float64), xpms
@@ -3925,6 +3932,7 @@ def _fdp_recursion_layout_level(
             derived=derived,
             component=component,
             seed=seed,
+            max_iters=steps,
         )
         local_positions = {
             derived_index: local_tensor[local_index]
@@ -4697,6 +4705,7 @@ def _graphviz_fdp_tlayout(
     num_nodes: int,
     seed: int,
     edge_weights: Optional[torch.Tensor],
+    max_iters: int = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS,
     node_ids: Optional[Sequence[str]] = None,
 ) -> tuple[torch.Tensor, tuple[float, float, float, int, int]]:
     """Run Graphviz ``fdp_tLayout`` for one connected component.
@@ -4711,6 +4720,8 @@ def _graphviz_fdp_tlayout(
         Graphviz ``seed`` attribute value.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
+    max_iters : int, default=_GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
+        Graphviz ``maxiter`` budget for the temperature schedule.
     node_ids : Sequence[str], optional
         Trace node identifiers. When provided, per-iteration positions are
         appended in Graphviz trace format.
@@ -4728,7 +4739,6 @@ def _graphviz_fdp_tlayout(
     x_displacements = [0.0] * num_nodes
     y_displacements = [0.0] * num_nodes
     outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, edge_weights)
-    max_iters = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
     pass1 = _GRAPHVIZ_FDP_DEFAULT_UNSCALED * max_iters // 100
     t0 = _GRAPHVIZ_FDP_DEFAULT_TFACT * _GRAPHVIZ_FDP_DEFAULT_K * math.sqrt(num_nodes) / 5.0
     loop_count = pass1
@@ -5491,6 +5501,7 @@ def _graphviz_fdp_component_layout(
     node_sizes: Optional[torch.Tensor],
     seed: int,
     edge_weights: Optional[torch.Tensor] = None,
+    max_iters: int = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS,
     flip_y: bool = True,
 ) -> torch.Tensor:
     """Run the Graphviz fdp ``tLayout`` plus ``xLayout`` kernels.
@@ -5507,6 +5518,8 @@ def _graphviz_fdp_component_layout(
         Graphviz ``seed`` attribute value.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
+    max_iters : int, default=_GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
+        Graphviz ``maxiter`` budget for the temperature schedule.
     flip_y : bool, default=True
         Whether to convert Graphviz's internal y-up coordinates to the
         benchmark adapter's y-down convention.
@@ -5525,6 +5538,7 @@ def _graphviz_fdp_component_layout(
         num_nodes=num_nodes,
         seed=seed,
         edge_weights=edge_weights,
+        max_iters=max_iters,
     )
     positions = _graphviz_fdp_xlayout(
         positions=positions,
@@ -6196,7 +6210,7 @@ def _layout_fmmm_fidelity_components(
     torch.Tensor
         Packed parent coordinates with shape ``[N, 2]``.
     """
-    del steps, force_model, reference_mode, fidelity_mode, fidelity_dtype
+    del force_model, reference_mode, fidelity_mode, fidelity_dtype
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     component_positions: list[torch.Tensor] = []
     boxes: list[tuple[float, float, float, float]] = []
@@ -6209,6 +6223,7 @@ def _layout_fmmm_fidelity_components(
             node_sizes=local_sizes,
             seed=seed,
             edge_weights=local_weights,
+            max_iters=steps,
             flip_y=False,
         )
         component_positions.append(local_pos)
@@ -6307,15 +6322,30 @@ def layout_fmmm_pipeline(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
-    if fidelity_mode == "graphviz_fdp" and clusters:
-        return graphviz_fdp_fidelity(
+    if fidelity_mode == "graphviz_fdp":
+        if clusters:
+            return graphviz_fdp_fidelity(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                node_sizes=node_sizes,
+                steps=steps,
+                seed=seed,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+            )
+        components = _weak_components(edge_index, num_nodes)
+        return _layout_fmmm_fidelity_components(
             edge_index=edge_index,
+            components=components,
             num_nodes=num_nodes,
             node_sizes=node_sizes,
             steps=steps,
             seed=seed,
-            clusters=clusters,
-            cluster_parents=cluster_parents,
+            edge_weights=edge_weights,
+            force_model=force_model,
+            reference_mode=reference_mode,
+            fidelity_mode=True,
+            fidelity_dtype=fidelity_dtype,
         )
 
     effective_reference_mode = reference_mode or fidelity_mode
