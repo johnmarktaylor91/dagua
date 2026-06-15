@@ -14,9 +14,12 @@ from dagua.layout.ops.fmmm import (
     _unique_edges_with_lengths,
 )
 from dagua.layout.ops.pipelines.fmmm import (
+    _graphviz_fdp_collapse_parallel_edges,
     _graphviz_tile_pack_offsets,
     _layout_ogdf_fmmm_small_fidelity,
     _ogdf_fmmm_max_mult_iter,
+    _ogdf_maar_pack_component_transforms,
+    _ogdf_maar_pack_offsets,
     layout_fmmm_pipeline,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -276,6 +279,68 @@ def test_fmmm_graphviz_tile_pack_offsets_handle_nonzero_box_origins() -> None:
     offsets = _graphviz_tile_pack_offsets(boxes)
 
     assert offsets == [(9.0, -6.0), (-10.0, -7.0), (7.0, 6.0)]
+
+
+def test_fmmm_ogdf_maar_pack_offsets_match_best_fit_rows() -> None:
+    """Verify FMMM disconnected packing follows OGDF MAARPacking rows.
+
+    Returns
+    -------
+    None
+        The assertion covers decreasing-height presort plus the Best-Fit
+        shortest-row insertion rule from OGDF ``MAARPacking.cpp``.
+    """
+    boxes = [
+        (2.0, 3.0, 12.0, 33.0),
+        (-5.0, 7.0, 45.0, 17.0),
+        (0.0, 0.0, 12.0, 12.0),
+    ]
+
+    offsets = _ogdf_maar_pack_offsets(boxes)
+
+    assert offsets == [(-2.0, -3.0), (5.0, 23.0), (10.0, 9.0)]
+
+
+def test_fmmm_ogdf_maar_pack_reports_tipped_components() -> None:
+    """Verify MAARPacking exposes OGDF ``NoGrowingRow`` tip-over decisions.
+
+    Returns
+    -------
+    None
+        The assertion guards the export transform needed when MAARPacking tips
+        a component rectangle before final placement.
+    """
+    boxes = [
+        (0.0, 0.0, 10.0, 10.0),
+        (0.0, 0.0, 8.0, 4.0),
+        (0.0, 0.0, 7.0, 4.0),
+    ]
+
+    transforms = _ogdf_maar_pack_component_transforms(boxes)
+
+    assert transforms == [(0.0, 0.0, False), (14.0, 1.0, True), (0.0, 10.0, False)]
+
+
+def test_fmmm_graphviz_fdp_collapses_parallel_edges_to_one_spring() -> None:
+    """Verify FDP fidelity uses Graphviz's single spring for multi-edges.
+
+    Returns
+    -------
+    None
+        The assertion checks duplicate undirected pairs are not summed, matching
+        Graphviz's multiedge skip in the FDP preprocessing path.
+    """
+    edge_index = torch.tensor([[0, 0, 1, 2], [1, 1, 0, 3]], dtype=torch.long)
+    edge_weights = torch.tensor([2.0, 5.0, 7.0, 11.0], dtype=torch.float64)
+
+    collapsed_edges, collapsed_weights = _graphviz_fdp_collapse_parallel_edges(
+        edge_index,
+        edge_weights,
+    )
+
+    assert torch.equal(collapsed_edges, torch.tensor([[0, 2], [1, 3]], dtype=torch.long))
+    assert collapsed_weights is not None
+    assert torch.allclose(collapsed_weights, torch.tensor([2.0, 11.0], dtype=torch.float64))
 
 
 def test_fmmm_fidelity_mode_packs_disconnected_components_only_in_fidelity() -> None:
