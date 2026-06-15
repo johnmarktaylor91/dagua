@@ -2112,7 +2112,7 @@ _BASE_ENGINE_STOCHASTICITY: dict[str, bool] = {
     "graphviz_sfdp": False,
     "graphviz_neato": False,
     "graphviz_fdp": False,
-    "ogdf_gem": False,
+    "ogdf_gem": True,
     "ogdf_fmmm": False,
     "ogdf_stress": False,
     "ogdf_pivot_mds": False,

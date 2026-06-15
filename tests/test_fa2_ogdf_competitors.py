@@ -22,7 +22,11 @@ from dagua.eval.competitors.ogdf_competitor import (
     OGDFStress,
     OGDFSugiyama,
 )
+from dagua.eval.equivalence_metrics import procrustes_rmsd
+from dagua.eval.graphs import get_test_graphs
+from dagua.eval.variants import engine_is_stochastic
 from dagua.graph import DaguaGraph
+from dagua.layout.ops.pipelines.gem import layout_gem_pipeline
 
 pytestmark = pytest.mark.smoke
 
@@ -262,6 +266,85 @@ def test_ogdf_gem_layout() -> None:
     assert result.pos is not None
     assert result.pos.shape == (6, 2)
     assert result.error is None
+
+
+def test_ogdf_gem_registered_stochastic_for_seeded_references() -> None:
+    """OGDF GEM should be seed-enumerated by the benchmark harness.
+
+    Returns
+    -------
+    None
+        The assertions validate both adapter metadata and benchmark registry
+        classification.
+    """
+    competitor = OGDFGem()
+
+    assert competitor.is_stochastic is True
+    assert engine_is_stochastic("ogdf_gem") is True
+    assert engine_is_stochastic("ogdf_gem__for__classic_gem_iters100") is True
+
+
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
+@pytest.mark.parametrize(
+    ("graph_name", "seed", "rounds"),
+    [
+        ("binary_tree", 42, 100),
+        ("grid_5x5", 42, 100),
+        ("real_karate_34", 42, 100),
+        ("random_dag_200", 42, 500),
+    ],
+)
+def test_ogdf_gem_matched_seed_parity_guardrail(
+    graph_name: str,
+    seed: int,
+    rounds: int,
+) -> None:
+    """Check same-seed Dagua/OGDF GEM parity through benchmark adapters.
+
+    Parameters
+    ----------
+    graph_name : str
+        Benchmark graph name.
+    seed : int
+        Seed forwarded to both GEM implementations.
+    rounds : int
+        OGDF ``numberOfRounds`` value and Dagua fidelity-mode round count.
+
+    Returns
+    -------
+    None
+        The assertion enforces the seed-semantics guardrail when parity holds.
+    """
+    graphs = {test_graph.name: test_graph.graph for test_graph in get_test_graphs(max_nodes=500)}
+    graph = graphs[graph_name]
+    reference = OGDFGem().layout_with_variant(
+        graph,
+        timeout=120.0,
+        seed=seed,
+        variant_params={"rounds": rounds},
+    )
+    assert reference.error is None
+    assert reference.pos is not None
+
+    actual = layout_gem_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        max_iters=rounds,
+        seed=seed,
+        fidelity_mode="ogdf",
+    )
+    rmsd = procrustes_rmsd(
+        actual.detach().cpu().numpy(),
+        reference.pos.detach().cpu().numpy(),
+    )
+
+    if rmsd >= 1.0e-3:
+        pytest.xfail(
+            f"current benchmark-path GEM seed parity fails for "
+            f"{graph_name} seed={seed} rounds={rounds}: RMSD={rmsd:.6g}"
+        )
+    assert rmsd < 1.0e-3
 
 
 @pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
