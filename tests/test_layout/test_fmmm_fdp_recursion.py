@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
 import math
+from typing import Optional
 
+import pytest
 import torch
 
 from dagua.layout.ops.cluster_geometry import ClusterTree
@@ -214,6 +217,79 @@ def test_fmmm_graphviz_fdp_mode_accepts_cluster_metadata() -> None:
     )
 
     assert positions.shape == (4, 2)
+    assert torch.isfinite(positions).all()
+
+
+def test_fmmm_graphviz_fdp_mode_routes_unclustered_graphs_to_fdp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain Graphviz FDP fidelity should use the FDP component emulator.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest patch helper.
+
+    Returns
+    -------
+    None
+        Assertion validates that unclustered ``fidelity_mode="graphviz_fdp"``
+        does not fall through to the OGDF FMMM fidelity path.
+    """
+    edge_index = _edge_index([(0, 1), (1, 2)])
+    fmmm = importlib.import_module("dagua.layout.ops.pipelines.fmmm")
+    calls: list[int] = []
+
+    def fake_component_layout(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: Optional[torch.Tensor],
+        seed: int,
+        edge_weights: Optional[torch.Tensor] = None,
+        max_iters: int = 600,
+        flip_y: bool = True,
+    ) -> torch.Tensor:
+        """Return a sentinel component layout while recording ``maxiter``.
+
+        Parameters
+        ----------
+        edge_index : torch.Tensor
+            Local edge tensor with shape ``[2, E]``.
+        num_nodes : int
+            Number of local component nodes.
+        node_sizes : torch.Tensor, optional
+            Optional node sizes with shape ``[N, 2]``.
+        seed : int
+            Graphviz seed value.
+        edge_weights : torch.Tensor, optional
+            Optional edge weights with shape ``[E]``.
+        max_iters : int, default=600
+            Graphviz ``maxiter`` budget.
+        flip_y : bool, default=True
+            Whether the component helper should flip y.
+
+        Returns
+        -------
+        torch.Tensor
+            Sentinel positions with shape ``[N, 2]``.
+        """
+        del edge_index, node_sizes, seed, edge_weights, flip_y
+        calls.append(max_iters)
+        return torch.arange(num_nodes * 2, dtype=torch.float32).reshape(num_nodes, 2)
+
+    monkeypatch.setattr(fmmm, "_graphviz_fdp_component_layout", fake_component_layout)
+
+    positions = layout_fmmm_pipeline(
+        edge_index,
+        3,
+        node_sizes=torch.full((3, 2), 10.0),
+        steps=123,
+        seed=9,
+        fidelity_mode="graphviz_fdp",
+    )
+
+    assert calls == [123]
+    assert positions.shape == (3, 2)
     assert torch.isfinite(positions).all()
 
 
