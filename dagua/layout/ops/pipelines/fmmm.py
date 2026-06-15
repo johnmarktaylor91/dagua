@@ -5993,7 +5993,7 @@ def build_fmmm_pipeline(
     steps: int = 200,
     force_model: str = "ogdf_new",
     reference_mode: bool = False,
-    fidelity_mode: bool = False,
+    fidelity_mode: Union[bool, str] = False,
     fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build an FM^3 multilevel force-directed pipeline.
@@ -6003,10 +6003,9 @@ def build_fmmm_pipeline(
     Targets: Graphviz 7.0.5 fdp / Hachul and Junger (2004), "Drawing Large
         Graphs with a Potential-Field-Based Multilevel Algorithm".
     Fidelity mode: ``reference_mode=True`` or ``fidelity_mode=True`` enables
-        OGDF/Graphviz-aligned coarsening, coarsest initialization, and force
-        scaling choices used by evaluation competitors. ``fidelity_mode=True``
-        also records fdp compound-edge attachment metadata in
-        ``SolveState.extras`` for clustered graphs.
+        OGDF-aligned coarsening, coarsest initialization, and force scaling
+        choices used by evaluation competitors. ``fidelity_mode="graphviz_fdp"``
+        selects the Graphviz FDP cluster-recursion compatibility route.
     Verified at: final 100-seed report, strong equivalent; median RMSD 0.067
         to 0.179 across step-count variants. Round 33 fdp bounded subset
         remained 0.121966.
@@ -6025,9 +6024,10 @@ def build_fmmm_pipeline(
     reference_mode : bool, default=False
         Use OGDF-aligned coarsening, coarsest initialization, and force
         scaling choices for fidelity comparisons.
-    fidelity_mode : bool, default=False
-        Alias for ``reference_mode`` used by evaluation competitors. Also
-        enables Graphviz fdp compound-edge attachment metadata.
+    fidelity_mode : bool or str, default=False
+        Alias for ``reference_mode`` used by evaluation competitors. The
+        special value ``"graphviz_fdp"`` selects Graphviz FDP cluster-recursion
+        compatibility.
 
     Returns
     -------
@@ -6046,7 +6046,7 @@ def build_fmmm_pipeline(
     if steps < 0:
         raise ValueError("steps must be non-negative.")
 
-    effective_reference_mode = reference_mode or fidelity_mode
+    effective_reference_mode = bool(reference_mode or fidelity_mode)
     initialize_state = _InitializeFMMMState(
         config=_InitializeFMMMStateConfig(
             steps=steps,
@@ -6262,12 +6262,15 @@ def layout_fmmm_pipeline(
         Spring-force model for edge attraction.
     reference_mode : bool, default=False
         Use OGDF-aligned reference behavior for algorithm fidelity runs.
-    fidelity_mode : bool, default=False
-        Alias for ``reference_mode`` used by evaluation competitors.
+    fidelity_mode : bool or str, default=False
+        Alias for ``reference_mode`` used by evaluation competitors. The
+        special value ``"graphviz_fdp"`` selects the cluster-aware Graphviz FDP
+        fidelity route; boolean ``True`` selects OGDF FMMM plain-graph
+        fidelity.
     clusters : Mapping[str, Sequence[int]], optional
-        Cluster membership. Only used when ``fidelity_mode`` is enabled.
+        Cluster membership. Only used for ``fidelity_mode="graphviz_fdp"``.
     cluster_parents : Mapping[str, str | None], optional
-        Cluster parent mapping. Only used when ``fidelity_mode`` is enabled.
+        Cluster parent mapping. Only used for ``fidelity_mode="graphviz_fdp"``.
     **kwargs : Any
         Ignored compatibility keywords from generic layout dispatch.
 
@@ -6304,7 +6307,7 @@ def layout_fmmm_pipeline(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
-    if fidelity_mode and clusters:
+    if fidelity_mode == "graphviz_fdp" and clusters:
         return graphviz_fdp_fidelity(
             edge_index=edge_index,
             num_nodes=num_nodes,
