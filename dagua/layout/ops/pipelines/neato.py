@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 import torch
 
@@ -13,6 +14,8 @@ _GRAPHVIZ_VPSC_DEFAULT_GAP = 1.0 / 9.0
 _GRAPHVIZ_VPSC_X_SCALE = 1.0001
 _GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_DEFAULT_NODE_SIZE = (0.75, 0.5)
+_GRAPHVIZ_PACK_MARGIN_POINTS = 8.0
+_GRAPHVIZ_POLYOMINO_MAX_AVG_SIZE = 100.0
 _VPSC_FEASIBILITY_TOLERANCE = 1.0e-9
 
 
@@ -52,6 +55,28 @@ class _VPSCBlock:
     variables: List[int]
     offsets: dict[int, float]
     position: float
+
+
+@dataclass
+class _PolyominoComponent:
+    """Graphviz pack.c polyomino metadata for one disconnected component.
+
+    Parameters
+    ----------
+    cells : list[tuple[int, int]]
+        Occupied grid cells in the component's covering polyomino.
+    perimeter : int
+        Graphviz sort key: grid width plus grid height.
+    index : int
+        Component index before perimeter sorting.
+    bbox : tuple[float, float, float, float]
+        Component bounding box in points as ``(min_x, min_y, max_x, max_y)``.
+    """
+
+    cells: List[Tuple[int, int]]
+    perimeter: int
+    index: int
+    bbox: Tuple[float, float, float, float]
 
 
 def _weak_components(edge_index: torch.Tensor, num_nodes: int) -> List[List[int]]:
@@ -143,13 +168,412 @@ def _slice_component_edges(
     return local_edges, local_weights
 
 
+def _graphviz_round(value: float) -> int:
+    """Round like C99 ``round`` used by Graphviz ``pack.c``.
+
+    Parameters
+    ----------
+    value : float
+        Value to round.
+
+    Returns
+    -------
+    int
+        Nearest integer, with half values rounded away from zero.
+    """
+    if value >= 0.0:
+        return int(math.floor(value + 0.5))
+    return int(math.ceil(value - 0.5))
+
+
+def _graphviz_cell_value(value: float, step: int) -> int:
+    """Return Graphviz's ``CVAL`` cell index for a point coordinate.
+
+    Parameters
+    ----------
+    value : float
+        Point coordinate in Graphviz points.
+    step : int
+        Polyomino grid step in points.
+
+    Returns
+    -------
+    int
+        Grid cell containing ``value``.
+    """
+    if value >= 0.0:
+        return math.trunc(value / step)
+    return math.trunc(((value + 1.0) / step) - 1.0)
+
+
+def _graphviz_grid(size: float, step: int) -> int:
+    """Return Graphviz's ``GRID`` cell count for a size.
+
+    Parameters
+    ----------
+    size : float
+        Size in Graphviz points.
+    step : int
+        Polyomino grid step in points.
+
+    Returns
+    -------
+    int
+        Number of grid cells required to cover ``size``.
+    """
+    return int(math.ceil(size / step))
+
+
+def _compute_polyomino_step(
+    boxes: List[Tuple[float, float, float, float]],
+    margin: float,
+) -> int:
+    """Compute Graphviz's polyomino grid step.
+
+    Parameters
+    ----------
+    boxes : list[tuple[float, float, float, float]]
+        Component bounding boxes in points as ``(min_x, min_y, max_x, max_y)``.
+    margin : float
+        Graphviz pack margin in points.
+
+    Returns
+    -------
+    int
+        Grid step size in points.
+    """
+    graph_count = len(boxes)
+    a = _GRAPHVIZ_POLYOMINO_MAX_AVG_SIZE * float(graph_count) - 1.0
+    b = 0.0
+    c = 0.0
+    for min_x, min_y, max_x, max_y in boxes:
+        width = max_x - min_x + 2.0 * margin
+        height = max_y - min_y + 2.0 * margin
+        b -= width + height
+        c -= width * height
+    discriminant = b * b - 4.0 * a * c
+    root = int((-b + math.sqrt(max(discriminant, 0.0))) / (2.0 * a))
+    return 1 if root == 0 else root
+
+
+def _cell_point(point: Tuple[float, float], step: int) -> Tuple[int, int]:
+    """Map a point coordinate to its Graphviz polyomino cell.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Point coordinate in Graphviz points.
+    step : int
+        Polyomino grid step in points.
+
+    Returns
+    -------
+    tuple[int, int]
+        Cell coordinate.
+    """
+    return (_graphviz_cell_value(point[0], step), _graphviz_cell_value(point[1], step))
+
+
+def _bresenham_cells(start: Tuple[int, int], end: Tuple[int, int]) -> List[Tuple[int, int]]:
+    """Return cells crossed by Graphviz's ``fillLine`` Bresenham walk.
+
+    Parameters
+    ----------
+    start : tuple[int, int]
+        Starting cell.
+    end : tuple[int, int]
+        Ending cell.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Cells crossed by the line, including both endpoints.
+    """
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    ax = abs(dx) << 1
+    sx = 1 if dx > 0 else -1
+    dy = y2 - y1
+    ay = abs(dy) << 1
+    sy = 1 if dy > 0 else -1
+    x = x1
+    y = y1
+    cells: List[Tuple[int, int]] = []
+    if ax > ay:
+        d = ay - (ax >> 1)
+        while True:
+            cells.append((x, y))
+            if x == x2:
+                return cells
+            if d >= 0:
+                y += sy
+                d -= ax
+            x += sx
+            d += ay
+    d = ax - (ay >> 1)
+    while True:
+        cells.append((x, y))
+        if y == y2:
+            return cells
+        if d >= 0:
+            x += sx
+            d -= ay
+        y += sy
+        d += ax
+
+
+def _component_bbox_points(
+    positions_points: torch.Tensor,
+    sizes_points: torch.Tensor,
+) -> Tuple[float, float, float, float]:
+    """Build a component node bounding box in Graphviz points.
+
+    Parameters
+    ----------
+    positions_points : torch.Tensor
+        Component positions in points with shape ``[C, 2]``.
+    sizes_points : torch.Tensor
+        Component node sizes in points with shape ``[C, 2]``.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounding box as ``(min_x, min_y, max_x, max_y)``.
+    """
+    half_sizes = sizes_points / 2.0
+    lower = (positions_points - half_sizes).min(dim=0).values
+    upper = (positions_points + half_sizes).max(dim=0).values
+    return (
+        float(lower[0].item()),
+        float(lower[1].item()),
+        float(upper[0].item()),
+        float(upper[1].item()),
+    )
+
+
+def _generate_node_polyomino(
+    positions_points: torch.Tensor,
+    sizes_points: torch.Tensor,
+    local_edges: torch.Tensor,
+    bbox: Tuple[float, float, float, float],
+    step: int,
+    margin: float,
+    index: int,
+) -> _PolyominoComponent:
+    """Generate Graphviz ``l_node`` polyomino cells for one component.
+
+    Parameters
+    ----------
+    positions_points : torch.Tensor
+        Component positions in points with shape ``[C, 2]``.
+    sizes_points : torch.Tensor
+        Component node sizes in points with shape ``[C, 2]``.
+    local_edges : torch.Tensor
+        Component-local edges with shape ``[2, E]``.
+    bbox : tuple[float, float, float, float]
+        Component bounding box in points.
+    step : int
+        Polyomino grid step in points.
+    margin : float
+        Graphviz pack margin in points.
+    index : int
+        Component index before perimeter sorting.
+
+    Returns
+    -------
+    _PolyominoComponent
+        Polyomino metadata used by the Graphviz placement scan.
+    """
+    # This mirrors Graphviz pack.c:genPoly for mode l_node. Dagua does not have
+    # Graphviz spline routes here, so edge coverage uses the same straight-line
+    # fallback that pack.c uses when splines are unavailable.
+    min_x, min_y, max_x, max_y = bbox
+    dx = -float(_graphviz_round(min_x))
+    dy = -float(_graphviz_round(min_y))
+    cells: Set[Tuple[int, int]] = set()
+    shifted_centers: List[Tuple[int, int]] = []
+    for node_index in range(positions_points.shape[0]):
+        x = _graphviz_round(float(positions_points[node_index, 0].item())) + dx
+        y = _graphviz_round(float(positions_points[node_index, 1].item())) + dy
+        half_width = _graphviz_round(margin + float(sizes_points[node_index, 0].item()) / 2.0)
+        half_height = _graphviz_round(margin + float(sizes_points[node_index, 1].item()) / 2.0)
+        lower = _cell_point((x - half_width, y - half_height), step)
+        upper = _cell_point((x + half_width, y + half_height), step)
+        for cell_x in range(lower[0], upper[0] + 1):
+            for cell_y in range(lower[1], upper[1] + 1):
+                cells.add((cell_x, cell_y))
+        shifted_centers.append(_cell_point((x, y), step))
+
+    local_edges_cpu = local_edges.detach().to(device="cpu", dtype=torch.long)
+    for source, target in zip(local_edges_cpu[0].tolist(), local_edges_cpu[1].tolist()):
+        if source == target:
+            continue
+        cells.update(_bresenham_cells(shifted_centers[source], shifted_centers[target]))
+
+    width_cells = _graphviz_grid(max_x - min_x + 2.0 * margin, step)
+    height_cells = _graphviz_grid(max_y - min_y + 2.0 * margin, step)
+    return _PolyominoComponent(
+        cells=sorted(cells),
+        perimeter=width_cells + height_cells,
+        index=index,
+        bbox=bbox,
+    )
+
+
+def _polyomino_fits(
+    x: int,
+    y: int,
+    info: _PolyominoComponent,
+    occupied: Set[Tuple[int, int]],
+    step: int,
+) -> Tuple[bool, Tuple[float, float]]:
+    """Check and place a polyomino at a Graphviz scan coordinate.
+
+    Parameters
+    ----------
+    x : int
+        Candidate grid x coordinate.
+    y : int
+        Candidate grid y coordinate.
+    info : _PolyominoComponent
+        Polyomino metadata for the component.
+    occupied : set[tuple[int, int]]
+        Cells already occupied by previously placed components.
+    step : int
+        Polyomino grid step in points.
+
+    Returns
+    -------
+    tuple[bool, tuple[float, float]]
+        Whether the component fits and the resulting Graphviz point offset.
+    """
+    shifted_cells = [(cell_x + x, cell_y + y) for cell_x, cell_y in info.cells]
+    if any(cell in occupied for cell in shifted_cells):
+        return False, (0.0, 0.0)
+    occupied.update(shifted_cells)
+    min_x = float(_graphviz_round(info.bbox[0]))
+    min_y = float(_graphviz_round(info.bbox[1]))
+    return True, (float(step * x) - min_x, float(step * y) - min_y)
+
+
+def _place_polyomino_component(
+    sorted_index: int,
+    info: _PolyominoComponent,
+    occupied: Set[Tuple[int, int]],
+    step: int,
+    margin: float,
+) -> Tuple[float, float]:
+    """Place one component using Graphviz's rectangular spiral scan.
+
+    Parameters
+    ----------
+    sorted_index : int
+        Index in perimeter-sorted placement order.
+    info : _PolyominoComponent
+        Polyomino metadata for the component.
+    occupied : set[tuple[int, int]]
+        Cells already occupied by previously placed components.
+    step : int
+        Polyomino grid step in points.
+    margin : float
+        Graphviz pack margin in points.
+
+    Returns
+    -------
+    tuple[float, float]
+        Translation offset in Graphviz points.
+    """
+    min_x, min_y, max_x, max_y = info.bbox
+    if sorted_index == 0:
+        width_cells = _graphviz_grid(max_x - min_x + 2.0 * margin, step)
+        height_cells = _graphviz_grid(max_y - min_y + 2.0 * margin, step)
+        fits, offset = _polyomino_fits(
+            math.trunc(-width_cells / 2),
+            math.trunc(-height_cells / 2),
+            info,
+            occupied,
+            step,
+        )
+        if fits:
+            return offset
+
+    fits, offset = _polyomino_fits(0, 0, info, occupied, step)
+    if fits:
+        return offset
+    width = math.ceil(max_x - min_x)
+    height = math.ceil(max_y - min_y)
+    if width >= height:
+        bound = 1
+        while True:
+            x = 0
+            y = -bound
+            while x < bound:
+                fits, offset = _polyomino_fits(x, y, info, occupied, step)
+                if fits:
+                    return offset
+                x += 1
+            while y < bound:
+                fits, offset = _polyomino_fits(x, y, info, occupied, step)
+                if fits:
+                    return offset
+                y += 1
+            while x > -bound:
+                fits, offset = _polyomino_fits(x, y, info, occupied, step)
+                if fits:
+                    return offset
+                x -= 1
+            while y > -bound:
+                fits, offset = _polyomino_fits(x, y, info, occupied, step)
+                if fits:
+                    return offset
+                y -= 1
+            while x < 0:
+                fits, offset = _polyomino_fits(x, y, info, occupied, step)
+                if fits:
+                    return offset
+                x += 1
+            bound += 1
+    bound = 1
+    while True:
+        y = 0
+        x = -bound
+        while y > -bound:
+            fits, offset = _polyomino_fits(x, y, info, occupied, step)
+            if fits:
+                return offset
+            y -= 1
+        while x < bound:
+            fits, offset = _polyomino_fits(x, y, info, occupied, step)
+            if fits:
+                return offset
+            x += 1
+        while y < bound:
+            fits, offset = _polyomino_fits(x, y, info, occupied, step)
+            if fits:
+                return offset
+            y += 1
+        while x > -bound:
+            fits, offset = _polyomino_fits(x, y, info, occupied, step)
+            if fits:
+                return offset
+            x -= 1
+        while y > 0:
+            fits, offset = _polyomino_fits(x, y, info, occupied, step)
+            if fits:
+                return offset
+            y -= 1
+        bound += 1
+
+
 def _pack_component_positions(
     components: List[List[int]],
     component_positions: List[torch.Tensor],
+    component_edges: List[torch.Tensor],
     num_nodes: int,
-    gap: float,
+    node_sizes: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """Pack component layouts into a row-major grid.
+    """Pack component layouts using Graphviz's default polyomino packer.
 
     Parameters
     ----------
@@ -157,10 +581,12 @@ def _pack_component_positions(
         Parent node indices for each component.
     component_positions : list[torch.Tensor]
         Local component coordinates, each with shape ``[C, 2]``.
+    component_edges : list[torch.Tensor]
+        Component-local edge tensors, each with shape ``[2, E_c]``.
     num_nodes : int
         Total number of parent graph nodes.
-    gap : float
-        Padding between component bounding boxes.
+    node_sizes : torch.Tensor, optional
+        Optional parent node sizes in inches with shape ``[N, 2]``.
 
     Returns
     -------
@@ -172,23 +598,62 @@ def _pack_component_positions(
     device = component_positions[0].device
     dtype = component_positions[0].dtype
     packed = torch.zeros((num_nodes, 2), dtype=dtype, device=device)
-    cols = max(1, int(len(component_positions) ** 0.5 + 0.999))
-    x_cursor = 0.0
-    y_cursor = 0.0
-    row_height = 0.0
-    for index, (component, local_pos) in enumerate(zip(components, component_positions)):
-        local = local_pos - local_pos.mean(dim=0, keepdim=True)
-        mins = local.min(dim=0).values
-        maxs = local.max(dim=0).values
-        size = (maxs - mins).clamp(min=1.0)
-        local = local - mins + torch.tensor([x_cursor, y_cursor], dtype=dtype, device=device)
-        packed[component] = local
-        x_cursor += float(size[0].item()) + gap
-        row_height = max(row_height, float(size[1].item()))
-        if (index + 1) % cols == 0:
-            x_cursor = 0.0
-            y_cursor += row_height + gap
-            row_height = 0.0
+    if node_sizes is None:
+        sizes = torch.empty((num_nodes, 2), dtype=dtype, device=device)
+        sizes[:, 0] = _GRAPHVIZ_DEFAULT_NODE_SIZE[0]
+        sizes[:, 1] = _GRAPHVIZ_DEFAULT_NODE_SIZE[1]
+    else:
+        sizes = node_sizes.to(device=device, dtype=dtype)
+
+    positions_points = [
+        local_pos.detach().to(device="cpu", dtype=torch.float64) * _GRAPHVIZ_POINTS_PER_INCH
+        for local_pos in component_positions
+    ]
+    sizes_points = [
+        sizes[component].detach().to(device="cpu", dtype=torch.float64) * _GRAPHVIZ_POINTS_PER_INCH
+        for component in components
+    ]
+    boxes = [
+        _component_bbox_points(local_points, local_sizes)
+        for local_points, local_sizes in zip(positions_points, sizes_points)
+    ]
+    step = _compute_polyomino_step(boxes, _GRAPHVIZ_PACK_MARGIN_POINTS)
+    polyominoes = [
+        _generate_node_polyomino(
+            positions_points=local_points,
+            sizes_points=local_sizes,
+            local_edges=local_edges,
+            bbox=box,
+            step=step,
+            margin=_GRAPHVIZ_PACK_MARGIN_POINTS,
+            index=index,
+        )
+        for index, (local_points, local_sizes, local_edges, box) in enumerate(
+            zip(positions_points, sizes_points, component_edges, boxes)
+        )
+    ]
+    sorted_polyominoes = sorted(polyominoes, key=lambda info: -info.perimeter)
+    occupied: Set[Tuple[int, int]] = set()
+    offsets = [(0.0, 0.0)] * len(polyominoes)
+    for sorted_index, info in enumerate(sorted_polyominoes):
+        offsets[info.index] = _place_polyomino_component(
+            sorted_index=sorted_index,
+            info=info,
+            occupied=occupied,
+            step=step,
+            margin=_GRAPHVIZ_PACK_MARGIN_POINTS,
+        )
+
+    for component, local_pos, offset_points in zip(components, component_positions, offsets):
+        offset = torch.tensor(
+            [
+                offset_points[0] / _GRAPHVIZ_POINTS_PER_INCH,
+                offset_points[1] / _GRAPHVIZ_POINTS_PER_INCH,
+            ],
+            dtype=dtype,
+            device=device,
+        )
+        packed[component] = local_pos + offset
     return packed - packed.mean(dim=0, keepdim=True)
 
 
@@ -937,6 +1402,7 @@ def layout_neato_pipeline(
         return connected_result
 
     component_positions: List[torch.Tensor] = []
+    component_edges: List[torch.Tensor] = []
     for component_index, component in enumerate(components):
         local_edges, local_weights = _slice_component_edges(edge_index, edge_weights, component)
         local_sizes = node_sizes[component] if node_sizes is not None else None
@@ -952,14 +1418,13 @@ def layout_neato_pipeline(
             epsilon=epsilon,
         )
         component_positions.append(local_pos)
-    gap = 1.0
-    if node_sizes is not None and node_sizes.numel() > 0:
-        gap = max(float(node_sizes.to(dtype=torch.float32, device="cpu").max().item()), 1.0)
+        component_edges.append(local_edges)
     packed = _pack_component_positions(
         components=components,
         component_positions=component_positions,
+        component_edges=component_edges,
         num_nodes=num_nodes,
-        gap=gap,
+        node_sizes=node_sizes,
     )
     if postprocess_fidelity and overlap_removal:
         packed = remove_neato_overlap_fidelity(
