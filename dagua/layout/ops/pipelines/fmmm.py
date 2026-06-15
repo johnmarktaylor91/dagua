@@ -53,6 +53,8 @@ _OGDF_FMMM_FINE_TUNE_SCALAR = 0.2
 _OGDF_FMMM_POST_SPRING_STRENGTH = 2.0
 _OGDF_FMMM_EPSILON = 0.1
 _OGDF_FMMM_BILLION = 1_000_000_000
+_OGDF_FMMM_MAAR_TIP_IMPROVEMENT = 0.99999
+_OGDF_FMMM_NEARLY_EQUAL_DELTA = 1.0e-10
 _OGDF_FMMM_IDEAL_EDGE_LENGTH = _OGDF_FMMM_UNIT_EDGE_LENGTH + 2.0 * math.sqrt(
     (_OGDF_FMMM_DEFAULT_NODE_WIDTH / 2.0) ** 2 + (_OGDF_FMMM_DEFAULT_NODE_HEIGHT / 2.0) ** 2
 )
@@ -942,6 +944,361 @@ def _ogdf_fmmm_square_aspect_area(width: float, height: float) -> float:
     return width * height * scaling
 
 
+@dataclass
+class _OgdfMaarRectangle:
+    """Rectangle state used by OGDF FMMM MAARPacking.
+
+    Parameters
+    ----------
+    index : int
+        Original component index.
+    width : float
+        Rectangle width.
+    height : float
+        Rectangle height.
+    old_x : float
+        Original down-left x coordinate.
+    old_y : float
+        Original down-left y coordinate.
+    tipped : bool, default=False
+        Whether MAARPacking has tipped this rectangle by 90 degrees.
+    """
+
+    index: int
+    width: float
+    height: float
+    old_x: float
+    old_y: float
+    tipped: bool = False
+
+
+@dataclass
+class _OgdfMaarRow:
+    """Row bookkeeping used by OGDF FMMM MAARPacking.
+
+    Parameters
+    ----------
+    max_height : float
+        Maximum rectangle height in the row.
+    total_width : float
+        Sum of rectangle widths in the row.
+    row_index : int
+        Stable row order assigned at creation time.
+    """
+
+    max_height: float
+    total_width: float
+    row_index: int
+
+
+def _ogdf_fmmm_nearly_equal(first: float, second: float) -> bool:
+    """Return OGDF ``numexcept::nearly_equal`` for positive packing areas.
+
+    Parameters
+    ----------
+    first : float
+        Candidate value.
+    second : float
+        Reference value.
+
+    Returns
+    -------
+    bool
+        True when ``first`` falls inside OGDF's relative tolerance around
+        ``second``.
+    """
+    if second > 0.0:
+        lower = second * (1.0 - _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+        upper = second * (1.0 + _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+    else:
+        lower = second * (1.0 + _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+        upper = second * (1.0 - _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+    return lower <= first <= upper
+
+
+def _ogdf_maar_tipped_rectangle(rectangle: _OgdfMaarRectangle) -> _OgdfMaarRectangle:
+    """Return OGDF MAARPacking's tipped rectangle copy.
+
+    Parameters
+    ----------
+    rectangle : _OgdfMaarRectangle
+        Source rectangle.
+
+    Returns
+    -------
+    _OgdfMaarRectangle
+        Rectangle rotated by 90 degrees with old down-left coordinates updated
+        like ``MAARPacking::tipp_over``.
+    """
+    if not rectangle.tipped:
+        old_x = -rectangle.old_y - rectangle.height
+        old_y = rectangle.old_x
+    else:
+        old_x = rectangle.old_y
+        old_y = -rectangle.old_x - rectangle.width
+    return _OgdfMaarRectangle(
+        index=rectangle.index,
+        width=rectangle.height,
+        height=rectangle.width,
+        old_x=old_x,
+        old_y=old_y,
+        tipped=not rectangle.tipped,
+    )
+
+
+def _ogdf_maar_aspect_ratio_area(width: float, height: float, aspect_ratio: float) -> float:
+    """Return OGDF MAARPacking's aspect-ratio adjusted area.
+
+    Parameters
+    ----------
+    width : float
+        Candidate packing width.
+    height : float
+        Candidate packing height.
+    aspect_ratio : float
+        Desired page ratio.
+
+    Returns
+    -------
+    float
+        Area scaled by the ratio mismatch.
+    """
+    ratio = width / height
+    if ratio < aspect_ratio:
+        return width * height * (aspect_ratio / ratio)
+    return width * height * (ratio / aspect_ratio)
+
+
+def _ogdf_maar_better_tip_new_row(
+    rectangle: _OgdfMaarRectangle,
+    area_width: float,
+    area_height: float,
+    aspect_ratio: float,
+) -> tuple[bool, float]:
+    """Evaluate OGDF's tipped-vs-untipped new-row placement.
+
+    Parameters
+    ----------
+    rectangle : _OgdfMaarRectangle
+        Rectangle being inserted.
+    area_width : float
+        Current packing width.
+    area_height : float
+        Current packing height.
+    aspect_ratio : float
+        Desired page ratio.
+
+    Returns
+    -------
+    tuple[bool, float]
+        Whether tipping is better and the best resulting aspect-ratio area.
+    """
+    width = max(area_width, rectangle.width)
+    height = area_height + rectangle.height
+    best_area = _ogdf_maar_aspect_ratio_area(width, height, aspect_ratio)
+    tipped_width = max(area_width, rectangle.height)
+    tipped_height = area_height + rectangle.width
+    tipped_area = _ogdf_maar_aspect_ratio_area(tipped_width, tipped_height, aspect_ratio)
+    if tipped_area < _OGDF_FMMM_MAAR_TIP_IMPROVEMENT * best_area:
+        return True, tipped_area
+    return False, best_area
+
+
+def _ogdf_maar_better_tip_this_row(
+    rectangle: _OgdfMaarRectangle,
+    row: _OgdfMaarRow,
+    area_width: float,
+    area_height: float,
+    aspect_ratio: float,
+) -> tuple[bool, float]:
+    """Evaluate OGDF's tipped-vs-untipped existing-row placement.
+
+    Parameters
+    ----------
+    rectangle : _OgdfMaarRectangle
+        Rectangle being inserted.
+    row : _OgdfMaarRow
+        Best-Fit row candidate.
+    area_width : float
+        Current packing width.
+    area_height : float
+        Current packing height.
+    aspect_ratio : float
+        Desired page ratio.
+
+    Returns
+    -------
+    tuple[bool, float]
+        Whether tipping is better and the best resulting aspect-ratio area.
+    """
+    width = max(area_width, row.total_width + rectangle.width)
+    height = max(area_height, area_height - row.max_height + rectangle.height)
+    best_area = _ogdf_maar_aspect_ratio_area(width, height, aspect_ratio)
+    if rectangle.width > row.max_height:
+        return False, best_area
+    tipped_width = max(area_width, row.total_width + rectangle.height)
+    tipped_height = max(area_height, area_height - row.max_height + rectangle.width)
+    tipped_area = _ogdf_maar_aspect_ratio_area(tipped_width, tipped_height, aspect_ratio)
+    if tipped_area < _OGDF_FMMM_MAAR_TIP_IMPROVEMENT * best_area:
+        return True, tipped_area
+    return False, best_area
+
+
+def _ogdf_maar_pack_component_transforms(
+    boxes: list[tuple[float, float, float, float]],
+    aspect_ratio: float = 1.0,
+) -> list[tuple[float, float, bool]]:
+    """Pack component boxes with OGDF FMMM MAARPacking Best-Fit.
+
+    Parameters
+    ----------
+    boxes : list[tuple[float, float, float, float]]
+        Component bounding boxes as ``(llx, lly, urx, ury)``.
+    aspect_ratio : float, default=1.0
+        OGDF ``FMMMLayout::pageRatio``. The default is square packing.
+
+    Returns
+    -------
+    list[tuple[float, float, bool]]
+        Per-component ``(x_offset, y_offset, tipped)`` transforms in original
+        component order.
+
+    Notes
+    -----
+    This ports ``FMMMLayout::pack_subGraph_drawings`` and
+    ``MAARPacking::pack_rectangles_using_Best_Fit_strategy`` from OGDF
+    (``FMMMLayout.cpp:746-760`` and ``MAARPacking.cpp:58-104``). The FMMM
+    defaults are decreasing-height presort and ``TipOver::NoGrowingRow``.
+    """
+    if not boxes:
+        return []
+    rectangles = [
+        _OgdfMaarRectangle(
+            index=index,
+            width=box[2] - box[0],
+            height=box[3] - box[1],
+            old_x=box[0],
+            old_y=box[1],
+        )
+        for index, box in enumerate(boxes)
+    ]
+    rectangles.sort(key=lambda rectangle: -rectangle.height)
+
+    rows: list[_OgdfMaarRow] = []
+    row_for_rectangle: list[int] = []
+    area_width = 0.0
+    area_height = 0.0
+
+    for rect_pos, rectangle in enumerate(rectangles):
+        if not rows:
+            should_tip, _ = _ogdf_maar_better_tip_new_row(
+                rectangle,
+                area_width,
+                area_height,
+                aspect_ratio,
+            )
+            if should_tip:
+                rectangle = _ogdf_maar_tipped_rectangle(rectangle)
+                rectangles[rect_pos] = rectangle
+            rows.append(
+                _OgdfMaarRow(
+                    max_height=rectangle.height,
+                    total_width=rectangle.width,
+                    row_index=0,
+                )
+            )
+            row_for_rectangle.append(0)
+            area_width = max(area_width, rectangle.width)
+            area_height += rectangle.height
+            continue
+
+        should_tip_new, best_area = _ogdf_maar_better_tip_new_row(
+            rectangle,
+            area_width,
+            area_height,
+            aspect_ratio,
+        )
+        best_try_index = 2 if should_tip_new else 1
+        # OGDF's PQueue returns the row with the smallest total width; that is
+        # the only existing row considered by the Best-Fit insertion test.
+        best_row_index = min(range(len(rows)), key=lambda row_index: rows[row_index].total_width)
+        should_tip_row, row_area = _ogdf_maar_better_tip_this_row(
+            rectangle,
+            rows[best_row_index],
+            area_width,
+            area_height,
+            aspect_ratio,
+        )
+        row_try_index = 4 if should_tip_row else 3
+        if row_area <= best_area or _ogdf_fmmm_nearly_equal(best_area, row_area):
+            best_area = row_area
+            best_try_index = row_try_index
+        if best_try_index in (2, 4):
+            rectangle = _ogdf_maar_tipped_rectangle(rectangle)
+            rectangles[rect_pos] = rectangle
+        if best_try_index in (1, 2):
+            row_index = len(rows)
+            rows.append(
+                _OgdfMaarRow(
+                    max_height=rectangle.height,
+                    total_width=rectangle.width,
+                    row_index=row_index,
+                )
+            )
+            row_for_rectangle.append(row_index)
+            area_width = max(area_width, rectangle.width)
+            area_height += rectangle.height
+        else:
+            row = rows[best_row_index]
+            old_max_height = row.max_height
+            row.max_height = max(old_max_height, rectangle.height)
+            row.total_width += rectangle.width
+            row_for_rectangle.append(best_row_index)
+            area_width = max(area_width, row.total_width)
+            area_height = max(area_height, area_height - old_max_height + rectangle.height)
+
+    row_y_min = [0.0] * len(rows)
+    for row_index in range(1, len(rows)):
+        row_y_min[row_index] = row_y_min[row_index - 1] + rows[row_index - 1].max_height
+    act_row_x_max = [0.0] * len(rows)
+    offsets = [(0.0, 0.0, False) for _ in boxes]
+    for rectangle, row_index in zip(rectangles, row_for_rectangle):
+        row = rows[row_index]
+        new_x = act_row_x_max[row.row_index]
+        act_row_x_max[row.row_index] += rectangle.width
+        new_y = row_y_min[row.row_index] + (row.max_height - rectangle.height) / 2.0
+        offsets[rectangle.index] = (
+            new_x - rectangle.old_x,
+            new_y - rectangle.old_y,
+            rectangle.tipped,
+        )
+    return offsets
+
+
+def _ogdf_maar_pack_offsets(
+    boxes: list[tuple[float, float, float, float]],
+    aspect_ratio: float = 1.0,
+) -> list[tuple[float, float]]:
+    """Return only translations from OGDF FMMM MAARPacking Best-Fit.
+
+    Parameters
+    ----------
+    boxes : list[tuple[float, float, float, float]]
+        Component bounding boxes as ``(llx, lly, urx, ury)``.
+    aspect_ratio : float, default=1.0
+        OGDF ``FMMMLayout::pageRatio``.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Per-component translations in original component order.
+    """
+    return [
+        (x_offset, y_offset)
+        for x_offset, y_offset, _ in _ogdf_maar_pack_component_transforms(boxes, aspect_ratio)
+    ]
+
+
 def _ogdf_fmmm_rotate_positions(
     positions: list[list[float]],
     angle: float,
@@ -1479,11 +1836,29 @@ def _layout_ogdf_fmmm_component_fidelity(
         )
         component_positions.append(local_positions)
         component_sizes.append(local_sizes)
-        component_boxes.append(_component_box(local_positions, local_sizes))
+        local_points = local_positions.detach().to(device="cpu", dtype=torch.float64).tolist()
+        width, height, old_dlc = _ogdf_fmmm_component_rectangle(local_points)
+        component_boxes.append(
+            (
+                old_dlc[0],
+                old_dlc[1],
+                old_dlc[0] + width,
+                old_dlc[1] + height,
+            )
+        )
 
-    offsets = _graphviz_tile_pack_offsets(component_boxes)
-    for component, local_positions, offset in zip(components, component_positions, offsets):
-        offset_tensor = torch.tensor(offset, dtype=torch.float64, device=device)
+    transforms = _ogdf_maar_pack_component_transforms(component_boxes)
+    for component, local_positions, (x_offset, y_offset, tipped) in zip(
+        components,
+        component_positions,
+        transforms,
+    ):
+        if tipped:
+            local_positions = torch.stack(
+                (-local_positions[:, 1], local_positions[:, 0]),
+                dim=1,
+            )
+        offset_tensor = torch.tensor((x_offset, y_offset), dtype=torch.float64, device=device)
         global_indices = torch.tensor(component, dtype=torch.long, device=device)
         packed[global_indices] = local_positions + offset_tensor.unsqueeze(0)
 
@@ -4257,6 +4632,75 @@ def _graphviz_fdp_edge_lists(
     return outgoing, edges
 
 
+def _graphviz_fdp_collapse_parallel_edges(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Collapse FDP parallel edges to Graphviz's single spring per node pair.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor or None]
+        Edge tensor and optional weights with duplicate undirected node pairs
+        removed, preserving the first edge orientation and first weight.
+
+    Notes
+    -----
+    Graphviz degree logic skips repeated edges between the same pair
+    (``lib/neatogen/stuff.c:126-132``). The FDP emulator mirrors that by using
+    one spring per pair rather than summing duplicate weights.
+    """
+    if edge_index.numel() == 0:
+        return edge_index, edge_weights
+    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    weights_cpu = None if edge_weights is None else edge_weights.detach().to(device="cpu")
+    seen: set[tuple[int, int]] = set()
+    kept_sources: list[int] = []
+    kept_targets: list[int] = []
+    kept_weights: list[float] = []
+    for edge_pos, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        source_index = int(source)
+        target_index = int(target)
+        if source_index == target_index:
+            continue
+        key = (
+            min(source_index, target_index),
+            max(source_index, target_index),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        kept_sources.append(source_index)
+        kept_targets.append(target_index)
+        if weights_cpu is not None:
+            kept_weights.append(float(weights_cpu[edge_pos].item()))
+    if not kept_sources:
+        collapsed_edges = torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+    else:
+        collapsed_edges = torch.tensor(
+            [kept_sources, kept_targets],
+            dtype=torch.long,
+            device=edge_index.device,
+        )
+    if edge_weights is None:
+        return collapsed_edges, None
+    collapsed_weights = torch.tensor(
+        kept_weights,
+        dtype=edge_weights.dtype,
+        device=edge_weights.device,
+    )
+    return collapsed_edges, collapsed_weights
+
+
 def _graphviz_fdp_initial_positions(num_nodes: int, seed: int) -> torch.Tensor:
     """Initialize positions as Graphviz ``fdp_tLayout`` does without ports.
 
@@ -5533,6 +5977,7 @@ def _graphviz_fdp_component_layout(
         return torch.empty((0, 2), dtype=torch.float32)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32)
+    edge_index, edge_weights = _graphviz_fdp_collapse_parallel_edges(edge_index, edge_weights)
     positions, xpms = _graphviz_fdp_tlayout(
         edge_index=edge_index,
         num_nodes=num_nodes,
