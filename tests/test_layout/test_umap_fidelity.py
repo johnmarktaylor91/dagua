@@ -41,6 +41,15 @@ def test_build_undirected_adjacency_uses_weights_as_distances() -> None:
     assert adjacency == [[(1, 5.0)], [(0, 5.0)]]
 
 
+def test_build_undirected_adjacency_sums_parallel_unweighted_edges() -> None:
+    """Verify unweighted UMAP adjacency preserves CSR duplicate-sum semantics."""
+    edge_index = torch.tensor([[0, 0], [1, 1]], dtype=torch.long)
+
+    adjacency = _build_undirected_adjacency(edge_index=edge_index, num_nodes=2)
+
+    assert adjacency == [[(1, 2.0)], [(0, 2.0)]]
+
+
 def test_knn_from_distances_counts_self_neighbor() -> None:
     """Verify precomputed UMAP kNN semantics count the self neighbor."""
     distances = torch.tensor(
