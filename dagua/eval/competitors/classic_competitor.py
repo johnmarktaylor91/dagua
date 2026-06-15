@@ -117,13 +117,14 @@ class _ClassicLayoutSpec:
 
 
 # Fidelity adapters match each reference's weight semantics. Graphviz neato writes
-# no ``len=`` attributes, (SGD)^2 multi builds unit-edge distances, and igraph
-# MDS always uses unweighted shortest-path distances, so weighted support would
-# need separate dagua-specific variants.
+# no ``len=`` attributes, (SGD)^2 multi builds unit-edge distances, igraph MDS
+# always uses unweighted shortest-path distances, and OGDF PivotMDS runs BFS
+# from each pivot, so weighted support would need separate dagua-specific variants.
 _UNWEIGHTED_REFERENCE_LAYOUTS = frozenset(
     {
         "layout_classical_mds_pipeline",
         "layout_neato_pipeline",
+        "layout_pivot_mds_pipeline",
         "layout_sgd2_multi_pipeline",
     }
 )
@@ -1229,6 +1230,9 @@ class ClassicPivotMDS(_ClassicBase):
 
     name = "classic_pivot_mds"
     max_nodes = 500_000
+    variant_param_names = frozenset(
+        {"compute_dtype", "distance_scale", "first_pivot", "n_pivots", "ogdf_path_special_case"}
+    )
 
     def layout(
         self,
