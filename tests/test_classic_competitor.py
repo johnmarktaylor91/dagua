@@ -12,6 +12,7 @@ import torch
 
 from dagua.eval.competitors import classic_competitor, get_available_competitors
 from dagua.eval.competitors.classic_competitor import (
+    ClassicClassicalMDS,
     ClassicFR,
     ClassicMaxentStress,
     ClassicNeato,
@@ -370,6 +371,11 @@ def test_classic_sgd2_multi_enables_multiple_criteria(
     ("competitor_factory", "module_name", "fn_name"),
     [
         (
+            ClassicClassicalMDS,
+            "dagua.layout.ops.pipelines.classical_mds",
+            "layout_classical_mds_pipeline",
+        ),
+        (
             ClassicSGD2Multi,
             "dagua.layout.ops.pipelines.sgd2_multi",
             "layout_sgd2_multi_pipeline",
@@ -383,7 +389,7 @@ def test_classic_sgd2_multi_enables_multiple_criteria(
 )
 def test_reference_unweighted_classic_adapters_skip_edge_weights(
     monkeypatch: pytest.MonkeyPatch,
-    competitor_factory: type[ClassicSGD2Multi] | type[ClassicNeato],
+    competitor_factory: type[ClassicClassicalMDS] | type[ClassicSGD2Multi] | type[ClassicNeato],
     module_name: str,
     fn_name: str,
 ) -> None:
