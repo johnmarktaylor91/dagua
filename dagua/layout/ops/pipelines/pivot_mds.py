@@ -90,12 +90,13 @@ def build_pivot_mds_pipeline(
         raise ValueError("distance_scale must be positive.")
     resolved_dtype = _resolve_compute_dtype(compute_dtype)
     coordinate_op: Op
-    if _uses_ogdf_fidelity_coordinates(
+    is_ogdf_fidelity = _uses_ogdf_fidelity_coordinates(
         first_pivot=first_pivot,
         first_pivot_index=first_pivot_index,
         compute_dtype=resolved_dtype,
         distance_scale=distance_scale,
-    ):
+    )
+    if is_ogdf_fidelity:
         coordinate_op = _OGDFPivotMDSComputeCoordinates()
     else:
         coordinate_op = PivotMDSComputeCoordinates(compute_dtype=resolved_dtype)
@@ -123,7 +124,9 @@ def build_pivot_mds_pipeline(
                 ),
             ),
             coordinate_op,
-            PivotMDSFinalizePositions(),
+            # OGDF PivotMDS emits raw distance-scale coordinates; only dagua's
+            # normal user path applies drawing-extent normalization.
+            PivotMDSFinalizePositions(skip_normalization=is_ogdf_fidelity),
         ],
         name="pivot_mds_pipeline",
     )
