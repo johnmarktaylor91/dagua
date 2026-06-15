@@ -1022,6 +1022,22 @@ class PivotMDSFinalizePositions(Op):
     requires: ClassVar[Tuple[str, ...]] = ()
     access_pattern: ClassVar[str] = "global"
 
+    def __init__(self, skip_normalization: bool = False) -> None:
+        """Store Pivot-MDS finalization options.
+
+        Parameters
+        ----------
+        skip_normalization : bool, default=False
+            Whether to keep raw Pivot-MDS coordinates instead of rescaling to
+            dagua's standard drawing extent.
+
+        Returns
+        -------
+        None
+            The op is configured in place.
+        """
+        self.skip_normalization = skip_normalization
+
     def apply(
         self,
         problem: LayoutProblem,
@@ -1057,6 +1073,10 @@ class PivotMDSFinalizePositions(Op):
         )
         if state.pos is None or state.pos.numel() == 0:
             state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            return state
+
+        if self.skip_normalization:
+            state.pos = state.pos.to(dtype=torch.float32, device=output_device)
             return state
 
         extent = _layout_extent(num_nodes=problem.num_nodes, node_sizes=problem.node_sizes)
