@@ -1740,10 +1740,20 @@ def _quick_classic(
             extra_kwargs.setdefault("direction", graph.direction)
         if fn_name == "layout_kk_pipeline":
             extra_kwargs.setdefault("orient_to_direction", False)
+        node_sizes = graph.node_sizes
+        if fn_name == "layout_neato_pipeline":
+            if node_sizes is None:
+                graph.compute_node_sizes()
+                node_sizes = graph.node_sizes
+            if node_sizes is not None:
+                # Dagua text measurement stores label-sized boxes in points,
+                # while the neato compatibility pipeline models Graphviz's
+                # internal coordinates in inches before JSON export.
+                node_sizes = node_sizes / 72.0
         pos = fn(
             edge_index,
             graph.num_nodes,
-            node_sizes=graph.node_sizes,
+            node_sizes=node_sizes,
             seed=seed,
             **extra_kwargs,
         )
