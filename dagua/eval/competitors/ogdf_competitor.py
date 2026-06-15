@@ -345,6 +345,7 @@ class OGDFGem(_OGDFBase):
 
     name = "ogdf_gem"
     algorithm = "gem"
+    is_stochastic = True
     max_nodes = 20_000
     variant_param_names = frozenset({"max_iters", "rounds"})
 
