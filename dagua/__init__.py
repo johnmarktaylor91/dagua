@@ -1,6 +1,6 @@
 """Dagua: GPU-accelerated differentiable graph layout engine built on PyTorch."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Enable expandable CUDA memory segments to prevent allocator fragmentation.
 # Without this, large graphs (100M+ nodes) can OOM even with sufficient total
