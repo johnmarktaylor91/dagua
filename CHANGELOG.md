@@ -1,6 +1,9 @@
 # CHANGELOG
 
 
+## v0.3.0 (2026-06-13)
+
+
 ## v0.2.0 (2026-06-12)
 
 ### Bug Fixes
@@ -392,6 +395,10 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 7 competitor layout() methods had hardcoded old function names (layout_sgd2_multi, layout_graphopt,
   etc.) bypassing the spec. Updated to _pipeline suffix.
 
+- **eval**: Igraph_drl reference passes weights='weight' -- ref was ignoring edge weights (native
+  drl was correct); weighted drl now bit-exact (r71 P2c)
+  ([`cb7f21e`](https://github.com/johnmarktaylor91/dagua/commit/cb7f21ea861cd6aba3893b8db060eada2ff59f25))
+
 - **eval**: R69 P2b -- pair deterministic refs (seed=None) against all reimpl seeds
   ([`214b203`](https://github.com/johnmarktaylor91/dagua/commit/214b20387ca8534c66e4083106c4e679ab31a30a))
 
@@ -644,6 +651,10 @@ All fmmm fidelity variants ran _fdp_trace_positions/_fdp_trace_xlayout_event unc
   during the 100-seed escalation, nearly tripping the disk guard). Gate both behind DAGUA_FDP_TRACE
   env (default off); purely logging, zero effect on layout output.
 
+- **layout**: Gem OGDF fidelity -- numberOfRounds is per-node rounds (rounds*nodes capped 30k);
+  fixes over-dispersion, ratio 1.40->1.00 vs seeded ref (r71)
+  ([`2cb39a4`](https://github.com/johnmarktaylor91/dagua/commit/2cb39a48971f014d95cf8638d5c8d88b0addb783))
+
 - **layout**: Ignore dummy nodes in pivot stress
   ([`b67a463`](https://github.com/johnmarktaylor91/dagua/commit/b67a463d1c3a67f39d780fad6b3013a22ae0af90))
 
@@ -781,6 +792,10 @@ Root cause: _EDGE_BATCH_BYTES=64 only counted index storage, not the 5 context t
 Fixes: - _EDGE_BATCH_BYTES: 64 → 256 (4x reduction in batch size) - torch.cuda.synchronize() after
   GPU transfers to catch OOM immediately - try/except around compute_step with CPU fallback on CUDA
   OOM - Cross-tile edge VRAM safety validation
+
+- **layout**: Umap weighted-Dijkstra path truncation -- bit-exact on weighted graphs vs reference
+  (r71 P2c round 2)
+  ([`0416af1`](https://github.com/johnmarktaylor91/dagua/commit/0416af19fb5fc84abe49e75f8ab1a189e71a7565))
 
 - **layout**: Umap weighted-graph fidelity -- lock native preprocessing to reference adapter cost
   semantics (r71 P2c)
@@ -1559,6 +1574,28 @@ Baton updated with the completion state, dispatch summary, and next steps for th
   pipeline runs.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
+- **r71**: Fidelity completion summary -- 705->463 divergent, per-engine fix/residual ledger
+  ([`d7c3ebe`](https://github.com/johnmarktaylor91/dagua/commit/d7c3ebe438b6f229947261847e6103f1706ebf82))
+
+- **r71**: Final scorecard -- escalation-divergent 705 to 463 (-34pct); 12.5pct escalation, 6.3pct
+  all-pairs
+  ([`19db573`](https://github.com/johnmarktaylor91/dagua/commit/19db5737d236da443fb667605f4924c7295f4164))
+
+- **r71**: Fmmm over-dispersion = single-level-vs-OGDF-multilevel architecture gap (root-caused,
+  deferred); not chaos
+  ([`a5b6819`](https://github.com/johnmarktaylor91/dagua/commit/a5b6819d4732393427a680f6b16fbb0dcd8d08f5))
+
+- **r71**: P1e seeded-ref upgrade results -- 66% equiv-or-better, 1006 bit-exact; classical_mds
+  determinism decision
+  ([`74330ab`](https://github.com/johnmarktaylor91/dagua/commit/74330abcde32f0daaa376a00d474f84ad5adda05))
+
+- **r71**: Run complete -- final state, deferred items (fmmm multilevel, P3 structural gaps)
+  ([`74fddb5`](https://github.com/johnmarktaylor91/dagua/commit/74fddb52205accdee51c8c47b7dc5e2440968a30))
+
+- **r71**: Sfdp basin divergence = FP-stack libm residual (init/coarsening/RNG all match graphviz;
+  force-kernel FP only) -- documented-irreducible
+  ([`3d64c8d`](https://github.com/johnmarktaylor91/dagua/commit/3d64c8dbe9c4f0fd616a72b9a252ca0db4bbcda1))
 
 - **research**: Cluster sprint + graphviz parity research artifacts
   ([`5396b8d`](https://github.com/johnmarktaylor91/dagua/commit/5396b8da1940001f51db6a805a71df197d94270c))
@@ -2441,9 +2478,15 @@ No no-op routed variants found in the requested smoke coverage: neato graphviz f
 - **eval**: R70 distributional-fidelity stats core (Task A) + phase-CB control scripts
   ([`9cb2082`](https://github.com/johnmarktaylor91/dagua/commit/9cb20820488a028e39f17b38c1c4ab80f2d58827))
 
+- **eval**: R71 final-assembly chain -- union re-analysis across overlay stores + scorecard
+  ([`35c022a`](https://github.com/johnmarktaylor91/dagua/commit/35c022a049dedb92f020373806b69990d5458c52))
+
 - **eval**: R71 P1b seedability probe (6 seedable + fdp ensemble-ok + 3 deterministic) + P1d
   launcher
   ([`bc5847b`](https://github.com/johnmarktaylor91/dagua/commit/bc5847b2dde0643d6aef16beaae7284f2af735ac))
+
+- **eval**: R71 unattended weekend chain -- P1d completion auto-triggers P1e re-analysis + summary
+  ([`43f23d1`](https://github.com/johnmarktaylor91/dagua/commit/43f23d1218a0697a8e5461cfd659faf22994e5d6))
 
 - **eval**: Reimpl vs original comparison pipeline with PDF report
   ([`75f5c62`](https://github.com/johnmarktaylor91/dagua/commit/75f5c625cd244a39a55609dc18481cb483970b61))
@@ -5382,6 +5425,10 @@ Co-Authored-By: Happy <yesreply@happy.engineering>
 CUDA kernel verified: 0 mismatches against reference on 10K nodes. Tests cover CPU, CUDA, int32,
   numpy, and empty graph paths. AGENTS.md updated: tests are ALWAYS in scope, never excluded by "do
   not modify other files" restrictions.
+
+- **layout**: Refresh stale FDP attachment-point expectations to margin-aware cluster-boundary
+  clipping (failing since round 36; verified independently)
+  ([`800780f`](https://github.com/johnmarktaylor91/dagua/commit/800780f89f560390084abf0a8034c7d4774770cd))
 
 - **ops**: Exhaustive test hardening -- 570 tests across 21 files
   ([`ce906f2`](https://github.com/johnmarktaylor91/dagua/commit/ce906f244bfc8231bd42398ae03d38b4e38987bb))
