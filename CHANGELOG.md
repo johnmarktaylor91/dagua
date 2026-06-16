@@ -1,7 +1,110 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-06-16)
+
+
 ## v0.3.0 (2026-06-13)
+
+### Bug Fixes
+
+- **eval**: Align mds and gem reference harness
+  ([`24ae7d3`](https://github.com/johnmarktaylor91/dagua/commit/24ae7d3d213cd4207dc7508aa0178da96841c660))
+
+- **eval**: Sgd2_multi + neato match unweighted reference semantics (suppress edge_weights for those
+  2 fidelity adapters) -- 17 weighted combos (r72 I-C)
+  ([`98a7264`](https://github.com/johnmarktaylor91/dagua/commit/98a7264eda055fbcbff5d986807cad039af08dc7))
+
+- **eval**: Sgd2_multi RNG-stream match -- emulate DataLoader shuffle + ideal-edge RNG; bit-exact at
+  matched seeds (0.04-0.46 -> ~1e-6) (r72 sgd2)
+  ([`af614aa`](https://github.com/johnmarktaylor91/dagua/commit/af614aa0408374c0c3823da8670da7d319557454))
+
+- **layout**: Fmmm multilevel round 2 -- connected-component decomposition (OGDF DIVIDE_ET_IMPERA)
+  was the over-dispersion root cause; 6/7 anchors distributionally matched, perf fixed (r72 I-A r2)
+  ([`b3f7395`](https://github.com/johnmarktaylor91/dagua/commit/b3f7395e1c8a02b2dd66bd4786f5e5135d478835))
+
+- **layout**: Fmmm OGDF component packing (MAARPacking) + FDP multi-edge
+  ([`79a2ac5`](https://github.com/johnmarktaylor91/dagua/commit/79a2ac5564c132de32983ac0bdc5d5bbfbb2c68a))
+
+M1: port OGDF MAARPacking::pack_rectangles_using_Best_Fit_strategy (DecreasingHeight presort,
+  NoGrowingRow tip-over) to replace the polyomino packer on the OGDF-fidelity path -- matches
+  FMMMLayout::pack_subGraph_drawings. Source-faithful; connected-graph guards unregressed. M1
+  partially improves disconnected cases (residual is component rotation/trajectory, not packing --
+  rebench-gated, revert if net-negative). M5b: aggregate parallel edges before FDP spring force
+  (parallel_multiedge_bundle e_rel 5.15 -> ~1).
+
+r73 fmmm-packing
+
+- **layout**: Fmmm round 3 -- OGDF fidelity ignores cluster forces (match plain-graph OGDF ref);
+  clustered over-dispersion 1.5x->1.0x, gates clean (r72 I-A r3)
+  ([`b0fc1e8`](https://github.com/johnmarktaylor91/dagua/commit/b0fc1e8439f97140874f6cd6f9c610c7781904cb))
+
+- **layout**: Pivot-mds OGDF-scale fidelity + unweighted reference
+  ([`0c01c00`](https://github.com/johnmarktaylor91/dagua/commit/0c01c0089586264d8c3e4355e40ee3e7bd9a86f5))
+
+PivotMDSFinalizePositions normalized to sqrt(N)*5 extent while OGDF pivot-MDS emits raw
+  distance_scale=100 coordinates -> add skip_normalization on the fidelity path. Also add
+  layout_pivot_mds_pipeline to _UNWEIGHTED_REFERENCE_LAYOUTS (OGDF PivotMDS runs BFS from each
+  pivot, not weighted distances). Procrustes RMSD <1e-5 after fix.
+
+r73 pivot
+
+- **layout**: Route unclustered fdp fidelity through graphviz emulator
+  ([`22817c2`](https://github.com/johnmarktaylor91/dagua/commit/22817c2d040a413cf8ecd14750dfae8681176714))
+
+The graphviz_fdp branch in layout_fmmm_pipeline was gated by `and clusters`, so unclustered
+  benchmark graphs fell through to the OGDF FM3 component path instead of the fdp emulator
+  (fidelity_mode="graphviz_fdp" is a truthy string). This produced systematic 0.48x under-dispersion
+  vs the real fdp binary across 54/61 divergent combos plus local-neighborhood mismatch. Route
+  unclustered graphviz_fdp to _layout_fmmm_fidelity_components (the fdp emulator) and thread steps
+  -> fdp maxiter for the graphviz_fdp path only (real fdp runs -Gmaxiter=200 while the variant
+  passes steps=200; emulator hard-coded 600).
+
+Benchmark-path spread ratios (seed 42): grid_5x5 0.57->1.01 (kNN J@5 1.0), petersen_10 0.37->1.00
+  (1.0), karate 0.26->0.98, random_dag_50 0.32->0.94. OGDF steps* variants unregressed (separate
+  branch). 47 fmmm + 441 layout tests pass.
+
+r72 fdp lever
+
+- **neato**: Port polyomino component packing
+  ([`786f32b`](https://github.com/johnmarktaylor91/dagua/commit/786f32b149a2c67fbdd2733333d33e9d44118bc3))
+
+- **umap**: Preserve parallel edge multiplicity
+  ([`7e2f7ae`](https://github.com/johnmarktaylor91/dagua/commit/7e2f7ae35102db435b59795f7bd0ccd8dfa9173b))
+
+### Documentation
+
+- **r72**: All engine fixes landed (FMMM multilevel, sgd2 bit-exact, neato, 3Q tier); Phase B
+  re-benchmark running
+  ([`969b08d`](https://github.com/johnmarktaylor91/dagua/commit/969b08d6c7ace2e09a9928d73ada835238ef5507))
+
+- **r72**: Convergence push COMPLETE -- escalation-divergent 705->331 (-53%)
+  ([`1aa6080`](https://github.com/johnmarktaylor91/dagua/commit/1aa6080db4ebabaefb15db776e16687c1e69e49c))
+
+fmmm fdp-routing bug fixed (61->11 divergent); final fidelity verdict supersedes r71. Remaining 331
+  = verified FP-basin floor (sfdp 184 + chaotic tails). 3Q quality-identical tier = 32 (gate clean).
+  RESULTS.md is the authoritative writeup.
+
+- **r72**: Convergence-push plan v2 (research-grounded, adversarial-reviewed) + gate + state
+  ([`305196d`](https://github.com/johnmarktaylor91/dagua/commit/305196d62a921a5157f88c0425ba7f0c98a39721))
+
+- **r73**: Drive-to-zero COMPLETE -- divergent 617->574 (-43, 0 regressions)
+  ([`0e9a3f6`](https://github.com/johnmarktaylor91/dagua/commit/0e9a3f6179a62e9b9cd28264717553ea15bf9fb3))
+
+umap/pivot/mds clean wins (39), fmmm/neato partial (4). Adversarial critique stopped a 218-combo
+  laundering + corrected wrong packing diagnoses. gem/sugiyama not fixable at sprint scale.
+  r73_RESULTS.md supersedes r72.
+
+### Features
+
+- **eval**: 3q QUALITY_IDENTICAL tier -- quality battery {stress+crossings+kNN-neighborhood} IUT
+  TOST; anti-laundering gate (0/16 controls launder); 5-tier report (r72 I-B)
+  ([`02146c2`](https://github.com/johnmarktaylor91/dagua/commit/02146c27688603a1fd4d1a49d74870f6afa2c317))
+
+- **layout**: Fmmm multilevel fidelity port round 1 -- wire bit-exact kernel into coarsening
+  hierarchy + per-level get_max_mult_iter; transformer matches (disp 1.47->1.00), others partial
+  (r72 I-A r1)
+  ([`9abd10a`](https://github.com/johnmarktaylor91/dagua/commit/9abd10ac3985df0519f19b7ff52d356cca0ca548))
 
 
 ## v0.2.0 (2026-06-12)
