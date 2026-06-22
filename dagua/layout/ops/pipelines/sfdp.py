@@ -12,6 +12,11 @@ from dagua.layout.ops.base import Op, Pipeline, Repeat
 from dagua.layout.ops.graph_utils import (
     layout_device as _layout_device,
 )
+from dagua.layout.ops.pipelines.neato import (
+    _pack_component_positions,
+    _slice_component_edges,
+    _weak_components,
+)
 from dagua.layout.ops.quadtree import GraphvizQuadTree, graphviz_supernode_repulsive_force
 from dagua.layout.ops.sfdp import (
     _BASE_GRAPH_KEY,
@@ -950,6 +955,86 @@ def build_sfdp_pipeline(
     )
 
 
+def _layout_graphviz_sfdp_components(
+    edge_index: torch.Tensor,
+    components: list[list[int]],
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    steps: int,
+    seed: int,
+    theta: float,
+    repulsive_exponent: float,
+    edge_weights: Optional[torch.Tensor],
+    direction: str,
+    fidelity_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Lay out disconnected SFDP components independently and pack them.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Parent graph edge tensor with shape ``[2, E]``.
+    components : list[list[int]]
+        Weak components expressed as parent node indices.
+    num_nodes : int
+        Number of parent graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional parent node sizes with shape ``[N, 2]``.
+    steps : int
+        Maximum number of spring-electrical iterations per level.
+    seed : int
+        Graphviz random seed. The same value is reused per component because
+        Graphviz calls ``sfdpLayout`` separately and each call resets ``srand``.
+    theta : float
+        Barnes-Hut opening angle threshold.
+    repulsive_exponent : float
+        Requested SFDP repulsive exponent ``p``.
+    edge_weights : torch.Tensor, optional
+        Optional parent edge weights with shape ``[E]``.
+    direction : str
+        Requested layout flow direction.
+    fidelity_dtype : torch.dtype
+        Floating dtype forwarded to component SFDP runs.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed parent coordinates with shape ``[N, 2]``.
+    """
+    component_positions: list[torch.Tensor] = []
+    component_edges: list[torch.Tensor] = []
+    for component in components:
+        local_edges, local_weights = _slice_component_edges(
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            component=component,
+        )
+        local_sizes = node_sizes[component] if node_sizes is not None else None
+        local_pos = layout_sfdp_pipeline(
+            edge_index=local_edges,
+            num_nodes=len(component),
+            node_sizes=local_sizes,
+            steps=steps,
+            seed=seed,
+            theta=theta,
+            repulsive_exponent=repulsive_exponent,
+            edge_weights=local_weights,
+            direction=direction,
+            fidelity_mode=_GRAPHVIZ_FIDELITY_MODE,
+            fidelity_dtype=fidelity_dtype,
+        )
+        component_positions.append(local_pos)
+        component_edges.append(local_edges)
+
+    return _pack_component_positions(
+        components=components,
+        component_positions=component_positions,
+        component_edges=component_edges,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+    )
+
+
 def layout_sfdp_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -1023,7 +1108,7 @@ def layout_sfdp_pipeline(
             f"edge_weights length {edge_weights.shape[0]} does not match "
             f"edge count {edge_index.shape[1]}"
         )
-    _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
+    graphviz_fidelity = _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
     if edge_index.numel() != 0:
         edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
         if int(edge_index_cpu.min().item()) < 0:
@@ -1036,6 +1121,23 @@ def layout_sfdp_pipeline(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
+
+    if graphviz_fidelity:
+        components = _weak_components(edge_index=edge_index, num_nodes=num_nodes)
+        if len(components) > 1:
+            return _layout_graphviz_sfdp_components(
+                edge_index=edge_index,
+                components=components,
+                num_nodes=num_nodes,
+                node_sizes=node_sizes,
+                steps=steps,
+                seed=seed,
+                theta=theta,
+                repulsive_exponent=repulsive_exponent,
+                edge_weights=edge_weights,
+                direction=direction,
+                fidelity_dtype=fidelity_dtype,
+            )
 
     problem = LayoutProblem(
         edge_index=edge_index,
