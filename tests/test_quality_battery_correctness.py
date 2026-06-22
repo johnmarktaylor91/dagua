@@ -87,3 +87,63 @@ def test_battery_stress_rejects_genuinely_worse_layout_after_scale_fit() -> None
     assert metrics["battery_stress_D_mean"] > metrics["battery_stress_margin"]
     assert metrics["battery_stress_direct_equivalent"] is False
     assert metrics["quality_identical_raw"] is False
+
+
+def test_neighborhood_preservation_passes_when_dagua_is_better() -> None:
+    """The NP leg should be one-sided so better dagua preservation passes."""
+    payload = _path_payload(20)
+    dists = _path_distances(20)
+    dagua = np.column_stack([np.arange(20, dtype=np.float64), np.zeros(20, dtype=np.float64)])
+    interleaved_order = (0, 10, 1, 11, 2, 12, 3, 13, 4, 14, 5, 15, 6, 16, 7, 17, 8, 18, 9, 19)
+    interleaved = np.asarray(
+        [[index, 0.0] for index in interleaved_order],
+        dtype=np.float64,
+    )
+    metrics = analysis.quality_metric_samples(payload, [dagua], [interleaved], dists)
+
+    np_gate = analysis.quality_np_noninferiority(
+        metrics["np_d"],
+        metrics["np_r"],
+        analysis.QUALITY_NP_ABS_MARGIN,
+    )
+
+    assert metrics["np_d"][0] > metrics["np_r"][0]
+    assert analysis.metric_equivalent(np_gate) is True
+    assert np_gate["noninferior_direct"] is True
+
+
+def test_chance_layout_still_fails_quality_battery() -> None:
+    """Destroyed structure should stay blocked by stress even with one-sided NP."""
+    payload = _path_payload(20)
+    dists = _path_distances(20)
+    reference = np.column_stack([np.arange(20, dtype=np.float64), np.zeros(20, dtype=np.float64)])
+    chance = np.asarray(
+        [
+            [0.34558419, 0.82161814],
+            [0.33043708, -1.30315723],
+            [0.90535587, 0.44637457],
+            [-0.53695324, 0.5811181],
+            [0.3645724, 0.2941325],
+            [0.02842224, 0.54671299],
+            [-0.73645409, -0.16290995],
+            [-0.48211931, 0.59884621],
+            [0.03972211, -0.29245675],
+            [-0.78190846, -0.25719224],
+            [0.00814218, -0.27560291],
+            [1.29406381, 1.00672432],
+            [-2.71116248, -1.88901325],
+            [-0.17477209, -0.42219041],
+            [0.213643, 0.21732193],
+            [2.11783876, -1.11202076],
+            [-0.37760501, 2.04277161],
+            [0.646703, 0.66306337],
+            [-0.51400637, -1.64807517],
+            [0.16746474, 0.10901409],
+        ],
+        dtype=np.float64,
+    )
+
+    metrics = analysis.compute_mode_a_quality_battery(payload, [chance], [reference], dists)
+
+    assert metrics["battery_stress_direct_equivalent"] is False
+    assert metrics["quality_identical_raw"] is False
