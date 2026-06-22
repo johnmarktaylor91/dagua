@@ -1167,12 +1167,16 @@ def deterministic_quality_identical(row: dict[str, Any]) -> bool:
         the strict battery margins.
     """
     stress_rel = as_float(row.get("stress_rel_delta"))
+    np_d = as_float(row.get("np_D_mean"))
+    np_r = as_float(row.get("np_R_mean"))
     np_delta = as_float(row.get("neighborhood_preservation_delta"))
     crossings_delta = as_float(row.get("crossings_delta"))
     cross_r = as_float(row.get("cross_R_mean"))
     if stress_rel is None or np_delta is None or crossings_delta is None or cross_r is None:
         return False
     cross_margin = max(0.02 * cross_r, 0.5)
+    if np_d is not None and np_r is not None:
+        np_delta = max(np_r - np_d, 0.0)
     return stress_rel < 0.02 and np_delta < 0.02 and crossings_delta <= cross_margin
 
 

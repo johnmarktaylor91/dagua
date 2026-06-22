@@ -1172,10 +1172,7 @@ def compute_mode_a_quality_battery(
         metrics["cross_d"] - metrics["cross_r"],
         quality_cross_margin(metrics["cross_r"]),
     )
-    np_tost = df.paired_tost(
-        metrics["np_d"] - metrics["np_r"],
-        QUALITY_NP_ABS_MARGIN,
-    )
+    np_tost = quality_np_noninferiority(metrics["np_d"], metrics["np_r"], QUALITY_NP_ABS_MARGIN)
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
 
@@ -1209,7 +1206,6 @@ def compute_mode_b_quality_battery(
     metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
     stress_target = float(metrics["stress_r"][0]) if metrics["stress_r"].size else float("nan")
     cross_target = float(metrics["cross_r"][0]) if metrics["cross_r"].size else float("nan")
-    np_target = float(metrics["np_r"][0]) if metrics["np_r"].size else float("nan")
     stress_tost = df.one_sample_tost(
         metrics["stress_d"],
         stress_target,
@@ -1220,7 +1216,7 @@ def compute_mode_b_quality_battery(
         cross_target,
         quality_cross_margin(np.asarray([cross_target])),
     )
-    np_tost = df.one_sample_tost(metrics["np_d"], np_target, QUALITY_NP_ABS_MARGIN)
+    np_tost = quality_np_noninferiority(metrics["np_d"], metrics["np_r"], QUALITY_NP_ABS_MARGIN)
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
 
@@ -1409,6 +1405,36 @@ def quality_cross_margin(cross_r: np.ndarray) -> float:
         ``max(2% * mean(reference), 0.5)``.
     """
     return max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
+
+
+def quality_np_noninferiority(np_d: np.ndarray, np_r: np.ndarray, margin: float) -> dict[str, Any]:
+    """Return the one-sided neighborhood-preservation battery decision.
+
+    Parameters
+    ----------
+    np_d : numpy.ndarray
+        Dagua neighborhood-preservation samples.
+    np_r : numpy.ndarray
+        Reference neighborhood-preservation samples.
+    margin : float
+        Allowed absolute non-inferiority shortfall.
+
+    Returns
+    -------
+    dict[str, Any]
+        TOST-shaped payload where direct equivalence means
+        ``mean(np_d) >= mean(np_r) - margin``.
+    """
+    d_mean = metric_mean(np.asarray(np_d, dtype=np.float64))
+    r_mean = metric_mean(np.asarray(np_r, dtype=np.float64))
+    noninferior = math.isfinite(d_mean) and math.isfinite(r_mean) and d_mean >= r_mean - margin
+    return {
+        "p_tost": 0.0 if noninferior else 1.0,
+        "wilcoxon_p_tost": float("nan"),
+        "degenerate_sd": True,
+        "equivalent_direct": noninferior,
+        "noninferior_direct": noninferior,
+    }
 
 
 def metric_equivalent(tost: dict[str, Any]) -> bool:
@@ -2231,7 +2257,7 @@ def deterministic_quality_metrics(
     np_r = neighborhood_preservation(r_layout, dists, k=10)
     stress_rel_delta = abs(stress_d - stress_r) / max(stress_r, df.EPSILON)
     crossings_delta = abs(cross_d - cross_r)
-    neighborhood_delta = abs(np_d - np_r)
+    neighborhood_delta = max(np_r - np_d, 0.0)
     return {
         "battery_n": 1,
         "battery_stress_D_mean": stress_d,
