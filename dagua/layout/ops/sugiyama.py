@@ -13,7 +13,8 @@ from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
-from dagua.layout.cycle import make_acyclic_robust
+from dagua.layout.cycle import _is_acyclic as _cycle_is_acyclic
+from dagua.layout.cycle import make_acyclic, make_acyclic_robust
 from dagua.layout.ops._dot_mincross import graphviz_mincross
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.pipelines.dot_rank import GraphvizVirtualEdge, graphviz_rank_assignment
@@ -164,6 +165,65 @@ def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> t
     return node_sizes.detach().to(device="cpu", dtype=torch.float32)
 
 
+def _iterative_dfs_back_edges(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Detect DFS back edges without consuming Python call stack.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean tensor with shape ``[E]`` marking edges that point to a node
+        currently on the DFS stack.
+    """
+    num_edges = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    if num_edges == 0:
+        return torch.zeros((0,), dtype=torch.bool)
+
+    sources = edge_index[0].tolist()
+    targets = edge_index[1].tolist()
+    adjacency: list[list[tuple[int, int]]] = [[] for _ in range(num_nodes)]
+    in_degree = [0] * num_nodes
+    for edge_id, (source, target) in enumerate(zip(sources, targets)):
+        source_id = int(source)
+        target_id = int(target)
+        adjacency[source_id].append((target_id, edge_id))
+        in_degree[target_id] += 1
+
+    white, gray, black = 0, 1, 2
+    color = [white] * num_nodes
+    reversed_edges = [False] * num_edges
+    visit_order = [node for node, degree in enumerate(in_degree) if degree == 0]
+    visit_order.extend(node for node, degree in enumerate(in_degree) if degree > 0)
+
+    for start in visit_order:
+        if color[start] != white:
+            continue
+        color[start] = gray
+        stack: list[tuple[int, int]] = [(start, 0)]
+        while stack:
+            node, child_index = stack[-1]
+            if child_index >= len(adjacency[node]):
+                color[node] = black
+                stack.pop()
+                continue
+
+            stack[-1] = (node, child_index + 1)
+            child, edge_id = adjacency[node][child_index]
+            if color[child] == gray:
+                reversed_edges[edge_id] = True
+            elif color[child] == white:
+                color[child] = gray
+                stack.append((child, 0))
+
+    return torch.tensor(reversed_edges, dtype=torch.bool)
+
+
 def _prepare_acyclic_edges(
     edge_index: torch.Tensor,
     edge_weights: Optional[torch.Tensor],
@@ -202,7 +262,10 @@ def _prepare_acyclic_edges(
     if filtered_edges.numel() == 0:
         return filtered_edges, filtered_weights, torch.zeros((0,), dtype=torch.bool)
 
-    acyclic_edges, reversed_mask = make_acyclic_robust(filtered_edges, num_nodes)
+    reversed_mask = _iterative_dfs_back_edges(filtered_edges, num_nodes)
+    acyclic_edges = make_acyclic(filtered_edges, reversed_mask)
+    if not _cycle_is_acyclic(acyclic_edges, num_nodes):
+        acyclic_edges, reversed_mask = make_acyclic_robust(filtered_edges, num_nodes)
     return acyclic_edges, filtered_weights, reversed_mask
 
 
