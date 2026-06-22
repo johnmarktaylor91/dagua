@@ -13,6 +13,11 @@ import torch
 from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.distance import ClassicalMDSDistanceMatrix
 from dagua.layout.ops.embed import ClassicalMDSComputeEmbedding, ClassicalMDSComputeEmbeddingConfig
+from dagua.layout.ops.gem import (
+    _connected_components_from_edges,
+    _extract_component_edges,
+    _ogdf_tile_to_rows_offsets,
+)
 from dagua.layout.ops.graph_utils import shortest_path_distances as _shortest_path_distances
 from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.postprocess import (
@@ -232,12 +237,59 @@ def _layout_igraph_classical_mds(
         return torch.zeros((0, 2), dtype=output_dtype, device=output_device)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=output_dtype, device=output_device)
+    components = _connected_components_from_edges(edge_index, num_nodes)
+    if len(components) > 1:
+        return _layout_igraph_classical_mds_components(
+            edge_index=edge_index,
+            components=components,
+            output_dtype=output_dtype,
+            output_device=output_device,
+            use_two_node_special=use_two_node_special,
+        )
     if num_nodes == 2 and use_two_node_special:
         return (
             torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float64, device=output_device)
             * _IGRAPH_LAYOUT_SCALE
         ).to(dtype=output_dtype)
 
+    return _layout_igraph_classical_mds_connected(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        output_dtype=output_dtype,
+        output_device=output_device,
+    )
+
+
+def _layout_igraph_classical_mds_connected(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    output_dtype: torch.dtype,
+    output_device: torch.device,
+) -> torch.Tensor:
+    """Run igraph-compatible classical MDS on one connected component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Component-local graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the connected component.
+    output_dtype : torch.dtype
+        Dtype used for returned coordinates.
+    output_device : torch.device
+        Device used for returned coordinates.
+
+    Returns
+    -------
+    torch.Tensor
+        igraph-scaled component coordinates with shape ``[N, 2]``.
+
+    Notes
+    -----
+    This is the pre-existing connected-graph kernel. Keep this path isolated
+    from disconnected component packing so connected fidelity remains byte
+    identical.
+    """
     distances = _shortest_path_distances(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -276,6 +328,92 @@ def _layout_igraph_classical_mds(
         dtype=output_dtype,
         device=output_device,
     )
+
+
+def _layout_igraph_classical_mds_components(
+    edge_index: torch.Tensor,
+    components: list[list[int]],
+    output_dtype: torch.dtype,
+    output_device: torch.device,
+    use_two_node_special: bool,
+) -> torch.Tensor:
+    """Layout disconnected graphs per component and pack the component boxes.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Parent graph connectivity tensor with shape ``[2, E]``.
+    components : list[list[int]]
+        Weak connected components as parent node indices.
+    output_dtype : torch.dtype
+        Dtype used for returned coordinates.
+    output_device : torch.device
+        Device used for returned coordinates.
+    use_two_node_special : bool
+        Whether component-level two-node MDS should use igraph's raw two-node
+        special case.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed coordinates with shape ``[N, 2]``.
+
+    Notes
+    -----
+    igraph runs classical MDS per connected component and then uses stochastic
+    DLA packing. The benchmark cannot seed that DLA path reliably, so Dagua uses
+    the existing deterministic OGDF TileToRows packer as the rung-3 target.
+    """
+    num_nodes = sum(len(component) for component in components)
+    packed = torch.zeros((num_nodes, 2), dtype=torch.float64, device="cpu")
+    shifted_components: list[torch.Tensor] = []
+    boxes: list[tuple[float, float]] = []
+
+    for component in components:
+        component_edges = _extract_component_edges(edge_index, component)
+        local_positions = _layout_igraph_classical_mds(
+            edge_index=component_edges,
+            num_nodes=len(component),
+            output_dtype=torch.float64,
+            use_two_node_special=use_two_node_special,
+        ).to(device="cpu", dtype=torch.float64)
+        shifted, box = _shift_component_to_packed_box(local_positions)
+        shifted_components.append(shifted)
+        boxes.append(box)
+
+    offsets = _ogdf_tile_to_rows_offsets(boxes, page_ratio=1.0)
+    for component, shifted, (dx, dy) in zip(components, shifted_components, offsets):
+        offset = torch.tensor([dx, dy], dtype=torch.float64)
+        for local_index, node_index in enumerate(component):
+            packed[node_index] = shifted[local_index] + offset
+
+    return packed.to(dtype=output_dtype, device=output_device)
+
+
+def _shift_component_to_packed_box(
+    positions: torch.Tensor,
+) -> tuple[torch.Tensor, tuple[float, float]]:
+    """Shift a component to its lower-left box before TileToRows packing.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Component coordinates with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, tuple[float, float]]
+        Shifted component coordinates and its packing box ``(width, height)``.
+    """
+    if positions.shape[0] == 0:
+        return positions, (0.0, 0.0)
+
+    minimum = positions.min(dim=0, keepdim=True).values
+    shifted = positions - minimum
+    span = shifted.max(dim=0).values
+    width = max(float(span[0].item()), _IGRAPH_LAYOUT_SCALE)
+    height = max(float(span[1].item()), _IGRAPH_LAYOUT_SCALE)
+    return shifted, (width, height)
 
 
 def _layout_ogdf_classical_mds(
