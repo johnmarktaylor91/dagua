@@ -389,6 +389,8 @@ def _graphviz_layer_assignments(
 def _igraph_glpk_layer_assignments(
     edge_index: torch.Tensor,
     num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+    is_directed: bool = True,
 ) -> torch.Tensor:
     """Assign layers using igraph 1.0.0's GLPK Sugiyama formulation.
 
@@ -398,6 +400,11 @@ def _igraph_glpk_layer_assignments(
         Original non-loop edge list with shape ``[2, E]`` on CPU.
     num_nodes : int
         Number of original graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    is_directed : bool, default=True
+        Whether to follow igraph's directed-graph GLPK gate. Undirected graphs
+        use igraph's BFS fallback.
 
     Returns
     -------
@@ -406,19 +413,48 @@ def _igraph_glpk_layer_assignments(
 
     Notes
     -----
-    igraph 1.0.0 first finds Eades feedback edges, then uses a GLPK LP whose
-    objective is effectively zero in the released source. SciPy's HiGHS
-    feasible point matches the small fixtures except cases where GLPK simplex
-    pivot choice selects another equally feasible layer vector.
+    igraph 1.0.0 uses the LP only for directed graphs with at most 1000 nodes.
+    Its GLPK objective minimizes ``sum_i (out_strength_i - in_strength_i) * x_i``
+    after removing the Eades feedback-edge contributions from the source
+    out-strength and target in-strength accumulators.
     """
     if num_nodes == 0 or edge_index.numel() == 0:
         return torch.zeros((num_nodes,), dtype=torch.long)
 
-    feedback_edges = set(_igraph_eades_feedback_edges(edge_index=edge_index, num_nodes=num_nodes))
+    if not is_directed:
+        return _igraph_undirected_layer_assignments(
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            num_nodes=num_nodes,
+        )
+    if num_nodes > 1000:
+        return _igraph_eades_layer_assignments(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weights=edge_weights,
+        )
+
+    feedback_edges = set(
+        _igraph_eades_feedback_edges(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weights=edge_weights,
+        )
+    )
+    objective = _igraph_glpk_objective_coefficients(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        feedback_edges=feedback_edges,
+        edge_weights=edge_weights,
+    )
     try:
         from scipy.optimize import linprog
     except ImportError:
-        return _igraph_eades_layer_assignments(edge_index=edge_index, num_nodes=num_nodes)
+        return _igraph_eades_layer_assignments(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weights=edge_weights,
+        )
 
     constraints: List[List[float]] = []
     bounds: List[float] = []
@@ -439,20 +475,79 @@ def _igraph_glpk_layer_assignments(
         return torch.zeros((num_nodes,), dtype=torch.long)
 
     result = linprog(
-        [0.0] * num_nodes,
+        objective,
         A_ub=constraints,
         b_ub=bounds,
         bounds=[(0.0, None)] * num_nodes,
         method="highs",
     )
     if not result.success:
-        return _igraph_eades_layer_assignments(edge_index=edge_index, num_nodes=num_nodes)
+        return _igraph_eades_layer_assignments(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weights=edge_weights,
+        )
 
     raw_layers = [int(math.floor(float(value))) for value in result.x]
     return torch.tensor(_normalize_igraph_layers(raw_layers), dtype=torch.long)
 
 
-def _igraph_eades_layer_assignments(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _igraph_glpk_objective_coefficients(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    feedback_edges: Set[int],
+    edge_weights: Optional[torch.Tensor],
+) -> List[float]:
+    """Return igraph's GLPK layer-assignment objective coefficients.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+    feedback_edges : set of int
+        Edge ids selected by the Eades feedback heuristic.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    list of float
+        Per-node ``out_strength - in_strength`` coefficients for the LP
+        objective.
+    """
+    in_strengths = [0.0] * num_nodes
+    out_strengths = [0.0] * num_nodes
+    weights = (
+        [1.0] * int(edge_index.shape[1])
+        if edge_weights is None
+        else [float(value) for value in edge_weights.tolist()]
+    )
+    for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        if source == target:
+            continue
+        weight = weights[edge_id]
+        out_strengths[source] += weight
+        in_strengths[target] += weight
+
+    for edge_id in feedback_edges:
+        source = int(edge_index[0, edge_id].item())
+        target = int(edge_index[1, edge_id].item())
+        if source == target:
+            continue
+        weight = weights[edge_id]
+        out_strengths[source] -= weight
+        in_strengths[target] -= weight
+
+    return [out_strengths[node] - in_strengths[node] for node in range(num_nodes)]
+
+
+def _igraph_eades_layer_assignments(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """Assign longest-path layers from igraph's Eades feedback ordering.
 
     Parameters
@@ -461,13 +556,19 @@ def _igraph_eades_layer_assignments(edge_index: torch.Tensor, num_nodes: int) ->
         Original non-loop edge list with shape ``[2, E]`` on CPU.
     num_nodes : int
         Number of original graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
 
     Returns
     -------
     torch.Tensor
         Normalized layer ids with shape ``[N]``.
     """
-    ordering = _igraph_eades_ordering(edge_index=edge_index, num_nodes=num_nodes)
+    ordering = _igraph_eades_ordering(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     ranks = _igraph_sort_indices([float(value) for value in ordering])
     layers = [0] * num_nodes
     sources = edge_index[0].tolist()
@@ -485,7 +586,70 @@ def _igraph_eades_layer_assignments(edge_index: torch.Tensor, num_nodes: int) ->
     return torch.tensor(_normalize_igraph_layers(layers), dtype=torch.long)
 
 
-def _igraph_eades_feedback_edges(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+def _igraph_undirected_layer_assignments(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    num_nodes: int,
+) -> torch.Tensor:
+    """Assign layers with igraph's undirected Sugiyama fallback.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        BFS-distance layer ids with shape ``[N]``.
+    """
+    if num_nodes == 0 or edge_index.numel() == 0:
+        return torch.zeros((num_nodes,), dtype=torch.long)
+
+    strengths = [0.0] * num_nodes
+    adjacency: List[List[int]] = [[] for _ in range(num_nodes)]
+    weights = (
+        [1.0] * int(edge_index.shape[1])
+        if edge_weights is None
+        else [float(value) for value in edge_weights.tolist()]
+    )
+    for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        if source == target:
+            continue
+        weight = weights[edge_id]
+        strengths[source] += weight
+        strengths[target] += weight
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+
+    roots = sorted(range(num_nodes), key=lambda node: (-strengths[node], node))
+    layers = [-1] * num_nodes
+    for root in roots:
+        if layers[root] >= 0:
+            continue
+        layers[root] = 0
+        queue = [root]
+        head = 0
+        while head < len(queue):
+            node = queue[head]
+            head += 1
+            for neighbor in adjacency[node]:
+                if layers[neighbor] >= 0:
+                    continue
+                layers[neighbor] = layers[node] + 1
+                queue.append(neighbor)
+    return torch.tensor(_normalize_igraph_layers(layers), dtype=torch.long)
+
+
+def _igraph_eades_feedback_edges(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> List[int]:
     """Return feedback edge ids from igraph's Eades ordering.
 
     Parameters
@@ -494,13 +658,19 @@ def _igraph_eades_feedback_edges(edge_index: torch.Tensor, num_nodes: int) -> Li
         Original non-loop edge list with shape ``[2, E]`` on CPU.
     num_nodes : int
         Number of original graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
 
     Returns
     -------
     list[int]
         Edge ids whose source appears after their target in the Eades order.
     """
-    ordering = _igraph_eades_ordering(edge_index=edge_index, num_nodes=num_nodes)
+    ordering = _igraph_eades_ordering(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     feedback_edges: List[int] = []
     for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
         if source == target or ordering[source] > ordering[target]:
@@ -508,7 +678,11 @@ def _igraph_eades_feedback_edges(edge_index: torch.Tensor, num_nodes: int) -> Li
     return feedback_edges
 
 
-def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+def _igraph_eades_ordering(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> List[int]:
     """Return igraph's deterministic Eades vertex ordering.
 
     Parameters
@@ -517,6 +691,8 @@ def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int
         Original non-loop edge list with shape ``[2, E]`` on CPU.
     num_nodes : int
         Number of original graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
 
     Returns
     -------
@@ -529,6 +705,11 @@ def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int
     outgoing_edges: List[List[int]] = [[] for _ in range(num_nodes)]
     in_degrees = [0] * num_nodes
     out_degrees = [0] * num_nodes
+    weights = (
+        [1.0] * int(edge_index.shape[1])
+        if edge_weights is None
+        else [float(value) for value in edge_weights.tolist()]
+    )
     for edge_id, (source, target) in enumerate(zip(sources, targets)):
         if source == target:
             continue
@@ -537,8 +718,14 @@ def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int
         out_degrees[source] += 1
         in_degrees[target] += 1
 
-    in_strengths = [float(value) for value in in_degrees]
-    out_strengths = [float(value) for value in out_degrees]
+    in_strengths = [0.0] * num_nodes
+    out_strengths = [0.0] * num_nodes
+    for edge_id, (source, target) in enumerate(zip(sources, targets)):
+        if source == target:
+            continue
+        weight = weights[edge_id]
+        out_strengths[source] += weight
+        in_strengths[target] += weight
     sources_queue: List[int] = []
     sinks_queue: List[int] = []
     ordering = [0] * num_nodes
@@ -572,7 +759,7 @@ def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int
                 if in_degrees[target] <= 0:
                     continue
                 in_degrees[target] -= 1
-                in_strengths[target] -= 1.0
+                in_strengths[target] -= weights[edge_id]
                 if in_degrees[target] == 0:
                     sources_queue.append(target)
             nodes_left -= 1
@@ -590,7 +777,7 @@ def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int
                 if out_degrees[source] <= 0:
                     continue
                 out_degrees[source] -= 1
-                out_strengths[source] -= 1.0
+                out_strengths[source] -= weights[edge_id]
                 if out_degrees[source] == 0:
                     sinks_queue.append(source)
             nodes_left -= 1
@@ -614,7 +801,7 @@ def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int
             if in_degrees[target] <= 0:
                 continue
             in_degrees[target] -= 1
-            in_strengths[target] -= 1.0
+            in_strengths[target] -= weights[edge_id]
             if in_degrees[target] == 0:
                 sources_queue.append(target)
         for edge_id in incoming_edges[best_node]:
@@ -622,7 +809,7 @@ def _igraph_eades_ordering(edge_index: torch.Tensor, num_nodes: int) -> List[int
             if out_degrees[source] <= 0:
                 continue
             out_degrees[source] -= 1
-            out_strengths[source] -= 1.0
+            out_strengths[source] -= weights[edge_id]
             if out_degrees[source] == 0 and in_degrees[source] > 0:
                 sinks_queue.append(source)
         out_degrees[best_node] = -1
@@ -647,6 +834,32 @@ def _normalize_igraph_layers(raw_layers: Sequence[int]) -> List[int]:
     """
     mapping = {value: index for index, value in enumerate(sorted(set(raw_layers)))}
     return [mapping[value] for value in raw_layers]
+
+
+def _resolve_igraph_sugiyama_directed(problem: LayoutProblem) -> bool:
+    """Return whether igraph fidelity should use directed Sugiyama gating.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs, optionally carrying topology classification in
+        ``problem.structure``.
+
+    Returns
+    -------
+    bool
+        ``False`` only when a caller supplied an explicit semantic-direction
+        hint that the graph is undirected. Tensor-only calls default to
+        directed, matching the current igraph reference adapter.
+    """
+    direct_hint = getattr(problem, "is_semantically_directed", None)
+    if direct_hint is not None:
+        return bool(direct_hint)
+    structure = getattr(problem, "structure", None)
+    structure_hint = getattr(structure, "is_semantically_directed", None)
+    if structure_hint is not None:
+        return bool(structure_hint)
+    return True
 
 
 def _orient_edges_by_layers(
@@ -2323,6 +2536,8 @@ class _AssignLayers(Op):
             layer_assignments = _igraph_glpk_layer_assignments(
                 edge_index=original_edges,
                 num_nodes=problem.num_nodes,
+                edge_weights=original_weights,
+                is_directed=_resolve_igraph_sugiyama_directed(problem),
             )
             oriented_edges, oriented_weights, reversed_mask = _orient_edges_by_layers(
                 edge_index=original_edges,
