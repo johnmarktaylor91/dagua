@@ -42,6 +42,7 @@ _FDP_TRACE_PATH = "/tmp/dagua_fdp_trace.log"
 # balloon to tens of GB during a benchmark (observed 20.5 GB, 2026-06-04). Default OFF; opt in with
 # DAGUA_FDP_TRACE=1. Purely logging -- gating it off has zero effect on layout output.
 _FDP_TRACE_ENABLED = bool(os.environ.get("DAGUA_FDP_TRACE"))
+_GRAPHVIZ_FDP_GRID_VECTORIZE_MIN_PAIRS = 20_000
 _OGDF_FMMM_UNIT_EDGE_LENGTH = 20.0
 _OGDF_FMMM_DEFAULT_NODE_WIDTH = 20.0
 _OGDF_FMMM_DEFAULT_NODE_HEIGHT = 20.0
@@ -3720,46 +3721,16 @@ def _graphviz_fdp_tlayout_with_ports(
                     edge=edges[edge_id],
                     phase=iteration,
                 )
-        for (cell_x, cell_y), nodes in sorted(grid.items()):
-            for source in nodes:
-                for target in nodes:
-                    if source != target:
-                        _graphviz_fdp_apply_tlayout_repulsion_lists(
-                            x_positions=x_positions,
-                            y_positions=y_positions,
-                            x_displacements=x_displacements,
-                            y_displacements=y_displacements,
-                            source=source,
-                            target=target,
-                            phase=iteration,
-                            port_indices=port_indices,
-                        )
-            for delta_x, delta_y in (
-                (-1, -1),
-                (-1, 0),
-                (-1, 1),
-                (0, -1),
-                (0, 1),
-                (1, -1),
-                (1, 0),
-                (1, 1),
-            ):
-                for source in nodes:
-                    for target in grid.get((cell_x + delta_x, cell_y + delta_y), []):
-                        x_delta = x_positions[target] - x_positions[source]
-                        y_delta = y_positions[target] - y_positions[source]
-                        dist2 = x_delta * x_delta + y_delta * y_delta
-                        if dist2 < cell_size2:
-                            _graphviz_fdp_apply_tlayout_repulsion_lists(
-                                x_positions=x_positions,
-                                y_positions=y_positions,
-                                x_displacements=x_displacements,
-                                y_displacements=y_displacements,
-                                source=source,
-                                target=target,
-                                phase=iteration,
-                                port_indices=port_indices,
-                            )
+        _graphviz_fdp_apply_grid_repulsion_lists(
+            x_positions=x_positions,
+            y_positions=y_positions,
+            x_displacements=x_displacements,
+            y_displacements=y_displacements,
+            grid=grid,
+            cell_size2=cell_size2,
+            phase=iteration,
+            port_indices=port_indices,
+        )
         _graphviz_fdp_update_position_lists_with_ports(
             x_positions=x_positions,
             y_positions=y_positions,
@@ -4870,6 +4841,208 @@ def _graphviz_fdp_apply_tlayout_repulsion_lists(
     y_displacements[source] -= y_delta * force
 
 
+def _graphviz_fdp_apply_grid_repulsion_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    x_displacements: List[float],
+    y_displacements: List[float],
+    grid: Mapping[tuple[int, int], list[int]],
+    cell_size2: float,
+    phase: int,
+    port_indices: Optional[frozenset[int]] = None,
+) -> None:
+    """Apply Graphviz fdp grid repulsion with batched torch arithmetic.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    x_displacements : list[float]
+        Mutable X displacement list.
+    y_displacements : list[float]
+        Mutable Y displacement list.
+    grid : Mapping[tuple[int, int], list[int]]
+        Graphviz-style spatial grid keyed by integer cell coordinates. Node
+        lists use Graphviz's head-insertion order.
+    cell_size2 : float
+        Squared neighbor-cell cutoff, matching ``T_Cell * T_Cell``.
+    phase : int
+        Iteration counter for deterministic zero-distance fallback.
+    port_indices : frozenset[int], optional
+        Local port node indices. Graphviz multiplies port-port repulsion by
+        ten in recursive cluster layouts.
+
+    Returns
+    -------
+    None
+        Updates displacement lists in place.
+
+    Notes
+    -----
+    Small pair batches replay the scalar pair stream exactly. Large batches use
+    one unordered representative per reciprocal pair and double its symmetric
+    contribution, preserving Graphviz's same-cell and neighbor-cell force
+    algebra while avoiding one Python call per directed pair.
+    """
+    source_indices: list[int] = []
+    target_indices: list[int] = []
+    same_cell_flags: list[bool] = []
+    neighbor_offsets = (
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    )
+    for (cell_x, cell_y), nodes in sorted(grid.items()):
+        if len(nodes) > 1:
+            same_cell_sources = [source for source in nodes for target in nodes if source != target]
+            same_cell_targets = [target for source in nodes for target in nodes if source != target]
+            source_indices.extend(same_cell_sources)
+            target_indices.extend(same_cell_targets)
+            same_cell_flags.extend([True] * len(same_cell_sources))
+        for delta_x, delta_y in neighbor_offsets:
+            neighbor_nodes = grid.get((cell_x + delta_x, cell_y + delta_y), [])
+            if neighbor_nodes:
+                neighbor_sources = [source for source in nodes for _target in neighbor_nodes]
+                neighbor_targets = [target for _source in nodes for target in neighbor_nodes]
+                source_indices.extend(neighbor_sources)
+                target_indices.extend(neighbor_targets)
+                same_cell_flags.extend([False] * len(neighbor_sources))
+
+    if not source_indices:
+        return
+
+    if len(source_indices) < _GRAPHVIZ_FDP_GRID_VECTORIZE_MIN_PAIRS:
+        for source, target, same_cell in zip(source_indices, target_indices, same_cell_flags):
+            if not same_cell:
+                x_delta = x_positions[target] - x_positions[source]
+                y_delta = y_positions[target] - y_positions[source]
+                dist2 = x_delta * x_delta + y_delta * y_delta
+                if dist2 >= cell_size2:
+                    continue
+            _graphviz_fdp_apply_tlayout_repulsion_lists(
+                x_positions=x_positions,
+                y_positions=y_positions,
+                x_displacements=x_displacements,
+                y_displacements=y_displacements,
+                source=source,
+                target=target,
+                phase=phase,
+                port_indices=port_indices,
+            )
+        return
+
+    unordered_sources: list[int] = []
+    unordered_targets: list[int] = []
+    unordered_same_cell: list[bool] = []
+    for (cell_x, cell_y), nodes in sorted(grid.items()):
+        if len(nodes) > 1:
+            unordered_sources.extend(
+                source
+                for source_index, source in enumerate(nodes)
+                for _target in nodes[source_index + 1 :]
+            )
+            unordered_targets.extend(
+                target
+                for source_index, _source in enumerate(nodes)
+                for target in nodes[source_index + 1 :]
+            )
+            unordered_same_cell.extend([True] * (len(nodes) * (len(nodes) - 1) // 2))
+        for delta_x, delta_y in ((0, 1), (1, -1), (1, 0), (1, 1)):
+            neighbor_nodes = grid.get((cell_x + delta_x, cell_y + delta_y), [])
+            if neighbor_nodes:
+                neighbor_sources = [source for source in nodes for _target in neighbor_nodes]
+                neighbor_targets = [target for _source in nodes for target in neighbor_nodes]
+                unordered_sources.extend(neighbor_sources)
+                unordered_targets.extend(neighbor_targets)
+                unordered_same_cell.extend([False] * len(neighbor_sources))
+
+    if not unordered_sources:
+        return
+
+    previous_threads = torch.get_num_threads()
+    if previous_threads != 1:
+        torch.set_num_threads(1)
+    try:
+        device = torch.device("cpu")
+        sources = torch.tensor(unordered_sources, dtype=torch.long, device=device)
+        targets = torch.tensor(unordered_targets, dtype=torch.long, device=device)
+        x_values = torch.tensor(list(x_positions), dtype=torch.float64, device=device)
+        y_values = torch.tensor(list(y_positions), dtype=torch.float64, device=device)
+        x_delta = x_values[targets] - x_values[sources]
+        y_delta = y_values[targets] - y_values[sources]
+        dist2 = x_delta.square() + y_delta.square()
+        same_cell = torch.tensor(unordered_same_cell, dtype=torch.bool, device=device)
+        active = same_cell | (dist2 < cell_size2)
+        if not bool(active.any()):
+            return
+
+        zero_dist = active & (dist2 == 0.0)
+        if bool(zero_dist.any()):
+            directed_pairs = zip(source_indices, target_indices, same_cell_flags)
+            for source, target, same_cell_flag in directed_pairs:
+                if not same_cell_flag:
+                    scalar_x_delta = x_positions[target] - x_positions[source]
+                    scalar_y_delta = y_positions[target] - y_positions[source]
+                    scalar_dist2 = scalar_x_delta * scalar_x_delta + scalar_y_delta * scalar_y_delta
+                    if scalar_dist2 >= cell_size2:
+                        continue
+                _graphviz_fdp_apply_tlayout_repulsion_lists(
+                    x_positions=x_positions,
+                    y_positions=y_positions,
+                    x_displacements=x_displacements,
+                    y_displacements=y_displacements,
+                    source=source,
+                    target=target,
+                    phase=phase,
+                    port_indices=port_indices,
+                )
+            return
+
+        sources = sources[active]
+        targets = targets[active]
+        x_delta = x_delta[active]
+        y_delta = y_delta[active]
+        dist2 = dist2[active]
+
+        force = (
+            2.0 * _GRAPHVIZ_FDP_DEFAULT_K * _GRAPHVIZ_FDP_DEFAULT_K / (torch.sqrt(dist2) * dist2)
+        )
+        if port_indices is not None:
+            active_source_indices = sources.tolist()
+            active_target_indices = targets.tolist()
+            port_mask = torch.tensor(
+                [
+                    source in port_indices and target in port_indices
+                    for source, target in zip(active_source_indices, active_target_indices)
+                ],
+                dtype=torch.bool,
+                device=device,
+            )
+            force = torch.where(port_mask, force * 10.0, force)
+        x_contrib = x_delta * force
+        y_contrib = y_delta * force
+
+        x_disp = torch.tensor(x_displacements, dtype=torch.float64, device=device)
+        y_disp = torch.tensor(y_displacements, dtype=torch.float64, device=device)
+        x_disp.index_add_(0, targets, x_contrib)
+        y_disp.index_add_(0, targets, y_contrib)
+        x_disp.index_add_(0, sources, -x_contrib)
+        y_disp.index_add_(0, sources, -y_contrib)
+
+        x_displacements[:] = [float(value) for value in x_disp.tolist()]
+        y_displacements[:] = [float(value) for value in y_disp.tolist()]
+    finally:
+        if previous_threads != 1:
+            torch.set_num_threads(previous_threads)
+
+
 def _graphviz_fdp_apply_tlayout_attraction_lists(
     x_positions: Sequence[float],
     y_positions: Sequence[float],
@@ -5211,44 +5384,15 @@ def _graphviz_fdp_tlayout(
                     edge=edges[edge_id],
                     phase=iteration,
                 )
-        for (cell_x, cell_y), nodes in sorted(grid.items()):
-            for source in nodes:
-                for target in nodes:
-                    if source != target:
-                        _graphviz_fdp_apply_tlayout_repulsion_lists(
-                            x_positions=x_positions,
-                            y_positions=y_positions,
-                            x_displacements=x_displacements,
-                            y_displacements=y_displacements,
-                            source=source,
-                            target=target,
-                            phase=iteration,
-                        )
-            for delta_x, delta_y in (
-                (-1, -1),
-                (-1, 0),
-                (-1, 1),
-                (0, -1),
-                (0, 1),
-                (1, -1),
-                (1, 0),
-                (1, 1),
-            ):
-                for source in nodes:
-                    for target in grid.get((cell_x + delta_x, cell_y + delta_y), []):
-                        x_delta = x_positions[target] - x_positions[source]
-                        y_delta = y_positions[target] - y_positions[source]
-                        dist2 = x_delta * x_delta + y_delta * y_delta
-                        if dist2 < cell_size2:
-                            _graphviz_fdp_apply_tlayout_repulsion_lists(
-                                x_positions=x_positions,
-                                y_positions=y_positions,
-                                x_displacements=x_displacements,
-                                y_displacements=y_displacements,
-                                source=source,
-                                target=target,
-                                phase=iteration,
-                            )
+        _graphviz_fdp_apply_grid_repulsion_lists(
+            x_positions=x_positions,
+            y_positions=y_positions,
+            x_displacements=x_displacements,
+            y_displacements=y_displacements,
+            grid=grid,
+            cell_size2=cell_size2,
+            phase=iteration,
+        )
         _graphviz_fdp_update_position_lists(
             x_positions=x_positions,
             y_positions=y_positions,
