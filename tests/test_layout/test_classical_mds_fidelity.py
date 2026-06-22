@@ -40,6 +40,20 @@ def _path_edge_index(num_nodes: int) -> torch.Tensor:
     )
 
 
+def _two_triangles_edge_index() -> torch.Tensor:
+    """Build two disconnected directed triangle components.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    """
+    return torch.tensor(
+        [[0, 1, 2, 3, 4, 5], [1, 2, 0, 4, 5, 3]],
+        dtype=torch.long,
+    )
+
+
 def test_igraph_fidelity_uses_two_node_special_case_and_scale() -> None:
     """igraph fidelity should match the reference two-node raw layout."""
     edge_index = _single_edge_index()
@@ -105,6 +119,24 @@ def test_igraph_fidelity_ignores_edge_weights_like_igraph_mds() -> None:
 
     torch.testing.assert_close(weighted, unweighted)
     assert not torch.equal(default_weighted, weighted)
+
+
+def test_igraph_fidelity_packs_disconnected_components() -> None:
+    """Disconnected igraph fidelity should layout components independently."""
+    edge_index = _two_triangles_edge_index()
+
+    positions = layout_classical_mds_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        igraph_fidelity=True,
+        fidelity_dtype=torch.float64,
+    )
+
+    assert torch.isfinite(positions).all()
+    first_component = positions[:3] - positions[:3].min(dim=0, keepdim=True).values
+    second_component = positions[3:] - positions[3:].min(dim=0, keepdim=True).values
+    torch.testing.assert_close(first_component, second_component)
+    assert float(positions[3:, 1].min().item()) >= float(positions[:3, 1].max().item())
 
 
 def test_igraph_mds_metadata_marks_rng_usage() -> None:
