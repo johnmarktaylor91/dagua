@@ -11,6 +11,13 @@ import torch
 
 from dagua.layout.ops.base import Op, Pipeline, Repeat
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
+from dagua.layout.ops.gem import (
+    _GEM_PHYSICS_CONFIG,
+    _connected_components_from_edges,
+    _extract_component_edges,
+    _ogdf_shift_component_to_origin,
+    _ogdf_tile_to_rows_offsets,
+)
 from dagua.layout.ops.graph_utils import (
     _shared_all_pairs_shortest_paths,
     _shared_build_undirected_adjacency,
@@ -98,6 +105,75 @@ def _ogdf_runner_initial_positions(num_nodes: int, seed: int) -> np.ndarray:
         positions[node, 0] = float(libc.rand() % _OGDF_RAND_BUCKETS) / _OGDF_RAND_SCALE
         positions[node, 1] = float(libc.rand() % _OGDF_RAND_BUCKETS) / _OGDF_RAND_SCALE
     return positions
+
+
+def _layout_ogdf_disconnected_components(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    iterations: int,
+    seed: int,
+    fidelity_dtype: torch.dtype,
+    epsilon: Optional[float],
+) -> torch.Tensor:
+    """Lay out disconnected OGDF stress components and pack them in rows.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``.
+    iterations : int
+        Number of OGDF stress-majorization iterations per component.
+    seed : int
+        Seed forwarded to the OGDF runner-compatible initialization stream.
+    fidelity_dtype : torch.dtype
+        Output dtype requested by the fidelity pipeline.
+    epsilon : float, optional
+        Relative stress-delta convergence threshold for each component.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed positions with shape ``[N, 2]``.
+    """
+    components = _connected_components_from_edges(edge_index=edge_index, num_nodes=num_nodes)
+    final_positions = torch.zeros((num_nodes, 2), dtype=torch.float64, device="cpu")
+    shifted_components: list[tuple[list[int], torch.Tensor]] = []
+    bounding_boxes: list[tuple[float, float]] = []
+
+    for component_nodes in components:
+        component_edges = _extract_component_edges(edge_index, component_nodes)
+        component_sizes = None
+        if node_sizes is not None:
+            component_sizes = node_sizes.to(device="cpu")[component_nodes]
+        component_positions = layout_stress_majorization_pipeline(
+            edge_index=component_edges,
+            num_nodes=len(component_nodes),
+            node_sizes=component_sizes,
+            iterations=iterations,
+            seed=seed,
+            fidelity_mode=_FIDELITY_MODE_OGDF,
+            fidelity_dtype=fidelity_dtype,
+            epsilon=epsilon,
+        )
+        shifted, box = _ogdf_shift_component_to_origin(
+            positions=component_positions.to(dtype=torch.float64, device="cpu"),
+            config=_GEM_PHYSICS_CONFIG,
+        )
+        shifted_components.append((component_nodes, shifted))
+        bounding_boxes.append(box)
+
+    offsets = _ogdf_tile_to_rows_offsets(bounding_boxes, _GEM_PHYSICS_CONFIG.page_ratio)
+    for component_index, (component_nodes, shifted) in enumerate(shifted_components):
+        dx, dy = offsets[component_index]
+        for local_index, node_index in enumerate(component_nodes):
+            final_positions[node_index, 0] = shifted[local_index, 0] + dx
+            final_positions[node_index, 1] = shifted[local_index, 1] + dy
+    return final_positions.to(dtype=fidelity_dtype)
 
 
 def _is_graphviz_fidelity(fidelity_mode: Optional[str]) -> bool:
@@ -1157,6 +1233,22 @@ def layout_stress_majorization_pipeline(
         device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
         single = torch.zeros((1, 2), dtype=torch.float32, device=device)
         return (single, []) if trace_every > 0 else single
+
+    if fidelity_mode == _FIDELITY_MODE_OGDF and edge_weights is None:
+        components = _connected_components_from_edges(edge_index=edge_index, num_nodes=num_nodes)
+        if len(components) > 1:
+            positions = _layout_ogdf_disconnected_components(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                node_sizes=node_sizes,
+                iterations=iterations,
+                seed=seed,
+                fidelity_dtype=fidelity_dtype,
+                epsilon=epsilon,
+            )
+            device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
+            positions = positions.to(dtype=torch.float32, device=device)
+            return (positions, []) if trace_every > 0 else positions
 
     problem = LayoutProblem(
         edge_index=edge_index,
