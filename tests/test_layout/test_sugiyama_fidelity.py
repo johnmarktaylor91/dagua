@@ -3,6 +3,12 @@
 import torch
 
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
+from dagua.layout.ops.sugiyama import (
+    _igraph_eades_layer_assignments,
+    _igraph_glpk_layer_assignments,
+    _igraph_glpk_objective_coefficients,
+    _igraph_undirected_layer_assignments,
+)
 
 
 def test_sugiyama_ignores_self_loops_before_layering() -> None:
@@ -76,6 +82,96 @@ def test_sugiyama_igraph_fidelity_uses_multiedge_incidence_barycenters() -> None
 
     assert default_positions[5, 0] < default_positions[6, 0]
     assert fidelity_positions[6, 0] < fidelity_positions[5, 0]
+
+
+def test_sugiyama_igraph_glpk_objective_matches_out_minus_in_strength() -> None:
+    """Igraph LP coefficients should minimize out-strength minus in-strength."""
+    edge_index = torch.tensor(
+        [
+            [0, 0, 1, 2],
+            [1, 2, 3, 3],
+        ],
+        dtype=torch.long,
+    )
+
+    objective = _igraph_glpk_objective_coefficients(
+        edge_index=edge_index,
+        num_nodes=4,
+        feedback_edges=set(),
+        edge_weights=None,
+    )
+
+    assert objective == [2.0, 0.0, 0.0, -2.0]
+
+
+def test_sugiyama_igraph_glpk_falls_back_above_1000_nodes() -> None:
+    """Igraph fidelity mode should use Eades layering above GLPK's node gate."""
+    edge_index = torch.stack(
+        [
+            torch.arange(1000, dtype=torch.long),
+            torch.arange(1, 1001, dtype=torch.long),
+        ]
+    )
+
+    layers = _igraph_glpk_layer_assignments(edge_index=edge_index, num_nodes=1001)
+    expected = _igraph_eades_layer_assignments(edge_index=edge_index, num_nodes=1001)
+
+    assert torch.equal(layers, expected)
+
+
+def test_sugiyama_igraph_undirected_gate_uses_bfs_fallback() -> None:
+    """Undirected igraph Sugiyama should use the non-LP BFS fallback."""
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2],
+            [1, 2, 3],
+        ],
+        dtype=torch.long,
+    )
+
+    layers = _igraph_glpk_layer_assignments(
+        edge_index=edge_index,
+        num_nodes=4,
+        is_directed=False,
+    )
+    expected = _igraph_undirected_layer_assignments(
+        edge_index=edge_index,
+        edge_weights=None,
+        num_nodes=4,
+    )
+
+    assert torch.equal(layers, expected)
+    assert torch.equal(layers, torch.tensor([1, 0, 1, 2]))
+
+
+def test_sugiyama_graphviz_fidelity_layer_output_remains_stable() -> None:
+    """Graphviz fidelity should keep its existing rank-assignment path."""
+    edge_index = torch.tensor(
+        [
+            [0, 0, 1, 2, 2, 3],
+            [1, 2, 3, 3, 4, 4],
+        ],
+        dtype=torch.long,
+    )
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=5,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+    )
+
+    expected = torch.tensor(
+        [
+            [0.0, 0.0],
+            [-0.5, 1.0],
+            [0.5, 1.0],
+            [-0.5, 2.0],
+            [0.0, 3.0],
+        ]
+    )
+    assert torch.equal(positions, expected)
 
 
 def test_sugiyama_igraph_fidelity_packs_weak_components_independently() -> None:
