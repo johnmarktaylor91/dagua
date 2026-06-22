@@ -403,6 +403,31 @@ def _is_graphviz_fidelity_mode(fidelity_mode: SFDPFidelityMode) -> bool:
     raise ValueError("fidelity_mode must be False, True, None, or 'graphviz'.")
 
 
+def _graphviz_repulsive_exponent(repulsive_exponent: float) -> float:
+    """Return Graphviz's effective SFDP repulsive exponent.
+
+    Parameters
+    ----------
+    repulsive_exponent : float
+        Requested SFDP repulsion exponent ``p``.
+
+    Returns
+    -------
+    float
+        Effective Graphviz exponent after the ``repulsiveforce`` parse clamp.
+
+    Notes
+    -----
+    Graphviz parses ``repulsiveforce`` with a minimum of zero before negating
+    it into ``p``. The benchmark variant named ``p_neg2`` passes the clamped
+    negative graph attribute through as ``p=-2`` on the Dagua side, so the
+    fidelity path must collapse that request to Graphviz's fallback ``p=-1``.
+    """
+    if repulsive_exponent < _DEFAULT_P:
+        return _DEFAULT_P
+    return repulsive_exponent
+
+
 def _sfdp_force_scales(ideal_length: float, repulsive_exponent: float) -> tuple[float, float]:
     """Compute Graphviz SFDP attractive and repulsive scale constants.
 
@@ -879,6 +904,11 @@ def build_sfdp_pipeline(
         raise ValueError("steps must be non-negative.")
 
     graphviz_fidelity = _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
+    effective_repulsive_exponent = (
+        _graphviz_repulsive_exponent(repulsive_exponent)
+        if graphviz_fidelity
+        else repulsive_exponent
+    )
     hierarchy_op: Op
     refine_op: Op
     prolongate_op: Op
@@ -887,24 +917,24 @@ def build_sfdp_pipeline(
         refine_op = _SFDPGraphvizRefineCoarsestLevel(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
         prolongate_op = _SFDPGraphvizProlongateAndRefineLevels(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
     else:
         hierarchy_op = BuildSFDPHierarchy()
         refine_op = SFDPRefineCoarsestLevel(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
         prolongate_op = SFDPProlongateAndRefineLevels(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
 
     return Pipeline(
