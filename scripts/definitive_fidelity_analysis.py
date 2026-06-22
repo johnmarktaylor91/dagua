@@ -1273,11 +1273,17 @@ def quality_metric_samples(
     edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
     cross_seed = stable_int_seed(f"{payload.combo_id}::r70::crossings")
     stress_d = np.asarray(
-        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in d_layouts],
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in d_layouts
+        ],
         dtype=np.float64,
     )
     stress_r = np.asarray(
-        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in r_layouts],
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in r_layouts
+        ],
         dtype=np.float64,
     )
     np_d = np.asarray(
@@ -2217,8 +2223,8 @@ def deterministic_quality_metrics(
     edge_index = edge_index_array(edges)
     edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
     cross_seed = stable_int_seed(f"{combo_id}::r70::crossings")
-    stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists)
-    stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists)
+    stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+    stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
     cross_d = crossing_count(d_layout, edge_tensor, cross_seed)
     cross_r = crossing_count(r_layout, edge_tensor, cross_seed)
     np_d = neighborhood_preservation(d_layout, dists, k=10)
