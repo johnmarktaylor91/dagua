@@ -147,3 +147,26 @@ def test_chance_layout_still_fails_quality_battery() -> None:
 
     assert metrics["battery_stress_direct_equivalent"] is False
     assert metrics["quality_identical_raw"] is False
+
+
+def test_reference_self_split_remaps_disjoint_seed_halves() -> None:
+    """Self-split controls should compare disjoint rows with matched labels."""
+    rows = tuple(
+        analysis.PositionRow(
+            key=f"row_{seed}",
+            graph="synthetic_path",
+            engine="reference",
+            seed=seed,
+            status="ok",
+            positions_file=f"positions/{seed}.pt",
+            runtime_seconds=0.1,
+            num_nodes=20,
+        )
+        for seed in range(100)
+    )
+
+    first, second = analysis.split_reference_self_rows(list(rows))
+
+    assert [row.seed for row in first] == list(range(50))
+    assert [row.seed for row in second] == list(range(50))
+    assert {row.positions_file for row in first}.isdisjoint({row.positions_file for row in second})
