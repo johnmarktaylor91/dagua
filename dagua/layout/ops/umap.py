@@ -267,6 +267,27 @@ def _all_pairs_shortest_paths(
     return torch.where(finite_mask, distances, torch.full_like(distances, fill_value))
 
 
+def _effective_umap_n_neighbors(requested: int, num_nodes: int) -> int:
+    """Clamp UMAP neighbor count to the valid graph range.
+
+    Parameters
+    ----------
+    requested : int
+        Requested UMAP ``n_neighbors`` value.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    int
+        Effective neighbor count. For graphs with at least two nodes this is
+        at most ``num_nodes - 1``, matching umap-learn's kNN precondition.
+    """
+    if num_nodes <= 1:
+        return 1
+    return min(requested, num_nodes - 1)
+
+
 def _knn_from_distances(
     distances: torch.Tensor,
     n_neighbors: int,
@@ -1579,7 +1600,10 @@ class StoreUMAPHyperparameters(Op):
                 else self.config.default_epochs_large
             )
 
-        state.extras[_N_NEIGHBORS_KEY] = min(self.config.n_neighbors, max(problem.num_nodes - 1, 1))
+        state.extras[_N_NEIGHBORS_KEY] = _effective_umap_n_neighbors(
+            requested=self.config.n_neighbors,
+            num_nodes=problem.num_nodes,
+        )
         state.extras[_MIN_DIST_KEY] = self.config.min_dist
         state.extras[_SPREAD_KEY] = self.config.spread
         state.extras[_N_EPOCHS_KEY] = n_epochs
