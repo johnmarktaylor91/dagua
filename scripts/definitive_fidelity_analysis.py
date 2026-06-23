@@ -29,9 +29,13 @@ import torch
 
 from dagua.eval import distributional_fidelity as df
 from dagua.eval.equivalence_metrics import (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
     compute_equivalence_metrics,
     neighborhood_preservation,
     normalized_stress,
+    reference_is_canonical,
+    reference_self_spread,
+    variance_tied_margin,
 )
 from dagua.eval.graphs import get_test_graphs
 from dagua.metrics import count_crossings
@@ -51,6 +55,11 @@ QUALITY_STRESS_REL_MARGIN = 0.02
 QUALITY_NP_ABS_MARGIN = 0.02
 QUALITY_CROSS_REL_MARGIN = 0.02
 QUALITY_CROSS_ABS_FLOOR = 0.5
+QUALITY_BATTERY_FINAL_TIER = "final_3q"
+QUALITY_BATTERY_EXPLORATORY_TIER = "exploratory_noncanonical_reference"
+QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION = (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+)
 FREE_ASPECT_PREFIX = "classic_sugiyama"
 REFERENCE_SELF_SPLIT_PREFERRED = (
     "center_port_backedge_hub",
@@ -1187,15 +1196,24 @@ def compute_mode_a_quality_battery(
     selected_d = [d_layouts[index] for index in indices]
     selected_r = [r_layouts[index] for index in indices]
     metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
+    reference_diagnostics = quality_reference_diagnostics(payload, r_layouts, dists)
+    metrics["reference_diagnostics"] = reference_diagnostics
     stress_tost = df.paired_tost(
         metrics["stress_d"] - metrics["stress_r"],
-        quality_stress_margin(metrics["stress_r"]),
+        quality_stress_margin(
+            metrics["stress_r"],
+            reference_diagnostics["battery_stress_ref_self_spread"],
+        ),
     )
     cross_tost = df.paired_tost(
         metrics["cross_d"] - metrics["cross_r"],
-        quality_cross_margin(metrics["cross_r"]),
+        quality_cross_margin(metrics["cross_r"], reference_diagnostics["cross_ref_self_spread"]),
     )
-    np_tost = quality_np_noninferiority(metrics["np_d"], metrics["np_r"], QUALITY_NP_ABS_MARGIN)
+    np_tost = quality_np_noninferiority(
+        metrics["np_d"],
+        metrics["np_r"],
+        quality_np_margin(reference_diagnostics["np_ref_self_spread"]),
+    )
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
 
@@ -1227,19 +1245,31 @@ def compute_mode_b_quality_battery(
     selected_d = [d_layouts[index] for index in indices]
     selected_r = [r_layout for _index in indices]
     metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
+    reference_diagnostics = deterministic_reference_diagnostics(payload, r_layout, dists)
+    metrics["reference_diagnostics"] = reference_diagnostics
     stress_target = float(metrics["stress_r"][0]) if metrics["stress_r"].size else float("nan")
     cross_target = float(metrics["cross_r"][0]) if metrics["cross_r"].size else float("nan")
     stress_tost = df.one_sample_tost(
         metrics["stress_d"],
         stress_target,
-        quality_stress_margin(np.asarray([stress_target])),
+        quality_stress_margin(
+            np.asarray([stress_target]),
+            reference_diagnostics["battery_stress_ref_self_spread"],
+        ),
     )
     cross_tost = df.one_sample_tost(
         metrics["cross_d"],
         cross_target,
-        quality_cross_margin(np.asarray([cross_target])),
+        quality_cross_margin(
+            np.asarray([cross_target]),
+            reference_diagnostics["cross_ref_self_spread"],
+        ),
     )
-    np_tost = quality_np_noninferiority(metrics["np_d"], metrics["np_r"], QUALITY_NP_ABS_MARGIN)
+    np_tost = quality_np_noninferiority(
+        metrics["np_d"],
+        metrics["np_r"],
+        quality_np_margin(reference_diagnostics["np_ref_self_spread"]),
+    )
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
 
@@ -1334,6 +1364,125 @@ def quality_metric_samples(
     }
 
 
+def quality_reference_diagnostics(
+    payload: ComboPayload,
+    r_layouts: list[np.ndarray],
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Compute reference-only diagnostics for variance-tied 3Q margins.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item.
+    r_layouts : list[numpy.ndarray]
+        All loaded reference layouts with shape ``[N, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Reference self-spreads, canonical-reference gate fields, and crossing
+        metadata used by the final quality battery.
+    """
+    edge_index = edge_index_array(payload.graph_edges)
+    edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
+    cross_seed = stable_int_seed(f"{payload.combo_id}::r70::crossings")
+    stress_r = np.asarray(
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in r_layouts
+        ],
+        dtype=np.float64,
+    )
+    cross_r = np.asarray(
+        [crossing_count(layout, edge_tensor, cross_seed) for layout in r_layouts],
+        dtype=np.float64,
+    )
+    np_r = np.asarray(
+        [neighborhood_preservation(layout, dists, k=10) for layout in r_layouts],
+        dtype=np.float64,
+    )
+    plain_mean_w_r = reference_plain_mean_w_r(r_layouts)
+    canonical = reference_is_canonical(
+        plain_mean_w_r,
+        QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    )
+    return {
+        "quality_battery_eligible": canonical,
+        "quality_battery_tier": (
+            QUALITY_BATTERY_FINAL_TIER if canonical else QUALITY_BATTERY_EXPLORATORY_TIER
+        ),
+        "quality_reference_plain_mean_W_R": plain_mean_w_r,
+        "quality_reference_canonical": canonical,
+        "quality_reference_canonical_threshold": (
+            QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+        ),
+        "battery_stress_ref_self_spread": reference_self_spread(stress_r),
+        "cross_ref_self_spread": reference_self_spread(cross_r),
+        "np_ref_self_spread": reference_self_spread(np_r),
+        "quality_reference_metric_n": int(len(r_layouts)),
+    }
+
+
+def deterministic_reference_diagnostics(
+    payload: ComboPayload,
+    r_layout: np.ndarray,
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Return zero-spread diagnostics for a deterministic reference layout.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item.
+    r_layout : numpy.ndarray
+        Deterministic reference layout with shape ``[N, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Reference diagnostics in the same shape as Mode A.
+    """
+    del payload, r_layout, dists
+    return {
+        "quality_battery_eligible": True,
+        "quality_battery_tier": QUALITY_BATTERY_FINAL_TIER,
+        "quality_reference_plain_mean_W_R": 0.0,
+        "quality_reference_canonical": True,
+        "quality_reference_canonical_threshold": (
+            QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+        ),
+        "battery_stress_ref_self_spread": 0.0,
+        "cross_ref_self_spread": 0.0,
+        "np_ref_self_spread": 0.0,
+        "quality_reference_metric_n": 1,
+    }
+
+
+def reference_plain_mean_w_r(r_layouts: list[np.ndarray]) -> float:
+    """Return plain Procrustes self-dispersion for reference layouts.
+
+    Parameters
+    ----------
+    r_layouts : list[numpy.ndarray]
+        Reference layouts with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Mean off-diagonal plain Procrustes distance, or ``0.0`` for fewer than
+        two reference layouts.
+    """
+    if len(r_layouts) < 2:
+        return 0.0
+    plain = df.pairwise_procrustes_matrix(r_layouts, free_aspect=False)
+    return offdiag_mean(plain)
+
+
 def quality_battery_record(
     metrics: dict[str, Any],
     stress_tost: dict[str, Any],
@@ -1358,8 +1507,16 @@ def quality_battery_record(
     dict[str, Any]
         JSON-ready fields consumed by the report-stage 3Q rung.
     """
-    stress_margin = quality_stress_margin(metrics["stress_r"])
-    cross_margin = quality_cross_margin(metrics["cross_r"])
+    reference_diagnostics = dict(metrics["reference_diagnostics"])
+    stress_margin = quality_stress_margin(
+        metrics["stress_r"],
+        reference_diagnostics["battery_stress_ref_self_spread"],
+    )
+    cross_margin = quality_cross_margin(
+        metrics["cross_r"],
+        reference_diagnostics["cross_ref_self_spread"],
+    )
+    np_margin = quality_np_margin(reference_diagnostics["np_ref_self_spread"])
     stress_p = float(stress_tost.get("p_tost", float("nan")))
     cross_p = float(cross_tost.get("p_tost", float("nan")))
     np_p = float(np_tost.get("p_tost", float("nan")))
@@ -1374,60 +1531,112 @@ def quality_battery_record(
     # tests must reject.  No within-battery multiplicity correction is applied because
     # the max-p conjunction is already level-alpha and conservative (Berger-Hsu 1996).
     battery_p_iut = max(finite_p) if len(finite_p) == 3 else float("nan")
+    metric_identical = bool(stress_ok and cross_ok and np_ok)
+    final_eligible = bool(reference_diagnostics["quality_battery_eligible"])
     return {
         "battery_n": int(metrics["battery_n"]),
         "battery_p_iut": battery_p_iut,
-        "quality_identical_raw": bool(stress_ok and cross_ok and np_ok),
+        "quality_identical_raw": bool(final_eligible and metric_identical),
+        "quality_identical_exploratory": bool((not final_eligible) and metric_identical),
+        "quality_battery_eligible": final_eligible,
+        "quality_battery_tier": str(reference_diagnostics["quality_battery_tier"]),
+        "quality_reference_plain_mean_W_R": reference_diagnostics[
+            "quality_reference_plain_mean_W_R"
+        ],
+        "quality_reference_canonical": bool(reference_diagnostics["quality_reference_canonical"]),
+        "quality_reference_canonical_threshold": reference_diagnostics[
+            "quality_reference_canonical_threshold"
+        ],
+        "quality_reference_metric_n": int(reference_diagnostics["quality_reference_metric_n"]),
         "battery_stress_D_mean": metric_mean(metrics["stress_d"]),
         "battery_stress_R_mean": metric_mean(metrics["stress_r"]),
         "battery_stress_margin": stress_margin,
+        "battery_stress_ref_self_spread": reference_diagnostics["battery_stress_ref_self_spread"],
         "battery_stress_p_tost": stress_p,
         "battery_stress_direct_equivalent": stress_direct,
         "cross_D_mean": metric_mean(metrics["cross_d"]),
         "cross_R_mean": metric_mean(metrics["cross_r"]),
         "cross_margin": cross_margin,
+        "cross_ref_self_spread": reference_diagnostics["cross_ref_self_spread"],
         "cross_p_tost": cross_p,
         "cross_direct_equivalent": cross_direct,
         "cross_sampled": bool(metrics["cross_sampled"]),
         "cross_seed": int(metrics["cross_seed"]),
         "np_D_mean": metric_mean(metrics["np_d"]),
         "np_R_mean": metric_mean(metrics["np_r"]),
-        "np_margin": QUALITY_NP_ABS_MARGIN,
+        "np_margin": np_margin,
+        "np_ref_self_spread": reference_diagnostics["np_ref_self_spread"],
         "np_p_tost": np_p,
         "np_direct_equivalent": np_direct,
     }
 
 
-def quality_stress_margin(stress_r: np.ndarray) -> float:
+def quality_stress_margin(stress_r: np.ndarray, ref_self_spread: Optional[float] = None) -> float:
     """Return the strict normalized-stress battery margin.
 
     Parameters
     ----------
     stress_r : numpy.ndarray
         Reference normalized-stress values.
+    ref_self_spread : Optional[float], default=None
+        Reference seed-to-seed normalized-stress spread.  When omitted, the
+        spread is computed from ``stress_r``.
 
     Returns
     -------
     float
-        ``max(2% * mean(reference), 1e-6)``.
+        ``max(2% * mean(reference), 1e-6, reference self-spread)``.
     """
-    return max(QUALITY_STRESS_REL_MARGIN * float(np.mean(stress_r)), 1.0e-6)
+    base_margin = max(QUALITY_STRESS_REL_MARGIN * float(np.mean(stress_r)), 1.0e-6)
+    if ref_self_spread is None:
+        return variance_tied_margin(base_margin, stress_r)
+    if not math.isfinite(float(ref_self_spread)):
+        return base_margin
+    return max(base_margin, float(ref_self_spread))
 
 
-def quality_cross_margin(cross_r: np.ndarray) -> float:
+def quality_cross_margin(cross_r: np.ndarray, ref_self_spread: Optional[float] = None) -> float:
     """Return the strict crossing-count battery margin.
 
     Parameters
     ----------
     cross_r : numpy.ndarray
         Reference crossing counts or estimates.
+    ref_self_spread : Optional[float], default=None
+        Reference seed-to-seed crossing-count spread.  When omitted, the spread
+        is computed from ``cross_r``.
 
     Returns
     -------
     float
-        ``max(2% * mean(reference), 0.5)``.
+        ``max(2% * mean(reference), 0.5, reference self-spread)``.
     """
-    return max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
+    base_margin = max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
+    if ref_self_spread is None:
+        return variance_tied_margin(base_margin, cross_r)
+    if not math.isfinite(float(ref_self_spread)):
+        return base_margin
+    return max(base_margin, float(ref_self_spread))
+
+
+def quality_np_margin(ref_self_spread: Optional[float] = None) -> float:
+    """Return the neighborhood-preservation non-inferiority margin.
+
+    Parameters
+    ----------
+    ref_self_spread : Optional[float], default=None
+        Reference seed-to-seed neighborhood-preservation spread.
+
+    Returns
+    -------
+    float
+        ``max(0.02, reference self-spread)``.
+    """
+    if ref_self_spread is None:
+        return QUALITY_NP_ABS_MARGIN
+    if not math.isfinite(float(ref_self_spread)):
+        return QUALITY_NP_ABS_MARGIN
+    return max(QUALITY_NP_ABS_MARGIN, float(ref_self_spread))
 
 
 def quality_np_noninferiority(np_d: np.ndarray, np_r: np.ndarray, margin: float) -> dict[str, Any]:
@@ -2439,19 +2648,30 @@ def deterministic_quality_metrics(
     neighborhood_delta = max(np_r - np_d, 0.0)
     return {
         "battery_n": 1,
+        "quality_battery_eligible": True,
+        "quality_battery_tier": QUALITY_BATTERY_FINAL_TIER,
+        "quality_reference_plain_mean_W_R": 0.0,
+        "quality_reference_canonical": True,
+        "quality_reference_canonical_threshold": (
+            QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+        ),
+        "quality_reference_metric_n": 1,
         "battery_stress_D_mean": stress_d,
         "battery_stress_R_mean": stress_r,
+        "battery_stress_ref_self_spread": 0.0,
         "stress_rel_delta": stress_rel_delta,
         "cross_D_mean": float(cross_d),
         "cross_R_mean": float(cross_r),
         "crossings_delta": crossings_delta,
         "cross_margin": max(QUALITY_CROSS_REL_MARGIN * float(cross_r), QUALITY_CROSS_ABS_FLOOR),
+        "cross_ref_self_spread": 0.0,
         "cross_sampled": edge_index.shape[1] > 500,
         "cross_seed": cross_seed,
         "np_D_mean": np_d,
         "np_R_mean": np_r,
         "neighborhood_preservation_delta": neighborhood_delta,
         "np_margin": QUALITY_NP_ABS_MARGIN,
+        "np_ref_self_spread": 0.0,
     }
 
 

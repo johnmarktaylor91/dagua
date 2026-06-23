@@ -19,7 +19,11 @@ import torch
 from scipy import stats
 
 from dagua.eval import distributional_fidelity as df
-from dagua.eval.equivalence_metrics import compute_equivalence_metrics
+from dagua.eval.equivalence_metrics import (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    compute_equivalence_metrics,
+    reference_is_canonical,
+)
 from dagua.eval.graphs import get_test_graphs
 from dagua.eval.variants import get_variant, original_variant_name
 
@@ -49,6 +53,11 @@ SIZE_BINS = (
 PASSING_RUNGS = {"0", "1", "2", "2'", "3", "3Q"}
 MODE_A_PASS_RUNGS = {"0", "1", "2"}
 MODE_B_PASS_RUNGS = {"0", "2'"}
+QUALITY_BATTERY_FINAL_TIER = "final_3q"
+QUALITY_BATTERY_EXPLORATORY_TIER = "exploratory_noncanonical_reference"
+QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION = (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+)
 TIMEOUT_RE = re.compile("timeout", re.IGNORECASE)
 HIERARCHY_ENGINE_PREFIXES = (
     "classic_sugiyama",
@@ -446,6 +455,7 @@ def finalize_rows(
             typ_count += 1
             typ_raw_fail += int(p_typ <= 0.05)
             row["not_typical_raw"] = bool(p_typ <= 0.05)
+        apply_quality_battery_prescreen(row)
         row["quality_identical"] = bool(row.get("quality_identical_raw", False))
         rung, annotations = df.assign_rung(row)
         row["final_rung"] = rung
@@ -456,6 +466,118 @@ def finalize_rows(
         row["typicality_raw_fail_count"] = typ_raw_fail
         row["expected_false_atypicality"] = expected_false
     return sorted(eligible, key=lambda item: str(item.get("combo_id", "")))
+
+
+def apply_quality_battery_prescreen(row: dict[str, Any]) -> None:
+    """Apply the reference-canonical gate before final 3Q assignment.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Mutable per-combo row being finalized.
+
+    Returns
+    -------
+    None
+        The row is updated in place.
+    """
+    if not row_has_quality_battery(row):
+        return
+    eligible = quality_battery_eligible(row)
+    row["quality_battery_eligible"] = eligible
+    row["quality_battery_tier"] = (
+        QUALITY_BATTERY_FINAL_TIER if eligible else QUALITY_BATTERY_EXPLORATORY_TIER
+    )
+    row.setdefault(
+        "quality_reference_canonical_threshold",
+        QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    )
+    metric_identical = bool(row.get("quality_identical_raw", False)) or q_lt(
+        row.get("q_battery"), 0.05
+    )
+    if eligible:
+        row["quality_identical_raw"] = metric_identical
+        return
+    row["quality_identical_exploratory"] = bool(
+        row.get("quality_identical_exploratory", False) or metric_identical
+    )
+    row["quality_identical_raw"] = False
+    row["quality_identical"] = False
+    row["q_battery"] = None
+
+
+def row_has_quality_battery(row: dict[str, Any]) -> bool:
+    """Return whether a row carries 3Q battery fields.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Candidate per-combo row.
+
+    Returns
+    -------
+    bool
+        ``True`` when any quality-battery decision or metric field is present.
+    """
+    return any(
+        key in row
+        for key in (
+            "quality_identical_raw",
+            "quality_identical_exploratory",
+            "battery_p_iut",
+            "battery_stress_D_mean",
+            "cross_D_mean",
+            "np_D_mean",
+        )
+    )
+
+
+def quality_battery_eligible(row: dict[str, Any]) -> bool:
+    """Return whether a row may enter final 3Q.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Candidate per-combo row.
+
+    Returns
+    -------
+    bool
+        ``True`` for deterministic references or Mode A rows whose plain
+        reference self-dispersion is below the audited canonical threshold.
+    """
+    explicit = row.get("quality_battery_eligible")
+    if explicit is not None:
+        return bool(explicit)
+    mode = str(row.get("mode", ""))
+    if mode in {"B", "deterministic"}:
+        return True
+    plain_mean_w_r = as_float(row.get("quality_reference_plain_mean_W_R"))
+    if plain_mean_w_r is None:
+        plain_mean_w_r = as_float(row.get("plain_mean_W_R"))
+    return reference_is_canonical(
+        plain_mean_w_r,
+        QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    )
+
+
+def q_lt(value: Any, threshold: float) -> bool:
+    """Return whether a possibly-missing p/q value is below a threshold.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate numeric value.
+    threshold : float
+        Strict upper threshold.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``value`` is finite and less than ``threshold``.
+    """
+    numeric = as_float(value)
+    return numeric is not None and numeric < threshold
 
 
 def apply_bh_family(rows: list[dict[str, Any]], p_key: str, q_key: str) -> None:
@@ -2380,15 +2502,17 @@ def evaluate_gate_quality_identical_laundering(
         if as_float(row.get("battery_p_iut")) is None and row.get("quality_identical_raw") is None
     )
     three_q = sum(1 for row in scored if str(row.get("final_rung")) == "3Q")
+    leaked = [str(row.get("combo_id", "")) for row in scored if str(row.get("final_rung")) == "3Q"]
     rate = safe_percent(three_q, len(scored))
-    passed = bool(scored) and missing_battery == 0 and rate <= 5.0
+    passed = bool(scored) and missing_battery == 0 and three_q == 0
     return {
         "passed": passed,
         "scored": len(scored),
         "missing_battery_count": missing_battery,
         "three_q_count": three_q,
         "three_q_percent": rate,
-        "limit_percent": 5.0,
+        "limit_percent": 0.0,
+        "leaked_combo_ids": leaked,
     }
 
 
@@ -2480,9 +2604,9 @@ def render_report(state: dict[str, Any]) -> str:
         ),
         "- Stress margins: max(5% of reference stress, 1e-6).",
         (
-            "- 3Q quality-identical battery: normalized stress at 2%, edge crossings at "
-            "2%/0.5 floor, and k-NN neighborhood preservation at 0.02 absolute; the "
-            "battery p-value is the IUT max-p conjunction."
+            "- 3Q quality-identical battery: normalized stress, edge crossings, and "
+            "k-NN preservation use max(current strict margin, reference self-spread); "
+            "only canonical references with plain self-dispersion <= 1.0 enter final 3Q."
         ),
         (
             "- Mode B design: REF_TYPICAL is a non-refutation against a single "
@@ -2511,8 +2635,8 @@ def render_report(state: dict[str, Any]) -> str:
         "## Rung 3 And 3Q Definitions",
         "- Rung 3: stress-only-equivalent, loose 5% fallback.",
         (
-            "- Rung 3Q: quality-identical, strict battery across stress, crossings, "
-            "and k-NN preservation."
+            "- Rung 3Q: quality-identical variance-tied battery across stress, crossings, "
+            "and k-NN preservation for canonical references only."
         ),
         "",
         "## Quality-Identical Breakdown",
@@ -2611,8 +2735,8 @@ def render_tiers(state: dict[str, Any]) -> str:
         "  (JMT decision 2026-06-12; previously reported as a Tier-3 sub-rung.)",
         "- Tier 2: TIMEOUT only.",
         "- Tier 3: rungs 1, 2, 2' plus rung 3 stress-only-equivalent loose 5% fallback.",
-        "- Tier 3Q: quality-identical strict battery, statistically different but drawing-quality",
-        "  indistinguishable by normalized stress, edge crossings, and k-NN preservation.",
+        "- Tier 3Q: quality-identical variance-tied battery on canonical references,",
+        "  statistically different but drawing-quality indistinguishable.",
         "- Tier 4: rung 4 DIFFERENT.",
         "- NO_DATA: ERROR_NO_DATA, REF_NO_DATA, and INSUFFICIENT_DATA.",
         "",

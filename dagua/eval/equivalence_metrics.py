@@ -20,6 +20,7 @@ EPSILON: float = 1.0e-12
 DEFAULT_MAX_AUTOMORPHISMS: int = 20_000
 DEFAULT_NEIGHBORHOOD_K: int = 10
 FREE_ASPECT_ENGINES: set[str] = {"classic_sugiyama"}
+REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,75 @@ def as_float64_positions(
     if array64.ndim != 2 or array64.shape[1] != 2:
         raise ValueError(f"Expected positions with shape [N, 2], got {array64.shape}.")
     return array64
+
+
+def reference_self_spread(values: Sequence[float] | np.ndarray) -> float:
+    """Return the reference seed-to-seed metric spread.
+
+    Parameters
+    ----------
+    values : Sequence[float] | numpy.ndarray
+        Per-seed reference metric values.
+
+    Returns
+    -------
+    float
+        Sample standard deviation over finite values, or ``0.0`` when fewer
+        than two finite reference seeds are available.
+    """
+    array = np.asarray(values, dtype=np.float64)
+    finite = array[np.isfinite(array)]
+    if finite.size < 2:
+        return 0.0
+    return float(np.std(finite, ddof=1))
+
+
+def variance_tied_margin(base_margin: float, values: Sequence[float] | np.ndarray) -> float:
+    """Tie an equivalence margin to reference self-variance.
+
+    Parameters
+    ----------
+    base_margin : float
+        Existing fixed or relative quality-battery margin.
+    values : Sequence[float] | numpy.ndarray
+        Per-seed reference metric values used to estimate self-spread.
+
+    Returns
+    -------
+    float
+        ``max(base_margin, reference_self_spread(values))``.
+    """
+    base = float(base_margin)
+    spread = reference_self_spread(values)
+    if not np.isfinite(base):
+        return spread
+    return max(base, spread)
+
+
+def reference_is_canonical(
+    plain_mean_w_r: Optional[float],
+    threshold: float = REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+) -> bool:
+    """Return whether a reference cloud is canonical enough for final 3Q.
+
+    Parameters
+    ----------
+    plain_mean_w_r : Optional[float]
+        Mean off-diagonal plain Procrustes distance among reference seeds.
+    threshold : float, default=REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+        Maximum allowed reference self-dispersion.
+
+    Returns
+    -------
+    bool
+        ``True`` when the reference self-dispersion is finite and no larger
+        than ``threshold``.
+    """
+    return (
+        plain_mean_w_r is not None
+        and np.isfinite(float(plain_mean_w_r))
+        and (float(plain_mean_w_r) <= threshold)
+    )
 
 
 def as_edge_index(edge_index: np.ndarray | torch.Tensor | Sequence[Sequence[int]]) -> np.ndarray:
