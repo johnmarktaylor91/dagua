@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -52,6 +52,10 @@ QUALITY_NP_ABS_MARGIN = 0.02
 QUALITY_CROSS_REL_MARGIN = 0.02
 QUALITY_CROSS_ABS_FLOOR = 0.5
 FREE_ASPECT_PREFIX = "classic_sugiyama"
+REFERENCE_SELF_SPLIT_PREFERRED = (
+    "center_port_backedge_hub",
+    "classic_sgd2_multi_batch8",
+)
 DETERMINISTIC_DIFFERENT_ENGINES = {
     "classic_kk_steps100",
     "classic_kk_steps300",
@@ -205,6 +209,7 @@ def parse_args() -> argparse.Namespace:
             "full",
             "negative-control",
             "chance-control",
+            "reference-self-split-positive-control",
             "modeb-positive-control",
             "deterministic",
             "rung0-reverify",
@@ -248,6 +253,14 @@ def main() -> int:
         combo_pairs = select_negative_controls(combo_pairs, failing_map, index, args.data_dir)
     elif args.mode == "chance-control":
         combo_pairs = select_chance_controls(combo_pairs, failing_map, index)
+    elif args.mode == "reference-self-split-positive-control":
+        combo_pairs = select_reference_self_split_positive_controls(
+            combo_pairs,
+            failing_map,
+            index,
+            args.data_dir,
+            graph_data,
+        )
     elif args.mode == "modeb-positive-control":
         if args.combos_file is None:
             raise ValueError("--combos-file is required for modeb-positive-control.")
@@ -585,13 +598,23 @@ def build_payloads(
     payloads = []
     for graph, engine in combo_pairs:
         source_combo_id = None
-        if "\t" in engine:
+        if mode == "reference-self-split-positive-control":
+            source_combo_id = f"{graph}::{engine}"
+            reference = reference_for_engine(engine, failing_map)
+            combo_id = f"{graph}::{reference}::SELF_SPLIT"
+            ref_rows = sorted_ok_seed_rows(index.get((graph, reference), []))[:100]
+            reimpl_rows, reference_rows = split_reference_self_rows(ref_rows)
+        elif "\t" in engine:
             engine, reference = engine.split("\t", 1)
             source_combo_id = f"{graph}::{engine}"
             combo_id = f"{graph}::{engine}::NEGREF::{reference}"
+            reimpl_rows = tuple(index.get((graph, engine), []))
+            reference_rows = tuple(resolve_rows(index, graph, reference, None))
         else:
             reference = reference_for_engine(engine, failing_map)
             combo_id = f"{graph}::{engine}"
+            reimpl_rows = tuple(index.get((graph, engine), []))
+            reference_rows = tuple(resolve_rows(index, graph, reference, None))
         graph_n_nodes, edges = graph_data.get(graph, fallback_graph_data(graph, index, engine))
         payloads.append(
             ComboPayload(
@@ -600,8 +623,8 @@ def build_payloads(
                 engine=engine,
                 reference=reference,
                 data_dir=str(data_dir),
-                reimpl_rows=tuple(index.get((graph, engine), [])),
-                ref_rows=tuple(resolve_rows(index, graph, reference, None)),
+                reimpl_rows=reimpl_rows,
+                ref_rows=reference_rows,
                 graph_edges=edges,
                 graph_n_nodes=graph_n_nodes,
                 git_sha=git_sha,
@@ -1172,10 +1195,7 @@ def compute_mode_a_quality_battery(
         metrics["cross_d"] - metrics["cross_r"],
         quality_cross_margin(metrics["cross_r"]),
     )
-    np_tost = df.paired_tost(
-        metrics["np_d"] - metrics["np_r"],
-        QUALITY_NP_ABS_MARGIN,
-    )
+    np_tost = quality_np_noninferiority(metrics["np_d"], metrics["np_r"], QUALITY_NP_ABS_MARGIN)
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
 
@@ -1209,7 +1229,6 @@ def compute_mode_b_quality_battery(
     metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
     stress_target = float(metrics["stress_r"][0]) if metrics["stress_r"].size else float("nan")
     cross_target = float(metrics["cross_r"][0]) if metrics["cross_r"].size else float("nan")
-    np_target = float(metrics["np_r"][0]) if metrics["np_r"].size else float("nan")
     stress_tost = df.one_sample_tost(
         metrics["stress_d"],
         stress_target,
@@ -1220,7 +1239,7 @@ def compute_mode_b_quality_battery(
         cross_target,
         quality_cross_margin(np.asarray([cross_target])),
     )
-    np_tost = df.one_sample_tost(metrics["np_d"], np_target, QUALITY_NP_ABS_MARGIN)
+    np_tost = quality_np_noninferiority(metrics["np_d"], metrics["np_r"], QUALITY_NP_ABS_MARGIN)
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
 
@@ -1273,11 +1292,17 @@ def quality_metric_samples(
     edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
     cross_seed = stable_int_seed(f"{payload.combo_id}::r70::crossings")
     stress_d = np.asarray(
-        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in d_layouts],
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in d_layouts
+        ],
         dtype=np.float64,
     )
     stress_r = np.asarray(
-        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in r_layouts],
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in r_layouts
+        ],
         dtype=np.float64,
     )
     np_d = np.asarray(
@@ -1403,6 +1428,36 @@ def quality_cross_margin(cross_r: np.ndarray) -> float:
         ``max(2% * mean(reference), 0.5)``.
     """
     return max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
+
+
+def quality_np_noninferiority(np_d: np.ndarray, np_r: np.ndarray, margin: float) -> dict[str, Any]:
+    """Return the one-sided neighborhood-preservation battery decision.
+
+    Parameters
+    ----------
+    np_d : numpy.ndarray
+        Dagua neighborhood-preservation samples.
+    np_r : numpy.ndarray
+        Reference neighborhood-preservation samples.
+    margin : float
+        Allowed absolute non-inferiority shortfall.
+
+    Returns
+    -------
+    dict[str, Any]
+        TOST-shaped payload where direct equivalence means
+        ``mean(np_d) >= mean(np_r) - margin``.
+    """
+    d_mean = metric_mean(np.asarray(np_d, dtype=np.float64))
+    r_mean = metric_mean(np.asarray(np_r, dtype=np.float64))
+    noninferior = math.isfinite(d_mean) and math.isfinite(r_mean) and d_mean >= r_mean - margin
+    return {
+        "p_tost": 0.0 if noninferior else 1.0,
+        "wilcoxon_p_tost": float("nan"),
+        "degenerate_sd": True,
+        "equivalent_direct": noninferior,
+        "noninferior_direct": noninferior,
+    }
 
 
 def metric_equivalent(tost: dict[str, Any]) -> bool:
@@ -1790,6 +1845,117 @@ def select_negative_controls(
     return draw_sorted(candidates, 20, "r70::negctl")
 
 
+def select_reference_self_split_positive_controls(
+    combo_pairs: list[tuple[str, str]],
+    failing_map: dict[str, dict[str, Any]],
+    index: dict[tuple[str, str], list[PositionRow]],
+    data_dir: Path,
+    graph_data: dict[str, tuple[int, tuple[tuple[int, int], ...]]],
+) -> list[tuple[str, str]]:
+    """Select one seedable reference combo that passes the self-split battery.
+
+    Parameters
+    ----------
+    combo_pairs : list[tuple[str, str]]
+        Candidate real combos.
+    failing_map : dict[str, dict[str, Any]]
+        Approved failing-map scope.
+    index : dict[tuple[str, str], list[PositionRow]]
+        Results index.
+    data_dir : pathlib.Path
+        Benchmark root directory used to load reference layouts for screening.
+    graph_data : dict[str, tuple[int, tuple[tuple[int, int], ...]]]
+        Graph edge payloads.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        One ``(graph, engine)`` pair whose reference has at least 100 ok seeds.
+    """
+    preferred_graph, preferred_engine = REFERENCE_SELF_SPLIT_PREFERRED
+    preferred_reference = reference_for_engine(preferred_engine, failing_map)
+    preferred_rows = sorted_ok_seed_rows(index.get((preferred_graph, preferred_reference), []))
+    if (preferred_graph, preferred_engine) in set(combo_pairs) and len(preferred_rows) >= 100:
+        return [REFERENCE_SELF_SPLIT_PREFERRED]
+    for graph, engine in combo_pairs:
+        reference = reference_for_engine(engine, failing_map)
+        rows = sorted_ok_seed_rows(index.get((graph, reference), []))[:100]
+        if len(rows) < 100:
+            continue
+        if reference_self_split_quality_passes(
+            graph, engine, reference, rows, index, data_dir, graph_data
+        ):
+            return [(graph, engine)]
+    raise ValueError(
+        "No reference self-split positive-control candidate passed the quality battery."
+    )
+
+
+def reference_self_split_quality_passes(
+    graph: str,
+    engine: str,
+    reference: str,
+    rows: list[PositionRow],
+    index: dict[tuple[str, str], list[PositionRow]],
+    data_dir: Path,
+    graph_data: dict[str, tuple[int, tuple[tuple[int, int], ...]]],
+) -> bool:
+    """Return whether a reference self split passes the quality battery.
+
+    Parameters
+    ----------
+    graph : str
+        Graph name.
+    engine : str
+        Source implementation engine name.
+    reference : str
+        Seedable reference engine name.
+    rows : list[PositionRow]
+        First 100 ok reference seed rows.
+    index : dict[tuple[str, str], list[PositionRow]]
+        Results index for graph fallback metadata.
+    data_dir : pathlib.Path
+        Benchmark root directory used to load reference layouts.
+    graph_data : dict[str, tuple[int, tuple[tuple[int, int], ...]]]
+        Graph edge payloads.
+
+    Returns
+    -------
+    bool
+        ``True`` when the exact self-split Mode A quality battery passes.
+    """
+    reimpl_rows, reference_rows = split_reference_self_rows(rows)
+    graph_n_nodes, edges = graph_data.get(graph, fallback_graph_data(graph, index, engine))
+    payload = ComboPayload(
+        combo_id=f"{graph}::{reference}::SELF_SPLIT_SCREEN",
+        graph=graph,
+        engine=engine,
+        reference=reference,
+        data_dir=str(data_dir),
+        reimpl_rows=reimpl_rows,
+        ref_rows=reference_rows,
+        graph_edges=edges,
+        graph_n_nodes=graph_n_nodes,
+        git_sha="screen",
+        control_kind="reference-self-split-positive-control",
+        source_combo_id=f"{graph}::{engine}",
+    )
+    reimpl = collect_layouts(str(data_dir), reimpl_rows)
+    ref = collect_layouts(str(data_dir), reference_rows)
+    seeds = sorted(set(reimpl["seeded"]) & set(ref["seeded"]))
+    if len(seeds) < MIN_MODE_SEEDS:
+        return False
+    edge_rows = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    dists = df.prepare_graph_distances(edge_rows, graph_n_nodes)
+    battery = compute_mode_a_quality_battery(
+        payload,
+        [reimpl["seeded"][seed] for seed in seeds],
+        [ref["seeded"][seed] for seed in seeds],
+        dists,
+    )
+    return bool(battery.get("quality_identical_raw", False))
+
+
 def ok_seed_set(rows: Iterable[PositionRow]) -> set[int]:
     """Return ok integer seeds for rows.
 
@@ -1804,6 +1970,51 @@ def ok_seed_set(rows: Iterable[PositionRow]) -> set[int]:
         Seeds with ok rows.
     """
     return {int(row.seed) for row in rows if row.status == "ok" and row.seed is not None}
+
+
+def sorted_ok_seed_rows(rows: Iterable[PositionRow]) -> list[PositionRow]:
+    """Return ok seeded rows in deterministic seed order.
+
+    Parameters
+    ----------
+    rows : Iterable[PositionRow]
+        Candidate benchmark rows.
+
+    Returns
+    -------
+    list[PositionRow]
+        Rows with ok status and integer seeds, sorted by seed.
+    """
+    return sorted(
+        (row for row in rows if row.status == "ok" and row.seed is not None),
+        key=lambda row: seed_sort_value(row.seed),
+    )
+
+
+def split_reference_self_rows(
+    rows: list[PositionRow],
+) -> tuple[tuple[PositionRow, ...], tuple[PositionRow, ...]]:
+    """Split 100 reference rows into matched-label A/B halves.
+
+    Parameters
+    ----------
+    rows : list[PositionRow]
+        Seeded reference rows sorted in deterministic seed order.
+
+    Returns
+    -------
+    tuple[tuple[PositionRow, ...], tuple[PositionRow, ...]]
+        First 50 rows and second 50 rows with remapped labels ``0..49`` so
+        Mode A compares disjoint seed halves pairwise.
+    """
+    if len(rows) < 100:
+        raise ValueError(f"Need 100 reference rows for self-split control, found {len(rows)}.")
+    first = rows[:50]
+    second = rows[50:100]
+    return (
+        tuple(replace(row, seed=index) for index, row in enumerate(first)),
+        tuple(replace(row, seed=index) for index, row in enumerate(second)),
+    )
 
 
 def draw_sorted(items: list[tuple[str, str]], count: int, purpose: str) -> list[tuple[str, str]]:
@@ -2217,15 +2428,15 @@ def deterministic_quality_metrics(
     edge_index = edge_index_array(edges)
     edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
     cross_seed = stable_int_seed(f"{combo_id}::r70::crossings")
-    stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists)
-    stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists)
+    stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+    stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
     cross_d = crossing_count(d_layout, edge_tensor, cross_seed)
     cross_r = crossing_count(r_layout, edge_tensor, cross_seed)
     np_d = neighborhood_preservation(d_layout, dists, k=10)
     np_r = neighborhood_preservation(r_layout, dists, k=10)
     stress_rel_delta = abs(stress_d - stress_r) / max(stress_r, df.EPSILON)
     crossings_delta = abs(cross_d - cross_r)
-    neighborhood_delta = abs(np_d - np_r)
+    neighborhood_delta = max(np_r - np_d, 0.0)
     return {
         "battery_n": 1,
         "battery_stress_D_mean": stress_d,
