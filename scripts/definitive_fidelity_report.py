@@ -1167,12 +1167,16 @@ def deterministic_quality_identical(row: dict[str, Any]) -> bool:
         the strict battery margins.
     """
     stress_rel = as_float(row.get("stress_rel_delta"))
+    np_d = as_float(row.get("np_D_mean"))
+    np_r = as_float(row.get("np_R_mean"))
     np_delta = as_float(row.get("neighborhood_preservation_delta"))
     crossings_delta = as_float(row.get("crossings_delta"))
     cross_r = as_float(row.get("cross_R_mean"))
     if stress_rel is None or np_delta is None or crossings_delta is None or cross_r is None:
         return False
     cross_margin = max(0.02 * cross_r, 0.5)
+    if np_d is not None and np_r is not None:
+        np_delta = max(np_r - np_d, 0.0)
     return stress_rel < 0.02 and np_delta < 0.02 and crossings_delta <= cross_margin
 
 
@@ -2205,6 +2209,9 @@ def evaluate_controls(
         "gate_5_quality_identical_laundering": evaluate_gate_quality_identical_laundering(
             finalized
         ),
+        "gate_6_reference_self_split_positive": evaluate_gate_reference_self_split_positive(
+            finalized
+        ),
     }
     all_passed = all(gate["passed"] for gate in gates.values())
     payload = {"all_passed": all_passed, "gates": gates, "summary": {"all_passed": all_passed}}
@@ -2382,6 +2389,35 @@ def evaluate_gate_quality_identical_laundering(
         "three_q_count": three_q,
         "three_q_percent": rate,
         "limit_percent": 5.0,
+    }
+
+
+def evaluate_gate_reference_self_split_positive(
+    finalized: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Evaluate the reference-self-split positive-control gate.
+
+    Parameters
+    ----------
+    finalized : dict[str, list[dict[str, Any]]]
+        Finalized control rows by kind.
+
+    Returns
+    -------
+    dict[str, Any]
+        PASS/FAIL and measured quality-battery count for the known-equivalent
+        self split.
+    """
+    rows = control_rows(finalized, ("reference-self-split", "self_split"))
+    scored = [row for row in rows if row.get("final_rung") != "INSUFFICIENT_DATA"]
+    quality_identical = sum(1 for row in scored if bool(row.get("quality_identical", False)))
+    three_q = sum(1 for row in scored if str(row.get("final_rung")) == "3Q")
+    passed = bool(scored) and quality_identical == len(scored)
+    return {
+        "passed": passed,
+        "scored": len(scored),
+        "quality_identical_count": quality_identical,
+        "three_q_count": three_q,
     }
 
 

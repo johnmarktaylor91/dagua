@@ -386,6 +386,7 @@ def normalized_stress(
     edge_index: np.ndarray | torch.Tensor | Sequence[Sequence[int]],
     *,
     all_pairs_distances: Optional[np.ndarray] = None,
+    fit_scale: bool = False,
 ) -> float:
     """Compute exact normalized graph-theoretic stress.
 
@@ -397,6 +398,9 @@ def normalized_stress(
         Graph edges with shape ``[2, E]`` or ``[E, 2]``.
     all_pairs_distances : numpy.ndarray, optional
         Precomputed graph shortest-path distances with shape ``[N, N]``.
+    fit_scale : bool, default=False
+        If ``True``, fit the closed-form scalar ``alpha`` that minimizes the
+        weighted residual before computing stress.
 
     Returns
     -------
@@ -416,6 +420,12 @@ def normalized_stress(
     d_graph_valid = d_graph[valid]
     d_layout = np.linalg.norm(pos[rows[valid]] - pos[cols[valid]], axis=1)
     weights = 1.0 / np.square(d_graph_valid)
+    if fit_scale:
+        alpha_denominator = float(np.sum(weights * np.square(d_layout)))
+        alpha = 0.0
+        if alpha_denominator >= EPSILON:
+            alpha = float(np.sum(weights * d_layout * d_graph_valid) / alpha_denominator)
+        d_layout = alpha * d_layout
     numerator = float(np.sum(weights * np.square(d_layout - d_graph_valid)))
     denominator = float(np.sum(weights * np.square(d_graph_valid)))
     return numerator / max(denominator, EPSILON)
