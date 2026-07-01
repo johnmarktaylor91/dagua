@@ -24,6 +24,7 @@ from dagua.metrics import (
     full,
     layout_similarity,
     neighborhood_preservation,
+    sampled_crossing_rate,
     sampled_stress,
 )
 
@@ -51,20 +52,85 @@ def _make_small_graph() -> DaguaGraph:
 
 
 class TestCountCrossings:
-    def test_no_crossings(self):
+    def test_no_crossings(self) -> None:
+        """Parallel disjoint edges should not count as crossings."""
         pos = torch.tensor([[0.0, 0.0], [0.0, 100.0], [50.0, 0.0], [50.0, 100.0]])
         ei = torch.tensor([[0, 2], [1, 3]])  # parallel edges
         assert count_crossings(pos, ei) == 0
 
-    def test_one_crossing(self):
+    def test_one_crossing(self) -> None:
+        """Strict interior intersections should count as one crossing."""
         pos = torch.tensor([[0.0, 0.0], [100.0, 100.0], [100.0, 0.0], [0.0, 100.0]])
         ei = torch.tensor([[0, 2], [1, 3]])  # X pattern
         assert count_crossings(pos, ei) == 1
 
-    def test_empty_edges(self):
+    def test_empty_edges(self) -> None:
+        """Empty edge tensors should have no crossings."""
         pos = torch.randn(5, 2)
         ei = torch.zeros(2, 0, dtype=torch.long)
         assert count_crossings(pos, ei) == 0
+
+    def test_collinear_overlap_counts_as_crossing(self) -> None:
+        """Exact crossings should match vector semantics for collinear overlap."""
+        pos = torch.tensor([[0.0, 0.0], [2.0, 0.0], [1.0, 0.0], [3.0, 0.0]])
+        ei = torch.tensor([[0, 2], [1, 3]])
+
+        assert count_crossings(pos, ei) == 1
+
+    def test_endpoint_touch_does_not_count_as_crossing(self) -> None:
+        """Endpoint-only contact should be excluded even without shared node ids."""
+        pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        ei = torch.tensor([[0, 2], [1, 3]])
+
+        assert count_crossings(pos, ei) == 0
+
+    def test_near_parallel_non_overlap_does_not_count_as_crossing(self) -> None:
+        """Nearly parallel separated segments should remain non-crossing."""
+        pos = torch.tensor([[0.0, 0.0], [1.0, 1.0e-9], [0.0, 1.0], [1.0, 1.0 + 1.0e-9]])
+        ei = torch.tensor([[0, 2], [1, 3]])
+
+        assert count_crossings(pos, ei) == 0
+
+    def test_exact_and_sampled_predicates_agree_across_edge_cutoff(self) -> None:
+        """The 500/501-edge paths should agree on degenerate crossing semantics."""
+        pos = torch.zeros((504, 2), dtype=torch.float64)
+        pos[0] = torch.tensor([0.0, 0.0])
+        pos[1] = torch.tensor([2.0, 0.0])
+        pos[2] = torch.tensor([1.0, 0.0])
+        pos[3] = torch.tensor([3.0, 0.0])
+        edges = [(0, 1), (2, 3)]
+        for node in range(4, 502):
+            pos[node] = torch.tensor([1000.0 + float(node), 1000.0])
+            edges.append((0, node))
+
+        exact_edge_index = torch.as_tensor(edges[:500], dtype=torch.long).T
+        sampled_edges = edges + [(0, 502)]
+        pos[502] = torch.tensor([2000.0, 1000.0])
+        sampled_edge_index = torch.as_tensor(sampled_edges, dtype=torch.long).T
+        total_pairs = sampled_edge_index.shape[1] * (sampled_edge_index.shape[1] - 1) // 2
+        sampled = sampled_crossing_rate(pos, sampled_edge_index, n_samples=total_pairs, seed=42)
+
+        assert count_crossings(pos, exact_edge_index) == 1
+        assert sampled["crossing_estimated_total"] == 1
+
+    def test_sampled_crossing_total_scales_by_eligible_pairs(self) -> None:
+        """Sampled totals should not scale valid-pair rates by adjacent pairs."""
+        pos = torch.zeros((604, 2), dtype=torch.float64)
+        pos[0] = torch.tensor([0.0, 0.0])
+        pos[1] = torch.tensor([2.0, 0.0])
+        pos[2] = torch.tensor([1.0, 0.0])
+        pos[3] = torch.tensor([3.0, 0.0])
+        edges = [(0, 1), (2, 3)]
+        for node in range(4, 604):
+            pos[node] = torch.tensor([1000.0 + float(node), 1000.0])
+            edges.append((0, node))
+        edge_index = torch.as_tensor(edges, dtype=torch.long).T
+        total_pairs = edge_index.shape[1] * (edge_index.shape[1] - 1) // 2
+
+        sampled = sampled_crossing_rate(pos, edge_index, n_samples=total_pairs, seed=42)
+
+        assert sampled["crossing_eligible_pairs"] < total_pairs
+        assert sampled["crossing_estimated_total"] == 1
 
 
 class TestDagFraction:
