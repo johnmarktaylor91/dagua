@@ -144,8 +144,8 @@ def test_sugiyama_igraph_undirected_gate_uses_bfs_fallback() -> None:
     assert torch.equal(layers, torch.tensor([1, 0, 1, 2]))
 
 
-def test_sugiyama_graphviz_fidelity_layer_output_remains_stable() -> None:
-    """Graphviz fidelity should keep its existing rank-assignment path."""
+def test_sugiyama_graphviz_fidelity_uses_dot_x_assignment() -> None:
+    """Graphviz fidelity should keep ranks while using dot x assignment."""
     edge_index = torch.tensor(
         [
             [0, 0, 1, 2, 2, 3],
@@ -164,11 +164,11 @@ def test_sugiyama_graphviz_fidelity_layer_output_remains_stable() -> None:
 
     expected = torch.tensor(
         [
-            [0.0, 0.0],
-            [-0.5, 1.0],
-            [0.5, 1.0],
-            [-0.5, 2.0],
-            [0.0, 3.0],
+            [-0.2, 0.0],
+            [-0.6, 1.0],
+            [0.2, 1.0],
+            [-0.6, 2.0],
+            [-0.2, 3.0],
         ]
     )
     assert torch.equal(positions, expected)
