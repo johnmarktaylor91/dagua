@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Hashable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Hashable, List, Literal, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -13,6 +13,7 @@ _NO_TREE_INDEX = -1
 NodeId = Hashable
 VirtualNodeFactory = Callable[..., NodeId]
 EdgeLike = Union[Tuple[NodeId, NodeId], Tuple[NodeId, NodeId, int], Tuple[NodeId, NodeId, int, int]]
+BalanceMode = Literal["none", "tb", "lr"]
 
 
 @dataclass(frozen=True)
@@ -177,7 +178,7 @@ def graphviz_rank_assignment(
             ordered_nodes=local_nodes,
             maxiter=maxiter,
             search_size=search_size,
-            balance=balance,
+            balance_mode="tb" if balance else "none",
         )
         ranks.update(local_ranks)
 
@@ -187,6 +188,90 @@ def graphviz_rank_assignment(
         virtual_node_factory=virtual_node_factory,
     )
     return ranks, virtual_edges
+
+
+def graphviz_network_simplex_assignment(
+    edges: Union[torch.Tensor, Sequence[EdgeLike]],
+    num_nodes: Optional[int] = None,
+    edge_minlens: Optional[Sequence[int]] = None,
+    edge_weights: Optional[Union[torch.Tensor, Sequence[float]]] = None,
+    initial_ranks: Optional[Dict[NodeId, int]] = None,
+    maxiter: Optional[int] = None,
+    search_size: int = _GRAPHVIZ_SEARCH_SIZE,
+    balance_mode: BalanceMode = "tb",
+) -> Dict[NodeId, int]:
+    """Assign node ranks for arbitrary Graphviz network-simplex constraints.
+
+    Parameters
+    ----------
+    edges : torch.Tensor or sequence
+        Directed rank constraints. A tensor must have shape ``[2, E]`` and
+        uses integer node ids. Sequence entries may be ``(tail, head)``,
+        ``(tail, head, minlen)``, or ``(tail, head, minlen, weight)``.
+    num_nodes : int, optional
+        Number of integer nodes. When supplied, isolated nodes ``0..N-1`` are
+        included with rank zero.
+    edge_minlens : sequence of int, optional
+        Per-edge minimum lengths for tensor input or two-tuple edges.
+    edge_weights : torch.Tensor or sequence of float, optional
+        Per-edge objective weights. Values are coerced to Graphviz-style ints.
+    initial_ranks : dict, optional
+        Optional starting ranks keyed by node id. Graphviz's x-coordinate
+        simplex seeds ranks during auxiliary-graph construction before calling
+        ``rank(g, 2, ...)``.
+    maxiter : int, optional
+        Maximum network-simplex pivots per weak component. ``None`` uses a
+        conservative finite bound.
+    search_size : int, default=30
+        Graphviz ``searchsize`` equivalent for selecting leaving tree edges.
+    balance_mode : {"none", "tb", "lr"}, default="tb"
+        Post-optimal balancing pass. ``"lr"`` matches dot ``rank(g, 2, ...)``
+        for horizontal coordinate assignment.
+
+    Returns
+    -------
+    dict
+        Original node id to simplex rank.
+
+    Raises
+    ------
+    ValueError
+        If edge shapes are invalid, ``balance_mode`` is unsupported, or the
+        input still contains a directed cycle.
+    """
+    if balance_mode not in ("none", "tb", "lr"):
+        raise ValueError("balance_mode must be 'none', 'tb', or 'lr'.")
+
+    records = _normalize_edge_records(
+        edges=edges,
+        num_nodes=num_nodes,
+        edge_minlens=edge_minlens,
+        edge_weights=edge_weights,
+    )
+    ordered_nodes = _ordered_nodes(records=records, num_nodes=num_nodes)
+    if not ordered_nodes:
+        return {}
+
+    ranks: Dict[NodeId, int] = {node: 0 for node in ordered_nodes}
+    for component_nodes in _weak_components(records=records, ordered_nodes=ordered_nodes):
+        component_records = [
+            record
+            for record in records
+            if record.tail in component_nodes and record.head in component_nodes
+        ]
+        if not component_records:
+            continue
+        local_nodes = [node for node in ordered_nodes if node in component_nodes]
+        local_ranks = _rank_component(
+            records=component_records,
+            ordered_nodes=local_nodes,
+            maxiter=maxiter,
+            search_size=search_size,
+            balance_mode=balance_mode,
+            initial_ranks=initial_ranks,
+        )
+        ranks.update(local_ranks)
+    return ranks
 
 
 def _normalize_edge_records(
@@ -416,7 +501,8 @@ def _rank_component(
     ordered_nodes: Sequence[NodeId],
     maxiter: Optional[int],
     search_size: int,
-    balance: bool,
+    balance_mode: BalanceMode,
+    initial_ranks: Optional[Dict[NodeId, int]] = None,
 ) -> Dict[NodeId, int]:
     """Run network simplex on one weak component.
 
@@ -430,8 +516,10 @@ def _rank_component(
         Pivot cap.
     search_size : int
         Leaving-edge search window.
-    balance : bool
-        Whether to apply top-bottom balancing.
+    balance_mode : {"none", "tb", "lr"}
+        Post-optimal balancing pass.
+    initial_ranks : dict, optional
+        Optional starting ranks keyed by original node id.
 
     Returns
     -------
@@ -444,9 +532,12 @@ def _rank_component(
         node_to_local=node_to_local,
         search_size=search_size,
     )
+    if initial_ranks is not None:
+        for node, local_id in node_to_local.items():
+            graph.nodes[local_id].rank = int(initial_ranks.get(node, 0))
     if len(graph.nodes) == 1:
         return {ordered_nodes[0]: 0}
-    _run_network_simplex(graph=graph, balance=balance, maxiter=maxiter)
+    _run_network_simplex(graph=graph, balance_mode=balance_mode, maxiter=maxiter)
     return {node: graph.nodes[node_to_local[node]].rank for node in ordered_nodes}
 
 
@@ -493,7 +584,7 @@ def _build_simplex_graph(
 
 def _run_network_simplex(
     graph: _SimplexGraph,
-    balance: bool,
+    balance_mode: BalanceMode,
     maxiter: Optional[int],
 ) -> None:
     """Apply Graphviz's network-simplex rank optimizer.
@@ -502,8 +593,8 @@ def _run_network_simplex(
     ----------
     graph : _SimplexGraph
         Mutable rank graph.
-    balance : bool
-        Whether to apply Graphviz top-bottom balancing after pivots.
+    balance_mode : {"none", "tb", "lr"}
+        Post-optimal balancing pass to apply after pivots.
     maxiter : int, optional
         Maximum number of pivots.
 
@@ -529,8 +620,10 @@ def _run_network_simplex(
         if entering is None:
             break
         _update(graph=graph, leaving=leaving, entering=entering)
-    if balance:
+    if balance_mode == "tb":
         _top_bottom_balance(graph=graph)
+    elif balance_mode == "lr":
+        _left_right_balance(graph=graph)
     else:
         _scan_and_normalize(graph=graph)
 
@@ -1363,6 +1456,38 @@ def _top_bottom_balance(graph: _SimplexGraph) -> None:
             node.rank = choice
 
 
+def _left_right_balance(graph: _SimplexGraph) -> None:
+    """Apply dot's LR balance pass for horizontal coordinate simplex ranks.
+
+    Parameters
+    ----------
+    graph : _SimplexGraph
+        Mutable rank graph.
+
+    Notes
+    -----
+    Graphviz 7.0.5 calls this path as ``rank(g, 2, nsiter2(g))`` after
+    building the x-coordinate auxiliary graph in ``position.c``. It shifts the
+    tail or head side of zero-cut tree edges halfway across the currently
+    available slack, preserving optimal objective value while centering
+    degree-balanced nodes in their feasible horizontal range.
+    """
+    for edge_id in list(graph.tree_edges):
+        edge = graph.edges[edge_id]
+        if edge.cutvalue != 0:
+            continue
+        entering = _enter_edge(graph=graph, edge_id=edge_id)
+        if entering is None:
+            continue
+        delta = _slack(graph=graph, edge_id=entering)
+        if delta <= 1:
+            continue
+        if graph.nodes[edge.tail].lim < graph.nodes[edge.head].lim:
+            _rerank(graph=graph, node_id=edge.tail, parent_edge=edge_id, delta=delta // 2)
+        else:
+            _rerank(graph=graph, node_id=edge.head, parent_edge=edge_id, delta=-(delta // 2))
+
+
 def _build_virtual_edges(
     records: Sequence[_EdgeRecord],
     ranks: Dict[NodeId, int],
@@ -1528,4 +1653,8 @@ def _seq(low: int, value: int, high: int) -> bool:
     return low <= value <= high
 
 
-__all__ = ["GraphvizVirtualEdge", "graphviz_rank_assignment"]
+__all__ = [
+    "GraphvizVirtualEdge",
+    "graphviz_network_simplex_assignment",
+    "graphviz_rank_assignment",
+]
