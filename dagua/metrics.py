@@ -143,21 +143,41 @@ def _sampled_knn_preservation(pos_a: torch.Tensor, pos_b: torch.Tensor, k: int) 
     return float(np.mean(jaccard_scores)) if jaccard_scores else 1.0
 
 
-def segments_intersect(p1, p2, p3, p4):
+def segments_intersect(
+    p1: torch.Tensor,
+    p2: torch.Tensor,
+    p3: torch.Tensor,
+    p4: torch.Tensor,
+) -> torch.Tensor:
     """Vectorized segment intersection test.  All inputs ``[N, 2]``.
 
-    Returns an ``[N]`` bool tensor. Counts both standard transversal
-    crossings and *collinear-overlap* crossings (two parallel segments
-    on the same infinite line whose 1D projections overlap, e.g. two
-    vertical edges that share part of a column). The collinear case
-    matters because a layout that collapses every node to one column
-    produces edges that all live on the same vertical line; without
-    counting collinear overlap as crossing, every such pair scores
-    zero crossings and the composite metric awards a degenerate
-    layout free points.
+    Parameters
+    ----------
+    p1 : torch.Tensor
+        First endpoints for the first segment set with shape ``[N, 2]``.
+    p2 : torch.Tensor
+        Second endpoints for the first segment set with shape ``[N, 2]``.
+    p3 : torch.Tensor
+        First endpoints for the second segment set with shape ``[N, 2]``.
+    p4 : torch.Tensor
+        Second endpoints for the second segment set with shape ``[N, 2]``.
 
-    Excludes endpoint-touch cases (segments that share only a vertex)
-    via a small ``EPS`` boundary on the parametric coordinates.
+    Returns
+    -------
+    torch.Tensor
+        Boolean tensor with shape ``[N]``. Counts both standard transversal
+        crossings and *collinear-overlap* crossings (two parallel segments on
+        the same infinite line whose 1D projections overlap, e.g. two vertical
+        edges that share part of a column). Excludes endpoint-touch cases
+        (segments that share only a vertex) via a small ``EPS`` boundary on the
+        parametric coordinates.
+
+    Notes
+    -----
+    Collinear overlap is treated as a crossing because a layout that collapses
+    every node to one column produces edges that all live on the same vertical
+    line; without this case, a degenerate collapsed layout receives free
+    crossing points.
     """
     EPS = 1e-6
     d1 = p2 - p1  # [N, 2]
@@ -750,7 +770,10 @@ def sampled_crossing_rate(
     Returns
     -------
     Dict[str, float]
-        Estimated crossing statistics for the sampled edge pairs.
+        Estimated crossing statistics for the sampled edge pairs. The
+        ``crossing_estimated_total`` and ``crossing_se`` fields are in crossing
+        count units over eligible non-adjacent edge pairs, while
+        ``crossing_rate`` is conditional on eligible sampled pairs.
 
     Notes
     -----
@@ -762,6 +785,7 @@ def sampled_crossing_rate(
             "crossing_se": 0.0,
             "crossing_estimated_total": 0,
             "crossing_n_samples": 0,
+            "crossing_eligible_pairs": 0.0,
         }
 
     E = edge_index.shape[1]
@@ -779,6 +803,7 @@ def sampled_crossing_rate(
         ii, jj = torch.triu_indices(E, E, offset=1)
         idx1 = ii
         idx2 = jj
+        pair_space_exhausted = True
     else:
         # Without-replacement sample of unordered pairs (i, j), i < j.
         # Encode pair as p = i * E + j; sample without replacement from the
@@ -791,6 +816,7 @@ def sampled_crossing_rate(
             ii, jj = torch.triu_indices(E, E, offset=1)
             idx1 = ii[perm]
             idx2 = jj[perm]
+            pair_space_exhausted = False
         else:
             idx1 = torch.randint(0, E, (n_samples,), generator=gen)
             idx2 = torch.randint(0, E, (n_samples,), generator=gen)
@@ -799,6 +825,7 @@ def sampled_crossing_rate(
             lo = torch.minimum(idx1, idx2)
             hi = torch.maximum(idx1, idx2)
             idx1, idx2 = lo, hi
+            pair_space_exhausted = False
 
     # Exclude pairs sharing a node
     e1s, e1t = src[idx1], tgt[idx1]
@@ -813,6 +840,7 @@ def sampled_crossing_rate(
             "crossing_se": 0.0,
             "crossing_estimated_total": 0,
             "crossing_n_samples": 0,
+            "crossing_eligible_pairs": 0.0,
         }
 
     p1 = pos[e1s[valid]]
@@ -823,13 +851,21 @@ def sampled_crossing_rate(
     crossings = segments_intersect(p1, p2, p3, p4)
     n_valid = int(valid.sum().item())
     rate = crossings.float().mean().item()
-    se = (rate * (1 - rate) / n_valid) ** 0.5 if n_valid > 0 else 0.0
+    if pair_space_exhausted:
+        eligible_pairs = float(n_valid)
+        estimated_total = int(crossings.sum().item())
+        se = 0.0
+    else:
+        eligible_pairs = float(total_pairs) * (float(n_valid) / float(valid.numel()))
+        estimated_total = int(rate * eligible_pairs)
+        se = eligible_pairs * (rate * (1 - rate) / n_valid) ** 0.5 if n_valid > 0 else 0.0
 
     return {
         "crossing_rate": rate,
         "crossing_se": se,
-        "crossing_estimated_total": int(rate * E * (E - 1) / 2),
+        "crossing_estimated_total": estimated_total,
         "crossing_n_samples": n_valid,
+        "crossing_eligible_pairs": eligible_pairs,
     }
 
 
@@ -2066,15 +2102,20 @@ def count_crossings(
     src, tgt = ei[0], ei[1]
 
     if E <= 500:
-        crossings = 0
-        pos_np = pos.numpy()
-        for i in range(E):
-            for j in range(i + 1, E):
-                a, b = pos_np[src[i]], pos_np[tgt[i]]
-                c, d = pos_np[src[j]], pos_np[tgt[j]]
-                if _segments_intersect_scalar(a, b, c, d):
-                    crossings += 1
-        return crossings
+        ii, jj = torch.triu_indices(E, E, offset=1)
+        e1s, e1t = src[ii], tgt[ii]
+        e2s, e2t = src[jj], tgt[jj]
+        shares_node = (e1s == e2s) | (e1s == e2t) | (e1t == e2s) | (e1t == e2t)
+        valid = ~shares_node
+        if not bool(valid.any().item()):
+            return 0
+        crossings = segments_intersect(
+            pos[e1s[valid]],
+            pos[e1t[valid]],
+            pos[e2s[valid]],
+            pos[e2t[valid]],
+        )
+        return int(crossings.sum().item())
     else:
         result = sampled_crossing_rate(pos, ei, n_samples=125000, seed=seed)
         return int(result["crossing_estimated_total"])

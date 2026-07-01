@@ -38,7 +38,7 @@ from dagua.eval.equivalence_metrics import (
     variance_tied_margin,
 )
 from dagua.eval.graphs import get_test_graphs
-from dagua.metrics import count_crossings
+from dagua.metrics import count_crossings, sampled_crossing_rate
 
 SPEC_VERSION = "r70-v6"
 DEFAULT_DATA_DIR = Path("eval_output/benchmark_100seed_escalation_final")
@@ -55,6 +55,7 @@ QUALITY_STRESS_REL_MARGIN = 0.02
 QUALITY_NP_ABS_MARGIN = 0.02
 QUALITY_CROSS_REL_MARGIN = 0.02
 QUALITY_CROSS_ABS_FLOOR = 0.5
+QUALITY_CROSS_SAMPLING_Z = 1.96
 QUALITY_BATTERY_FINAL_TIER = "final_3q"
 QUALITY_BATTERY_EXPLORATORY_TIER = "exploratory_noncanonical_reference"
 QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION = (
@@ -189,6 +190,29 @@ class ComboPayload:
     force_mode_b_seed42: bool = False
     control_kind: Optional[str] = None
     source_combo_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CrossingEstimate:
+    """Crossing count estimate and sampling diagnostics.
+
+    Parameters
+    ----------
+    value : float
+        Exact crossing count or sampled eligible-pair total estimate.
+    se : float
+        Standard error in crossing-count units. Exact counts use ``0.0``.
+    n_valid : int
+        Number of eligible non-adjacent edge pairs evaluated.
+    eligible_pairs : float
+        Eligible non-adjacent edge-pair population, exact for enumerated paths
+        and estimated for the huge sampled path.
+    """
+
+    value: float
+    se: float
+    n_valid: int
+    eligible_pairs: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -1207,7 +1231,12 @@ def compute_mode_a_quality_battery(
     )
     cross_tost = df.paired_tost(
         metrics["cross_d"] - metrics["cross_r"],
-        quality_cross_margin(metrics["cross_r"], reference_diagnostics["cross_ref_self_spread"]),
+        quality_cross_margin(
+            metrics["cross_r"],
+            reference_diagnostics["cross_ref_self_spread"],
+            sampling_se=quality_cross_sampling_se(metrics),
+            cross_sampled=bool(metrics["cross_sampled"]),
+        ),
     )
     np_tost = quality_np_noninferiority(
         metrics["np_d"],
@@ -1263,6 +1292,8 @@ def compute_mode_b_quality_battery(
         quality_cross_margin(
             np.asarray([cross_target]),
             reference_diagnostics["cross_ref_self_spread"],
+            sampling_se=quality_cross_sampling_se(metrics),
+            cross_sampled=bool(metrics["cross_sampled"]),
         ),
     )
     np_tost = quality_np_noninferiority(
@@ -1343,19 +1374,33 @@ def quality_metric_samples(
         [neighborhood_preservation(layout, dists, k=10) for layout in r_layouts],
         dtype=np.float64,
     )
-    cross_d = np.asarray(
-        [crossing_count(layout, edge_tensor, cross_seed) for layout in d_layouts],
-        dtype=np.float64,
-    )
-    cross_r = np.asarray(
-        [crossing_count(layout, edge_tensor, cross_seed) for layout in r_layouts],
-        dtype=np.float64,
-    )
+    cross_d_estimates = [crossing_estimate(layout, edge_tensor, cross_seed) for layout in d_layouts]
+    cross_r_estimates = [crossing_estimate(layout, edge_tensor, cross_seed) for layout in r_layouts]
+    cross_d = np.asarray([estimate.value for estimate in cross_d_estimates], dtype=np.float64)
+    cross_r = np.asarray([estimate.value for estimate in cross_r_estimates], dtype=np.float64)
     return {
         "stress_d": stress_d,
         "stress_r": stress_r,
         "cross_d": cross_d,
         "cross_r": cross_r,
+        "cross_se_d": np.asarray([estimate.se for estimate in cross_d_estimates], dtype=np.float64),
+        "cross_se_r": np.asarray([estimate.se for estimate in cross_r_estimates], dtype=np.float64),
+        "cross_n_valid_d": np.asarray(
+            [estimate.n_valid for estimate in cross_d_estimates],
+            dtype=np.float64,
+        ),
+        "cross_n_valid_r": np.asarray(
+            [estimate.n_valid for estimate in cross_r_estimates],
+            dtype=np.float64,
+        ),
+        "cross_eligible_pairs_d": np.asarray(
+            [estimate.eligible_pairs for estimate in cross_d_estimates],
+            dtype=np.float64,
+        ),
+        "cross_eligible_pairs_r": np.asarray(
+            [estimate.eligible_pairs for estimate in cross_r_estimates],
+            dtype=np.float64,
+        ),
         "np_d": np_d,
         "np_r": np_r,
         "battery_n": len(d_layouts),
@@ -1396,10 +1441,8 @@ def quality_reference_diagnostics(
         ],
         dtype=np.float64,
     )
-    cross_r = np.asarray(
-        [crossing_count(layout, edge_tensor, cross_seed) for layout in r_layouts],
-        dtype=np.float64,
-    )
+    cross_r_estimates = [crossing_estimate(layout, edge_tensor, cross_seed) for layout in r_layouts]
+    cross_r = np.asarray([estimate.value for estimate in cross_r_estimates], dtype=np.float64)
     np_r = np.asarray(
         [neighborhood_preservation(layout, dists, k=10) for layout in r_layouts],
         dtype=np.float64,
@@ -1515,6 +1558,8 @@ def quality_battery_record(
     cross_margin = quality_cross_margin(
         metrics["cross_r"],
         reference_diagnostics["cross_ref_self_spread"],
+        sampling_se=quality_cross_sampling_se(metrics),
+        cross_sampled=bool(metrics["cross_sampled"]),
     )
     np_margin = quality_np_margin(reference_diagnostics["np_ref_self_spread"])
     stress_p = float(stress_tost.get("p_tost", float("nan")))
@@ -1532,12 +1577,22 @@ def quality_battery_record(
     # the max-p conjunction is already level-alpha and conservative (Berger-Hsu 1996).
     battery_p_iut = max(finite_p) if len(finite_p) == 3 else float("nan")
     metric_identical = bool(stress_ok and cross_ok and np_ok)
+    superior_distinct = quality_superior_distinct(
+        metrics,
+        stress_margin,
+        cross_margin,
+        np_margin,
+        stress_ok,
+        cross_ok,
+        np_ok,
+    )
     final_eligible = bool(reference_diagnostics["quality_battery_eligible"])
     return {
         "battery_n": int(metrics["battery_n"]),
         "battery_p_iut": battery_p_iut,
         "quality_identical_raw": bool(final_eligible and metric_identical),
         "quality_identical_exploratory": bool((not final_eligible) and metric_identical),
+        "quality_superior_distinct": superior_distinct,
         "quality_battery_eligible": final_eligible,
         "quality_battery_tier": str(reference_diagnostics["quality_battery_tier"]),
         "quality_reference_plain_mean_W_R": reference_diagnostics[
@@ -1556,6 +1611,12 @@ def quality_battery_record(
         "battery_stress_direct_equivalent": stress_direct,
         "cross_D_mean": metric_mean(metrics["cross_d"]),
         "cross_R_mean": metric_mean(metrics["cross_r"]),
+        "cross_se_D": aggregate_standard_error(metrics["cross_se_d"]),
+        "cross_se_R": aggregate_standard_error(metrics["cross_se_r"]),
+        "cross_n_valid_D": metric_mean(metrics["cross_n_valid_d"]),
+        "cross_n_valid_R": metric_mean(metrics["cross_n_valid_r"]),
+        "cross_eligible_pairs_D": metric_mean(metrics["cross_eligible_pairs_d"]),
+        "cross_eligible_pairs_R": metric_mean(metrics["cross_eligible_pairs_r"]),
         "cross_margin": cross_margin,
         "cross_ref_self_spread": reference_diagnostics["cross_ref_self_spread"],
         "cross_p_tost": cross_p,
@@ -1595,7 +1656,13 @@ def quality_stress_margin(stress_r: np.ndarray, ref_self_spread: Optional[float]
     return max(base_margin, float(ref_self_spread))
 
 
-def quality_cross_margin(cross_r: np.ndarray, ref_self_spread: Optional[float] = None) -> float:
+def quality_cross_margin(
+    cross_r: np.ndarray,
+    ref_self_spread: Optional[float] = None,
+    *,
+    sampling_se: float = 0.0,
+    cross_sampled: bool = False,
+) -> float:
     """Return the strict crossing-count battery margin.
 
     Parameters
@@ -1605,18 +1672,115 @@ def quality_cross_margin(cross_r: np.ndarray, ref_self_spread: Optional[float] =
     ref_self_spread : Optional[float], default=None
         Reference seed-to-seed crossing-count spread.  When omitted, the spread
         is computed from ``cross_r``.
+    sampling_se : float, default=0.0
+        Standard error of the Dagua/reference crossing-count difference in
+        count units.
+    cross_sampled : bool, default=False
+        Whether crossings came from the sampled ``E > 500`` estimator.
 
     Returns
     -------
     float
-        ``max(2% * mean(reference), 0.5, reference self-spread)``.
+        ``max(2% * mean(reference), 0.5, reference self-spread)`` for exact
+        rows. Sampled rows also include a 95% normal sampling-error term.
     """
     base_margin = max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
     if ref_self_spread is None:
-        return variance_tied_margin(base_margin, cross_r)
-    if not math.isfinite(float(ref_self_spread)):
-        return base_margin
-    return max(base_margin, float(ref_self_spread))
+        margin = variance_tied_margin(base_margin, cross_r)
+    elif not math.isfinite(float(ref_self_spread)):
+        margin = base_margin
+    else:
+        margin = max(base_margin, float(ref_self_spread))
+    if cross_sampled and math.isfinite(float(sampling_se)):
+        margin = max(margin, QUALITY_CROSS_SAMPLING_Z * float(sampling_se))
+    return margin
+
+
+def aggregate_standard_error(values: np.ndarray) -> float:
+    """Return the standard error for the mean of independent estimates.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Per-layout standard errors in metric units.
+
+    Returns
+    -------
+    float
+        Standard error of the sample mean, or ``0.0`` for empty/exact arrays.
+    """
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.sqrt(np.sum(finite**2)) / finite.size)
+
+
+def quality_cross_sampling_se(metrics: dict[str, Any]) -> float:
+    """Return the crossing-difference standard error for a battery row.
+
+    Parameters
+    ----------
+    metrics : dict[str, Any]
+        Per-side metric arrays from :func:`quality_metric_samples`.
+
+    Returns
+    -------
+    float
+        Standard error of the Dagua-reference mean crossing difference.
+    """
+    se_d = aggregate_standard_error(np.asarray(metrics["cross_se_d"], dtype=np.float64))
+    se_r = aggregate_standard_error(np.asarray(metrics["cross_se_r"], dtype=np.float64))
+    return float(math.sqrt(se_d**2 + se_r**2))
+
+
+def quality_superior_distinct(
+    metrics: dict[str, Any],
+    stress_margin: float,
+    cross_margin: float,
+    np_margin: float,
+    stress_ok: bool,
+    cross_ok: bool,
+    np_ok: bool,
+) -> bool:
+    """Return whether a failed battery is strictly better on failing legs.
+
+    Parameters
+    ----------
+    metrics : dict[str, Any]
+        Per-side metric arrays from :func:`quality_metric_samples`.
+    stress_margin : float
+        Strict stress equivalence margin.
+    cross_margin : float
+        Strict crossing-count equivalence margin.
+    np_margin : float
+        Neighborhood-preservation non-inferiority margin.
+    stress_ok : bool
+        Whether the stress battery leg passed.
+    cross_ok : bool
+        Whether the crossing battery leg passed.
+    np_ok : bool
+        Whether the neighborhood-preservation battery leg passed.
+
+    Returns
+    -------
+    bool
+        ``True`` when the combo remains non-identical but every failed metric
+        leg favors Dagua beyond that metric's margin.
+    """
+    if stress_ok and cross_ok and np_ok:
+        return False
+    stress_delta = metric_mean(metrics["stress_d"]) - metric_mean(metrics["stress_r"])
+    cross_delta = metric_mean(metrics["cross_d"]) - metric_mean(metrics["cross_r"])
+    np_delta = metric_mean(metrics["np_d"]) - metric_mean(metrics["np_r"])
+    failing_directions: list[bool] = []
+    if not stress_ok:
+        failing_directions.append(stress_delta < -stress_margin)
+    if not cross_ok:
+        failing_directions.append(cross_delta < -cross_margin)
+    if not np_ok:
+        failing_directions.append(np_delta > np_margin)
+    return bool(failing_directions) and all(failing_directions)
 
 
 def quality_np_margin(ref_self_spread: Optional[float] = None) -> float:
@@ -1723,8 +1887,44 @@ def edge_index_array(edges: Iterable[tuple[int, int]]) -> np.ndarray:
     return edge_list.reshape(-1, 2).T.copy()
 
 
-def crossing_count(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> int:
+def crossing_estimate(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> CrossingEstimate:
     """Count or estimate crossings with deterministic large-edge sampling.
+
+    Parameters
+    ----------
+    layout : numpy.ndarray
+        Layout coordinates with shape ``[N, 2]``.
+    edge_tensor : torch.Tensor
+        Edge index with shape ``[2, E]``.
+    seed : int
+        Fixed seed for the sampled ``E > 500`` path.
+
+    Returns
+    -------
+    CrossingEstimate
+        Exact crossing count for ``E <= 500`` or fixed-seed sampled estimate
+        and sampling diagnostics for larger edge sets.
+    """
+    pos_tensor = torch.as_tensor(layout, dtype=torch.float64)
+    if edge_tensor.shape[1] <= 500:
+        eligible_pairs = exact_eligible_edge_pairs(edge_tensor)
+        return CrossingEstimate(
+            value=float(count_crossings(pos_tensor, edge_tensor, seed=seed)),
+            se=0.0,
+            n_valid=eligible_pairs,
+            eligible_pairs=float(eligible_pairs),
+        )
+    result = sampled_crossing_rate(pos_tensor, edge_tensor, n_samples=125000, seed=seed)
+    return CrossingEstimate(
+        value=float(result["crossing_estimated_total"]),
+        se=float(result["crossing_se"]),
+        n_valid=int(result["crossing_n_samples"]),
+        eligible_pairs=float(result["crossing_eligible_pairs"]),
+    )
+
+
+def crossing_count(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> int:
+    """Return the crossing-count point estimate for legacy callers.
 
     Parameters
     ----------
@@ -1741,8 +1941,31 @@ def crossing_count(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> 
         Exact crossing count for ``E <= 500`` or fixed-seed sampled estimate for
         larger edge sets.
     """
-    pos_tensor = torch.as_tensor(layout, dtype=torch.float64)
-    return int(count_crossings(pos_tensor, edge_tensor, seed=seed))
+    return int(crossing_estimate(layout, edge_tensor, seed).value)
+
+
+def exact_eligible_edge_pairs(edge_tensor: torch.Tensor) -> int:
+    """Count non-adjacent unordered edge pairs exactly.
+
+    Parameters
+    ----------
+    edge_tensor : torch.Tensor
+        Edge index with shape ``[2, E]``.
+
+    Returns
+    -------
+    int
+        Number of unordered edge pairs that do not share an endpoint.
+    """
+    if edge_tensor.numel() == 0 or edge_tensor.shape[1] < 2:
+        return 0
+    edge_count = int(edge_tensor.shape[1])
+    src, tgt = edge_tensor[0], edge_tensor[1]
+    ii, jj = torch.triu_indices(edge_count, edge_count, offset=1)
+    e1s, e1t = src[ii], tgt[ii]
+    e2s, e2t = src[jj], tgt[jj]
+    shares_node = (e1s == e2s) | (e1s == e2t) | (e1t == e2s) | (e1t == e2t)
+    return int((~shares_node).sum().item())
 
 
 def stable_int_seed(purpose: str) -> int:
@@ -2639,8 +2862,10 @@ def deterministic_quality_metrics(
     cross_seed = stable_int_seed(f"{combo_id}::r70::crossings")
     stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
     stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
-    cross_d = crossing_count(d_layout, edge_tensor, cross_seed)
-    cross_r = crossing_count(r_layout, edge_tensor, cross_seed)
+    cross_d_estimate = crossing_estimate(d_layout, edge_tensor, cross_seed)
+    cross_r_estimate = crossing_estimate(r_layout, edge_tensor, cross_seed)
+    cross_d = cross_d_estimate.value
+    cross_r = cross_r_estimate.value
     np_d = neighborhood_preservation(d_layout, dists, k=10)
     np_r = neighborhood_preservation(r_layout, dists, k=10)
     stress_rel_delta = abs(stress_d - stress_r) / max(stress_r, df.EPSILON)
@@ -2662,6 +2887,12 @@ def deterministic_quality_metrics(
         "stress_rel_delta": stress_rel_delta,
         "cross_D_mean": float(cross_d),
         "cross_R_mean": float(cross_r),
+        "cross_se_D": cross_d_estimate.se,
+        "cross_se_R": cross_r_estimate.se,
+        "cross_n_valid_D": float(cross_d_estimate.n_valid),
+        "cross_n_valid_R": float(cross_r_estimate.n_valid),
+        "cross_eligible_pairs_D": cross_d_estimate.eligible_pairs,
+        "cross_eligible_pairs_R": cross_r_estimate.eligible_pairs,
         "crossings_delta": crossings_delta,
         "cross_margin": max(QUALITY_CROSS_REL_MARGIN * float(cross_r), QUALITY_CROSS_ABS_FLOOR),
         "cross_ref_self_spread": 0.0,
