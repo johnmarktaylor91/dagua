@@ -181,14 +181,44 @@ class TestClassicalMDSPipelineFidelity:
 
         _assert_exact_match(classic, pipeline)
 
-    def test_layout_classical_mds_pipeline_matches_classic_on_disconnected_graph(self) -> None:
-        """Disconnected components and isolated nodes should match exactly."""
+    def test_layout_classical_mds_pipeline_uses_seeded_dla_on_disconnected_graph(self) -> None:
+        """Disconnected igraph-compatible layouts should use seeded DLA."""
         edge_index = _disconnected_edge_index()
 
-        classic = layout_classical_mds(edge_index=edge_index, num_nodes=9, seed=99)
-        pipeline = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=99)
+        first = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=99)
+        repeated = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=99)
+        different_seed = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=101)
+        legacy = layout_classical_mds(edge_index=edge_index, num_nodes=9, seed=99)
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(first, repeated)
+        assert not torch.equal(first, different_seed)
+        assert not torch.equal(first, legacy)
+
+    def test_connected_igraph_fidelity_path_matches_frozen_expectation(self) -> None:
+        """Connected graphs should keep the pre-DLA byte-identical path."""
+        edge_index = _edge_index_from_edges([(0, 1), (1, 2), (2, 3), (1, 4), (4, 5), (2, 6)])
+        expected = torch.tensor(
+            [
+                [19.74042874517258, 81.1747700083929],
+                [11.637134713339654, 12.375749423550795],
+                [-41.32600763180907, -7.664278204494579],
+                [-81.43278709339432, -17.817869289935743],
+                [61.483717691141706, -12.624917741342301],
+                [111.33030066894376, -37.625584906235375],
+                [-81.43278709339432, -17.817869289935746],
+            ],
+            dtype=torch.float64,
+        )
+
+        positions = layout_classical_mds_pipeline(
+            edge_index=edge_index,
+            num_nodes=7,
+            seed=123,
+            igraph_fidelity=True,
+            fidelity_dtype=torch.float64,
+        )
+
+        assert torch.equal(positions, expected)
 
     def test_build_classical_mds_pipeline_matches_classic_on_complete_graph(self) -> None:
         """The raw pipeline object should match classic classical MDS on a dense graph."""
