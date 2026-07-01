@@ -102,6 +102,7 @@ def build_sugiyama_pipeline(
     use_igraph_fidelity = fidelity_mode == "igraph"
     use_graphviz_mincross = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
     use_graphviz_rank = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
+    use_graphviz_xcoord = fidelity_mode == "graphviz"
 
     ops: list[Op] = [
         _ValidateInputs(),
@@ -120,7 +121,10 @@ def build_sugiyama_pipeline(
             center_coordinates=center_coordinates,
             use_graphviz_mincross=use_graphviz_mincross,
         ),
-        _CoordinateAssignment(center_coordinates=center_coordinates),
+        _CoordinateAssignment(
+            center_coordinates=center_coordinates,
+            use_graphviz_xcoord=use_graphviz_xcoord,
+        ),
     ]
     if return_edge_routes:
         ops.append(_BuildEdgeRoutes())
@@ -160,13 +164,13 @@ def layout_sugiyama_pipeline(
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]``.
     rank_sep : float, optional
-        Vertical center-to-center spacing between layers. Defaults to a
-        Graphviz-dot-compatible point spacing for direct calls, or
+        Vertical center-to-center spacing between layers. Defaults to the
+        classic compatibility spacing of ``1.0`` for direct calls, or
         ``config.rank_sep`` when invoked through ``LayoutConfig``.
     node_sep : float, optional
-        Horizontal gap between node bounding boxes. Defaults to Graphviz dot's
-        point-unit ``nodesep`` for direct calls, or ``config.node_sep`` when
-        invoked through ``LayoutConfig``.
+        Horizontal gap between node bounding boxes. Defaults to the classic
+        compatibility spacing of ``1.0`` for direct calls, or
+        ``config.node_sep`` when invoked through ``LayoutConfig``.
     layer_sep : float, optional
         Alias for ``rank_sep``. Overrides ``rank_sep`` when provided.
     seed : int
@@ -226,9 +230,9 @@ def layout_sugiyama_pipeline(
         if node_sep is None:
             node_sep = config.node_sep
     if rank_sep is None:
-        rank_sep = _DOT_DEFAULT_RANK_CENTER_SEP
+        rank_sep = 1.0
     if node_sep is None:
-        node_sep = _DOT_DEFAULT_NODE_SEP
+        node_sep = 1.0
     if layer_sep is not None:
         rank_sep = layer_sep
 

@@ -17,7 +17,11 @@ from dagua.layout.cycle import _is_acyclic as _cycle_is_acyclic
 from dagua.layout.cycle import make_acyclic, make_acyclic_robust
 from dagua.layout.ops._dot_mincross import graphviz_mincross
 from dagua.layout.ops.base import Op
-from dagua.layout.ops.pipelines.dot_rank import GraphvizVirtualEdge, graphviz_rank_assignment
+from dagua.layout.ops.pipelines.dot_rank import (
+    GraphvizVirtualEdge,
+    graphviz_network_simplex_assignment,
+    graphviz_rank_assignment,
+)
 from dagua.layout.ops.state import (  # noqa: E402
     LayoutProblem,
     RuntimeContext,
@@ -43,6 +47,15 @@ _SUGIYAMA_EXPANDED_POSITIONS_KEY = "sugiyama_expanded_positions"
 _SUGIYAMA_RANK_SEP_KEY = "sugiyama_rank_sep"
 _SUGIYAMA_NODE_SEP_KEY = "sugiyama_node_sep"
 _SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY = "sugiyama_graphviz_virtual_edges"
+_GRAPHVIZ_VIRTUAL_NODE_CLASS = 2
+_GRAPHVIZ_SINGLETON_NODE_CLASS = 1
+_GRAPHVIZ_ORDINARY_NODE_CLASS = 0
+_GRAPHVIZ_OMEGA_TABLE = (
+    (1, 1, 1),
+    (1, 2, 2),
+    (1, 2, 4),
+)
+_GRAPHVIZ_X_AUX_RESOLUTION = 2
 
 
 @dataclass(frozen=True)
@@ -1738,6 +1751,449 @@ def _coordinate_assignment(
     return positions.to(output_device)
 
 
+def _graphviz_x_coordinate_assignment(
+    layers: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    node_sizes: torch.Tensor,
+    num_nodes: int,
+    num_original_nodes: int,
+    rank_sep: float,
+    node_sep: float,
+    output_device: torch.device,
+    center_coordinates: bool = True,
+) -> torch.Tensor:
+    """Assign Graphviz dot x coordinates with an auxiliary network simplex.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered expanded nodes per layer.
+    edge_index : torch.Tensor
+        Expanded edge list with shape ``[2, E]`` on CPU.
+    edge_weights : torch.Tensor, optional
+        Expanded edge weights with shape ``[E]``.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_nodes : int
+        Number of expanded nodes.
+    num_original_nodes : int
+        Count of non-dummy nodes. Dummy nodes occupy trailing indices.
+    rank_sep : float
+        Vertical layer spacing.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+    output_device : torch.device
+        Device for the returned position tensor.
+    center_coordinates : bool, default=True
+        Whether to translate the final horizontal span to be centered at zero.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Notes
+    -----
+    This implements Stage A of Graphviz 7.0.5 ``position.c``: left-to-right
+    same-rank constraints plus one slack node for each expanded edge. Ports,
+    flat-edge labels, edge labels, and clusters are intentionally omitted.
+    """
+    positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    for layer_idx, layer_nodes in enumerate(layers):
+        if layer_nodes:
+            positions[list(layer_nodes), 1] = float(layer_idx) * rank_sep
+    if num_nodes == 0:
+        return positions.to(output_device)
+
+    aux_edges, initial_ranks = _build_graphviz_x_aux_edges(
+        layers=layers,
+        edge_index=edge_index,
+        edge_weights=edge_weights,
+        node_sizes=node_sizes,
+        num_nodes=num_nodes,
+        num_original_nodes=num_original_nodes,
+        node_sep=node_sep,
+    )
+    aux_node_count = num_nodes + int(edge_index.shape[1])
+    x_ranks = graphviz_network_simplex_assignment(
+        edges=aux_edges,
+        num_nodes=aux_node_count,
+        initial_ranks=initial_ranks,
+        balance_mode="lr",
+    )
+    x_positions = [
+        float(x_ranks.get(node, 0)) / float(_GRAPHVIZ_X_AUX_RESOLUTION) for node in range(num_nodes)
+    ]
+    output_scale = _graphviz_x_output_scale(
+        layers=layers,
+        node_sizes=node_sizes,
+        num_original_nodes=num_original_nodes,
+        node_sep=node_sep,
+        rank_sep=rank_sep,
+    )
+    x_positions = [value * output_scale for value in x_positions]
+    if center_coordinates:
+        x_positions = _center_coordinates(values=x_positions)
+    positions[:, 0] = torch.tensor(x_positions, dtype=torch.float32)
+    return positions.to(output_device)
+
+
+def _build_graphviz_x_aux_edges(
+    layers: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    node_sizes: torch.Tensor,
+    num_nodes: int,
+    num_original_nodes: int,
+    node_sep: float,
+) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, int]]:
+    """Build Stage A Graphviz dot auxiliary x-coordinate constraints.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered expanded nodes per layer.
+    edge_index : torch.Tensor
+        Expanded edge list with shape ``[2, E]`` on CPU.
+    edge_weights : torch.Tensor, optional
+        Expanded edge weights with shape ``[E]``.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_nodes : int
+        Number of expanded nodes before adding slack nodes.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+
+    Returns
+    -------
+    tuple
+        ``(aux_edges, initial_ranks)`` where auxiliary constraints are
+        ``(tail, head, minlen, weight)`` and initial ranks mirror Graphviz's
+        ``ND_rank`` seeding in ``position.c``.
+    """
+    aux_edges: List[Tuple[int, int, int, int]] = []
+    initial_ranks: Dict[int, int] = {node: 0 for node in range(num_nodes)}
+    for layer_nodes in layers:
+        last_rank = 0
+        for left_node, right_node in zip(layer_nodes, layer_nodes[1:]):
+            minlen = _graphviz_scaled_minlen(
+                _graphviz_right_width(
+                    node=left_node,
+                    node_sizes=node_sizes,
+                    num_original_nodes=num_original_nodes,
+                    node_sep=node_sep,
+                )
+                + _graphviz_left_width(
+                    node=right_node,
+                    node_sizes=node_sizes,
+                    num_original_nodes=num_original_nodes,
+                    node_sep=node_sep,
+                )
+                + node_sep
+            )
+            aux_edges.append((int(left_node), int(right_node), minlen, 0))
+            initial_ranks[int(left_node)] = last_rank
+            last_rank += minlen
+            initial_ranks[int(right_node)] = last_rank
+
+    if edge_index.numel() == 0:
+        return aux_edges, initial_ranks
+
+    weights_cpu = (
+        torch.ones((edge_index.shape[1],), dtype=torch.float32)
+        if edge_weights is None
+        else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    weight_classes = _graphviz_weight_classes(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        num_original_nodes=num_original_nodes,
+    )
+    edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    for edge_id, (tail, head) in enumerate(zip(edge_cpu[0].tolist(), edge_cpu[1].tolist())):
+        slack_node = num_nodes + edge_id
+        port_dx = 0
+        tail_minlen = (max(port_dx, 0) + 1) * _GRAPHVIZ_X_AUX_RESOLUTION
+        head_minlen = (max(-port_dx, 0) + 1) * _GRAPHVIZ_X_AUX_RESOLUTION
+        weight = _graphviz_round(float(weights_cpu[edge_id].item())) * _graphviz_omega_weight(
+            tail=int(tail),
+            head=int(head),
+            weight_classes=weight_classes,
+            num_original_nodes=num_original_nodes,
+        )
+        initial_ranks[slack_node] = min(
+            initial_ranks.get(int(tail), 0) - tail_minlen,
+            initial_ranks.get(int(head), 0) - head_minlen,
+        )
+        aux_edges.append((slack_node, int(tail), tail_minlen, weight))
+        aux_edges.append((slack_node, int(head), head_minlen, weight))
+    return aux_edges, initial_ranks
+
+
+def _graphviz_left_width(
+    node: int,
+    node_sizes: torch.Tensor,
+    num_original_nodes: int,
+    node_sep: float,
+) -> float:
+    """Return Graphviz left half-width for Stage A x constraints.
+
+    Parameters
+    ----------
+    node : int
+        Expanded node id.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+
+    Returns
+    -------
+    float
+        Left half-width in layout units.
+    """
+    if node >= num_original_nodes:
+        return node_sep / 2.0
+    return float(node_sizes[node, 0].item()) / 2.0
+
+
+def _graphviz_right_width(
+    node: int,
+    node_sizes: torch.Tensor,
+    num_original_nodes: int,
+    node_sep: float,
+) -> float:
+    """Return Graphviz right half-width for Stage A x constraints.
+
+    Parameters
+    ----------
+    node : int
+        Expanded node id.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+
+    Returns
+    -------
+    float
+        Right half-width in layout units.
+    """
+    if node >= num_original_nodes:
+        return node_sep / 2.0
+    return float(node_sizes[node, 0].item()) / 2.0
+
+
+def _graphviz_round(value: float) -> int:
+    """Round like Graphviz's ``ROUND`` macro for non-negative minlen values.
+
+    Parameters
+    ----------
+    value : float
+        Candidate value.
+
+    Returns
+    -------
+    int
+        ``floor(value + 0.5)`` clamped to zero.
+    """
+    return max(int(math.floor(value + 0.5)), 0)
+
+
+def _graphviz_scaled_minlen(value: float) -> int:
+    """Return an auxiliary x minlen at Dagua's internal sub-point resolution.
+
+    Parameters
+    ----------
+    value : float
+        Graphviz minlen value before integer quantization.
+
+    Returns
+    -------
+    int
+        Scaled integer minlen.
+
+    Notes
+    -----
+    The benchmark variants pass Dagua label boxes in a smaller coordinate
+    system than Graphviz's point-unit DOT output. A two-unit internal
+    resolution preserves Graphviz's midpoint LR-balance behavior for odd
+    Dagua minlens, then coordinates are divided back down before returning.
+    """
+    return _graphviz_round(value * float(_GRAPHVIZ_X_AUX_RESOLUTION))
+
+
+def _graphviz_x_output_scale(
+    layers: Sequence[Sequence[int]],
+    node_sizes: torch.Tensor,
+    num_original_nodes: int,
+    node_sep: float,
+    rank_sep: float,
+) -> float:
+    """Return the x-unit conversion for graphviz coordinate output.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered expanded nodes per layer.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+    rank_sep : float
+        Vertical layer spacing used by the returned Dagua layout.
+
+    Returns
+    -------
+    float
+        Multiplicative scale from auxiliary x units to returned coordinates.
+
+    Notes
+    -----
+    Graphviz solves x and y in one point-unit frame. The benchmark variants
+    often pass point-like label widths with ``rank_sep=1``; normalizing by the
+    median same-rank separation preserves the Graphviz x shape while returning
+    coordinates in the same unit family as Dagua's y ranks.
+    """
+    separations: List[float] = []
+    for layer_nodes in layers:
+        for left_node, right_node in zip(layer_nodes, layer_nodes[1:]):
+            separations.append(
+                _graphviz_right_width(
+                    node=left_node,
+                    node_sizes=node_sizes,
+                    num_original_nodes=num_original_nodes,
+                    node_sep=node_sep,
+                )
+                + _graphviz_left_width(
+                    node=right_node,
+                    node_sizes=node_sizes,
+                    num_original_nodes=num_original_nodes,
+                    node_sep=node_sep,
+                )
+                + node_sep
+            )
+    if not separations:
+        return 1.0
+    ordered = sorted(value for value in separations if value > 0.0)
+    if not ordered:
+        return 1.0
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        median_sep = ordered[mid]
+    else:
+        median_sep = (ordered[mid - 1] + ordered[mid]) / 2.0
+    if median_sep <= 0.0:
+        return 1.0
+    return rank_sep / median_sep
+
+
+def _graphviz_weight_classes(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    num_original_nodes: int,
+) -> List[int]:
+    """Compute Graphviz ``ND_weight_class`` equivalents for expanded nodes.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Expanded edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of expanded nodes.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+
+    Returns
+    -------
+    list of int
+        Capped weight-class counters indexed by node id.
+    """
+    weight_classes = [0] * num_nodes
+    if edge_index.numel() == 0:
+        return weight_classes
+    edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    for tail, head in zip(edge_cpu[0].tolist(), edge_cpu[1].tolist()):
+        for node in (int(tail), int(head)):
+            if node < num_original_nodes and weight_classes[node] <= 2:
+                weight_classes[node] += 1
+    return weight_classes
+
+
+def _graphviz_omega_weight(
+    tail: int,
+    head: int,
+    weight_classes: Sequence[int],
+    num_original_nodes: int,
+) -> int:
+    """Return Graphviz 7.0.5 ``virtual_weight`` endpoint multiplier.
+
+    Parameters
+    ----------
+    tail : int
+        Expanded edge tail node id.
+    head : int
+        Expanded edge head node id.
+    weight_classes : sequence of int
+        ``ND_weight_class`` equivalents indexed by node id.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+
+    Returns
+    -------
+    int
+        Multiplier from Graphviz's ``C_EE/C_VS/C_SS/C_VV`` table.
+    """
+    tail_class = _graphviz_endpoint_class(
+        node=tail,
+        weight_classes=weight_classes,
+        num_original_nodes=num_original_nodes,
+    )
+    head_class = _graphviz_endpoint_class(
+        node=head,
+        weight_classes=weight_classes,
+        num_original_nodes=num_original_nodes,
+    )
+    return _GRAPHVIZ_OMEGA_TABLE[tail_class][head_class]
+
+
+def _graphviz_endpoint_class(
+    node: int,
+    weight_classes: Sequence[int],
+    num_original_nodes: int,
+) -> int:
+    """Classify an expanded endpoint for Graphviz omega weighting.
+
+    Parameters
+    ----------
+    node : int
+        Expanded node id.
+    weight_classes : sequence of int
+        ``ND_weight_class`` equivalents indexed by node id.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+
+    Returns
+    -------
+    int
+        Endpoint class index used by ``_GRAPHVIZ_OMEGA_TABLE``.
+    """
+    if node >= num_original_nodes:
+        return _GRAPHVIZ_VIRTUAL_NODE_CLASS
+    if weight_classes[node] <= 1:
+        return _GRAPHVIZ_SINGLETON_NODE_CLASS
+    return _GRAPHVIZ_ORDINARY_NODE_CLASS
+
+
 def _brandes_koepf_x_positions(
     layers: Sequence[Sequence[int]],
     parents: Sequence[Sequence[int]],
@@ -2837,6 +3293,7 @@ class _CoordinateAssignment(Op):
     category: ClassVar[OpCategory] = OpCategory.COORDINATE
     reads: ClassVar[Tuple[str, ...]] = (
         f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY}",
         f"extras.{_SUGIYAMA_ORDERED_LAYERS_KEY}",
         f"extras.{_SUGIYAMA_PARENTS_KEY}",
         f"extras.{_SUGIYAMA_CHILDREN_KEY}",
@@ -2850,7 +3307,11 @@ class _CoordinateAssignment(Op):
     )
     access_pattern: ClassVar[str] = "global"
 
-    def __init__(self, center_coordinates: bool = True) -> None:
+    def __init__(
+        self,
+        center_coordinates: bool = True,
+        use_graphviz_xcoord: bool = False,
+    ) -> None:
         """Store coordinate-frame options.
 
         Parameters
@@ -2858,12 +3319,16 @@ class _CoordinateAssignment(Op):
         center_coordinates : bool, default=True
             Whether to translate the final horizontal span to be centered at
             zero.
+        use_graphviz_xcoord : bool, default=False
+            Whether to use Graphviz dot's auxiliary-graph network simplex for
+            x coordinates instead of Brandes-Kopf compaction.
         Returns
         -------
         None
             The constructor stores configuration only.
         """
         self.center_coordinates = center_coordinates
+        self.use_graphviz_xcoord = use_graphviz_xcoord
 
     def apply(
         self,
@@ -2897,18 +3362,32 @@ class _CoordinateAssignment(Op):
         rank_sep = state.extras.get(_SUGIYAMA_RANK_SEP_KEY, 1.0)
         node_sep = state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)
 
-        expanded_positions = _coordinate_assignment(
-            layers=state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY],
-            parents=state.extras[_SUGIYAMA_PARENTS_KEY],
-            children=state.extras[_SUGIYAMA_CHILDREN_KEY],
-            node_sizes=expanded_graph.node_sizes,
-            num_nodes=expanded_graph.num_nodes,
-            num_original_nodes=problem.num_nodes,
-            rank_sep=rank_sep,
-            node_sep=node_sep,
-            output_device=output_device,
-            center_coordinates=self.center_coordinates,
-        )
+        if self.use_graphviz_xcoord:
+            expanded_positions = _graphviz_x_coordinate_assignment(
+                layers=state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY],
+                edge_index=expanded_graph.edge_index,
+                edge_weights=state.extras.get(_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY),
+                node_sizes=expanded_graph.node_sizes,
+                num_nodes=expanded_graph.num_nodes,
+                num_original_nodes=problem.num_nodes,
+                rank_sep=rank_sep,
+                node_sep=node_sep,
+                output_device=output_device,
+                center_coordinates=self.center_coordinates,
+            )
+        else:
+            expanded_positions = _coordinate_assignment(
+                layers=state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY],
+                parents=state.extras[_SUGIYAMA_PARENTS_KEY],
+                children=state.extras[_SUGIYAMA_CHILDREN_KEY],
+                node_sizes=expanded_graph.node_sizes,
+                num_nodes=expanded_graph.num_nodes,
+                num_original_nodes=problem.num_nodes,
+                rank_sep=rank_sep,
+                node_sep=node_sep,
+                output_device=output_device,
+                center_coordinates=self.center_coordinates,
+            )
         # Keep the expanded coordinates for downstream edge routing before
         # slicing back to the original node set.
         state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY] = expanded_positions

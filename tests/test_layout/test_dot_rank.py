@@ -118,3 +118,47 @@ def test_sugiyama_graphviz_fidelity_uses_network_simplex_layers() -> None:
     assert torch.unique(graphviz_pos[:, 1]).numel() == 3
     assert graphviz_pos[0, 1] == graphviz_pos[3, 1]
     assert default_pos[0, 1] != default_pos[3, 1]
+
+
+def test_sugiyama_graphviz_fidelity_uses_dot_x_simplex() -> None:
+    """Use Graphviz dot x-network-simplex only for graphviz fidelity mode."""
+    edge_index = torch.tensor(
+        [
+            [0, 0, 1, 1, 2, 2, 3, 3, 4, 4],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        ],
+        dtype=torch.long,
+    )
+    node_sizes = torch.full((11, 2), 44.0, dtype=torch.float32)
+
+    graphviz_pos = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=11,
+        node_sizes=node_sizes,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+    )
+    graphviz_dot_alias_pos = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=11,
+        node_sizes=node_sizes,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz_dot",
+    )
+
+    assert graphviz_pos[:, 0].tolist() == [
+        0.5,
+        0.0,
+        1.0,
+        -1.0,
+        0.0,
+        1.0,
+        2.0,
+        -2.0,
+        -1.0,
+        0.0,
+        1.0,
+    ]
+    assert not torch.equal(graphviz_pos[:, 0], graphviz_dot_alias_pos[:, 0])
