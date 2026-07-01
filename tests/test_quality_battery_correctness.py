@@ -179,6 +179,92 @@ def test_neighborhood_preservation_passes_when_dagua_is_better() -> None:
     assert np_gate["noninferior_direct"] is True
 
 
+def test_exact_crossing_fixture_keeps_zero_sampling_margin() -> None:
+    """Exact E<=500 rows should not inherit sampled-crossing uncertainty."""
+    payload = _path_payload(501)
+    dists = _path_distances(501)
+    reference = np.column_stack([np.arange(501, dtype=np.float64), np.zeros(501, dtype=np.float64)])
+
+    metrics = analysis.compute_mode_a_quality_battery(
+        payload,
+        [reference.copy()],
+        [reference],
+        dists,
+    )
+
+    assert metrics["cross_sampled"] is False
+    assert metrics["cross_se_D"] == pytest.approx(0.0)
+    assert metrics["cross_se_R"] == pytest.approx(0.0)
+    assert metrics["cross_margin"] == pytest.approx(analysis.QUALITY_CROSS_ABS_FLOOR)
+    assert metrics["quality_identical_raw"] is True
+
+
+def test_sampled_crossing_margin_includes_sampling_uncertainty() -> None:
+    """Sampled rows should widen only to the pooled crossing-estimator SE."""
+    margin = analysis.quality_cross_margin(
+        np.asarray([10.0], dtype=np.float64),
+        0.0,
+        sampling_se=3.0,
+        cross_sampled=True,
+    )
+    exact_margin = analysis.quality_cross_margin(
+        np.asarray([10.0], dtype=np.float64),
+        0.0,
+        sampling_se=3.0,
+        cross_sampled=False,
+    )
+
+    assert margin == pytest.approx(analysis.QUALITY_CROSS_SAMPLING_Z * 3.0)
+    assert exact_margin == pytest.approx(analysis.QUALITY_CROSS_ABS_FLOOR)
+
+
+def test_quality_superior_distinct_is_metadata_only() -> None:
+    """Strictly better but non-equivalent rows should not become quality-identical."""
+    metrics = {
+        "battery_n": 1,
+        "stress_d": np.asarray([0.0], dtype=np.float64),
+        "stress_r": np.asarray([10.0], dtype=np.float64),
+        "cross_d": np.asarray([0.0], dtype=np.float64),
+        "cross_r": np.asarray([10.0], dtype=np.float64),
+        "cross_se_d": np.asarray([0.0], dtype=np.float64),
+        "cross_se_r": np.asarray([0.0], dtype=np.float64),
+        "cross_n_valid_d": np.asarray([100.0], dtype=np.float64),
+        "cross_n_valid_r": np.asarray([100.0], dtype=np.float64),
+        "cross_eligible_pairs_d": np.asarray([100.0], dtype=np.float64),
+        "cross_eligible_pairs_r": np.asarray([100.0], dtype=np.float64),
+        "cross_sampled": False,
+        "cross_seed": 123,
+        "np_d": np.asarray([1.0], dtype=np.float64),
+        "np_r": np.asarray([0.0], dtype=np.float64),
+        "reference_diagnostics": {
+            "quality_battery_eligible": True,
+            "quality_battery_tier": analysis.QUALITY_BATTERY_FINAL_TIER,
+            "quality_reference_plain_mean_W_R": 0.0,
+            "quality_reference_canonical": True,
+            "quality_reference_canonical_threshold": (
+                analysis.QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+            ),
+            "quality_reference_metric_n": 1,
+            "battery_stress_ref_self_spread": 0.0,
+            "cross_ref_self_spread": 0.0,
+            "np_ref_self_spread": 0.0,
+        },
+    }
+    stress_tost = {"p_tost": 1.0, "degenerate_sd": True, "equivalent_direct": False}
+    cross_tost = {"p_tost": 1.0, "degenerate_sd": True, "equivalent_direct": False}
+    np_tost = {"p_tost": 0.0, "degenerate_sd": True, "equivalent_direct": True}
+
+    row = analysis.quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
+
+    assert row["battery_stress_D_mean"] < (
+        row["battery_stress_R_mean"] - row["battery_stress_margin"]
+    )
+    assert row["cross_D_mean"] < row["cross_R_mean"] - row["cross_margin"]
+    assert row["np_D_mean"] > row["np_R_mean"] + row["np_margin"]
+    assert row["quality_superior_distinct"] is True
+    assert row["quality_identical_raw"] is False
+
+
 def test_chance_layout_still_fails_quality_battery() -> None:
     """Destroyed structure should stay blocked by stress even with one-sided NP."""
     payload = _path_payload(20)
