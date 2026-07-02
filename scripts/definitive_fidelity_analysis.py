@@ -235,7 +235,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         action="append",
         default=None,
-        help="Benchmark root; repeatable -- later dirs override earlier per record key.",
+        help="Benchmark root; repeatable -- later dirs override earlier per graph/engine combo.",
     )
     parser.add_argument("--refresh-dir", type=Path, default=DEFAULT_REFRESH_DIR)
     parser.add_argument("--output", type=Path, default=None)
@@ -413,10 +413,12 @@ def load_results(data_dir: Path) -> dict[str, Any]:
 def load_results_multi(data_dirs: list[Path]) -> dict[str, Any]:
     """Load and overlay results from multiple benchmark roots.
 
-    Later directories override earlier ones PER RECORD KEY (r71 union-store
-    semantics: e.g. post-fix umap rows supersede pre-fix rows without mutating
-    either store). positions_file paths are absolutized against their own root
-    and rows are tagged with source_dir.
+    Later directories override earlier ones per ``(graph, engine)`` combo.  A
+    directory wins a combo only when it has at least one usable ``ok`` row for
+    that combo, and all surviving rows for the combo come from that winning
+    directory.  This prevents seed-era mixing while preserving older results
+    for combos absent from newer benchmark roots.  ``positions_file`` paths are
+    absolutized against their own root and rows are tagged with ``source_dir``.
 
     Parameters
     ----------
@@ -428,8 +430,12 @@ def load_results_multi(data_dirs: list[Path]) -> dict[str, Any]:
     dict[str, Any]
         Merged result mapping.
     """
-    merged: dict[str, Any] = {}
+    rows_by_dir_combo: list[dict[tuple[str, str], dict[str, Any]]] = []
+    ok_combo_sources: dict[tuple[str, str], set[str]] = defaultdict(set)
+    winning_rows: dict[tuple[str, str], dict[str, Any]] = {}
+
     for data_dir in data_dirs:
+        dir_rows_by_combo: dict[tuple[str, str], dict[str, Any]] = defaultdict(dict)
         rows = load_results(data_dir)
         for key, row in rows.items():
             if isinstance(row, dict):
@@ -438,8 +444,56 @@ def load_results_multi(data_dirs: list[Path]) -> dict[str, Any]:
                 if pos and not Path(pos).is_absolute():
                     row["positions_file"] = str((data_dir / pos).resolve())
                 row.setdefault("source_dir", data_dir.name)
-            merged[key] = row
+                combo = result_combo_key(key, row)
+                dir_rows_by_combo[combo][key] = row
+                if row.get("status") == "ok":
+                    ok_combo_sources[combo].add(data_dir.name)
+            else:
+                combo = result_combo_key(key, {})
+                dir_rows_by_combo[combo][key] = row
+        rows_by_dir_combo.append(dict(dir_rows_by_combo))
+
+    for dir_rows_by_combo in rows_by_dir_combo:
+        for combo, combo_rows in dir_rows_by_combo.items():
+            has_ok_row = any(
+                isinstance(row, dict) and row.get("status") == "ok" for row in combo_rows.values()
+            )
+            if has_ok_row:
+                winning_rows[combo] = combo_rows
+
+    merged: dict[str, Any] = {}
+    for combo_rows in winning_rows.values():
+        merged.update(combo_rows)
+
+    would_mix = sum(1 for sources in ok_combo_sources.values() if len(sources) > 1)
+    print(
+        "overlay: "
+        f"{len(winning_rows)} combos resolved, "
+        f"{would_mix} would have era-mixed under union semantics"
+    )
     return merged
+
+
+def result_combo_key(key: str, row: dict[str, Any]) -> tuple[str, str]:
+    """Return the benchmark combo key for one raw result row.
+
+    Parameters
+    ----------
+    key : str
+        Raw ``results.json`` record key.
+    row : dict[str, Any]
+        Result row payload.  Missing graph or engine fields fall back to the
+        split record key.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(graph, engine)`` combo identifier.
+    """
+    split_graph, split_engine, _ = split_key(key)
+    graph = str(row.get("graph_name") or split_graph)
+    engine = str(row.get("engine_name") or split_engine)
+    return graph, engine
 
 
 def index_results(results: dict[str, Any]) -> dict[tuple[str, str], list[PositionRow]]:
