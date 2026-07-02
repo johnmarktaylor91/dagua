@@ -1,5 +1,6 @@
 """Regression tests for Sugiyama igraph-fidelity edge cases."""
 
+import pytest
 import torch
 
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
@@ -84,8 +85,8 @@ def test_sugiyama_igraph_fidelity_uses_multiedge_incidence_barycenters() -> None
     assert fidelity_positions[6, 0] < fidelity_positions[5, 0]
 
 
-def test_sugiyama_igraph_glpk_objective_matches_out_minus_in_strength() -> None:
-    """Igraph LP coefficients should minimize out-strength minus in-strength."""
+def test_sugiyama_igraph_glpk_objective_matches_in_in_strength_quirk() -> None:
+    """Igraph LP coefficients should preserve the 1.0.0 IN/IN source quirk."""
     edge_index = torch.tensor(
         [
             [0, 0, 1, 2],
@@ -101,7 +102,35 @@ def test_sugiyama_igraph_glpk_objective_matches_out_minus_in_strength() -> None:
         edge_weights=None,
     )
 
-    assert objective == [2.0, 0.0, 0.0, -2.0]
+    assert objective == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_sugiyama_igraph_glpk_two_hubs_bridge_matches_installed_igraph() -> None:
+    """The LP layering should match installed igraph on an IN/IN-only distinguisher."""
+    igraph = pytest.importorskip("igraph")
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 2, 3, 4, 5, 6, 6],
+            [2, 2, 3, 4, 6, 6, 6, 7, 8],
+        ],
+        dtype=torch.long,
+    )
+    edges = list(zip(edge_index[0].tolist(), edge_index[1].tolist()))
+    graph = igraph.Graph(n=9, edges=edges, directed=True)
+    layout = graph.layout("sugiyama")
+    if isinstance(layout, tuple):
+        layout = layout[0]
+    y_values = [float(coord[1]) for coord in layout.coords]
+    ordered_y_values = sorted(set(y_values))
+    expected_layers = torch.tensor(
+        [ordered_y_values.index(y_value) for y_value in y_values],
+        dtype=torch.long,
+    )
+
+    layers = _igraph_glpk_layer_assignments(edge_index=edge_index, num_nodes=9)
+
+    assert torch.equal(expected_layers, torch.tensor([0, 0, 1, 2, 2, 0, 3, 4, 4]))
+    assert torch.equal(layers, expected_layers)
 
 
 def test_sugiyama_igraph_glpk_falls_back_above_1000_nodes() -> None:
