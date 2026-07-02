@@ -44,6 +44,14 @@ class AlgorithmVariant:
         Whether the variant should be scheduled in the throttled heavy lane.
     max_nodes : int | None
         Optional per-variant graph-size cap for benchmark scheduling.
+    reference_expressible : bool
+        Whether the configured original can express this exact variant. Graphviz
+        7.0.5 SFDP does not read graph attributes for ``theta`` or ``maxiter``:
+        ``lib/sfdpgen/spring_electrical.c`` initializes ``bh`` to the compile-time
+        constant ``0.6`` and ``maxiter`` internally, and the r75 probe found
+        bit-identical reference positions across the ignored settings
+        (RMS approximately 4e-16). Those Dagua knobs remain valid extensions,
+        but they have no canonical Graphviz reference.
     """
 
     variant_id: str
@@ -56,6 +64,7 @@ class AlgorithmVariant:
     is_stochastic: bool
     is_heavy: bool
     max_nodes: Optional[int] = None
+    reference_expressible: bool = True
 
 
 def _variant(
@@ -69,6 +78,7 @@ def _variant(
     is_stochastic: bool,
     is_heavy: bool,
     max_nodes: Optional[int] = None,
+    reference_expressible: bool = True,
 ) -> AlgorithmVariant:
     """Build one immutable registry entry.
 
@@ -94,6 +104,8 @@ def _variant(
         Whether the variant needs throttled scheduling.
     max_nodes : int | None, default=None
         Optional per-variant graph-size cap for benchmark scheduling.
+    reference_expressible : bool, default=True
+        Whether the original-side competitor can express the exact variant.
 
     Returns
     -------
@@ -111,6 +123,7 @@ def _variant(
         is_stochastic=is_stochastic,
         is_heavy=is_heavy,
         max_nodes=max_nodes,
+        reference_expressible=reference_expressible,
     )
 
 
@@ -1600,6 +1613,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         False,
         True,
         False,
+        reference_expressible=False,
     ),
     _variant(
         "classic_sfdp_theta08",
@@ -1611,6 +1625,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         False,
         True,
         False,
+        reference_expressible=False,
     ),
     _variant(
         "classic_sfdp_p_neg2",
@@ -1633,6 +1648,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         False,
         True,
         False,
+        reference_expressible=False,
     ),
     _variant(
         "classic_umap_default",
