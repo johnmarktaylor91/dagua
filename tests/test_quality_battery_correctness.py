@@ -85,6 +85,53 @@ def _finalized_battery_row(
     return report.finalize_rows([row], report.SPEC_VERSION, include_controls=True)[0]
 
 
+def _graph_info(name: str = "synthetic_path") -> report.GraphInfo:
+    """Build minimal graph metadata for report accounting tests.
+
+    Parameters
+    ----------
+    name : str, default="synthetic_path"
+        Graph identifier.
+
+    Returns
+    -------
+    scripts.definitive_fidelity_report.GraphInfo
+        Non-hierarchical graph metadata.
+    """
+    return report.GraphInfo(
+        name=name,
+        num_nodes=20,
+        has_hierarchy=False,
+        source="test",
+        tags=[],
+        reason="test fixture",
+        disconnected_hint=False,
+    )
+
+
+def _ok_result(graph: str, engine: str) -> dict[str, object]:
+    """Build a minimal successful five-seed result row.
+
+    Parameters
+    ----------
+    graph : str
+        Graph identifier.
+    engine : str
+        Engine identifier.
+
+    Returns
+    -------
+    dict[str, object]
+        Result row with enough fields for report indexing.
+    """
+    return {
+        "graph_name": graph,
+        "engine_name": engine,
+        "status": "ok",
+        "num_nodes": 20,
+    }
+
+
 def _repeated_layout(layout: np.ndarray, count: int) -> list[np.ndarray]:
     """Return independent copies of a layout.
 
@@ -263,6 +310,71 @@ def test_quality_superior_distinct_is_metadata_only() -> None:
     assert row["np_D_mean"] > row["np_R_mean"] + row["np_margin"]
     assert row["quality_superior_distinct"] is True
     assert row["quality_identical_raw"] is False
+
+
+def test_no_canonical_reference_variant_is_excluded_from_fidelity_accounting() -> None:
+    """Reference-inexpressible variants should route to their own accounting tier."""
+    graph = "synthetic_path"
+    engine = "classic_sfdp_theta04"
+    raw_row: dict[str, object] = {
+        "spec_version": report.SPEC_VERSION,
+        "combo_id": f"{graph}::{engine}",
+        "graph": graph,
+        "engine": engine,
+        "reference": "graphviz_sfdp__for__classic_sfdp_theta04",
+        "mode": "A",
+        "quality_identical_raw": True,
+        "battery_p_iut": 0.0,
+    }
+    finalized = report.finalize_rows([raw_row], report.SPEC_VERSION, include_controls=True)[0]
+    triage = report.TriageInventory(
+        categories={"ESCALATE_STOCHASTIC": [engine]},
+        variant_to_category={engine: "ESCALATE_STOCHASTIC"},
+    )
+    accounting = report.build_accounting(
+        [finalized],
+        [],
+        [],
+        {engine: {"graphs": [graph], "ref": "graphviz_sfdp__for__classic_sfdp_theta04"}},
+        triage,
+        {f"{graph}::{engine}::0": _ok_result(graph, engine)},
+        {graph: _graph_info(graph)},
+        report.ReportContext(strict=True),
+    )
+    section = report.render_no_canonical_reference_section([finalized])
+    headlines = report.assign_headlines(accounting, triage)
+
+    assert finalized["no_canonical_reference"] is True
+    assert finalized["quality_identical"] is False
+    assert finalized["final_rung"] == report.NO_CANONICAL_REFERENCE_RUNG
+    assert accounting[0].bucket == report.NO_CANONICAL_REFERENCE_BUCKET
+    assert accounting[0].final_rung is None
+    assert accounting[0].bucket != "ESCALATION"
+    assert "NO CANONICAL REFERENCE" in section
+    assert engine in section
+    assert headlines[engine]["usable"] == 0
+
+
+def test_quality_superior_distinct_report_overlay_keeps_rung4() -> None:
+    """Quality-superior distinct rows should remain divergent while being reported."""
+    row: dict[str, object] = {
+        "spec_version": report.SPEC_VERSION,
+        "combo_id": "synthetic_path::classic_fr_steps50",
+        "graph": "synthetic_path",
+        "engine": "classic_fr_steps50",
+        "reference": "nx_spring__for__classic_fr_steps50",
+        "mode": "A",
+        "quality_superior_distinct": True,
+        "quality_identical_raw": False,
+    }
+    finalized = report.finalize_rows([row], report.SPEC_VERSION, include_controls=True)[0]
+    section = report.render_quality_superior_distinct_section([finalized])
+
+    assert finalized["final_rung"] == "4"
+    assert finalized["quality_identical"] is False
+    assert "QUALITY-SUPERIOR BUT DISTINCT" in section
+    assert "DIFFERENT from the reference, not equivalent" in section
+    assert "remain counted as divergent/non-identical" in section
 
 
 def test_chance_layout_still_fails_quality_battery() -> None:
