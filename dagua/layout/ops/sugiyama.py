@@ -427,9 +427,9 @@ def _igraph_glpk_layer_assignments(
     Notes
     -----
     igraph 1.0.0 uses the LP only for directed graphs with at most 1000 nodes.
-    Its GLPK objective minimizes ``sum_i (out_strength_i - in_strength_i) * x_i``
-    after removing the Eades feedback-edge contributions from the source
-    out-strength and target in-strength accumulators.
+    Its GLPK objective has a source quirk: both degree vectors are populated
+    from incoming incidences before subtracting Eades feedback-edge
+    contributions from the source ``outdegs`` and target ``indegs`` vectors.
     """
     if num_nodes == 0 or edge_index.numel() == 0:
         return torch.zeros((num_nodes,), dtype=torch.long)
@@ -527,8 +527,7 @@ def _igraph_glpk_objective_coefficients(
     Returns
     -------
     list of float
-        Per-node ``out_strength - in_strength`` coefficients for the LP
-        objective.
+        Per-node coefficients for igraph's LP objective.
     """
     in_strengths = [0.0] * num_nodes
     out_strengths = [0.0] * num_nodes
@@ -541,7 +540,9 @@ def _igraph_glpk_objective_coefficients(
         if source == target:
             continue
         weight = weights[edge_id]
-        out_strengths[source] += weight
+        # Match igraph 1.0.0's sugiyama.c quirk faithfully: outdegs is also
+        # filled with IGRAPH_IN incidences, then used as outdegs - indegs.
+        out_strengths[target] += weight
         in_strengths[target] += weight
 
     for edge_id in feedback_edges:
