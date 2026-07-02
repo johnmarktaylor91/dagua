@@ -616,28 +616,37 @@ def _igraph_layout_merge_dla_walk(
     y_coord = 0.0
     total_steps = 0
     restarts = 0
+    rng_random = rng.random
+    two_pi = 2.0 * math.pi
+    start_low = 0.5 * start_radius
+    start_width = start_radius - start_low
+    walk_step_high = start_radius / _IGRAPH_DLA_WALK_STEP_DIVISOR
+    get_sphere = grid.get_sphere
+    cos = math.cos
+    sin = math.sin
+    hypot = math.hypot
     while sphere < 0:
         restarts += 1
         if restarts > _IGRAPH_DLA_MAX_RESTARTS:
             raise RuntimeError("igraph DLA restart guardrail exceeded.")
         while True:
-            angle = _rng_unif(rng, 0.0, 2.0 * math.pi)
-            length = _rng_unif(rng, 0.5 * start_radius, start_radius)
-            x_coord = center_x + length * math.cos(angle)
-            y_coord = center_y + length * math.sin(angle)
-            sphere = grid.get_sphere(x_coord, y_coord, radius)
+            angle = two_pi * rng_random()
+            length = start_low + start_width * rng_random()
+            x_coord = center_x + length * cos(angle)
+            y_coord = center_y + length * sin(angle)
+            sphere = get_sphere(x_coord, y_coord, radius)
             if sphere < 0:
                 break
 
-        while sphere < 0 and math.hypot(x_coord - center_x, y_coord - center_y) < kill_radius:
+        while sphere < 0 and hypot(x_coord - center_x, y_coord - center_y) < kill_radius:
             total_steps += 1
             if total_steps > _IGRAPH_DLA_MAX_TOTAL_STEPS:
                 raise RuntimeError("igraph DLA step guardrail exceeded.")
-            angle = _rng_unif(rng, 0.0, 2.0 * math.pi)
-            length = _rng_unif(rng, 0.0, start_radius / _IGRAPH_DLA_WALK_STEP_DIVISOR)
-            next_x = x_coord + length * math.cos(angle)
-            next_y = y_coord + length * math.sin(angle)
-            sphere = grid.get_sphere(next_x, next_y, radius)
+            angle = two_pi * rng_random()
+            length = walk_step_high * rng_random()
+            next_x = x_coord + length * cos(angle)
+            next_y = y_coord + length * sin(angle)
+            sphere = get_sphere(next_x, next_y, radius)
             if sphere < 0:
                 x_coord = next_x
                 y_coord = next_y
@@ -689,6 +698,8 @@ class _IgraphMergeGrid:
         self.data = np.zeros((stepsx, stepsy), dtype=np.int64)
         self.occupied_x = np.empty(0, dtype=np.int64)
         self.occupied_y = np.empty(0, dtype=np.int64)
+        self.cell_x_coords = minx + np.arange(stepsx, dtype=np.float64) * self.deltax
+        self.cell_y_coords = miny + np.arange(stepsy, dtype=np.float64) * self.deltay
 
     def _mat_index(self, x_index: int, y_index: int) -> int:
         """Return igraph's flattened ``MAT(i, j)`` storage index.
@@ -960,15 +971,26 @@ class _IgraphMergeGrid:
         if self.occupied_x.size == 0:
             return -1
 
-        cell_x = self.minx + self.occupied_x.astype(np.float64) * self.deltax
-        cell_y = self.miny + self.occupied_y.astype(np.float64) * self.deltay
-        delta_x = x_coord - cell_x
-        delta_y = y_coord - cell_y
+        x_start = max(0, math.floor((x_coord - radius - self.minx) / self.deltax) + 1)
+        x_stop = min(self.stepsx, math.ceil((x_coord + radius - self.minx) / self.deltax))
+        y_start = max(0, math.floor((y_coord - radius - self.miny) / self.deltay) + 1)
+        y_stop = min(self.stepsy, math.ceil((y_coord + radius - self.miny) / self.deltay))
+        if x_start >= x_stop or y_start >= y_stop:
+            return -1
+
+        local_occupied_x, local_occupied_y = np.nonzero(self.data[x_start:x_stop, y_start:y_stop])
+        if local_occupied_x.size == 0:
+            return -1
+
+        hit_x_indices = x_start + local_occupied_x
+        hit_y_indices = y_start + local_occupied_y
+        delta_x = x_coord - self.cell_x_coords[hit_x_indices]
+        delta_y = y_coord - self.cell_y_coords[hit_y_indices]
         hits = delta_x * delta_x + delta_y * delta_y < radius * radius
         if not bool(hits.any()):
             return -1
-        hit_x = self.occupied_x[hits][0]
-        hit_y = self.occupied_y[hits][0]
+        hit_x = hit_x_indices[hits][0]
+        hit_y = hit_y_indices[hits][0]
         return self._get_mat(int(hit_x), int(hit_y)) - 1
 
     def _refresh_occupied_cells(self) -> None:
