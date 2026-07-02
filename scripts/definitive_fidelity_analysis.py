@@ -38,6 +38,7 @@ from dagua.eval.equivalence_metrics import (
     variance_tied_margin,
 )
 from dagua.eval.graphs import get_test_graphs
+from dagua.eval.variants import get_variant
 from dagua.metrics import count_crossings, sampled_crossing_rate
 
 SPEC_VERSION = "r70-v6"
@@ -61,6 +62,11 @@ QUALITY_BATTERY_EXPLORATORY_TIER = "exploratory_noncanonical_reference"
 QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION = (
     REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
 )
+NO_CANONICAL_REFERENCE_VARIANTS = {
+    "classic_sfdp_theta04",
+    "classic_sfdp_theta08",
+    "classic_sfdp_steps200",
+}
 FREE_ASPECT_PREFIX = "classic_sugiyama"
 REFERENCE_SELF_SPLIT_PREFERRED = (
     "center_port_backedge_hub",
@@ -863,11 +869,32 @@ def base_row(payload: ComboPayload) -> dict[str, Any]:
         "graph": payload.graph,
         "engine": payload.engine,
         "reference": payload.reference,
+        "no_canonical_reference": no_canonical_reference_for_engine(payload.engine),
         "free_aspect": is_free_aspect(payload.engine),
         "control_kind": payload.control_kind,
         "source_combo_id": payload.source_combo_id,
     }
     return row
+
+
+def no_canonical_reference_for_engine(engine: str) -> bool:
+    """Return whether an engine lacks an expressible canonical reference.
+
+    Parameters
+    ----------
+    engine : str
+        Reimplementation variant identifier.
+
+    Returns
+    -------
+    bool
+        ``True`` when the registry marks the variant as valid Dagua behavior
+        with no original-side parameterization that can express it.
+    """
+    if engine in NO_CANONICAL_REFERENCE_VARIANTS:
+        return True
+    variant = get_variant(engine)
+    return bool(variant is not None and not getattr(variant, "reference_expressible", True))
 
 
 def collect_layouts(data_dir: str, rows: Iterable[PositionRow]) -> dict[Any, Any]:
