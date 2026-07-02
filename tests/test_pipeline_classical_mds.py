@@ -9,6 +9,7 @@ import torch
 
 from dagua.layout.classic.classical_mds import layout_classical_mds
 from dagua.layout.ops.pipelines.classical_mds import (
+    _IgraphMergeGrid,
     build_classical_mds_pipeline,
     layout_classical_mds_pipeline,
 )
@@ -103,6 +104,48 @@ def _assert_exact_match(classic: torch.Tensor, pipeline: torch.Tensor) -> None:
     assert torch.equal(classic, pipeline)
 
 
+def _brute_force_grid_get_sphere(
+    grid: _IgraphMergeGrid,
+    x_coord: float,
+    y_coord: float,
+    radius: float,
+) -> int:
+    """Find a merge-grid collision by scanning all occupied cells.
+
+    Parameters
+    ----------
+    grid : _IgraphMergeGrid
+        Grid populated with already placed component spheres.
+    x_coord : float
+        Candidate center x coordinate.
+    y_coord : float
+        Candidate center y coordinate.
+    radius : float
+        Candidate sphere radius.
+
+    Returns
+    -------
+    int
+        Component id of the first colliding occupied cell, or ``-1``.
+    """
+    if (
+        x_coord - radius <= grid.minx
+        or x_coord + radius >= grid.maxx
+        or y_coord - radius <= grid.miny
+        or y_coord + radius >= grid.maxy
+    ):
+        return -1
+    radius_squared = radius * radius
+    for x_index, y_index in zip(grid.occupied_x, grid.occupied_y):
+        cell_x = grid.minx + float(x_index) * grid.deltax
+        cell_y = grid.miny + float(y_index) * grid.deltay
+        delta_x = x_coord - cell_x
+        delta_y = y_coord - cell_y
+        if delta_x * delta_x + delta_y * delta_y < radius_squared:
+            return grid._get_mat(int(x_index), int(y_index)) - 1
+    return -1
+
+
 def _run_pipeline_direct(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -193,6 +236,36 @@ class TestClassicalMDSPipelineFidelity:
         _assert_exact_match(first, repeated)
         assert not torch.equal(first, different_seed)
         assert not torch.equal(first, legacy)
+
+    def test_igraph_merge_grid_lookup_matches_full_occupied_scan(self) -> None:
+        """Optimized DLA collision lookup should preserve full-scan decisions."""
+        grid = _IgraphMergeGrid(
+            minx=-10.0,
+            maxx=10.0,
+            stepsx=40,
+            miny=-10.0,
+            maxy=10.0,
+            stepsy=40,
+        )
+        grid.place_sphere(0.0, 0.0, 1.8, 3)
+        grid.place_sphere(3.4, -2.2, 1.2, 7)
+        grid.place_sphere(-4.5, 4.0, 2.0, 11)
+
+        candidates = [
+            (-9.5, 0.0, 0.75),
+            (-4.0, 3.6, 0.8),
+            (0.9, 0.9, 1.0),
+            (2.8, -1.8, 0.65),
+            (7.5, 7.5, 0.5),
+            (9.8, 0.0, 0.4),
+        ]
+        for x_coord, y_coord, radius in candidates:
+            assert grid.get_sphere(x_coord, y_coord, radius) == _brute_force_grid_get_sphere(
+                grid,
+                x_coord,
+                y_coord,
+                radius,
+            )
 
     def test_connected_igraph_fidelity_path_matches_frozen_expectation(self) -> None:
         """Connected graphs should keep the pre-DLA byte-identical path."""
