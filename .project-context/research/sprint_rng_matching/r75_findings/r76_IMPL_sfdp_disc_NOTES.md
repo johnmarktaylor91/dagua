@@ -239,6 +239,175 @@ Neato/FMMM disconnected hash gate:
 - `parallel_cycles_4x5::classic_fmmm`: unchanged.
 - `multi_component_80::classic_fmmm_graphviz_fdp_fidelity`: unchanged.
 
+## Packing parity (C4d)
+
+### Graphviz 7.0.5 Pack Trace
+
+Scratch source/build: `/tmp/gv750-pack`, extracted with:
+
+```bash
+mkdir -p /tmp/gv750-pack
+git -C /home/jtaylor/projects/_references/graphviz archive 7.0.5 | tar -x -C /tmp/gv750-pack
+```
+
+Instrumentation was limited to scratch `lib/pack/pack.c` and emitted
+`GV_PACK_TRACE` lines from `polyGraphs`: component bboxes after `compute_bb`,
+`computeStep`, `genPoly` cell counts/perimeters, `qsort(cmpf)` order, and
+`placeGraph` offsets. Source rules cited:
+
+- `computeStep`: `pack.c` computes grid step from component bboxes plus
+  `pinfo->margin`.
+- `genPoly`: `pack.c` mode `l_node` fills node boxes plus edge cells; with
+  `pinfo.doSplines=1`, routed spline control points are used when present,
+  otherwise straight edge cells are used.
+- `cmpf`: descending perimeter sort; equal perimeters return `0`, so C qsort
+  tie order is not stable by contract.
+- `placeGraph`: first sorted component tries `(-GRID(W)/2, -GRID(H)/2)`,
+  then `(0,0)`, then rectangular spiral scan by bbox orientation.
+
+Trace command shape:
+
+```bash
+GV_PACK_TRACE=1 /tmp/gv750-pack/build/cmd/dot/dot_builtins \
+  -Tjson -Ksfdp -Gseed=100 -Gstart=100 -Gmaxiter=500 \
+  -Gtheta=0.6 -Grepulsiveforce=-1.0 <graph>.dot
+```
+
+The scratch build lacks GTS, so Graphviz exits after packing with
+`remove_overlap: Graphviz not built with triangulation library`; the pack trace
+is still complete because `packSubgraphs` ran before that failure.
+
+| Graph | Step | Sort order | Placement offsets in sorted order |
+|---|---:|---|---|
+| `multi_component_80` | 23 | `0,1,2,3,4,5,6` | `0=(-368,-92)`, `1=(115,115)`, `2=(-184,184)`, `3=(92,-138)`, `4=(-23,92)`, `5=(-138,115)`, `6=(-161,-138)` |
+| `kitchen_sink_platform_graph` | 27 | `0,1` | `0=(-270,-108)`, `1=(-135,135)` |
+
+### First Differing Dagua Decision
+
+The first Dagua-vs-Graphviz packing difference before the port was the grid
+step and every placement decision derived from it. Dagua reused neato's shared
+packer, which treats local positions and node sizes as inches and multiplies
+both by `72` before `genPoly`. Graphviz SFDP reaches `packSubgraphs` with
+component coordinates and node sizes already in points.
+
+For `multi_component_80` seed 100:
+
+| Packer | Step | First bbox scale | First placement |
+|---|---:|---:|---|
+| Graphviz `packSubgraphs` | 23 | `712 x 166` points | `(-368,-92)` |
+| Dagua pre-port shared neato pack | 4790 | `65827 x 86208` points | `(-2484,-3216)` |
+| Dagua C4d SFDP-only point pack | 67 | `914 x 1197` points | `(-38,-49)` |
+
+The C4d port removes the unit-rule mismatch. The remaining first difference is
+component-local geometry: Dagua's component bboxes and polyominoes are still
+larger/different than Graphviz's before packing starts. For
+`kitchen_sink_platform_graph`, the remaining difference is even clearer:
+Graphviz traces component 0 bbox as `512 x 210` points with step `27`, while
+Dagua's SFDP component 0 bbox is `90 x 52` points with step `8`. This is not a
+packer scan-order issue; it is upstream component layout/label geometry and,
+where edges matter, Graphviz spline-box occupancy that Dagua does not have at
+pack time.
+
+### Port
+
+- Added `_pack_graphviz_sfdp_component_positions()` in
+  `dagua/layout/ops/pipelines/sfdp.py`.
+- The new helper is called only by `_layout_graphviz_sfdp_components()`, the
+  disconnected Graphviz-fidelity SFDP path.
+- The helper reuses Graphviz-compatible cell generation and placement helpers
+  from the existing neato packer, but keeps SFDP component coordinates and
+  node sizes in point units.
+- Shared neato/fmmm/fdp packer defaults were not changed.
+- Added a regression test that fails if SFDP disconnected packing rescales
+  point coordinates as inches.
+
+### Focused W Gate
+
+Command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --variants \
+  --graphs disconnected_encoder_residual,disconnected_label_cycle_collage,kitchen_sink_platform_graph,multi_component_80,random_dag_50 \
+  --engines classic_sfdp_default,classic_sfdp_graphviz_fidelity,classic_sfdp_p_neg2,graphviz_sfdp__for__classic_sfdp_default,graphviz_sfdp__for__classic_sfdp_graphviz_fidelity,graphviz_sfdp__for__classic_sfdp_p_neg2 \
+  --seed-refs graphviz_sfdp --seeds 5 --seed-start 100 \
+  --workers 4 --timeout 180 --output-dir /tmp/r76-c4d-benchmark
+```
+
+Result: `150 total, 150 ok, 0 skipped, 0 errors, 0 timeouts`.
+
+`W` below is mean pairwise Procrustes RMSD inside each 15-layout cloud
+(3 variants x 5 seeds), matching the fidelity-analysis `W_D`/`W_R` diagnostic.
+
+| Graph | Before Dagua W | Fresh ref W | C4d Dagua W | C4d ref W | Result |
+|---|---:|---:|---:|---:|---|
+| `disconnected_encoder_residual` | 0.7636 | 0.7688 | 0.1312 | 0.1410 | parity/better |
+| `disconnected_label_cycle_collage` | 0.5110 | 0.7634 | 0.1059 | 0.1761 | parity/better |
+| `kitchen_sink_platform_graph` | 0.4997 | 0.4791 | 0.0685 | 0.0760 | parity/better |
+| `multi_component_80` | 0.9078 | 0.8662 | 0.0572 | 0.0614 | parity/better |
+| `random_dag_50` | 1.0971 | 1.1204 | 0.0717 | 0.0719 | parity/better |
+
+Gate 1 passed on the W diagnostic: 5/5 material shrink, and the two previously
+worse graphs (`kitchen_sink_platform_graph`, `multi_component_80`) are
+parity-or-better on the focused run. Exact/sample graph-theoretic stress remains
+mixed on some graphs because component-local geometry is still not identical;
+the named residual is upstream component bbox/spline occupancy, not the
+polyomino placement scan.
+
+### Regression Gates
+
+Baseline: archived current branch `HEAD` into `/tmp/r76-c4d-head`, then ran the
+same benchmark subset against archived `HEAD` and the working tree.
+
+Connected SFDP hash gate:
+
+- Graphs: `binary_tree`, `braided_feedback_tails`,
+  `broken_symmetry_residual_pair`, `cluster_member_style_stress`,
+  `deep_chain_20`.
+- Engine: `classic_sfdp_p_neg2`.
+- Seeds: `100-104`.
+- Result: `25/25` position tensor hashes unchanged.
+
+Disconnected non-SFDP hash gate:
+
+- `parallel_cycles_4x5::classic_neato`, seeds `100-101`.
+- `multi_component_80::classic_neato_graphviz_fidelity`, seeds `100-101`.
+- `parallel_cycles_4x5::classic_fmmm_steps10`, seeds `100-101`.
+- `multi_component_80::classic_fmmm_graphviz_fdp_fidelity`, seeds `100-101`.
+- Result: `8/8` position tensor hashes unchanged.
+
+Combined regression command result: baseline and current each completed
+`245 total, 245 ok, 0 skipped, 0 errors, 0 timeouts`; hash comparison reported
+`checks 33 failed 0`.
+
+### Tests
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+Found 2 errors (2 fixed, 0 remaining).
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sfdp" -x -q
+29 passed, 3125 deselected, 34 warnings in 29.23s
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q
+455 passed, 153 warnings in 1456.28s (0:24:16)
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
+FAILED tests/test_bench_large.py::test_hierarchy_checkpoint_rejects_incomplete_manifest
+1 failed, 63 passed, 88 deselected, 34 warnings in 13.15s
+```
+
+The final tier stopped only on the known pre-existing failure named in the C4d
+task spec.
+
+### Commit
+
+Commit SHA: `1ffeea0`.
+
 ### Tests
 
 Passed:
