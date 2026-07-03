@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import os
 from collections import deque
 from dataclasses import dataclass
 from math import log2
@@ -14,14 +15,19 @@ from scipy import optimize, sparse
 from scipy.sparse import csgraph
 from scipy.sparse import linalg as sparse_linalg
 
-try:
-    from numba import njit as _numba_njit
-    from numba import prange as _numba_prange
-    from numba import types as _numba_types
-except ImportError:
+if os.environ.get("DAGUA_DISABLE_NUMBA"):
     _numba_njit = None
     _numba_prange = range
     _numba_types = None
+else:
+    try:
+        from numba import njit as _numba_njit
+        from numba import prange as _numba_prange
+        from numba import types as _numba_types
+    except ImportError:
+        _numba_njit = None
+        _numba_prange = range
+        _numba_types = None
 
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
@@ -955,14 +961,20 @@ def _select_positive_edges(
         empty_float = torch.empty((0,), dtype=torch.float64)
         return empty_long, empty_long, empty_float.to(dtype=torch.float32), empty_float
 
-    max_weight = float(weight.max().item())
+    weights_np = weight.detach().to(device="cpu", dtype=torch.float32).numpy()
+    max_weight_np = np.float32(weights_np.max())
     prune_epochs = n_epochs if n_epochs > 10 else default_epochs
-    min_weight = max_weight / float(max(prune_epochs, 1))
+    min_weight = float(max_weight_np) / float(max(prune_epochs, 1))
     keep = weight >= min_weight
     kept_head = head[keep]
     kept_tail = tail[keep]
     kept_weight = weight[keep]
-    epochs_per_sample = max_weight / kept_weight.to(dtype=torch.float64)
+    kept_weight_np = kept_weight.detach().to(device="cpu", dtype=torch.float32).numpy()
+    n_samples = np.float32(float(n_epochs)) * (kept_weight_np / max_weight_np)
+    epochs_per_sample_np = -1.0 * np.ones(kept_weight_np.shape[0], dtype=np.float64)
+    positive = n_samples > np.float32(0.0)
+    epochs_per_sample_np[positive] = float(n_epochs) / np.float64(n_samples[positive])
+    epochs_per_sample = torch.from_numpy(epochs_per_sample_np)
     return kept_head, kept_tail, kept_weight, epochs_per_sample
 
 
@@ -1095,8 +1107,8 @@ def _tau_rand_int(state: np.ndarray) -> int:
     return _to_signed_int32(state_0 ^ state_1 ^ state_2)
 
 
-def _tau_rand_int_numba(state: np.ndarray) -> int:
-    """Draw one Tausworthe int using numba's int32 return cast.
+def _umap_tau_rand_int_kernel(state: np.ndarray) -> int:
+    """Copy of ``umap.utils.tau_rand_int`` from umap-learn 0.5.11.
 
     Parameters
     ----------
@@ -1106,88 +1118,95 @@ def _tau_rand_int_numba(state: np.ndarray) -> int:
     Returns
     -------
     int
-        Signed int32 random integer after numba applies the declared return
-        type, matching ``umap.utils.tau_rand_int``.
+        Signed int32 random integer when compiled with numba signature
+        ``i4(i8[:])``.
     """
-    state[0] = (((state[0] & 4294967294) << 12) & _TAU_RAND_MASK) ^ (
-        (((state[0] << 13) & _TAU_RAND_MASK) ^ state[0]) >> 19
+    state[0] = (((state[0] & 4294967294) << 12) & 0xFFFFFFFF) ^ (
+        (((state[0] << 13) & 0xFFFFFFFF) ^ state[0]) >> 19
     )
-    state[1] = (((state[1] & 4294967288) << 4) & _TAU_RAND_MASK) ^ (
-        (((state[1] << 2) & _TAU_RAND_MASK) ^ state[1]) >> 25
+    state[1] = (((state[1] & 4294967288) << 4) & 0xFFFFFFFF) ^ (
+        (((state[1] << 2) & 0xFFFFFFFF) ^ state[1]) >> 25
     )
-    state[2] = (((state[2] & 4294967280) << 17) & _TAU_RAND_MASK) ^ (
-        (((state[2] << 3) & _TAU_RAND_MASK) ^ state[2]) >> 11
+    state[2] = (((state[2] & 4294967280) << 17) & 0xFFFFFFFF) ^ (
+        (((state[2] << 3) & 0xFFFFFFFF) ^ state[2]) >> 11
     )
+
     return state[0] ^ state[1] ^ state[2]
 
 
 _UMAP_TAU_RAND_INT = (
-    _numba_njit("i4(i8[:])")(_tau_rand_int_numba) if _numba_njit is not None else _tau_rand_int
+    _numba_njit("i4(i8[:])")(_umap_tau_rand_int_kernel)
+    if _numba_njit is not None
+    else _tau_rand_int
 )
 
 
-def _squared_euclidean_distance(
-    current: np.ndarray,
-    other: np.ndarray,
-) -> np.float32:
-    """Compute UMAP's reduced Euclidean distance for two embedding rows.
+def _umap_rdist(x: np.ndarray, y: np.ndarray) -> np.float32:
+    """Copy of ``umap.layouts.rdist`` from umap-learn 0.5.11.
 
     Parameters
     ----------
-    current : numpy.ndarray
+    x : numpy.ndarray
         First coordinate row with shape ``[D]`` and dtype ``float32``.
-    other : numpy.ndarray
+    y : numpy.ndarray
         Second coordinate row with shape ``[D]`` and dtype ``float32``.
 
     Returns
     -------
     numpy.float32
-        Squared Euclidean distance between the two rows.
+        Squared Euclidean distance between ``x`` and ``y``.
     """
     result = np.float32(0.0)
-    for dimension in range(current.shape[0]):
-        diff = current[dimension] - other[dimension]
+    dim = x.shape[0]
+    for i in range(dim):
+        diff = x[i] - y[i]
         result += diff * diff
+
     return result
-
-
-def _clip_umap_gradient(value: float) -> float:
-    """Clamp one UMAP SGD gradient component.
-
-    Parameters
-    ----------
-    value : float
-        Raw gradient component.
-
-    Returns
-    -------
-    float
-        Component restricted to UMAP's ``[-4, 4]`` clipping range.
-    """
-    if value > _GRADIENT_CLIP_VALUE:
-        return _GRADIENT_CLIP_VALUE
-    if value < -_GRADIENT_CLIP_VALUE:
-        return -_GRADIENT_CLIP_VALUE
-    return value
 
 
 _UMAP_RDIST = (
     _numba_njit(
         "f4(f4[::1],f4[::1])",
         fastmath=True,
+        cache=True,
         locals={
             "result": _numba_types.float32,
             "diff": _numba_types.float32,
-            "dimension": _numba_types.intp,
+            "dim": _numba_types.intp,
+            "i": _numba_types.intp,
         },
-    )(_squared_euclidean_distance)
-    if _numba_njit is not None
-    else _squared_euclidean_distance
+    )(_umap_rdist)
+    if _numba_njit is not None and _numba_types is not None
+    else _umap_rdist
 )
-_UMAP_CLIP = _numba_njit(_clip_umap_gradient) if _numba_njit is not None else _clip_umap_gradient
 
 
-def _native_umap_single_epoch(
+def _umap_clip(val: float) -> float:
+    """Copy of ``umap.layouts.clip`` from umap-learn 0.5.11.
+
+    Parameters
+    ----------
+    val : float
+        Raw gradient value.
+
+    Returns
+    -------
+    float
+        Value clamped to UMAP's ``[-4, 4]`` range.
+    """
+    if val > 4.0:
+        return 4.0
+    elif val < -4.0:
+        return -4.0
+    else:
+        return val
+
+
+_UMAP_CLIP = _numba_njit()(_umap_clip) if _numba_njit is not None else _umap_clip
+
+
+def _optimize_layout_euclidean_single_epoch(
     head_embedding: np.ndarray,
     tail_embedding: np.ndarray,
     head: np.ndarray,
@@ -1204,14 +1223,26 @@ def _native_umap_single_epoch(
     epochs_per_negative_sample: np.ndarray,
     epoch_of_next_negative_sample: np.ndarray,
     epoch_of_next_sample: np.ndarray,
-    epoch: int,
+    n: int,
+    densmap_flag: bool,
+    dens_phi_sum: np.ndarray,
+    dens_re_sum: np.ndarray,
+    dens_re_cov: float,
+    dens_re_std: float,
+    dens_re_mean: float,
+    dens_lambda: float,
+    dens_R: np.ndarray,
+    dens_mu: np.ndarray,
+    dens_mu_tot: float,
 ) -> None:
-    """Run one native UMAP Euclidean SGD epoch.
+    """Copy of umap-learn 0.5.11's serial Euclidean single-epoch optimizer.
 
     Parameters
     ----------
-    embedding : numpy.ndarray
+    head_embedding : numpy.ndarray
         Mutable embedding array with shape ``[N, 2]`` and dtype ``float32``.
+    tail_embedding : numpy.ndarray
+        Tail embedding array with shape ``[N, 2]`` and dtype ``float32``.
     head : numpy.ndarray
         Positive-edge source indices with shape ``[E]``.
     tail : numpy.ndarray
@@ -1230,6 +1261,8 @@ def _native_umap_single_epoch(
         Repulsion multiplier for negative samples.
     dim : int
         Embedding dimensionality.
+    move_other : bool
+        Whether to update tail rows alongside head rows for positive edges.
     alpha : float
         Current learning rate.
     epochs_per_negative_sample : numpy.ndarray
@@ -1238,71 +1271,123 @@ def _native_umap_single_epoch(
         Next negative-sample epoch per edge with shape ``[E]``.
     epoch_of_next_sample : numpy.ndarray
         Next positive-sample epoch per edge with shape ``[E]``.
-    epoch : int
+    n : int
         Current epoch number.
+    densmap_flag : bool
+        Whether densMAP correction is active. Dagua passes ``False``.
+    dens_phi_sum : numpy.ndarray
+        densMAP phi sums. Unused when ``densmap_flag`` is ``False``.
+    dens_re_sum : numpy.ndarray
+        densMAP re sums. Unused when ``densmap_flag`` is ``False``.
+    dens_re_cov : float
+        densMAP covariance. Unused when ``densmap_flag`` is ``False``.
+    dens_re_std : float
+        densMAP standard deviation. Unused when ``densmap_flag`` is ``False``.
+    dens_re_mean : float
+        densMAP mean. Unused when ``densmap_flag`` is ``False``.
+    dens_lambda : float
+        densMAP lambda. Unused when ``densmap_flag`` is ``False``.
+    dens_R : numpy.ndarray
+        densMAP radius terms. Unused when ``densmap_flag`` is ``False``.
+    dens_mu : numpy.ndarray
+        densMAP edge weights. Unused when ``densmap_flag`` is ``False``.
+    dens_mu_tot : float
+        densMAP total edge mass. Unused when ``densmap_flag`` is ``False``.
 
     Returns
     -------
     None
         The embedding and epoch counters are mutated in place.
+
+    Notes
+    -----
+    The statement order mirrors ``umap/layouts.py:63-187`` so numba can compile
+    dagua's local kernel with the same scalar behavior as the reference serial
+    optimizer. The source project is BSD-3-Clause licensed.
     """
-    for edge_id in _numba_prange(epochs_per_sample.shape[0]):
-        if epoch_of_next_sample[edge_id] <= epoch:
-            source = head[edge_id]
-            target = tail[edge_id]
-            current = head_embedding[source]
-            other = tail_embedding[target]
+    for i in _numba_prange(epochs_per_sample.shape[0]):
+        if epoch_of_next_sample[i] <= n:
+            j = head[i]
+            k = tail[i]
 
-            distance_sq = _UMAP_RDIST(current, other)
+            current = head_embedding[j]
+            other = tail_embedding[k]
 
-            if distance_sq > 0.0:
-                grad_coeff = -2.0 * a * b * pow(distance_sq, b - 1.0)
-                grad_coeff /= (a * pow(distance_sq, b)) + 1.0
+            dist_squared = _UMAP_RDIST(current, other)
+
+            if densmap_flag:
+                phi = 1.0 / (1.0 + a * pow(dist_squared, b))
+                dphi_term = a * b * pow(dist_squared, b - 1) / (1.0 + a * pow(dist_squared, b))
+
+                q_jk = phi / dens_phi_sum[k]
+                q_kj = phi / dens_phi_sum[j]
+
+                drk = q_jk * ((1.0 - b * (1 - phi)) / np.exp(dens_re_sum[k]) + dphi_term)
+                drj = q_kj * ((1.0 - b * (1 - phi)) / np.exp(dens_re_sum[j]) + dphi_term)
+
+                re_std_sq = dens_re_std * dens_re_std
+                weight_k = dens_R[k] - dens_re_cov * (dens_re_sum[k] - dens_re_mean) / re_std_sq
+                weight_j = dens_R[j] - dens_re_cov * (dens_re_sum[j] - dens_re_mean) / re_std_sq
+
+                grad_cor_coeff = (
+                    dens_lambda
+                    * dens_mu_tot
+                    * (weight_k * drk + weight_j * drj)
+                    / (dens_mu[i] * dens_re_std)
+                    / n_vertices
+                )
+
+            if dist_squared > 0.0:
+                grad_coeff = -2.0 * a * b * pow(dist_squared, b - 1.0)
+                grad_coeff /= a * pow(dist_squared, b) + 1.0
             else:
                 grad_coeff = 0.0
 
-            for dimension in range(dim):
-                grad_d = _UMAP_CLIP(grad_coeff * (current[dimension] - other[dimension]))
-                current[dimension] += grad_d * alpha
-                if move_other:
-                    other[dimension] += -grad_d * alpha
+            for d in range(dim):
+                grad_d = _UMAP_CLIP(grad_coeff * (current[d] - other[d]))
 
-            epoch_of_next_sample[edge_id] += epochs_per_sample[edge_id]
+                if densmap_flag:
+                    grad_d += _UMAP_CLIP(2 * grad_cor_coeff * (current[d] - other[d]))
+
+                current[d] += grad_d * alpha
+                if move_other:
+                    other[d] += -grad_d * alpha
+
+            epoch_of_next_sample[i] += epochs_per_sample[i]
+
             n_neg_samples = int(
-                (epoch - epoch_of_next_negative_sample[edge_id])
-                / epochs_per_negative_sample[edge_id]
+                (n - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]
             )
 
-            for _ in range(n_neg_samples):
-                negative = _UMAP_TAU_RAND_INT(rng_state_per_sample[source]) % n_vertices
-                other = tail_embedding[negative]
+            for p in range(n_neg_samples):
+                k = _UMAP_TAU_RAND_INT(rng_state_per_sample[j]) % n_vertices
 
-                distance_sq = _UMAP_RDIST(current, other)
+                other = tail_embedding[k]
 
-                if distance_sq > 0.0:
+                dist_squared = _UMAP_RDIST(current, other)
+
+                if dist_squared > 0.0:
                     grad_coeff = 2.0 * gamma * b
-                    grad_coeff /= (0.001 + distance_sq) * ((a * pow(distance_sq, b)) + 1.0)
-                elif source == negative:
+                    grad_coeff /= (0.001 + dist_squared) * (a * pow(dist_squared, b) + 1)
+                elif j == k:
                     continue
                 else:
                     grad_coeff = 0.0
 
-                for dimension in range(dim):
+                for d in range(dim):
                     if grad_coeff > 0.0:
-                        grad_d = _UMAP_CLIP(grad_coeff * (current[dimension] - other[dimension]))
+                        grad_d = _UMAP_CLIP(grad_coeff * (current[d] - other[d]))
                     else:
-                        grad_d = 0.0
-                    current[dimension] += grad_d * alpha
+                        grad_d = 0
+                    current[d] += grad_d * alpha
 
-            epoch_of_next_negative_sample[edge_id] += (
-                n_neg_samples * epochs_per_negative_sample[edge_id]
-            )
+            epoch_of_next_negative_sample[i] += n_neg_samples * epochs_per_negative_sample[i]
 
 
 _UMAP_SINGLE_EPOCH = (
-    _numba_njit(_native_umap_single_epoch, fastmath=True)
+    _numba_njit(_optimize_layout_euclidean_single_epoch, fastmath=True, parallel=False)
     if _numba_njit is not None
-    else _native_umap_single_epoch
+    else _optimize_layout_euclidean_single_epoch
 )
 
 
@@ -1380,6 +1465,10 @@ def _optimize_embedding(
         seed=seed,
         rng_state=rng_state,
     )
+    dens_phi_sum = np.zeros(1, dtype=np.float32)
+    dens_re_sum = np.zeros(1, dtype=np.float32)
+    dens_R = np.zeros(1, dtype=np.float32)
+    dens_mu = np.zeros(1, dtype=np.float32)
     alpha = float(learning_rate)
 
     for epoch in range(n_epochs):
@@ -1401,6 +1490,16 @@ def _optimize_embedding(
             next_negative_epoch,
             next_sample_epoch,
             epoch,
+            False,
+            dens_phi_sum,
+            dens_re_sum,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            dens_R,
+            dens_mu,
+            0.0,
         )
         alpha = float(learning_rate) * (1.0 - (float(epoch) / float(max(n_epochs, 1))))
 
