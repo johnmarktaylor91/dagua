@@ -354,6 +354,69 @@ for retries. 2-attempt max per work item, then park documented.
   D3 INVESTIGATION ITEM: scoring nondeterminism -- random_dag_50::classic_gem_iters100
   metric-identical in gem-rescore but NOT in maar-rescore (same chain/data); run analysis
   twice on one combo set + field-diff before trusting marginal verdicts.
+- 2026-07-03 17:32 ET: SPRINT RESUMED (paused 14:58-17:30 per JMT, soft, claude-only;
+  PAUSE_STATE at ~/.claude/state/sprint-pause/20260703-1458-dagua-r76-fidelity/). During
+  pause: A4b codex finished; MAAR dagua bench + D1 finished; sfdp bench 96.6% (watcher
+  re-armed 240min). HARVEST:
+  * A4b: honest no-commit; weighted_karate crossings 108/108 EXACT + hub_skip 2/2;
+    dense_pair 343v331, heavy_tail 63v67; residual NAMED = position.c aux x-graph
+    (make_edge_pairs, LR edges, slack nodes, initial ranks, insertion order). Stack (975
+    lines incl A4b + classic_competitor node-box helper -- needs gating review) PROTECTED as
+    wip commit 525327d on r76/mincross.
+  * D1 big-graph (400 combos): 31 identical + 192 equivalent + 83 divergent + 23
+    no-canonical + 71 insufficient (52 = matched_seeds<30 -- the seed-era mismatch; 7
+    ref<30; 12 reimpl<30). Ledger items: era-aligned re-bench for the 52; cause-bucket the
+    83 (ogdf big-graph stale refs + sugiyama port-in-progress expected dominant).
+  * A4c DISPATCHED (genuinely final sugiyama push): codex HIGH pid 715514, log
+    /tmp/r76_cx_sugiyama_a4c.log, brief r76_scratch/r76_impl_sugiyama_a4c.md -- aux x-graph
+    trace+port; on fail the A4b/A4c dossier = official port-in-progress disposition.
+  * MAAR FINAL rescore launched: pid 704103 (fresh both-sides: refs2 + maar_bench) ->
+    r76_maar_final.jsonl.
+  PENDING: sfdp bench (96.6%) -> family rescore; MAAR final verdicts; A4c; then umap merge,
+  A3 (if A4c passes), D2 population tier, D3 ledger + D4 invariants.
+- 2026-07-03 ~17:50 ET: ***MAAR CLUSTER CLOSED (final rescore, fresh both sides, n=100).***
+  random_dag_200: ALL 6 rows EQUIVALENT (fmmm steps10/100/200 + gem iters100/500/2000) --
+  the stale refs + seed-era mismatch were most of the "divergence". random_dag_50: gem
+  iters100 + iters500 IDENTICAL(any); residual = 4 rows: fmmm steps10/100/200 (dagua stress
+  LOWER than ref: 0.74v0.86, 0.69v0.83, 0.71v0.83 -- superior-pattern, quality NOT lesser)
+  + gem iters2000 (W 1.0217v1.0204 = 0.13% gap, marginal). DISPOSITION: 4 rows =
+  divergent-with-named-cause (MAAR packing tie-breaks, dossier bc02ce6: pairing-heap
+  newest-push ties + qsort stability; port attempt worsened fit -> non-portable-as-traced)
+  + quality equal-or-better = JMT option-3 compliant / superior-distinct candidates.
+  NO further MAAR work. Ledger: r76_maar_final.jsonl SUPERSEDES r76_maar_rescore.jsonl and
+  all older verdicts for these 12 combos.
+- 2026-07-03 ~18:00 ET: A4c LANDED (dossier-only, notes committed 156cb25). Aux x-graph
+  EDGE construction now matches; residual narrowed to ONE constant class: ND_lw/ND_rw node
+  half-widths feeding make_LR_constraints minlens are ~1pt-per-node smaller in dagua (gv
+  146,146,136 vs dagua 144,144,135 on karate; 177,141 vs 175,139 on dense_pair).
+  classic_competitor node-box helper VERIFIED gated to graphviz-fidelity engine input (no
+  scoring leak). Calibration movement-gate now measures margin noise (crossing-exact graphs
+  with 1e-4 stress deltas) -- ARCHITECT DECISION: stop micro-porting; the benchmark scoring
+  is the honest arbiter. SUGIYAMA FAMILY RE-BENCH launched FROM THE STACK (worktree
+  PYTHONPATH): pid 749129, log /tmp/r76_sugiyama_bench.log -> benchmark_100seed_
+  r76_sugiyama_wip (classic_sugiyama all variants <=300n, seeds 100-199). On done -> family
+  rescore -> rows flip = merge r76/mincross; no flips = A4b/A4c dossier disposition stands
+  (with the 1pt half-width item as the named port-in-progress residual).
+- 2026-07-03 ~19:05 ET: SFDP BENCH DONE (53400/53400 ok) -> family rescore launched (607
+  combos, pid 814182 -> r76_sfdp_rescore.jsonl, watcher bqa3y90px). UMAP MERGED to develop
+  (630bc2f: schedule float32 fix + reference-parity numba kernels, +521/-93). FLOOR-DOSSIERS
+  codex dispatched (pid 819132, log /tmp/r76_cx_floors.log, brief
+  r76_scratch/r76_probe_floor_dossiers.md): mds-connected equivalence-class proofs
+  (eigengap tables + orthogonal-transform-within-degenerate-eigenspace residuals) + umap
+  random_dag 1-ULP perturbation experiment + quality-parity tables -> r76_FLOOR_DOSSIERS.md.
+  Still pending: sugiyama wip bench (pid 749129), sfdp rescore, floors codex. Then: A3
+  decision, D2+D3 ledger, housekeeping (2 pre-existing test failures -- deferred to ledger
+  phase alongside D4 invariants).
+- 2026-07-03 ~19:30 ET: ***SFDP FAMILY RESCORE: 261 IDENTICAL + 6 EQUIVALENT*** (of 288
+  scoreable; 290 no-canonical, 29 insufficient); 28/44 r75-divergent flipped. Residual 21
+  divergent + 6 "regressions" (random_dag_200 x3, kitchen_sink x3) are ORACLE-CONFOUNDED:
+  (a) rescore used old-era stored sfdp refs while the fixup's gates used FRESH dot runs --
+  random_dag_200 shows W_D 0.086 vs W_R 1.292 which contradicts the fixup's 19x RMSD
+  improvement vs fresh refs; (b) 4 rows are p_neg2 variants whose refs are PROVEN param-noop
+  (fairness probe) -> reclassify no-canonical at ledger, not divergent. SFDP REFS REGEN
+  LAUNCHED: pid 827651 -> benchmark_100seed_r76_sfdp_refs (graphviz_sfdp, 19 affected
+  graphs, seeds 100-199, --max-nodes 0), log /tmp/r76_sfdp_refs.log. On done -> rescore the
+  ~27 affected combos w/ fresh refs -> final sfdp dispositions.
   ON EACH LANDING: verify per wake-up routing (Case A/B). After mincross verdict -> sugiyama
   family re-bench if ladder passed. After gem rescore -> read closure counts. After sfdp probe
   -> targeted fix/floor codexes. After umap -> re-bench umap family. THEN: superior-distinct
