@@ -962,15 +962,18 @@ def _tree_adjust(
     delta : int
         Rank delta.
     """
-    graph.nodes[node_id].rank += delta
-    for edge_id in graph.nodes[node_id].tree_in:
-        tail = graph.edges[edge_id].tail
-        if tail != from_node:
-            _tree_adjust(graph=graph, node_id=tail, from_node=node_id, delta=delta)
-    for edge_id in graph.nodes[node_id].tree_out:
-        head = graph.edges[edge_id].head
-        if head != from_node:
-            _tree_adjust(graph=graph, node_id=head, from_node=node_id, delta=delta)
+    stack: List[Tuple[int, Optional[int]]] = [(node_id, from_node)]
+    while stack:
+        current, previous = stack.pop()
+        graph.nodes[current].rank += delta
+        for edge_id in reversed(graph.nodes[current].tree_out):
+            head = graph.edges[edge_id].head
+            if head != previous:
+                stack.append((head, current))
+        for edge_id in reversed(graph.nodes[current].tree_in):
+            tail = graph.edges[edge_id].tail
+            if tail != previous:
+                stack.append((tail, current))
 
 
 def _add_tree_edge(graph: _SimplexGraph, edge_id: int) -> None:
@@ -1024,16 +1027,17 @@ def _dfs_range_init(graph: _SimplexGraph) -> None:
     """
     if not graph.nodes:
         return
-    _dfs_range_visit(graph=graph, node_id=0, parent_edge=None, low=1)
+    _dfs_range(graph=graph, node_id=0, parent_edge=None, low=1, reuse_clean=False)
 
 
-def _dfs_range_visit(
+def _dfs_range(
     graph: _SimplexGraph,
     node_id: int,
     parent_edge: Optional[int],
     low: int,
+    reuse_clean: bool,
 ) -> int:
-    """Visit one tree node while assigning DFS range attributes.
+    """Assign DFS low/lim intervals over the current tree.
 
     Parameters
     ----------
@@ -1045,34 +1049,105 @@ def _dfs_range_visit(
         Parent tree edge.
     low : int
         Low DFS index.
+    reuse_clean : bool
+        Whether unchanged ``(parent_edge, low)`` intervals may be reused.
 
     Returns
     -------
     int
         Next DFS index after this subtree.
     """
+    root = graph.nodes[node_id]
+    if reuse_clean and root.par == parent_edge and root.low == low:
+        return root.lim + 1
+
+    root.par = parent_edge
+    root.low = low
+    stack: List[Tuple[int, Optional[int], int, int, List[Tuple[int, int]]]] = [
+        (
+            node_id,
+            parent_edge,
+            0,
+            low,
+            _dfs_range_children(graph=graph, node_id=node_id, parent_edge=parent_edge),
+        )
+    ]
+    while stack:
+        current, _current_parent, child_index, lim, children = stack[-1]
+        if child_index < len(children):
+            edge_id, child_id = children[child_index]
+            child = graph.nodes[child_id]
+            if reuse_clean and child.par == edge_id and child.low == lim:
+                stack[-1] = (
+                    current,
+                    _current_parent,
+                    child_index + 1,
+                    child.lim + 1,
+                    children,
+                )
+                continue
+            stack[-1] = (current, _current_parent, child_index + 1, lim, children)
+            child.par = edge_id
+            child.low = lim
+            stack.append(
+                (
+                    child_id,
+                    edge_id,
+                    0,
+                    lim,
+                    _dfs_range_children(graph=graph, node_id=child_id, parent_edge=edge_id),
+                )
+            )
+            continue
+
+        graph.nodes[current].lim = lim
+        next_low = lim + 1
+        stack.pop()
+        if stack:
+            parent_id, grandparent, parent_index, _, parent_children = stack[-1]
+            stack[-1] = (
+                parent_id,
+                grandparent,
+                parent_index,
+                next_low,
+                parent_children,
+            )
+        else:
+            return next_low
+    return low
+
+
+def _dfs_range_children(
+    graph: _SimplexGraph,
+    node_id: int,
+    parent_edge: Optional[int],
+) -> List[Tuple[int, int]]:
+    """Return tree children in Graphviz DFS traversal order.
+
+    Parameters
+    ----------
+    graph : _SimplexGraph
+        Mutable rank graph.
+    node_id : int
+        Tree node whose children should be listed.
+    parent_edge : int, optional
+        Parent tree edge to skip.
+
+    Returns
+    -------
+    list of tuple[int, int]
+        ``(edge_id, child_node_id)`` pairs with tree-out edges before tree-in
+        edges, matching Graphviz ``dfs_range_init`` and ``dfs_cutval`` order.
+    """
     node = graph.nodes[node_id]
-    node.par = parent_edge
-    node.low = low
-    lim = low
-    for edge_id in list(node.tree_out):
+    children: List[Tuple[int, int]] = []
+    for edge_id in node.tree_out:
         if edge_id != parent_edge:
-            lim = _dfs_range_visit(
-                graph=graph,
-                node_id=graph.edges[edge_id].head,
-                parent_edge=edge_id,
-                low=lim,
-            )
-    for edge_id in list(node.tree_in):
+            children.append((edge_id, graph.edges[edge_id].head))
+    for edge_id in node.tree_in:
         if edge_id != parent_edge:
-            lim = _dfs_range_visit(
-                graph=graph,
-                node_id=graph.edges[edge_id].tail,
-                parent_edge=edge_id,
-                low=lim,
-            )
-    node.lim = lim
-    return lim + 1
+            children.append((edge_id, graph.edges[edge_id].tail))
+    return children
 
 
 def _dfs_cutval(graph: _SimplexGraph) -> None:
@@ -1083,34 +1158,34 @@ def _dfs_cutval(graph: _SimplexGraph) -> None:
     graph : _SimplexGraph
         Mutable rank graph.
     """
-    if graph.nodes:
-        _dfs_cutval_visit(graph=graph, node_id=0, parent_edge=None)
+    if not graph.nodes:
+        return
 
+    stack: List[Tuple[int, Optional[int], int, List[Tuple[int, int]]]] = [
+        (0, None, 0, _dfs_range_children(graph=graph, node_id=0, parent_edge=None))
+    ]
+    while stack:
+        node_id, parent_edge, child_index, children = stack[-1]
+        if child_index < len(children):
+            edge_id, child_id = children[child_index]
+            stack[-1] = (node_id, parent_edge, child_index + 1, children)
+            stack.append(
+                (
+                    child_id,
+                    edge_id,
+                    0,
+                    _dfs_range_children(
+                        graph=graph,
+                        node_id=child_id,
+                        parent_edge=edge_id,
+                    ),
+                )
+            )
+            continue
 
-def _dfs_cutval_visit(
-    graph: _SimplexGraph,
-    node_id: int,
-    parent_edge: Optional[int],
-) -> None:
-    """Post-order cut-value traversal.
-
-    Parameters
-    ----------
-    graph : _SimplexGraph
-        Mutable rank graph.
-    node_id : int
-        Node to visit.
-    parent_edge : int, optional
-        Parent tree edge.
-    """
-    for edge_id in graph.nodes[node_id].tree_out:
-        if edge_id != parent_edge:
-            _dfs_cutval_visit(graph=graph, node_id=graph.edges[edge_id].head, parent_edge=edge_id)
-    for edge_id in graph.nodes[node_id].tree_in:
-        if edge_id != parent_edge:
-            _dfs_cutval_visit(graph=graph, node_id=graph.edges[edge_id].tail, parent_edge=edge_id)
-    if parent_edge is not None:
-        _x_cutval(graph=graph, edge_id=parent_edge)
+        stack.pop()
+        if parent_edge is not None:
+            _x_cutval(graph=graph, edge_id=parent_edge)
 
 
 def _x_cutval(graph: _SimplexGraph, edge_id: int) -> None:
@@ -1278,6 +1353,8 @@ def _dfs_enter_outedge(
                         best = edge_id
             elif graph.nodes[edge.head].lim < graph.nodes[current].lim:
                 stack.append(edge.head)
+        if best is not None and _slack(graph=graph, edge_id=best) == 0:
+            continue
         for edge_id in graph.nodes[current].tree_in:
             edge = graph.edges[edge_id]
             if graph.nodes[edge.tail].lim < graph.nodes[current].lim:
@@ -1321,6 +1398,8 @@ def _dfs_enter_inedge(
                         best = edge_id
             elif graph.nodes[edge.tail].lim < graph.nodes[current].lim:
                 stack.append(edge.tail)
+        if best is not None and _slack(graph=graph, edge_id=best) == 0:
+            continue
         for edge_id in graph.nodes[current].tree_out:
             edge = graph.edges[edge_id]
             if graph.nodes[edge.head].lim < graph.nodes[current].lim:
@@ -1357,9 +1436,115 @@ def _update(graph: _SimplexGraph, leaving: int, entering: int) -> None:
             _rerank(graph=graph, node_id=leaving_edge.tail, parent_edge=leaving, delta=delta)
         else:
             _rerank(graph=graph, node_id=leaving_edge.head, parent_edge=leaving, delta=-delta)
+    cutvalue = graph.edges[leaving].cutvalue
+    entering_edge = graph.edges[entering]
+    lca = _tree_update(
+        graph=graph,
+        node_id=entering_edge.tail,
+        target_node=entering_edge.head,
+        cutvalue=cutvalue,
+        direction=1,
+    )
+    other_lca = _tree_update(
+        graph=graph,
+        node_id=entering_edge.head,
+        target_node=entering_edge.tail,
+        cutvalue=cutvalue,
+        direction=0,
+    )
+    if lca != other_lca:
+        raise ValueError("graphviz rank assignment tree update found mismatched LCA")
+    lca_low = graph.nodes[lca].low
+    _invalidate_path(graph=graph, lca=lca, node_id=entering_edge.head)
+    _invalidate_path(graph=graph, lca=lca, node_id=entering_edge.tail)
+    graph.edges[entering].cutvalue = -cutvalue
+    graph.edges[leaving].cutvalue = 0
     _exchange_tree_edges(graph=graph, leaving=leaving, entering=entering)
-    _dfs_range_init(graph=graph)
-    _dfs_cutval(graph=graph)
+    _dfs_range(
+        graph=graph,
+        node_id=lca,
+        parent_edge=graph.nodes[lca].par,
+        low=lca_low,
+        reuse_clean=True,
+    )
+
+
+def _tree_update(
+    graph: _SimplexGraph,
+    node_id: int,
+    target_node: int,
+    cutvalue: int,
+    direction: int,
+) -> int:
+    """Update cut values while walking one endpoint toward the LCA.
+
+    Parameters
+    ----------
+    graph : _SimplexGraph
+        Mutable rank graph.
+    node_id : int
+        Endpoint node to walk upward through the old tree.
+    target_node : int
+        Opposite entering-edge endpoint.
+    cutvalue : int
+        Cut value of the leaving tree edge.
+    direction : int
+        Graphviz ``treeupdate`` direction flag, either ``1`` or ``0``.
+
+    Returns
+    -------
+    int
+        Lowest common ancestor of ``node_id`` and ``target_node`` in the old
+        tree intervals.
+    """
+    target_lim = graph.nodes[target_node].lim
+    current = node_id
+    while not _seq(graph.nodes[current].low, target_lim, graph.nodes[current].lim):
+        parent_edge = graph.nodes[current].par
+        if parent_edge is None:
+            return current
+        edge = graph.edges[parent_edge]
+        if current == edge.tail:
+            add_cutvalue = bool(direction)
+        else:
+            add_cutvalue = not bool(direction)
+        if add_cutvalue:
+            edge.cutvalue += cutvalue
+        else:
+            edge.cutvalue -= cutvalue
+        current = (
+            edge.tail if graph.nodes[edge.tail].lim > graph.nodes[edge.head].lim else edge.head
+        )
+    return current
+
+
+def _invalidate_path(graph: _SimplexGraph, lca: int, node_id: int) -> None:
+    """Invalidate cached DFS lows from one entering endpoint to the LCA.
+
+    Parameters
+    ----------
+    graph : _SimplexGraph
+        Mutable rank graph.
+    lca : int
+        Lowest common ancestor in the old tree intervals.
+    node_id : int
+        Endpoint node whose path to ``lca`` should be invalidated.
+    """
+    current = node_id
+    while True:
+        node = graph.nodes[current]
+        if node.low == -1:
+            break
+        node.low = -1
+        parent_edge = node.par
+        if parent_edge is None:
+            break
+        if node.lim >= graph.nodes[lca].lim:
+            break
+        edge = graph.edges[parent_edge]
+        current = (
+            edge.tail if graph.nodes[edge.tail].lim > graph.nodes[edge.head].lim else edge.head
+        )
 
 
 def _rerank(graph: _SimplexGraph, node_id: int, parent_edge: int, delta: int) -> None:
@@ -1376,23 +1561,16 @@ def _rerank(graph: _SimplexGraph, node_id: int, parent_edge: int, delta: int) ->
     delta : int
         Amount subtracted from each rank.
     """
-    graph.nodes[node_id].rank -= delta
-    for edge_id in graph.nodes[node_id].tree_out:
-        if edge_id != parent_edge:
-            _rerank(
-                graph=graph,
-                node_id=graph.edges[edge_id].head,
-                parent_edge=edge_id,
-                delta=delta,
-            )
-    for edge_id in graph.nodes[node_id].tree_in:
-        if edge_id != parent_edge:
-            _rerank(
-                graph=graph,
-                node_id=graph.edges[edge_id].tail,
-                parent_edge=edge_id,
-                delta=delta,
-            )
+    stack: List[Tuple[int, int]] = [(node_id, parent_edge)]
+    while stack:
+        current, previous_edge = stack.pop()
+        graph.nodes[current].rank -= delta
+        for edge_id in reversed(graph.nodes[current].tree_in):
+            if edge_id != previous_edge:
+                stack.append((graph.edges[edge_id].tail, edge_id))
+        for edge_id in reversed(graph.nodes[current].tree_out):
+            if edge_id != previous_edge:
+                stack.append((graph.edges[edge_id].head, edge_id))
 
 
 def _scan_and_normalize(graph: _SimplexGraph) -> int:
