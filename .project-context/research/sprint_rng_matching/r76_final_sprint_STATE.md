@@ -40,6 +40,10 @@ TRACK D -- infrastructure:
      bound from r73 snapshot; ba_500/2000/5000 et al).
   D2 population-equivalence aggregate tier (S3 design, metadata-only, BH-corrected).
   D3 final ledger generation + official report + gates + r76_RESULTS + baton + memory.
+  D4 (added 2026-07-03, JMT plumbing discussion): ORACLE INVARIANTS -- fold param-sensitivity
+     tripwire into validate_benchmark_integrity.py (reference engines: vary iters/steps ->
+     output MUST differ, else abort scoring), expected-__for__-row-count assertion on any
+     --seed-refs run, overwrite-or-fail on analysis output files. Permanent gates, not notes.
 
 ## Wake-up routing
 Case A: codex done + not verified -> verify (NOTES + gates + git log) -> merge or park (2-attempt
@@ -71,6 +75,290 @@ for retries. 2-attempt max per work item, then park documented.
   nothing on the table except the truly absurd."
 
 ## Iteration log
+- 2026-07-03 ~12:50: POST-REBOOT RESUME (Fable). Checklist executed: no stale watchers/procs
+  (one FOREIGN torchlens codex running -- untouched); pause sentinels clear; /tmp rebuilt from
+  r76_scratch. KEY FINDING: the mincross codex FINISHED before reboot (snapshot log has final
+  summary) -- honest ladder-a fail 4/6; residual root-cause NAMED: pre-mincross rank/decompose
+  parity (edge-weights asymmetry: DOT adapter emits no weight= but dagua rank consumes
+  edge_weights -- necessary-not-sufficient; + build_ranks/GD_nlist seeding). WIP uncommitted in
+  dagua-mincross2 worktree (3 files, 517-line diff) + notes banked.
+  WAVE 3 DISPATCHED (4 parallel):
+  * gem full-family rescore: pid 82292, log /tmp/r76_gem_rescore.log, output
+    eval_output/fidelity_definitive/r76_gem_rescore.jsonl (315 combos), watcher b1caro52w.
+  * A1-FIXUP mincross (the ONE sanctioned fixup): codex HIGH, pid 84720, log
+    /tmp/r76_cx_mincross_fixup.log, worktree dagua-mincross2 (builds on WIP), brief
+    r76_scratch/r76_fixup_mincross.md, watcher bau3wx0ds. Targets: rank-parity bisection
+    (weights gating -> rank extraction from dot -Tdot -> build_ranks seeding); ladder a-e.
+  * C4 sfdp/fdp triage probe: codex MED, pid 87221, log /tmp/r76_cx_sfdp_probe.log, output
+    r75_findings/r76_PROBE_sfdp_triage.md (44 sfdp + 3 fdp rows; bisection-first per JMT
+    ruling), brief r76_scratch/r76_probe_sfdp_triage.md, watcher byyg0lqos.
+  * C3 umap trace+port: codex MED, pid 89533, log /tmp/r76_cx_umap.log, worktree
+    dagua-umap-port (branch r76/umap-port), phase-1 first-divergence trace MANDATORY before
+    code (verdict #24), then scalar-faithful SGD port (tau_rand stream), brief
+    r76_scratch/r76_impl_umap_port.md, watcher bck581p0o.
+- 2026-07-03 ~13:05: SFDP PROBE LANDED (r76_PROBE_sfdp_triage.md, 288 lines). VERDICTS: all
+  47 rows STRUCTURAL (0 hairline; RMSD 0.0116-0.3841). Cluster A = 21 disconnected rows:
+  first divergence NAMED = component orchestration (graphviz ccomps + ONE mutable ctrl reused
+  across components + packSubgraphs vs dagua recursive pipelines + neato packer;
+  sfdpinit.c:268-315). Cluster B = 23 connected rows: init RNG proven matched (libc parity
+  seed 100); divergence between multilevel matching/prolongation and first spring-electrical
+  iters -- needs instrumented gv750 trace build. Cluster C = 3 rows are FDP not SFDP ->
+  rerouted out of sfdp closure (aggregate-tier or fdp parity candidates -- decide at ledger).
+  NO floor labels assigned (bisection not exhausted -- correct per JMT ruling). Rejected r75
+  theories NOT re-litigated. WAVE 3b DISPATCHED:
+  * C4a sfdp-disc fix: codex MED, pid 144153, log /tmp/r76_cx_sfdp_disc.log, worktree
+    dagua-sfdp-disc (branch r76/sfdp-disc), brief r76_scratch/r76_impl_sfdp_disc.md, watcher
+    btrj3q7hp. Blast-radius gates: neato/fmmm position hashes unchanged.
+  * C4b sfdp-conn bisect-then-fix: codex HIGH, pid 146388, log /tmp/r76_cx_sfdp_conn.log,
+    worktree dagua-sfdp-conn (branch r76/sfdp-conn), brief r76_scratch/r76_impl_sfdp_conn.md,
+    watcher bqt9w1r6n. Instrumented /tmp gv750 trace build sanctioned (NOT a reference build);
+    fix if op difference, 1-ULP floor dossier only if bisection exhausts.
+- 2026-07-03 ~13:15: UMAP ATTEMPT 1 LANDED (honest no-commit). PHASE-1 WIN: first divergence
+  found+fixed = epochs_per_sample float32 schedule rounding (make_epochs_per_sample computes
+  n_samples in float32 THEN divides in float64; dagua promoted early -- 3.48e-08 shift);
+  tiny-graph trace now matches draw-for-draw through epoch 1 (schedule, tau-rand, negatives,
+  gradients, embedding). BLOCKER WAS MY BRIEF'S ERROR: I banned numba wholesale; dagua's umap
+  op already used optional-numba-with-fallback (codex deleted it to comply -> pure-scalar vs
+  reference fastmath kernels -> probe gate failed, mean RMSD 0.01504->0.01457 only).
+  CORRECTION ISSUED: no-delegation = no umap-learn imports; numba JIT of dagua's OWN kernel is
+  fine and mirrors the reference compilation environment. ATTEMPT 2 DISPATCHED: codex MED,
+  pid 170464, log /tmp/r76_cx_umap2.log, same worktree (keeps attempt-1 fix, restores numba
+  wrappers, makes kernel bodies structurally identical to umap-learn 0.5.11 layouts.py:92-187
+  + rdist + clip + tau_rand; per-epoch bisection loop if RMSD does not collapse), brief
+  r76_scratch/r76_impl_umap_retry.md. FINAL umap attempt -- honest fail -> aggregate tier.
+  Note: attempt-1 codex flagged a phantom "repo AGENTS says no commits" concern; retry brief
+  grants explicit commit authority on the branch.
+- 2026-07-03 ~13:35: SFDP-DISC ATTEMPTS 1+2 LANDED (honest no-commit, reverted). Both carried
+  ctrl scalar state (K/random_start/cooling timing) across components -- improved 3/6 then
+  2/6, below the 4/6 gate. THE PRIZE: exact unported rule NAMED = graphviz's single
+  process-wide rand() stream threads the WHOLE component loop (Multilevel.c
+  random_permutation consumes draws per component BEFORE the conditional
+  srand(random_start); prolongation flips random_start=FALSE on the SHARED ctrl -> component
+  order + prior draw counts determine later streams; dagua used independent per-component
+  GraphvizRandom). PROCESS BUG (mine): probe file + r75_final.jsonl are untracked ->
+  absent in worktrees; both sfdp briefs referenced them relatively. Fixed: probe file copied
+  into both sfdp worktrees; all future briefs use absolute main-repo paths for artifacts.
+  FIXUP DISPATCHED (final disc attempt): codex MED, pid 260695, log
+  /tmp/r76_cx_sfdp_disc2.log, brief r76_scratch/r76_fixup_sfdp_disc.md -- step 1 instrumented
+  gv750 stream-schedule trace (own /tmp/gv750-disc copy; /tmp/gv750-trace belongs to conn
+  task), step 2 thread ONE GraphvizRandom through the loop. Same 6-graph gate.
+  Conn codex (146388) healthy: instrumented build up, writing tests, gates running.
+- 2026-07-03 ~13:50: GEM RESCORE LANDED = NEAR-TOTAL CLOSURE. Deduped 315 combos (pre-reboot
+  run had completed and my rerun APPENDED -- jsonl rewritten deduped in place): 147
+  identical_raw + 166 equivalent_raw + 0 no-canonical + 2 divergent. The 2 divergent are
+  random_dag_50::iters2000 + random_dag_200::iters100, BOTH disconnected = MAAR
+  packing-tie-break family (same root cause as fmmm's 4 parked rows -> now 6 rows total
+  sharing that cause; strengthens case for one MAAR attempt-2 pre-ledger). All 7
+  r75-divergent gem rows flipped (2 identical, 5 equivalent). 7 iters100 rows moved
+  identical->equivalent = anticipated HONESTY CORRECTIONS (old passes matched the stale
+  binary; all 7 verified quality_equivalent_raw=true, rung-2 held). gem DISPOSITION: closed
+  (313/315 rung-1/rung-2; 2 rows -> MAAR packing cluster).
+- 2026-07-03 ~14:15: UMAP ATTEMPT 2 LANDED (honest no-commit, but MAJOR narrowing). Kernel
+  parity PROVEN: dagua's local numba kernels (tau_rand i4(i8[:]), rdist f4 fastmath,
+  clip, serial single-epoch) match installed umap-learn 0.5.11 EXACTLY on trace (epoch-1
+  embedding max diff 0.0; RNG state exact). Bisection killer evidence: substituting the
+  REFERENCE'S OWN compiled kernel still leaves RMSD ~0.14 on random_dag_50 -> divergence is
+  NOT the epoch body. Pre-optimizer all-exact (distances, fuzzy COO 628 entries diff 0.0,
+  head/tail, schedule, curve, base RNG state). SOLE divergence = spectral init: same RNG
+  stream consumed, DIFFERENT second-eigenvector basis (max diff 0.376) in degenerate/
+  near-degenerate component eigenspace (fuzzy graph 2 comps [52,45]). Same class as mds
+  connected floor (JMT-ruled: no vendoring; equivalence-class evidence). Per-seed RMSD is the
+  WRONG metric in this chaotic regime -- rung-2 distributional equivalence is the real test.
+  STAGE-1 DISPOSITION TEST launched: pid 319281, log /tmp/r76_umap_stage1.log, script
+  r76_scratch/r76_umap_stage1.sh -- bench 5 graphs (3 divergent + citation_dag_300 +
+  clustered_longlabel_handoffs regression) x 6 umap variants x 100 seeds FROM THE WORKTREE
+  (uncommitted attempt-2 code), rescore 22 combos -> r76_umap_stage1.jsonl. DECISION RULE:
+  7 divergent flip to equivalent AND regression rows stay identical -> commit attempt-2 on
+  r76/umap-port + full-family umap bench; else -> floor/aggregate disposition w/ the
+  bisection dossier (which is already sufficient evidence: named non-chaos-free op = ARPACK
+  eigsh basis selection under degeneracy).
+- 2026-07-03 ~14:30: MINCROSS FIXUP LANDED (no commit yet, but A1 is DONE-ENOUGH). Ladder-a
+  PASSED 5/6 exact: the missing seed-order rule was `class2()` then `decompose(g,1)` component
+  DFS (NOT reverse fast-node creation) -- weighted_karate_34 now EXACT (pass-0 178=178, final
+  63=63). Weight gating landed (graphviz fidelity ignores dagua edge_weights; ranks match
+  reference on both residual graphs). heavy_tail_weights_50 off by ONE crossing (pass-0 91 vs
+  96; "expanded fast-edge metadata/order" residual). Ladders c/d "failed" but MY GATE WAS
+  MIS-SPECIFIED: ba_500 reference dot renders ~140,276 crossings (ledger cross_R), old dagua
+  117,932, port 95,261 -- gate demanded <=11k which is a QUALITY target not a FIDELITY target.
+  Rendered divergence despite exact ordering = downstream stages (position.c B-D, flat edges,
+  order-to-coordinate plumbing) = the queued A4 item. perf: ba_500 mincross 33.7s. b/e green
+  (457+54 tests). Known pre-existing failure: test_bench_large hierarchy checkpoint test.
+  A4 DISPATCHED: codex HIGH, pid 336440, log /tmp/r76_cx_sugiyama_a4.log, same worktree ON TOP
+  of A1 WIP, brief r76_scratch/r76_impl_sugiyama_a4.md. Step-0 localization (ordering-gap vs
+  rendered-gap per graph incl ba_500), then port named downstream stages; fidelity-correct
+  gates (move TOWARD reference, >=3/4 + ba_500, byte-identical regression rows); on pass
+  commit the ENTIRE stack (A1+A4). A3 (igraph GLPK/BK/qsort ties) SERIALIZED after A4 (shared
+  files).
+- 2026-07-03 ~14:50: SFDP-CONN ROUND 1 LANDED = FIRST DIVERGENCE FOUND AND FIXED. Named op:
+  graphviz symmetrized-CSR neighbor ORDER (makeMatrix -> SparseMatrix_symmetrize appends
+  outgoing then incoming-transpose entries; coarsening matching iterates row order ->
+  hierarchies were structurally different, e.g. hexagonal [42,24,12,6] vs gv [42,24,15,8,4]).
+  Fix +5/-4 gated to graphviz_order=True. RMSD medians: hourglass 0.526->0.0025, hexagonal
+  0.384->0.0018, planar_60 0.090->0.019. Unchanged-row gate passed. Codex withheld commit
+  ONLY due to test_bench_large::test_hierarchy_checkpoint_rejects_incomplete_manifest -- I
+  VERIFIED it fails on untouched develop (pre-existing, 2 codexes hit it independently) and
+  COMMITTED myself: 681370b (fix) + 09b8a28 (notes) on r76/sfdp-conn. TODO ledger-phase:
+  file/fix the pre-existing test separately.
+  ROUND 2 DISPATCHED: codex HIGH, pid 356295, log /tmp/r76_cx_sfdp_conn2.log, brief
+  r76_scratch/r76_impl_sfdp_conn2.md -- bisect real_karate_34 (0.3898, unchanged) +
+  weighted_chain_20 (0.2390, unchanged); PRIME HYPOTHESIS: weighted-edge handling in
+  coarsening matching (all 3 fixed graphs unweighted, both residuals weighted). Fix-or-floor
+  per JMT ruling; pre-existing-failure exclusion clause now in all briefs.
+- 2026-07-03 ~15:05: UMAP STAGE-1 VERDICT + TWO INFRA DISCOVERIES. Bench 3000/3000 ok; rescore
+  22 combos. RESULTS: clustered_longlabel 6/6 STAYED bit-identical; citation_dag_300 6/6
+  DROPPED identical->equivalent (= attempt-2's diagnostic "spectral alignment" hunks broke
+  matching graphs -- classes: schedule fix GOOD, kernel parity GOOD, spectral alignment BAD);
+  the 7 divergent stayed non-equivalent. DISCOVERY 1 (oracle alarm, param-insensitivity
+  class): parallel_multiedge_bundle reference mean_W IDENTICAL to 16 digits across ALL 5
+  variants (0.6037692...) while citation refs differ per variant -> multiedge-specific
+  reference anomaly (adapter clamping or degenerate path) -- MUST resolve before
+  dispositioning those 5 rows; also dagua W 0.128 vs ref 0.604 = structural multi-edge
+  handling difference, NOT eigenspace chaos. DISCOVERY 2 (era seed-range mismatch):
+  escalation_final umap refs are SEED-42-START era (42-141); benches now use 100-199 ->
+  matched n=42, halved TOST power; final ledger (D3) must flag rows with n<100 and the
+  42-start reference era generally. ACTIONS DISPATCHED:
+  * umap spectral-revert codex: pid 405030, log /tmp/r76_cx_umap3.log, brief
+    r76_scratch/r76_impl_umap_revert_spectral.md -- keep schedule+kernel, revert spectral
+    hunks to HEAD, byte-identity checks vs HEAD on citation_dag_300, commit on pass.
+  * umap refs regen seeds 100-199: pid 407303, log /tmp/r76_umap_refs.log, dir
+    benchmark_100seed_r76_umap_refs (5 stage-1 graphs x variants; __for__-row verification
+    armed per r75 lesson).
+  NEXT after both: stage-1b rescore (chain + r76_umap_refs + r76_umap_fix) -> dispositions:
+  multiedge-5 (pending oracle answer), random_dag pair (expect equivalence at full power or
+  eigenspace floor dossier), citation identity restored.
+- 2026-07-03 ~15:25: ***ORACLE BUG #2 FOUND AND FIXED (umap tiny-graph fallback).*** The fresh
+  param-identical refs on parallel_multiedge_bundle exposed it: umap_competitor.py returned
+  seeded torch.randn for num_nodes<=3 WITHOUT running umap or consuming variant params. The
+  "reference" for that graph was a Gaussian cloud (stress 0.604 vs dagua's real-umap 0.128 --
+  the 5 divergent multiedge rows were dagua-does-umap vs reference-does-randn). Empirically
+  verified: umap-learn RUNS at n=3 with random init (min_dist visibly changes output); only
+  n<=2 genuinely fails (n_neighbors>1 required). FIXED adapter cutoff 3->2, committed develop
+  7d1f090. Blast radius verified: parallel_multiedge_bundle is the ONLY <=3-node graph.
+  Multiedge refs regen w/ real umap: pid 466512, dir benchmark_100seed_r76_umap_refs2.
+  REMAINING for umap closure: (a) dagua pipeline ALSO special-cases N<=3 ("historical
+  explicit fallbacks", umap_layout.py docstring) -- its fidelity path must run the real port
+  at N=3 (QUEUED behind the spectral-revert codex, same file umap.py); (b) then re-bench
+  dagua multiedge rows + stage-1b rescore (chain + r76_umap_refs + r76_umap_refs2 + fix dir).
+  Era note appended to D3: umap refs in escalation_final are seed-42-era; ledger must prefer
+  r76_umap_refs* dirs and flag n<100 rows.
+- 2026-07-03 ~15:45: SALVO EXPANSION + A4 VERDICT. Multiedge refs2 verified (600/600 ok;
+  param-sensitivity tripwire passes: mindist/spread differ, default==nn5==nn30 correctly
+  clamp-identical at n=3; seed-sensitive). DISPATCHED: F1 fairness triage (codex 488766, log
+  /tmp/r76_cx_fairness.log, 79 superior-distinct rows, oracle-sanity-first brief); D1
+  big-graph rescore (local pid 486784, 400 combos >300 nodes, 16 graphs, log
+  /tmp/r76_biggraph.log -> r76_biggraph.jsonl); B2b MAAR attempt-2 (first dispatch DIED --
+  dagua-fmmm-disc worktree had been cleaned pre-reboot; RECREATED off develop 7d1f090,
+  redispatched codex 501893, log /tmp/r76_cx_maar2.log; instrumented TileToRowsCCPacker
+  trace mandate).
+  A4 LANDED (honest no-commit, blocker precisely named): rendered real-node RANK+ORDER now
+  MATCH on all 3 step-0 graphs; ba_500 internal mincross 79046 vs gv 79098 (0.07%).
+  Divergence is purely X-COORDINATE parity: (1) node boxes -- dagua feeds narrower boxes
+  than gv (44-52pt vs 54-70pt); (2) nodesep units -- benchmark 1.0 = DOT inches = 72pt, not
+  layout units; (3) virtual-node widths + aux constraints. A4's units-only patch improved
+  crossings 3/4 but stress 2/4 -> honestly reverted; verdict: box+units must land TOGETHER.
+  A4b DISPATCHED (final targeted attempt): codex HIGH 507112, log
+  /tmp/r76_cx_sugiyama_a4b.log, brief r76_scratch/r76_impl_sugiyama_a4b.md -- box rule
+  validated against dot -Tjson, units port, gates on crossings AND stress, commit full A1+A4b
+  stack on pass; else dossier = official port-in-progress disposition. A3 (igraph ties) still
+  queued behind the mincross worktree.
+- 2026-07-03 ~16:00: ***SFDP-DISC FIXED (attempt 3, committed).*** Shared-RNG-stream port
+  landed: 8647d47 (fix) + 80d693d (docs) on r76/sfdp-disc. RMSD medians improved 6/6:
+  encoder_residual 1.090->0.363, label_cycle_collage 0.738->0.279, kitchen_sink 0.558->0.132,
+  multi_component_80 1.014->0.112, parallel_cycles 0.752->0.168, random_dag_200 1.250->0.065.
+  Regression gates: 25/25 connected sfdp hashes unchanged, 8/8 neato/fmmm disc hashes
+  unchanged, pytest green. KEY TRACE CORRECTION: gv 7.0.5 RESTORES ctrl after each multilevel
+  call -- only the process rand() stream persists across components (why ctrl-carrying
+  attempts 1-2 regressed). Residual after fix = packer geometry itself (packSubgraphs
+  polyomino vs dagua packer; doSplines) -- defer judgment to family re-bench verdicts.
+  PLAN: when conn round-2 lands -> merge r76/sfdp-disc + r76/sfdp-conn into develop -> sfdp
+  FAMILY RE-BENCH (all classic_sfdp combos <=300 nodes, seeds 100-199) -> family rescore
+  (gem-pattern) -> dispositions.
+- 2026-07-03 ~16:20: FAIRNESS TRIAGE LANDED (r76_PROBE_fairness.md, 189 lines). Count
+  correction: 89 superior-distinct rows (not 79). BUCKETS: 8 reference-bug (umap multiedge 4
+  = randn fallback; gem 2 + fmmm 2 = stale runner -- REMOVE superior labels, rescores/regens
+  already in motion); 13 sfdp reference-param-noop (gv sfdp refs BIT-IDENTICAL across
+  theta04/theta08/steps200/p_neg2 variants on connected graphs -- collapse these variant rows
+  to reference-non-expressible at ledger, extends the r75 theta/maxiter no-canonical
+  finding to p_neg2); 54 fair-but-portable (sugiyama 45 [18 dot + 27 igraph] + sfdp 9 --
+  disposition rides on A4b/A3/sfdp merges); 11 fair-non-portable (mds 6, maxent 2, misc 3 --
+  keep w/ documented basis/packing cause); 3 reclassify (mds disc margin-direction).
+  LEDGER RULES BANKED (probe recs 1-5): no superior-distinct for param-noop refs; sugiyama
+  45 held until parity attempts merged-or-parked; narrow "fair non-portable basis" labels.
+  D4 SPEC SHARPENED: same-graph same-seed reference positions must NOT be bit-identical
+  across param variants unless declared non-expressible or clamp-equivalent; seed response
+  alone is NOT adequate oracle sanity. A3 igraph (27 portable rows) = next dispatch when
+  mincross worktree frees.
+- 2026-07-03 ~16:40: UMAP REVERT COMMITTED (795ccbd fix + 77c9830 docs on r76/umap-port):
+  byte-identity to HEAD restored on citation rows (torch.equal across 6 variants x 3 seeds),
+  tiny-trace exact, schedule+kernel parity preserved. STAGE-1B launched: pid 548099, log
+  /tmp/r76_umap_stage1b.log, bench worktree code -> benchmark_100seed_r76_umap_fix2 (fresh
+  dir per retry law), rescore w/ honest refs -> r76_umap_stage1b.jsonl.
+  MAAR ATTEMPT-2 PARKED (honest, notes committed bc02ce6 on r76/fmmm-disconnected): named
+  the exact rules (FMMM uses MAARPacking NOT TileToRowsCCPacker; OGDF qsort stable only
+  <=40 items; MAAR equal-row-width tie = newest pairing-heap push) but porting them WORSENED
+  random_dag_50 vs honest refs (0.9-1.0 RMSD) -> tie rules alone are not the _50 residual;
+  reverted, no commit. ***INFRA CATCH: random_dag_200 honest ogdf refs MISSING from r76_refs
+  (regen capped at <=300 builder-nodes; random_dag_200 counts >300)*** -> its gem/fmmm
+  verdicts (incl 2 of the 6 MAAR-cluster rows) were scored vs STALE-binary refs =
+  unreliable. REGEN LAUNCHED: pid 558655, dir benchmark_100seed_r76_refs2 (ogdf fmmm+gem,
+  random_dag_200, seeds 100-199, --max-nodes 0). After: rescore MAAR-cluster rows w/ refs2;
+  also audit big-graph ogdf ref coverage when D1 lands (ba_500+ likely same gap -> ledger
+  must flag stale-ref ogdf rows or regen).
+- 2026-07-03 ~17:00: SFDP-CONN ROUND 2 LANDED = SECOND OP FOUND+FIXED. Weighted-edge
+  hypothesis CONFIRMED: DOT adapter emits no weight= -> gv makeMatrix sees unit weights;
+  dagua fidelity hierarchy consumed edge_weights (same asymmetry class as mincross
+  weight-gating). Fix +4/-1: real_karate_34 0.3898->0.0800, weighted_chain_20
+  0.2390->0.0476. Residual first-divergence now 6e-10 coarsest force deltas; 1-ULP
+  perturbation reproduces comparable magnitudes for SOME seeds -- floor evidence close but
+  honestly NOT claimed. Commit withheld over classic_fcose name-list test -- VERIFIED
+  pre-existing on develop (phantom blocker #2; both now in briefs' known-failures) -- I
+  committed: e3e4622 (fix) + 8e3dcc6 (notes) on r76/sfdp-conn.
+  ***SFDP MERGED TO DEVELOP***: 7a54b9d (disc: shared RNG stream) + aff2a0e (conn: CSR
+  order + unit weights). Merged smoke green (28 sfdp tests). LAUNCHED: sfdp FAMILY RE-BENCH
+  pid 583635 -> benchmark_100seed_r76_sfdp_fix (classic_sfdp all variants, <=300 nodes,
+  seeds 100-199), log /tmp/r76_sfdp_bench.log; MAAR-cluster rescore pid 585922 (12
+  fmmm/gem combos on random_dag_50/200 vs honest refs2) -> r76_maar_rescore.jsonl, log
+  /tmp/r76_maar_rescore.log. random_dag_200 honest refs DONE (600/600 ok, refs2).
+  NEXT: sfdp bench done -> family rescore -> dispositions (incl 13 param-noop variant rows
+  -> no-canonical). Then remaining: A4b + A3, umap stage-1b verdicts, D1 verdicts + ogdf
+  big-graph ref audit, D2 population tier, D3 ledger + D4 invariants.
+- 2026-07-03 ~17:15: MAAR RESCORE (12 combos, honest refs2) = mixed w/ TWO CAVEATS. Verdicts
+  as scored: random_dag_200 fmmm steps10/100 EQUIV (flips), steps200 div; gem iters100
+  ident(!), iters500/2000 div; random_dag_50 fmmm all div, gem iters500 equiv,
+  iters100/2000 div. CAVEAT 1: random_dag_200 DAGUA side is old-era (n=42; graph >300
+  builder-nodes -> excluded from r76_gem_fix bench; old positions + old code) -- its rows
+  unreliable until current-code bench. LAUNCHED: pid 606191, dagua classic_fmmm+classic_gem
+  on random_dag_50+200, seeds 100-199 -> benchmark_100seed_r76_maar_bench, then final MAAR
+  rescore. CAVEAT 2 (LEDGER INVESTIGATION ITEM): random_dag_50::classic_gem_iters100
+  identical_raw FLIPPED between gem-rescore (True) and maar-rescore (False) on the same
+  chain -- diff the two jsonl rows field-by-field at ledger time; possible scoring
+  nondeterminism or overlay-resolution sensitivity. Do NOT trust single-run verdict flips
+  near margins for MAAR-cluster rows; ledger decides w/ D4 invariants + fresh benches.
+- 2026-07-03 ~17:40: ***ACCOUNTING CORRECTION (major, positive) + D3 LEDGER RULE.*** Root
+  cause of "regressions"/verdict weirdness found in the SCORER, not the data:
+  quality_identical_raw = metric_identical AND battery_eligible, where eligibility =
+  reference plain_mean_W_R <= 1.0 ("canonical reference" gate added in r75 3Q work).
+  Bit-identical rows vs poor-stress references get DEMOTED to
+  quality_identical_exploratory. r75_final rows predate the gate (fields None) -> r75
+  counted ungated; r76 rescores counted gated = apples-to-oranges. VERIFIED: citation_dag_300
+  umap positions are byte-equal to refs on ALL sampled seeds incl 142-199 (torch.equal) yet
+  scored ident_raw=False / exploratory=True (W_R_plain 1.09-1.13 > 1.0).
+  CORRECTED COUNTS: gem = 147 raw + 160 exploratory = ***307/315 metric-identical*** (+6
+  equivalent-only, 2 MAAR-divergent); the "7 iters100 honesty-correction regressions" are
+  RETRACTED -- all 7 are exploratory-IDENTICAL (bit-identical vs refs with plain stress
+  1.16-1.32). umap stage-1b = 13 raw + 6 exploratory (all citation -- never regressed) =
+  19/22 identical; multiedge 5/5 became bit-identical after the oracle fix.
+  D3 LEDGER RULE (binding): fidelity-identical := identical_raw OR identical_exploratory;
+  report the canonical flag as metadata, never as a fidelity gate. D3 must recompute ALL
+  families uniformly under this rule.
+  D3 INVESTIGATION ITEM: scoring nondeterminism -- random_dag_50::classic_gem_iters100
+  metric-identical in gem-rescore but NOT in maar-rescore (same chain/data); run analysis
+  twice on one combo set + field-diff before trusting marginal verdicts.
+  ON EACH LANDING: verify per wake-up routing (Case A/B). After mincross verdict -> sugiyama
+  family re-bench if ladder passed. After gem rescore -> read closure counts. After sfdp probe
+  -> targeted fix/floor codexes. After umap -> re-bench umap family. THEN: superior-distinct
+  fairness triage (79), fmmm MAAR attempt-2 (only if 4 rows still matter), big-graph tier (D1),
+  population tier (D2), FINAL LEDGER (D3).
 - 2026-07-02: STATE created at r75 close (r75 official: divergent 574->352, 3Q 36->79,
   no-canonical 290, ZERO bit-exact regressions -- verified). WAVE 1 dispatched (all codex):
   A2 xns-perf (worktree dagua-xns-perf, branch r76/xns-perf), B1 fmmm triage probe,

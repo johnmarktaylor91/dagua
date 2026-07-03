@@ -1,0 +1,12 @@
+random_dag_50::classic_fmmm_steps10
+random_dag_50::classic_fmmm_steps100
+random_dag_50::classic_fmmm_steps200
+random_dag_200::classic_fmmm_steps10
+random_dag_200::classic_fmmm_steps100
+random_dag_200::classic_fmmm_steps200
+random_dag_50::classic_gem_iters100
+random_dag_50::classic_gem_iters500
+random_dag_50::classic_gem_iters2000
+random_dag_200::classic_gem_iters100
+random_dag_200::classic_gem_iters500
+random_dag_200::classic_gem_iters2000
