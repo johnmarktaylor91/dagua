@@ -1,0 +1,7 @@
+grid_5x5::classic_gem_iters100
+random_dag_200::classic_gem_iters500
+random_dag_50::classic_gem_iters100
+random_dag_50::classic_gem_iters500
+regular_4_40::classic_gem_iters100
+tl_resnet_2block::classic_gem_iters100
+triangular_lattice_36::classic_gem_iters100

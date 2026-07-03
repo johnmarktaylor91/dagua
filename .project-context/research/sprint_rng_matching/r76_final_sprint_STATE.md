@@ -118,7 +118,26 @@ for retries. 2-attempt max per work item, then park documented.
   NEXT: gem bench done -> gem rescore (expect near-total closure); mincross done -> verify ->
   merge if ladder passes -> sugiyama re-bench (graphviz family); then umap scalar port +
   superior-distinct fairness triage + big-graph tier + population tier + final ledger.
-- 2026-07-03 ~10:00: ***USAGE PAUSE (JMT out of Claude credits).*** Monitors DETACHED; in-flight
+- 2026-07-03 ~10:15: ***REBOOT IMMINENT (supersedes the run-to-completion plan below).*** JMT is
+  rebooting: the in-flight mincross codex (pid 2807906) and gem rescore (pid 2895173) WILL DIE
+  mid-flight and /tmp WILL BE WIPED. Everything needed is preserved on disk:
+  * ALL briefs/scripts/combo-lists/codex-log-snapshots: .project-context/research/
+    sprint_rng_matching/r76_scratch/ (41 files; .log files untracked but on disk; the live
+    mincross transcript snapshot = r76_cx_mincross_SNAPSHOT_AT_REBOOT.log -- contains its
+    in-progress reasoning/patches).
+  * Mincross WIP survives in the worktree ~/.claude/worktrees/dagua-mincross2 (3 modified files
+    + a partial r76_IMPL_mincross_NOTES.md, uncommitted -- inspect `git -C <worktree> diff`
+    before deciding: resume-in-place vs fresh re-dispatch with the brief
+    r76_scratch/r76_impl_mincross_final.md; give the new codex the snapshot log + worktree diff
+    as recovered context).
+  POST-REBOOT RESUME CHECKLIST:
+  1. pkill leftover watchers (none expected post-reboot); verify no codex/bench procs.
+  2. Re-run gem rescore: bash r76_scratch/r76_gem_rescore.sh (script paths are absolute;
+     combo list embedded path /tmp/r76_gem_all_combos.txt -- COPY r76_scratch/
+     r76_gem_all_combos.txt back to /tmp first, or edit the script path). ~30-60 min local.
+  3. Re-dispatch mincross per above (codex, high effort, worktree dagua-mincross2 exists).
+  4. Then continue the REMAINING r76 QUEUE below.
+- 2026-07-03 ~10:00 (superseded by reboot note): usage pause; monitors detached; in-flight
   jobs left running to completion unattended:
   * MINCROSS FINAL codex: pid 2807906, log /tmp/r76_cx_mincross.log, worktree
     ~/.claude/worktrees/dagua-mincross2, branch r76/mincross. ON RESUME: check
