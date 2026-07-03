@@ -47,6 +47,9 @@ _SUGIYAMA_EXPANDED_POSITIONS_KEY = "sugiyama_expanded_positions"
 _SUGIYAMA_RANK_SEP_KEY = "sugiyama_rank_sep"
 _SUGIYAMA_NODE_SEP_KEY = "sugiyama_node_sep"
 _SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY = "sugiyama_graphviz_virtual_edges"
+_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY = "sugiyama_graphviz_edge_order"
+_SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY = "sugiyama_graphviz_node_sizes"
+_GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_VIRTUAL_NODE_CLASS = 2
 _GRAPHVIZ_SINGLETON_NODE_CLASS = 1
 _GRAPHVIZ_ORDINARY_NODE_CLASS = 0
@@ -55,7 +58,7 @@ _GRAPHVIZ_OMEGA_TABLE = (
     (1, 2, 2),
     (1, 2, 4),
 )
-_GRAPHVIZ_X_AUX_RESOLUTION = 2
+_GRAPHVIZ_X_AUX_RESOLUTION = 1
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,8 @@ class _ExpandedLayeredGraph:
     node_sizes: torch.Tensor
     edge_paths: list[list[int]]
     num_nodes: int
+    graphviz_node_order: Optional[list[int]] = None
+    mincross_edge_penalties: Optional[list[int]] = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +98,9 @@ class _BarycenterOrderingConfig:
     use_graphviz_mincross : bool, default=False
         If ``True``, replace the default barycenter sweeps with Graphviz dot's
         median/transpose mincross heuristic on the expanded adjacent-rank DAG.
+    use_graphviz_node_order : bool, default=False
+        If ``True``, seed ``build_ranks`` from the graphviz-style fast-node
+        list built during dummy expansion.
     """
 
     barycenter_passes: int = 24
@@ -102,6 +110,7 @@ class _BarycenterOrderingConfig:
     use_incidence_barycenters: bool = False
     center_coordinates: bool = True
     use_graphviz_mincross: bool = False
+    use_graphviz_node_order: bool = False
 
 
 @dataclass(frozen=True)
@@ -1014,6 +1023,8 @@ def _expand_long_edges_with_dummy_nodes(
     node_sizes: torch.Tensor,
     num_original_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
+    use_graphviz_edge_order: bool = False,
+    graphviz_virtual_node_sep: Optional[float] = None,
 ) -> "_ExpandedLayeredGraph":
     """Insert dummy nodes for edges spanning more than one layer.
 
@@ -1027,6 +1038,15 @@ def _expand_long_edges_with_dummy_nodes(
         Original-node sizes with shape ``[N, 2]`` on CPU.
     num_original_nodes : int
         Number of real graph nodes before dummy expansion.
+    edge_weights : torch.Tensor, optional
+        Original edge weights with shape ``[E]``.
+    use_graphviz_edge_order : bool, default=False
+        Whether to create virtual chains by scanning original tail nodes then
+        each tail's outgoing edges, matching Graphviz ``class2()``.
+    graphviz_virtual_node_sep : float, optional
+        Point-unit ``GD_nodesep`` value used to size Graphviz plain virtual
+        nodes. When omitted, dummy nodes keep zero size as in the native
+        Brandes-Kopf path.
 
     Returns
     -------
@@ -1041,34 +1061,69 @@ def _expand_long_edges_with_dummy_nodes(
     expanded_sources: list[int] = []
     expanded_targets: list[int] = []
     expanded_weight_values: list[float] = []
-    edge_paths: list[list[int]] = []
+    mincross_edge_penalties: list[int] = []
+    edge_count = int(edge_index.shape[1])
+    edge_paths: list[list[int]] = [[] for _ in range(edge_count)]
     next_dummy_index = num_original_nodes
+    created_node_order: list[int] = (
+        [] if use_graphviz_edge_order else list(range(num_original_nodes))
+    )
+    representative_chains: Dict[Tuple[int, int], Tuple[List[int], List[int]]] = {}
+    edge_order = _edge_processing_order(
+        edge_index=edge_index,
+        num_nodes=num_original_nodes,
+        use_graphviz_edge_order=use_graphviz_edge_order,
+        created_node_order=created_node_order,
+    )
+    sources = edge_index[0].tolist()
+    targets = edge_index[1].tolist()
+    virtual_width = 0.0 if graphviz_virtual_node_sep is None else float(graphviz_virtual_node_sep)
 
-    for edge_idx, (source, target) in enumerate(
-        zip(edge_index[0].tolist(), edge_index[1].tolist())
-    ):
+    for edge_idx in edge_order:
+        source = int(sources[edge_idx])
+        target = int(targets[edge_idx])
         source_layer = int(layer_assignments[source].item())
         target_layer = int(layer_assignments[target].item())
         path = [source]
         previous = source
         orig_weight = float(edge_weights[edge_idx].item()) if edge_weights is not None else 1.0
+        edge_pair = (source, target)
+        if use_graphviz_edge_order and edge_pair in representative_chains:
+            representative_path, representative_segments = representative_chains[edge_pair]
+            edge_paths[edge_idx] = list(representative_path)
+            for segment_index in representative_segments:
+                mincross_edge_penalties[segment_index] += 1
+                expanded_weight_values[segment_index] += orig_weight
+            if graphviz_virtual_node_sep is not None:
+                for dummy_index in representative_path[1:-1]:
+                    dummy_sizes[dummy_index - num_original_nodes][0] += virtual_width
+            continue
+
+        segment_indices: list[int] = []
 
         for layer_index in range(source_layer + 1, target_layer):
             dummy_index = next_dummy_index
             next_dummy_index += 1
+            created_node_order.append(dummy_index)
             expanded_layers[layer_index].append(dummy_index)
-            dummy_sizes.append([0.0, 0.0])
+            dummy_sizes.append([virtual_width, 0.0])
             expanded_sources.append(previous)
             expanded_targets.append(dummy_index)
             expanded_weight_values.append(orig_weight)
+            mincross_edge_penalties.append(1)
+            segment_indices.append(len(expanded_sources) - 1)
             path.append(dummy_index)
             previous = dummy_index
 
         expanded_sources.append(previous)
         expanded_targets.append(target)
         expanded_weight_values.append(orig_weight)
+        mincross_edge_penalties.append(1)
+        segment_indices.append(len(expanded_sources) - 1)
         path.append(target)
-        edge_paths.append(path)
+        edge_paths[edge_idx] = path
+        if use_graphviz_edge_order:
+            representative_chains[edge_pair] = (list(path), segment_indices)
 
     if dummy_sizes:
         expanded_node_sizes = torch.cat(
@@ -1094,7 +1149,118 @@ def _expand_long_edges_with_dummy_nodes(
         node_sizes=expanded_node_sizes,
         edge_paths=edge_paths,
         num_nodes=next_dummy_index,
+        graphviz_node_order=(
+            _graphviz_decompose_node_order(
+                edge_index=expanded_edge_index,
+                num_nodes=next_dummy_index,
+                num_original_nodes=num_original_nodes,
+            )
+            if use_graphviz_edge_order
+            else list(reversed(created_node_order))
+        ),
+        mincross_edge_penalties=mincross_edge_penalties,
     ), expanded_edge_weights
+
+
+def _graphviz_decompose_node_order(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    num_original_nodes: int,
+) -> List[int]:
+    """Return Graphviz ``decompose(g, 1)`` component node order.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Expanded adjacent-rank edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of expanded real plus virtual nodes.
+    num_original_nodes : int
+        Number of real input nodes. Graphviz starts component searches from
+        ``agfstnode`` real nodes; virtual nodes are discovered through fast
+        edges, not used as roots.
+
+    Returns
+    -------
+    list of int
+        Node ids in the component-list order scanned by ``build_ranks``.
+    """
+    outgoing: List[List[int]] = [[] for _ in range(num_nodes)]
+    incoming: List[List[int]] = [[] for _ in range(num_nodes)]
+    for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+        source_id = int(source)
+        target_id = int(target)
+        outgoing[source_id].append(target_id)
+        incoming[target_id].append(source_id)
+
+    processed = 1
+    on_stack = 2
+    marks = [0] * num_nodes
+    node_order: List[int] = []
+    for root in range(num_original_nodes):
+        if marks[root] == processed:
+            continue
+        marks[root] = on_stack
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if marks[node] == processed:
+                continue
+            node_order.append(node)
+            marks[node] = processed
+            for neighbors in (incoming[node], outgoing[node]):
+                for other in reversed(neighbors):
+                    if marks[other] != processed:
+                        marks[other] = on_stack
+                        stack.append(other)
+    return node_order
+
+
+def _edge_processing_order(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    use_graphviz_edge_order: bool,
+    created_node_order: list[int],
+) -> List[int]:
+    """Return edge-chain creation order and record real-node creation.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+    use_graphviz_edge_order : bool
+        Whether to match Graphviz ``class2()`` installation order.
+    created_node_order : list[int]
+        Mutable creation-order list. In graphviz mode this function appends
+        real nodes at the same point that ``class2()`` calls ``fast_node()``
+        before scanning each node's outgoing edges.
+
+    Returns
+    -------
+    list of int
+        Edge indices in the order their virtual chains should be created.
+    """
+    if not use_graphviz_edge_order:
+        return list(range(int(edge_index.shape[1])))
+
+    outgoing: List[List[int]] = [[] for _ in range(num_nodes)]
+    sources = edge_index[0].tolist()
+    for edge_idx, source in enumerate(sources):
+        source_id = int(source)
+        if 0 <= source_id < num_nodes:
+            outgoing[source_id].append(edge_idx)
+
+    edge_order: list[int] = []
+    for node_id, source_edges in enumerate(outgoing):
+        # Graphviz 7.0.5 class2.c calls fast_node(g, n) before processing
+        # agfstout/agnxtout for that same real node, and fast_node prepends to
+        # GD_nlist in fastgr.c. Virtual nodes created below are appended to the
+        # same creation stream and reversed when exposed as GD_nlist order.
+        created_node_order.append(node_id)
+        edge_order.extend(source_edges)
+    return edge_order
 
 
 def _build_edge_routes(
@@ -1199,6 +1365,10 @@ def _build_neighbor_weight_maps(
 
 def _barycenter_ordering(
     layers: List[List[int]],
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    graphviz_node_order: Optional[Sequence[int]],
+    mincross_edge_penalties: Optional[Sequence[int]],
     parents: List[List[int]],
     children: List[List[int]],
     parent_weights: List[Dict[int, float]],
@@ -1216,6 +1386,7 @@ def _barycenter_ordering(
     use_incidence_barycenters: bool,
     center_coordinates: bool,
     use_graphviz_mincross: bool,
+    use_graphviz_node_order: bool,
 ) -> Tuple[List[List[int]], List[torch.Tensor]]:
     """Minimize crossings via repeated barycenter sweeps.
 
@@ -1223,6 +1394,15 @@ def _barycenter_ordering(
     ----------
     layers : list of list of int
         Node ids grouped by layer.
+    edge_index : torch.Tensor
+        Expanded edge list with shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Expanded edge weights with shape ``[E]``. Present for API symmetry
+        with the non-Graphviz sweeps; mincross uses ``ED_xpenalty`` instead.
+    graphviz_node_order : sequence of int, optional
+        Graphviz ``GD_nlist`` scan order for expanded nodes.
+    mincross_edge_penalties : sequence of int, optional
+        Per-edge ``ED_xpenalty`` values aligned to ``edge_index``.
     parents : list of list of int
         Parent adjacency for every node.
     children : list of list of int
@@ -1260,6 +1440,9 @@ def _barycenter_ordering(
     use_graphviz_mincross : bool
         Whether to use Graphviz dot's median/transpose mincross heuristic
         instead of the existing barycenter sweep.
+    use_graphviz_node_order : bool
+        Whether to use ``graphviz_node_order`` for Graphviz ``build_ranks``
+        seed scans.
 
     Returns
     -------
@@ -1273,14 +1456,18 @@ def _barycenter_ordering(
     del seed
     traces: List[torch.Tensor] = []
     if use_graphviz_mincross:
-        edge_sources, edge_targets = _expanded_edge_index_from_neighbors(children)
+        del edge_weights
+        edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
         edge_pairs = [
-            (int(source), int(target)) for source, target in zip(edge_sources, edge_targets)
+            (int(source), int(target))
+            for source, target in zip(edge_cpu[0].tolist(), edge_cpu[1].tolist())
         ]
         ordered_layers = graphviz_mincross(
             ranks=ordered_layers,
             edges=edge_pairs,
             iterations=num_passes,
+            edge_penalties=mincross_edge_penalties,
+            node_order=graphviz_node_order if use_graphviz_node_order else None,
         )
         if trace_every > 0:
             traces.append(
@@ -1807,6 +1994,7 @@ def _graphviz_x_coordinate_assignment(
     if num_nodes == 0:
         return positions.to(output_device)
 
+    graphviz_node_sep = float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
     aux_edges, initial_ranks = _build_graphviz_x_aux_edges(
         layers=layers,
         edge_index=edge_index,
@@ -1814,7 +2002,7 @@ def _graphviz_x_coordinate_assignment(
         node_sizes=node_sizes,
         num_nodes=num_nodes,
         num_original_nodes=num_original_nodes,
-        node_sep=node_sep,
+        node_sep=graphviz_node_sep,
     )
     aux_node_count = num_nodes + int(edge_index.shape[1])
     x_ranks = graphviz_network_simplex_assignment(
@@ -1830,7 +2018,7 @@ def _graphviz_x_coordinate_assignment(
         layers=layers,
         node_sizes=node_sizes,
         num_original_nodes=num_original_nodes,
-        node_sep=node_sep,
+        node_sep=graphviz_node_sep,
         rank_sep=rank_sep,
     )
     x_positions = [value * output_scale for value in x_positions]
@@ -1959,6 +2147,9 @@ def _graphviz_left_width(
         Left half-width in layout units.
     """
     if node >= num_original_nodes:
+        stored_width = float(node_sizes[node, 0].item())
+        if stored_width > 0.0:
+            return stored_width / 2.0
         return node_sep / 2.0
     return float(node_sizes[node, 0].item()) / 2.0
 
@@ -1988,6 +2179,9 @@ def _graphviz_right_width(
         Right half-width in layout units.
     """
     if node >= num_original_nodes:
+        stored_width = float(node_sizes[node, 0].item())
+        if stored_width > 0.0:
+            return stored_width / 2.0
         return node_sep / 2.0
     return float(node_sizes[node, 0].item()) / 2.0
 
@@ -3005,13 +3199,21 @@ class _AssignLayers(Op):
             state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY] = oriented_weights
             state.extras[_SUGIYAMA_REVERSED_MASK_KEY] = reversed_mask
             state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = []
-        elif self.fidelity_mode == "graphviz":
+            state.extras[_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY] = False
+        elif self.fidelity_mode in {"dot", "graphviz_dot", "graphviz"}:
+            rank_edge_weights = (
+                None
+                if self.fidelity_mode == "graphviz"
+                else state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY]
+            )
             layer_assignments, virtual_edges = _graphviz_layer_assignments(
                 edge_index=acyclic_edges,
-                edge_weights=state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY],
+                edge_weights=rank_edge_weights,
                 num_nodes=problem.num_nodes,
             )
+            state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY] = rank_edge_weights
             state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = virtual_edges
+            state.extras[_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY] = self.fidelity_mode == "graphviz"
         else:
             layer_assignments = _longest_path_layering(
                 edge_index=acyclic_edges,
@@ -3023,6 +3225,7 @@ class _AssignLayers(Op):
                 num_nodes=problem.num_nodes,
             )
             state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = []
+            state.extras[_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY] = False
         state.extras[_SUGIYAMA_LAYER_ASSIGNMENTS_KEY] = layer_assignments
         return state
 
@@ -3038,6 +3241,7 @@ class _ExpandDummyNodes(Op):
         f"extras.{_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY}",
         f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
         f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",
+        f"extras.{_SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY}",
     )
     writes: ClassVar[Tuple[str, ...]] = (
         f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
@@ -3075,12 +3279,24 @@ class _ExpandDummyNodes(Op):
         """
         del ctx
 
+        use_graphviz_edge_order = bool(state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY, False))
+        node_sizes = state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY]
+        if use_graphviz_edge_order:
+            node_sizes = state.extras.get(_SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY, node_sizes)
+        graphviz_virtual_node_sep = (
+            float(state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)) * _GRAPHVIZ_POINTS_PER_INCH
+            if use_graphviz_edge_order
+            else None
+        )
+
         expanded_graph, expanded_edge_weights = _expand_long_edges_with_dummy_nodes(
             edge_index=state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY],
             layer_assignments=state.extras[_SUGIYAMA_LAYER_ASSIGNMENTS_KEY],
-            node_sizes=state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY],
+            node_sizes=node_sizes,
             num_original_nodes=problem.num_nodes,
             edge_weights=state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY],
+            use_graphviz_edge_order=use_graphviz_edge_order,
+            graphviz_virtual_node_sep=graphviz_virtual_node_sep,
         )
         state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY] = expanded_graph
         state.extras[_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY] = expanded_edge_weights
@@ -3186,6 +3402,7 @@ class _BarycenterOrdering(Op):
         use_incidence_barycenters: bool = False,
         center_coordinates: bool = True,
         use_graphviz_mincross: bool = False,
+        use_graphviz_node_order: bool = False,
         *,
         config: Optional[_BarycenterOrderingConfig] = None,
     ) -> None:
@@ -3210,6 +3427,9 @@ class _BarycenterOrdering(Op):
         use_graphviz_mincross : bool, default=False
             Use Graphviz dot's median/transpose mincross heuristic instead of
             the default barycenter ordering.
+        use_graphviz_node_order : bool, default=False
+            Use the graphviz-style fast-node list for ``build_ranks`` seed
+            scans.
         config : _BarycenterOrderingConfig | None, optional
             Optional configuration. When provided, it takes precedence over
             the scalar arguments.
@@ -3227,6 +3447,7 @@ class _BarycenterOrdering(Op):
             use_incidence_barycenters=use_incidence_barycenters,
             center_coordinates=center_coordinates,
             use_graphviz_mincross=use_graphviz_mincross,
+            use_graphviz_node_order=use_graphviz_node_order,
         )
 
     def apply(
@@ -3263,6 +3484,10 @@ class _BarycenterOrdering(Op):
 
         ordered_layers, traces = _barycenter_ordering(
             layers=expanded_graph.layers,
+            edge_index=expanded_graph.edge_index,
+            edge_weights=state.extras[_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY],
+            graphviz_node_order=expanded_graph.graphviz_node_order,
+            mincross_edge_penalties=expanded_graph.mincross_edge_penalties,
             parents=state.extras[_SUGIYAMA_PARENTS_KEY],
             children=state.extras[_SUGIYAMA_CHILDREN_KEY],
             parent_weights=state.extras[_SUGIYAMA_PARENT_WEIGHTS_KEY],
@@ -3280,6 +3505,7 @@ class _BarycenterOrdering(Op):
             use_incidence_barycenters=self.config.use_incidence_barycenters,
             center_coordinates=self.config.center_coordinates,
             use_graphviz_mincross=self.config.use_graphviz_mincross,
+            use_graphviz_node_order=self.config.use_graphviz_node_order,
         )
         state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY] = ordered_layers
         state.extras[_SUGIYAMA_TRACES_KEY] = traces
