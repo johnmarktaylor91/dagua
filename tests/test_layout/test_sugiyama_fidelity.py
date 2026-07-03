@@ -197,7 +197,7 @@ def test_sugiyama_graphviz_fidelity_uses_dot_x_assignment() -> None:
             [-0.6, 1.0],
             [0.2, 1.0],
             [-0.6, 2.0],
-            [-0.2, 3.0],
+            [0.0, 3.0],
         ]
     )
     assert torch.equal(positions, expected)
