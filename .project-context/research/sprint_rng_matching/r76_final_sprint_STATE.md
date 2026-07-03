@@ -79,3 +79,69 @@ for retries. 2-attempt max per work item, then park documented.
   (bisection-first per JMT ruling); then umap scalar port; then superior-distinct fairness
   triage (79 rows: match-the-worse-reference where portable); then D1 big-graph hang-safe
   rescore + D2 population tier + D3 final ledger/report/baton.
+- 2026-07-03 ~00:30: TRIAGE PROBES IN + CRITICAL CATCH. ***--seed-refs DID NOT REGENERATE REFS
+  in r75 (my invocation error: ref engines must ALSO be in --engines; r75_fixes has ZERO
+  __for__ rows). r75's fmmm/gem verdicts scored vs STALE refs.*** REF REGEN running correctly:
+  pid 2416761 (via pidfile /tmp/r76_refs.pid), --engines ogdf_fmmm,ogdf_gem --seed-refs same,
+  dir benchmark_100seed_r76_refs, <=300 nodes, log /tmp/r76_refs.log. On done -> rescore
+  fmmm+gem combos (chain + r76_refs last).
+  TRIAGE VERDICTS: fmmm 30 OGDF rows = 24 near-match (RMSD 1e-17..1e-3 vs honest runner --
+  stale-ref accounting + integer-crossing margins; expect mass flips on rescore) + 6 structural
+  ALL-DISCONNECTED (random_dag_50 x3, random_dag_200, multi_component_80,
+  kitchen_sink_platform) + 3 fdp-family rows; RNG primitive proven bit-exact (mt19937+
+  uniform_int_distribution first-20 match); deep_chain steps200 "regression" = stale-ref
+  artifact (identical R stress across step counts). mds: 14 connected = FORMAL FLOOR DOSSIER
+  (machine-precision eigenvalue ties, evd flips coordinates); 4 small disc = hairline
+  (1.8e-06!) near-margin; 4 large disc = within-big-component geometry (DLA packing VINDICATED:
+  zero cross-component crossings). gem: 4 connected = EARLY divergence (round-20 0.144, bbox 3x
+  -> init/RNG-distribution suspect, fixable) + 3 disc/noncanonical -> aggregate tier.
+  WAVE 2 dispatched: B2 fmmm-disconnected parity fix (pid 2440376, worktree dagua-fmmm-disc,
+  branch r76/fmmm-disconnected), B3 gem trace+fix (pid 2440653, worktree dagua-gem-trace,
+  branch r76/gem-fix). Still running: A2 xns-perf (pid 2171417), ref regen.
+  NEXT wake-ups: refs done -> rescore fmmm/gem; A2 done -> verify/merge -> dispatch A1 mincross;
+  B2/B3 done -> verify/merge -> targeted re-bench of touched engines; then umap port + remaining
+  ladder.
+- 2026-07-03 ~02:00: WAVE-2 RESULTS. ***GEM SOLVED***: root cause = update-budget bridge
+  multiplied rounds x num_nodes (25x over-iteration); fix ec52d79; RMSD 1.0 -> 5-7e-08 on ALL
+  probe graphs (float32-rounding = essentially bit-exact); RNG chain verified draw-for-draw;
+  MERGED (fe239cc). XNS-PERF merged (00fbe41): ns.c incremental cutvalues ported, bit-identity
+  8/8; targets partially met -- remaining large-graph hotspot RELOCATED to mincross _transpose
+  (faulthandler-proven). FMMM-DISC attempt 1 resisted honestly (component internals match at
+  0.001; residual = MAAR singleton-packing tie-breaks; 3 partial approaches reverted; notes
+  92b75b7) -- PARKED pending honest rescore. REFS REGEN DONE (53400/53400 ok, r76_refs).
+  ***FMMM RESCORE vs HONEST REFS: 26/33 FLIP.*** Remaining 7 = 4 OGDF disconnected-packing rows
+  (random_dag_50 x3, random_dag_200 -- np-leg/packing residual) + 3 fdp-family rows (route to
+  sfdp/fdp triage). GEM RE-BENCH running (pid 2788296, r76_gem_fix dir; rescore on completion).
+  A1 MINCROSS FINAL dispatched HIGH effort: pid 2807906, worktree dagua-mincross2, branch
+  r76/mincross -- armed w/ attempts-1+2 notes, recoverable patches, dot -v discriminator,
+  GD_nlist + chain-merge mandate, transpose incremental-delta perf mandate; ladder a-e.
+  NEXT: gem bench done -> gem rescore (expect near-total closure); mincross done -> verify ->
+  merge if ladder passes -> sugiyama re-bench (graphviz family); then umap scalar port +
+  superior-distinct fairness triage + big-graph tier + population tier + final ledger.
+- 2026-07-03 ~10:00: ***USAGE PAUSE (JMT out of Claude credits).*** Monitors DETACHED; in-flight
+  jobs left running to completion unattended:
+  * MINCROSS FINAL codex: pid 2807906, log /tmp/r76_cx_mincross.log, worktree
+    ~/.claude/worktrees/dagua-mincross2, branch r76/mincross. ON RESUME: check
+    `kill -0 2807906` / tail the log for CODEX_DONE-equivalent (process gone). Then verify:
+    read r75_findings/r76_IMPL_mincross_NOTES.md (in the WORKTREE), check `git -C <worktree>
+    log --oneline` for commits, ladder a-e evidence. Ladder passed -> merge r76/mincross ->
+    sweep -> launch sugiyama-family re-bench (all classic_sugiyama_* <=300, seeds 100-199,
+    OMP capped, batch timeout 1800) -> sugiyama rescore. Failed -> park notes per 2-attempt
+    protocol (this was the final attempt; disposition = documented port-in-progress).
+  * GEM FULL-FAMILY RESCORE: pid 2895173, log /tmp/r76_gem_rescore.log, output
+    eval_output/fidelity_definitive/r76_gem_rescore.jsonl (315 combos). ON RESUME: read the
+    summary at log tail ("gem full-family rescored=..."); expect near-total closure vs honest
+    refs (gem fix = 5-7e-08 RMSD). Watch for regressions among previously-identical rows
+    (old passes were stale-ref artifacts; honest verdicts supersede).
+  REMAINING r76 QUEUE after those two land (in order): (1) sfdp/fdp-family triage (44 sfdp rows
+  + 3 fmmm-fdp transfers; sfdp default/graphviz_fidelity cluster root-cause -- probe brief
+  pattern: like /tmp/r76_probe_fmmm_triage.md); (2) umap scalar-faithful SGD port (tau_rand
+  stream portable; target rung-3); (3) superior-distinct fairness triage (79 rows -- match-the-
+  worse-reference where portable); (4) fmmm MAAR packing attempt 2 ONLY if the 4 rows still
+  matter post-ledger; (5) big-graph tier hang-safe rescore (D1); (6) population tier (D2);
+  (7) FINAL LEDGER: full re-analysis (fixed loader, all dirs incl r76_refs + r76_gem_fix +
+  any sugiyama dir), official report, gates 0/40, r76_RESULTS.md, baton, memory. Codex-first
+  routing throughout (JMT credits directive).
+  DIRS ADDED in r76 so far: benchmark_100seed_r76_refs (honest ogdf fmmm/gem refs, 53400 ok),
+  benchmark_100seed_r76_gem_fix (post-fix gem, 26700 ok). develop @ 92b75b7+merges (fe239cc gem,
+  00fbe41 xns-perf). fmmm rescore artifact: r76_fmmm_rescore.jsonl (26/33 flip).
