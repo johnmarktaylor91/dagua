@@ -383,6 +383,36 @@ class TestSFDPPipelineFidelity:
 
         _assert_exact_match(classic, pipeline)
 
+    def test_graphviz_fidelity_ignores_edge_weights_from_dot_reference(self) -> None:
+        """Verify Graphviz-fidelity SFDP ignores in-memory edge weights.
+
+        Returns
+        -------
+        None
+            The assertion fails if weighted and unweighted fidelity-mode layouts
+            differ.
+        """
+        edge_index = _path_edge_index(8)
+        edge_weights = torch.linspace(1.0, 4.0, edge_index.shape[1], dtype=torch.float64)
+
+        weighted = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=8,
+            steps=25,
+            seed=100,
+            edge_weights=edge_weights,
+            fidelity_mode="graphviz",
+        )
+        unweighted = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=8,
+            steps=25,
+            seed=100,
+            fidelity_mode="graphviz",
+        )
+
+        _assert_exact_match(weighted, unweighted)
+
     def test_layout_sfdp_pipeline_matches_classic_on_disconnected_graph(self) -> None:
         """Disconnected components and isolated nodes should match exactly."""
         edge_index = _disconnected_edge_index()
