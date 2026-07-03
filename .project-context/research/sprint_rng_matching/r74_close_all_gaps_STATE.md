@@ -240,3 +240,60 @@ Overlay re-bench must match base SEED COUNT. ADVERSARIAL-review every research f
   DEFERRED. Disconnected-packing = documented DEAD-END for maxent/mds. OPTION 1 eval re-score RUNNING
   (pid 1483163, 409 divergent on <=300 graphs, corrected metrics, 9-dir chain NO r74). Contended (torchlens
   restarted 20 jobs) but progressing. On done: count rung-4 -> 3Q reclassifications + confirm controls 0/40.
+- 2026-06-23 ~14:00: OPTION 1 RE-SCORE (Phase 1 metrics) DONE on 409 divergent <=300-graph combos.
+  RESULT: scale-alpha fix ALONE flips ~0 at strict margins (confirms CX2/CX3 over O2 -- scale artifact is
+  REAL but not the decisive lever). The decisive lever is MARGIN MISCALIBRATION (the arbitrary 2% stress /
+  0.02 np margins are TIGHTER than the references' own seed-to-seed spread). This is exactly JMT's pushback
+  ("quality can't be worse from mere rounding -- it averages out over 100 seeds"). -> Phase 2 needed.
+- 2026-06-23 ~15:30: EVAL-FIX PHASE 2 (variance-tied margins) IMPLEMENTED + MERGED. Branch r74/eval-phase2 ->
+  develop. Commits: 729c3b4 (fix(eval): gate 3q margins by reference variance), merge 89ed3c3. Design:
+  * VARIANCE-TIED MARGIN: margin = max(current_floor, reference_self_spread) where reference_self_spread =
+    sample std (ddof=1) of the reference's own per-seed metric values. Ties the equivalence bound to the
+    reference's OWN noise instead of an arbitrary constant. Persisted fields: battery_stress_ref_self_spread,
+    cross_ref_self_spread, np_ref_self_spread (analysis.py).
+  * CANONICAL PRE-SCREEN: quality_reference_canonical gate (plain_mean_W_R threshold) -- only CANONICAL
+    references (graphviz/OGDF/igraph/umap-learn defaults) can earn a certified 3Q; NON-canonical refs route
+    to an EXPLORATORY tier (quality_identical_exploratory) that does NOT count. Prevents laundering via a
+    weird reference.
+  * Regression test tests/test_quality_battery_correctness.py extended (9 passed: chance fails, worse fails,
+    canonical-equal passes, stochastic-equal excluded, scaled passes).
+  RESULT (the r74 headline): **72 of 409 divergent combos reclassify to quality-identical** under the
+  corrected metrics -- fmmm 33, sfdp 20, gem 16, drl 2, umap 1. ALL 72 canonical-certified; **0 exploratory
+  leaks**; anti-laundering **gate_5 held 0/40** (chance+negative controls). JMT's intuition VALIDATED: the
+  2% margin was tighter than the references' seed noise; these combos are quality-neutral, not worse.
+- 2026-06-23 ~16:00: r74 SPRINT CLOSED. Net = a genuine MIXED-BUT-NET-POSITIVE round whose real win is the
+  EVAL-PIPELINE CORRECTIONS (JMT's metric-audit pushback), not the layout fixes.
+  LAYOUT FIXES (final disposition): KEPT -- 6f8cff5 sfdp p_neg2 clamp (the one real layout win; made combos
+  bit-exact), 369ae1c sfdp disconnected packing (connected path byte-identical), 7cf7f83 fmmm fdp vectorize
+  (perf), 1e6de1e umap nn30 clamp (crash recovery), 6563d98 sugiyama iterative cycle-break, 169ce7b sugiyama
+  igraph LP objective (igraph variants only). REVERTED -- e756688 maxent disconnected (Option 2 confirmed
+  OGDF StressMinimization does NOT component-split -> blanket fix was pure harm, broke 25 bit-exact combos),
+  91ccaab classical_mds disconnected (igraph uses stochastic DLA merge not TileToRows -> faithful fix is a
+  multi-day DLA port, deferred). EVAL FIXES: all merged + live (52fc9ae Phase 1, 89ed3c3 Phase 2).
+  REPO: develop == origin/develop == **89ed3c3**, pushed/public. Clean (only untracked scripts/r71_tuesday_ping.sh).
+
+## QUEUED LEADS for the NEXT sprint (Fable) -- ROI notes
+1. **Extend variance-margins to the ~165 huge-graph divergent combos** (>300 nodes) that Phase 2's <=300
+   re-score never touched. NEEDS a hang-safe scoring path (crossings/APSP grind forever on ba_2000/ba_5000;
+   the r74 analysis hung at combo ~24 = ba_2000 until we filtered to <=300). Likely more reclassifications.
+2. **Crossings-metric audit.** Post-Phase-2, CROSSINGS is now the binding battery leg (only ~42% of combos
+   pass it) -- stress/np are largely satisfied. Audit how crossings-equivalence is computed the same way we
+   audited stress (JMT's metric-audit lens). May be another margin/scale artifact hiding real quality-neutrality.
+3. **sugiyama position.c network-simplex x-coord port** -- THE real prize (~231 genuine divergent, NOT
+   artifact; ba_500 dagua 22344 crossings vs igraph 2805). Deep Graphviz lib/dotgen/position.c + mincross.c
+   port (virtual/slack node weights, set_xcoords, rank seeding, flat-edge, port-order tie-breaks). Multi-day.
+   Source: /home/jtaylor/projects/_references/graphviz/lib/dotgen/{position,mincross,coord}.c.
+4. **classical_mds DLA-merge port** -- igraph splits disconnected graphs + merges components via stochastic
+   Diffusion-Limited Aggregation (NOT TileToRows). Faithful fix = multi-day DLA port (naive attempt HUNG).
+5. **sfdp gv_random** -- graphviz uses rejection-sampling; dagua uses raw modulo (ops/sfdp.py:247-253). May
+   close some of the "floor" sfdp tail if the RNG stream can be matched.
+6. **Population two-sample equivalence test** for stochastic-ref combos -- the info-theoretic LAUNDERING
+   LIMIT (O4+CX4): stochastic-ref floor combos can't be per-combo 3Q-certified without certifying chance;
+   the honest claim there is AGGREGATE quality-neutrality via a 2-sample equivalence test, not per-combo 3Q.
+
+## LOOSE ENDS (two, both honest, neither blocks the sprint)
+- **gate_6 positive-control data** (reference-self-split) reads 0 in the tracked-dir report because the
+  control data isn't committed -- codex validated separately that it PASSES (quality_identical_raw=True,
+  battery_p_iut=7.96e-16). Regenerate + commit the control data so the tracked report shows it green.
+- **gate_3 negative calibration** -- PRE-EXISTING (not a Phase-1/2 regression): report exits nonzero on
+  gate_3_negative primary-rate 90% vs 95% target. Orthogonal to 3Q laundering (gate_5). Separate calibration fix.
