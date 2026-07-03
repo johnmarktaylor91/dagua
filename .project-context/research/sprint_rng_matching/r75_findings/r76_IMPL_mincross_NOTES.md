@@ -641,3 +641,175 @@ and must not be committed under this task contract.
   geometry. The next useful trace is the full `position.c` auxiliary graph:
   ordered LR edges, slack nodes, slack initial ranks, and edge-pair constraint
   insertion order.
+
+## A4c: auxiliary x-graph parity
+
+Date: 2026-07-03
+Commit: none. Gate B failed; completion contract requires no new commit.
+Base HEAD: `525327d`.
+
+### Source trace
+
+Pinned Graphviz 7.0.5 source was read with
+`git -C /home/jtaylor/projects/_references/graphviz show 7.0.5:<path>`.
+The reference clone was not modified. I also archived 7.0.5 into
+`/tmp/gv750-a4c`, instrumented only that scratch copy, built `dot_builtins`,
+captured traces, and then removed the scratch tree before finishing.
+
+Relevant source anchors:
+
+- `lib/dotgen/position.c:171-188`: `make_aux_edge()` rounds `len` into
+  `ED_minlen`, sets `ED_weight`, and appends the edge with `fast_edge()`.
+- `lib/dotgen/position.c:191-209`: `allocate_aux_edges()` saves current
+  `ND_in` and `ND_out` as `ND_save_in` and `ND_save_out` before adding x-stage
+  aux constraints.
+- `lib/dotgen/position.c:230-259`: `make_LR_constraints()` seeds same-rank
+  `ND_rank` values and emits zero-weight LR aux edges from
+  `ND_rw(left) + ND_lw(right) + GD_nodesep`.
+- `lib/dotgen/position.c:323-347`: `make_edge_pairs()` scans `GD_nlist` and
+  each node's saved outgoing fast-edge list, creates one slack node per saved
+  edge, emits two positive-weight aux edges, and seeds the slack node rank from
+  the endpoint ranks.
+- `lib/common/ns.c:907-955`: `rank(g, 2, nsiter2(g))` preserves feasible
+  initial ranks when possible, builds the feasible tree, pivots, then runs
+  `LR_balance()`.
+- `lib/dotgen/class2.c:35-50` and `:146-154`: plain virtual nodes receive
+  `GD_nodesep / 2` on both sides; merged long-edge chains increment internal
+  virtual widths.
+- `lib/dotgen/fastgr.c:60-75` and `:177-187`: `fast_edge()` appends to tail
+  `ND_out` and head `ND_in`; `fast_node()` prepends to `GD_nlist`.
+- `lib/dotgen/decomp.c:24-44` and `:92-115`: decomposition rebuilds
+  `GD_nlist` in component DFS order before later stages scan it.
+
+### Aux trace evidence
+
+The scratch Graphviz trace dumped aux edge creation order, node ranks after
+`make_edge_pairs()`, and final x ranks for the two requested calibration
+graphs. I captured Dagua's current aux builder by wrapping
+`_build_graphviz_x_aux_edges()` in the graphviz-fidelity pipeline with the
+same benchmark variant parameters.
+
+Counts match, so the current port is not missing whole classes of aux edges on
+these two traces:
+
+| Graph | Reference aux edges | Reference LR | Reference edge-pair edges | Dagua aux edges | Dagua LR | Dagua edge-pair edges |
+|---|---:|---:|---:|---:|---:|---:|
+| `weighted_karate_34` | 375 | 91 | 284 | 375 | 91 | 284 |
+| `dense_pair_50` | 2121 | 573 | 1548 | 2121 | 573 | 1548 |
+
+The first concrete mismatch is in LR minlen/rank seeding from the actual
+Graphviz `ND_lw` and `ND_rw` values, before edge-pair ordering can explain the
+residual:
+
+| Graph | First reference LR minlens | First Dagua LR minlens | Interpretation |
+|---|---:|---:|---|
+| `weighted_karate_34` | `146, 146, 146, 146, 136, 136, 146, 146, 146, 146` | `144, 144, 144, 144, 135, 135, 144, 144, 144, 144` | Dagua's point boxes/virtual widths still seed smaller LR ranks. |
+| `dense_pair_50` | `177, 141, 146, 182, 182, 141, 141, 146, 146, 146` | `175, 139, 144, 180, 180, 139, 139, 144, 144, 144` | Same first mismatch class, including long-label rows. |
+
+Representative final reference x ranks from the scratch trace:
+
+| Graph | First final reference x-rank rows |
+|---|---|
+| `weighted_karate_34` | `n0:379`, `%0:-1351`, `%0:-1205`, `%0:-1059`, `%0:-767`, `%0:-248`, `n1:24`, `%0:160`, `%0:306`, `%0:452` |
+| `dense_pair_50` | `n0:916`, `%0:452`, `n1:916`, `%0:1354`, `%0:1646`, `%0:-977`, `%0:452`, `%0:634`, `n2:775`, `%0:916` |
+
+Conclusion: A4c narrowed the residual to exact x-aux rank seeding values from
+Graphviz's in-memory node half-widths. Saved fast-edge traversal remains
+source-relevant, but a Dagua-side saved-out-order patch was not sufficient and
+therefore was not retained.
+
+### Attempted patch, not kept
+
+I tested a narrow graphviz-only patch that threaded `expanded_graph.graphviz_node_order`
+into `_graphviz_x_coordinate_assignment()` and made
+`_build_graphviz_x_aux_edges()` allocate slack nodes by saved outgoing fast-edge
+traversal instead of raw tensor edge order. A regression test verified the
+intended slack insertion order on a synthetic graph.
+
+The patch was reverted because it failed Gate B:
+
+| Graph | A4b D/R crossings | A4c probe D/R crossings | Crossing movement | A4b D/R stress | A4c probe D/R stress | Stress movement |
+|---|---:|---:|---|---:|---:|---|
+| `dense_pair_50` | 343 / 331 | 341 / 331 | toward | 0.692804 / 0.698054 | 0.691155 / 0.698054 | away |
+| `weighted_karate_34` | 108 / 108 | 108 / 108 | exact | 0.634794 / 0.634682 | 0.634794 / 0.634682 | same/toward-equivalent |
+| `hub_skip_superfan` | 2 / 2 | 2 / 2 | exact | 0.543615 / 0.540018 | 0.543615 / 0.540018 | same/toward-equivalent |
+| `heavy_tail_weights_50` | 63 / 67 | 63 / 67 | same away | 0.727680 / 0.725004 | 0.727680 / 0.725004 | same away |
+
+Gate B remains 2/4 by the strict "crossings and stress both move toward
+reference" reading. `dense_pair_50` improved crossings but stress moved farther
+from reference, and `heavy_tail_weights_50` did not move.
+
+Benchmark command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --workers 1 --timeout 360 --watchdog-timeout 720 \
+  --seeds 5 --seed-start 100 --seed-refs graphviz_dot \
+  --graphs dense_pair_50,weighted_karate_34,hub_skip_superfan,heavy_tail_weights_50 \
+  --engines classic_sugiyama_graphviz_fidelity --variants \
+  --output-dir /tmp/r76_a4c_calib
+```
+
+Output:
+
+```text
+[benchmark] Done: 20 total, 20 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+The scoring command regenerated Graphviz references through
+`GraphvizDot.layout_with_variant(..., {"maxiter": 24, "vgap": 1.0, "hgap": 1.0})`
+and used `count_crossings()` plus `sampled_stress()`.
+
+### Competitor-helper review
+
+`dagua/eval/competitors/classic_competitor.py` remains acceptable as engine
+input plumbing:
+
+- `_graphviz_dot_node_sizes()` is only passed when
+  `fn_name == "layout_sugiyama_pipeline"` and
+  `extra_kwargs.get("fidelity_mode") == "graphviz"`.
+- It is supplied through `graphviz_node_sizes`, which
+  `layout_sugiyama_pipeline()` stores only for graphviz fidelity mode.
+- The benchmark scoring path still uses `graph.node_sizes` in
+  `scripts/run_benchmark.py` and `dagua/eval/pipeline_io.py`; the helper does
+  not feed scoring metrics or other engine inputs.
+
+No relocation was needed.
+
+### Gate status
+
+- Gate a: not rerun after the failed x-stage-only probe. The probe did not
+  alter rank assignment or mincross ordering; A4b's inherited state remains
+  the applicable 5/6 exact discriminator.
+- Gate b: failed, as shown above. Required small-graph movement remains 2/4.
+- Gate c: not run because Gate B failed and the code patch was reverted.
+- Gate d:
+  - During the reverted probe,
+    `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check dagua/layout/ops/sugiyama.py tests/test_layout/test_dot_rank.py --fix`
+    passed after one automatic import/format fix.
+  - During the reverted probe,
+    `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/test_dot_rank.py -q`
+    passed: 7 passed, 3 warnings.
+  - The required broader pytest commands were not run because Gate B failed
+    and no code patch was retained.
+- Gate e: no commit made, no push, no merge. Commit shas: none beyond base
+  `525327d`.
+
+### Concerns
+
+- The scratch reference trace shows exact aux edge counts but not exact LR
+  minlen values. The remaining mismatch is therefore not "missing edge-pair
+  construction"; it is exact `ND_lw`/`ND_rw` rank seeding feeding
+  `make_LR_constraints()`, plus any downstream tie effects in `rank(g, 2, ...)`.
+- The failed saved-out traversal probe moved one metric on one graph but did
+  not meet the sprint gate. It should not be revived without first matching
+  the traced LR minlens and initial ranks.
+
+### Knowledge
+
+- For `weighted_karate_34` and `dense_pair_50`, Dagua now matches the
+  reference aux edge counts exactly but still starts network simplex from
+  different integer LR constraints.
+- A source-faithful slack insertion order alone is insufficient: it improves
+  `dense_pair_50` crossings from 343 to 341 but worsens stress, leaving the
+  overall movement gate unchanged.
