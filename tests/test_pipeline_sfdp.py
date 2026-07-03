@@ -20,6 +20,7 @@ from dagua.layout.ops.sfdp import (
     GraphData,
     GraphvizRandom,
     SFDPHierarchyConfig,
+    _build_graph,
 )
 from dagua.layout.ops.state import (
     ExecutionPlan,
@@ -320,6 +321,24 @@ class TestSFDPPipelineFidelity:
         assert [level.num_nodes for level in graphs] == [8, 4]
         assert mappings[0].tolist() == [0, 0, 1, 1, 2, 2, 3, 3]
 
+    def test_graphviz_order_matches_csr_symmetrization_neighbor_order(self) -> None:
+        """Graphviz fidelity graph rows should match 7.0.5 matrix row order."""
+        edge_index = _edge_index_from_edges(
+            [
+                (0, 7),
+                (0, 1),
+                (10, 11),
+                (7, 11),
+                (0, 11),
+                (11, 12),
+            ]
+        )
+
+        graph = _build_graph(edge_index=edge_index, num_nodes=13, graphviz_order=True)
+
+        assert graph.adjacency[0] == [(1, 1.0), (7, 1.0), (11, 1.0)]
+        assert graph.adjacency[11] == [(12, 1.0), (0, 1.0), (7, 1.0), (10, 1.0)]
+
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
         [(0, 123), (1, 123), (2, 123), (5, 123), (5, 99), (20, 123), (50, 7)],
@@ -363,6 +382,36 @@ class TestSFDPPipelineFidelity:
         )
 
         _assert_exact_match(classic, pipeline)
+
+    def test_graphviz_fidelity_ignores_edge_weights_from_dot_reference(self) -> None:
+        """Verify Graphviz-fidelity SFDP ignores in-memory edge weights.
+
+        Returns
+        -------
+        None
+            The assertion fails if weighted and unweighted fidelity-mode layouts
+            differ.
+        """
+        edge_index = _path_edge_index(8)
+        edge_weights = torch.linspace(1.0, 4.0, edge_index.shape[1], dtype=torch.float64)
+
+        weighted = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=8,
+            steps=25,
+            seed=100,
+            edge_weights=edge_weights,
+            fidelity_mode="graphviz",
+        )
+        unweighted = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=8,
+            steps=25,
+            seed=100,
+            fidelity_mode="graphviz",
+        )
+
+        _assert_exact_match(weighted, unweighted)
 
     def test_layout_sfdp_pipeline_matches_classic_on_disconnected_graph(self) -> None:
         """Disconnected components and isolated nodes should match exactly."""
