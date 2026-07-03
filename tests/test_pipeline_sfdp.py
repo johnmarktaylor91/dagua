@@ -20,6 +20,7 @@ from dagua.layout.ops.sfdp import (
     GraphData,
     GraphvizRandom,
     SFDPHierarchyConfig,
+    _build_graph,
 )
 from dagua.layout.ops.state import (
     ExecutionPlan,
@@ -319,6 +320,24 @@ class TestSFDPPipelineFidelity:
         mappings: list[torch.Tensor] = final_state.extras[_MAPPING_KEY]
         assert [level.num_nodes for level in graphs] == [8, 4]
         assert mappings[0].tolist() == [0, 0, 1, 1, 2, 2, 3, 3]
+
+    def test_graphviz_order_matches_csr_symmetrization_neighbor_order(self) -> None:
+        """Graphviz fidelity graph rows should match 7.0.5 matrix row order."""
+        edge_index = _edge_index_from_edges(
+            [
+                (0, 7),
+                (0, 1),
+                (10, 11),
+                (7, 11),
+                (0, 11),
+                (11, 12),
+            ]
+        )
+
+        graph = _build_graph(edge_index=edge_index, num_nodes=13, graphviz_order=True)
+
+        assert graph.adjacency[0] == [(1, 1.0), (7, 1.0), (11, 1.0)]
+        assert graph.adjacency[11] == [(12, 1.0), (0, 1.0), (7, 1.0), (10, 1.0)]
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
