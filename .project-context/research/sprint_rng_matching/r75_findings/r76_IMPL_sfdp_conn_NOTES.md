@@ -245,3 +245,222 @@ No commit was created because the final Tier 2 gate did not pass.
   comparisons and then running the required 1-ULP perturbation experiment.
 - The `/tmp/gv750-trace` worktree was removed with:
   `git -C /home/jtaylor/projects/_references/graphviz worktree remove /tmp/gv750-trace --force`.
+
+## Round 2: post-hierarchy bisection
+
+Date: 2026-07-03
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-sfdp-conn`
+
+### Trace Rebuild
+
+Rebuilt a scratch-only Graphviz 7.0.5 tree under `/tmp/gv750-conn2` from the
+pinned reference archive:
+
+```text
+mkdir -p /tmp/gv750-conn2
+git -C /home/jtaylor/projects/_references/graphviz archive 7.0.5 | tar -x -C /tmp/gv750-conn2
+cmake -S /tmp/gv750-conn2 -B /tmp/gv750-conn2-build -DCMAKE_BUILD_TYPE=RelWithDebInfo ...
+cmake --build /tmp/gv750-conn2-build --target dot_builtins -j2
+```
+
+Instrumentation was gated by `GV_SFDP_TRACE=1` and added only to the scratch
+tree. It dumped symmetrized matrix rows with values, fine-to-coarse maps,
+coarse matrix rows, coarsest random coordinates and K, per-node force vectors,
+step updates, convergence exits, and prolongation multiply/interpolate/jitter
+outputs.
+
+DOT input was generated with
+`dagua/eval/competitors/graphviz_competitor.py::_graph_to_dot`; layout params
+were `maxiter=500`, `theta=0.6`, `repulsiveforce=-1.0`, `seed/start=100`.
+
+Pinned 7.0.5 source used for the ruling:
+
+- `lib/neatogen/adjust.c::makeMatrix` reads edge `weight` only when the DOT
+  edge has a `weight` attribute; otherwise it stores `1`.
+- `lib/sfdpgen/Multilevel.c::maximal_independent_edge_set_heavest_edge_pernode_supernodes_first`
+  compares sparse matrix values when choosing heavy-edge partners.
+- `lib/sfdpgen/spring_electrical.c::spring_electrical_embedding` matched the
+  Dagua first-iteration force path after the matrix fix.
+
+### First Divergence
+
+The first divergent quantity for both target graphs was earlier than
+prolongation: the base Graphviz sparse matrix was unit-weighted because the
+benchmark DOT exporter does not emit edge `weight` attributes, while Dagua's
+Graphviz-fidelity hierarchy consumed `DaguaGraph.edge_weights`.
+
+`real_karate_34`, seed 100:
+
+```text
+Graphviz row 0: 1=1 2=1 3=1 4=1 5=1 6=1 7=1 8=1 10=1 11=1 12=1 13=1 17=1 19=1 21=1 31=1
+Dagua old row 0: 1=4 2=5 3=3 4=3 5=3 6=3 7=2 8=2 10=2 11=3 12=1 13=3 17=2 19=2 21=2 31=2
+```
+
+This changed the first cluster map:
+
+```text
+Graphviz/Dagua fixed levels: [34, 19, 10, 6]
+Dagua old weighted levels: [34, 19, 12, 8, 4]
+
+Graphviz/Dagua fixed level-1 map head:
+[3,10,9,11,12,5,5,14,9,15,12,3,16,11,0,0,17,2,0,10,0,2,1,13,8,8,7,13,18,7,6,4,4,6]
+
+Dagua old weighted level-1 map head:
+[3,10,9,13,12,5,5,14,9,15,12,3,13,11,0,0,16,2,0,10,0,2,1,17,8,4,7,8,18,7,6,4,6,11]
+```
+
+`weighted_chain_20`, seed 100:
+
+```text
+Graphviz row 1: 2=1 0=1
+Dagua old row 1: 2=1.222222 0=1
+```
+
+The first-level pairings were unchanged, but the weighted matrix diverged on
+the next coarsening pass:
+
+```text
+Graphviz/Dagua fixed levels: [20, 10, 6, 4]
+Dagua old weighted levels: [20, 10, 5]
+
+Graphviz/Dagua fixed level-2 map:
+[3,1,0,4,3,1,2,0,5,2]
+
+Dagua old weighted level-2 map:
+[4,1,0,4,3,3,2,0,1,2]
+```
+
+After the fix, the coarsest seed-100 spring-electrical entry point matched the
+Graphviz trace:
+
+```text
+real_karate_34 K: Graphviz 0.35292720920943993, Dagua 0.35292720920943993
+real_karate_34 iter 1 Fnorm: Graphviz 5.8258649681207597, Dagua 5.825864968120761
+
+weighted_chain_20 K: Graphviz 0.29336195627395734, Dagua 0.29336195627395734
+weighted_chain_20 iter 1 Fnorm: Graphviz 1.2236919371330941, Dagua 1.223691937133094
+```
+
+### Fix
+
+Changed only Graphviz-fidelity SFDP hierarchy construction:
+`BuildGraphvizSFDPMatrixHierarchy` now passes `edge_weights=None` into
+`_build_graph(..., graphviz_order=True)`.
+
+Rationale: the current Graphviz reference path uses `_graph_to_dot`/DOT without
+edge `weight` attributes. Per Graphviz 7.0.5 `makeMatrix`, missing `weight`
+parses as unit matrix value. Non-fidelity SFDP still consumes Dagua edge
+weights; regression coverage preserves that behavior.
+
+Added regression coverage:
+
+```text
+tests/test_pipeline_sfdp.py::TestSFDPPipelineFidelity::test_graphviz_fidelity_ignores_edge_weights_from_dot_reference
+```
+
+### RMSD Probe
+
+Reference: installed Graphviz 7.0.5 `dot` via the benchmark adapter with
+`maxiter=500`, `theta=0.6`, `repulsiveforce=-1.0`.
+
+| Graph | Fixed RMSD values, seeds 100-104 | Fixed median | Fixed max |
+|---|---|---:|---:|
+| real_karate_34 | 0.087372, 0.067060, 0.079972, 0.046834, 0.081407 | 0.079972 | 0.087372 |
+| weighted_chain_20 | 0.047562, 0.008559, 0.171647, 0.299452, 0.022810 | 0.047562 | 0.299452 |
+| weighted_karate_34 | 0.087372, 0.067060, 0.079972, 0.046834, 0.081407 | 0.079972 | 0.087372 |
+| sparse_pair_50 | 0.064315, 0.427182, 0.028040, 0.098315, 0.042548 | 0.064315 | 0.427182 |
+| real_lesmis_77 | 0.112186, 0.816942, 0.155157, 0.279478, 0.587596 | 0.279478 | 0.816942 |
+
+Interpretation: the named op difference materially reduces the two target
+medians from the round-1 residuals (`0.3898` to `0.079972`,
+`0.2390` to `0.047562`) but does not produce a near-zero collapse. This is a
+valid op fix, not a final floor claim.
+
+### Residual Sensitivity
+
+With the matrix fix applied, coarsest iterations matched Graphviz until
+float-rounding-scale differences:
+
+```text
+real_karate_34 first coarsest mismatch: iteration 24 Fnorm
+  Dagua 0.570184693020715
+  Graphviz 0.5701846923951516
+  delta 6.255634e-10
+
+weighted_chain_20 first coarsest mismatch: iteration 141 Fnorm
+  Dagua 0.3177265807738041
+  Graphviz 0.3177265799686586
+  delta 8.051455e-10
+```
+
+Required 1-ULP perturbation experiment, nudging one coarsest init coordinate by
+one ULP and comparing final Dagua layouts, showed the residual path is highly
+sensitive:
+
+```text
+real_karate_34 seed 100: max RMSD 0.097511 from coord (0, y, -1 ULP)
+real_karate_34 seed 101: max RMSD 0.138411 from coord (5, x, +1 ULP)
+real_karate_34 seed 104: max RMSD 0.098316 from coord (2, x, +1 ULP)
+
+weighted_chain_20 seed 102: max RMSD 0.220864 from coord (3, y, +1 ULP)
+weighted_chain_20 seed 104: max RMSD 0.433408 from coord (1, x, -1 ULP)
+```
+
+This supports a residual numerical-sensitivity concern after the op fix, but it
+does not by itself close the remaining residuals as a floor because not every
+seed's observed Dagua-vs-Graphviz gap was reproduced by the sampled 1-ULP
+coordinate nudges.
+
+### Test Results
+
+Passed:
+
+```text
+ruff check . --fix
+All checks passed!
+
+mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+
+pytest -k sfdp -x --tb=short -q
+28 passed, 3125 deselected, 34 warnings in 21.82s
+```
+
+Not green:
+
+```text
+pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q
+277 passed, 96 warnings in 1130.63s (0:18:50), then KeyboardInterrupt in
+matplotlib/font_manager.py while loading fonts.
+
+MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q
+No assertion failure was observed, but the command was externally terminated
+with exit code -1 before pytest emitted a summary.
+
+MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q \
+  -m "not slow and not benchmark and not rare" \
+  --deselect tests/test_bench_large.py::test_hierarchy_checkpoint_rejects_incomplete_manifest
+FAILED tests/test_classic_competitor.py::test_classic_competitor_names_match_expected_values
+assert {'classic_cir...ic_dot', ...} == {'classic_cir...ic_dot', ...}
+Extra items in the left set:
+'classic_fcose'
+1 failed, 115 passed, 89 deselected, 1 xfailed, 42 warnings in 20.74s
+```
+
+The `classic_fcose` expected-name failure is outside this SFDP task and was not
+patched here.
+
+### Commit
+
+No commit created because the required final gate did not pass.
+
+### Concerns and Follow-Up
+
+- This round names and fixes the first post-CSR divergence for the weighted
+  connected residuals: missing Graphviz DOT `weight` attributes versus Dagua
+  fidelity-mode weighted sparse matrices.
+- Residual connected SFDP gaps remain after the fix. The next layer appears to
+  be chaotic amplification of sub-nanoscopic coarsest force differences, but
+  the sampled 1-ULP experiment is not complete enough to claim a floor.
+- The scratch `/tmp/gv750-conn2` tree was removed at the end of the task.
