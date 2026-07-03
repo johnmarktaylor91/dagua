@@ -233,7 +233,8 @@ def _resolve_ogdf_gem_update_budget(
     """
     if requested_rounds <= 0 or num_nodes <= 0:
         return 0
-    return min(int(requested_rounds) * int(num_nodes), int(max_rounds))
+    del num_nodes
+    return min(int(requested_rounds), int(max_rounds))
 
 
 def _mt19937_first_uint32(seed: int) -> int:
