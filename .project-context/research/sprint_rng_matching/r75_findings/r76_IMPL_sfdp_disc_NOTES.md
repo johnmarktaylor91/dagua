@@ -442,4 +442,4 @@ sanctioned SFDP fixup scope.
 
 ### Commit
 
-Commit SHA: 8647d47
+Implementation commit SHA: `622420c`.
