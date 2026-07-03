@@ -351,7 +351,10 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
         base_graph = _build_graph(
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
-            edge_weights=problem.edge_weights,
+            # The Graphviz reference path used by the benchmark DOT exporter
+            # does not emit edge ``weight`` attributes, so makeMatrix sees a
+            # unit-valued sparse matrix even when DaguaGraph carries weights.
+            edge_weights=None,
             graphviz_order=True,
         )
         state.extras[_BASE_GRAPH_KEY] = base_graph
