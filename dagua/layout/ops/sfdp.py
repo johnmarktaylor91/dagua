@@ -187,6 +187,21 @@ class GraphvizRandom:
         self._state.append(next_value)
         return next_value >> 1
 
+    def reseed(self, seed: int) -> None:
+        """Reset the stream to Graphviz ``srand(seed)`` state.
+
+        Parameters
+        ----------
+        seed : int
+            Seed supplied to Graphviz's ``srand``.
+
+        Returns
+        -------
+        None
+            The generator state is replaced in place.
+        """
+        self._state = self._initialize_state(seed=seed)
+
     def drand(self) -> float:
         """Return Graphviz ``drand`` as ``rand() / RAND_MAX``.
 
