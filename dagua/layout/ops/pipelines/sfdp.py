@@ -54,6 +54,7 @@ _DEFAULT_P = -1.0
 _GRAPHVIZ_MAX_CLUSTER_SIZE = 4
 _GRAPHVIZ_FIDELITY_MODE = "graphviz"
 _GRAPHVIZ_MIN_DISTANCE = 1.0e-15
+_GRAPHVIZ_SHARED_RNG_KEY = "sfdp_graphviz_shared_rng"
 SFDPFidelityMode = Optional[Union[bool, str]]
 
 
@@ -346,7 +347,13 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
             State with SFDP graph levels, mappings, and generator populated.
         """
         del ctx
-        permutation_generator = GraphvizRandom(seed=1)
+        shared_generator = state.extras.get(_GRAPHVIZ_SHARED_RNG_KEY)
+        if shared_generator is not None and not isinstance(shared_generator, GraphvizRandom):
+            raise TypeError("_GRAPHVIZ_SHARED_RNG_KEY must contain a GraphvizRandom instance.")
+        if isinstance(shared_generator, GraphvizRandom):
+            permutation_generator = shared_generator
+        else:
+            permutation_generator = GraphvizRandom(seed=1)
 
         base_graph = _build_graph(
             edge_index=problem.edge_index,
@@ -375,9 +382,16 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
 
         state.extras[_GRAPH_KEY] = graphs
         state.extras[_MAPPING_KEY] = mappings
-        # Graphviz coarsening consumes the process-default rand stream before
-        # spring_electrical.c resets srand(ctrl->random_seed) for random_start.
-        state.extras[_GENERATOR_KEY] = GraphvizRandom(seed=problem.seed)
+        # Graphviz coarsening consumes the process rand stream before
+        # spring_electrical.c conditionally calls srand(ctrl->random_seed) for
+        # random_start. In the disconnected loop the same rand object must be
+        # reseeded in place so prolongation advances the stream seen by the
+        # next component's coarsening.
+        if isinstance(shared_generator, GraphvizRandom):
+            shared_generator.reseed(seed=problem.seed)
+            state.extras[_GENERATOR_KEY] = shared_generator
+        else:
+            state.extras[_GENERATOR_KEY] = GraphvizRandom(seed=problem.seed)
         return state
 
 
@@ -1001,6 +1015,7 @@ def _layout_graphviz_sfdp_components(
     torch.Tensor
         Packed parent coordinates with shape ``[N, 2]``.
     """
+    shared_generator = GraphvizRandom(seed=1)
     component_positions: list[torch.Tensor] = []
     component_edges: list[torch.Tensor] = []
     for component in components:
@@ -1010,19 +1025,26 @@ def _layout_graphviz_sfdp_components(
             component=component,
         )
         local_sizes = node_sizes[component] if node_sizes is not None else None
-        local_pos = layout_sfdp_pipeline(
+        problem = LayoutProblem(
             edge_index=local_edges,
             num_nodes=len(component),
             node_sizes=local_sizes,
-            steps=steps,
+            edge_weights=local_weights,
             seed=seed,
+            direction=direction,
+        )
+        state = SolveState(extras={_GRAPHVIZ_SHARED_RNG_KEY: shared_generator})
+        ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
+        final_state = build_sfdp_pipeline(
+            steps=steps,
             theta=theta,
             repulsive_exponent=repulsive_exponent,
-            edge_weights=local_weights,
-            direction=direction,
             fidelity_mode=_GRAPHVIZ_FIDELITY_MODE,
             fidelity_dtype=fidelity_dtype,
-        )
+        ).apply(problem, state, ctx)
+        if final_state.pos is None:
+            raise RuntimeError("SFDP component pipeline did not produce final positions.")
+        local_pos = final_state.pos
         component_positions.append(local_pos)
         component_edges.append(local_edges)
 
