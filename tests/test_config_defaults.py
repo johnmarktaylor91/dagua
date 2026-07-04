@@ -14,7 +14,9 @@ def test_layout_config_default_aesthetic_values() -> None:
     assert config.rank_sep == 240.0
     assert config.w_attract_x_bias == 1.0
     assert config.w_crossing == 1.8
-    assert config.w_straightness == 2.2
+    # Later sweep dropped straightness from 2.2 to 0.5 to avoid
+    # over-constraining layered DAG layouts.
+    assert config.w_straightness == 0.5
     # Sprint 11: CV^2 reformulation of edge length variance loss
     # (var/mean^2) -- bumped from 0.7 to make uniformity an active
     # constraint vs background noise.
