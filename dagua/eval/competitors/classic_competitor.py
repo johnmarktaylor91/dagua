@@ -496,6 +496,51 @@ def _graphviz_dot_edge_label_sizes(graph: DaguaGraph) -> torch.Tensor:
     return torch.tensor(boxes, dtype=graph.size_dtype)
 
 
+def _has_graphviz_dot_edge_labels(graph: DaguaGraph) -> bool:
+    """Return whether Graphviz DOT will receive any edge label attributes.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph that the Graphviz reference adapter serializes to DOT.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one edge has a truthy label.
+    """
+    return any(bool(label) for label in graph.edge_labels)
+
+
+def _apply_sugiyama_graphviz_metadata(
+    graph: DaguaGraph,
+    extra_kwargs: dict[str, Any],
+) -> None:
+    """Attach graphviz-fidelity Sugiyama metadata using the DOT guard rules.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph passed to both classic and Graphviz competitors.
+    extra_kwargs : dict[str, Any]
+        Mutable layout keyword dictionary for ``layout_sugiyama_pipeline``.
+
+    Returns
+    -------
+    None
+        ``extra_kwargs`` is updated in place.
+    """
+    extra_kwargs.setdefault("graphviz_node_sizes", _graphviz_dot_node_sizes(graph=graph))
+    has_edge_labels = _has_graphviz_dot_edge_labels(graph=graph)
+    has_clusters = bool(graph.clusters)
+    if has_edge_labels and not has_clusters:
+        extra_kwargs.setdefault("graphviz_edge_label_sizes", _graphviz_dot_edge_label_sizes(graph))
+    elif has_clusters and not has_edge_labels:
+        extra_kwargs.setdefault("clusters", graph.clusters)
+        extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
+        extra_kwargs.setdefault("graphviz_apply_cluster_constraints", True)
+
+
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fr": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fr",
@@ -2042,12 +2087,31 @@ def _sugiyama_cache_key(
     if fn_name != "layout_sugiyama_pipeline":
         return None
 
+    def _cache_param_value(key: str, value: Any) -> Tuple[Any, ...]:
+        """Return a hashable fingerprint for a layout keyword value.
+
+        Parameters
+        ----------
+        key : str
+            Layout keyword name.
+        value : Any
+            Keyword value to fingerprint.
+
+        Returns
+        -------
+        tuple[Any, ...]
+            Hashable value summary suitable for the deterministic cache key.
+        """
+        if isinstance(value, torch.Tensor):
+            return (key, "tensor", tuple(value.shape), str(value.dtype), str(value.device))
+        if isinstance(value, Mapping):
+            return (key, "mapping", id(value), len(value))
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return (key, type(value).__name__, id(value), len(value))
+        return (key, value)
+
     scalar_params = tuple(
-        sorted(
-            (key, value)
-            for key, value in extra_kwargs.items()
-            if not isinstance(value, torch.Tensor)
-        )
+        sorted(_cache_param_value(key=key, value=value) for key, value in extra_kwargs.items())
     )
     edge_count = int(graph.edge_index.shape[1]) if graph.edge_index.numel() > 0 else 0
     return (
@@ -2139,7 +2203,7 @@ def _quick_classic(
             fn_name == "layout_sugiyama_pipeline"
             and extra_kwargs.get("fidelity_mode") == "graphviz"
         ):
-            extra_kwargs.setdefault("graphviz_node_sizes", _graphviz_dot_node_sizes(graph=graph))
+            _apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=extra_kwargs)
         if fn_name == "layout_neato_pipeline":
             if node_sizes is None:
                 graph.compute_node_sizes()
