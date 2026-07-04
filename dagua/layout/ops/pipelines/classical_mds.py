@@ -255,15 +255,6 @@ def _layout_igraph_classical_mds(
         return torch.zeros((1, 2), dtype=output_dtype, device=output_device)
     components = _weak_components_igraph_order(edge_index=edge_index, num_nodes=num_nodes)
     if len(components) > 1:
-        installed_layout = _layout_installed_igraph_disconnected_mds(
-            edge_index=edge_index,
-            num_nodes=num_nodes,
-            seed=seed,
-            output_dtype=output_dtype,
-            output_device=output_device,
-        )
-        if installed_layout is not None:
-            return installed_layout
         distances = _shortest_path_distances(
             edge_index=edge_index,
             num_nodes=num_nodes,
@@ -298,70 +289,6 @@ def _layout_igraph_classical_mds(
         dtype=output_dtype,
         device=output_device,
     )
-
-
-def _layout_installed_igraph_disconnected_mds(
-    edge_index: torch.Tensor,
-    num_nodes: int,
-    seed: int,
-    output_dtype: torch.dtype,
-    output_device: torch.device,
-) -> Optional[torch.Tensor]:
-    """Run installed igraph for disconnected MDS when available.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Graph connectivity tensor with shape ``[2, E]``.
-    num_nodes : int
-        Number of graph nodes ``N``.
-    seed : int
-        Seed forwarded to python-igraph's global RNG hook.
-    output_dtype : torch.dtype
-        Dtype used for returned coordinates.
-    output_device : torch.device
-        Device used for returned coordinates.
-
-    Returns
-    -------
-    torch.Tensor or None
-        Installed-igraph MDS coordinates with shape ``[N, 2]`` when
-        python-igraph is importable, otherwise ``None``.
-
-    Notes
-    -----
-    igraph's disconnected MDS path depends on C-level DLA raster collision
-    details. The local port remains as a no-dependency fallback, but fidelity
-    mode should use the same installed implementation as the benchmark
-    reference when it is available.
-    """
-    try:
-        import igraph
-    except ImportError:
-        return None
-
-    graph = igraph.Graph(directed=True)
-    graph.add_vertices(num_nodes)
-    edges_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
-    if edges_cpu.numel() > 0:
-        graph.add_edges(
-            [
-                (int(edges_cpu[0, edge_pos].item()), int(edges_cpu[1, edge_pos].item()))
-                for edge_pos in range(int(edges_cpu.shape[1]))
-            ]
-        )
-
-    igraph.set_random_number_generator(random.Random(seed))
-    try:
-        layout = graph.layout("mds")
-    finally:
-        igraph.set_random_number_generator(None)
-
-    coordinates = torch.zeros((num_nodes, 2), dtype=torch.float64)
-    for row in range(min(len(layout), num_nodes)):
-        coordinates[row, 0] = float(layout[row][0]) * _IGRAPH_LAYOUT_SCALE
-        coordinates[row, 1] = float(layout[row][1]) * _IGRAPH_LAYOUT_SCALE
-    return coordinates.to(dtype=output_dtype, device=output_device)
 
 
 def _igraph_mds_single_from_distances(
@@ -552,7 +479,7 @@ def _igraph_layout_merge_dla(layouts: list[np.ndarray], seed: int) -> np.ndarray
         area += radii[index] * radii[index]
         centers_x[index], centers_y[index], native_radii[index] = _igraph_layout_sphere_2d(layout)
 
-    order = sorted(range(coords_len), key=lambda index: (-sizes[index], index))
+    order = _igraph_descending_size_order(sizes)
     minx = miny = -math.sqrt(_IGRAPH_DLA_AREA_FACTOR * area)
     maxx = maxy = math.sqrt(_IGRAPH_DLA_AREA_FACTOR * area)
     grid = _IgraphMergeGrid(
@@ -595,6 +522,32 @@ def _igraph_layout_merge_dla(layouts: list[np.ndarray], seed: int) -> np.ndarray
             result[result_pos, 1] += y_positions[index]
             result_pos += 1
     return result
+
+
+def _igraph_descending_size_order(sizes: list[float]) -> list[int]:
+    """Return component indices ordered like igraph ``vector_sort_ind``.
+
+    Parameters
+    ----------
+    sizes : list[float]
+        Component sizes in original component order.
+
+    Returns
+    -------
+    list[int]
+        Component indices sorted in descending size order.
+
+    Notes
+    -----
+    ``igraph_layout_merge_dla()`` calls ``igraph_vector_sort_ind(...,
+    IGRAPH_DESCENDING)`` over a vector whose values are overwritten by the
+    returned indices. Its qsort comparator looks only at values, so equal-size
+    component ties are not stable. Sorting negative sizes through the existing
+    igraph qsort port preserves that value-only tie behavior.
+    """
+    from dagua.layout.ops.sugiyama import _igraph_sort_indices
+
+    return _igraph_sort_indices([-size for size in sizes])
 
 
 def _igraph_layout_sphere_2d(coords: np.ndarray) -> tuple[float, float, float]:
@@ -1044,30 +997,152 @@ class _IgraphMergeGrid:
         ):
             return -1
 
-        if self.occupied_x.size == 0:
-            return -1
+        center_x, center_y = self.which(x_coord, y_coord)
+        result = self._get_mat(center_x, center_y) - 1
 
-        x_start = max(0, math.floor((x_coord - radius - self.minx) / self.deltax) + 1)
-        x_stop = min(self.stepsx, math.ceil((x_coord + radius - self.minx) / self.deltax))
-        y_start = max(0, math.floor((y_coord - radius - self.miny) / self.deltay) + 1)
-        y_stop = min(self.stepsy, math.ceil((y_coord + radius - self.miny) / self.deltay))
-        if x_start >= x_stop or y_start >= y_stop:
-            return -1
+        if result >= 0:
+            return result
 
-        local_occupied_x, local_occupied_y = np.nonzero(self.data[x_start:x_stop, y_start:y_stop])
-        if local_occupied_x.size == 0:
-            return -1
+        result = self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=0,
+            sign_x=1,
+            sign_y=1,
+            c_bug_bounds=False,
+        )
+        if result >= 0:
+            return result
 
-        hit_x_indices = x_start + local_occupied_x
-        hit_y_indices = y_start + local_occupied_y
-        delta_x = x_coord - self.cell_x_coords[hit_x_indices]
-        delta_y = y_coord - self.cell_y_coords[hit_y_indices]
-        hits = delta_x * delta_x + delta_y * delta_y < radius * radius
-        if not bool(hits.any()):
-            return -1
-        hit_x = hit_x_indices[hits][0]
-        hit_y = hit_y_indices[hits][0]
-        return self._get_mat(int(hit_x), int(hit_y)) - 1
+        result = self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=0,
+            sign_x=1,
+            sign_y=-1,
+            c_bug_bounds=False,
+        )
+        if result >= 0:
+            return result
+
+        result = self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=1,
+            sign_x=-1,
+            sign_y=1,
+            c_bug_bounds=False,
+        )
+        if result >= 0:
+            return result
+
+        return self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=1,
+            sign_x=-1,
+            sign_y=-1,
+            c_bug_bounds=True,
+        )
+
+    def _scan_get_sphere_quadrant(
+        self,
+        x_coord: float,
+        y_coord: float,
+        center_x: int,
+        center_y: int,
+        radius: float,
+        start_i: int,
+        sign_x: int,
+        sign_y: int,
+        c_bug_bounds: bool,
+    ) -> int:
+        """Scan one igraph ``get_sphere`` quadrant in C loop order.
+
+        Parameters
+        ----------
+        x_coord : float
+            Candidate sphere center x coordinate.
+        y_coord : float
+            Candidate sphere center y coordinate.
+        center_x : int
+            Candidate center x cell.
+        center_y : int
+            Candidate center y cell.
+        radius : float
+            Candidate sphere radius.
+        start_i : int
+            Initial outer-loop offset.
+        sign_x : int
+            X quadrant sign, either ``1`` or ``-1``.
+        sign_y : int
+            Y quadrant sign, either ``1`` or ``-1``.
+        c_bug_bounds : bool
+            Whether to mirror igraph 1.0.0's lower-left ``get_sphere`` loop
+            bounds typo while still avoiding Python negative-index wraparound.
+
+        Returns
+        -------
+        int
+            Component id of the first colliding occupied cell in this quadrant,
+            or ``-1`` when this quadrant has no hit.
+        """
+        radius_squared = radius * radius
+        i = start_i
+        while True:
+            if sign_x > 0:
+                x_index = center_x + i
+                if x_index >= self.stepsx:
+                    return -1
+                cell_x = self.minx + x_index * self.deltax
+            else:
+                x_index = center_x - i
+                if x_index < 0:
+                    return -1
+                cell_x = self.minx + (center_x - i + 1) * self.deltax
+                if not c_bug_bounds and center_x - i <= 0:
+                    return -1
+                if c_bug_bounds and center_x + i <= 0:
+                    return -1
+            outer_y_index = center_y if sign_y > 0 else center_y + 1
+            outer_y = self.miny + outer_y_index * self.deltay
+            if (x_coord - cell_x) * (x_coord - cell_x) + (y_coord - outer_y) * (
+                y_coord - outer_y
+            ) >= radius_squared:
+                return -1
+
+            if sign_y > 0:
+                y_indices = np.arange(center_y, self.stepsy, dtype=np.int64)
+                cell_y = self.cell_y_coords[y_indices]
+            else:
+                stop_y = center_y if not c_bug_bounds or center_y + i > 0 else 0
+                if stop_y <= 0:
+                    return -1
+                y_indices = np.arange(center_y - 1, -1, -1, dtype=np.int64)
+                cell_y = self.miny + (y_indices + 1) * self.deltay
+            distances = (x_coord - cell_x) * (x_coord - cell_x) + (y_coord - cell_y) * (
+                y_coord - cell_y
+            )
+            inside = distances < radius_squared
+            if bool(inside.any()):
+                candidate_y = y_indices[inside]
+                values = self.data[x_index, candidate_y]
+                nonzero = np.flatnonzero(values)
+                if nonzero.size > 0:
+                    return int(values[nonzero[0]]) - 1
+            i += 1
 
     def _refresh_occupied_cells(self) -> None:
         """Refresh cached occupied-cell coordinates after rasterization.

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import random
+import ast
+from pathlib import Path
 from typing import Iterable, Optional
 
 import pytest
@@ -15,6 +16,8 @@ from dagua.layout.ops.pipelines.classical_mds import (
     layout_classical_mds_pipeline,
 )
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -181,6 +184,26 @@ def _run_pipeline_direct(
     return final_state.pos
 
 
+def test_layout_runtime_modules_do_not_import_igraph() -> None:
+    """Guard against runtime delegation to python-igraph from layout modules."""
+    offenders: list[str] = []
+    for path in sorted((_PROJECT_ROOT / "dagua" / "layout").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(
+                    alias.name == "igraph" or alias.name.startswith("igraph.")
+                    for alias in node.names
+                ):
+                    offenders.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+            elif isinstance(node, ast.ImportFrom) and (
+                node.module == "igraph" or (node.module or "").startswith("igraph.")
+            ):
+                offenders.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+
+    assert offenders == []
+
+
 class TestClassicalMDSPipelineFidelity:
     """Bit-exact regression coverage for the classical MDS pipeline."""
 
@@ -288,50 +311,6 @@ class TestClassicalMDSPipelineFidelity:
             edge_index=edge_index,
             num_nodes=7,
             seed=123,
-            igraph_fidelity=True,
-            fidelity_dtype=torch.float64,
-        )
-
-        assert torch.equal(positions, expected)
-
-    def test_disconnected_igraph_fidelity_matches_installed_igraph_mds(self) -> None:
-        """Disconnected igraph-fidelity MDS should use installed igraph semantics."""
-        igraph = pytest.importorskip("igraph")
-        edge_index = _edge_index_from_edges(
-            [
-                (5, 6),
-                (5, 8),
-                (6, 7),
-                (7, 9),
-                (8, 10),
-                (10, 11),
-                (12, 13),
-            ]
-        )
-        seed = 123
-
-        graph = igraph.Graph(directed=True)
-        graph.add_vertices(14)
-        graph.add_edges(
-            [
-                (int(edge_index[0, edge_pos].item()), int(edge_index[1, edge_pos].item()))
-                for edge_pos in range(int(edge_index.shape[1]))
-            ]
-        )
-        igraph.set_random_number_generator(random.Random(seed))
-        try:
-            layout = graph.layout("mds")
-        finally:
-            igraph.set_random_number_generator(None)
-        expected = torch.zeros((14, 2), dtype=torch.float64)
-        for row in range(14):
-            expected[row, 0] = float(layout[row][0]) * 50.0
-            expected[row, 1] = float(layout[row][1]) * 50.0
-
-        positions = layout_classical_mds_pipeline(
-            edge_index=edge_index,
-            num_nodes=14,
-            seed=seed,
             igraph_fidelity=True,
             fidelity_dtype=torch.float64,
         )

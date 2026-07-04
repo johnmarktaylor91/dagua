@@ -459,3 +459,105 @@ These `/tmp` artifacts were scratch only and are summarized above before cleanup
 Commit sha: none. No code fix was committed because the named difference was classified
 as non-portable in the pure Python/NumPy DrL port, and repository instructions prohibit
 committing unrelated research-only artifacts as a fix commit.
+
+## M2: native DLA rule port
+
+Scope: `r77/mds-disc`, native disconnected classical-MDS DLA path.
+
+### Delegation revert
+
+The M1 runtime delegation from `bc72627` was removed. The disconnected igraph-fidelity
+path no longer imports python-igraph or calls `Graph.layout("mds")` from
+`dagua/layout/ops/pipelines/classical_mds.py`. The M1 test that imported igraph at test
+runtime was removed and replaced with an AST guard over `dagua/layout/`.
+
+### Source diff
+
+igraph source extracted read-only to `/tmp/igraph-src/igraph-1.0.0`:
+
+| source | lines | rule |
+| --- | ---: | --- |
+| `vendor/source/igraph/src/layout/mds.c` | 250-280 | disconnected MDS discovers components with `igraph_subcomponent()`, stores per-component MDS layouts, calls `igraph_layout_merge_dla()`, then reorders by `vertex_order` |
+| `vendor/source/igraph/src/layout/merge_dla.c` | 123-150 | DLA component order is `igraph_vector_sort_ind(..., IGRAPH_DESCENDING)` over component sizes, largest component placed first |
+| `vendor/source/igraph/src/layout/merge_dla.c` | 277-297 | a walk returns the last non-colliding point before a candidate step collides |
+| `vendor/source/igraph/src/layout/merge_grid.c` | 145-202 | `get_sphere()` scans four quadrants in order and stops at the first occupied cell |
+| `vendor/source/igraph/src/layout/merge_grid.c` | 192-194 | lower-left `get_sphere()` loop uses `cx + i > 0` / `cy + i > 0`, unlike `place_sphere()` bounds |
+| `vendor/source/igraph/src/core/vector.pmt` | 1006-1015, 1044-1069 | `vector_sort_ind()` uses a value-only descending qsort comparator; equal ties are not stable |
+
+Named native rule ported:
+
+1. DLA collision lookup must use igraph's ordered quadrant scan, not a vectorized bounding
+   window over all occupied cells.
+2. The lower-left quadrant preserves igraph 1.0.0's `get_sphere()` bounds typo while
+   avoiding Python negative-index wraparound.
+3. Component-size ordering uses the existing igraph qsort port on negative sizes instead
+   of Python stable sorting, so equal-size ties follow value-only qsort behavior.
+
+### Trace evidence
+
+Scratch probes used installed igraph only from `/tmp/r77_mds_dla_probe_fast.py`, never from
+runtime modules. Because `random_dag_50/200` are affected by hash-dependent edge-list
+realization, each probe generated one graph and sent the same in-memory edge tensor to
+both igraph and Dagua in the same Python process.
+
+The graph realization in this process differs from M1's recorded process, so the absolute
+draw totals differ from M1. The parity check is still valid because both sides share the
+same realized graph.
+
+| graph | seed | igraph DLA draws | native Dagua DLA draws | native walks |
+| --- | ---: | ---: | ---: | ---: |
+| `random_dag_50` | 100 | 125978 | 125978 | 4 |
+| `random_dag_200` | 100 | 316682 | 316682 | 18 |
+
+First native walk summaries after the port:
+
+| graph | walk | draws | cumulative draws | returned x | returned y |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `random_dag_50` | 0 | 1920 | 1920 | 13.4729316658 | 14.2877963644 |
+| `random_dag_50` | 1 | 63986 | 65906 | 17.9939887553 | 5.3799381502 |
+| `random_dag_50` | 2 | 15314 | 81220 | 16.3307350037 | 12.7275195465 |
+| `random_dag_50` | 3 | 44758 | 125978 | 14.2559372708 | -12.4938617357 |
+| `random_dag_200` | 0 | 1962 | 1962 | 34.8461241896 | 38.6611671432 |
+| `random_dag_200` | 1 | 19204 | 21166 | 37.5604664369 | 40.0732704401 |
+| `random_dag_200` | 2 | 44966 | 66132 | 42.8933228399 | -26.8636142173 |
+
+### RMSD probe
+
+An offline scratch RMSD probe compared native Dagua to installed igraph on the same
+in-memory ad hoc `random_dag_50` realization for seeds 100-104. Raw and Procrustes-aligned
+RMSD remained large after draw-count parity:
+
+| seed | raw RMSD | aligned RMSD |
+| ---: | ---: | ---: |
+| 100 | 522.699 | 259.125 |
+| 101 | 518.582 | 301.720 |
+
+The probe was stopped after two aligned seeds because it proved the named collision rule
+is not sufficient by itself to close full coordinate parity on that ad hoc realization.
+The runtime delegation remains reverted; no runtime igraph fallback exists.
+
+### Gate evidence
+
+| gate | result |
+| --- | --- |
+| `ruff check . --fix` | pass |
+| `mypy --follow-imports=silent dagua/cli.py` | pass (`Success: no issues found in 1 source file`) |
+| AST no-igraph runtime guard | pass (`tests/test_pipeline_classical_mds.py::test_layout_runtime_modules_do_not_import_igraph`) |
+| `pytest tests/test_pipeline_classical_mds.py -q` | pass, 14 passed in 98.33s |
+| `pytest -k mds -x --tb=short -q` | pass, 56 passed, 3107 deselected, 34 warnings in 128.86s |
+| draw-count parity probe | pass on shared-process `random_dag_50` and `random_dag_200` |
+| 6-row / 5-seed installed-igraph RMSD gate | not passed; ad hoc RMSD probe above remains large |
+| r75 9/9 byte-identity probe | not rerun |
+| final 100-seed re-bench to `benchmark_100seed_r77_mds2` | not run |
+
+### Concerns
+
+The native collision rule is now source-cited and draw-count parity is closed on the traced
+shared-process probes, but full coordinate parity still has at least one remaining rule
+outside the collision/walk-termination fix. A likely next target is a C-level per-walk dump
+of component id assignment and returned `(x, y)` for equal-size components, because equal
+size ties can preserve RNG draw counts while assigning the same DLA walks to different
+components.
+
+Commit sha: see the `fix(classical-mds): port native DLA collision scan` commit on
+`r77/mds-disc`.
