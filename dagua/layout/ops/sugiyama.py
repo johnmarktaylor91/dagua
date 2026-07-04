@@ -49,6 +49,7 @@ _SUGIYAMA_NODE_SEP_KEY = "sugiyama_node_sep"
 _SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY = "sugiyama_graphviz_virtual_edges"
 _SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY = "sugiyama_graphviz_edge_order"
 _SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY = "sugiyama_graphviz_node_sizes"
+_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY = "sugiyama_graphviz_edge_label_sizes"
 _GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_VIRTUAL_NODE_CLASS = 2
 _GRAPHVIZ_SINGLETON_NODE_CLASS = 1
@@ -349,6 +350,7 @@ def _graphviz_layer_assignments(
     edge_index: torch.Tensor,
     edge_weights: Optional[torch.Tensor],
     num_nodes: int,
+    edge_label_sizes: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, List[GraphvizVirtualEdge]]:
     """Assign layers with the Graphviz dot network-simplex ranker.
 
@@ -360,6 +362,10 @@ def _graphviz_layer_assignments(
         Optional edge-weight vector aligned to ``edge_index``.
     num_nodes : int
         Number of original graph nodes.
+    edge_label_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT label boxes with shape ``[E, 2]``. When any
+        label is present, dot doubles every input edge ``minlen`` before rank
+        assignment to reserve midpoint ranks for label virtual nodes.
 
     Returns
     -------
@@ -400,15 +406,64 @@ def _graphviz_layer_assignments(
         virtual_counter += 1
         return value
 
+    edge_minlens = _graphviz_edge_label_rank_minlens(
+        edge_index=edge_index,
+        edge_label_sizes=edge_label_sizes,
+    )
     ranks, virtual_edges = graphviz_rank_assignment(
         edges=edge_index,
         virtual_node_factory=virtual_node_factory,
         num_nodes=num_nodes,
+        edge_minlens=edge_minlens,
         edge_weights=edge_weights,
         balance=True,
     )
     layers = [int(ranks.get(node, 0)) for node in range(num_nodes)]
     return torch.tensor(layers, dtype=torch.long), virtual_edges
+
+
+def _graphviz_edge_label_rank_minlens(
+    edge_index: torch.Tensor,
+    edge_label_sizes: Optional[torch.Tensor],
+) -> Optional[List[int]]:
+    """Return dot rank ``minlen`` values after edge-label expansion.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]``.
+    edge_label_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT edge-label boxes with shape ``[E, 2]``.
+
+    Returns
+    -------
+    list[int] or None
+        A list of doubled ``minlen`` values when any label is present,
+        otherwise ``None`` so the ranker keeps default unit constraints.
+    """
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    if edge_count == 0 or not _has_graphviz_edge_labels(edge_label_sizes=edge_label_sizes):
+        return None
+    return [2] * edge_count
+
+
+def _has_graphviz_edge_labels(edge_label_sizes: Optional[torch.Tensor]) -> bool:
+    """Return whether the Graphviz DOT input contains any edge label.
+
+    Parameters
+    ----------
+    edge_label_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT edge-label boxes with shape ``[E, 2]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one edge-label box has positive area.
+    """
+    if edge_label_sizes is None or edge_label_sizes.numel() == 0:
+        return False
+    label_sizes = edge_label_sizes.detach().to(device="cpu", dtype=torch.float32)
+    return bool(torch.any(label_sizes[:, 0] > 0.0).item())
 
 
 def _igraph_glpk_layer_assignments(
@@ -1026,6 +1081,7 @@ def _expand_long_edges_with_dummy_nodes(
     node_sizes: torch.Tensor,
     num_original_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
+    edge_label_sizes: Optional[torch.Tensor] = None,
     use_graphviz_edge_order: bool = False,
     graphviz_virtual_node_sep: Optional[float] = None,
 ) -> "_ExpandedLayeredGraph":
@@ -1043,6 +1099,10 @@ def _expand_long_edges_with_dummy_nodes(
         Number of real graph nodes before dummy expansion.
     edge_weights : torch.Tensor, optional
         Original edge weights with shape ``[E]``.
+    edge_label_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT edge-label boxes with shape ``[E, 2]``.
+        Labeled edges receive a midpoint virtual node with this label width,
+        matching dot ``class2.c`` label-node construction.
     use_graphviz_edge_order : bool, default=False
         Whether to create virtual chains by scanning original tail nodes then
         each tail's outgoing edges, matching Graphviz ``class2()``.
@@ -1080,6 +1140,11 @@ def _expand_long_edges_with_dummy_nodes(
     )
     sources = edge_index[0].tolist()
     targets = edge_index[1].tolist()
+    label_sizes_cpu = (
+        None
+        if edge_label_sizes is None
+        else edge_label_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
     if graphviz_virtual_node_sep is None:
         virtual_width = 0.0
         virtual_width_increment = 0.0
@@ -1099,8 +1164,20 @@ def _expand_long_edges_with_dummy_nodes(
         path = [source]
         previous = source
         orig_weight = float(edge_weights[edge_idx].item()) if edge_weights is not None else 1.0
+        label_width = (
+            float(label_sizes_cpu[edge_idx, 0].item())
+            if label_sizes_cpu is not None and edge_idx < label_sizes_cpu.shape[0]
+            else 0.0
+        )
+        label_height = (
+            float(label_sizes_cpu[edge_idx, 1].item())
+            if label_sizes_cpu is not None and edge_idx < label_sizes_cpu.shape[0]
+            else 0.0
+        )
+        has_label = label_width > 0.0
+        label_rank = (source_layer + target_layer) // 2 if has_label else -1
         edge_pair = (source, target)
-        if use_graphviz_edge_order and edge_pair in representative_chains:
+        if use_graphviz_edge_order and not has_label and edge_pair in representative_chains:
             representative_path, representative_segments = representative_chains[edge_pair]
             edge_paths[edge_idx] = list(representative_path)
             for segment_index in representative_segments:
@@ -1118,7 +1195,13 @@ def _expand_long_edges_with_dummy_nodes(
             next_dummy_index += 1
             created_node_order.append(dummy_index)
             expanded_layers[layer_index].append(dummy_index)
-            dummy_sizes.append([virtual_width, 0.0])
+            if layer_index == label_rank and graphviz_virtual_node_sep is not None:
+                # Graphviz 7.0.5 class2.c creates a label virtual node with
+                # ND_lw=GD_nodesep and ND_rw=label width. Store the total box;
+                # the current x-solver consumes symmetric boxes.
+                dummy_sizes.append([float(graphviz_virtual_node_sep) + label_width, label_height])
+            else:
+                dummy_sizes.append([virtual_width, 0.0])
             expanded_sources.append(previous)
             expanded_targets.append(dummy_index)
             expanded_weight_values.append(orig_weight)
@@ -1134,7 +1217,7 @@ def _expand_long_edges_with_dummy_nodes(
         segment_indices.append(len(expanded_sources) - 1)
         path.append(target)
         edge_paths[edge_idx] = path
-        if use_graphviz_edge_order:
+        if use_graphviz_edge_order and not has_label:
             representative_chains[edge_pair] = (list(path), segment_indices)
 
     if dummy_sizes:
@@ -1191,7 +1274,6 @@ def _graphviz_decompose_node_order(
         Number of real input nodes. Graphviz starts component searches from
         ``agfstnode`` real nodes; virtual nodes are discovered through fast
         edges, not used as roots.
-
     Returns
     -------
     list of int
@@ -1248,7 +1330,6 @@ def _edge_processing_order(
         Mutable creation-order list. In graphviz mode this function appends
         real nodes at the same point that ``class2()`` calls ``fast_node()``
         before scanning each node's outgoing edges.
-
     Returns
     -------
     list of int
@@ -3377,6 +3458,7 @@ class _AssignLayers(Op):
                 edge_index=acyclic_edges,
                 edge_weights=rank_edge_weights,
                 num_nodes=problem.num_nodes,
+                edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY),
             )
             state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY] = rank_edge_weights
             state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = virtual_edges
@@ -3462,6 +3544,7 @@ class _ExpandDummyNodes(Op):
             node_sizes=node_sizes,
             num_original_nodes=problem.num_nodes,
             edge_weights=state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY],
+            edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY),
             use_graphviz_edge_order=use_graphviz_edge_order,
             graphviz_virtual_node_sep=graphviz_virtual_node_sep,
         )
@@ -3918,6 +4001,13 @@ class _StoreSpacingParams(Op):
         """
         del problem, ctx
 
-        state.extras[_SUGIYAMA_RANK_SEP_KEY] = self.config.rank_sep
+        rank_sep = self.config.rank_sep
+        if _has_graphviz_edge_labels(
+            edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY)
+        ):
+            # Graphviz 7.0.5 rank.c reserves midpoint ranks for edge labels by
+            # doubling minlen and reducing GD_ranksep to keep endpoint spacing.
+            rank_sep = rank_sep / 2.0
+        state.extras[_SUGIYAMA_RANK_SEP_KEY] = rank_sep
         state.extras[_SUGIYAMA_NODE_SEP_KEY] = self.config.node_sep
         return state
