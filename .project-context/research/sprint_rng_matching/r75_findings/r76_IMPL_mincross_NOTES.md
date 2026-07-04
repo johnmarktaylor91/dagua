@@ -940,3 +940,249 @@ Final topup result:
 - `scripts/run_benchmark.py` groups all seeds for one graph/engine in one
   future. A 100-seed deterministic group can exceed the 600s watchdog even
   when each individual layout is below `--timeout`.
+
+## A5: half-width rule
+
+Date: 2026-07-04
+Commit: pending.
+
+### Named rule
+
+The missing x-coordinate constant is Graphviz's virtual-node half-width seed:
+`virtual_node()` initializes every virtual node with `ND_lw = ND_rw = 1`, then
+`plain_vnode()` calls `incr_width()`, which adds integer `GD_nodesep(g) / 2` to
+both sides. With the benchmark's graphviz-mode `nodesep=72pt`, a plain virtual
+node is therefore `37 + 37 = 74pt`, not `36 + 36 = 72pt`.
+
+Pinned Graphviz 7.0.5 source:
+
+- `lib/dotgen/fastgr.c:250`: `virtual_node()` seeds `ND_lw(n) = ND_rw(n) = 1`.
+- `lib/dotgen/class2.c:35-50`: `incr_width()` adds `GD_nodesep(g) / 2` to both
+  sides and `plain_vnode()` applies it to new plain virtual nodes.
+- `lib/dotgen/class2.c:146-154`: `merge_chain()` calls `incr_width()` on each
+  internal representative-chain virtual node for duplicate long edges, so
+  duplicate increments add one `nodesep` after the initial 2pt seed.
+- `lib/dotgen/position.c:230-259`: LR constraints consume
+  `ND_rw(left) + ND_lw(right) + GD_nodesep(g)` and round through
+  `make_aux_edge()`.
+
+For label-expanded original boxes, the traced LR tables also require the same
+1pt half-width seed when `ND_width` exceeds the 54pt default floor. Default
+54pt numeric boxes are not inflated; this preserves `weighted_karate_34`'s
+`136` rows while closing the `dense_pair_50` label-adjacent rows.
+
+### Implementation
+
+- `dagua/layout/ops/sugiyama.py`
+  - Added `_GRAPHVIZ_VIRTUAL_NODE_HALF_WIDTH_SEED_POINTS = 1.0`.
+  - Graphviz-only dummy expansion now initializes new virtual widths to
+    `nodesep + 2pt`.
+  - Duplicate-chain virtual width growth still adds exactly one `nodesep`,
+    matching later `incr_width()` calls.
+  - Added graphviz-only original half-width seed for label-expanded boxes in
+    `_graphviz_left_width()` and `_graphviz_right_width()`.
+- Tests:
+  - Updated duplicate-chain width golden from `144pt` to `146pt`.
+  - Added `test_graphviz_virtual_node_width_seed_matches_lr_minlen()`.
+  - Updated the graphviz x-assignment golden for the source-faithful
+    half-width constants.
+
+### Minlen parity
+
+First LR minlen rows after A5:
+
+| Graph | Graphviz traced | Dagua A5 | Result |
+|---|---|---|---|
+| `weighted_karate_34` | `146, 146, 146, 146, 136, 136, 146, 146, 146, 146` | `146, 146, 146, 146, 136, 136, 146, 146, 146, 146` | exact |
+| `dense_pair_50` | `177, 141, 146, 182, 182, 141, 141, 146, 146, 146` | `177, 141, 146, 182, 182, 141, 141, 146, 146, 146` | exact |
+
+Additional calibration first rows:
+
+| Graph | Dagua A5 first LR minlens |
+|---|---|
+| `hub_skip_superfan` | `136, 126, 136, 136, 126, 136, 146, 136, 136, 126` |
+| `heavy_tail_weights_50` | `136, 136, 136, 146, 136, 136, 136, 126, 136, 136` |
+| `binary_tree` | `126, 126, 126, 126, 126, 126, 126` |
+
+### Benchmark-path d_R probe
+
+Probe rows were selected from mode-B graphviz-fidelity close/far rows in
+`eval_output/fidelity_definitive/per_combo_r76.jsonl`. Fresh positions were
+generated through `scripts/run_benchmark.py`, then rescored with
+`dagua.eval.distributional_fidelity.analyze_mode_b(..., free_aspect=True)`.
+
+Commands:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --workers 5 --timeout 360 --watchdog-timeout 720 --seeds 100 --seed-start 100 \
+  --graphs hub_skip_superfan,cluster_member_style_stress,dense_pair_50,width_skew_late_merge,ragged_feature_pyramid,real_lesmis_77,shape_and_routing_matrix,long_skip_only_24,braided_feedback_tails,edge_label_braid,clustered_longlabel_handoffs,random_dag_50,random_bipartite_60,sierpinski_42,citation_dag_300 \
+  --engines classic_sugiyama_graphviz_fidelity --variants \
+  --output-dir /tmp/r77_a5_probe2
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --workers 5 --timeout 360 --watchdog-timeout 720 --seeds 1 --seed-start 100 \
+  --graphs hub_skip_superfan,cluster_member_style_stress,dense_pair_50,width_skew_late_merge,ragged_feature_pyramid,real_lesmis_77,shape_and_routing_matrix,long_skip_only_24,braided_feedback_tails,edge_label_braid,clustered_longlabel_handoffs,random_dag_50,random_bipartite_60,sierpinski_42,citation_dag_300 \
+  --engines graphviz_dot \
+  --output-dir /tmp/r77_a5_probe2_refs
+```
+
+Done lines:
+
+```text
+[benchmark] Done: 1500 total, 1500 ok, 0 skipped, 0 errors, 0 timeouts
+[benchmark] Done: 15 total, 15 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+Selected 10-row d_R table:
+
+| Graph | r76 d_R | A5 d_R | Movement |
+|---|---:|---:|---|
+| `random_dag_50` | 0.356513 | 0.309665 | improved |
+| `braided_feedback_tails` | 0.146031 | 0.117821 | improved |
+| `sierpinski_42` | 0.084275 | 0.056331 | improved |
+| `edge_label_braid` | 0.601591 | 0.581059 | improved |
+| `dense_pair_50` | 0.041961 | 0.029611 | improved |
+| `cluster_member_style_stress` | 0.040248 | 0.030950 | improved |
+| `clustered_longlabel_handoffs` | 0.237398 | 0.230032 | improved |
+| `compound_10x20` | 0.025792 | 0.020439 | improved |
+| `compound_dag_5x30` | 0.033203 | 0.029676 | improved |
+| `width_skew_late_merge` | 0.042290 | 0.041268 | improved |
+
+Result: d_R improved on 10/10 selected close/far rows. No selected row was a
+bit-exact/near row in the r76 baseline.
+
+### Gate evidence
+
+Ordering discriminator: unchanged by construction because this patch only
+changes x-coordinate half-width consumption after rank assignment and
+mincross ordering. The inherited A4 state remains 5/6 exact, with
+`heavy_tail_weights_50` as the known one-off residual.
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+Success: no issues found in 1 source file
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/test_dot_mincross.py tests/test_layout/test_dot_rank.py -x --tb=short -q
+16 passed, 3 warnings in 0.04s
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+59 passed, 3104 deselected, 34 warnings in 31.52s
+```
+
+Project broader gates:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q
+FAILED tests/test_layout/test_engine.py::test_classify_early_exit
+assert 0.6000620170016191 < 0.1
+```
+
+This failure is a persistent classifier timing assertion outside the
+Sugiyama/Graphviz x-coordinate scope. It was rerun once directly and failed
+the same way. I did not modify `dagua/layout/graph_classify.py` under this
+task's scope discipline.
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
+FAILED tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border
+assert 0 >= 2
+```
+
+This is the known pre-existing double-border render smoke failure listed in
+the task.
+
+### Full family bench
+
+Command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --engines classic_sugiyama --variants --max-nodes 0 --seeds 100 \
+  --seed-start 100 --workers 5 --timeout 3600 --watchdog-timeout 7200 \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r77_sugiyama_a5
+```
+
+No successful Done line was emitted. The runner reached 60,600 accounted
+result entries, then remained active for more than two hours with the same
+200 rows marked `running`; it was terminated after the benchmark gate was
+already unrecoverably failed by completed errors.
+
+Final recorded result status at termination:
+
+```text
+60600 rows
+56900 ok
+3395 skipped
+200 running
+105 errors
+```
+
+Non-ok rows:
+
+```text
+ba_2000 classic_sugiyama_default: 3 error, 97 skipped
+ba_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+ba_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+ba_2000 classic_sugiyama_tight: 3 error, 97 skipped
+ba_2000 classic_sugiyama_wide: 3 error, 97 skipped
+ba_5000 classic_sugiyama_default: 3 error, 97 skipped
+ba_5000 classic_sugiyama_graphviz_fidelity: 100 running
+ba_5000 classic_sugiyama_passes4: 3 error, 97 skipped
+ba_5000 classic_sugiyama_passes48: 3 error, 97 skipped
+ba_5000 classic_sugiyama_tight: 3 error, 97 skipped
+ba_5000 classic_sugiyama_wide: 3 error, 97 skipped
+er_2000 classic_sugiyama_default: 3 error, 97 skipped
+er_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+er_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+er_2000 classic_sugiyama_tight: 3 error, 97 skipped
+er_2000 classic_sugiyama_wide: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_default: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_tight: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_wide: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_default: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_graphviz_fidelity: 100 running
+rgg_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_tight: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_wide: 3 error, 97 skipped
+rgg_500 classic_sugiyama_default: 3 error, 97 skipped
+rgg_500 classic_sugiyama_passes4: 3 error, 97 skipped
+rgg_500 classic_sugiyama_passes48: 3 error, 97 skipped
+rgg_500 classic_sugiyama_tight: 3 error, 97 skipped
+rgg_500 classic_sugiyama_wide: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_default: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_passes4: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_passes48: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_tight: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_wide: 3 error, 97 skipped
+```
+
+Observed error text for completed failures:
+
+```text
+maximum recursion depth exceeded
+```
+
+Commit: `3d1537fcf8064c5ae5ccfe67bb8315019e867782`.
+
+### Concerns
+
+- The 1pt original label-expanded half-width seed is intentionally applied
+  only in Graphviz x-coordinate half-width consumption. The raw DOT box helper
+  continues to match `dot -Tjson`/`dot -Tdot` exposed node box widths.
+- The broader project `tests/test_layout/ tests/test_graph.py` gate is blocked
+  by an unrelated classifier timing assertion in this environment.
+
+### Knowledge
+
+- Graphviz virtual nodes are not zero-geometry and are not exactly
+  `nodesep`-wide. They start with `ND_lw=ND_rw=1`, then class2 adds integer
+  half-nodesep widths.
+- Duplicate long-edge chain merges should add one further `nodesep` to the
+  existing virtual width, not re-add the initial 2pt seed.
