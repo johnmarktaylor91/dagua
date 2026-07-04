@@ -6,6 +6,10 @@ import torch
 
 from dagua.layout.ops.pipelines.dot_rank import graphviz_rank_assignment
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
+from dagua.layout.ops.sugiyama import (
+    _build_graphviz_x_aux_edges,
+    _expand_long_edges_with_dummy_nodes,
+)
 
 
 def _virtual_factory(tail: object, head: object, rank: int, edge_index: int) -> str:
@@ -162,3 +166,37 @@ def test_sugiyama_graphviz_fidelity_uses_dot_x_simplex() -> None:
         1.0,
     ]
     assert not torch.equal(graphviz_pos[:, 0], graphviz_dot_alias_pos[:, 0])
+
+
+def test_graphviz_virtual_node_width_seed_matches_lr_minlen() -> None:
+    """Seed Graphviz dummy-node half-widths before LR minlen construction."""
+    edge_index = torch.tensor(
+        [
+            [0, 1],
+            [2, 3],
+        ],
+        dtype=torch.long,
+    )
+    layer_assignments = torch.tensor([0, 0, 2, 2], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 54.0, dtype=torch.float32)
+    expanded_graph, expanded_weights = _expand_long_edges_with_dummy_nodes(
+        edge_index=edge_index,
+        layer_assignments=layer_assignments,
+        node_sizes=node_sizes,
+        num_original_nodes=4,
+        edge_weights=None,
+        use_graphviz_edge_order=True,
+        graphviz_virtual_node_sep=72.0,
+    )
+    aux_edges, _ = _build_graphviz_x_aux_edges(
+        layers=expanded_graph.layers,
+        edge_index=expanded_graph.edge_index,
+        edge_weights=expanded_weights,
+        node_sizes=expanded_graph.node_sizes,
+        num_nodes=expanded_graph.num_nodes,
+        num_original_nodes=4,
+        node_sep=72.0,
+    )
+
+    assert expanded_graph.node_sizes[4, 0].item() == 74.0
+    assert 146 in [edge[2] for edge in aux_edges if edge[3] == 0]
