@@ -133,6 +133,38 @@ def test_sugiyama_igraph_glpk_two_hubs_bridge_matches_installed_igraph() -> None
     assert torch.equal(layers, expected_layers)
 
 
+def test_sugiyama_igraph_conflict_quirk_matches_installed_igraph() -> None:
+    """The BK conflict pass should match installed igraph on a tie-sensitive DAG."""
+    igraph = pytest.importorskip("igraph")
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7, 4, 3, 2, 5, 6, 7, 8, 2, 3, 4, 9, 10, 11, 12, 13],
+            [1, 2, 3, 4, 5, 6, 7, 8, 6, 7, 8, 9, 10, 11, 12, 9, 10, 11, 13, 13, 13, 13, 14],
+        ],
+        dtype=torch.long,
+    )
+    graph = igraph.Graph(
+        n=15,
+        edges=list(zip(edge_index[0].tolist(), edge_index[1].tolist())),
+        directed=True,
+    )
+    reference = torch.tensor(
+        graph.layout("sugiyama", maxiter=24, vgap=1.0, hgap=1.0).coords,
+        dtype=torch.float32,
+    )
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=15,
+        rank_sep=1.0,
+        node_sep=1.0,
+        barycenter_passes=24,
+        fidelity_mode="igraph",
+    )
+
+    assert torch.equal(positions, reference)
+
+
 def test_sugiyama_igraph_glpk_falls_back_above_1000_nodes() -> None:
     """Igraph fidelity mode should use Eades layering above GLPK's node gate."""
     edge_index = torch.stack(

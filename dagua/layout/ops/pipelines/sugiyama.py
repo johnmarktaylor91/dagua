@@ -126,6 +126,7 @@ def build_sugiyama_pipeline(
         _CoordinateAssignment(
             center_coordinates=center_coordinates,
             use_graphviz_xcoord=use_graphviz_xcoord,
+            use_igraph_conflicts=use_igraph_fidelity,
         ),
     ]
     if return_edge_routes:
