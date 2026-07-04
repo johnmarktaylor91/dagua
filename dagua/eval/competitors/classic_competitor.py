@@ -397,6 +397,37 @@ def _graphviz_dot_node_sizes(graph: DaguaGraph) -> torch.Tensor:
     return torch.tensor(boxes, dtype=graph.size_dtype)
 
 
+def _graphviz_dot_edge_label_sizes(graph: DaguaGraph) -> torch.Tensor:
+    """Compute Graphviz DOT edge-label boxes for emitted edge labels.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph passed to both classic and Graphviz competitors.
+
+    Returns
+    -------
+    torch.Tensor
+        Float tensor with shape ``[E, 2]`` containing point-unit label boxes.
+        Unlabeled edges receive a zero-size box.
+    """
+    edge_count = int(graph.edge_index.shape[1]) if graph.edge_index.numel() > 0 else 0
+    boxes: list[tuple[float, float]] = []
+    for edge_index in range(edge_count):
+        if edge_index >= len(graph.edge_labels) or not graph.edge_labels[edge_index]:
+            boxes.append((0.0, 0.0))
+            continue
+        label = str(graph.edge_labels[edge_index])
+        font_size = 9.0
+        boxes.append(
+            (
+                _graphviz_helvetica_text_width(text=label, font_size=font_size),
+                font_size * _GRAPHVIZ_TEXT_HEIGHT_FACTOR,
+            )
+        )
+    return torch.tensor(boxes, dtype=graph.size_dtype)
+
+
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fr": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fr",
@@ -2028,6 +2059,11 @@ def _quick_classic(
             and extra_kwargs.get("fidelity_mode") == "graphviz"
         ):
             extra_kwargs.setdefault("graphviz_node_sizes", _graphviz_dot_node_sizes(graph=graph))
+            if not graph.clusters:
+                extra_kwargs.setdefault(
+                    "graphviz_edge_label_sizes",
+                    _graphviz_dot_edge_label_sizes(graph=graph),
+                )
         if fn_name == "layout_neato_pipeline":
             if node_sizes is None:
                 graph.compute_node_sizes()

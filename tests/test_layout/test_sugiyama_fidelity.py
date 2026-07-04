@@ -5,6 +5,8 @@ import torch
 
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
+    _expand_long_edges_with_dummy_nodes,
+    _graphviz_layer_assignments,
     _igraph_eades_layer_assignments,
     _igraph_glpk_layer_assignments,
     _igraph_glpk_objective_coefficients,
@@ -233,6 +235,44 @@ def test_sugiyama_graphviz_fidelity_uses_dot_x_assignment() -> None:
         ]
     )
     assert torch.allclose(positions, expected, atol=1e-4)
+
+
+def test_sugiyama_graphviz_edge_labels_double_rank_minlen() -> None:
+    """Graphviz fidelity should reserve midpoint ranks for DOT edge labels."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    label_sizes = torch.tensor([[80.0, 10.0]], dtype=torch.float32)
+
+    layers, _ = _graphviz_layer_assignments(
+        edge_index=edge_index,
+        edge_weights=None,
+        num_nodes=2,
+        edge_label_sizes=label_sizes,
+    )
+
+    assert torch.equal(layers, torch.tensor([0, 2]))
+
+
+def test_sugiyama_graphviz_edge_labels_create_midpoint_label_dummy() -> None:
+    """Graphviz fidelity should size the midpoint dummy as a label node."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    layer_assignments = torch.tensor([0, 2], dtype=torch.long)
+    node_sizes = torch.full((2, 2), 54.0, dtype=torch.float32)
+    label_sizes = torch.tensor([[80.0, 10.0]], dtype=torch.float32)
+
+    expanded, _ = _expand_long_edges_with_dummy_nodes(
+        edge_index=edge_index,
+        layer_assignments=layer_assignments,
+        node_sizes=node_sizes,
+        num_original_nodes=2,
+        edge_label_sizes=label_sizes,
+        use_graphviz_edge_order=True,
+        graphviz_virtual_node_sep=72.0,
+    )
+
+    assert expanded.edge_paths == [[0, 2, 1]]
+    assert expanded.layers == [[0], [2], [1]]
+    assert expanded.node_sizes[2, 0].item() == pytest.approx(152.0)
+    assert expanded.node_sizes[2, 1].item() == pytest.approx(10.0)
 
 
 def test_sugiyama_igraph_fidelity_packs_weak_components_independently() -> None:
