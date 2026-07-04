@@ -5,6 +5,7 @@ import importlib
 import pytest
 import torch
 
+from dagua.eval.graphs import make_real_karate_graph
 from dagua.graph import DaguaGraph
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
@@ -227,6 +228,34 @@ def test_sugiyama_igraph_conflict_quirk_matches_installed_igraph() -> None:
     positions = layout_sugiyama_pipeline(
         edge_index=edge_index,
         num_nodes=15,
+        rank_sep=1.0,
+        node_sep=1.0,
+        barycenter_passes=24,
+        fidelity_mode="igraph",
+    )
+
+    assert torch.equal(positions, reference)
+
+
+def test_sugiyama_igraph_bk_alignment_matches_installed_igraph_on_karate() -> None:
+    """The igraph BK x-stage should match installed igraph on the GLPK-tie probe."""
+    pytest.importorskip("networkx")
+    igraph = pytest.importorskip("igraph")
+    graph = make_real_karate_graph().graph
+    edge_index = graph.edge_index.detach().cpu().to(dtype=torch.long)
+    reference_graph = igraph.Graph(
+        n=graph.num_nodes,
+        edges=list(zip(edge_index[0].tolist(), edge_index[1].tolist())),
+        directed=True,
+    )
+    reference = torch.tensor(
+        reference_graph.layout("sugiyama", maxiter=24, vgap=1.0, hgap=1.0).coords,
+        dtype=torch.float32,
+    )
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=graph.num_nodes,
         rank_sep=1.0,
         node_sep=1.0,
         barycenter_passes=24,

@@ -262,3 +262,133 @@ did not pass. No benchmark output directory was written.
   variants become exact after the GLPK port.
 - `real_karate_34` rank parity is fixed, but full-layout distance remains
   about 0.09, so it has at least one downstream ordering or coordinate residual.
+
+## A7: BK x-stage parity
+
+### Source bisection
+
+Installed python-igraph reports Python package `1.0.0` and C core `1.0.0`.
+The reference BK implementation used for the port was
+`/home/jtaylor/projects/_references/igraph/src/layout/sugiyama.c`.
+
+The first divergent quantity was the four-direction BK run orientation:
+Dagua mirrored layers and coordinates for right/down passes, while igraph keeps
+the original `vertex_to_the_left` array for all four passes and changes only the
+`reverse` and `align_right` flags. Igraph calls vertical alignment and horizontal
+compaction as `reverse = i / 2`, `align_right = i % 2` while passing the same
+`vertex_to_the_left` into compaction (`sugiyama.c:981-988`). Vertical alignment
+uses original `X_POS` order and an `align_right` scan/median rule
+(`sugiyama.c:1049-1168`). Horizontal compaction walks the original
+`vertex_to_the_left` relation recursively and applies class shifts from that
+relation (`sugiyama.c:1190-1301`). Balancing then anchors all four runs to the
+minimum-width run and takes `median_4` (`sugiyama.c:990-1029`).
+
+Ordering was checked with matched GLPK ranks before BK comparison. The A3
+ordinal-edge Type-1 conflict quirk remained active; no ordering-stage mismatch
+was found on the named probes before entering BK.
+
+| Probe | Rank equal | Dagua mirrored BK max abs x residual | Source-shaped BK max abs x residual | Named divergence |
+|---|---:|---:|---:|---|
+| `real_karate_34` | yes | 59.0 | 0.0 | four-run orientation/compaction relation |
+| `width_skew_late_merge` | yes | 7.0 | 3.5 | four-run orientation fixed; residual remains |
+| `hexagonal_lattice_42` | yes | 3.0 | 3.0 | no improvement from orientation alone |
+
+The port is gated to `fidelity_mode="igraph"` through the existing igraph
+conflict/BK branch. Generic BK and graphviz-fidelity paths remain separate.
+
+### Implementation
+
+Commits:
+
+- `2f54853 fix(sugiyama): match igraph BK alignment runs`
+- `922464a fix(sugiyama): avoid recursion limit in igraph compaction`
+
+Changed files:
+
+- `dagua/layout/ops/sugiyama.py`: added the source-shaped igraph-only BK
+  coordinate assignment path, including igraph edge-id Type-1 ignore marking,
+  original-order vertical alignment, original `vertex_to_the_left` horizontal
+  compaction, min-width anchoring, and four-run median balancing. The later
+  recursion-limit guard keeps igraph's recursive C block-placement shape but
+  raises Python's recursion limit around large dummy-expanded compactions.
+- `tests/test_layout/test_sugiyama_fidelity.py`: added a karate regression that
+  compares igraph-fidelity Sugiyama coordinates against installed python-igraph.
+
+### 10-row probe from r76 igraph-far rows
+
+References were invoked in fresh subprocesses to avoid the known repeated
+installed-igraph segfault mode.
+
+| Row | d_R after A6 GLPK | d_R after A7 BK | Exact positions after A7 |
+|---|---:|---:|---:|
+| `moe_router_sparse::classic_sugiyama_default` | 0.000000000 | 0.000000000 | yes |
+| `moe_router_sparse::classic_sugiyama_passes4` | 0.000000000 | 0.000000000 | yes |
+| `moe_router_sparse::classic_sugiyama_passes48` | 0.000000000 | 0.000000000 | yes |
+| `moe_router_sparse::classic_sugiyama_tight` | 0.000000000 | 0.000000000 | yes |
+| `moe_router_sparse::classic_sugiyama_wide` | 0.000000000 | 0.000000000 | yes |
+| `real_karate_34::classic_sugiyama_default` | 0.092463303 | 0.000000000 | yes |
+| `real_karate_34::classic_sugiyama_passes4` | 0.099041559 | 0.000000000 | yes |
+| `hexagonal_lattice_42::classic_sugiyama_default` | 0.153686513 | 0.144675773 | no |
+| `width_skew_late_merge::classic_sugiyama_default` | 0.302972600 | 0.298854126 | no |
+| `kitchen_sink_platform_graph::classic_sugiyama_default` | 0.048839821 | 0.000000000 | no raw-exact; equivalence distance zero |
+
+Result: 8 of 10 rows under 0.01. No row that was exact or near after A6 left
+that class.
+
+### Regression evidence
+
+| Gate item | Result |
+|---|---|
+| Focused igraph fidelity regression | pass: `pytest tests/test_layout/test_sugiyama_fidelity.py -q -x` -> `15 passed, 3 warnings in 1.04s`. |
+| Task test gate | pass: `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q` -> `61 passed, 3104 deselected, 34 warnings in 20.24s`. |
+| Ruff | pass: `ruff check . --fix` -> `All checks passed!`. |
+| CLI mypy | pass: `mypy --follow-imports=silent dagua/cli.py` -> `Success: no issues found in 1 source file` plus the existing unused pyproject section note. |
+| Broader targeted project test | pass before the recursion-limit follow-up: `pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q` -> `464 passed, 153 warnings in 3423.70s`. |
+| Final Tier 2 project test | blocked by known pre-existing double-border smoke: `pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"` -> `FAILED tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border`, `1 failed, 260 passed, 88 deselected, 1 xfailed, 63 warnings in 524.03s`. |
+| rgg recursion check | pass after `922464a`: `run_benchmark --engines classic_sugiyama --graphs rgg_500 --max-nodes 0 --seeds 3 --seed-start 100 --workers 1 --timeout 600 --watchdog-timeout 1200` -> `Done: 1 total, 1 ok, 0 skipped, 0 errors, 0 timeouts`. |
+
+### Full family benchmark
+
+Command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --engines classic_sugiyama --variants --max-nodes 0 \
+  --seeds 100 --seed-start 100 --workers 5 \
+  --timeout 3600 --watchdog-timeout 7200 \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r77_igraph_bk
+```
+
+Done line:
+
+```text
+[benchmark] Done: 60600 total, 60400 ok, 0 skipped, 200 errors, 0 timeouts
+```
+
+The 200 errors were all watchdog expirations in graphviz-fidelity rows:
+
+- `rgg_2000::classic_sugiyama_graphviz_fidelity`, seeds 100-199
+- `ba_5000::classic_sugiyama_graphviz_fidelity`, seeds 100-199
+
+The benchmark therefore did not meet the requested 0-error gate. The failing
+rows are graphviz-fidelity large-graph rows, not igraph-fidelity BK rows, and
+the task safety constraints prohibited graphviz-fidelity path changes.
+
+### Concerns
+
+- The igraph BK orientation divergence is ported and flips the real-karate
+  class to exact, giving 8 of 10 A6 probe rows under 0.01.
+- `hexagonal_lattice_42` and `width_skew_late_merge` retain smaller x-stage
+  residuals after the first divergence fix. Their next divergent quantity was
+  not ported in this pass.
+- The full benchmark is not clean because two graphviz-fidelity large-graph
+  groups exceeded the watchdog. This is outside the igraph BK change surface
+  and outside the allowed edit scope for A7.
+
+### Knowledge
+
+- Igraph's four BK passes are flag-driven over the original layer/order
+  relations; right/down passes are not coordinate-mirrored compaction runs.
+- Igraph's horizontal compaction recursion can exceed Python's default
+  recursion depth after dummy expansion; a temporary recursion-limit guard is
+  required to preserve source-shaped behavior on larger graphs.
