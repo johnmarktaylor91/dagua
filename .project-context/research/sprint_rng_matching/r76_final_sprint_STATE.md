@@ -658,3 +658,25 @@ for retries. 2-attempt max per work item, then park documented.
   w_straightness metadata drift (2.2 vs 0.5).
   SPRINT STATUS: DONE. Official artifacts: eval_output/fidelity_definitive_r76/ +
   per_combo_r76.jsonl + r76_RESULTS.md.
+- 2026-07-04 ~04:15 ET: ***r77 MOP-UP SALVO LAUNCHED (JMT: "perfect fidelity unless
+  violence").*** The r76 ledger stands; r77 attacks every named-cause row that was closed
+  by budget rather than proof. DISPATCHED (all parallel):
+  * A5 half-width rule: codex MED pid 1297475, worktree dagua-sugiyama-final
+    (r77/sugiyama-final), brief r76_scratch/r77_impl_a5_halfwidth.md. Stages B-D dispatches
+    into the SAME worktree when A5 lands (serialized, shared files).
+  * A6 GLPK parity via OPTIONAL swiglpk DEP (JMT-authorized, umap-numba precedent): codex
+    HIGH pid 1299744, worktree dagua-igraph-glpk (r77/igraph-glpk), brief
+    r77_impl_a6_glpk.md. Draw-level LP parity gates; fallback = current behavior.
+  * E1 evidence-thin rows probe: codex MED pid 1302016, main repo read-only, brief
+    r77_probe_thin_rows.md -> r76_THIN_ROW_DOSSIERS.md.
+  * C1 sfdp spline-occupancy BOUND (doSplines=1 vs 0 instrumented) + approximation: codex
+    MED pid 1304321, worktree dagua-sfdp-pack2 (r77/sfdp-pack2), brief
+    r77_impl_sfdp_pack2.md. Targets the 2 quality-worse clusters.
+  * B1 MAAR instrumented-RUNNER trace (attempt-2 only read source; this one RUNS it): codex
+    MED pid 1307032, worktree dagua-maar-trace (r77/maar-trace), brief
+    r77_impl_maar_trace.md.
+  * ERA REGEN: local pid 1309414, script r76_scratch/r77_era_regen.sh, plan
+    r77_era_regen_plan.json (10 stochastic ref engines x 182 engine-graph pairs, seeds
+    100-199) -> benchmark_100seed_r77_era_refs; after: rescore the 414 low-power rows.
+  AFTER ALL LAND: rescores per family -> ledger amendment (r77 addendum or refreshed
+  official ledger) -> updated RESULTS + memory.
