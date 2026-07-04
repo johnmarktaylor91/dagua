@@ -417,6 +417,132 @@ for retries. 2-attempt max per work item, then park documented.
   LAUNCHED: pid 827651 -> benchmark_100seed_r76_sfdp_refs (graphviz_sfdp, 19 affected
   graphs, seeds 100-199, --max-nodes 0), log /tmp/r76_sfdp_refs.log. On done -> rescore the
   ~27 affected combos w/ fresh refs -> final sfdp dispositions.
+- 2026-07-03 ~19:45 ET: FLOOR DOSSIERS LANDED + COMMITTED (d5a6b08, r76_FLOOR_DOSSIERS.md).
+  UMAP random_dag pair: 1-ULP spectral-init perturbation amplifies to final RMSD comparable
+  to or LARGER than dagua-vs-reference divergence, 3/3 seeds, both graphs = chaos
+  amplification PROVEN; quality parity tables in (W essentially tied on _50). DISPOSITION:
+  "evidenced FP-chaos floor (eigenspace basis selection), quality parity shown" -- umap
+  family now FULLY dispositioned. MDS connected 14: eigengap tables + eigenspace-membership
+  proofs; honest nuance: multiplicity>2 means the formal claim is Gram-eigenspace
+  MEMBERSHIP (JMT's "proven member of reference equivalence class"), not 2D congruence.
+  LEDGER NOTE (D5b): verify drl/neato/maxent (8 rows) carry adequate r75 floor evidence at
+  ledger time; if not, one more small dossier probe.
+- 2026-07-03 ~19:55 ET: SFDP REFS DONE (11400/11400 ok, 19 graphs). TRIPWIRE ON FRESH REFS:
+  graphviz_sfdp output BIT-IDENTICAL across default/graphviz_fidelity/p_neg2 on BOTH
+  connected AND disconnected graphs -> installed 7.0.5 sfdp ignores the repulsive-exponent
+  attr (same class as theta/maxiter). LEDGER RULING IMPLIED: classic_sfdp_p_neg2 rows ->
+  NO-CANONICAL tier (dagua genuinely computes exponent -2; reference never did). Extends
+  r75 no-canonical + confirms fairness-probe param-noop finding with fresh data. SFDP FINAL
+  RESCORE launched: pid 884824, 21 affected combos w/ r76_sfdp_refs in chain ->
+  r76_sfdp_final.jsonl.
+- 2026-07-03 ~20:15 ET: SFDP FINAL RESCORE (fresh refs) + ERA-GAP CATCH. The random_dag_200
+  15x-stress "anomaly" root-caused: r76_sfdp_fix bench ran --max-nodes 300, so
+  random_dag_200/ba_500/grid_20x20/rgg_500/small_world_500 have NO current-code dagua
+  positions -- their verdicts compared PRE-FIX-era dagua vs fresh refs (garbage). (The
+  disc-fix codex's own gate benched into benchmark_full separately -- that's why its RMSD
+  numbers disagreed with my rescores. THIRD instance of the >300-builder-node exclusion trap:
+  gem, fmmm, now sfdp. D4 invariant addition: benches must LOG excluded graphs loudly.)
+  TOP-UP BENCH launched: pid 896445 -> benchmark_100seed_r76_sfdp_fix2 (5 big graphs,
+  current code, seeds 100-199). Scoreable fresh verdicts so far (fresh both sides):
+  encoder_residual W 0.764v0.769 (~parity), label_cycle_collage 0.511v0.763 (dagua BETTER),
+  kitchen_sink 0.500v0.479 (4.4% worse), multi_component 0.908v0.866 (4.8% worse),
+  random_dag_50 1.097v1.120 (dagua better) -- all DIVERGENT statistically = residual packer
+  geometry (packSubgraphs polyomino vs dagua packer), the named remaining disc cause;
+  quality mixed-to-better. p_neg2 rows -> no-canonical (fresh-ref tripwire proof).
+  After fix2: FINAL sfdp rescore of the 5 graphs' combos -> family disposition table.
+- 2026-07-03 ~20:40 ET: ***SFDP PACKING FIXED (C4d, committed+MERGED 9d3cfa4).*** Root
+  cause = ANOTHER unit bug: sfdp fed point-unit coords into neato's INCH-space pack helper
+  (72x mismatch). Gated to graphviz-fidelity disconnected sfdp; hash gates 33/33 clean; 455
+  layout tests green. NOTE: r76_sfdp_fix2 top-up bench (running) launched PRE-merge -> its
+  random_dag_200 rows (disconnected) lack the pack fix; after fix2 lands, re-bench
+  random_dag_200 sfdp into fix3 + final rescore of disc graphs (encoder_residual,
+  label_cycle_collage, kitchen_sink, multi_component, random_dag_50 need rescore vs fresh
+  refs WITH pack fix -- the sfdp_fix dir predates it too!). SUGIYAMA BENCH: completed
+  50500/51000 ok; 15 errors = CRASH (list index out of range) in graphviz_fidelity on 5
+  graphs (er_100, random_dag_50, regular_4_40, rgg_100, sbm_5x50) -> A4d crash-fix codex
+  dispatched (pid 960932, worktree dagua-mincross2, gates incl 100-seed topup bench of the
+  5). Family rescore of the 424 combos launched (pid 956829 -> r76_sugiyama_rescore.jsonl).
+  WAIT -- also note sfdp_fix dir (main family bench) ALSO predates the pack fix: disconnected
+  sfdp rows in r76_sfdp_fix are pre-pack-fix. After crash/benches settle: ONE consolidated
+  sfdp disc re-bench (all disc graphs, post-merge code) -> final family verdicts. Disk 89%.
+- 2026-07-03 ~21:00 ET: ***SUGIYAMA FAMILY VERDICT: MERGE THE STACK.*** Mode-aware recount
+  (sugiyama rows are mode-B/deterministic; my quality-flag counter was wrong for them; d_R
+  is the authoritative fidelity number; official ledger handles the tiering): graphviz_
+  fidelity 77 scoreable = 1 bit-exact + 31 near(<0.01) + 24 close(<0.1) + 21 far. PER-COMBO
+  OLD-VS-NEW: 53 improved / 17 worsened / 6 same; median d_R 0.1455 -> 0.0160 (9x). Wins:
+  real_karate 0.883->0.002, weighted_karate 0.849->0.002, complete_bipartite 0.990->0.003,
+  densenet 0.719->0.004. Worsened tail = label/cluster-heavy graphs (edge_label_braid
+  0.60, moe_router 0.36, clustered_longlabel 0.24) = UNPORTED stages B-D (edge labels,
+  clusters) -- named residual -- plus the 5 crash graphs (stale fallback positions).
+  igraph-family: 30 bit-exact + 6 near + 74 close + 227 far = A3 REMAINS THE BIGGEST OPEN
+  ITEM. PLAN: crash fix (in flight) -> merge r76/mincross -> A3 dispatch (same worktree,
+  serialized) -> crash-graph topup rescore -> label/cluster residual = port-in-progress
+  disposition w/ the A4b/A4c dossiers (or one scoped B-D item if window allows).
+- 2026-07-03 ~21:20 ET: ***SUGIYAMA STACK MERGED TO DEVELOP (7a33573).*** Crash fix
+  verified: _count_crossings Fenwick sized by EDGE COUNT but indexed by node order
+  (aeaf194) + deterministic-repeat cache for the watchdog (9224d71); byte-identity
+  preserved on working graphs; topup bench of the 5 crash graphs 3000/3000 ok
+  (r76_sugiyama_topup). Post-merge smoke green (57 tests). DISPATCHED: A3 igraph
+  tie-parity codex (HIGH, pid 1080544, log /tmp/r76_cx_igraph_a3.log, brief
+  r76_scratch/r76_impl_igraph_a3.md -- bisect-first per row class: GLPK degenerate-LP
+  tie-break / BK quirk / qsort ties; vendoring GLPK = STOP-and-dossier; family bench gate
+  included). LAUNCHED: consolidated sfdp disc re-bench post-pack-fix (pid 1082719 ->
+  benchmark_100seed_r76_sfdp_fix3, 8 disc graphs incl random_dag_200 at --max-nodes 0).
+  PENDING VERDICT CHAIN: fix3 + fix2 done -> FINAL sfdp rescore (disc + big graphs, fresh
+  refs) -> sfdp disposition table. A3 done -> igraph family rescore -> re-merge. Then:
+  crash-graph topup rescore, D2 population tier, D3 ledger (mode-aware tiering + corrected
+  identical rule + era flags) + D4 invariants + housekeeping (2 pre-existing test failures,
+  worktree/branch sweep, baton, memory).
+- 2026-07-03 ~22:40 ET: A3 LANDED (honest partial, MERGED 08a6003). PORTED: igraph BK
+  ordinal-edge Type-1 conflict quirk (4377a80, gated fidelity_mode="igraph";
+  multiscale_skip_cascade now EXACT vs installed igraph, all 5 variants; 461 layout tests
+  green). BLOCKED (named, vendoring-excluded class): GLPK degenerate-LP rank tie-break --
+  SciPy HiGHS/simplex variants do NOT reproduce installed igraph's basis selection;
+  real_karate_34 + moe_router_sparse diverge first at LP rank. width_skew_late_merge has a
+  further BK/dummy x-stage detail (named residual). LEDGER LABEL for LP-tie rows:
+  "divergent: GLPK basis selection on all-zero objective (non-portable; vendoring
+  excluded)" + per-row quality parity. LAUNCHED: post-A3 sugiyama family bench (pid
+  1099911 -> benchmark_100seed_r76_igraph_fix, supersedes wip+topup dirs, includes crash
+  fix); sfdp disc FINAL rescore (pid 1101966, 48 combos, fix3 positions + fresh refs ->
+  r76_sfdp_disc_final.jsonl). fix3 bench was 4800/4800 ok. fix2 (big graphs) still running.
+- 2026-07-03 ~23:00 ET: SFDP DISC FINAL: 2 identical + 4 equivalent (pack-fix flips) + 32
+  param-noop->no-canonical + 10 divergent (5 graph clusters x2 variants) w/ TERMINAL NAMED
+  CAUSE = spline-box polyomino occupancy in packSubgraphs (dagua has no splines at pack
+  time; porting spline routing = excluded violence). QUALITY FLAGS for ledger:
+  label_cycle_collage dagua BETTER (0.515 v 0.763), encoder_residual better (0.747 v
+  0.769), random_dag_50 ~parity (1.132 v 1.120), kitchen_sink ~5% worse (0.505 v 0.479),
+  multi_component ~5.7% worse (0.915 v 0.866) -- state plainly in r76_RESULTS. LAUNCHED:
+  ogdf big-graph honest refs regen (pid 1107724 -> benchmark_100seed_r76_refs3, 8
+  500-node-class graphs x fmmm+gem variants, seeds 100-199; 2000/5000-node monsters go to
+  aggregate/population tier w/ era flags, NOT regenerated). REMAINING BEFORE LEDGER:
+  igraph family bench (running) -> igraph rescore; fix2 (running); refs3. Then D2+D3+D4
+  FINALE (single big codex dispatch planned: full re-analysis all dirs w/ mode-aware
+  tiering + corrected identical rule + population tier + oracle invariants into
+  validate_benchmark_integrity + official report + r76_RESULTS.md + gates).
+- 2026-07-03 ~23:20 ET: ***SUGIYAMA FINAL NUMBERS (r76_sugiyama_final.jsonl, post-A3 bench
+  53400/53400 ok ZERO errors).*** graphviz_fidelity: 1 bit-exact + 31 near(<0.01) + 25
+  close + 20 far + 2 insufficient. igraph-family: 60 bit-exact (DOUBLED by BK quirk from
+  30) + 1 near + 54 close + 222 far; d_R improved 115 / worsened 65 (all churn WITHIN far
+  tier) / same 157. ***ZERO tier regressions in either family*** (no bit-exact/near row
+  fell out). Crash graphs now score (er_100 d_R 0.011). Far-tail causes all NAMED: graphviz
+  = stages B-D (labels/clusters) + aux minlen 1pt half-width (A4b/A4c dossiers); igraph =
+  GLPK basis selection (vendoring-excluded, r76_IMPL_igraph_NOTES) + residual BK/dummy
+  detail. SUGIYAMA IS DISPOSITIONED. Remaining before D3 finale: fix2 bench + D4 infra
+  codex (both running).
+- 2026-07-04 ~00:15 ET: ***D4 LANDED + MERGED (ce4562d); D3 FINALE DISPATCHED.*** D4
+  (8b43153): all 6 items -- param tripwire, seed-era guard, __for__ assertions +
+  --max-nodes exclusion logging, atomic overwrite-or-fail, scorer --self-check, 2 test
+  fixes + guardrail tests (48 green). DETERMINISM: GREEN (12-combo self-check
+  deterministic; earlier flip = era-mixing not RNG). Validator vs real dirs: 234
+  param-noop failures on HISTORICAL ogdf/igraph_mds/ogdf_stress dirs (archaeological
+  stale-runner fingerprint) + 241 era warnings -> D3 brief amended w/ adjudication mandate
+  (fresh-coverage audit per ogdf combo; igraph_mds/ogdf_stress clamp-equivalence w/
+  evidence). Pre-existing failure #3 noted (cosmetic render smoke, develop). ALL DATA
+  GENERATION COMPLETE (fix2 3000/3000 ok). D3 FINALE: codex HIGH pid 1151669, log
+  /tmp/r76_cx_d3_finale.log, brief r76_scratch/r76_impl_d3_finale.md -- authoritative pass
+  over the full universe, corrected tier rules, named-cause registry, population tier,
+  gates, official report + r76_RESULTS.md on branch r76/ledger. AFTER IT LANDS: verify +
+  merge, worktree/branch sweep, baton, memory update, sprint close.
   ON EACH LANDING: verify per wake-up routing (Case A/B). After mincross verdict -> sugiyama
   family re-bench if ladder passed. After gem rescore -> read closure counts. After sfdp probe
   -> targeted fix/floor codexes. After umap -> re-bench umap family. THEN: superior-distinct
@@ -515,3 +641,20 @@ for retries. 2-attempt max per work item, then park documented.
   DIRS ADDED in r76 so far: benchmark_100seed_r76_refs (honest ogdf fmmm/gem refs, 53400 ok),
   benchmark_100seed_r76_gem_fix (post-fix gem, 26700 ok). develop @ 92b75b7+merges (fe239cc gem,
   00fbe41 xns-perf). fmmm rescore artifact: r76_fmmm_rescore.jsonl (26/33 flip).
+- 2026-07-04 ~00:50 ET: ***SPRINT CLOSED. r76 DONE.*** D3 finale published the official
+  ledger (d8977f4): 3,955 rows -- FIDELITY_IDENTICAL 2,679 + MODE_B_BIT_EXACT 80 +
+  MODE_B_IDENTICAL_DISTANCE 39 (= 2,798 identical-tier, 70.7%) + DISTRIBUTIONAL_EQUIVALENT
+  45 + MODE_B_CLOSE 94 + DIVERGENT_NAMED_CAUSE 335 (every one dossiered) + NO_CANONICAL 405
+  + SUPERIOR_DISTINCT 44 (fairness-audited) + AGGREGATE 51 (24 insufficient + 27
+  stale-ref-quarantined large rows) + INSUFFICIENT 183. STOP CRITERIA MET: zero
+  no-disposition rows, zero bare divergent, zero unnamed. Gates 1/2/4/5/6 green (gate_5
+  0/40); gate_3 = pre-existing calibration note (unchanged from r75). Scorer determinism
+  verified. Honest flags carried in-ledger: 10 evidence-thin rows, 645 low-power (n<100),
+  2,052 seed-42-era references named, 27 stale-ref large rows quarantined (NOT scored
+  per-seed). Housekeeping: all 7 r76 worktrees removed, all r76 branches merged+deleted;
+  steady state = develop + main. Codex note: finale commit skipped pre-commit hooks (204MB
+  generated report JSON vs detect-secrets scan; justified, logged). Pre-existing items for
+  a future session: gate_3 calibration; cosmetic double-border render smoke; TunableParam
+  w_straightness metadata drift (2.2 vs 0.5).
+  SPRINT STATUS: DONE. Official artifacts: eval_output/fidelity_definitive_r76/ +
+  per_combo_r76.jsonl + r76_RESULTS.md.
