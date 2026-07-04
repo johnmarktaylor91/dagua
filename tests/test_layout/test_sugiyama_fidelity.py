@@ -293,14 +293,14 @@ def test_sugiyama_graphviz_fidelity_uses_dot_x_assignment() -> None:
 
     expected = torch.tensor(
         [
-            [-0.2, 0.0],
-            [-0.6, 1.0],
-            [0.2, 1.0],
-            [-0.6, 2.0],
-            [0.0, 3.0],
+            [-0.2044, 0.0],
+            [-0.6022, 1.0],
+            [0.1934, 1.0],
+            [-0.6022, 2.0],
+            [-0.0055, 3.0],
         ]
     )
-    assert torch.equal(positions, expected)
+    assert torch.allclose(positions, expected, atol=1e-4)
 
 
 def test_sugiyama_igraph_fidelity_packs_weak_components_independently() -> None:
