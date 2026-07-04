@@ -734,3 +734,19 @@ for retries. 2-attempt max per work item, then park documented.
   r77_sugiyama_a5b). A8 stages B-D dispatched (pid 1741008, HIGH -- labels/clusters, THE
   final graphviz item; DOT-content audit first). Housekeeping list now 6 pre-existing
   failures (+ test_engine test_classify_early_exit seen by A5 = #7? verify at ledger).
+- 2026-07-04 ~09:45 ET: r77 ROLLING (4). M5 mds finisher LANDED+MERGED (a45087c):
+  align+uplo ported, eigensign heuristic removed, byte-identity 9/9+11/11 at 0.0, bench
+  1200/1200; eigensign residual PROVEN scoring-invisible (scorer Procrustes is O(2) --
+  reflections equivalent). mds line CLOSED. A8 labels LANDED (labels are STRUCTURAL in dot:
+  2x minlen, ranksep/2, midpoint label nodes; improved both pure-label rows; committed
+  gated). A9 CLUSTER MACHINERY LANDED (x slot/boundary constraints; improved 5/6 cluster
+  rows: interleaved/clustered_longlabel/kitchen_sink x2/nested) + A9b guard-hole fix
+  (small_label_storm byte-restored; pipeline no longer trusts callers -- wrapper classifies
+  cluster-only DOT). ALL MERGED (8d9784d; conflicts vs pack2/A6 union-resolved; 97-test
+  smoke green). sugiyama-final + mds-disc + graph-determinism + sfdp-pack2 worktrees SWEPT.
+  POST-A5/A6 RESCORE (412 combos, no random_dag): igraph bit-exact 60->75 (GLPK effect),
+  far 222->176; graphviz near 31 stable, far 20->18 (A8/A9 not yet in this bench); ZERO
+  tier-regressions. Scorer robustness item noted: shape-mismatch should flag not crash
+  (hit on random_dag realization change). REMAINING IN FLIGHT: A7 BK x-stage, era regen,
+  random_dag full-matrix regen. THEN: consolidated final bench+rescore (sugiyama post-A7/8/9
+  + random_dag all-family + era rows) -> ledger refresh -> updated RESULTS/memory.
