@@ -59,6 +59,9 @@ _GRAPHVIZ_OMEGA_TABLE = (
     (1, 2, 4),
 )
 _GRAPHVIZ_X_AUX_RESOLUTION = 1
+_GRAPHVIZ_DEFAULT_NODE_WIDTH_POINTS = 54.0
+_GRAPHVIZ_LABEL_BOX_HALF_WIDTH_SEED_POINTS = 1.0
+_GRAPHVIZ_VIRTUAL_NODE_HALF_WIDTH_SEED_POINTS = 1.0
 
 
 @dataclass(frozen=True)
@@ -1077,7 +1080,16 @@ def _expand_long_edges_with_dummy_nodes(
     )
     sources = edge_index[0].tolist()
     targets = edge_index[1].tolist()
-    virtual_width = 0.0 if graphviz_virtual_node_sep is None else float(graphviz_virtual_node_sep)
+    if graphviz_virtual_node_sep is None:
+        virtual_width = 0.0
+        virtual_width_increment = 0.0
+    else:
+        # Graphviz 7.0.5 fastgr.c seeds virtual nodes at ND_lw=ND_rw=1
+        # before class2.c adds the integer nodesep/2 dummy-node width.
+        virtual_width = float(graphviz_virtual_node_sep) + (
+            2.0 * _GRAPHVIZ_VIRTUAL_NODE_HALF_WIDTH_SEED_POINTS
+        )
+        virtual_width_increment = float(graphviz_virtual_node_sep)
 
     for edge_idx in edge_order:
         source = int(sources[edge_idx])
@@ -1096,7 +1108,7 @@ def _expand_long_edges_with_dummy_nodes(
                 expanded_weight_values[segment_index] += orig_weight
             if graphviz_virtual_node_sep is not None:
                 for dummy_index in representative_path[1:-1]:
-                    dummy_sizes[dummy_index - num_original_nodes][0] += virtual_width
+                    dummy_sizes[dummy_index - num_original_nodes][0] += virtual_width_increment
             continue
 
         segment_indices: list[int] = []
@@ -2160,7 +2172,11 @@ def _graphviz_left_width(
         if stored_width > 0.0:
             return stored_width / 2.0
         return node_sep / 2.0
-    return float(node_sizes[node, 0].item()) / 2.0
+    stored_width = float(node_sizes[node, 0].item())
+    half_width = stored_width / 2.0
+    if stored_width > _GRAPHVIZ_DEFAULT_NODE_WIDTH_POINTS:
+        half_width += _GRAPHVIZ_LABEL_BOX_HALF_WIDTH_SEED_POINTS
+    return half_width
 
 
 def _graphviz_right_width(
@@ -2192,7 +2208,11 @@ def _graphviz_right_width(
         if stored_width > 0.0:
             return stored_width / 2.0
         return node_sep / 2.0
-    return float(node_sizes[node, 0].item()) / 2.0
+    stored_width = float(node_sizes[node, 0].item())
+    half_width = stored_width / 2.0
+    if stored_width > _GRAPHVIZ_DEFAULT_NODE_WIDTH_POINTS:
+        half_width += _GRAPHVIZ_LABEL_BOX_HALF_WIDTH_SEED_POINTS
+    return half_width
 
 
 def _graphviz_round(value: float) -> int:
