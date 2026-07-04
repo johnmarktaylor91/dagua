@@ -764,3 +764,15 @@ for retries. 2-attempt max per work item, then park documented.
   REMAINING IN FLIGHT: era regen, random_dag full-matrix regen. THEN: their rescores ->
   ledger refresh (corrected named-causes incl spline->label-box) -> r77 RESULTS addendum ->
   memory -> close.
+- 2026-07-04 ~19:20 ET: ***RANDOM_DAG CLEAN SWEEP (same-realization rescore,
+  r77_randomdag.jsonl).*** 69 combos: 50 identical + 1 equivalent + 6 no-canonical + 12
+  mode-B sugiyama tiers + ***ZERO divergent***. 25 formerly-divergent rows FLIPPED incl the
+  ENTIRE MAAR cluster (fmmm steps10/100/200 both graphs), all sfdp disc random_dag rows,
+  maxent x4, neato, stress_maj, mds x4, and random_dag_50::classic_umap_nn5 (the "eigenspace
+  floor" row -- IDENTICAL; the floor was a graph-realization phantom; the r76_FLOOR_DOSSIERS
+  umap section must be amended: chaos mechanism was real but the observed divergence was
+  oracle bug #5). Bench errors were known classes only (davidson timeouts, sgd2 disconnected
+  refusal). LEDGER IMPLICATIONS (for the r77 refresh): retract/close MAAR named-cause rows
+  (4), sfdp disc random_dag rows, umap floor row(s); r76_maar_final + parts of prior
+  rescores SUPERSEDED by r77_randomdag.jsonl. REMAINING: era regen (engine ~3/10) -> era
+  rescore -> comprehensive r77 ledger refresh + RESULTS addendum + memory + close.
