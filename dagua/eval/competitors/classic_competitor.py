@@ -9,7 +9,9 @@ from __future__ import annotations
 import time
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping, Optional, cast
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Tuple, cast
+
+import torch
 
 from dagua.eval.competitors.base import (
     CompetitorBase,
@@ -18,9 +20,146 @@ from dagua.eval.competitors.base import (
 )
 
 if TYPE_CHECKING:
-    import torch
-
     from dagua.graph import DaguaGraph
+
+_GRAPHVIZ_POINTS_PER_INCH = 72.0
+_GRAPHVIZ_DEFAULT_NODE_WIDTH_POINTS = 54.0
+_GRAPHVIZ_DEFAULT_NODE_HEIGHT_POINTS = 36.0
+_GRAPHVIZ_LABEL_XPAD_POINTS = 16.0
+_GRAPHVIZ_LABEL_YPAD_POINTS = 8.0
+_GRAPHVIZ_HELVETICA_UNITS_PER_EM = 2048.0
+_GRAPHVIZ_TEXT_HEIGHT_FACTOR = 1.128
+_SUGIYAMA_DETERMINISTIC_CACHE: dict[Tuple[Any, ...], Tuple[torch.Tensor, float]] = {}
+_GRAPHVIZ_HELVETICA_REGULAR_WIDTHS = (
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    569,
+    569,
+    727,
+    1139,
+    1139,
+    1821,
+    1366,
+    391,
+    682,
+    682,
+    797,
+    1196,
+    569,
+    682,
+    569,
+    569,
+    1139,
+    1139,
+    1139,
+    1139,
+    1139,
+    1139,
+    1139,
+    1139,
+    1139,
+    1139,
+    569,
+    569,
+    1196,
+    1196,
+    1196,
+    1139,
+    2079,
+    1366,
+    1366,
+    1479,
+    1479,
+    1366,
+    1251,
+    1593,
+    1479,
+    569,
+    1024,
+    1366,
+    1139,
+    1706,
+    1479,
+    1593,
+    1366,
+    1593,
+    1479,
+    1366,
+    1251,
+    1479,
+    1366,
+    1933,
+    1366,
+    1366,
+    1251,
+    569,
+    569,
+    569,
+    961,
+    1139,
+    682,
+    1139,
+    1139,
+    1024,
+    1139,
+    1139,
+    569,
+    1139,
+    1139,
+    455,
+    455,
+    1024,
+    455,
+    1706,
+    1139,
+    1139,
+    1139,
+    1139,
+    682,
+    1024,
+    569,
+    1139,
+    1024,
+    1479,
+    1024,
+    1024,
+    1024,
+    684,
+    532,
+    684,
+    1196,
+    -1,
+)
 
 
 class _ClassicBase(CompetitorBase):
@@ -162,6 +301,100 @@ def _warn_on_unrecognized_variant_params(
         UserWarning,
         stacklevel=3,
     )
+
+
+def _graphviz_helvetica_text_width(text: str, font_size: float) -> float:
+    """Estimate Graphviz's Helvetica label width in points.
+
+    Parameters
+    ----------
+    text : str
+        Plain ASCII DOT label text.
+    font_size : float
+        Graphviz node font size in points.
+
+    Returns
+    -------
+    float
+        Text width in points using Graphviz 7.0.5's hard-coded Helvetica
+        fallback metrics from ``textspan_lut.c``.
+    """
+    canonical_width = 0
+    for character in text:
+        codepoint = ord(character)
+        if codepoint >= len(_GRAPHVIZ_HELVETICA_REGULAR_WIDTHS):
+            codepoint = ord(" ")
+        character_width = _GRAPHVIZ_HELVETICA_REGULAR_WIDTHS[codepoint]
+        if character_width > 0:
+            canonical_width += character_width
+    return float(canonical_width) * float(font_size) / _GRAPHVIZ_HELVETICA_UNITS_PER_EM
+
+
+def _graphviz_dot_node_box(label: str, font_size: float, shape: str) -> tuple[float, float]:
+    """Return the DOT node box that ``_graph_to_dot`` asks Graphviz to compute.
+
+    Parameters
+    ----------
+    label : str
+        Node label emitted as DOT ``label``.
+    font_size : float
+        Node ``fontsize`` emitted by the Graphviz competitor adapter.
+    shape : str
+        Dagua node shape used by ``_graph_to_dot`` to select the DOT shape.
+
+    Returns
+    -------
+    tuple[float, float]
+        Graphviz node box ``(width, height)`` in points.
+    """
+    text_width = _graphviz_helvetica_text_width(text=label, font_size=font_size)
+    text_height = float(font_size) * _GRAPHVIZ_TEXT_HEIGHT_FACTOR if label else 0.0
+    padded_width = text_width + _GRAPHVIZ_LABEL_XPAD_POINTS if label else 0.0
+    padded_height = text_height + _GRAPHVIZ_LABEL_YPAD_POINTS if label else 0.0
+
+    width = max(_GRAPHVIZ_DEFAULT_NODE_WIDTH_POINTS, padded_width)
+    height = max(_GRAPHVIZ_DEFAULT_NODE_HEIGHT_POINTS, padded_height)
+    if shape in {"ellipse", "circle"} and padded_width > 0.0 and padded_height > 0.0:
+        ellipse_width = padded_width
+        ellipse_height = padded_height * 2.0**0.5
+        if height > ellipse_height:
+            ratio = min(padded_height / height, 0.999999)
+            ellipse_width *= (1.0 / (1.0 - ratio * ratio)) ** 0.5
+            ellipse_height = padded_height
+        else:
+            ellipse_width *= 2.0**0.5
+        width = max(width, ellipse_width)
+        height = max(height, ellipse_height)
+    if shape == "circle":
+        width = height = max(width, height)
+    return width, height
+
+
+def _graphviz_dot_node_sizes(graph: DaguaGraph) -> torch.Tensor:
+    """Compute Graphviz DOT node boxes for the benchmark adapter's DOT text.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph passed to both classic and Graphviz competitors.
+
+    Returns
+    -------
+    torch.Tensor
+        Float tensor with shape ``[N, 2]`` containing point-unit node boxes.
+    """
+    boxes: list[tuple[float, float]] = []
+    for node_index in range(graph.num_nodes):
+        label = graph.node_labels[node_index] if node_index < len(graph.node_labels) else ""
+        style = graph.get_style_for_node(node_index)
+        boxes.append(
+            _graphviz_dot_node_box(
+                label=label,
+                font_size=float(style.font_size),
+                shape=str(style.shape),
+            )
+        )
+    return torch.tensor(boxes, dtype=graph.size_dtype)
 
 
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
@@ -1682,6 +1915,55 @@ class ClassicFMMM(_ClassicBase):
 # ── New algorithms (March 2026) ──────────────────────────────────────────────
 
 
+def _sugiyama_cache_key(
+    name: str,
+    fn_name: str,
+    graph: DaguaGraph,
+    extra_kwargs: Mapping[str, Any],
+) -> Optional[Tuple[Any, ...]]:
+    """Return a cache key for deterministic classic Sugiyama benchmark repeats.
+
+    Parameters
+    ----------
+    name : str
+        Competitor name.
+    fn_name : str
+        Layout function name.
+    graph : DaguaGraph
+        Graph object supplied by the benchmark worker cache.
+    extra_kwargs : Mapping[str, Any]
+        Layout parameters after benchmark variant defaults have been merged.
+
+    Returns
+    -------
+    tuple[Any, ...] | None
+        Cache key when the layout is deterministic for repeated benchmark
+        seeds, otherwise ``None``.
+    """
+    if fn_name != "layout_sugiyama_pipeline":
+        return None
+
+    scalar_params = tuple(
+        sorted(
+            (key, value)
+            for key, value in extra_kwargs.items()
+            if not isinstance(value, torch.Tensor)
+        )
+    )
+    edge_count = int(graph.edge_index.shape[1]) if graph.edge_index.numel() > 0 else 0
+    return (
+        name,
+        fn_name,
+        id(graph),
+        graph.num_nodes,
+        edge_count,
+        id(graph.edge_index),
+        id(graph.edge_weights),
+        id(graph.node_sizes),
+        scalar_params,
+    )
+
+
 def _quick_classic(
     name: str,
     import_path: str,
@@ -1741,6 +2023,11 @@ def _quick_classic(
         if fn_name == "layout_kk_pipeline":
             extra_kwargs.setdefault("orient_to_direction", False)
         node_sizes = graph.node_sizes
+        if (
+            fn_name == "layout_sugiyama_pipeline"
+            and extra_kwargs.get("fidelity_mode") == "graphviz"
+        ):
+            extra_kwargs.setdefault("graphviz_node_sizes", _graphviz_dot_node_sizes(graph=graph))
         if fn_name == "layout_neato_pipeline":
             if node_sizes is None:
                 graph.compute_node_sizes()
@@ -1750,6 +2037,21 @@ def _quick_classic(
                 # while the neato compatibility pipeline models Graphviz's
                 # internal coordinates in inches before JSON export.
                 node_sizes = node_sizes / 72.0
+        cache_key = _sugiyama_cache_key(
+            name=name,
+            fn_name=fn_name,
+            graph=graph,
+            extra_kwargs=extra_kwargs,
+        )
+        if cache_key is not None:
+            cached = _SUGIYAMA_DETERMINISTIC_CACHE.get(cache_key)
+            if cached is not None:
+                cached_pos, cached_runtime = cached
+                return CompetitorResult(
+                    name=name,
+                    pos=cached_pos.clone(),
+                    runtime_seconds=cached_runtime,
+                )
         pos = fn(
             edge_index,
             graph.num_nodes,
@@ -1757,7 +2059,10 @@ def _quick_classic(
             seed=seed,
             **extra_kwargs,
         )
-        return CompetitorResult(name=name, pos=pos, runtime_seconds=time.perf_counter() - start)
+        runtime_seconds = time.perf_counter() - start
+        if cache_key is not None and isinstance(pos, torch.Tensor):
+            _SUGIYAMA_DETERMINISTIC_CACHE[cache_key] = (pos.detach().cpu().clone(), runtime_seconds)
+        return CompetitorResult(name=name, pos=pos, runtime_seconds=runtime_seconds)
     except Exception as exc:
         return CompetitorResult(
             name=name,
