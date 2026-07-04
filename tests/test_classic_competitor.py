@@ -439,6 +439,96 @@ def test_classic_sfdp_graphviz_fidelity_preserves_connected_pack(
     assert torch.equal(forwarded_sizes, original_sizes)
 
 
+def test_classic_sugiyama_graphviz_fidelity_forwards_label_only_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity Sugiyama should pass edge-label boxes for label-only DOT."""
+    graph = DaguaGraph()
+    graph.add_edge("source", "target", label="handoff label")
+    graph.compute_node_sizes()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sugiyama",
+        fn_name="layout_sugiyama_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSugiyama().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz"},
+    )
+
+    assert result.pos is not None
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert isinstance(kwargs["graphviz_edge_label_sizes"], torch.Tensor)
+    assert kwargs["graphviz_edge_label_sizes"].shape == (1, 2)
+    assert "clusters" not in kwargs
+    assert "cluster_parents" not in kwargs
+    assert "graphviz_apply_cluster_constraints" not in kwargs
+
+
+def test_classic_sugiyama_graphviz_fidelity_forwards_cluster_only_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity Sugiyama should opt into clusters for cluster-only DOT."""
+    graph = _make_clustered_graph()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sugiyama",
+        fn_name="layout_sugiyama_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSugiyama().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz"},
+    )
+
+    assert result.pos is not None
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert kwargs["clusters"] is graph.clusters
+    assert kwargs["cluster_parents"] is graph.cluster_parents
+    assert kwargs["graphviz_apply_cluster_constraints"] is True
+    assert "graphviz_edge_label_sizes" not in kwargs
+
+
+def test_classic_sugiyama_graphviz_fidelity_guards_mixed_label_cluster_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity Sugiyama should leave mixed label+cluster DOT unaugmented."""
+    graph = DaguaGraph()
+    graph.add_edge("source", "target", label="handoff label")
+    graph.add_cluster("group", ["source", "target"])
+    graph.compute_node_sizes()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sugiyama",
+        fn_name="layout_sugiyama_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSugiyama().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz"},
+    )
+
+    assert result.pos is not None
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert "graphviz_edge_label_sizes" not in kwargs
+    assert "clusters" not in kwargs
+    assert "cluster_parents" not in kwargs
+    assert "graphviz_apply_cluster_constraints" not in kwargs
+
+
 def test_classic_sgd2_multi_enables_multiple_criteria(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
