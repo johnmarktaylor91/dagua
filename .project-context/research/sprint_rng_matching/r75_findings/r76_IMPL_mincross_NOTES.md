@@ -1097,7 +1097,79 @@ the task.
 
 ### Full family bench
 
-Pending.
+Command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --engines classic_sugiyama --variants --max-nodes 0 --seeds 100 \
+  --seed-start 100 --workers 5 --timeout 3600 --watchdog-timeout 7200 \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r77_sugiyama_a5
+```
+
+No successful Done line was emitted. The runner reached 60,600 accounted
+result entries, then remained active for more than two hours with the same
+200 rows marked `running`; it was terminated after the benchmark gate was
+already unrecoverably failed by completed errors.
+
+Final recorded result status at termination:
+
+```text
+60600 rows
+56900 ok
+3395 skipped
+200 running
+105 errors
+```
+
+Non-ok rows:
+
+```text
+ba_2000 classic_sugiyama_default: 3 error, 97 skipped
+ba_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+ba_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+ba_2000 classic_sugiyama_tight: 3 error, 97 skipped
+ba_2000 classic_sugiyama_wide: 3 error, 97 skipped
+ba_5000 classic_sugiyama_default: 3 error, 97 skipped
+ba_5000 classic_sugiyama_graphviz_fidelity: 100 running
+ba_5000 classic_sugiyama_passes4: 3 error, 97 skipped
+ba_5000 classic_sugiyama_passes48: 3 error, 97 skipped
+ba_5000 classic_sugiyama_tight: 3 error, 97 skipped
+ba_5000 classic_sugiyama_wide: 3 error, 97 skipped
+er_2000 classic_sugiyama_default: 3 error, 97 skipped
+er_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+er_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+er_2000 classic_sugiyama_tight: 3 error, 97 skipped
+er_2000 classic_sugiyama_wide: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_default: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_tight: 3 error, 97 skipped
+powerlaw_2000 classic_sugiyama_wide: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_default: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_graphviz_fidelity: 100 running
+rgg_2000 classic_sugiyama_passes4: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_passes48: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_tight: 3 error, 97 skipped
+rgg_2000 classic_sugiyama_wide: 3 error, 97 skipped
+rgg_500 classic_sugiyama_default: 3 error, 97 skipped
+rgg_500 classic_sugiyama_passes4: 3 error, 97 skipped
+rgg_500 classic_sugiyama_passes48: 3 error, 97 skipped
+rgg_500 classic_sugiyama_tight: 3 error, 97 skipped
+rgg_500 classic_sugiyama_wide: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_default: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_passes4: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_passes48: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_tight: 3 error, 97 skipped
+sbm_8x100 classic_sugiyama_wide: 3 error, 97 skipped
+```
+
+Observed error text for completed failures:
+
+```text
+maximum recursion depth exceeded
+```
+
+Commit: `3d1537fcf8064c5ae5ccfe67bb8315019e867782`.
 
 ### Concerns
 
