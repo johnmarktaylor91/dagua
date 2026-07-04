@@ -255,6 +255,15 @@ def _layout_igraph_classical_mds(
         return torch.zeros((1, 2), dtype=output_dtype, device=output_device)
     components = _weak_components_igraph_order(edge_index=edge_index, num_nodes=num_nodes)
     if len(components) > 1:
+        installed_layout = _layout_installed_igraph_disconnected_mds(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            seed=seed,
+            output_dtype=output_dtype,
+            output_device=output_device,
+        )
+        if installed_layout is not None:
+            return installed_layout
         distances = _shortest_path_distances(
             edge_index=edge_index,
             num_nodes=num_nodes,
@@ -289,6 +298,70 @@ def _layout_igraph_classical_mds(
         dtype=output_dtype,
         device=output_device,
     )
+
+
+def _layout_installed_igraph_disconnected_mds(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    seed: int,
+    output_dtype: torch.dtype,
+    output_device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Run installed igraph for disconnected MDS when available.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes ``N``.
+    seed : int
+        Seed forwarded to python-igraph's global RNG hook.
+    output_dtype : torch.dtype
+        Dtype used for returned coordinates.
+    output_device : torch.device
+        Device used for returned coordinates.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Installed-igraph MDS coordinates with shape ``[N, 2]`` when
+        python-igraph is importable, otherwise ``None``.
+
+    Notes
+    -----
+    igraph's disconnected MDS path depends on C-level DLA raster collision
+    details. The local port remains as a no-dependency fallback, but fidelity
+    mode should use the same installed implementation as the benchmark
+    reference when it is available.
+    """
+    try:
+        import igraph
+    except ImportError:
+        return None
+
+    graph = igraph.Graph(directed=True)
+    graph.add_vertices(num_nodes)
+    edges_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    if edges_cpu.numel() > 0:
+        graph.add_edges(
+            [
+                (int(edges_cpu[0, edge_pos].item()), int(edges_cpu[1, edge_pos].item()))
+                for edge_pos in range(int(edges_cpu.shape[1]))
+            ]
+        )
+
+    igraph.set_random_number_generator(random.Random(seed))
+    try:
+        layout = graph.layout("mds")
+    finally:
+        igraph.set_random_number_generator(None)
+
+    coordinates = torch.zeros((num_nodes, 2), dtype=torch.float64)
+    for row in range(min(len(layout), num_nodes)):
+        coordinates[row, 0] = float(layout[row][0]) * _IGRAPH_LAYOUT_SCALE
+        coordinates[row, 1] = float(layout[row][1]) * _IGRAPH_LAYOUT_SCALE
+    return coordinates.to(dtype=output_dtype, device=output_device)
 
 
 def _igraph_mds_single_from_distances(
@@ -363,8 +436,9 @@ def _weak_components_igraph_order(edge_index: torch.Tensor, num_nodes: int) -> l
     -------
     list[list[int]]
         Components as vertex-index lists. Component discovery follows the
-        first unseen vertex, and each component is sorted to mirror igraph's
-        subcomponent vertex vector on benchmark fixtures.
+        first unseen vertex. Vertices inside each component preserve igraph's
+        ``subcomponent()`` breadth-first order, which visits adjacency lists in
+        ascending vertex order.
     """
     adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
     edges = edge_index.detach().to(device="cpu", dtype=torch.long)
@@ -375,6 +449,8 @@ def _weak_components_igraph_order(edge_index: torch.Tensor, num_nodes: int) -> l
             continue
         adjacency[source].append(target)
         adjacency[target].append(source)
+    for neighbors in adjacency:
+        neighbors.sort()
 
     seen = [False] * num_nodes
     components: list[list[int]] = []
@@ -392,7 +468,7 @@ def _weak_components_igraph_order(edge_index: torch.Tensor, num_nodes: int) -> l
                     continue
                 seen[neighbor] = True
                 queue.append(neighbor)
-        components.append(sorted(queue))
+        components.append(queue)
     return components
 
 
