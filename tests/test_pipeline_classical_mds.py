@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Iterable, Optional
 
 import pytest
@@ -14,6 +16,8 @@ from dagua.layout.ops.pipelines.classical_mds import (
     layout_classical_mds_pipeline,
 )
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -180,6 +184,26 @@ def _run_pipeline_direct(
     return final_state.pos
 
 
+def test_layout_runtime_modules_do_not_import_igraph() -> None:
+    """Guard against runtime delegation to python-igraph from layout modules."""
+    offenders: list[str] = []
+    for path in sorted((_PROJECT_ROOT / "dagua" / "layout").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(
+                    alias.name == "igraph" or alias.name.startswith("igraph.")
+                    for alias in node.names
+                ):
+                    offenders.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+            elif isinstance(node, ast.ImportFrom) and (
+                node.module == "igraph" or (node.module or "").startswith("igraph.")
+            ):
+                offenders.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+
+    assert offenders == []
+
+
 class TestClassicalMDSPipelineFidelity:
     """Bit-exact regression coverage for the classical MDS pipeline."""
 
@@ -268,17 +292,17 @@ class TestClassicalMDSPipelineFidelity:
             )
 
     def test_connected_igraph_fidelity_path_matches_frozen_expectation(self) -> None:
-        """Connected graphs should keep the pre-DLA byte-identical path."""
+        """Connected graphs should keep the aligned igraph-binding path."""
         edge_index = _edge_index_from_edges([(0, 1), (1, 2), (2, 3), (1, 4), (4, 5), (2, 6)])
         expected = torch.tensor(
             [
-                [19.74042874517258, 81.1747700083929],
-                [11.637134713339654, 12.375749423550795],
-                [-41.32600763180907, -7.664278204494579],
-                [-81.43278709339432, -17.817869289935743],
-                [61.483717691141706, -12.624917741342301],
-                [111.33030066894376, -37.625584906235375],
-                [-81.43278709339432, -17.817869289935746],
+                [18.665543833577367, -81.42865150765743],
+                [11.472505840196021, -12.528514990915745],
+                [-41.22107151432031, 8.209953129678556],
+                [-81.19011179594563, 18.892882956107357],
+                [61.6452504242114, 11.810977488588032],
+                [111.81799500822676, 36.150469968091826],
+                [-81.19011179594563, 18.892882956107417],
             ],
             dtype=torch.float64,
         )
