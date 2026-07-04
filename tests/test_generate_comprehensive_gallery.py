@@ -63,7 +63,7 @@ def test_build_sweep_catalog_covers_expected_counts() -> None:
     assert taper_sweep.values == [3.0, 2.0, 1.0, 0.5, 0.1]
 
     arrow_length_sweep = _sweep_by_name("edge_arrow_length")
-    assert arrow_length_sweep.values == [5.0, 10.0, 20.0, 35.0]
+    assert arrow_length_sweep.values == [5.0, 12.0, 20.0, 30.0, 45.0]
 
     arrow_width_sweep = _sweep_by_name("edge_arrow_width")
     assert arrow_width_sweep.values == [3.0, 7.0, 14.0, 25.0]
@@ -170,8 +170,8 @@ def test_apply_sweep_value_sets_node_special_cases() -> None:
     node_style = graph.node_styles[0]
 
     assert node_style is not None
-    assert node_style.min_width == 100.0
-    assert node_style.min_height == 60.0
+    assert node_style.min_width == 124.0
+    assert node_style.min_height == 78.0
 
     corner_radius_sweep = _sweep_by_name("node_corner_radius")
     assert corner_radius_sweep.values == [0.0, 4.0, 8.0, 12.0, 20.0]
@@ -320,7 +320,7 @@ def test_apply_sweep_value_sets_edge_and_graph_special_cases() -> None:
     assert edge_style.width == 3.0
     assert node_style is not None
     assert node_style.shape == "rect"
-    assert graph.node_labels == ["Start\n#0057FF", "End\n#FF6A00"]
+    assert graph.node_labels == ["Source\n#0057FF", "Target\n#FF6A00"]
 
     arrow_length_sweep = _sweep_by_name("edge_arrow_length")
     graph, _ = build_graph(arrow_length_sweep, 35.0)
@@ -341,8 +341,8 @@ def test_apply_sweep_value_sets_edge_and_graph_special_cases() -> None:
     assert node_style is not None
     assert edge_style.head_label == "Head"
     assert edge_style.tail_label == "Tail"
-    assert edge_style.label_font_size == 9.0
-    assert edge_style.head_label_offset == 12.0
+    assert edge_style.label_font_size == 12.0
+    assert edge_style.head_label_offset == 16.0
     assert node_style.shape == "rect"
 
     arrow_types_sweep = _sweep_by_name("edge_arrow_types")
@@ -409,7 +409,7 @@ def test_build_graph_uses_expected_showcase_positions() -> None:
 
     arrow_sweep = _sweep_by_name("edge_arrow_length")
     _, arrow_positions = build_graph(arrow_sweep, 35.0)
-    assert arrow_positions.tolist() == [[0.0, 82.0], [0.0, -82.0]]
+    assert arrow_positions.tolist() == [[0.0, 90.0], [0.0, -90.0]]
 
     curvature_sweep = _sweep_by_name("edge_curvature")
     _, curvature_positions = build_graph(curvature_sweep, 1.0)
