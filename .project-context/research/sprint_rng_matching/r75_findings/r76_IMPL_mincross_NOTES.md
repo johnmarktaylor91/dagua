@@ -1186,3 +1186,373 @@ Commit: `3d1537fcf8064c5ae5ccfe67bb8315019e867782`.
   half-nodesep widths.
 - Duplicate long-edge chain merges should add one further `nodesep` to the
   existing virtual width, not re-add the initial 2pt seed.
+
+## A8: stages B-D (labels/clusters)
+
+Date: 2026-07-04
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-sugiyama-final`
+Branch: `r77/sugiyama-final`
+Base commit: `1dbcd80`
+Commit: none. The 8-row probe gate did not pass; this is a residual-stage
+dossier, not a gated port.
+
+### DOT-content audit
+
+DOT input was audited through
+`dagua/eval/competitors/graphviz_competitor.py:_graph_to_dot()`, which is the
+input the reference `dot -Tjson` runner sees.
+
+| Graph | DOT edge labels | DOT cluster subgraphs | Finding |
+|---|---:|---:|---|
+| `edge_label_braid` | 10 | 0 | Label-only case; all 10 edges emit `label=...`. |
+| `small_label_storm` | 6 | 2 | Mixed label+cluster case; all 6 edges emit labels. |
+| `nested_cluster_label_stack` | 2 | 3 | Mixed label+cluster case with long cluster labels. |
+| `moe_router_sparse` | 0 | 1 | Cluster-only case. |
+| `clustered_longlabel_handoffs` | 0 | 3 | Cluster-only case with nested decoder subcluster. |
+| `interleaved_cluster_crosstalk` | 0 | 5 | Cluster-only nested encoder/decoder/system case. |
+| `kitchen_sink_hybrid_net` | 0 | 7 | Cluster-only deeply nested case. |
+| `kitchen_sink_platform_graph` | 0 | 5 | Cluster-only case. |
+
+The adapter emits real `subgraph cluster_*` blocks and edge `label=...`
+attributes. Therefore graphviz fidelity must mirror DOT labels and DOT
+clusters, not only Dagua graph metadata.
+
+### Pinned Graphviz 7.0.5 sources
+
+Checked with `git -C /home/jtaylor/projects/_references/graphviz show
+7.0.5:<path>`.
+
+- `lib/dotgen/rank.c:84-99`: if any edge label exists, `edgelabel_ranks()`
+  doubles every input edge `ED_minlen` and changes `GD_ranksep` to
+  `(GD_ranksep + 1) / 2`.
+- `lib/dotgen/class2.c:17-37`: `label_vnode()` creates a virtual node carrying
+  `ED_label`, with `ND_lw=GD_nodesep` and `ND_rw` set from the label width for
+  TB layouts.
+- `lib/dotgen/class2.c:71-98`: `make_chain()` computes the midpoint
+  `label_rank` and inserts a label virtual node at that rank, otherwise plain
+  virtual nodes.
+- `lib/dotgen/class2.c:158-163` and `219-237`: multi-edge mergeability includes
+  label identity; parallel edges with different labels do not merge into one
+  representative chain.
+- `lib/dotgen/rank.c:244-266`, `268-295`, `456-468`, and `1059-1074`: local
+  clusters are collapsed/ranked through cluster-specific ranking before
+  mincross and position.
+- `lib/dotgen/cluster.c:143-224` and `227-258`: intercluster edges are remapped
+  through cluster leaders/rank leaders and merged back into root ranks.
+- `lib/dotgen/position.c:489-533`, `1153-1214`: cluster x-position machinery
+  creates left/right cluster boundary virtual nodes and containment,
+  keepout, subcluster containment, and sibling-separation auxiliary
+  constraints.
+
+### What was ported
+
+- Added `graphviz_edge_label_sizes` plumbing to
+  `layout_sugiyama_pipeline()` and the exact graphviz-fidelity state.
+- Added Graphviz edge-label rank expansion:
+  when a positive edge-label box is present, all rank constraints use
+  `minlen=2`, matching `rank.c:84-99`.
+- Added midpoint label virtual-node sizing during long-edge expansion:
+  labeled chains skip representative-chain merging and create a midpoint dummy
+  with total width `GD_nodesep + label_width`, matching the TB branch in
+  `class2.c:17-37` and `class2.c:71-98`.
+- Added regression tests:
+  `test_sugiyama_graphviz_edge_labels_double_rank_minlen` and
+  `test_sugiyama_graphviz_edge_labels_create_midpoint_label_dummy`.
+
+The benchmark wrapper computes DOT edge-label boxes with the same Helvetica
+metrics used for DOT node boxes. It only enables the label-node path for
+label-only/non-cluster DOT inputs. Clustered labeled graphs are left on the
+previous path because the unported cluster machinery dominates them and the
+label path alone moves `small_label_storm` away from the near bucket.
+
+### Probe results
+
+Reference was installed Graphviz 7.0.5 `dot -Tjson`. Candidate was
+`layout_sugiyama_pipeline(fidelity_mode="graphviz")` with DOT node sizes and
+the conservative label-only wrapper guard. Values below are single-seed
+Procrustes distances from the local probe; the r76 baseline column is the
+recorded `d_R` from `eval_output/fidelity_definitive/per_combo_r76.jsonl`.
+
+| Graph | r76 `d_R` | A8 probe | Direction | Labels | Clusters |
+|---|---:|---:|---|---:|---:|
+| `edge_label_braid` | 0.601591 | 0.318589 | toward | 10 | 0 |
+| `moe_router_sparse` | 0.361810 | 0.386507 | away/residual | 0 | 1 |
+| `clustered_longlabel_handoffs` | 0.237398 | 0.311009 | away/residual | 0 | 3 |
+| `interleaved_cluster_crosstalk` | 0.625982 | 0.731868 | away/residual | 0 | 5 |
+| `kitchen_sink_hybrid_net` | 0.882609 | 1.075726 | away/residual | 0 | 7 |
+| `kitchen_sink_platform_graph` | 0.318403 | 0.433952 | away/residual | 0 | 5 |
+| `nested_cluster_label_stack` | 0.074680 | 0.067911 | toward | 2 | 3 |
+| `small_label_storm` | 0.006039 | 0.112343 | away/residual | 6 | 2 |
+
+Result: the gate requiring improvement on at least 6 of 8 rows did not pass.
+The implemented label-stage subset improves the pure label row and one mixed
+row, but cluster-heavy rows still require the remaining cluster stage.
+
+Isolation check for clustered labeled rows:
+
+| Graph | No label nodes | Label nodes forced |
+|---|---:|---:|
+| `nested_cluster_label_stack` | 0.067911 | 0.068807 |
+| `small_label_storm` | 0.112343 | 0.185790 |
+
+This is why the wrapper guard leaves clustered labeled DOT inputs on the
+pre-label path until cluster ranking/position constraints are ported.
+
+### Remaining exact stage
+
+The remaining stage is Graphviz cluster handling, specifically the cluster
+ranking/collapse and cluster x-position boundary machinery:
+
+- Rank/collapse: `rank.c:244-266`, `rank.c:268-295`, `rank.c:456-468`,
+  `rank.c:1059-1074`.
+- Intercluster path remapping and rank merge: `cluster.c:143-224`,
+  `cluster.c:227-258`.
+- Cluster containment/keepout/sibling separation auxiliary constraints:
+  `position.c:489-533`, `position.c:1153-1214`.
+
+The benchmark DOT definitely exercises this stage: the failing rows above all
+emit `subgraph cluster_*` blocks. A node-order-only experiment mirroring the
+adapter's clustered node declaration order did not improve the cluster rows
+and was removed.
+
+### Gate evidence
+
+Commands run:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/test_sugiyama_fidelity.py -k "graphviz_edge_labels or graphviz_fidelity_uses_dot_x_assignment" -q
+3 passed, 11 deselected, 3 warnings in 0.03s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+61 passed, 3104 deselected, 34 warnings in 22.09s
+```
+
+No commit was made because the required 8-row improvement gate failed.
+
+### Assumptions
+
+- Treated `graphviz_competitor._graph_to_dot()` as authoritative for what the
+  reference binary sees.
+- Treated the label-node port as safe only for label-only/non-cluster DOT
+  inputs after the mixed cluster+label isolation check showed a regression.
+- Did not run a full benchmark, per task instruction.
+
+### Concerns
+
+- The current x-coordinate auxiliary solver consumes symmetric node-size boxes;
+  Graphviz label virtual nodes are asymmetric (`ND_lw=GD_nodesep`,
+  `ND_rw=label_width`). This may explain remaining label residual after
+  rank/order parity improves.
+- Cluster rows need the actual cluster rank/collapse and boundary-constraint
+  machinery, not just DOT declaration order.
+
+### Knowledge
+
+- Edge labels are structural in dot, not cosmetic: they alter rank assignment,
+  dummy-chain materialization, mincross, and x-position constraints.
+- The benchmark DOT emits clusters for the far-tail cluster rows; dagua
+  graphviz-fidelity cannot ignore them and still match the reference.
+
+## A9: cluster machinery
+
+Date: 2026-07-04
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-sugiyama-final`
+Branch: `r77/sugiyama-final`
+Base commit: `0c2dee7`
+Commit: this commit. Final SHA is reported by `git log -1` after the amend.
+
+### DOT-content audit
+
+DOT input was audited through
+`dagua/eval/competitors/graphviz_competitor.py:_graph_to_dot()`, and the
+six-row discriminator used live Graphviz 7.0.5 `dot -Tjson`.
+
+| Graph | DOT cluster subgraphs | DOT edge labels | Finding |
+|---|---:|---:|---|
+| `interleaved_cluster_crosstalk` | 5 | 0 | Cluster-only nested system/encoder/decoder case. |
+| `clustered_longlabel_handoffs` | 3 | 0 | Cluster-only case with nested decoder cross-attention. |
+| `kitchen_sink_platform_graph` | 5 | 0 | Cluster-only platform graph with several sibling systems. |
+| `kitchen_sink_hybrid_net` | 7 | 0 | Cluster-only deeply nested experts/backbone/heads case. |
+| `nested_cluster_label_stack` | 3 | 2 | Mixed cluster+edge-label case. |
+| `small_label_storm` | 2 | 6 | Mixed cluster+edge-label near row; still residual. |
+
+### Pinned Graphviz 7.0.5 sources
+
+Checked with `git -C /home/jtaylor/projects/_references/graphviz show
+7.0.5:<path>`.
+
+- `lib/dotgen/rank.c:244-266`, `268-295`, `456-468`, `1059-1074`:
+  cluster subgraphs rank recursively, then collapse into parent ranking before
+  expansion.
+- `lib/dotgen/cluster.c:143-224`: `collapse_cluster()` locally ranks a
+  cluster, picks a leader, and marks its nodes as cluster members.
+- `lib/dotgen/cluster.c:227-258`: `interclexp()` remaps intercluster edges
+  through mapped cluster/rank leaders.
+- `lib/dotgen/cluster.c:merge_ranks` around the merge slot loop: expanded
+  cluster ranks reserve slots in root ranks before copying cluster nodes back.
+- `lib/dotgen/position.c:489-533`: `make_lrvn()` creates left/right cluster
+  boundary slack nodes, including label-width constraints.
+- `lib/dotgen/position.c:1153-1214`: `pos_clusters()` adds cluster node
+  containment, keepout, subcluster containment, and sibling separation
+  constraints to the LR x-simplex.
+- `lib/dotgen/class2.c:17-37`: label virtual nodes use asymmetric
+  `ND_lw=GD_nodesep`, `ND_rw=label width`; A9 stores this metadata and exposes
+  it to the x-auxiliary builder for mixed cluster+label work.
+
+### What landed
+
+- Added `clusters` and `cluster_parents` plumbing to
+  `layout_sugiyama_pipeline()`, stored on `LayoutProblem` only for exact
+  `fidelity_mode="graphviz"`.
+- Wired the classic benchmark wrapper to pass cluster metadata only for
+  clustered DOT inputs with no edge labels. The mixed cluster+edge-label rows
+  remain guarded because unguarded cluster+label interaction moved
+  `small_label_storm` away.
+- Added Graphviz label virtual-node left/right width metadata during dummy
+  expansion, while preserving the stored total box width used by the A8 path.
+- Extended `_build_graphviz_x_aux_edges()` and the x-output scale helper to
+  accept optional asymmetric `ND_lw`/`ND_rw` overrides.
+- Added a graphviz-only cluster x pass over original nodes:
+  normalized cluster membership, child-before-parent slot centering by rank,
+  sibling bbox separation, and recentering. This is a partial port of
+  `merge_ranks()` plus the observable x-boundary effects of `pos_clusters()`,
+  not a full recursive rank-collapse/intercluster-edge remapping port.
+- Added regression tests:
+  `test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths` and
+  `test_sugiyama_graphviz_clusters_affect_only_graphviz_mode`.
+
+### Six-row discriminator
+
+Reference was live Graphviz 7.0.5 `dot -Tjson`. Candidate was the benchmark
+path through `classic_sugiyama_graphviz_fidelity`. Baseline values are from
+`/home/jtaylor/projects/dagua/eval_output/fidelity_definitive/r76_sugiyama_rescore.jsonl`.
+
+| Graph | r76 `d_R` | A9 `d_R` | Direction |
+|---|---:|---:|---|
+| `interleaved_cluster_crosstalk` | 0.625982 | 0.189777 | improved |
+| `clustered_longlabel_handoffs` | 0.237398 | 0.107566 | improved |
+| `kitchen_sink_platform_graph` | 0.318403 | 0.090578 | improved |
+| `kitchen_sink_hybrid_net` | 0.882609 | 0.241348 | improved |
+| `nested_cluster_label_stack` | 0.074680 | 0.024010 | improved |
+| `small_label_storm` | 0.006039 | 0.045864 | residual/regressed vs r76, improved vs unguarded A9 |
+
+Unguarded cluster handling also improved the first five rows but moved
+`small_label_storm` to `0.163070`; the final wrapper therefore keeps
+cluster machinery off mixed edge-label+cluster DOT inputs.
+
+### Gate evidence
+
+Commands run:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+63 passed, 3104 deselected, 34 warnings in 22.75s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+```
+
+Byte-identical checks used a detached temporary worktree at `0c2dee7`:
+
+- Plain graphviz tensor rows: `chain4`, `diamond`, `empty4`, `forkjoin`,
+  `skip` all byte-identical.
+- Label-only graphviz tensor rows: `chain4`, `diamond`, `empty4`, `forkjoin`,
+  `skip` all byte-identical after the A9 asymmetric-width consumption was
+  narrowed to cluster-aware calls.
+- `edge_label_braid` benchmark-row construction was byte-identical.
+- Igraph tensor rows: `chain4`, `diamond`, `empty4`, `forkjoin`, `skip` all
+  byte-identical.
+
+Ordering discriminator and A5 minlen parity were preserved by construction:
+A9 does not change mincross input order or the non-cluster x-minlen path. The
+targeted `mincross` and `dot_rank` tests above passed after the final edits.
+
+### Residual disposition
+
+This is a committed partial cluster port, not the final exact Graphviz cluster
+port. Landed: benchmark-path cluster metadata plumbing, asymmetric label width
+metadata, and graphviz-only x-boundary/slot constraints for cluster-only DOT
+graphs. Remaining: true recursive rank-collapse and intercluster remapping
+from `rank.c`/`cluster.c`, plus safe mixed cluster+edge-label integration.
+
+`small_label_storm` remains the explicit residual. It was already an A8 mixed
+cluster+label problem; A9 avoids the worse unguarded path but does not restore
+the r76 near value.
+
+### Assumptions
+
+- Treated `_graph_to_dot()` as the benchmark DOT source of truth.
+- Treated cluster-only DOT rows as the safe scope for the committed cluster
+  machinery. Mixed cluster+edge-label rows are left guarded until recursive
+  rank-collapse and label-node integration can be validated together.
+- Did not run a full benchmark, per task instruction.
+
+### Concerns
+
+- The cluster x pass is an observable approximation. It improves the far-tail
+  cluster rows materially, but it is not Graphviz's full recursive
+  rank/collapse/intercluster-edge stage.
+- `small_label_storm` is still worse than the r76 baseline and should be the
+  first mixed cluster+label row for the next port stage.
+
+### A9b guard-hole fix
+
+Date: 2026-07-04
+Follow-up commit: this commit.
+
+Guard hole: the cluster-only decision lived only in the classic benchmark
+wrapper, while `layout_sugiyama_pipeline()` treated raw `clusters` metadata as
+authorization to run A9's Graphviz cluster machinery. Any caller that forwarded
+cluster metadata directly, or any benchmark path that constructed graphviz-mode
+kwargs outside `_quick_classic()`, could therefore bypass the mixed
+cluster+edge-label guard. For `small_label_storm`, passing clusters without the
+edge-label virtual-node metadata reproduced the A9 drift class: the row moved
+onto the cluster x-boundary path even though DOT still contained six edge
+labels.
+
+Fix: added explicit `graphviz_apply_cluster_constraints=False` to
+`layout_sugiyama_pipeline()`. Cluster metadata is now inert unless that flag is
+true. `_quick_classic()` sets the flag only after its existing DOT
+classification proves `graph.clusters` is non-empty and `graph.edge_labels` has
+no truthy labels. This makes the pipeline itself enforce the A9 scope instead
+of trusting every caller to repeat the wrapper classification.
+
+Validation:
+
+- Reconstructed `small_label_storm` from `dagua/eval/graphs.py` and compared
+  three seeds. A8 at `0c2dee7` and fixed HEAD both return the same wrapper-like
+  tensor:
+  `[[-0.0028962463, 0.0], [-0.0028962463, 1.0], [-0.5010505915, 2.0],
+  [0.5010505915, 2.0], [-0.0028962463, 3.0], [-0.0028962463, 4.0]]`.
+- Passing `clusters` and `cluster_parents` without the opt-in is now byte-equal
+  to the wrapper-like tensor for seeds 0, 1, and 2.
+- A cluster-only smoke graph still changes when
+  `graphviz_apply_cluster_constraints=True`, and remains equal to the plain
+  path without the flag. This preserves the A9 path used by the five improved
+  cluster-only rows; no benchmark rerun was performed per the no-bench scope.
+- `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q` passed:
+  63 passed, 3104 deselected, 34 warnings.
+
+### Knowledge
+
+- Passing cluster metadata through the classic benchmark wrapper is necessary;
+  the tensor pipeline otherwise cannot distinguish DOT clusters from ordinary
+  node subsets.
+- Graphviz's cluster x machinery has useful measurable effect even without
+  full rank-collapse: sibling boundary separation and rank slot reservation
+  reduced the main cluster-only residuals by 0.13 to 0.64 d_R.
