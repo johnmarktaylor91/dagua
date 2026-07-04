@@ -13,7 +13,12 @@ from dagua.layout.ops.graph_utils import (
     layout_device as _layout_device,
 )
 from dagua.layout.ops.pipelines.neato import (
-    _pack_component_positions,
+    _GRAPHVIZ_DEFAULT_NODE_SIZE,
+    _GRAPHVIZ_PACK_MARGIN_POINTS,
+    _component_bbox_points,
+    _compute_polyomino_step,
+    _generate_node_polyomino,
+    _place_polyomino_component,
     _slice_component_edges,
     _weak_components,
 )
@@ -1051,13 +1056,108 @@ def _layout_graphviz_sfdp_components(
         component_positions.append(local_pos)
         component_edges.append(local_edges)
 
-    return _pack_component_positions(
+    return _pack_graphviz_sfdp_component_positions(
         components=components,
         component_positions=component_positions,
         component_edges=component_edges,
         num_nodes=num_nodes,
         node_sizes=node_sizes,
     )
+
+
+def _pack_graphviz_sfdp_component_positions(
+    components: list[list[int]],
+    component_positions: list[torch.Tensor],
+    component_edges: list[torch.Tensor],
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Pack Graphviz-fidelity SFDP components using point-unit polyominoes.
+
+    Parameters
+    ----------
+    components : list[list[int]]
+        Parent node indices for each disconnected component.
+    component_positions : list[torch.Tensor]
+        Local SFDP component coordinates in Graphviz points, each with shape
+        ``[C, 2]``.
+    component_edges : list[torch.Tensor]
+        Component-local edge tensors, each with shape ``[2, E_c]``.
+    num_nodes : int
+        Total number of nodes in the parent graph.
+    node_sizes : torch.Tensor, optional
+        Optional parent node sizes in points with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed parent coordinates in points with shape ``[N, 2]``.
+
+    Notes
+    -----
+    Graphviz SFDP emits component coordinates in points before
+    ``packSubgraphs``. The shared neato pack helper models neato's internal
+    inch-space coordinates and therefore multiplies positions and sizes by
+    ``72`` before generating cells. This SFDP-only adapter keeps the
+    ``pack.c:genPoly`` geometry in point units so the grid step, perimeter
+    sort keys, and ``placeGraph`` scan operate on the same scale as Graphviz.
+    """
+    if not component_positions:
+        return torch.empty((0, 2), dtype=torch.float32)
+
+    device = component_positions[0].device
+    dtype = component_positions[0].dtype
+    packed = torch.zeros((num_nodes, 2), dtype=dtype, device=device)
+    if node_sizes is None:
+        sizes_points = torch.empty((num_nodes, 2), dtype=dtype, device=device)
+        sizes_points[:, 0] = _GRAPHVIZ_DEFAULT_NODE_SIZE[0] * 72.0
+        sizes_points[:, 1] = _GRAPHVIZ_DEFAULT_NODE_SIZE[1] * 72.0
+    else:
+        sizes_points = node_sizes.to(device=device, dtype=dtype)
+
+    positions_points = [
+        local_pos.detach().to(device="cpu", dtype=torch.float64)
+        for local_pos in component_positions
+    ]
+    component_sizes_points = [
+        sizes_points[component].detach().to(device="cpu", dtype=torch.float64)
+        for component in components
+    ]
+    boxes = [
+        _component_bbox_points(local_points, local_sizes)
+        for local_points, local_sizes in zip(positions_points, component_sizes_points)
+    ]
+    step = _compute_polyomino_step(boxes, _GRAPHVIZ_PACK_MARGIN_POINTS)
+    polyominoes = [
+        _generate_node_polyomino(
+            positions_points=local_points,
+            sizes_points=local_sizes,
+            local_edges=local_edges,
+            bbox=box,
+            step=step,
+            margin=_GRAPHVIZ_PACK_MARGIN_POINTS,
+            index=index,
+        )
+        for index, (local_points, local_sizes, local_edges, box) in enumerate(
+            zip(positions_points, component_sizes_points, component_edges, boxes)
+        )
+    ]
+    sorted_polyominoes = sorted(polyominoes, key=lambda info: -info.perimeter)
+    occupied: set[tuple[int, int]] = set()
+    offsets = [(0.0, 0.0)] * len(polyominoes)
+    for sorted_index, info in enumerate(sorted_polyominoes):
+        offsets[info.index] = _place_polyomino_component(
+            sorted_index=sorted_index,
+            info=info,
+            occupied=occupied,
+            step=step,
+            margin=_GRAPHVIZ_PACK_MARGIN_POINTS,
+        )
+
+    for component, local_pos, offset_points in zip(components, component_positions, offsets):
+        offset = torch.tensor(offset_points, dtype=dtype, device=device)
+        packed[component] = local_pos + offset
+    return packed - packed.mean(dim=0, keepdim=True)
 
 
 def layout_sfdp_pipeline(
