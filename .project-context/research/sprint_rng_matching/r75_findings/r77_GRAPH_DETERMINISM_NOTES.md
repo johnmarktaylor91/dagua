@@ -3,7 +3,7 @@
 Date: 2026-07-04
 Branch: r77/graph-determinism
 Worktree: /home/jtaylor/.claude/worktrees/dagua-graph-determinism
-Commit: b392611
+Implementation commit: 4178b93
 
 ## Verdict
 
