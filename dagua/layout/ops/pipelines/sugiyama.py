@@ -154,6 +154,7 @@ def layout_sugiyama_pipeline(
     graphviz_edge_label_sizes: Optional[torch.Tensor] = None,
     clusters: Optional[Dict[str, Any]] = None,
     cluster_parents: Optional[Dict[str, Optional[str]]] = None,
+    graphviz_apply_cluster_constraints: bool = False,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -216,6 +217,11 @@ def layout_sugiyama_pipeline(
         x-boundary machinery.
     cluster_parents : dict[str, str | None], optional
         Cluster hierarchy metadata from ``DaguaGraph.cluster_parents``.
+    graphviz_apply_cluster_constraints : bool, default=False
+        Whether Graphviz-dot cluster x-boundary machinery is allowed to consume
+        ``clusters``. The benchmark wrapper enables this only for cluster-only
+        DOT inputs; mixed cluster plus edge-label DOT inputs must remain on the
+        pre-A9 path until the combined Graphviz machinery is ported.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -287,8 +293,12 @@ def layout_sugiyama_pipeline(
         edge_index=edge_index,
         num_nodes=num_nodes,
         node_sizes=problem_node_sizes,
-        clusters=clusters if fidelity_mode == "graphviz" else None,
-        cluster_parents=cluster_parents if fidelity_mode == "graphviz" else None,
+        clusters=clusters
+        if fidelity_mode == "graphviz" and graphviz_apply_cluster_constraints
+        else None,
+        cluster_parents=cluster_parents
+        if fidelity_mode == "graphviz" and graphviz_apply_cluster_constraints
+        else None,
         edge_weights=edge_weights,
         seed=seed,
     )

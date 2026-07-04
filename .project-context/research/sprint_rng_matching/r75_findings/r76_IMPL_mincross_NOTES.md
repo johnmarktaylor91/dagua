@@ -1510,6 +1510,44 @@ the r76 near value.
 - `small_label_storm` is still worse than the r76 baseline and should be the
   first mixed cluster+label row for the next port stage.
 
+### A9b guard-hole fix
+
+Date: 2026-07-04
+Follow-up commit: this commit.
+
+Guard hole: the cluster-only decision lived only in the classic benchmark
+wrapper, while `layout_sugiyama_pipeline()` treated raw `clusters` metadata as
+authorization to run A9's Graphviz cluster machinery. Any caller that forwarded
+cluster metadata directly, or any benchmark path that constructed graphviz-mode
+kwargs outside `_quick_classic()`, could therefore bypass the mixed
+cluster+edge-label guard. For `small_label_storm`, passing clusters without the
+edge-label virtual-node metadata reproduced the A9 drift class: the row moved
+onto the cluster x-boundary path even though DOT still contained six edge
+labels.
+
+Fix: added explicit `graphviz_apply_cluster_constraints=False` to
+`layout_sugiyama_pipeline()`. Cluster metadata is now inert unless that flag is
+true. `_quick_classic()` sets the flag only after its existing DOT
+classification proves `graph.clusters` is non-empty and `graph.edge_labels` has
+no truthy labels. This makes the pipeline itself enforce the A9 scope instead
+of trusting every caller to repeat the wrapper classification.
+
+Validation:
+
+- Reconstructed `small_label_storm` from `dagua/eval/graphs.py` and compared
+  three seeds. A8 at `0c2dee7` and fixed HEAD both return the same wrapper-like
+  tensor:
+  `[[-0.0028962463, 0.0], [-0.0028962463, 1.0], [-0.5010505915, 2.0],
+  [0.5010505915, 2.0], [-0.0028962463, 3.0], [-0.0028962463, 4.0]]`.
+- Passing `clusters` and `cluster_parents` without the opt-in is now byte-equal
+  to the wrapper-like tensor for seeds 0, 1, and 2.
+- A cluster-only smoke graph still changes when
+  `graphviz_apply_cluster_constraints=True`, and remains equal to the plain
+  path without the flag. This preserves the A9 path used by the five improved
+  cluster-only rows; no benchmark rerun was performed per the no-bench scope.
+- `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q` passed:
+  63 passed, 3104 deselected, 34 warnings.
+
 ### Knowledge
 
 - Passing cluster metadata through the classic benchmark wrapper is necessary;

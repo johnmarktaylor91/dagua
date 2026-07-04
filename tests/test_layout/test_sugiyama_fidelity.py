@@ -309,7 +309,7 @@ def test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths() -> None:
 
 
 def test_sugiyama_graphviz_clusters_affect_only_graphviz_mode() -> None:
-    """Cluster x-boundary handling should stay gated to graphviz fidelity."""
+    """Cluster x-boundary handling should require the explicit graphviz guard."""
     edge_index = torch.empty((2, 0), dtype=torch.long)
     graphviz_sizes = torch.full((4, 2), 54.0, dtype=torch.float32)
     clusters = {"left": [0, 2], "right": [1, 3]}
@@ -323,6 +323,16 @@ def test_sugiyama_graphviz_clusters_affect_only_graphviz_mode() -> None:
         graphviz_node_sizes=graphviz_sizes,
     )
     clustered = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        graphviz_node_sizes=graphviz_sizes,
+        clusters=clusters,
+        graphviz_apply_cluster_constraints=True,
+    )
+    unguarded_clustered = layout_sugiyama_pipeline(
         edge_index=edge_index,
         num_nodes=4,
         rank_sep=1.0,
@@ -349,6 +359,7 @@ def test_sugiyama_graphviz_clusters_affect_only_graphviz_mode() -> None:
 
     assert torch.isfinite(clustered).all()
     assert not torch.allclose(clustered[:, 0], no_cluster[:, 0])
+    assert torch.equal(unguarded_clustered, no_cluster)
     assert torch.allclose(igraph_clustered, igraph_plain)
 
 

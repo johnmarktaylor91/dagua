@@ -2065,6 +2065,7 @@ def _quick_classic(
             if graph.clusters and not has_edge_labels:
                 extra_kwargs.setdefault("clusters", graph.clusters)
                 extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
+                extra_kwargs.setdefault("graphviz_apply_cluster_constraints", True)
             if not graph.clusters:
                 extra_kwargs.setdefault(
                     "graphviz_edge_label_sizes",
