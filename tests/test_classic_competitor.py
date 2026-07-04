@@ -167,7 +167,8 @@ def _install_classic_layout_spy(
         torch.Tensor
             Zero coordinates shaped ``[N, 2]``.
         """
-        del edge_index, node_sizes, seed
+        del edge_index, seed
+        seen["node_sizes"] = None if node_sizes is None else node_sizes.detach().clone()
         seen["kwargs"] = dict(kwargs)
         return torch.zeros((num_nodes, 2), dtype=torch.float32)
 
@@ -328,6 +329,114 @@ def test_classic_layout_with_variant_warns_on_unrecognized_params(
         result = ClassicUMAP().layout_with_variant(graph, seed=19, variant_params={"bogus": 1.0})
 
     assert result is not None
+
+
+def test_classic_sfdp_graphviz_fidelity_forwards_dot_node_boxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity SFDP should pack with DOT label-sized node boxes."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("short", "a substantially wider label"),
+            ("isolated wide component", "tail"),
+        ]
+    )
+    graph.compute_node_sizes()
+    original_sizes = None if graph.node_sizes is None else graph.node_sizes.detach().clone()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sfdp",
+        fn_name="layout_sfdp_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSFDP().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz", "steps": 500},
+    )
+
+    assert result.pos is not None
+    assert seen["kwargs"]["fidelity_mode"] == "graphviz"
+    forwarded_sizes = seen["node_sizes"]
+    assert isinstance(forwarded_sizes, torch.Tensor)
+    assert forwarded_sizes.shape == (graph.num_nodes, 2)
+    if original_sizes is not None:
+        assert not torch.equal(forwarded_sizes, original_sizes)
+    assert float(forwarded_sizes[:, 0].max().item()) > 54.0
+
+
+def test_classic_sfdp_graphviz_fidelity_preserves_small_modest_label_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Small modest-label SFDP graphs should keep the C4d default pack boxes."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("enc_in", "enc_conv"),
+            ("enc_conv", "enc_relu"),
+            ("enc_relu", "enc_out"),
+            ("res_in", "res_conv1"),
+            ("res_conv1", "res_conv2"),
+            ("res_in", "res_add"),
+            ("res_conv2", "res_add"),
+            ("res_add", "res_out"),
+        ]
+    )
+    graph.compute_node_sizes()
+    original_sizes = None if graph.node_sizes is None else graph.node_sizes.detach().clone()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sfdp",
+        fn_name="layout_sfdp_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSFDP().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz", "steps": 500},
+    )
+
+    assert result.pos is not None
+    forwarded_sizes = seen["node_sizes"]
+    assert isinstance(forwarded_sizes, torch.Tensor)
+    assert original_sizes is not None
+    assert torch.equal(forwarded_sizes, original_sizes)
+
+
+def test_classic_sfdp_graphviz_fidelity_preserves_connected_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connected Graphviz-fidelity SFDP should not use disconnected-pack boxes."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("source", "VeryLongConnectedLabelThatWouldOtherwiseTriggerThePackGate"),
+            ("VeryLongConnectedLabelThatWouldOtherwiseTriggerThePackGate", "sink"),
+        ]
+    )
+    graph.compute_node_sizes()
+    original_sizes = None if graph.node_sizes is None else graph.node_sizes.detach().clone()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sfdp",
+        fn_name="layout_sfdp_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSFDP().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz", "steps": 500},
+    )
+
+    assert result.pos is not None
+    forwarded_sizes = seen["node_sizes"]
+    assert isinstance(forwarded_sizes, torch.Tensor)
+    assert original_sizes is not None
+    assert torch.equal(forwarded_sizes, original_sizes)
 
 
 def test_classic_sgd2_multi_enables_multiple_criteria(
