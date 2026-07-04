@@ -716,3 +716,21 @@ for retries. 2-attempt max per work item, then park documented.
   --engines all + 10 stochastic ref engines, both graphs, new canonical realization, seeds
   100-199). On done -> rescore ALL random_dag combos (every family) -- expect flips
   anywhere the old verdict was permutation noise.
+- 2026-07-04 ~08:10 ET: r77 ROLLING (3). WATCHER MASS-KILL at ~07:00 (another session's
+  start-up pkill; all 6 jobs survived; re-armed; agent-issue filed w/ session-tag fix
+  sketch). C1 sfdp pack2 LANDED+MERGED (59a462c): instrumented doSplines on/off bound
+  proved SPLINES ARE NOT THE RESIDUAL (identical offsets both target graphs) -- real cause
+  = LABEL-BOX node sizes in genPoly; fixed w/ conservative gate; W improved on BOTH
+  quality-worse clusters, 41/41 hashes, 4800/4800 bench; r76 named-cause CORRECTED
+  (spline->label-box). sfdp = 5 fixes total, line closed. M4 mds: C-side dump proved DLA
+  placement MATCHES (825k trace lines identical; M3 hypothesis disproven by instrument);
+  real rule = eigensolve uplo='U' (ported); parity 5/6 probes; residual = align eigensign
+  (DSYEVR) = the excluded LAPACK class -> M5 finisher dispatched (gates+bench+commit+
+  equivalence-class evidence + reflection-handling note). A5 LANDED+MERGED (4279b3e):
+  ***the 1pt rule NAMED = virtual_node() seeds ND_lw=ND_rw=1 + class2 half-nodesep
+  increments; minlen parity EXACT; d_R improved 10/10 probes.*** Its --max-nodes 0 bench
+  hit recursion-depth crashes on 2000+ graphs = housekeeping #6 (pre-existing scaling
+  limit; those rows are aggregate-tier). Re-bench at <=300 running (pid 1736885 ->
+  r77_sugiyama_a5b). A8 stages B-D dispatched (pid 1741008, HIGH -- labels/clusters, THE
+  final graphviz item; DOT-content audit first). Housekeeping list now 6 pre-existing
+  failures (+ test_engine test_classify_early_exit seen by A5 = #7? verify at ledger).
