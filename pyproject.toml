@@ -52,6 +52,7 @@ test = [
     "pyyaml>=6.0",
 ]
 igraph = ["igraph>=0.10"]
+igraph-fidelity = ["igraph>=0.10", "swiglpk>=5.0"]
 scipy = ["scipy>=1.7"]
 pydot = ["pydot>=1.4"]
 interop = ["igraph>=0.10", "scipy>=1.7", "pydot>=1.4"]
