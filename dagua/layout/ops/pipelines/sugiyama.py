@@ -103,13 +103,14 @@ def build_sugiyama_pipeline(
     use_graphviz_mincross = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
     use_graphviz_rank = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
     use_graphviz_xcoord = fidelity_mode == "graphviz"
+    use_graphviz_node_order = fidelity_mode == "graphviz"
 
     ops: list[Op] = [
         _ValidateInputs(),
         _StoreSpacingParams(rank_sep=rank_sep, node_sep=node_sep),
         _ResolveNodeSizes(),
         _PrepareAcyclicEdges(),
-        _AssignLayers(fidelity_mode="graphviz" if use_graphviz_rank else fidelity_mode),
+        _AssignLayers(fidelity_mode=fidelity_mode if use_graphviz_rank else fidelity_mode),
         _ExpandDummyNodes(),
         _BuildNeighborStructures(),
         _BarycenterOrdering(
@@ -120,6 +121,7 @@ def build_sugiyama_pipeline(
             use_incidence_barycenters=use_igraph_fidelity,
             center_coordinates=center_coordinates,
             use_graphviz_mincross=use_graphviz_mincross,
+            use_graphviz_node_order=use_graphviz_node_order,
         ),
         _CoordinateAssignment(
             center_coordinates=center_coordinates,
@@ -147,6 +149,7 @@ def layout_sugiyama_pipeline(
     fidelity_dtype: torch.dtype = torch.float32,
     use_node_sizes_for_spacing: Optional[bool] = None,
     center_coordinates: Optional[bool] = None,
+    graphviz_node_sizes: Optional[torch.Tensor] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -195,6 +198,10 @@ def layout_sugiyama_pipeline(
         Whether to center final horizontal coordinates. Defaults to ``False``
         in igraph fidelity mode to match igraph's left-anchored coordinate
         frame, and ``True`` otherwise.
+    graphviz_node_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT node boxes with shape ``[N, 2]``. Only exact
+        ``fidelity_mode="graphviz"`` consumes this override during the
+        x-coordinate auxiliary solve.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -270,6 +277,11 @@ def layout_sugiyama_pipeline(
         seed=seed,
     )
     state = SolveState()
+    if graphviz_node_sizes is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_node_sizes"] = graphviz_node_sizes.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
 
     pipeline = build_sugiyama_pipeline(
