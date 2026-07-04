@@ -680,3 +680,19 @@ for retries. 2-attempt max per work item, then park documented.
     100-199) -> benchmark_100seed_r77_era_refs; after: rescore the 414 low-power rows.
   AFTER ALL LAND: rescores per family -> ledger amendment (r77 addendum or refreshed
   official ledger) -> updated RESULTS + memory.
+- 2026-07-04 ~04:50 ET: r77 ROLLING RESULTS. E1 thin-rows: ***7/10 inherited floors
+  RETRACTED as portable op differences*** (6 mds-disc = igraph component handling; 1 drl =
+  DRLPhaseSolve internals; 3 connected-mds floors CONFIRMED w/ multi-ULP sweeps) -> M1
+  (mds-disc fix, pid 1348267) + D1 (drl instrumented-igraph trace, pid 1350509) dispatched.
+  B1 MAAR attempt-3: real runner trace captured (descending-index insertion, newest-row
+  ties) but surfaced refs-vs-runner mismatch -> B2 parity probe: binary==source BYTE-EXACT
+  (8/8 probes; recipe scripts/rng_match/build_ogdf_runner.sh @ ogdf 5b679565) -> mismatch
+  lives in PAYLOAD/PARAM MAPPING -> B3 provenance probe dispatched (pid 1390221;
+  instruments the real adapter path; decides if fmmm/gem verdicts vs r76_refs are sound).
+  ***A6 GLPK PARITY LANDED + MERGED (445bc61: b47d272 feat + a61bd2e docs).*** swiglpk 5.0
+  == igraph vendored GLPK 5.0; rank vectors MATCH installed igraph on all probes;
+  moe_router_sparse exact on all 5 variants; fallback + graphviz byte-identity gates green.
+  Gate shortfall (5/10 d_R) was a STACKED-CAUSE artifact -- residual moved downstream to BK
+  x-stage -> A7 dispatched (pid 1403617, HIGH, last igraph item; segfault workaround noted:
+  batch reference calls in subprocesses). pyproject gains extra: igraph-fidelity =
+  [igraph>=0.10, swiglpk>=5.0].
