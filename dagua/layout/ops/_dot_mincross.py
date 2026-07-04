@@ -709,12 +709,16 @@ def _count_crossings(
         by_rank_pair[min(tail_rank, head_rank)].append((upper, lower, edge.penalty))
 
     crossings = 0
-    for edge_list in by_rank_pair.values():
+    for rank_index, edge_list in by_rank_pair.items():
         ordered_edges = sorted(
             ((order_map[upper], order_map[lower], penalty) for upper, lower, penalty in edge_list),
             key=lambda item: item[0],
         )
-        fenwick = [0] * (len(edge_list) + 2)
+        # Fenwick indices are lower-rank node orders, not edge positions.
+        # Sparse wide ranks can have a terminal node order larger than the
+        # number of edges between the rank pair.
+        lower_rank_width = len(ranks[rank_index + 1]) if rank_index + 1 < len(ranks) else 0
+        fenwick = [0] * (lower_rank_width + 2)
         total_penalty = 0
         index = 0
         while index < len(ordered_edges):
