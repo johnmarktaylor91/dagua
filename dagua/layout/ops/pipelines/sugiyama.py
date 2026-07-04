@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 
@@ -151,6 +151,10 @@ def layout_sugiyama_pipeline(
     use_node_sizes_for_spacing: Optional[bool] = None,
     center_coordinates: Optional[bool] = None,
     graphviz_node_sizes: Optional[torch.Tensor] = None,
+    graphviz_edge_label_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Dict[str, Any]] = None,
+    cluster_parents: Optional[Dict[str, Optional[str]]] = None,
+    graphviz_apply_cluster_constraints: bool = False,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -203,6 +207,21 @@ def layout_sugiyama_pipeline(
         Point-unit Graphviz DOT node boxes with shape ``[N, 2]``. Only exact
         ``fidelity_mode="graphviz"`` consumes this override during the
         x-coordinate auxiliary solve.
+    graphviz_edge_label_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT edge-label boxes with shape ``[E, 2]``. Only
+        exact ``fidelity_mode="graphviz"`` consumes this override when
+        materializing dot's label virtual nodes.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata from ``DaguaGraph.clusters``. Only exact
+        ``fidelity_mode="graphviz"`` consumes this for Graphviz-dot cluster
+        x-boundary machinery.
+    cluster_parents : dict[str, str | None], optional
+        Cluster hierarchy metadata from ``DaguaGraph.cluster_parents``.
+    graphviz_apply_cluster_constraints : bool, default=False
+        Whether Graphviz-dot cluster x-boundary machinery is allowed to consume
+        ``clusters``. The benchmark wrapper enables this only for cluster-only
+        DOT inputs; mixed cluster plus edge-label DOT inputs must remain on the
+        pre-A9 path until the combined Graphviz machinery is ported.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -274,12 +293,23 @@ def layout_sugiyama_pipeline(
         edge_index=edge_index,
         num_nodes=num_nodes,
         node_sizes=problem_node_sizes,
+        clusters=clusters
+        if fidelity_mode == "graphviz" and graphviz_apply_cluster_constraints
+        else None,
+        cluster_parents=cluster_parents
+        if fidelity_mode == "graphviz" and graphviz_apply_cluster_constraints
+        else None,
         edge_weights=edge_weights,
         seed=seed,
     )
     state = SolveState()
     if graphviz_node_sizes is not None and fidelity_mode == "graphviz":
         state.extras["sugiyama_graphviz_node_sizes"] = graphviz_node_sizes.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
+    if graphviz_edge_label_sizes is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_edge_label_sizes"] = graphviz_edge_label_sizes.detach().to(
             device="cpu",
             dtype=torch.float32,
         )
