@@ -196,3 +196,186 @@ No implementation patch was kept. No commit was created.
 ### Test Results
 
 Not run after reverting the failed implementation patch; there are no source changes to verify. The failed target probes above are the gate evidence for parking the attempt.
+
+## Attempt 3: instrumented runner trace
+
+Date: 2026-07-04
+Branch: `r77/maar-trace`
+Status: traced with a running instrumented runner; no implementation commit.
+
+### Instrumented Runner
+
+Scratch directory: `/tmp/maar-trace`.
+
+Build recipe used the same installed OGDF artifacts as the committed runner:
+
+```text
+g++ -std=c++17 -O2 /tmp/maar-trace/ogdf_runner_trace.cpp \
+  /tmp/maar-trace/MAARPacking_trace.cpp \
+  /tmp/maar-trace/TileToRowsCCPacker_trace.cpp \
+  -I/home/jtaylor/tools/ogdf/include \
+  -I/home/jtaylor/tools/ogdf/include/ogdf-release \
+  -L/home/jtaylor/tools/ogdf/lib -lOGDF -lCOIN -pthread \
+  -o /tmp/maar-trace/ogdf_runner_trace
+```
+
+The traced binary was checked against the committed binary on the same
+`random_dag_50` JSON payload:
+
+| Engine | Seed | Trace vs committed raw allclose | Procrustes RMSD | Max abs |
+|---|---:|---|---:|---:|
+| `ogdf_fmmm` steps10 | 100 | `True` | `8.8710614e-08` | `0` |
+| `ogdf_gem` iters2000 | 100 | `True` | `8.18114358e-08` | `0` |
+
+So the trace instrumentation did not perturb the runner output.
+
+### Traced Decision Sequence
+
+FMMM `MAARPacking`, `random_dag_50`, seed 100, steps10:
+
+```text
+MAAR_START count=52 aspect=1 presort=1 tip=1
+sorted comps:
+50, 51, 49, 48, 47, 46, 45, 44, 43, 42,
+41, 40, 39, 38, 37, 36, 35, 34, 33, 32,
+31, 30, 29, 28, 27, 26, 25, 24, 23, 22,
+21, 20, 19, 18, 17, 16, 15, 14, 13, 12,
+11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
+first decisions:
+comp 50 -> new row 0
+comp 51 -> new row 1
+comp 49 -> existing row 1
+comp 48 -> existing row 1
+comp 47 -> existing row 1
+comp 46 -> existing row 1
+comp 45 -> existing row 1
+comp 44 -> existing row 1
+comp 43 -> existing row 1
+comp 42 -> new row 2
+```
+
+The first real divergence from current Dagua is sorted position 2. Current
+Dagua's stable Python sort visits component `0`; the running OGDF runner visits
+component `49`.
+
+The traced row tie also confirms newest-push behavior in the pairing heap. When
+rows 3 and 4 both had width `450`, component `13` chose row 4, the more recently
+pushed equal-width row. The next singleton then chose row 3 after row 4 was
+updated to width `500`.
+
+GEM `TileToRowsCCPacker`, `random_dag_50`, seed 100, iters2000:
+
+```text
+TTR_START count=52 pageRatio=1
+sorted boxes:
+50, 51, 49, 48, 47, 46, 45, 44, 43, 42,
+41, 40, 39, 38, 37, 36, 35, 34, 33, 32,
+31, 30, 29, 28, 27, 26, 25, 24, 23, 22,
+21, 20, 19, 18, 17, 16, 15, 14, 13, 12,
+11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
+first decisions:
+box 50 -> new row
+box 51 -> row 0
+box 49 -> row 0
+box 48 -> row 0
+box 47 -> row 0
+box 46 -> new row
+```
+
+### Local Port Attempt
+
+The traced rules were ported locally, then reverted after the gate failed:
+
+- FMMM: OGDF `Array::quicksortInt` order for the MAAR decreasing-height sort,
+  plus newest-push row tie selection.
+- GEM: OGDF `Array::quicksortInt` order for `TileToRowsCCPacker` decreasing
+  height sort.
+
+The Python port matched the traced FMMM sorted order exactly on the traced
+input rectangles:
+
+```text
+50, 51, 49, 48, 47, 46, 45, 44, 43, 42,
+41, 40, 39, 38, 37, 36, 35, 34, 33, 32,
+31, 30, 29, 28, 27, 26, 25, 24, 23, 22,
+21, 20, 19, 18, 17, 16, 15, 14, 13, 12,
+11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
+```
+
+### Gate Result
+
+Against `/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r76_refs`,
+the port made the `random_dag_50` FMMM rows decisively worse:
+
+| Combo | Seeds 100-104 RMSD after traced-rule port | Max |
+|---|---|---:|
+| `classic_fmmm_steps10` | `0.875233591, 1.02653921, 0.95266211, 0.910838187, 0.825261712` | `1.02653921` |
+| `classic_fmmm_steps100` | `0.980312943, 0.963448107, 0.871365845, 0.96932584, 0.991103053` | `0.991103053` |
+| `classic_fmmm_steps200` | `0.976304889, 0.94935441, 0.879964948, 0.971267223, 0.987083495` | `0.987083495` |
+
+For comparison, Attempt 2's pre-port random_dag_50 FMMM residual was around
+`0.08-0.10`, so this is a clear regression, not a fidelity improvement.
+
+The live runner itself also does not match the stored `r76_refs` tensor for the
+same generated `random_dag_50` payload and seed:
+
+| Pair | Seed | RMSD vs `r76_refs` |
+|---|---:|---:|
+| live committed `ogdf_fmmm` steps10 | 100 | `0.870399535` |
+| live committed `ogdf_gem` iters2000 | 100 | `0.9849509` |
+
+A sampled `PYTHONHASHSEED` probe did not find a stored-reference match for the
+FMMM seed-100 row:
+
+```text
+hash=0 0.8710021376609802
+hash=1 0.9229878783226013
+hash=2 0.8721885681152344
+hash=3 0.9333824515342712
+hash=4 0.9090210199356079
+hash=5 0.8824561834335327
+hash=10 0.9094457626342773
+hash=20 0.9169886708259583
+hash=42 0.8018065690994263
+hash=100 0.9189379215240479
+hash=123 0.8747541308403015
+hash=999 0.9085854291915894
+```
+
+### Verdict
+
+The real running-runner rule is now traced: OGDF visits the large component,
+then the two-node component, then the singleton block in reverse component
+order for this 52-component input; MAAR row ties choose the newest pushed
+equal-width row.
+
+That rule is portable and was locally ported, but it fails the stored
+`r76_refs` gate badly. The additional live-runner check shows the committed
+runner's current output is itself far from the stored `r76_refs` tensor on the
+same generated graph and seed. Therefore no source patch was kept and no commit
+was created. This round proves the source-reading tie rules were not enough and
+that the active runner trace conflicts with the stored reference corpus used by
+the requested gate; it does not prove allocator- or pointer-order
+non-portability.
+
+### Test Results
+
+Focused tests after the reverted source probe:
+
+```text
+20 passed, 3 warnings in 0.89s
+```
+
+Final documentation-only verification:
+
+```text
+ruff check . --fix
+All checks passed!
+
+pytest -k "fmmm or gem" -x --tb=short -q
+76 passed, 3085 deselected, 1 xfailed, 66 warnings in 248.44s (0:04:08)
+```
+
+No final Tier 1/Tier 2 implementation gates or benchmark rerun were performed
+because there is no accepted implementation patch and the traced-rule port fails
+the first RMSD gate.
