@@ -265,15 +265,19 @@ def _layout_igraph_classical_mds(
             components=components,
             seed=seed,
         )
+        if num_nodes <= 1000:
+            coordinates = _igraph_layout_align(coordinates=coordinates, edge_index=edge_index)
         return torch.from_numpy(coordinates * _IGRAPH_LAYOUT_SCALE).to(
             dtype=output_dtype,
             device=output_device,
         )
     if num_nodes == 2 and use_two_node_special:
-        return (
-            torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float64, device=output_device)
-            * _IGRAPH_LAYOUT_SCALE
-        ).to(dtype=output_dtype)
+        coordinates = np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float64)
+        coordinates = _igraph_layout_align(coordinates=coordinates, edge_index=edge_index)
+        return torch.from_numpy(coordinates * _IGRAPH_LAYOUT_SCALE).to(
+            dtype=output_dtype,
+            device=output_device,
+        )
 
     distances = _shortest_path_distances(
         edge_index=edge_index,
@@ -284,6 +288,8 @@ def _layout_igraph_classical_mds(
         distances=distances,
         use_two_node_special=use_two_node_special,
     )
+    if num_nodes <= 1000:
+        coordinates = _igraph_layout_align(coordinates=coordinates, edge_index=edge_index)
 
     return torch.from_numpy(coordinates * _IGRAPH_LAYOUT_SCALE).to(
         dtype=output_dtype,
@@ -334,7 +340,7 @@ def _igraph_mds_single_from_distances(
         gram,
         subset_by_index=(num_nodes - 2, num_nodes - 1),
         driver="evr",
-        lower=True,
+        lower=False,
         check_finite=False,
     )
 
@@ -363,8 +369,9 @@ def _weak_components_igraph_order(edge_index: torch.Tensor, num_nodes: int) -> l
     -------
     list[list[int]]
         Components as vertex-index lists. Component discovery follows the
-        first unseen vertex, and each component is sorted to mirror igraph's
-        subcomponent vertex vector on benchmark fixtures.
+        first unseen vertex. Vertices inside each component preserve igraph's
+        ``subcomponent()`` breadth-first order, which visits adjacency lists in
+        ascending vertex order.
     """
     adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
     edges = edge_index.detach().to(device="cpu", dtype=torch.long)
@@ -375,6 +382,8 @@ def _weak_components_igraph_order(edge_index: torch.Tensor, num_nodes: int) -> l
             continue
         adjacency[source].append(target)
         adjacency[target].append(source)
+    for neighbors in adjacency:
+        neighbors.sort()
 
     seen = [False] * num_nodes
     components: list[list[int]] = []
@@ -392,7 +401,7 @@ def _weak_components_igraph_order(edge_index: torch.Tensor, num_nodes: int) -> l
                     continue
                 seen[neighbor] = True
                 queue.append(neighbor)
-        components.append(sorted(queue))
+        components.append(queue)
     return components
 
 
@@ -476,7 +485,7 @@ def _igraph_layout_merge_dla(layouts: list[np.ndarray], seed: int) -> np.ndarray
         area += radii[index] * radii[index]
         centers_x[index], centers_y[index], native_radii[index] = _igraph_layout_sphere_2d(layout)
 
-    order = sorted(range(coords_len), key=lambda index: (-sizes[index], index))
+    order = _igraph_descending_size_order(sizes)
     minx = miny = -math.sqrt(_IGRAPH_DLA_AREA_FACTOR * area)
     maxx = maxy = math.sqrt(_IGRAPH_DLA_AREA_FACTOR * area)
     grid = _IgraphMergeGrid(
@@ -521,6 +530,32 @@ def _igraph_layout_merge_dla(layouts: list[np.ndarray], seed: int) -> np.ndarray
     return result
 
 
+def _igraph_descending_size_order(sizes: list[float]) -> list[int]:
+    """Return component indices ordered like igraph ``vector_sort_ind``.
+
+    Parameters
+    ----------
+    sizes : list[float]
+        Component sizes in original component order.
+
+    Returns
+    -------
+    list[int]
+        Component indices sorted in descending size order.
+
+    Notes
+    -----
+    ``igraph_layout_merge_dla()`` calls ``igraph_vector_sort_ind(...,
+    IGRAPH_DESCENDING)`` over a vector whose values are overwritten by the
+    returned indices. Its qsort comparator looks only at values, so equal-size
+    component ties are not stable. Sorting negative sizes through the existing
+    igraph qsort port preserves that value-only tie behavior.
+    """
+    from dagua.layout.ops.sugiyama import _igraph_sort_indices
+
+    return _igraph_sort_indices([-size for size in sizes])
+
+
 def _igraph_layout_sphere_2d(coords: np.ndarray) -> tuple[float, float, float]:
     """Compute igraph's 2D bounding sphere from a coordinate bounding box.
 
@@ -551,6 +586,138 @@ def _igraph_layout_sphere_2d(coords: np.ndarray) -> tuple[float, float, float]:
     center_y = (ymin + ymax) / 2.0
     radius = math.sqrt((xmax - xmin) * (xmax - xmin) + (ymax - ymin) * (ymax - ymin)) / 2.0
     return center_x, center_y, radius
+
+
+def _igraph_layout_align(coordinates: np.ndarray, edge_index: torch.Tensor) -> np.ndarray:
+    """Align coordinates like python-igraph's layout wrapper.
+
+    Parameters
+    ----------
+    coordinates : numpy.ndarray
+        Raw igraph C layout matrix with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``. Edge direction is
+        preserved because ``igraph_layout_align()`` iterates stored edges and
+        uses ``from - to`` vectors.
+
+    Returns
+    -------
+    numpy.ndarray
+        Centered and axis-aligned coordinates with shape ``[N, 2]``.
+
+    Notes
+    -----
+    python-igraph's ``GraphBase.layout_mds`` calls ``igraph_layout_align()``
+    after ``igraph_layout_mds()`` for graphs with at most 1000 vertices
+    (``src/_igraph/graphobject.c:8871-8878`` in the 1.0.0 sdist). The C MDS
+    source itself does not perform this post-placement step.
+    """
+    vertex_count = int(coordinates.shape[0])
+    if vertex_count == 0:
+        return np.array(coordinates, dtype=np.float64, copy=True)
+
+    aligned = np.array(coordinates, dtype=np.float64, copy=True)
+    aligned -= aligned.mean(axis=0)
+    if aligned.shape[1] == 1:
+        return aligned
+
+    moment = np.zeros((aligned.shape[1], aligned.shape[1]), dtype=np.float64)
+    correction = np.zeros_like(moment)
+    correction_saved = False
+    correction_norm = 0.0
+    norm_squared_sum = 0.0
+
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    for edge_pos in range(int(edges.shape[1])):
+        source = int(edges[0, edge_pos].item())
+        target = int(edges[1, edge_pos].item())
+        if source == target:
+            continue
+        vector = aligned[source, :] - aligned[target, :]
+        outer = np.outer(vector, vector)
+        moment += outer
+        norm_squared_sum += float(np.trace(outer))
+        if not correction_saved and norm_squared_sum > 0.0:
+            correction_saved = True
+            correction_norm = norm_squared_sum
+            correction[:, :] = moment
+
+    if norm_squared_sum == 0.0:
+        for vertex in range(vertex_count):
+            vector = aligned[vertex, :]
+            outer = np.outer(vector, vector)
+            moment += outer
+            norm_squared_sum += float(np.trace(outer))
+            if not correction_saved and norm_squared_sum > 0.0:
+                correction_saved = True
+                correction_norm = norm_squared_sum
+                correction[:, :] = moment
+
+    if norm_squared_sum == 0.0:
+        return aligned
+
+    tensor, eigenvectors = _igraph_layout_align_nematic_basis(
+        moment=moment,
+        correction=correction,
+        norm_squared_sum=norm_squared_sum,
+        correction_norm=correction_norm,
+        correction_saved=correction_saved,
+    )
+    _ = tensor
+    rotated = aligned @ eigenvectors
+    extents = np.ptp(rotated, axis=0)
+    permutation = _igraph_descending_size_order([float(extent) for extent in extents])
+    return rotated[:, permutation]
+
+
+def _igraph_layout_align_nematic_basis(
+    moment: np.ndarray,
+    correction: np.ndarray,
+    norm_squared_sum: float,
+    correction_norm: float,
+    correction_saved: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute the nematic tensor basis used by ``igraph_layout_align``.
+
+    Parameters
+    ----------
+    moment : numpy.ndarray
+        Symmetric moment matrix with shape ``[D, D]``.
+    correction : numpy.ndarray
+        First non-zero moment contribution with shape ``[D, D]``.
+    norm_squared_sum : float
+        Sum of squared vector norms used to normalize ``moment``.
+    correction_norm : float
+        Squared norm sum associated with ``correction``.
+    correction_saved : bool
+        Whether ``correction`` contains a valid non-zero term.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        Nematic tensor and eigenvector matrix. The eigenvectors are columns,
+        matching LAPACK/SciPy convention and igraph's matrix multiplication.
+    """
+    dimension = int(moment.shape[0])
+    retried = False
+    working_moment = np.array(moment, dtype=np.float64, copy=True)
+    working_norm = float(norm_squared_sum)
+
+    while True:
+        tensor = working_moment / working_norm
+        for axis in range(dimension):
+            tensor[axis, axis] -= 1.0 / float(dimension)
+        eigenvalues, eigenvectors = scipy.linalg.eigh(
+            tensor,
+            driver="evr",
+            check_finite=False,
+        )
+        matrix_norm = float(np.max(np.abs(eigenvalues)))
+        if matrix_norm > 1e-3 or retried or not correction_saved:
+            return tensor, eigenvectors
+        working_moment -= correction
+        working_norm -= correction_norm
+        retried = True
 
 
 def _rng_unif(rng: random.Random, low: float, high: float) -> float:
@@ -968,30 +1135,159 @@ class _IgraphMergeGrid:
         ):
             return -1
 
-        if self.occupied_x.size == 0:
-            return -1
+        center_x, center_y = self.which(x_coord, y_coord)
+        result = self._get_mat(center_x, center_y) - 1
 
-        x_start = max(0, math.floor((x_coord - radius - self.minx) / self.deltax) + 1)
-        x_stop = min(self.stepsx, math.ceil((x_coord + radius - self.minx) / self.deltax))
-        y_start = max(0, math.floor((y_coord - radius - self.miny) / self.deltay) + 1)
-        y_stop = min(self.stepsy, math.ceil((y_coord + radius - self.miny) / self.deltay))
-        if x_start >= x_stop or y_start >= y_stop:
-            return -1
+        if result >= 0:
+            return result
 
-        local_occupied_x, local_occupied_y = np.nonzero(self.data[x_start:x_stop, y_start:y_stop])
-        if local_occupied_x.size == 0:
-            return -1
+        result = self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=0,
+            sign_x=1,
+            sign_y=1,
+            c_bug_bounds=False,
+        )
+        if result >= 0:
+            return result
 
-        hit_x_indices = x_start + local_occupied_x
-        hit_y_indices = y_start + local_occupied_y
-        delta_x = x_coord - self.cell_x_coords[hit_x_indices]
-        delta_y = y_coord - self.cell_y_coords[hit_y_indices]
-        hits = delta_x * delta_x + delta_y * delta_y < radius * radius
-        if not bool(hits.any()):
-            return -1
-        hit_x = hit_x_indices[hits][0]
-        hit_y = hit_y_indices[hits][0]
-        return self._get_mat(int(hit_x), int(hit_y)) - 1
+        result = self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=0,
+            sign_x=1,
+            sign_y=-1,
+            c_bug_bounds=False,
+        )
+        if result >= 0:
+            return result
+
+        result = self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=1,
+            sign_x=-1,
+            sign_y=1,
+            c_bug_bounds=False,
+        )
+        if result >= 0:
+            return result
+
+        return self._scan_get_sphere_quadrant(
+            x_coord=x_coord,
+            y_coord=y_coord,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            start_i=1,
+            sign_x=-1,
+            sign_y=-1,
+            c_bug_bounds=True,
+        )
+
+    def _scan_get_sphere_quadrant(
+        self,
+        x_coord: float,
+        y_coord: float,
+        center_x: int,
+        center_y: int,
+        radius: float,
+        start_i: int,
+        sign_x: int,
+        sign_y: int,
+        c_bug_bounds: bool,
+    ) -> int:
+        """Scan one igraph ``get_sphere`` quadrant in C loop order.
+
+        Parameters
+        ----------
+        x_coord : float
+            Candidate sphere center x coordinate.
+        y_coord : float
+            Candidate sphere center y coordinate.
+        center_x : int
+            Candidate center x cell.
+        center_y : int
+            Candidate center y cell.
+        radius : float
+            Candidate sphere radius.
+        start_i : int
+            Initial outer-loop offset.
+        sign_x : int
+            X quadrant sign, either ``1`` or ``-1``.
+        sign_y : int
+            Y quadrant sign, either ``1`` or ``-1``.
+        c_bug_bounds : bool
+            Whether to mirror igraph 1.0.0's lower-left ``get_sphere`` loop
+            bounds typo while still avoiding Python negative-index wraparound.
+
+        Returns
+        -------
+        int
+            Component id of the first colliding occupied cell in this quadrant,
+            or ``-1`` when this quadrant has no hit.
+        """
+        radius_squared = radius * radius
+        i = start_i
+        while True:
+            if sign_x > 0:
+                x_index = center_x + i
+                if x_index >= self.stepsx:
+                    return -1
+                cell_x = self.minx + x_index * self.deltax
+            else:
+                x_index = center_x - i
+                if x_index < 0:
+                    return -1
+                cell_x = self.minx + (center_x - i + 1) * self.deltax
+                if not c_bug_bounds and center_x - i <= 0:
+                    return -1
+                if c_bug_bounds and center_x + i <= 0:
+                    return -1
+            outer_y_index = center_y if sign_y > 0 else center_y + 1
+            outer_y = self.miny + outer_y_index * self.deltay
+            if (x_coord - cell_x) * (x_coord - cell_x) + (y_coord - outer_y) * (
+                y_coord - outer_y
+            ) >= radius_squared:
+                return -1
+
+            if sign_y > 0:
+                y_index = center_y
+                while y_index < self.stepsy:
+                    cell_y = self.miny + y_index * self.deltay
+                    if (x_coord - cell_x) * (x_coord - cell_x) + (y_coord - cell_y) * (
+                        y_coord - cell_y
+                    ) >= radius_squared:
+                        break
+                    value = self._get_mat(x_index, y_index)
+                    if value != 0:
+                        return value - 1
+                    y_index += 1
+            else:
+                if (not c_bug_bounds and center_y <= 0) or (c_bug_bounds and center_y + i <= 0):
+                    return -1
+                y_index = center_y - 1
+                while y_index >= 0:
+                    cell_y = self.miny + (y_index + 1) * self.deltay
+                    if (x_coord - cell_x) * (x_coord - cell_x) + (y_coord - cell_y) * (
+                        y_coord - cell_y
+                    ) >= radius_squared:
+                        break
+                    value = self._get_mat(x_index, y_index)
+                    if value != 0:
+                        return value - 1
+                    y_index -= 1
+            i += 1
 
     def _refresh_occupied_cells(self) -> None:
         """Refresh cached occupied-cell coordinates after rasterization.
