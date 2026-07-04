@@ -2184,7 +2184,23 @@ def _synthetic_graphs() -> List[TestGraph]:
 
 
 def _random_dag(n_nodes: int, n_edges: int, seed: int = 42) -> DaguaGraph:
-    """Generate a random DAG by sampling edges that respect topological order."""
+    """Generate a random DAG by sampling edges that respect topological order.
+
+    Parameters
+    ----------
+    n_nodes : int
+        Number of named nodes to materialize.
+    n_edges : int
+        Target number of sampled forward edges.
+    seed : int, default=42
+        Random seed for reproducible edge sampling.
+
+    Returns
+    -------
+    DaguaGraph
+        Random DAG with node IDs ``n0`` through ``n{n_nodes - 1}`` and edges
+        emitted in sorted string-key order.
+    """
     import random
 
     rng = random.Random(seed)
@@ -2198,7 +2214,7 @@ def _random_dag(n_nodes: int, n_edges: int, seed: int = 42) -> DaguaGraph:
         edges.add((node_names[i], node_names[j]))
         attempts += 1
 
-    return DaguaGraph.from_edge_list(list(edges), num_nodes=n_nodes)
+    return _build_named_graph(node_names, sorted(edges))
 
 
 # ─── TorchLens Graph Extractors ──────────────────────────────────────────────
@@ -2594,7 +2610,21 @@ def _torchlens_graphs() -> List[TestGraph]:
 
 
 def make_chain(n: int, seed: int = 42) -> TestGraph:
-    """Linear chain: 0→1→2→...→n-1."""
+    """Build a linear chain graph.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes in the chain.
+    seed : int, default=42
+        Unused seed parameter retained for scale-suite API consistency.
+
+    Returns
+    -------
+    TestGraph
+        Linear chain ``0 -> 1 -> ... -> n - 1``.
+    """
+    del seed
     src = list(range(n - 1))
     tgt = list(range(1, n))
     edge_index = torch.tensor([src, tgt], dtype=torch.long)
@@ -2608,7 +2638,22 @@ def make_chain(n: int, seed: int = 42) -> TestGraph:
 
 
 def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
-    """Layered DAG with fixed width per layer."""
+    """Build a layered DAG with fixed width per layer.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes to materialize.
+    width : int, default=0
+        Desired layer width. A non-positive value derives width from ``n``.
+    seed : int, default=42
+        Random seed for cross-layer target sampling.
+
+    Returns
+    -------
+    TestGraph
+        Layered scale graph with deterministic sorted edge order.
+    """
     import random
 
     rng = random.Random(seed)
@@ -2627,7 +2672,7 @@ def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
     if node_idx < n:
         layers[-1].extend(range(node_idx, n))
 
-    edges_set: set = set()
+    edges_set: set[tuple[int, int]] = set()
     for i in range(len(layers) - 1):
         for node in layers[i]:
             k = min(rng.randint(1, 3), len(layers[i + 1]))
@@ -2637,7 +2682,7 @@ def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
 
     g = DaguaGraph.from_edge_index(torch.zeros(2, 0, dtype=torch.long), num_nodes=n)
     if edges_set:
-        el = list(edges_set)
+        el = sorted(edges_set)
         g.edge_index = torch.tensor([[e[0] for e in el], [e[1] for e in el]], dtype=torch.long)
         g.edge_labels = [None] * len(el)
         g.edge_types = ["normal"] * len(el)
@@ -2652,14 +2697,29 @@ def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
 
 
 def make_random_dag(n: int, density: float = 1.5, seed: int = 42) -> TestGraph:
-    """Random DAG with ~n*density edges."""
+    """Build a random DAG with roughly ``n * density`` edges.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes to materialize.
+    density : float, default=1.5
+        Edge multiplier used to choose the target edge count.
+    seed : int, default=42
+        Random seed for reproducible edge sampling.
+
+    Returns
+    -------
+    TestGraph
+        Random scale DAG with deterministic sorted edge order.
+    """
     import random
 
     rng = random.Random(seed)
     n_edges = int(n * density)
 
     g = DaguaGraph.from_edge_index(torch.zeros(2, 0, dtype=torch.long), num_nodes=n)
-    edges_set: set = set()
+    edges_set: set[tuple[int, int]] = set()
     attempts = 0
     while len(edges_set) < n_edges and attempts < n_edges * 20:
         i = rng.randint(0, n - 2)
@@ -2668,7 +2728,7 @@ def make_random_dag(n: int, density: float = 1.5, seed: int = 42) -> TestGraph:
         attempts += 1
 
     if edges_set:
-        el = list(edges_set)
+        el = sorted(edges_set)
         g.edge_index = torch.tensor([[e[0] for e in el], [e[1] for e in el]], dtype=torch.long)
         g.edge_labels = [None] * len(el)
         g.edge_types = ["normal"] * len(el)
