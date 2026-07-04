@@ -1,8 +1,11 @@
 """Regression tests for Sugiyama igraph-fidelity edge cases."""
 
+import importlib
+
 import pytest
 import torch
 
+from dagua.graph import DaguaGraph
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
     _igraph_eades_layer_assignments,
@@ -10,6 +13,31 @@ from dagua.layout.ops.sugiyama import (
     _igraph_glpk_objective_coefficients,
     _igraph_undirected_layer_assignments,
 )
+
+
+def _moe_router_sparse_edge_index() -> torch.Tensor:
+    """Return the eval-catalog MoE router graph edge index.
+
+    Returns
+    -------
+    torch.Tensor
+        Directed edge list with shape ``[2, E]`` in ``DaguaGraph`` node order.
+    """
+    edges = [
+        ("input", "embed"),
+        ("embed", "router"),
+        ("router", "expert_0"),
+        ("router", "expert_3"),
+        ("embed", "expert_1"),
+        ("embed", "expert_2"),
+        ("expert_0", "combine"),
+        ("expert_1", "combine"),
+        ("expert_2", "combine"),
+        ("expert_3", "combine"),
+        ("combine", "output"),
+    ]
+    graph = DaguaGraph.from_edge_list(edges)
+    return graph.edge_index.detach().cpu().to(dtype=torch.long)
 
 
 def test_sugiyama_ignores_self_loops_before_layering() -> None:
@@ -131,6 +159,46 @@ def test_sugiyama_igraph_glpk_two_hubs_bridge_matches_installed_igraph() -> None
 
     assert torch.equal(expected_layers, torch.tensor([0, 0, 1, 2, 2, 0, 3, 4, 4]))
     assert torch.equal(layers, expected_layers)
+
+
+def test_sugiyama_igraph_glpk_matches_installed_igraph_on_tie_row() -> None:
+    """The GLPK path should match installed igraph on an LP-degenerate row."""
+    pytest.importorskip("swiglpk")
+    igraph = pytest.importorskip("igraph")
+    edge_index = _moe_router_sparse_edge_index()
+    graph = igraph.Graph(
+        n=9,
+        edges=list(zip(edge_index[0].tolist(), edge_index[1].tolist())),
+        directed=True,
+    )
+    layout = graph.layout("sugiyama")
+    if isinstance(layout, tuple):
+        layout = layout[0]
+    y_values = [float(coord[1]) for coord in layout.coords]
+    ordered_y_values = sorted(set(y_values))
+    expected_layers = torch.tensor(
+        [ordered_y_values.index(y_value) for y_value in y_values],
+        dtype=torch.long,
+    )
+
+    layers = _igraph_glpk_layer_assignments(edge_index=edge_index, num_nodes=9)
+
+    assert torch.equal(expected_layers, torch.tensor([0, 1, 2, 3, 3, 3, 2, 4, 5]))
+    assert torch.equal(layers, expected_layers)
+
+
+def test_sugiyama_igraph_glpk_import_absence_keeps_scipy_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing swiglpk should preserve the prior SciPy LP fallback behavior."""
+    pytest.importorskip("scipy")
+    sugiyama_ops = importlib.import_module("dagua.layout.ops.sugiyama")
+    monkeypatch.setattr(sugiyama_ops, "_swiglpk", None)
+    edge_index = _moe_router_sparse_edge_index()
+
+    layers = sugiyama_ops._igraph_glpk_layer_assignments(edge_index=edge_index, num_nodes=9)
+
+    assert torch.equal(layers, torch.tensor([0, 1, 2, 3, 3, 2, 2, 4, 5]))
 
 
 def test_sugiyama_igraph_conflict_quirk_matches_installed_igraph() -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -28,6 +28,11 @@ from dagua.layout.ops.state import (  # noqa: E402
     SolveState,
 )
 from dagua.layout.ops.taxonomy import OpCategory, register_op  # noqa: E402
+
+try:
+    import swiglpk as _swiglpk
+except ImportError:
+    _swiglpk = None
 
 _NO_SHIFT = float("inf")
 _SUGIYAMA_RESOLVED_SIZES_KEY = "sugiyama_resolved_sizes"
@@ -469,6 +474,143 @@ def _igraph_glpk_layer_assignments(
         feedback_edges=feedback_edges,
         edge_weights=edge_weights,
     )
+    if _swiglpk is not None:
+        layers = _igraph_swiglpk_layer_assignments(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            feedback_edges=feedback_edges,
+            objective=objective,
+        )
+        if layers is not None:
+            return layers
+
+    return _igraph_scipy_layer_assignments(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+        feedback_edges=feedback_edges,
+        objective=objective,
+    )
+
+
+def _igraph_swiglpk_layer_assignments(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    feedback_edges: Set[int],
+    objective: Sequence[float],
+) -> Optional[torch.Tensor]:
+    """Solve igraph's Sugiyama rank LP with GLPK simplex.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+    feedback_edges : set of int
+        Edge ids selected by the Eades feedback heuristic.
+    objective : sequence of float
+        Per-node objective coefficients matching igraph's ``outdegs - indegs``
+        vector.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Normalized layer ids with shape ``[N]``, or ``None`` if GLPK cannot
+        solve the LP so the caller can use the existing SciPy fallback.
+    """
+    glpk: Any = _swiglpk
+    if glpk is None:
+        return None
+
+    problem = glpk.glp_create_prob()
+    previous_term_out = glpk.glp_term_out(glpk.GLP_OFF)
+    try:
+        simplex_params = glpk.glp_smcp()
+        glpk.glp_init_smcp(simplex_params)
+        simplex_params.msg_lev = glpk.GLP_MSG_OFF
+        simplex_params.presolve = glpk.GLP_OFF
+
+        glpk.glp_set_obj_dir(problem, glpk.GLP_MIN)
+        glpk.glp_add_cols(problem, num_nodes)
+        for column in range(1, num_nodes + 1):
+            glpk.glp_set_col_kind(problem, column, glpk.GLP_IV)
+            glpk.glp_set_col_bnds(problem, column, glpk.GLP_LO, 0.0, 0.0)
+            glpk.glp_set_obj_coef(problem, column, float(objective[column - 1]))
+
+        edge_count = int(edge_index.shape[1])
+        glpk.glp_add_rows(problem, edge_count)
+        row_indices = glpk.intArray(3)
+        row_values = glpk.doubleArray(3)
+        row_values[1] = -1.0
+        row_values[2] = 1.0
+        sorted_feedback_edges = sorted(feedback_edges)
+        feedback_cursor = 0
+        sources = edge_index[0].tolist()
+        targets = edge_index[1].tolist()
+        for edge_id, (source, target) in enumerate(zip(sources, targets)):
+            row = edge_id + 1
+            row_indices[1] = int(source) + 1
+            row_indices[2] = int(target) + 1
+            if source == target:
+                if (
+                    feedback_cursor < len(sorted_feedback_edges)
+                    and sorted_feedback_edges[feedback_cursor] == edge_id
+                ):
+                    feedback_cursor += 1
+                continue
+
+            if (
+                feedback_cursor < len(sorted_feedback_edges)
+                and sorted_feedback_edges[feedback_cursor] == edge_id
+            ):
+                glpk.glp_set_row_bnds(problem, row, glpk.GLP_UP, -1.0, -1.0)
+                feedback_cursor += 1
+            else:
+                glpk.glp_set_row_bnds(problem, row, glpk.GLP_LO, 1.0, 1.0)
+            glpk.glp_set_mat_row(problem, row, 2, row_indices, row_values)
+
+        if glpk.glp_simplex(problem, simplex_params) != 0:
+            return None
+        raw_layers = [
+            int(math.floor(float(glpk.glp_get_col_prim(problem, column))))
+            for column in range(1, num_nodes + 1)
+        ]
+        return torch.tensor(_normalize_igraph_layers(raw_layers), dtype=torch.long)
+    finally:
+        glpk.glp_delete_prob(problem)
+        glpk.glp_term_out(previous_term_out)
+
+
+def _igraph_scipy_layer_assignments(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor],
+    feedback_edges: Set[int],
+    objective: Sequence[float],
+) -> torch.Tensor:
+    """Solve igraph's rank LP through the pre-existing SciPy fallback.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original non-loop edge list with shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of original graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]`` used by the Eades fallback if
+        SciPy is unavailable or fails.
+    feedback_edges : set of int
+        Edge ids selected by the Eades feedback heuristic.
+    objective : sequence of float
+        Per-node objective coefficients matching igraph's ``outdegs - indegs``
+        vector.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized layer ids with shape ``[N]``.
+    """
     try:
         from scipy.optimize import linprog
     except ImportError:
@@ -497,7 +639,7 @@ def _igraph_glpk_layer_assignments(
         return torch.zeros((num_nodes,), dtype=torch.long)
 
     result = linprog(
-        objective,
+        list(objective),
         A_ub=constraints,
         b_ub=bounds,
         bounds=[(0.0, None)] * num_nodes,
