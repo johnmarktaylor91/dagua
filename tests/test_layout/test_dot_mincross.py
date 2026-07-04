@@ -51,6 +51,17 @@ def test_graphviz_mincross_ignores_unexpanded_long_edges() -> None:
     assert ordering == ranks
 
 
+def test_graphviz_mincross_counts_sparse_wide_rank_edges() -> None:
+    """Count crossings when lower-rank node order exceeds edge count."""
+    ranks = [[0, 1], [2, 3, 4, 5, 6]]
+    edges = [(0, 6), (1, 2)]
+
+    ordering = graphviz_mincross(ranks=ranks, edges=edges, iterations=1)
+
+    assert ordering[0] == [0, 1]
+    assert sorted(ordering[1]) == [2, 3, 4, 5, 6]
+
+
 def test_graphviz_decompose_order_discovers_virtual_nodes_from_real_roots() -> None:
     """Match Graphviz 7.0.5 ``decompose(g, 1)`` DFS root and edge order."""
     edge_index = torch.tensor(
