@@ -52,6 +52,7 @@ EXPECTED_CLASSIC_NAMES = {
     "classic_umap",
     "classic_neulay",
     "classic_sgd2_multi",
+    "classic_fcose",
     "classic_fr_kk",
     "classic_kk_fr",
 }
@@ -280,8 +281,8 @@ def test_classic_neulay_uses_full_two_phase_defaults(
 
     assert result is not None
     assert observed["name"] == "classic_neulay"
-    assert observed["import_path"] == "dagua.layout.classic.neulay"
-    assert observed["fn_name"] == "layout_neulay"
+    assert observed["import_path"] == "dagua.layout.ops.pipelines.neulay"
+    assert observed["fn_name"] == "layout_neulay_pipeline"
     assert observed["seed"] == 23
     assert observed["extra_kwargs"] == {
         "steps": 20_000,
@@ -294,7 +295,7 @@ def test_classic_neulay_uses_full_two_phase_defaults(
 
 def test_classic_embedding_variant_param_names_match_registry_contract() -> None:
     """Classic embedding adapters should declare their supported override names."""
-    assert ClassicTsNET.variant_param_names == frozenset({"perplexity", "steps"})
+    assert ClassicTsNET.variant_param_names == frozenset({"perplexity", "steps", "fidelity_mode"})
     assert ClassicUMAP.variant_param_names == frozenset({"n_neighbors", "min_dist", "spread"})
     assert ClassicNeuLay.variant_param_names == frozenset(
         {"steps", "gcn_steps", "use_gcn", "lr", "radius"}
@@ -516,38 +517,44 @@ def test_graphviz_base_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None
     None
         The assertion validates timeout propagation.
     """
-    import dagua.graphviz_utils as graphviz_utils
+    from dagua.eval.competitors import graphviz_competitor
     from dagua.eval.competitors.graphviz_competitor import GraphvizSfdp
 
     graph = _make_small_graph()
     observed: dict[str, float | str] = {}
 
     def _fake_layout_with_graphviz(
-        input_graph: DaguaGraph,
+        graph: DaguaGraph,
         engine: str = "dot",
         timeout: float = 300.0,
+        seed: Optional[int] = None,
     ) -> torch.Tensor:
         """Capture Graphviz utility arguments for the regression test.
 
         Parameters
         ----------
-        input_graph : DaguaGraph
+        graph : DaguaGraph
             Graph passed through the competitor.
         engine : str, default="dot"
             Requested Graphviz engine.
         timeout : float, default=300.0
             Requested timeout in seconds.
+        seed : int | None, default=None
+            Optional Graphviz seed.
 
         Returns
         -------
         torch.Tensor
             Dummy position tensor with shape ``[N, 2]``.
         """
+        del seed
         observed["engine"] = engine
         observed["timeout"] = timeout
-        return torch.zeros((input_graph.num_nodes, 2))
+        return torch.zeros((graph.num_nodes, 2))
 
-    monkeypatch.setattr(graphviz_utils, "layout_with_graphviz", _fake_layout_with_graphviz)
+    monkeypatch.setattr(
+        graphviz_competitor, "_layout_with_graphviz_engine", _fake_layout_with_graphviz
+    )
 
     result = GraphvizSfdp().layout(graph, timeout=123.0)
 
@@ -557,36 +564,41 @@ def test_graphviz_base_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_graphviz_base_classifies_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Graphviz base competitors should normalize subprocess timeouts."""
-    import dagua.graphviz_utils as graphviz_utils
+    from dagua.eval.competitors import graphviz_competitor
     from dagua.eval.competitors.graphviz_competitor import GraphvizSfdp
 
     graph = _make_small_graph()
 
     def _fake_layout_with_graphviz(
-        input_graph: DaguaGraph,
+        graph: DaguaGraph,
         engine: str = "dot",
         timeout: float = 300.0,
+        seed: Optional[int] = None,
     ) -> torch.Tensor:
         """Raise a timeout to validate adapter error normalization.
 
         Parameters
         ----------
-        input_graph : DaguaGraph
+        graph : DaguaGraph
             Graph passed through the competitor.
         engine : str, default="dot"
             Requested Graphviz engine.
         timeout : float, default=300.0
             Requested timeout in seconds.
+        seed : int | None, default=None
+            Optional Graphviz seed.
 
         Returns
         -------
         torch.Tensor
             This helper never returns because it always raises.
         """
-        del input_graph, engine
+        del graph, engine, seed
         raise subprocess.TimeoutExpired(cmd="sfdp", timeout=timeout)
 
-    monkeypatch.setattr(graphviz_utils, "layout_with_graphviz", _fake_layout_with_graphviz)
+    monkeypatch.setattr(
+        graphviz_competitor, "_layout_with_graphviz_engine", _fake_layout_with_graphviz
+    )
 
     result = GraphvizSfdp().layout(graph, timeout=7.0)
 

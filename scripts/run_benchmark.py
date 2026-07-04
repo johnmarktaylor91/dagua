@@ -88,6 +88,7 @@ WATCHDOG_TIMEOUT = 600.0  # seconds to wait for any future before assuming dead 
 RUNNING_STATUS = "running"
 POSITION_DIRNAME = "positions"
 CONSECUTIVE_FAILURE_SKIP_THRESHOLD = 3  # skip remaining seeds after N consecutive failures
+REFERENCE_VARIANT_SEPARATOR = "__for__"
 # Minimum timeout (seconds) for tiny graphs -- no layout should need more
 # than this on a graph with <100 nodes.
 MIN_TIMEOUT_SECONDS = 30.0
@@ -833,6 +834,62 @@ def graph_summary(test_graph: Any) -> GraphSummary:
     )
 
 
+def requested_graph_names(graph_filter: Optional[str]) -> list[str]:
+    """Parse requested graph names from the CLI filter.
+
+    Parameters
+    ----------
+    graph_filter : str | None
+        Optional comma-separated graph filter.
+
+    Returns
+    -------
+    list[str]
+        Requested graph names in CLI order, or an empty list when no explicit
+        graph filter was provided.
+    """
+    if graph_filter is None:
+        return []
+    return [name.strip() for name in graph_filter.split(",") if name.strip()]
+
+
+def max_nodes_excluded_graphs(graph_filter: Optional[str], max_nodes: int) -> list[GraphSummary]:
+    """Return explicitly requested graphs excluded by ``--max-nodes``.
+
+    Parameters
+    ----------
+    graph_filter : str | None
+        Optional comma-separated graph filter.
+    max_nodes : int
+        Graph-level node-count limit. ``0`` means no graph-level limit.
+
+    Returns
+    -------
+    list[GraphSummary]
+        Requested graph summaries that exceed ``max_nodes``.
+    """
+    if graph_filter is None or max_nodes <= 0:
+        return []
+
+    from dagua.eval.graphs import get_test_graphs
+
+    all_graphs = sorted(
+        get_test_graphs(max_nodes=None),
+        key=lambda tg: (tg.graph.num_nodes, tg.name),
+    )
+    names = requested_graph_names(graph_filter)
+    if "tiny_graph" in names and all_graphs:
+        smallest_graph = min(all_graphs, key=lambda test_graph: test_graph.graph.num_nodes)
+        names = [smallest_graph.name if name == "tiny_graph" else name for name in names]
+    by_name = {test_graph.name: test_graph for test_graph in all_graphs}
+    excluded = []
+    for name in names:
+        test_graph = by_name.get(name)
+        if test_graph is not None and test_graph.graph.num_nodes > max_nodes:
+            excluded.append(graph_summary(test_graph))
+    return excluded
+
+
 def select_graphs(graph_filter: Optional[str], max_nodes: int) -> list[Any]:
     """Select benchmark graphs based on the CLI filters.
 
@@ -863,7 +920,7 @@ def select_graphs(graph_filter: Optional[str], max_nodes: int) -> list[Any]:
     if graph_filter is None:
         return selected
 
-    requested_names = [name.strip() for name in graph_filter.split(",") if name.strip()]
+    requested_names = requested_graph_names(graph_filter)
     if "tiny_graph" in requested_names and selected:
         smallest_graph = min(selected, key=lambda test_graph: test_graph.graph.num_nodes)
         requested_names = [
@@ -875,6 +932,65 @@ def select_graphs(graph_filter: Optional[str], max_nodes: int) -> list[Any]:
     if missing:
         raise ValueError(f"Unknown graph selection: {', '.join(sorted(missing))}")
     return [by_name[name] for name in requested_names]
+
+
+def for_variant_row_counts(records: Sequence[BenchmarkRecord]) -> dict[str, int]:
+    """Count rows for synthetic ``__for__`` reference variants.
+
+    Parameters
+    ----------
+    records : Sequence[BenchmarkRecord]
+        Scoped benchmark records.
+
+    Returns
+    -------
+    dict[str, int]
+        Row counts keyed by ``__for__`` engine name.
+    """
+    counts: dict[str, int] = {}
+    for record in records:
+        if REFERENCE_VARIANT_SEPARATOR not in record.engine_name:
+            continue
+        counts[record.engine_name] = counts.get(record.engine_name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def print_for_variant_row_count_summary(
+    records: Sequence[BenchmarkRecord], engine_names: Sequence[str]
+) -> bool:
+    """Print and validate ``__for__`` row counts for seeded-reference runs.
+
+    Parameters
+    ----------
+    records : Sequence[BenchmarkRecord]
+        Scoped benchmark records.
+    engine_names : Sequence[str]
+        Requested benchmark engine names.
+
+    Returns
+    -------
+    bool
+        ``True`` when every requested ``__for__`` engine has at least one row.
+    """
+    requested = [name for name in engine_names if REFERENCE_VARIANT_SEPARATOR in name]
+    counts = for_variant_row_counts(records)
+    for engine_name in requested:
+        counts.setdefault(engine_name, 0)
+    if not counts:
+        print("[benchmark] __for__ row counts: none requested")
+        return True
+    print(
+        "[benchmark] __for__ row counts: "
+        + ", ".join(f"{engine}={count}" for engine, count in counts.items())
+    )
+    zero_count_engines = [engine for engine, count in counts.items() if count <= 0]
+    if zero_count_engines:
+        print(
+            "[benchmark] ERROR: zero rows for requested __for__ variants: "
+            + ", ".join(zero_count_engines)
+        )
+        return False
+    return True
 
 
 def _expand_engine_name_for_variants(engine_name: str, *, additive: bool = False) -> list[str]:
@@ -2245,6 +2361,14 @@ def main() -> int:
     manifest_path = output_dir / "manifest.json"
 
     try:
+        excluded_graphs = max_nodes_excluded_graphs(args.graphs, args.max_nodes)
+        if excluded_graphs:
+            print("[benchmark] EXCLUDED GRAPHS due to --max-nodes:")
+            for summary in excluded_graphs:
+                print(
+                    f"[benchmark]   {summary.name} "
+                    f"(nodes={summary.num_nodes}, max_nodes={args.max_nodes})"
+                )
         selected_engines = select_engines(
             args.engines,
             include_variants=bool(args.variants),
@@ -2401,12 +2525,15 @@ def main() -> int:
         current_records = list(scoped_results(results, scoped_keys).values())
         generate_summary(output_dir, current_records, engine_names, graph_names)
         counts = status_counts(current_records)
+        for_counts_ok = True
+        if seed_refs:
+            for_counts_ok = print_for_variant_row_count_summary(current_records, engine_names)
         print(
             "[benchmark] Done: "
             f"{total_scope} total, {counts.get('ok', 0)} ok, {counts.get('skipped', 0)} skipped, "
             f"{counts.get('error', 0)} errors, {counts.get('timeout', 0)} timeouts"
         )
-        return 0
+        return 0 if for_counts_ok else 1
 
     # ── Serial execution (--workers 1) or parallel ─────────────────────────
     def _process_record(record: BenchmarkRecord) -> None:
@@ -2779,12 +2906,15 @@ def main() -> int:
     generate_summary(output_dir, current_records, engine_names, graph_names)
 
     counts = status_counts(current_records)
+    for_counts_ok = True
+    if seed_refs:
+        for_counts_ok = print_for_variant_row_count_summary(current_records, engine_names)
     print(
         "[benchmark] Done: "
         f"{total_scope} total, {counts.get('ok', 0)} ok, {counts.get('skipped', 0)} skipped, "
         f"{counts.get('error', 0)} errors, {counts.get('timeout', 0)} timeouts"
     )
-    return 0
+    return 0 if for_counts_ok else 1
 
 
 if __name__ == "__main__":

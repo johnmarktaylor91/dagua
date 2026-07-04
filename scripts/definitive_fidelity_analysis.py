@@ -17,6 +17,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -62,6 +63,10 @@ QUALITY_BATTERY_EXPLORATORY_TIER = "exploratory_noncanonical_reference"
 QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION = (
     REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
 )
+SELF_CHECK_EXACT_FIELDS = {
+    "d_R",
+    "mode",
+}
 NO_CANONICAL_REFERENCE_VARIANTS = {
     "classic_sfdp_theta04",
     "classic_sfdp_theta08",
@@ -199,6 +204,26 @@ class ComboPayload:
 
 
 @dataclass(frozen=True)
+class OutputTarget:
+    """Output path selected for a scoring run.
+
+    Parameters
+    ----------
+    final_path : Path
+        User-requested JSONL output path.
+    write_path : Path
+        Path the runner should write during this invocation.
+    atomic_replace : bool
+        Whether ``write_path`` should replace ``final_path`` after a
+        successful run.
+    """
+
+    final_path: Path
+    write_path: Path
+    atomic_replace: bool = False
+
+
+@dataclass(frozen=True)
 class CrossingEstimate:
     """Crossing count estimate and sampling diagnostics.
 
@@ -241,6 +266,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--combos-file", type=Path, default=None)
     parser.add_argument(
         "--mode",
@@ -272,12 +299,20 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     git_sha = git_rev_parse()
 
+    if args.self_check:
+        return run_self_check(args, git_sha)
+
+    output_target = prepare_output_target(output_path, resume=args.resume, overwrite=args.overwrite)
+    output_path = output_target.write_path
+
     if args.mode == "deterministic":
         rows = run_deterministic_mode(args.refresh_dir, output_path, args.combos_file, git_sha)
+        finalize_output_target(output_target)
         print_summary(rows)
         return 0
     if args.mode == "rung0-reverify":
         rows = run_rung0_reverify(args.refresh_dir, output_path, args.combos_file, git_sha)
+        finalize_output_target(output_target)
         print_summary(rows)
         return 0
 
@@ -317,8 +352,89 @@ def main() -> int:
     payloads = [payload for payload in payloads if payload.combo_id not in completed]
     run_payloads(payloads, output_path, args.workers)
     rows = read_jsonl(output_path)
+    finalize_output_target(output_target)
     print_summary(rows[-min(10, len(rows)) :])
     return 0
+
+
+def prepare_output_path(output_path: Path, *, resume: bool, overwrite: bool) -> Path:
+    """Return the write path for callers that only need guard validation.
+
+    Parameters
+    ----------
+    output_path : pathlib.Path
+        Requested JSONL output.
+    resume : bool
+        Whether existing compatible rows should be reused.
+    overwrite : bool
+        Whether an existing output should be replaced.
+
+    Returns
+    -------
+    pathlib.Path
+        Path that should be written by the analysis runner.
+    """
+    return prepare_output_target(output_path, resume=resume, overwrite=overwrite).write_path
+
+
+def prepare_output_target(output_path: Path, *, resume: bool, overwrite: bool) -> OutputTarget:
+    """Validate output-file reuse semantics before analysis starts.
+
+    Parameters
+    ----------
+    output_path : pathlib.Path
+        Requested JSONL output.
+    resume : bool
+        Whether existing compatible rows should be reused.
+    overwrite : bool
+        Whether an existing output should be replaced.
+
+    Returns
+    -------
+    OutputTarget
+        Final and write paths for the analysis runner.
+
+    Raises
+    ------
+    FileExistsError
+        Raised when the output already exists without ``--resume`` or
+        ``--overwrite``.
+    """
+    if resume:
+        return OutputTarget(final_path=output_path, write_path=output_path)
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"{output_path} already exists; use --resume to append missing rows or "
+            "--overwrite to replace it."
+        )
+    if overwrite and output_path.exists():
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=f"{output_path.name}.",
+            suffix=".tmp",
+            dir=output_path.parent,
+        )
+        os.close(file_descriptor)
+        temp_path = Path(temp_name)
+        temp_path.unlink(missing_ok=True)
+        return OutputTarget(final_path=output_path, write_path=temp_path, atomic_replace=True)
+    return OutputTarget(final_path=output_path, write_path=output_path)
+
+
+def finalize_output_target(output_target: OutputTarget) -> None:
+    """Atomically publish an overwrite output after successful scoring.
+
+    Parameters
+    ----------
+    output_target : OutputTarget
+        Output target returned by :func:`prepare_output_target`.
+
+    Returns
+    -------
+    None
+        The final path is replaced when ``atomic_replace`` is set.
+    """
+    if output_target.atomic_replace:
+        output_target.write_path.replace(output_target.final_path)
 
 
 def configure_thread_environment() -> None:
@@ -728,6 +844,113 @@ def build_payloads(
             )
         )
     return payloads
+
+
+def build_analysis_payloads_from_args(args: argparse.Namespace, git_sha: str) -> list[ComboPayload]:
+    """Build analysis payloads using the same path as normal scoring.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI options.
+    git_sha : str
+        Current git SHA.
+
+    Returns
+    -------
+    list[ComboPayload]
+        Payloads ready for analysis.
+    """
+    failing_map = load_failing_map(FAILING_MAP_PATH)
+    data_dirs = args.data_dir or [DEFAULT_DATA_DIR]
+    args.data_dir = data_dirs[0]
+    results = load_results_multi(data_dirs)
+    index = index_results(results)
+    graph_data = load_graph_data()
+    combo_pairs = load_combo_pairs(failing_map, args.combos_file)
+    if args.mode == "negative-control":
+        combo_pairs = select_negative_controls(combo_pairs, failing_map, index, args.data_dir)
+    elif args.mode == "chance-control":
+        combo_pairs = select_chance_controls(combo_pairs, failing_map, index)
+    elif args.mode == "reference-self-split-positive-control":
+        combo_pairs = select_reference_self_split_positive_controls(
+            combo_pairs,
+            failing_map,
+            index,
+            args.data_dir,
+            graph_data,
+        )
+    elif args.mode == "modeb-positive-control" and args.combos_file is None:
+        raise ValueError("--combos-file is required for modeb-positive-control.")
+    return build_payloads(
+        args.mode,
+        combo_pairs,
+        failing_map,
+        index,
+        graph_data,
+        args.data_dir,
+        git_sha,
+    )
+
+
+def verdict_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Extract fields that define the local analysis verdict.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Analysis output row.
+
+    Returns
+    -------
+    dict[str, Any]
+        Stable subset containing ``quality_*``, ``*_direct_equivalent``,
+        ``d_R``, and ``mode`` fields.
+    """
+    return {
+        key: jsonify(value)
+        for key, value in row.items()
+        if key in SELF_CHECK_EXACT_FIELDS
+        or key.startswith("quality_")
+        or key.endswith("_direct_equivalent")
+    }
+
+
+def run_self_check(args: argparse.Namespace, git_sha: str) -> int:
+    """Score requested combos twice and diff verdict fields.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI options.
+    git_sha : str
+        Current git SHA.
+
+    Returns
+    -------
+    int
+        ``0`` when verdict fields are reproducible, otherwise ``1``.
+    """
+    payloads = build_analysis_payloads_from_args(args, git_sha)
+    first_rows = [analyze_payload(payload) for payload in payloads]
+    second_rows = [analyze_payload(payload) for payload in payloads]
+    first_by_combo = {str(row.get("combo_id")): verdict_fields(row) for row in first_rows}
+    second_by_combo = {str(row.get("combo_id")): verdict_fields(row) for row in second_rows}
+    mismatches = []
+    for combo_id in sorted(set(first_by_combo) | set(second_by_combo)):
+        first = first_by_combo.get(combo_id)
+        second = second_by_combo.get(combo_id)
+        if first != second:
+            mismatches.append((combo_id, first, second))
+    if mismatches:
+        print(f"[self-check] verdict mismatch count={len(mismatches)}", file=sys.stderr)
+        for combo_id, first, second in mismatches:
+            print(f"[self-check] MISMATCH {combo_id}", file=sys.stderr)
+            print(f"  first={json.dumps(first, sort_keys=True)}", file=sys.stderr)
+            print(f"  second={json.dumps(second, sort_keys=True)}", file=sys.stderr)
+        return 1
+    print(f"[self-check] deterministic verdicts for {len(payloads)} combos")
+    return 0
 
 
 def reference_for_engine(engine: str, failing_map: dict[str, dict[str, Any]]) -> str:
