@@ -1884,6 +1884,8 @@ def _coordinate_assignment(
     node_sep: float,
     output_device: torch.device,
     center_coordinates: bool = True,
+    edge_index: Optional[torch.Tensor] = None,
+    use_igraph_conflicts: bool = False,
 ) -> torch.Tensor:
     """Assign ``(x, y)`` coordinates with Brandes-Kopf compaction.
 
@@ -1910,6 +1912,11 @@ def _coordinate_assignment(
         Device for the returned position tensor.
     center_coordinates : bool, default=True
         Whether to translate the final horizontal span to be centered at zero.
+    edge_index : torch.Tensor, optional
+        Expanded edge list with shape ``[2, E]``. Required only when
+        ``use_igraph_conflicts`` is enabled.
+    use_igraph_conflicts : bool, default=False
+        Whether to mirror igraph 1.0.0's ordinal-edge type-1 conflict scan.
 
     Returns
     -------
@@ -1934,6 +1941,8 @@ def _coordinate_assignment(
         num_original_nodes=num_original_nodes,
         node_sep=node_sep,
         center_coordinates=center_coordinates,
+        edge_index=edge_index,
+        use_igraph_conflicts=use_igraph_conflicts,
     )
     positions[:, 0] = torch.tensor(x_positions, dtype=torch.float32)
     return positions.to(output_device)
@@ -2398,6 +2407,8 @@ def _brandes_koepf_x_positions(
     num_original_nodes: int,
     node_sep: float,
     center_coordinates: bool = True,
+    edge_index: Optional[torch.Tensor] = None,
+    use_igraph_conflicts: bool = False,
 ) -> List[float]:
     """Compute balanced horizontal coordinates with four BK passes.
 
@@ -2419,6 +2430,11 @@ def _brandes_koepf_x_positions(
         Horizontal gap between node bounding boxes.
     center_coordinates : bool, default=True
         Whether to translate the final horizontal span to be centered at zero.
+    edge_index : torch.Tensor, optional
+        Expanded edge list with shape ``[2, E]``. Required only when
+        ``use_igraph_conflicts`` is enabled.
+    use_igraph_conflicts : bool, default=False
+        Whether to mirror igraph 1.0.0's ordinal-edge type-1 conflict scan.
 
     Returns
     -------
@@ -2429,6 +2445,16 @@ def _brandes_koepf_x_positions(
         return []
 
     dummy_mask = [node >= num_original_nodes for node in range(num_nodes)]
+    igraph_conflicts: Optional[Set[Tuple[int, int]]] = None
+    if use_igraph_conflicts:
+        if edge_index is None:
+            raise ValueError("edge_index is required when use_igraph_conflicts=True")
+        igraph_conflicts = _find_igraph_type1_conflicts(
+            layers=layers,
+            edge_index=edge_index,
+            dummy_mask=dummy_mask,
+            num_nodes=num_nodes,
+        )
     orientation_specs = (
         ("ul", False, False),
         ("ur", False, True),
@@ -2448,12 +2474,15 @@ def _brandes_koepf_x_positions(
             neighbors_by_node=predecessor_source,
             pos_of=pos_of,
         )
-        conflicts = _find_type1_conflicts(
-            layers=transformed_layers,
-            predecessors=predecessors,
-            pos_of=pos_of,
-            dummy_mask=dummy_mask,
-        )
+        if igraph_conflicts is None:
+            conflicts = _find_type1_conflicts(
+                layers=transformed_layers,
+                predecessors=predecessors,
+                pos_of=pos_of,
+                dummy_mask=dummy_mask,
+            )
+        else:
+            conflicts = igraph_conflicts
         root, align = _vertical_alignment(
             layers=transformed_layers,
             predecessors=predecessors,
@@ -2622,6 +2651,124 @@ def _find_type1_conflicts(
             scan_start = south_index + 1
             left_boundary = right_boundary
     return conflicts
+
+
+def _find_igraph_type1_conflicts(
+    layers: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    dummy_mask: Sequence[bool],
+    num_nodes: int,
+) -> Set[Tuple[int, int]]:
+    """Mark igraph 1.0.0's ordinal-edge Type 1 conflicts.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer in the original top-down orientation.
+    edge_index : torch.Tensor
+        Expanded adjacent-rank edge list with shape ``[2, E]``.
+    dummy_mask : sequence of bool
+        Flags indicating which nodes are dummy vertices created for long
+        edges.
+    num_nodes : int
+        Number of expanded graph nodes.
+
+    Returns
+    -------
+    set of tuple of int
+        Undirected edge pairs to ignore during vertical alignment.
+
+    Notes
+    -----
+    igraph 1.0.0 sizes each per-layer conflict scan from the gathered outgoing
+    neighbor count, but then indexes ``IGRAPH_FROM(graph, j)`` and
+    ``IGRAPH_TO(graph, j)`` by ordinal edge id. This preserves that tie-break
+    quirk instead of using the standard Brandes-Koepf segment scan.
+    """
+    if edge_index.numel() == 0:
+        return set()
+
+    edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    sources = [int(value) for value in edge_cpu[0].tolist()]
+    targets = [int(value) for value in edge_cpu[1].tolist()]
+    edge_count = len(sources)
+    pos_of = [-1] * num_nodes
+    for layer_nodes in layers:
+        for position, node in enumerate(layer_nodes):
+            if 0 <= node < num_nodes:
+                pos_of[node] = position
+
+    outgoing_counts = [0] * num_nodes
+    for source in sources:
+        if 0 <= source < num_nodes:
+            outgoing_counts[source] += 1
+
+    ignored_edges: Set[int] = set()
+    for layer_nodes in layers[:-1]:
+        scan_count = sum(outgoing_counts[node] for node in layer_nodes if 0 <= node < num_nodes)
+        scan_count = min(scan_count, edge_count)
+        for left_edge_id in range(scan_count):
+            left_source = sources[left_edge_id]
+            left_target = targets[left_edge_id]
+            left_inner = dummy_mask[left_source] and dummy_mask[left_target]
+            for right_edge_id in range(left_edge_id + 1, scan_count):
+                right_source = sources[right_edge_id]
+                right_target = targets[right_edge_id]
+                if (dummy_mask[right_source] and dummy_mask[right_target]) == left_inner:
+                    continue
+                if _igraph_segments_cross(
+                    left_source=left_source,
+                    left_target=left_target,
+                    right_source=right_source,
+                    right_target=right_target,
+                    pos_of=pos_of,
+                ):
+                    if left_inner:
+                        ignored_edges.add(right_edge_id)
+                    else:
+                        ignored_edges.add(left_edge_id)
+
+    conflicts: Set[Tuple[int, int]] = set()
+    for edge_id in ignored_edges:
+        source = sources[edge_id]
+        target = targets[edge_id]
+        conflicts.add((source, target))
+        conflicts.add((target, source))
+    return conflicts
+
+
+def _igraph_segments_cross(
+    left_source: int,
+    left_target: int,
+    right_source: int,
+    right_target: int,
+    pos_of: Sequence[int],
+) -> bool:
+    """Return whether igraph's BK conflict test treats two edges as crossing.
+
+    Parameters
+    ----------
+    left_source : int
+        Source vertex of the first edge.
+    left_target : int
+        Target vertex of the first edge.
+    right_source : int
+        Source vertex of the second edge.
+    right_target : int
+        Target vertex of the second edge.
+    pos_of : sequence of int
+        Original within-layer positions indexed by vertex id.
+
+    Returns
+    -------
+    bool
+        ``True`` when the ordinal-edge pair crosses under igraph's test.
+    """
+    if left_source == right_source or left_target == right_target:
+        return True
+    if pos_of[left_source] <= pos_of[right_source]:
+        return pos_of[left_target] >= pos_of[right_target]
+    return pos_of[left_target] <= pos_of[right_target]
 
 
 def _inner_segment_predecessor(
@@ -3538,6 +3685,7 @@ class _CoordinateAssignment(Op):
         self,
         center_coordinates: bool = True,
         use_graphviz_xcoord: bool = False,
+        use_igraph_conflicts: bool = False,
     ) -> None:
         """Store coordinate-frame options.
 
@@ -3549,6 +3697,9 @@ class _CoordinateAssignment(Op):
         use_graphviz_xcoord : bool, default=False
             Whether to use Graphviz dot's auxiliary-graph network simplex for
             x coordinates instead of Brandes-Kopf compaction.
+        use_igraph_conflicts : bool, default=False
+            Whether to mirror igraph 1.0.0's ordinal-edge Type 1 conflict
+            detection during Brandes-Koepf compaction.
         Returns
         -------
         None
@@ -3556,6 +3707,7 @@ class _CoordinateAssignment(Op):
         """
         self.center_coordinates = center_coordinates
         self.use_graphviz_xcoord = use_graphviz_xcoord
+        self.use_igraph_conflicts = use_igraph_conflicts
 
     def apply(
         self,
@@ -3614,6 +3766,8 @@ class _CoordinateAssignment(Op):
                 node_sep=node_sep,
                 output_device=output_device,
                 center_coordinates=self.center_coordinates,
+                edge_index=expanded_graph.edge_index,
+                use_igraph_conflicts=self.use_igraph_conflicts,
             )
         # Keep the expanded coordinates for downstream edge routing before
         # slicing back to the original node set.
