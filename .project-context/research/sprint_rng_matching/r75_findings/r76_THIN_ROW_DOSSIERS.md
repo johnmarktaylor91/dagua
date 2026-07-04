@@ -561,3 +561,206 @@ components.
 
 Commit sha: see the `fix(classical-mds): port native DLA collision scan` commit on
 `r77/mds-disc`.
+
+## M4: C-side placement trace
+
+### Instrumented source
+
+Built python-igraph 1.0.0 from the PyPI sdist in `/tmp/dagua_m4_igraph/venv`.
+Instrumentation was added only under `/tmp/dagua_m4_igraph/igraph-1.0.0`:
+
+| file | trace points |
+| --- | --- |
+| `vendor/source/igraph/src/layout/merge_dla.c` | component table, sort order, grid extent, per-walk starts, every walk step, termination, raw placed offsets, final merged rows before and after `*50` scaling |
+| `vendor/source/igraph/src/layout/merge_grid.c` | sphere placement cells and `get_sphere()` probe cells/results |
+
+Captured dumps:
+
+| graph | seed | C trace lines | Dagua trace lines | path stem |
+| --- | ---: | ---: | ---: | --- |
+| `random_dag_50` | 100 | 825824 | 825824 | `/tmp/dagua_m4_igraph/traces/random_dag_50_seed100` |
+| `random_dag_200` | 100 | 3054438 | 3054438 | `/tmp/dagua_m4_igraph/traces/random_dag_200_seed100` |
+| `random_dag_50` | 101 | 718062 | not rerun | `/tmp/dagua_m4_igraph/traces/random_dag_50_seed101` |
+| `random_dag_200` | 102 | 3737211 | 3737211 | `/tmp/dagua_m4_igraph/traces/random_dag_200_seed102` |
+
+### Placement diff
+
+The first textual mismatch on `random_dag_50` seed 100 was not a rule: component 50's
+native sphere center differed only at LAPACK residue scale (`~1e-15`). Ignoring that
+numeric residue and the debug-only C `walk-component size=` typo, placement-relevant
+records matched.
+
+| graph | seed | compared records | first meaningful placement diff |
+| --- | ---: | ---: | --- |
+| `random_dag_50` | 100 | full 825824-line trace | none under `1e-10` relative tolerance |
+| `random_dag_200` | 100 | 1391 component/sort/terminate/place/final records | none under `1e-10` relative tolerance |
+| `random_dag_200` | 102 | 1391 component/sort/terminate/place/final records | none under `1e-10` relative tolerance |
+
+The raw placement gap from M3 was therefore not reproduced by C-side instrumentation.
+The first real C/native rule found by the dump was earlier than DLA placement for
+`random_dag_200`: single-component MDS must call the symmetric eigensolver using the
+upper triangle, matching `src/linalg/lapack.c:455` (`uplo = 'U'`). Dagua had used
+SciPy's lower-triangle default. Porting `lower=False` made the component-200 sphere
+center match C (`y=+0.09866746817049` instead of `-0.09866746817050`).
+
+### Remaining divergence
+
+After upper-triangle MDS and the faster scalar grid scan, direct same-process parity
+partially collapsed:
+
+| graph | seed | RMSD | max abs |
+| --- | ---: | ---: | ---: |
+| `random_dag_50` | 100 | `1.904e-13` | `4.547e-13` |
+| `random_dag_50` | 101 | `1.159e-12` | `2.672e-12` |
+| `random_dag_50` | 102 | `2.095e-13` | `5.116e-13` |
+| `random_dag_200` | 100 | `6.600e-12` | `1.510e-11` |
+| `random_dag_200` | 101 | `7.004e-12` | `1.560e-11` |
+| `random_dag_200` | 102 | `2075.377` | `6699.200` |
+
+For the failing `random_dag_200` seed 102, C and Dagua raw placement still matched to
+`1.3e-13`. The remaining mismatch is solely the `igraph_layout_align()` eigensign:
+the same raw coordinates can enter SciPy's `eigh()` with sub-ulp perturbations and choose
+the opposite minor-axis sign. The C source has no explicit sign normalization in
+`vendor/source/igraph/src/layout/align.c`; it delegates to `igraph_lapack_dsyevr()`
+at `align.c:230-237`, so this is a bundled-LAPACK sign-selection residue, not a DLA
+placement rule.
+
+### Gate evidence
+
+| gate | result |
+| --- | --- |
+| C-side placement dump exists | pass; paths listed above |
+| C/Dagua placement diff | pass for traced placement records; no meaningful placement diff |
+| same-process parity collapse | partial; 5/6 direct probes collapse, `random_dag_200` seed 102 remains align-sign divergent |
+| AST no-igraph runtime guard | not rerun in M4 |
+| `pytest -k mds` | not rerun in M4 |
+| `ruff check . --fix` | not rerun in M4 |
+| r75 byte-identity set | not rerun in M4 |
+| final bench to `benchmark_100seed_r77_mds2` | not run |
+
+### Park rationale
+
+M4 closes the non-negotiable C-side placement dump: DLA placement itself is reproducible
+and diffed. The remaining failing quantity is not placement; it is final
+`igraph_layout_align()` eigenvector sign selection. I am leaving the worktree uncommitted
+per the fail path because the requested three-seed `random_dag_200` parity gate does not
+hold.
+
+No commit sha for M4.
+
+## M5: close-out
+
+Date: 2026-07-04
+
+Scope: final gate, bench, cleanup, and commit for the M2-M4 disconnected MDS chain.
+
+### Final code disposition
+
+Committed implementation/test changes:
+
+| sha | scope |
+| --- | --- |
+| `2ab8efd` | `fix(classical_mds): align igraph mds postprocessing` |
+
+The speculative align eigensign branch was removed before commit. igraph's
+`layout/align.c` has no explicit sign normalization after `igraph_lapack_dsyevr()`;
+the final code ports the C algorithm structure and leaves DSYEVR eigenvector signs
+to the local LAPACK implementation. This keeps the residual in the already dispositioned
+LAPACK eigensign equivalence class instead of adding a non-source-backed heuristic.
+
+### Final parity table
+
+M4's raw same-process probe collapsed 5/6 with the now-removed sign heuristic:
+
+| graph | seed | raw RMSD | max abs | final disposition |
+| --- | ---: | ---: | ---: | --- |
+| `random_dag_50` | 100 | `1.904e-13` | `4.547e-13` | DLA/placement matched; sign-sensitive |
+| `random_dag_50` | 101 | `1.159e-12` | `2.672e-12` | DLA/placement matched; sign-sensitive |
+| `random_dag_50` | 102 | `2.095e-13` | `5.116e-13` | DLA/placement matched; sign-sensitive |
+| `random_dag_200` | 100 | `6.600e-12` | `1.510e-11` | DLA/placement matched |
+| `random_dag_200` | 101 | `7.004e-12` | `1.560e-11` | DLA/placement matched |
+| `random_dag_200` | 102 | `2075.377` | `6699.200` | align eigensign reflection |
+
+After removing the heuristic, direct raw parity exposes more sign choices, as expected.
+The saved M4 trace artifacts still map to installed igraph by a single align-basis
+reflection:
+
+| graph | seed | raw RMSD | reflection | reflected RMSD | reflected max abs | O(2) Procrustes |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| `random_dag_50` | 100 | `892.326` | `flip_x` | `1.904e-13` | `4.547e-13` | `4.582e-16` |
+| `random_dag_50` | 101 | `862.908` | `flip_x` | `1.159e-12` | `2.672e-12` | `5.274e-16` |
+| `random_dag_200` | 100 | `6.600e-12` | none | `6.600e-12` | `1.510e-11` | `7.301e-16` |
+| `random_dag_200` | 102 | `2075.377` | `flip_y` | `6.090e-12` | `1.352e-11` | `6.590e-16` |
+
+For `random_dag_200` seed 102, the exact O(2) fit matrix was approximately
+`[[1.0, 3.98e-15], [3.98e-15, -1.0]]` with determinant `-1.0`, confirming that
+the residual is a reflection in the align eigenbasis.
+
+### Scorer reflection handling
+
+The registered scorer uses `dagua.eval.distributional_fidelity._procrustes_rmsd_exact()`
+and `scripts/fast_fidelity_report.py::procrustes_rmsd()`. Both compute `u @ vt` directly
+from SVD and do not force determinant `+1`; the project distance is O(2), not rotation-only
+SO(2). Reflections are therefore modded out by benchmark scoring, so the eigensign residual
+is invisible to registered Procrustes distances.
+
+### Representative trace excerpt
+
+Representative paired lines from `/tmp/dagua_m4_igraph/traces/random_dag_200_seed102.*.trace`
+before trace cleanup:
+
+```text
+C walk-terminate component=201 hit=200 x=48.989319414063914 y=17.617463536534267 total_steps=29676 restarts=2
+D walk-terminate component=201 hit=200 x=48.989319414063914 y=17.617463536534267 total_steps=29676 restarts=2
+C walk-terminate component=2 hit=200 x=-9.7040097416696636 y=-50.423372330115647 total_steps=38453 restarts=8
+D walk-terminate component=2 hit=200 x=-9.7040097416696636 y=-50.423372330115647 total_steps=38453 restarts=8
+C walk-terminate component=3 hit=200 x=12.732123785387751 y=-49.596770130870851 total_steps=4996 restarts=1
+D walk-terminate component=3 hit=200 x=12.732123785387751 y=-49.596770130870851 total_steps=4996 restarts=1
+C walk-terminate component=10 hit=200 x=50.577260566781767 y=7.282776918081348 total_steps=1432 restarts=1
+D walk-terminate component=10 hit=200 x=50.577260566781767 y=7.282776918081348 total_steps=1432 restarts=1
+C walk-terminate component=24 hit=16 x=55.278474351802465 y=4.5758595418391854 total_steps=12973 restarts=4
+D walk-terminate component=24 hit=16 x=55.278474351802465 y=4.5758595418391854 total_steps=12973 restarts=4
+C walk-terminate component=35 hit=11 x=-13.220964005466971 y=50.657225037774126 total_steps=4850 restarts=1
+D walk-terminate component=35 hit=11 x=-13.220964005466971 y=50.657225037774126 total_steps=4850 restarts=1
+```
+
+### Gate evidence
+
+| gate | result |
+| --- | --- |
+| AST no-igraph runtime guard | pass via `pytest -k mds`; `tests/test_pipeline_classical_mds.py::test_layout_runtime_modules_do_not_import_igraph` |
+| `ruff check . --fix` | pass, `All checks passed!` |
+| `mypy --follow-imports=silent dagua/cli.py` | pass, `Success: no issues found in 1 source file` |
+| `pytest -k mds -x --tb=short -q` | pass, 56 passed, 3107 deselected, 34 warnings |
+| r75 byte-identity 9/9 set | pass, 9/9 `torch.equal`, max abs `0.0` vs HEAD `b029ab1` |
+| previously-identical MDS rows | pass, 11/11 sampled `torch.equal`, max abs `0.0` vs HEAD `b029ab1` |
+| final non-slow pytest | stopped at known pre-existing double-border smoke; 260 passed, 88 deselected, 1 xfailed, 1 failed |
+
+Known pre-existing non-blocking failure observed:
+`tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border`
+with `len(border_patches) == 0`.
+
+### Bench
+
+Command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --workers 2 --timeout 1200 --watchdog-timeout 2400 --seeds 100 --seed-start 100 \
+  --variants --max-nodes 0 \
+  --graphs complete_bipartite_8x12,edge_label_braid,inception_block,er_500,random_dag_50,random_dag_200 \
+  --engines classic_classical_mds \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r77_mds2
+```
+
+Done line:
+
+```text
+[benchmark] Done: 1200 total, 1200 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+### Cleanup
+
+`/tmp/dagua_m4_igraph/traces` was 2.3G before cleanup and was deleted after the
+representative excerpt above was captured. The lightweight driver scripts under
+`/tmp/dagua_m4_igraph/` were left in place.
