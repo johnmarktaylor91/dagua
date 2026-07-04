@@ -41,7 +41,7 @@ def _path_edge_index(num_nodes: int) -> torch.Tensor:
 
 
 def test_igraph_fidelity_uses_two_node_special_case_and_scale() -> None:
-    """igraph fidelity should match the reference two-node raw layout."""
+    """igraph fidelity should match the aligned reference two-node layout."""
     edge_index = _single_edge_index()
 
     positions = layout_classical_mds_pipeline(
@@ -53,7 +53,7 @@ def test_igraph_fidelity_uses_two_node_special_case_and_scale() -> None:
 
     torch.testing.assert_close(
         positions,
-        torch.tensor([[0.0, 0.0], [50.0, 50.0]], dtype=torch.float32),
+        torch.tensor([[-35.35533905029297, 0.0], [35.35533905029297, 0.0]], dtype=torch.float32),
     )
     assert not torch.equal(default_positions, positions)
 
