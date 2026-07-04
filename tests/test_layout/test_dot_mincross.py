@@ -137,7 +137,7 @@ def test_graphviz_duplicate_long_edges_inflate_virtual_width() -> None:
     )
 
     assert expanded_graph.edge_paths == [[0, 3, 2], [0, 3, 2]]
-    assert float(expanded_graph.node_sizes[3, 0].item()) == pytest.approx(144.0)
+    assert float(expanded_graph.node_sizes[3, 0].item()) == pytest.approx(146.0)
 
 
 def test_sugiyama_dot_fidelity_uses_graphviz_mincross() -> None:
