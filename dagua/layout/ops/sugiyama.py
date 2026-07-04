@@ -9,7 +9,7 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -76,6 +76,8 @@ class _ExpandedLayeredGraph:
     num_nodes: int
     graphviz_node_order: Optional[list[int]] = None
     mincross_edge_penalties: Optional[list[int]] = None
+    graphviz_left_widths: Optional[list[float]] = None
+    graphviz_right_widths: Optional[list[float]] = None
 
 
 @dataclass(frozen=True)
@@ -1121,6 +1123,8 @@ def _expand_long_edges_with_dummy_nodes(
         num_nodes=num_original_nodes,
     )
     dummy_sizes: list[list[float]] = []
+    graphviz_left_widths: list[float] = [-1.0] * num_original_nodes
+    graphviz_right_widths: list[float] = [-1.0] * num_original_nodes
     expanded_sources: list[int] = []
     expanded_targets: list[int] = []
     expanded_weight_values: list[float] = []
@@ -1148,6 +1152,7 @@ def _expand_long_edges_with_dummy_nodes(
     if graphviz_virtual_node_sep is None:
         virtual_width = 0.0
         virtual_width_increment = 0.0
+        virtual_half_width_increment = 0.0
     else:
         # Graphviz 7.0.5 fastgr.c seeds virtual nodes at ND_lw=ND_rw=1
         # before class2.c adds the integer nodesep/2 dummy-node width.
@@ -1155,6 +1160,7 @@ def _expand_long_edges_with_dummy_nodes(
             2.0 * _GRAPHVIZ_VIRTUAL_NODE_HALF_WIDTH_SEED_POINTS
         )
         virtual_width_increment = float(graphviz_virtual_node_sep)
+        virtual_half_width_increment = virtual_width_increment / 2.0
 
     for edge_idx in edge_order:
         source = int(sources[edge_idx])
@@ -1186,6 +1192,10 @@ def _expand_long_edges_with_dummy_nodes(
             if graphviz_virtual_node_sep is not None:
                 for dummy_index in representative_path[1:-1]:
                     dummy_sizes[dummy_index - num_original_nodes][0] += virtual_width_increment
+                    if graphviz_left_widths[dummy_index] >= 0.0:
+                        graphviz_left_widths[dummy_index] += virtual_half_width_increment
+                    if graphviz_right_widths[dummy_index] >= 0.0:
+                        graphviz_right_widths[dummy_index] += virtual_half_width_increment
             continue
 
         segment_indices: list[int] = []
@@ -1197,11 +1207,19 @@ def _expand_long_edges_with_dummy_nodes(
             expanded_layers[layer_index].append(dummy_index)
             if layer_index == label_rank and graphviz_virtual_node_sep is not None:
                 # Graphviz 7.0.5 class2.c creates a label virtual node with
-                # ND_lw=GD_nodesep and ND_rw=label width. Store the total box;
-                # the current x-solver consumes symmetric boxes.
+                # ND_lw=GD_nodesep and ND_rw=label width. Keep both the total
+                # box and the asymmetric half-widths for position.c x constraints.
                 dummy_sizes.append([float(graphviz_virtual_node_sep) + label_width, label_height])
+                graphviz_left_widths.append(float(graphviz_virtual_node_sep))
+                graphviz_right_widths.append(label_width)
             else:
                 dummy_sizes.append([virtual_width, 0.0])
+                if graphviz_virtual_node_sep is None:
+                    graphviz_left_widths.append(-1.0)
+                    graphviz_right_widths.append(-1.0)
+                else:
+                    graphviz_left_widths.append(virtual_width / 2.0)
+                    graphviz_right_widths.append(virtual_width / 2.0)
             expanded_sources.append(previous)
             expanded_targets.append(dummy_index)
             expanded_weight_values.append(orig_weight)
@@ -1254,6 +1272,12 @@ def _expand_long_edges_with_dummy_nodes(
             else list(reversed(created_node_order))
         ),
         mincross_edge_penalties=mincross_edge_penalties,
+        graphviz_left_widths=(
+            graphviz_left_widths if graphviz_virtual_node_sep is not None else None
+        ),
+        graphviz_right_widths=(
+            graphviz_right_widths if graphviz_virtual_node_sep is not None else None
+        ),
     ), expanded_edge_weights
 
 
@@ -2052,6 +2076,8 @@ def _graphviz_x_coordinate_assignment(
     node_sep: float,
     output_device: torch.device,
     center_coordinates: bool = True,
+    graphviz_left_widths: Optional[Sequence[float]] = None,
+    graphviz_right_widths: Optional[Sequence[float]] = None,
 ) -> torch.Tensor:
     """Assign Graphviz dot x coordinates with an auxiliary network simplex.
 
@@ -2077,6 +2103,12 @@ def _graphviz_x_coordinate_assignment(
         Device for the returned position tensor.
     center_coordinates : bool, default=True
         Whether to translate the final horizontal span to be centered at zero.
+    graphviz_left_widths : sequence of float, optional
+        Per-expanded-node ``ND_lw`` override in Graphviz point units. Negative
+        entries fall back to symmetric width derivation.
+    graphviz_right_widths : sequence of float, optional
+        Per-expanded-node ``ND_rw`` override in Graphviz point units. Negative
+        entries fall back to symmetric width derivation.
 
     Returns
     -------
@@ -2105,6 +2137,8 @@ def _graphviz_x_coordinate_assignment(
         num_nodes=num_nodes,
         num_original_nodes=num_original_nodes,
         node_sep=graphviz_node_sep,
+        graphviz_left_widths=graphviz_left_widths,
+        graphviz_right_widths=graphviz_right_widths,
     )
     aux_node_count = num_nodes + int(edge_index.shape[1])
     x_ranks = graphviz_network_simplex_assignment(
@@ -2122,6 +2156,8 @@ def _graphviz_x_coordinate_assignment(
         num_original_nodes=num_original_nodes,
         node_sep=graphviz_node_sep,
         rank_sep=rank_sep,
+        graphviz_left_widths=graphviz_left_widths,
+        graphviz_right_widths=graphviz_right_widths,
     )
     x_positions = [value * output_scale for value in x_positions]
     if center_coordinates:
@@ -2138,6 +2174,8 @@ def _build_graphviz_x_aux_edges(
     num_nodes: int,
     num_original_nodes: int,
     node_sep: float,
+    graphviz_left_widths: Optional[Sequence[float]] = None,
+    graphviz_right_widths: Optional[Sequence[float]] = None,
 ) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, int]]:
     """Build Stage A Graphviz dot auxiliary x-coordinate constraints.
 
@@ -2157,6 +2195,10 @@ def _build_graphviz_x_aux_edges(
         Count of non-dummy nodes.
     node_sep : float
         Horizontal gap between node bounding boxes.
+    graphviz_left_widths : sequence of float, optional
+        Per-expanded-node ``ND_lw`` override in Graphviz point units.
+    graphviz_right_widths : sequence of float, optional
+        Per-expanded-node ``ND_rw`` override in Graphviz point units.
 
     Returns
     -------
@@ -2176,12 +2218,14 @@ def _build_graphviz_x_aux_edges(
                     node_sizes=node_sizes,
                     num_original_nodes=num_original_nodes,
                     node_sep=node_sep,
+                    graphviz_right_widths=graphviz_right_widths,
                 )
                 + _graphviz_left_width(
                     node=right_node,
                     node_sizes=node_sizes,
                     num_original_nodes=num_original_nodes,
                     node_sep=node_sep,
+                    graphviz_left_widths=graphviz_left_widths,
                 )
                 + node_sep
             )
@@ -2229,6 +2273,7 @@ def _graphviz_left_width(
     node_sizes: torch.Tensor,
     num_original_nodes: int,
     node_sep: float,
+    graphviz_left_widths: Optional[Sequence[float]] = None,
 ) -> float:
     """Return Graphviz left half-width for Stage A x constraints.
 
@@ -2242,12 +2287,20 @@ def _graphviz_left_width(
         Count of non-dummy nodes.
     node_sep : float
         Horizontal gap between node bounding boxes.
+    graphviz_left_widths : sequence of float, optional
+        Per-expanded-node ``ND_lw`` override in Graphviz point units.
 
     Returns
     -------
     float
         Left half-width in layout units.
     """
+    if (
+        graphviz_left_widths is not None
+        and 0 <= node < len(graphviz_left_widths)
+        and graphviz_left_widths[node] >= 0.0
+    ):
+        return float(graphviz_left_widths[node])
     if node >= num_original_nodes:
         stored_width = float(node_sizes[node, 0].item())
         if stored_width > 0.0:
@@ -2265,6 +2318,7 @@ def _graphviz_right_width(
     node_sizes: torch.Tensor,
     num_original_nodes: int,
     node_sep: float,
+    graphviz_right_widths: Optional[Sequence[float]] = None,
 ) -> float:
     """Return Graphviz right half-width for Stage A x constraints.
 
@@ -2278,12 +2332,20 @@ def _graphviz_right_width(
         Count of non-dummy nodes.
     node_sep : float
         Horizontal gap between node bounding boxes.
+    graphviz_right_widths : sequence of float, optional
+        Per-expanded-node ``ND_rw`` override in Graphviz point units.
 
     Returns
     -------
     float
         Right half-width in layout units.
     """
+    if (
+        graphviz_right_widths is not None
+        and 0 <= node < len(graphviz_right_widths)
+        and graphviz_right_widths[node] >= 0.0
+    ):
+        return float(graphviz_right_widths[node])
     if node >= num_original_nodes:
         stored_width = float(node_sizes[node, 0].item())
         if stored_width > 0.0:
@@ -2341,6 +2403,8 @@ def _graphviz_x_output_scale(
     num_original_nodes: int,
     node_sep: float,
     rank_sep: float,
+    graphviz_left_widths: Optional[Sequence[float]] = None,
+    graphviz_right_widths: Optional[Sequence[float]] = None,
 ) -> float:
     """Return the x-unit conversion for graphviz coordinate output.
 
@@ -2356,6 +2420,10 @@ def _graphviz_x_output_scale(
         Horizontal gap between node bounding boxes.
     rank_sep : float
         Vertical layer spacing used by the returned Dagua layout.
+    graphviz_left_widths : sequence of float, optional
+        Per-expanded-node ``ND_lw`` override in Graphviz point units.
+    graphviz_right_widths : sequence of float, optional
+        Per-expanded-node ``ND_rw`` override in Graphviz point units.
 
     Returns
     -------
@@ -2378,12 +2446,14 @@ def _graphviz_x_output_scale(
                     node_sizes=node_sizes,
                     num_original_nodes=num_original_nodes,
                     node_sep=node_sep,
+                    graphviz_right_widths=graphviz_right_widths,
                 )
                 + _graphviz_left_width(
                     node=right_node,
                     node_sizes=node_sizes,
                     num_original_nodes=num_original_nodes,
                     node_sep=node_sep,
+                    graphviz_left_widths=graphviz_left_widths,
                 )
                 + node_sep
             )
@@ -3232,6 +3302,415 @@ def _center_coordinates(values: Sequence[float]) -> List[float]:
     return [value - midpoint for value in values]
 
 
+def _flatten_graphviz_cluster_members(members: Any) -> Tuple[int, ...]:
+    """Return sorted integer leaf ids from nested cluster membership.
+
+    Parameters
+    ----------
+    members : Any
+        Dagua cluster membership value. Values may be flat sequences, sets, or
+        nested dictionaries produced by user-facing cluster helpers.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Sorted unique node ids found in ``members``.
+    """
+    out: Set[int] = set()
+
+    def visit(value: Any) -> None:
+        """Collect integer leaves from one nested membership value.
+
+        Parameters
+        ----------
+        value : Any
+            Current nested value.
+
+        Returns
+        -------
+        None
+            The function mutates ``out`` in the enclosing scope.
+        """
+        if isinstance(value, Mapping):
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, (str, bytes)):
+            return
+        try:
+            out.add(int(value))
+            return
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, (Sequence, set, frozenset)):
+            for child in value:
+                visit(child)
+
+    visit(members)
+    return tuple(sorted(out))
+
+
+def _normalize_graphviz_clusters(
+    clusters: Optional[Mapping[str, Any]],
+    num_nodes: int,
+) -> Dict[str, Tuple[int, ...]]:
+    """Normalize cluster metadata to valid descendant leaf ids.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Any], optional
+        Raw Dagua cluster membership.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    dict[str, tuple[int, ...]]
+        Cluster names mapped to valid original-node ids.
+    """
+    if not clusters:
+        return {}
+    normalized: Dict[str, Tuple[int, ...]] = {}
+    for name, members in clusters.items():
+        filtered = tuple(
+            node for node in _flatten_graphviz_cluster_members(members) if 0 <= node < num_nodes
+        )
+        if filtered:
+            normalized[str(name)] = filtered
+    return normalized
+
+
+def _normalize_graphviz_cluster_parents(
+    cluster_names: Sequence[str],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> Dict[str, Optional[str]]:
+    """Normalize parent references to known cluster names.
+
+    Parameters
+    ----------
+    cluster_names : sequence of str
+        Known cluster names.
+    cluster_parents : Mapping[str, str | None], optional
+        Raw Dagua parent mapping.
+
+    Returns
+    -------
+    dict[str, str | None]
+        Parent mapping where missing or unknown parents become ``None``.
+    """
+    known = set(cluster_names)
+    raw = cluster_parents or {}
+    parents: Dict[str, Optional[str]] = {}
+    for name in cluster_names:
+        parent = raw.get(name)
+        parents[name] = parent if parent in known else None
+    return parents
+
+
+def _graphviz_cluster_depth(name: str, parents: Mapping[str, Optional[str]]) -> int:
+    """Return the nesting depth of one normalized cluster.
+
+    Parameters
+    ----------
+    name : str
+        Cluster name.
+    parents : Mapping[str, str | None]
+        Normalized parent mapping.
+
+    Returns
+    -------
+    int
+        Number of valid parent hops above ``name``.
+    """
+    depth = 0
+    seen: Set[str] = set()
+    parent = parents.get(name)
+    while parent is not None and parent not in seen:
+        seen.add(parent)
+        depth += 1
+        parent = parents.get(parent)
+    return depth
+
+
+def _graphviz_cluster_bbox(
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    members: Sequence[int],
+    padding: float,
+) -> Tuple[float, float, float, float]:
+    """Return a padded cluster bbox in output coordinate units.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]`` in output coordinate units.
+    members : sequence of int
+        Original-node ids in the cluster.
+    padding : float
+        Uniform padding around the member boxes.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounding box as ``(xmin, ymin, xmax, ymax)``.
+    """
+    if not members:
+        return (0.0, 0.0, 0.0, 0.0)
+    idx = torch.tensor(list(members), dtype=torch.long, device=positions.device)
+    half = node_sizes[idx].to(dtype=positions.dtype, device=positions.device) * 0.5
+    lo = (positions[idx] - half).min(dim=0).values
+    hi = (positions[idx] + half).max(dim=0).values
+    return (
+        float(lo[0].item()) - padding,
+        float(lo[1].item()) - padding,
+        float(hi[0].item()) + padding,
+        float(hi[1].item()) + padding,
+    )
+
+
+def _shift_graphviz_cluster_members(
+    positions: torch.Tensor,
+    members: Sequence[int],
+    dx: float,
+) -> None:
+    """Shift original cluster members in place along x.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    members : sequence of int
+        Original-node ids to shift.
+    dx : float
+        Horizontal displacement.
+
+    Returns
+    -------
+    None
+        The function mutates ``positions`` in place.
+    """
+    if not members or abs(dx) <= 1.0e-9:
+        return
+    idx = torch.tensor(list(members), dtype=torch.long, device=positions.device)
+    positions[idx, 0] += float(dx)
+
+
+def _separate_graphviz_cluster_siblings(
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    clusters: Mapping[str, Sequence[int]],
+    parents: Mapping[str, Optional[str]],
+    padding: float,
+) -> torch.Tensor:
+    """Separate sibling cluster boxes along x.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]`` in output coordinate units.
+    clusters : Mapping[str, sequence[int]]
+        Normalized cluster membership.
+    parents : Mapping[str, str | None]
+        Normalized parent mapping.
+    padding : float
+        Minimum sibling bbox clearance.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor after deterministic sibling shifts.
+    """
+    out = positions.detach().clone()
+    parent_groups: List[Optional[str]] = [None]
+    parent_groups.extend(sorted(parent for parent in set(parents.values()) if parent is not None))
+    for parent_name in parent_groups:
+        siblings = [name for name, parent in parents.items() if parent == parent_name]
+        if len(siblings) < 2:
+            continue
+        siblings.sort(
+            key=lambda name: (
+                _graphviz_cluster_bbox(out, node_sizes, clusters[name], padding)[0],
+                name,
+            )
+        )
+        cursor_right: Optional[float] = None
+        for name in siblings:
+            bbox = _graphviz_cluster_bbox(out, node_sizes, clusters[name], padding)
+            if cursor_right is None:
+                cursor_right = bbox[2]
+                continue
+            dx = max(0.0, cursor_right + padding - bbox[0])
+            if dx > 0.0:
+                _shift_graphviz_cluster_members(out, clusters[name], dx)
+                bbox = _graphviz_cluster_bbox(out, node_sizes, clusters[name], padding)
+            cursor_right = max(cursor_right, bbox[2])
+    return out
+
+
+def _apply_graphviz_cluster_x_constraints(
+    positions: torch.Tensor,
+    clusters: Optional[Mapping[str, Any]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    node_sizes: torch.Tensor,
+    rank_sep: float,
+    node_sep: float,
+    center_coordinates: bool,
+) -> torch.Tensor:
+    """Apply Graphviz-like cluster slot and boundary x constraints.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Original-node positions with shape ``[N, 2]``.
+    clusters : Mapping[str, Any], optional
+        Raw Dagua cluster membership.
+    cluster_parents : Mapping[str, str | None], optional
+        Raw Dagua cluster hierarchy.
+    node_sizes : torch.Tensor
+        Original-node Graphviz boxes with shape ``[N, 2]`` in point units.
+    rank_sep : float
+        Vertical rank spacing in output units.
+    node_sep : float
+        DOT ``nodesep`` in inches.
+    center_coordinates : bool
+        Whether to recenter x after cluster shifts.
+
+    Returns
+    -------
+    torch.Tensor
+        Cluster-adjusted original-node positions with shape ``[N, 2]``.
+
+    Notes
+    -----
+    This mirrors the observable effects of Graphviz 7.0.5 cluster machinery:
+    child clusters reserve rank slots before parent rank merge
+    (``cluster.c:merge_ranks``), and sibling/containment boundary nodes add
+    left-right constraints during ``position.c:pos_clusters``.
+    """
+    num_nodes = int(positions.shape[0])
+    normalized_clusters = _normalize_graphviz_clusters(clusters=clusters, num_nodes=num_nodes)
+    if not normalized_clusters:
+        return positions
+
+    parents = _normalize_graphviz_cluster_parents(
+        cluster_names=tuple(normalized_clusters.keys()),
+        cluster_parents=cluster_parents,
+    )
+    out = positions.detach().clone()
+    graphviz_node_sep = float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
+    output_scale = _graphviz_cluster_output_scale(
+        positions=out,
+        node_sizes=node_sizes,
+        node_sep=graphviz_node_sep,
+        rank_sep=rank_sep,
+    )
+    scaled_sizes = node_sizes.to(device=out.device, dtype=out.dtype) * output_scale
+    pitch = max(
+        float(scaled_sizes[:, 0].median().item()) + graphviz_node_sep * output_scale,
+        graphviz_node_sep * output_scale,
+    )
+    rank_values = _graphviz_position_ranks(positions=out, rank_sep=rank_sep)
+
+    for name in sorted(
+        normalized_clusters.keys(),
+        key=lambda cluster_name: (-_graphviz_cluster_depth(cluster_name, parents), cluster_name),
+    ):
+        members = normalized_clusters[name]
+        center_x = float(out[list(members), 0].median().item())
+        member_ranks = sorted({rank_values[node] for node in members})
+        for rank in member_ranks:
+            rank_nodes = [node for node in members if rank_values[node] == rank]
+            ordered = sorted(rank_nodes, key=lambda node: (float(out[node, 0].item()), node))
+            start = -(len(ordered) - 1) / 2.0
+            for slot, node in enumerate(ordered):
+                out[node, 0] = center_x + (start + slot) * pitch
+
+    clearance = max(
+        float(scaled_sizes[:, 0].median().item()) * 0.25,
+        graphviz_node_sep * output_scale,
+    )
+    repeat_order = sorted(
+        normalized_clusters.keys(),
+        key=lambda cluster_name: (-_graphviz_cluster_depth(cluster_name, parents), cluster_name),
+    )
+    for _ in repeat_order:
+        out = _separate_graphviz_cluster_siblings(
+            positions=out,
+            node_sizes=scaled_sizes,
+            clusters=normalized_clusters,
+            parents=parents,
+            padding=clearance,
+        )
+
+    if center_coordinates:
+        centered = _center_coordinates([float(value) for value in out[:, 0].tolist()])
+        out[:, 0] = torch.tensor(centered, dtype=out.dtype, device=out.device)
+    return out
+
+
+def _graphviz_cluster_output_scale(
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    node_sep: float,
+    rank_sep: float,
+) -> float:
+    """Estimate point-to-output scale for cluster bbox constraints.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Original-node positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Original-node Graphviz boxes with shape ``[N, 2]`` in point units.
+    node_sep : float
+        DOT nodesep in points.
+    rank_sep : float
+        Vertical rank spacing in output units.
+
+    Returns
+    -------
+    float
+        Multiplicative scale from Graphviz point widths to output x units.
+    """
+    if positions.shape[0] < 2 or node_sizes.numel() == 0:
+        denom = max(float(node_sizes[:, 0].median().item()) + node_sep, 1.0)
+        return float(rank_sep) / denom
+    x_values = sorted(float(value) for value in torch.unique(positions[:, 0]).tolist())
+    gaps = [right - left for left, right in zip(x_values, x_values[1:]) if right > left]
+    denom = max(float(node_sizes[:, 0].median().item()) + node_sep, 1.0)
+    if not gaps:
+        return float(rank_sep) / denom
+    gaps.sort()
+    return max(gaps[len(gaps) // 2] / denom, 1.0e-6)
+
+
+def _graphviz_position_ranks(positions: torch.Tensor, rank_sep: float) -> List[int]:
+    """Return integer rank ids from final y positions.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Original-node positions with shape ``[N, 2]``.
+    rank_sep : float
+        Vertical rank spacing in output units.
+
+    Returns
+    -------
+    list[int]
+        Rank id per original node.
+    """
+    if positions.numel() == 0:
+        return []
+    if abs(rank_sep) <= 1.0e-9:
+        return [0 for _ in range(int(positions.shape[0]))]
+    min_y = float(positions[:, 1].min().item())
+    return [int(round((float(value) - min_y) / float(rank_sep))) for value in positions[:, 1]]
+
+
 @register_op
 class _ValidateInputs(Op):
     """Validate Sugiyama layout inputs exactly like the classic entry point."""
@@ -3845,6 +4324,10 @@ class _CoordinateAssignment(Op):
         node_sep = state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)
 
         if self.use_graphviz_xcoord:
+            graphviz_left_widths = expanded_graph.graphviz_left_widths if problem.clusters else None
+            graphviz_right_widths = (
+                expanded_graph.graphviz_right_widths if problem.clusters else None
+            )
             expanded_positions = _graphviz_x_coordinate_assignment(
                 layers=state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY],
                 edge_index=expanded_graph.edge_index,
@@ -3856,6 +4339,8 @@ class _CoordinateAssignment(Op):
                 node_sep=node_sep,
                 output_device=output_device,
                 center_coordinates=self.center_coordinates,
+                graphviz_left_widths=graphviz_left_widths,
+                graphviz_right_widths=graphviz_right_widths,
             )
         else:
             expanded_positions = _coordinate_assignment(
@@ -3876,6 +4361,19 @@ class _CoordinateAssignment(Op):
         # slicing back to the original node set.
         state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY] = expanded_positions
         state.pos = expanded_positions[: problem.num_nodes]
+        if self.use_graphviz_xcoord and problem.clusters:
+            state.pos = _apply_graphviz_cluster_x_constraints(
+                positions=state.pos,
+                clusters=problem.clusters,
+                cluster_parents=problem.cluster_parents,
+                node_sizes=expanded_graph.node_sizes[: problem.num_nodes],
+                rank_sep=rank_sep,
+                node_sep=node_sep,
+                center_coordinates=self.center_coordinates,
+            )
+            expanded_positions = expanded_positions.clone()
+            expanded_positions[: problem.num_nodes] = state.pos
+            state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY] = expanded_positions
         return state
 
 
