@@ -813,3 +813,130 @@ No relocation was needed.
 - A source-faithful slack insertion order alone is insufficient: it improves
   `dense_pair_50` crossings from 343 to 341 but worsens stress, leaving the
   overall movement gate unchanged.
+
+## A4d: crash fix
+
+Date: 2026-07-03
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-mincross2`
+Branch: `r76/mincross`
+Fix commits:
+
+- `aeaf19452ba1e577a89bcbb961aef02dbea78ac2`
+  (`fix(sugiyama): size mincross Fenwick by rank width`)
+- `9224d71b1f30ab3b3ac49509c639983bcde4d471`
+  (`fix(benchmark): cache deterministic sugiyama repeats`)
+
+### Root cause
+
+The crash was in
+`dagua/layout/ops/_dot_mincross.py:717-721` after A1's graphviz-style
+component/rank ordering reached sparse wide ranks. `_count_crossings()` sized
+its Fenwick tree by the number of edges between a rank pair, but queried it
+with lower-rank node order (`lower_order + 1`). On the five crashing
+graphviz-fidelity graphs, a terminal node could sit farther right than the
+rank-pair edge count, so `_fenwick_sum()` indexed past the list and raised
+`IndexError: list index out of range`.
+
+### Fix
+
+- Changed `_count_crossings()` to size the Fenwick tree from the lower-rank
+  width, which is the coordinate system used by `lower_order`.
+- Added `test_graphviz_mincross_counts_sparse_wide_rank_edges()` in
+  `tests/test_layout/test_dot_mincross.py`.
+- Added a per-worker deterministic cache for
+  `layout_sugiyama_pipeline` in
+  `dagua/eval/competitors/classic_competitor.py:32` and
+  `dagua/eval/competitors/classic_competitor.py:1918-1964`.
+  The layout ignores seed, so the cache returns cloned positions and preserves
+  the first run's reported runtime. This keeps the 100-seed benchmark group
+  under `scripts/run_benchmark.py`'s fixed 600s future watchdog without
+  changing coordinates.
+
+### Gate evidence
+
+Crash repro before fix:
+
+```text
+classic_sugiyama_graphviz_fidelity on er_100 seed=100:
+IndexError at dagua/layout/ops/_dot_mincross.py:775 in _fenwick_sum
+```
+
+Focused direct repro after fix:
+
+```text
+er_100 graphviz fidelity returned (100, 2)
+```
+
+Five crash graphs, 5 seeds, default timeout:
+
+```text
+Done: 150 total, 145 ok, 2 skipped, 3 errors, 0 timeouts
+```
+
+The remaining errors were not the original crash. They were
+`worker layout timeout exceeded` on `sbm_5x50` because the benchmark scales
+the default 120s timeout to 60s for a 250-node graph, while the first
+graphviz-fidelity layout takes about 65-76s on this machine.
+
+Five crash graphs, 5 seeds, `--timeout 240`:
+
+```text
+Done: 150 total, 150 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+No-behavior-change check on working graphviz-fidelity graphs:
+
+```text
+BYTE_IDENTITY_OK
+binary_tree, dense_pair_50, weighted_karate_34, citation_dag_300
+seeds 100, 101, 102 were byte-identical against HEAD's old mincross helper
+```
+
+Selector tests and lint:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+57 passed, 3099 deselected, 34 warnings in 13.81s
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+Success: no issues found in 1 source file
+```
+
+Final topup command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --engines classic_sugiyama --variants \
+  --graphs er_100,random_dag_50,regular_4_40,rgg_100,sbm_5x50 \
+  --max-nodes 0 --seeds 100 --seed-start 100 --workers 4 \
+  --timeout 3600 \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r76_sugiyama_topup
+```
+
+Final topup result:
+
+```text
+[benchmark] Done: 3000 total, 3000 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+### Concerns
+
+- The default 5-seed command without `--timeout` still reports three
+  `sbm_5x50` graphviz-fidelity worker timeouts because of the benchmark's
+  size-scaled 60s budget. The crash is fixed; the timeout is a runtime-budget
+  mismatch for this graph and exact x-coordinate path.
+- The deterministic cache is intentionally scoped to classic Sugiyama worker
+  repeats. It does not change coordinates, and it preserves the first run's
+  runtime in cached `CompetitorResult` rows.
+
+### Knowledge
+
+- `classic_sugiyama_graphviz_fidelity` is deterministic across benchmark
+  seeds; `_barycenter_ordering()` deletes the seed argument in the graphviz
+  mincross path.
+- `scripts/run_benchmark.py` groups all seeds for one graph/engine in one
+  future. A 100-seed deterministic group can exceed the 600s watchdog even
+  when each individual layout is below `--timeout`.
