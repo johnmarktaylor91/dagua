@@ -750,3 +750,17 @@ for retries. 2-attempt max per work item, then park documented.
   (hit on random_dag realization change). REMAINING IN FLIGHT: A7 BK x-stage, era regen,
   random_dag full-matrix regen. THEN: consolidated final bench+rescore (sugiyama post-A7/8/9
   + random_dag all-family + era rows) -> ledger refresh -> updated RESULTS/memory.
+- 2026-07-04 ~11:45 ET: r77 ROLLING (5) -- SUGIYAMA SAGA CLOSED. A7 BK alignment MERGED
+  (flag-driven 4-run + min-width anchor + median_4): ***igraph bit-exact 141*** (30 this
+  morning -> 60 -> 75 -> 141; far 222->152; zero regressions). A10 wiring MERGED (8ed1003;
+  _quick_classic never called the metadata classifier + cache-key fix): ***edge_label_braid
+  0.6016 -> 0.0066 (91x, near tier)***; cluster rows improved (interleaved 0.626->0.595,
+  clustered_longlabel 0.237->0.210, kitchen_sink 0.318->0.302, hybrid 0.883->0.845);
+  mixed-DOT rows byte-stable per guard. FINAL graphviz table: 1 bit-exact + 32 near + 24
+  close + 18 far (named: recursive cluster rank-collapse + structural stragglers).
+  Definitive artifact: r77_sugiyama_wired.jsonl. ALL SUGIYAMA WORK ITEMS EXHAUSTED --
+  remaining far-tier causes named w/ dossiers (recursive cluster machinery = the honest
+  boundary; porting it whole is the next-violence-tier judgment call, documented).
+  REMAINING IN FLIGHT: era regen, random_dag full-matrix regen. THEN: their rescores ->
+  ledger refresh (corrected named-causes incl spline->label-box) -> r77 RESULTS addendum ->
+  memory -> close.
