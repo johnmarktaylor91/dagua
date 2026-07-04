@@ -696,3 +696,23 @@ for retries. 2-attempt max per work item, then park documented.
   x-stage -> A7 dispatched (pid 1403617, HIGH, last igraph item; segfault workaround noted:
   batch reference calls in subprocesses). pyproject gains extra: igraph-fidelity =
   [igraph>=0.10, swiglpk>=5.0].
+- 2026-07-04 ~05:40 ET: r77 ROLLING (2). D1 drl: evidenced floor CONFIRMED w/ instrumented
+  trace (edge-cut float-accumulation split at recompute 448; schedules/RNG/init matched) --
+  drl line CLOSED, worktree swept. M1 mds: took the RUNTIME-DELEGATION shortcut (4th
+  incident; rejected unmerged; my brief omitted the prohibition -- restored to all briefs).
+  M2: delegation reverted, NATIVE port of igraph get_sphere() quadrant scan (incl its
+  bounds typo) + equal-size qsort -> RNG draw counts EXACT (125978==125978,
+  316682==316682); one placement rule remains -> M3 dispatched (pid 1478129).
+  B3 provenance: ***ORACLE BUG #5 -- _random_dag built edges via string set =>
+  PYTHONHASHSEED-dependent graph realization; benchmark graphs not reproducible across
+  processes.*** All cross-process per-seed comparisons on random_dag_50/200 were
+  permutation-corrupted (explains MAAR attempt-2/3 gate failures). G1 fix LANDED + MERGED
+  (73bbb52: sorted edges, named nodes, cross-hash-seed subprocess tripwire green over the
+  FULL graph catalog; affected graphs = random_dag_50 + random_dag_200 ONLY).
+  PRE-EXISTING failures #4/#5 discovered (fail on develop untouched):
+  test_integration test_50_node_dag (node_overlaps 44); test_ops_init graphopt fidelity
+  seed matrix. Housekeeping list now 5.
+  LAUNCHED: full-matrix random_dag regen (pid 1526947 -> benchmark_100seed_r77_randomdag:
+  --engines all + 10 stochastic ref engines, both graphs, new canonical realization, seeds
+  100-199). On done -> rescore ALL random_dag combos (every family) -- expect flips
+  anywhere the old verdict was permutation noise.
