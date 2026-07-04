@@ -1556,3 +1556,169 @@ Validation:
 - Graphviz's cluster x machinery has useful measurable effect even without
   full rank-collapse: sibling boundary separation and rank slot reservation
   reduced the main cluster-only residuals by 0.13 to 0.64 d_R.
+
+## A10: benchmark wiring
+
+Date: 2026-07-04
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-a10`
+Branch: `r77/a10-wiring`
+Base commit: `118a50e`
+Commit: see `git log -1` on `r77/a10-wiring`.
+
+### Gap
+
+`scripts/run_benchmark.py --engines classic_sugiyama --variants` expands
+`classic_sugiyama_graphviz_fidelity` through
+`dagua/eval/variants.py` to the base `classic_sugiyama` competitor with
+`fidelity_mode="graphviz"`. `ClassicBase.layout_with_variant()` then dispatches
+through `_CLASSIC_LAYOUT_SPECS["classic_sugiyama"]`, which maps to
+`dagua.layout.ops.pipelines.sugiyama:layout_sugiyama_pipeline`.
+
+The benchmark wrapper path only set `graphviz_node_sizes` for graphviz
+fidelity. It never called `_graphviz_dot_edge_label_sizes()` and never passed
+`clusters`, `cluster_parents`, or `graphviz_apply_cluster_constraints=True`.
+Therefore A8/A9 were present in the direct pipeline but inert in the fresh
+family benchmark rows.
+
+### Fix
+
+Added `_apply_sugiyama_graphviz_metadata()` in
+`dagua/eval/competitors/classic_competitor.py` and called it only when
+`fn_name == "layout_sugiyama_pipeline"` and
+`fidelity_mode == "graphviz"`.
+
+The classifier follows the A9b guard:
+
+- label-only DOT: pass `graphviz_edge_label_sizes`;
+- cluster-only DOT: pass `clusters`, `cluster_parents`, and
+  `graphviz_apply_cluster_constraints=True`;
+- mixed edge-label plus cluster DOT: pass neither label nor cluster metadata.
+
+The deterministic Sugiyama cache key now fingerprints tensor kwargs by key,
+shape, dtype, and device, and mapping kwargs by identity and size. This avoids
+colliding old graphviz-node-only calls with graphviz-node-plus-label calls, and
+keeps cluster metadata hashable.
+
+Added regression coverage in `tests/test_classic_competitor.py` for label-only,
+cluster-only, and mixed graphviz-fidelity Sugiyama forwarding.
+
+### Step-3 verification
+
+Scratch run:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --engines classic_sugiyama --variants \
+  --graphs edge_label_braid,nested_cluster_label_stack,interleaved_cluster_crosstalk,kitchen_sink_platform_graph,clustered_longlabel_handoffs,small_label_storm \
+  --max-nodes 300 --seeds 5 --seed-start 100 --workers 2 \
+  --timeout 3600 --watchdog-timeout 7200 \
+  --output-dir /tmp/dagua-a10-step3
+```
+
+Done line:
+
+```text
+[benchmark] Done: 180 total, 180 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+`d_R` used `dagua.eval.distributional_fidelity.pairwise_procrustes_matrix`
+with `free_aspect=True`, matching the definitive analysis. Old values are from
+`eval_output/fidelity_definitive/r77_sugiyama_final.jsonl`; new values are
+seed 100 from `/tmp/dagua-a10-step3` against live `graphviz_dot` reference
+positions from the offline adapter.
+
+| Graph | old `d_R` | new `d_R` | old/new bytes | Result |
+|---|---:|---:|---|---|
+| `edge_label_braid` | 0.601567 | 0.006611 | diff | A8 reached benchmark path |
+| `nested_cluster_label_stack` | 0.074680 | 0.074680 | same | mixed label+cluster guard |
+| `interleaved_cluster_crosstalk` | 0.626016 | 0.595315 | diff | A9 reached benchmark path |
+| `kitchen_sink_platform_graph` | 0.318412 | 0.301723 | diff | A9 reached benchmark path |
+| `clustered_longlabel_handoffs` | 0.237325 | 0.210412 | diff | A9 reached benchmark path |
+| `small_label_storm` | 0.006045 | 0.006045 | same | mixed label+cluster guard |
+
+Note: `nested_cluster_label_stack` is intentionally unchanged because it has
+both DOT edge labels and DOT clusters. This follows the explicit mixed-input
+guard; only cluster-only DOT rows receive A9 metadata.
+
+### Control evidence
+
+Control run:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --engines classic_sugiyama --variants \
+  --graphs linear_3layer_mlp,parallel_multiedge_bundle,binary_tree,hub_skip_superfan,width_skew_late_merge \
+  --max-nodes 300 --seeds 5 --seed-start 100 --workers 2 \
+  --timeout 3600 --watchdog-timeout 7200 \
+  --output-dir /tmp/dagua-a10-controls
+```
+
+Done line:
+
+```text
+[benchmark] Done: 150 total, 150 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+Byte-identical against
+`eval_output/benchmark_100seed_r77_sugiyama_final/positions` for seeds
+100-104:
+
+- Plain graphviz-fidelity rows: `linear_3layer_mlp`,
+  `parallel_multiedge_bundle`, `binary_tree`, `hub_skip_superfan`,
+  `width_skew_late_merge`.
+- Igraph/default rows: `linear_3layer_mlp`,
+  `parallel_multiedge_bundle`, `binary_tree`.
+
+### Gates
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+69 passed, 3109 deselected, 34 warnings in 14.61s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
+FAILED tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border
+1 failed, 266 passed, 88 deselected, 1 xfailed, 63 warnings in 144.91s
+```
+
+The Tier 2 failure is the known pre-existing double-border smoke failure listed
+in the task.
+
+Full family benchmark:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --engines classic_sugiyama --variants --max-nodes 300 \
+  --seeds 100 --seed-start 100 --workers 5 \
+  --timeout 3600 --watchdog-timeout 7200 \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r77_sugiyama_wired
+```
+
+Done line:
+
+```text
+[benchmark] Done: 51600 total, 51600 ok, 0 skipped, 0 errors, 0 timeouts
+```
+
+### Knowledge
+
+- The benchmark path is `run_benchmark.py` variant expansion to
+  `ClassicBase.layout_with_variant()`, then `_CLASSIC_LAYOUT_SPECS` to
+  `_quick_classic()`, then `layout_sugiyama_pipeline()`.
+- A8/A9 activation has to live in `_quick_classic()` because that is where the
+  benchmark has both the graph object and final variant kwargs.
+- The report `d_R` for these rows is the free-aspect distributional
+  Procrustes distance; plain isotropic Procrustes gives misleading numbers for
+  the cluster x-boundary path.
