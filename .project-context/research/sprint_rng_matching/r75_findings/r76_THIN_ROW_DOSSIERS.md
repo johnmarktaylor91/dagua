@@ -170,3 +170,186 @@ PY
 ```
 
 No tests were run because this was research/probe only and made no package code changes.
+## D1 DrL trace
+
+Date: 2026-07-04
+
+Scope: `real_lesmis_77::classic_drl_coarsen`, seed 100, benchmark-matched graph and parameters.
+The source file requested by the r77 task was absent in this worktree, so this section creates the
+requested dossier path and records the DrL trace evidence.
+
+### Setup
+
+Instrumented reference build:
+
+```bash
+python -m venv /tmp/igraph-drl-venv
+/tmp/igraph-drl-venv/bin/python -m pip install /tmp/igraph-drl-src
+IGRAPH_DRL_TRACE=1 /tmp/igraph-drl-venv/bin/python <trace script>
+```
+
+The patched source was the PyPI `igraph==1.0.0` sdist, extracted to
+`/tmp/igraph-drl-src`. The DrL C++ files used by python-igraph 1.0.0 are under
+`vendor/source/igraph/src/layout/drl/`.
+
+Benchmark input:
+
+| field | value |
+| --- | --- |
+| graph | `real_lesmis_77` |
+| variant | `classic_drl_coarsen` vs `igraph_drl` |
+| options | `coarsen` |
+| seed | 100 |
+| nodes | 77 |
+| oriented edges | 254 |
+| weighted | yes |
+| initial matrix | `np.random.RandomState(100).uniform(-1, 1, size=(77, 2))` |
+| igraph RNG | `random.Random(100)` via `igraph.set_random_number_generator()` |
+
+The first three initial matrix rows were:
+
+| node | x | y |
+| ---: | ---: | ---: |
+| 0 | 0.0868098836 | -0.443261230 |
+| 1 | -0.150964819 | 0.689552265 |
+| 2 | -0.990562288 | -0.756861758 |
+
+### Source cites
+
+Reference source:
+
+| quantity | source |
+| --- | --- |
+| phase scheduler calls `update_nodes()` before automatic control | `vendor/source/igraph/src/layout/drl/drl_graph.cpp:571-611` |
+| phase transitions and schedule updates | `vendor/source/igraph/src/layout/drl/drl_graph.cpp:624-808` |
+| accepted candidate rule and RNG draws | `vendor/source/igraph/src/layout/drl/drl_graph.cpp:909-975` |
+| analytic centroid and edge-cut score | `vendor/source/igraph/src/layout/drl/drl_graph.cpp:1064-1133` |
+| density grid formula and coarse/fine density | `vendor/source/igraph/src/layout/drl/DensityGrid.cpp:93-135` |
+| density add/subtract update order | `vendor/source/igraph/src/layout/drl/DensityGrid.cpp:149-228` |
+
+Dagua source:
+
+| quantity | source |
+| --- | --- |
+| runtime energy and density call | `dagua/layout/ops/drl.py:943-973` |
+| analytic centroid and edge-cut score | `dagua/layout/ops/drl.py:976-1051` |
+| accepted candidate rule and RNG draws | `dagua/layout/ops/drl.py:1054-1219` |
+| node sweep and density writeback | `dagua/layout/ops/drl.py:1221-1311` |
+| phase scheduler | `dagua/layout/ops/drl.py:1314-1450` |
+
+### Phase schedule trace
+
+The igraph and Dagua schedule states matched at every phase boundary observed in the
+instrumented run. Both sides ran 755 `ReCompute` sweeps: the initial/liquid stage,
+expansion, cooldown, crunch, simmer, and the final stage-6 update.
+
+| checkpoint | igraph stage/iter | Dagua stage/iter | temp | attraction | damping | min_edges | cut_off_length |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| recompute 0 before update | 0 / 0 | 0 / 0 | 2000 | 10 | 1 | 20 | 31999.998 |
+| recompute 0 after control | 0 / 1 | 0 / 1 | 2000 | 2 | 1 | 20 | 31999.998 |
+| recompute 448 before update | 2 / 47 | 2 / 47 | 1530 | 1 | 0.100000001 | 2.60000730 | 14359.998 |
+| recompute 753 after control | 6 / 100 | 6 / 100 | 50 | 0.5 | 0 | 99 | 7999.99951 |
+| recompute 754 before update | 6 / 100 | 6 / 100 | 50 | 0.5 | 0 | 99 | 7999.99951 |
+
+The initial node updates also matched exactly to the trace precision:
+
+| recompute | node | igraph chosen | Dagua chosen | igraph energy | Dagua energy |
+| ---: | ---: | --- | --- | ---: | ---: |
+| 0 | 0 | (-0.150964811, 0.689552248) | (-0.150964811, 0.689552248) | 644.456909 | 644.456909 |
+| 0 | 1 | (-0.148327380, 0.113887586) | (-0.148327380, 0.113887586) | 128439.391 | 128439.391 |
+| 0 | 2 | (0.0266232416, 0.438912511) | (0.0266232416, 0.438912511) | 327885.75 | 327885.75 |
+| 1 | 0 | (-0.148327380, 0.113887586) | (-0.148327380, 0.113887586) | 5760.81396 | 5760.81396 |
+| 1 | 1 | (-0.0847093835, 0.243496075) | (-0.0847093835, 0.243496075) | 5760.81104 | 5760.81104 |
+| 1 | 2 | (-0.0981817544, 0.224914983) | (-0.0981817544, 0.224914983) | 5760.81494 | 5760.81494 |
+| 2 | 0 | (-0.0847093835, 0.243496075) | (-0.0847093835, 0.243496075) | 5718.38379 | 5718.38379 |
+| 2 | 1 | (-0.0961194187, 0.174530968) | (-0.0961194187, 0.174530968) | 5718.38379 | 5718.38379 |
+| 2 | 2 | (-0.0987587646, 0.140832424) | (-0.0987587646, 0.140832424) | 5718.38379 | 5718.38379 |
+
+### First logged divergence
+
+The first phase-level divergence is the cooldown edge-cut decision at recompute 448,
+stage 2, iter 47.
+
+| quantity | igraph trace | Dagua focused probe |
+| --- | ---: | ---: |
+| recompute | 448 | 448 |
+| stage / iter | 2 / 47 | 2 / 47 |
+| temperature | 1530 | 1530 |
+| attraction | 1 | 1 |
+| damping | 0.100000001 | 0.100000001 |
+| min_edges | 2.60000730 | 2.60000730 |
+| cut_off_length | 14359.998 | 14359.998 |
+| node evaluated | 23 | 23 |
+| max edge-cut neighbor | 29 | 30 |
+| max edge-cut score | 15865.9209 | 9708.40820 |
+| cut decision | cut node 23 -> 29 | no cut |
+| directed neighbor entries after update | 507 | 508 |
+
+Subsequent cut counts stayed different through the final layout:
+
+| checkpoint | igraph directed neighbor entries | Dagua directed neighbor entries |
+| --- | ---: | ---: |
+| initial | 508 | 508 |
+| after recompute 448 | 507 | 508 |
+| final recompute 754 | 486 | 491 |
+
+The named first diverging quantity is therefore: `Solve_Analytic` edge-cut max score for
+node 23 at cooldown recompute 448. In igraph it is 15865.9209 for neighbor 29, exceeding
+the 14359.998 threshold; in Dagua it is 9708.40820 for neighbor 30, below the same
+threshold.
+
+### Portability verdict
+
+Verdict: non-portability dossier, no portable fix applied.
+
+Reasoning:
+
+| checked class | result |
+| --- | --- |
+| phase schedule constants | matched |
+| phase transition order | matched |
+| update-before-control order | matched |
+| initial seed matrix | matched |
+| Python RNG hook and first random jumps | matched |
+| first three node acceptances | matched |
+| first logged divergence | edge-cut score after hundreds of density-driven updates |
+
+The first edge-cut divergence is not caused by a mismatched threshold, schedule decrement,
+phase order, or RNG consumption. It is caused by different geometry already present when
+the same `Solve_Analytic` edge-cut formula is evaluated. The remaining difference is the
+floating-point and density-grid execution path inside hundreds of sequential DrL node
+updates: igraph executes the density grid and node state as C++ `float` arrays/deques,
+while Dagua emulates the same state with Python lists, NumPy `float32` arrays, and explicit
+rounding. That is not a small named schedule constant or ordering rule that can be ported
+without replacing this part of DRL with the C implementation or a scalar C-compatible
+kernel.
+
+This also explains why the row was not a 1-ULP chaos case from the r77 thin-row probe:
+the divergence originates inside `DRLPhaseSolve`, but the trace shows it is an accumulated
+density-grid/float execution difference before the first visible coarsening cut split.
+
+### Gate evidence
+
+No portable code fix was made, so the fix gates were not run:
+
+| gate | result |
+| --- | --- |
+| flagged row 5-seed RMSD improvement | not run; no fix |
+| zero-regression byte-identical DrL rows | not run; no fix |
+| `pytest -k "drl"` | not run; no code change |
+| `ruff check . --fix` | not run; no code change |
+| r77 100-seed re-bench | not run; no fix |
+
+Trace artifacts were generated under `/tmp` during the run:
+
+| artifact | content |
+| --- | --- |
+| `/tmp/igraph_drl_trace_seed100.log` | instrumented igraph phase, node, and cut trace |
+| `/tmp/dagua_drl_trace_seed100.log` | Dagua phase and cut trace |
+| `/tmp/dagua_drl_cut_probe_seed100.log` | focused Dagua recompute-448 edge-cut probe |
+
+These `/tmp` artifacts were scratch only and are summarized above before cleanup.
+
+Commit sha: none. No code fix was committed because the named difference was classified
+as non-portable in the pure Python/NumPy DrL port, and repository instructions prohibit
+committing unrelated research-only artifacts as a fix commit.
