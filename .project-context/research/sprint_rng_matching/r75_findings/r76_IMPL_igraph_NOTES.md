@@ -101,7 +101,7 @@ GLPK-like simplex basis parity or a version-pinned replacement solver.
 
 ## Commit
 
-`817b9dc` (`fix(sugiyama): match igraph conflict tie quirk`).
+Implementation commit: `4377a80` (`fix(sugiyama): match igraph conflict tie quirk`).
 
 ## Concerns
 
