@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import sys
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -2966,19 +2967,29 @@ def _igraph_horizontal_compaction(
     sink = list(range(num_nodes))
     shift = [math.inf] * num_nodes
     x_positions = [-1.0] * num_nodes
+    original_recursion_limit = sys.getrecursionlimit()
+    needed_recursion_limit = max(original_recursion_limit, num_nodes + 100)
 
-    for node in range(num_nodes):
-        if root[node] == node:
-            _igraph_place_compaction_block(
-                block_root=node,
-                vertex_to_the_left=vertex_to_the_left,
-                root=root,
-                align=align,
-                sink=sink,
-                shift=shift,
-                node_sep=node_sep,
-                x_positions=x_positions,
-            )
+    # Igraph implements this block walk recursively in C; dummy-expanded Python
+    # layouts can legitimately exceed the default recursion limit.
+    try:
+        if needed_recursion_limit > original_recursion_limit:
+            sys.setrecursionlimit(needed_recursion_limit)
+        for node in range(num_nodes):
+            if root[node] == node:
+                _igraph_place_compaction_block(
+                    block_root=node,
+                    vertex_to_the_left=vertex_to_the_left,
+                    root=root,
+                    align=align,
+                    sink=sink,
+                    shift=shift,
+                    node_sep=node_sep,
+                    x_positions=x_positions,
+                )
+    finally:
+        if sys.getrecursionlimit() != original_recursion_limit:
+            sys.setrecursionlimit(original_recursion_limit)
 
     old_x_positions = list(x_positions)
     for node in range(num_nodes):
