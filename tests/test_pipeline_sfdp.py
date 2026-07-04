@@ -11,6 +11,7 @@ from dagua.layout.classic.sfdp import layout_sfdp
 from dagua.layout.ops.pipelines.sfdp import (
     _decompose_graphviz_supervariables,
     _graphviz_sfdp_coarsen,
+    _pack_graphviz_sfdp_component_positions,
     build_sfdp_pipeline,
     layout_sfdp_pipeline,
 )
@@ -421,6 +422,33 @@ class TestSFDPPipelineFidelity:
         pipeline = layout_sfdp_pipeline(edge_index=edge_index, num_nodes=7, steps=500, seed=99)
 
         _assert_exact_match(classic, pipeline)
+
+    def test_graphviz_sfdp_component_pack_uses_point_units(self) -> None:
+        """SFDP disconnected packing should not rescale point positions as inches."""
+        components = [[0, 1], [2]]
+        component_positions = [
+            torch.tensor([[0.0, 0.0], [100.0, 0.0]], dtype=torch.float32),
+            torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        ]
+        component_edges = [
+            torch.tensor([[0], [1]], dtype=torch.long),
+            torch.empty((2, 0), dtype=torch.long),
+        ]
+        node_sizes = torch.tensor(
+            [[54.0, 36.0], [54.0, 36.0], [54.0, 36.0]],
+            dtype=torch.float32,
+        )
+
+        packed = _pack_graphviz_sfdp_component_positions(
+            components=components,
+            component_positions=component_positions,
+            component_edges=component_edges,
+            num_nodes=3,
+            node_sizes=node_sizes,
+        )
+
+        assert torch.isfinite(packed).all()
+        assert float(torch.abs(packed).max().item()) < 500.0
 
     def test_build_sfdp_pipeline_matches_classic_on_complete_graph(self) -> None:
         """The raw pipeline object should match classic SFDP on a dense graph."""
