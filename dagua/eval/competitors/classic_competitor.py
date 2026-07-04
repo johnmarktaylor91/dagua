@@ -29,6 +29,8 @@ _GRAPHVIZ_LABEL_XPAD_POINTS = 16.0
 _GRAPHVIZ_LABEL_YPAD_POINTS = 8.0
 _GRAPHVIZ_HELVETICA_UNITS_PER_EM = 2048.0
 _GRAPHVIZ_TEXT_HEIGHT_FACTOR = 1.128
+_SFDP_LABEL_BOX_MIN_NODE_COUNT = 10
+_SFDP_LABEL_BOX_WIDE_LABEL_POINTS = 100.0
 _SUGIYAMA_DETERMINISTIC_CACHE: dict[Tuple[Any, ...], Tuple[torch.Tensor, float]] = {}
 _GRAPHVIZ_HELVETICA_REGULAR_WIDTHS = (
     -1,
@@ -395,6 +397,72 @@ def _graphviz_dot_node_sizes(graph: DaguaGraph) -> torch.Tensor:
             )
         )
     return torch.tensor(boxes, dtype=graph.size_dtype)
+
+
+def _should_use_sfdp_graphviz_label_boxes(graph: DaguaGraph, node_sizes: torch.Tensor) -> bool:
+    """Return whether SFDP packing should use Graphviz DOT label boxes.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph being laid out through the benchmark adapter.
+    node_sizes : torch.Tensor
+        Graphviz DOT node boxes in points with shape ``[N, 2]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when label boxes are large or numerous enough to affect
+        Graphviz's component bboxes and pack polyomino cells.
+    """
+    if graph.num_nodes >= _SFDP_LABEL_BOX_MIN_NODE_COUNT:
+        return True
+    if node_sizes.numel() == 0:
+        return False
+    max_width = float(node_sizes[:, 0].max().item())
+    return max_width >= _SFDP_LABEL_BOX_WIDE_LABEL_POINTS
+
+
+def _has_multiple_weak_components(graph: DaguaGraph) -> bool:
+    """Return whether a graph has more than one weak connected component.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph whose edge tensor is inspected.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least two weak components are present.
+    """
+    if graph.num_nodes <= 1:
+        return False
+    neighbors: list[list[int]] = [[] for _ in range(graph.num_nodes)]
+    edge_index = graph.edge_index.to(device="cpu", dtype=torch.long)
+    for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+        if source == target:
+            continue
+        neighbors[source].append(target)
+        neighbors[target].append(source)
+
+    seen = [False] * graph.num_nodes
+    component_count = 0
+    for start in range(graph.num_nodes):
+        if seen[start]:
+            continue
+        component_count += 1
+        if component_count > 1:
+            return True
+        stack = [start]
+        seen[start] = True
+        while stack:
+            node = stack.pop()
+            for neighbor in neighbors[node]:
+                if not seen[neighbor]:
+                    seen[neighbor] = True
+                    stack.append(neighbor)
+    return False
 
 
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
@@ -2023,6 +2091,19 @@ def _quick_classic(
         if fn_name == "layout_kk_pipeline":
             extra_kwargs.setdefault("orient_to_direction", False)
         node_sizes = graph.node_sizes
+        if (
+            fn_name == "layout_sfdp_pipeline"
+            and extra_kwargs.get("fidelity_mode") == "graphviz"
+            and _has_multiple_weak_components(graph=graph)
+        ):
+            # Graphviz sfdp computes component bboxes from label-sized DOT node
+            # boxes before pack.c rasterizes l_node polyominoes.
+            graphviz_sfdp_node_sizes = _graphviz_dot_node_sizes(graph=graph)
+            if _should_use_sfdp_graphviz_label_boxes(
+                graph=graph,
+                node_sizes=graphviz_sfdp_node_sizes,
+            ):
+                node_sizes = graphviz_sfdp_node_sizes
         if (
             fn_name == "layout_sugiyama_pipeline"
             and extra_kwargs.get("fidelity_mode") == "graphviz"
