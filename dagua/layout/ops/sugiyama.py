@@ -2587,16 +2587,22 @@ def _brandes_koepf_x_positions(
         return []
 
     dummy_mask = [node >= num_original_nodes for node in range(num_nodes)]
-    igraph_conflicts: Optional[Set[Tuple[int, int]]] = None
     if use_igraph_conflicts:
         if edge_index is None:
             raise ValueError("edge_index is required when use_igraph_conflicts=True")
-        igraph_conflicts = _find_igraph_type1_conflicts(
+        balanced = _igraph_brandes_koepf_x_positions(
             layers=layers,
+            parents=parents,
+            children=children,
             edge_index=edge_index,
             dummy_mask=dummy_mask,
             num_nodes=num_nodes,
+            node_sep=node_sep,
         )
+        if center_coordinates:
+            return _center_coordinates(values=balanced)
+        return balanced
+
     orientation_specs = (
         ("ul", False, False),
         ("ur", False, True),
@@ -2616,15 +2622,12 @@ def _brandes_koepf_x_positions(
             neighbors_by_node=predecessor_source,
             pos_of=pos_of,
         )
-        if igraph_conflicts is None:
-            conflicts = _find_type1_conflicts(
-                layers=transformed_layers,
-                predecessors=predecessors,
-                pos_of=pos_of,
-                dummy_mask=dummy_mask,
-            )
-        else:
-            conflicts = igraph_conflicts
+        conflicts = _find_type1_conflicts(
+            layers=transformed_layers,
+            predecessors=predecessors,
+            pos_of=pos_of,
+            dummy_mask=dummy_mask,
+        )
         root, align = _vertical_alignment(
             layers=transformed_layers,
             predecessors=predecessors,
@@ -2651,6 +2654,416 @@ def _brandes_koepf_x_positions(
     if center_coordinates:
         return _center_coordinates(values=balanced)
     return balanced
+
+
+def _igraph_brandes_koepf_x_positions(
+    layers: Sequence[Sequence[int]],
+    parents: Sequence[Sequence[int]],
+    children: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    dummy_mask: Sequence[bool],
+    num_nodes: int,
+    node_sep: float,
+) -> List[float]:
+    """Compute igraph 1.0.0 Brandes-Koepf x coordinates.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer in igraph's top-down layer order.
+    parents : sequence of sequence of int
+        Incoming adjacency lists indexed by expanded node id.
+    children : sequence of sequence of int
+        Outgoing adjacency lists indexed by expanded node id.
+    edge_index : torch.Tensor
+        Expanded adjacent-rank edge list with shape ``[2, E]``.
+    dummy_mask : sequence of bool
+        Flags indicating which expanded nodes are dummy vertices.
+    num_nodes : int
+        Number of expanded graph nodes.
+    node_sep : float
+        Igraph ``hgap`` value used as the center-to-center block separation.
+
+    Returns
+    -------
+    list of float
+        Median-balanced x coordinates for all expanded nodes.
+
+    Notes
+    -----
+    Igraph does not mirror layers to implement right-aligned passes. It keeps
+    the original ``vertex_to_the_left`` array, flips only the vertical-alignment
+    scan order with ``align_right``, then compacts in the original coordinate
+    frame. This differs from the generic BK helper's mirrored-orientation
+    emulation on tie-heavy layouts.
+    """
+    ignored_edges = _find_igraph_ignored_type1_edges(
+        layers=layers,
+        edge_index=edge_index,
+        dummy_mask=dummy_mask,
+        num_nodes=num_nodes,
+    )
+    vertex_to_the_left = _igraph_vertex_to_the_left(layers=layers, num_nodes=num_nodes)
+    x_by_alignment: Dict[str, List[float]] = {}
+    for run_index, alignment_name in enumerate(("ul", "ur", "dl", "dr")):
+        reverse = bool(run_index // 2)
+        align_right = bool(run_index % 2)
+        root, align = _igraph_vertical_alignment(
+            layers=layers,
+            parents=parents,
+            children=children,
+            edge_index=edge_index,
+            ignored_edges=ignored_edges,
+            reverse=reverse,
+            align_right=align_right,
+            num_nodes=num_nodes,
+        )
+        x_by_alignment[alignment_name] = _igraph_horizontal_compaction(
+            vertex_to_the_left=vertex_to_the_left,
+            root=root,
+            align=align,
+            node_sep=node_sep,
+            num_nodes=num_nodes,
+        )
+
+    _align_compacted_coordinates(x_by_alignment=x_by_alignment)
+    return _median_balanced_coordinates(x_by_alignment=x_by_alignment, num_nodes=num_nodes)
+
+
+def _igraph_vertex_to_the_left(
+    layers: Sequence[Sequence[int]],
+    num_nodes: int,
+) -> List[int]:
+    """Return igraph's left-neighbor array for horizontal compaction.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer.
+    num_nodes : int
+        Number of expanded graph nodes.
+
+    Returns
+    -------
+    list of int
+        ``vertex_to_the_left[v]`` is the immediate left neighbor of ``v`` in
+        its layer, or ``v`` itself for leftmost vertices.
+    """
+    vertex_to_the_left = list(range(num_nodes))
+    for layer_nodes in layers:
+        if not layer_nodes:
+            continue
+        previous = layer_nodes[0]
+        vertex_to_the_left[previous] = previous
+        for node in layer_nodes[1:]:
+            vertex_to_the_left[node] = previous
+            previous = node
+    return vertex_to_the_left
+
+
+def _igraph_initial_x_positions(
+    layers: Sequence[Sequence[int]],
+    num_nodes: int,
+) -> List[float]:
+    """Return igraph's ordering-stage x column before final BK placement.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer.
+    num_nodes : int
+        Number of expanded graph nodes.
+
+    Returns
+    -------
+    list of float
+        Within-layer order index for each expanded node.
+    """
+    x_positions = [0.0] * num_nodes
+    for layer_nodes in layers:
+        for position, node in enumerate(layer_nodes):
+            x_positions[node] = float(position)
+    return x_positions
+
+
+def _igraph_undirected_edge_lookup(edge_index: torch.Tensor) -> Dict[Tuple[int, int], int]:
+    """Return first edge ids keyed by both endpoint orders.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Expanded edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    dict
+        Mapping ``(u, v)`` and ``(v, u)`` to the first matching edge id,
+        matching ``igraph_get_eid(..., IGRAPH_UNDIRECTED, error=true)`` for
+        the simple expanded graphs used by Sugiyama.
+    """
+    edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    lookup: Dict[Tuple[int, int], int] = {}
+    for edge_id, (source, target) in enumerate(zip(edge_cpu[0].tolist(), edge_cpu[1].tolist())):
+        source_id = int(source)
+        target_id = int(target)
+        lookup.setdefault((source_id, target_id), edge_id)
+        lookup.setdefault((target_id, source_id), edge_id)
+    return lookup
+
+
+def _igraph_vertical_alignment(
+    layers: Sequence[Sequence[int]],
+    parents: Sequence[Sequence[int]],
+    children: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    ignored_edges: Sequence[bool],
+    reverse: bool,
+    align_right: bool,
+    num_nodes: int,
+) -> Tuple[List[int], List[int]]:
+    """Construct one igraph BK vertical alignment.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer in original top-down order.
+    parents : sequence of sequence of int
+        Incoming adjacency indexed by expanded node id.
+    children : sequence of sequence of int
+        Outgoing adjacency indexed by expanded node id.
+    edge_index : torch.Tensor
+        Expanded edge tensor with shape ``[2, E]``.
+    ignored_edges : sequence of bool
+        Edge-id mask for Type-1 conflicts.
+    reverse : bool
+        Whether to align downward through outgoing neighbors.
+    align_right : bool
+        Whether to scan each layer and the even-median pair right-to-left.
+    num_nodes : int
+        Number of expanded graph nodes.
+
+    Returns
+    -------
+    tuple
+        ``(root, align)`` arrays indexed by expanded node id.
+    """
+    root = list(range(num_nodes))
+    align = list(range(num_nodes))
+    initial_x = _igraph_initial_x_positions(layers=layers, num_nodes=num_nodes)
+    edge_lookup = _igraph_undirected_edge_lookup(edge_index=edge_index)
+    layer_index = len(layers) - 2 if reverse else 1
+    layer_step = -1 if reverse else 1
+    layer_limit = -1 if reverse else len(layers)
+
+    while layer_index != layer_limit:
+        layer_nodes = layers[layer_index]
+        previous_position = math.inf if align_right else -1.0
+        node_positions = (
+            range(len(layer_nodes) - 1, -1, -1) if align_right else range(len(layer_nodes))
+        )
+        for node_position in node_positions:
+            node = layer_nodes[node_position]
+            if align[node] != node:
+                continue
+            neighbors = children[node] if reverse else parents[node]
+            medians = _igraph_alignment_medians(
+                neighbors=neighbors,
+                initial_x=initial_x,
+                align_right=align_right,
+            )
+            for predecessor in medians:
+                if predecessor < 0 or align[node] != node:
+                    continue
+                edge_id = edge_lookup[(node, predecessor)]
+                if ignored_edges[edge_id]:
+                    continue
+                predecessor_position = initial_x[predecessor]
+                can_align = (
+                    previous_position > predecessor_position
+                    if align_right
+                    else previous_position < predecessor_position
+                )
+                if not can_align:
+                    continue
+                align[predecessor] = node
+                root[node] = root[predecessor]
+                align[node] = root[predecessor]
+                previous_position = predecessor_position
+        layer_index += layer_step
+
+    return root, align
+
+
+def _igraph_alignment_medians(
+    neighbors: Sequence[int],
+    initial_x: Sequence[float],
+    align_right: bool,
+) -> Tuple[int, int]:
+    """Return igraph's one- or two-median candidate tuple.
+
+    Parameters
+    ----------
+    neighbors : sequence of int
+        Neighbor node ids from igraph-neighbor order.
+    initial_x : sequence of float
+        Ordering-stage x positions indexed by node id.
+    align_right : bool
+        Whether the right-alignment median ordering is active.
+
+    Returns
+    -------
+    tuple of int
+        Two candidate node ids. The second value is ``-1`` when there is only
+        one usable median.
+    """
+    neighbor_count = len(neighbors)
+    if neighbor_count == 0:
+        return -1, -1
+    if neighbor_count == 1:
+        return int(neighbors[0]), -1
+
+    order = sorted(range(neighbor_count), key=lambda index: (initial_x[neighbors[index]], index))
+    if neighbor_count % 2:
+        return int(neighbors[order[neighbor_count // 2]]), -1
+    if align_right:
+        return (
+            int(neighbors[order[neighbor_count // 2]]),
+            int(neighbors[order[neighbor_count // 2 - 1]]),
+        )
+    return (
+        int(neighbors[order[neighbor_count // 2 - 1]]),
+        int(neighbors[order[neighbor_count // 2]]),
+    )
+
+
+def _igraph_horizontal_compaction(
+    vertex_to_the_left: Sequence[int],
+    root: Sequence[int],
+    align: Sequence[int],
+    node_sep: float,
+    num_nodes: int,
+) -> List[float]:
+    """Compact one igraph BK alignment into concrete x coordinates.
+
+    Parameters
+    ----------
+    vertex_to_the_left : sequence of int
+        Immediate-left-neighbor array in original layer order.
+    root : sequence of int
+        Block-root array from vertical alignment.
+    align : sequence of int
+        Alignment cycle array from vertical alignment.
+    node_sep : float
+        Igraph ``hgap`` value.
+    num_nodes : int
+        Number of expanded graph nodes.
+
+    Returns
+    -------
+    list of float
+        X coordinates for one alignment run.
+    """
+    sink = list(range(num_nodes))
+    shift = [math.inf] * num_nodes
+    x_positions = [-1.0] * num_nodes
+
+    for node in range(num_nodes):
+        if root[node] == node:
+            _igraph_place_compaction_block(
+                block_root=node,
+                vertex_to_the_left=vertex_to_the_left,
+                root=root,
+                align=align,
+                sink=sink,
+                shift=shift,
+                node_sep=node_sep,
+                x_positions=x_positions,
+            )
+
+    old_x_positions = list(x_positions)
+    for node in range(num_nodes):
+        block_root = root[node]
+        x_positions[node] = old_x_positions[block_root]
+        sink_shift = shift[sink[block_root]]
+        if sink_shift < math.inf:
+            x_positions[node] += sink_shift
+    return x_positions
+
+
+def _igraph_place_compaction_block(
+    block_root: int,
+    vertex_to_the_left: Sequence[int],
+    root: Sequence[int],
+    align: Sequence[int],
+    sink: List[int],
+    shift: List[float],
+    node_sep: float,
+    x_positions: List[float],
+) -> None:
+    """Place one igraph horizontal-compaction block recursively.
+
+    Parameters
+    ----------
+    block_root : int
+        Root node of the block being placed.
+    vertex_to_the_left : sequence of int
+        Immediate-left-neighbor array in original layer order.
+    root : sequence of int
+        Block-root array from vertical alignment.
+    align : sequence of int
+        Alignment cycle array from vertical alignment.
+    sink : list of int
+        Sink representative for each block root.
+    shift : list of float
+        Deferred class shifts indexed by sink root.
+    node_sep : float
+        Igraph ``hgap`` value.
+    x_positions : list of float
+        Mutable x-coordinate work array. Values below zero mean unplaced.
+
+    Returns
+    -------
+    None
+        The work arrays are updated in place.
+    """
+    if x_positions[block_root] >= 0.0:
+        return
+
+    x_positions[block_root] = 0.0
+    current = block_root
+    while True:
+        left_neighbor = vertex_to_the_left[current]
+        if left_neighbor != current:
+            left_root = root[left_neighbor]
+            _igraph_place_compaction_block(
+                block_root=left_root,
+                vertex_to_the_left=vertex_to_the_left,
+                root=root,
+                align=align,
+                sink=sink,
+                shift=shift,
+                node_sep=node_sep,
+                x_positions=x_positions,
+            )
+
+            left_sink = sink[left_root]
+            block_sink = sink[block_root]
+            if block_sink == block_root:
+                sink[block_root] = block_sink = left_sink
+            if block_sink != left_sink:
+                shift[left_sink] = min(
+                    shift[left_sink],
+                    x_positions[block_root] - x_positions[left_root] - node_sep,
+                )
+            else:
+                x_positions[block_root] = max(
+                    x_positions[block_root],
+                    x_positions[left_root] + node_sep,
+                )
+
+        current = align[current]
+        if current == block_root:
+            break
 
 
 def _transform_layers(
@@ -2827,8 +3240,57 @@ def _find_igraph_type1_conflicts(
     ``IGRAPH_TO(graph, j)`` by ordinal edge id. This preserves that tie-break
     quirk instead of using the standard Brandes-Koepf segment scan.
     """
+    ignored_edge_mask = _find_igraph_ignored_type1_edges(
+        layers=layers,
+        edge_index=edge_index,
+        dummy_mask=dummy_mask,
+        num_nodes=num_nodes,
+    )
     if edge_index.numel() == 0:
         return set()
+
+    edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    sources = [int(value) for value in edge_cpu[0].tolist()]
+    targets = [int(value) for value in edge_cpu[1].tolist()]
+    conflicts: Set[Tuple[int, int]] = set()
+    for edge_id, ignored in enumerate(ignored_edge_mask):
+        if not ignored:
+            continue
+        source = sources[edge_id]
+        target = targets[edge_id]
+        conflicts.add((source, target))
+        conflicts.add((target, source))
+    return conflicts
+
+
+def _find_igraph_ignored_type1_edges(
+    layers: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    dummy_mask: Sequence[bool],
+    num_nodes: int,
+) -> List[bool]:
+    """Return igraph 1.0.0's ignored-edge mask for Type-1 conflicts.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer in the original top-down orientation.
+    edge_index : torch.Tensor
+        Expanded adjacent-rank edge list with shape ``[2, E]``.
+    dummy_mask : sequence of bool
+        Flags indicating which nodes are dummy vertices created for long
+        edges.
+    num_nodes : int
+        Number of expanded graph nodes.
+
+    Returns
+    -------
+    list of bool
+        Boolean mask aligned to expanded edge ids. ``True`` means igraph would
+        skip that edge during vertical alignment.
+    """
+    if edge_index.numel() == 0:
+        return []
 
     edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
     sources = [int(value) for value in edge_cpu[0].tolist()]
@@ -2845,7 +3307,7 @@ def _find_igraph_type1_conflicts(
         if 0 <= source < num_nodes:
             outgoing_counts[source] += 1
 
-    ignored_edges: Set[int] = set()
+    ignored_edges = [False] * edge_count
     for layer_nodes in layers[:-1]:
         scan_count = sum(outgoing_counts[node] for node in layer_nodes if 0 <= node < num_nodes)
         scan_count = min(scan_count, edge_count)
@@ -2866,17 +3328,10 @@ def _find_igraph_type1_conflicts(
                     pos_of=pos_of,
                 ):
                     if left_inner:
-                        ignored_edges.add(right_edge_id)
+                        ignored_edges[right_edge_id] = True
                     else:
-                        ignored_edges.add(left_edge_id)
-
-    conflicts: Set[Tuple[int, int]] = set()
-    for edge_id in ignored_edges:
-        source = sources[edge_id]
-        target = targets[edge_id]
-        conflicts.add((source, target))
-        conflicts.add((target, source))
-    return conflicts
+                        ignored_edges[left_edge_id] = True
+    return ignored_edges
 
 
 def _igraph_segments_cross(
