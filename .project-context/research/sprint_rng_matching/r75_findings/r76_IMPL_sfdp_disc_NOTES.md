@@ -443,3 +443,142 @@ sanctioned SFDP fixup scope.
 ### Commit
 
 Implementation commit SHA: `622420c`.
+
+## Pack2: spline-occupancy bound + approximation
+
+### Graphviz 7.0.5 Spline Bound
+
+Scratch source/build: `/tmp/gv750-pack2`, extracted from Graphviz `7.0.5`.
+Instrumentation was limited to scratch `lib/pack/pack.c` and added:
+
+- `GV_PACK_TRACE=1`: dump `polyGraphs` bboxes, grid step, `genPoly` cell counts,
+  sort order, and final `placeGraph` offsets.
+- `GV_PACK_FORCE_NOSPLINES=1`: keep `pinfo.doSplines` unchanged for layout, but
+  force `genPoly` to call the no-spline `fillEdge` branch.
+
+Relevant source rules:
+
+- `pack.c:178-185`: `fillEdge` falls back to a straight head-to-tail
+  Bresenham line when `doS` is false or the edge has no spline.
+- `pack.c:270-275`: `genPoly` documents the spline-control-polyline vs
+  straight-edge fallback rule.
+- `pack.c:352-365`: node boxes use `ND_xsize/ND_ysize` plus pack margin before
+  edge occupancy is added.
+
+Commands:
+
+```bash
+GV_PACK_TRACE=1 /tmp/gv750-pack2/build/cmd/dot/dot_builtins \
+  -Tjson -Ksfdp -Gseed=100 -Gstart=100 -Gmaxiter=500 \
+  -Gtheta=0.6 -Grepulsiveforce=-1.0 <graph>.dot
+
+GV_PACK_TRACE=1 GV_PACK_FORCE_NOSPLINES=1 \
+  /tmp/gv750-pack2/build/cmd/dot/dot_builtins \
+  -Tjson -Ksfdp -Gseed=100 -Gstart=100 -Gmaxiter=500 \
+  -Gtheta=0.6 -Grepulsiveforce=-1.0 <graph>.dot
+```
+
+Bound result:
+
+| Graph | Mode | Step | genPoly cells by component | Placement offsets |
+|---|---:|---:|---|---|
+| `kitchen_sink_platform_graph` | splines | 27 | `132,18` | `0=(-270,-108)`, `1=(-135,135)` |
+| `kitchen_sink_platform_graph` | no splines | 27 | `132,18` | `0=(-270,-108)`, `1=(-135,135)` |
+| `multi_component_80` | splines | 23 | `206,154,104,42,21,15,15` | `0=(-368,-92)`, `1=(115,115)`, `2=(-184,184)`, `3=(92,-138)`, `4=(-23,92)`, `5=(-138,115)`, `6=(-161,-138)` |
+| `multi_component_80` | no splines | 23 | `206,154,103,42,21,15,15` | `0=(-368,-92)`, `1=(115,115)`, `2=(-184,184)`, `3=(92,-138)`, `4=(-23,92)`, `5=(-138,115)`, `6=(-161,-138)` |
+
+Conclusion: splines are not the residual on the two quality-worse targets.
+For `multi_component_80`, routed spline occupancy adds one cell in component 2,
+but it does not change perimeter sort order or final packed offsets. The named
+residual is Graphviz `compute_bb`/`genPoly` using DOT label-sized node boxes in
+points (`ND_xsize/ND_ysize`) before rasterization, while the Dagua benchmark
+adapter was still passing its own node-size cache/default boxes into the SFDP
+packing path.
+
+### Implementation
+
+- Added a Graphviz-fidelity SFDP adapter gate in
+  `dagua/eval/competitors/classic_competitor.py`.
+- For disconnected `layout_sfdp_pipeline` calls with `fidelity_mode="graphviz"`,
+  the adapter computes `_graphviz_dot_node_sizes()` and forwards those point
+  boxes when label boxes are numerous (`N >= 10`) or materially wide
+  (`max width >= 100pt`).
+- Connected SFDP rows and small/modest-label disconnected rows keep the C4d
+  point-pack behavior unchanged.
+- Added adapter tests for the positive label-box path, the small/modest-label
+  preservation path, and the connected-row preservation path.
+
+This is a non-spline approximation: it ports the label-box occupancy input that
+`pack.c:352-365` consumes, without attempting Graphviz spline routing.
+
+### Focused W Gate
+
+Command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py \
+  --variants \
+  --graphs disconnected_encoder_residual,disconnected_label_cycle_collage,kitchen_sink_platform_graph,multi_component_80,random_dag_50 \
+  --engines classic_sfdp_default,classic_sfdp_graphviz_fidelity,classic_sfdp_p_neg2,graphviz_sfdp__for__classic_sfdp_default,graphviz_sfdp__for__classic_sfdp_graphviz_fidelity,graphviz_sfdp__for__classic_sfdp_p_neg2 \
+  --seed-refs graphviz_sfdp --seeds 5 --seed-start 100 \
+  --workers 4 --timeout 180 --output-dir /tmp/r77-pack2-focus
+```
+
+Result: `150 total, 150 ok, 0 skipped, 0 errors, 0 timeouts`.
+
+| Graph | C4d Dagua W | Pack2 Dagua W | Pack2 ref W | Result |
+|---|---:|---:|---:|---|
+| `disconnected_encoder_residual` | 0.1312 | 0.1312 | 0.1410 | unchanged |
+| `disconnected_label_cycle_collage` | 0.1059 | 0.0885 | 0.1761 | improved |
+| `kitchen_sink_platform_graph` | 0.0685 | 0.0643 | 0.0760 | improved |
+| `multi_component_80` | 0.0572 | 0.0553 | 0.0614 | improved |
+| `random_dag_50` | 0.0717 | 0.0688 | 0.0707 | improved |
+
+The two quality-worse targets both moved closer to the reference cloud, and the
+three guard clusters did not regress.
+
+### Regression Gates
+
+Hash sample:
+
+- Baseline: archived `HEAD` into `/tmp/r77-pack2-head`.
+- Connected SFDP sample: `binary_tree`, `braided_feedback_tails`,
+  `broken_symmetry_residual_pair`, `cluster_member_style_stress`,
+  `deep_chain_20`; engine `classic_sfdp_p_neg2`; seeds `100-104`.
+- Disconnected non-SFDP sample: `parallel_cycles_4x5`, `multi_component_80`;
+  engines `classic_neato`, `classic_neato_graphviz_fidelity`,
+  `classic_fmmm_steps10`, `classic_fmmm_graphviz_fdp_fidelity`; seeds
+  `100-101`.
+- Result: baseline/current benchmark runs completed `25/25 ok` and `16/16 ok`
+  for both trees; tensor hash comparison reported `checks 41 failed 0`.
+
+Tests:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sfdp" -x -q
+32 passed, 3133 deselected, 34 warnings in 32.85s
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q
+461 passed, 153 warnings in 1919.30s (0:31:59)
+```
+
+Project Tier 2 was run once and stopped on the known pre-existing double-border
+render smoke failure named in this task spec:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
+FAILED tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border
+assert 0 >= 2
+1 failed, 263 passed, 88 deselected, 1 xfailed, 63 warnings in 140.74s
+```
+
+### Commit
+
+Implementation commit SHA: reported after commit.
