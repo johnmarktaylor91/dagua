@@ -1978,7 +1978,7 @@ def _sugiyama_cache_key(
         sorted(
             (key, value)
             for key, value in extra_kwargs.items()
-            if not isinstance(value, torch.Tensor)
+            if isinstance(value, (str, int, float, bool, type(None)))
         )
     )
     edge_count = int(graph.edge_index.shape[1]) if graph.edge_index.numel() > 0 else 0
@@ -1991,6 +1991,8 @@ def _sugiyama_cache_key(
         id(graph.edge_index),
         id(graph.edge_weights),
         id(graph.node_sizes),
+        id(graph.clusters),
+        id(graph.cluster_parents),
         scalar_params,
     )
 
@@ -2059,6 +2061,10 @@ def _quick_classic(
             and extra_kwargs.get("fidelity_mode") == "graphviz"
         ):
             extra_kwargs.setdefault("graphviz_node_sizes", _graphviz_dot_node_sizes(graph=graph))
+            has_edge_labels = any(bool(label) for label in graph.edge_labels)
+            if graph.clusters and not has_edge_labels:
+                extra_kwargs.setdefault("clusters", graph.clusters)
+                extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
             if not graph.clusters:
                 extra_kwargs.setdefault(
                     "graphviz_edge_label_sizes",

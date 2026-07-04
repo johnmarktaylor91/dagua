@@ -5,6 +5,7 @@ import torch
 
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
+    _build_graphviz_x_aux_edges,
     _expand_long_edges_with_dummy_nodes,
     _graphviz_layer_assignments,
     _igraph_eades_layer_assignments,
@@ -273,6 +274,82 @@ def test_sugiyama_graphviz_edge_labels_create_midpoint_label_dummy() -> None:
     assert expanded.layers == [[0], [2], [1]]
     assert expanded.node_sizes[2, 0].item() == pytest.approx(152.0)
     assert expanded.node_sizes[2, 1].item() == pytest.approx(10.0)
+
+
+def test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths() -> None:
+    """Graphviz x constraints should use label-node ND_lw/ND_rw separately."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    layer_assignments = torch.tensor([0, 2], dtype=torch.long)
+    node_sizes = torch.full((2, 2), 54.0, dtype=torch.float32)
+    label_sizes = torch.tensor([[80.0, 10.0]], dtype=torch.float32)
+
+    expanded, _ = _expand_long_edges_with_dummy_nodes(
+        edge_index=edge_index,
+        layer_assignments=layer_assignments,
+        node_sizes=node_sizes,
+        num_original_nodes=2,
+        edge_label_sizes=label_sizes,
+        use_graphviz_edge_order=True,
+        graphviz_virtual_node_sep=72.0,
+    )
+    padded_sizes = torch.cat([expanded.node_sizes, torch.tensor([[54.0, 54.0]])], dim=0)
+    aux_edges, _ = _build_graphviz_x_aux_edges(
+        layers=[[0], [2, 3], [1]],
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_weights=None,
+        node_sizes=padded_sizes,
+        num_nodes=4,
+        num_original_nodes=2,
+        node_sep=72.0,
+        graphviz_left_widths=[*expanded.graphviz_left_widths, -1.0],
+        graphviz_right_widths=[*expanded.graphviz_right_widths, -1.0],
+    )
+
+    assert aux_edges[0] == (2, 3, 179, 0)
+
+
+def test_sugiyama_graphviz_clusters_affect_only_graphviz_mode() -> None:
+    """Cluster x-boundary handling should stay gated to graphviz fidelity."""
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    graphviz_sizes = torch.full((4, 2), 54.0, dtype=torch.float32)
+    clusters = {"left": [0, 2], "right": [1, 3]}
+
+    no_cluster = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        graphviz_node_sizes=graphviz_sizes,
+    )
+    clustered = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        graphviz_node_sizes=graphviz_sizes,
+        clusters=clusters,
+    )
+    igraph_clustered = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="igraph",
+        clusters=clusters,
+    )
+    igraph_plain = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="igraph",
+    )
+
+    assert torch.isfinite(clustered).all()
+    assert not torch.allclose(clustered[:, 0], no_cluster[:, 0])
+    assert torch.allclose(igraph_clustered, igraph_plain)
 
 
 def test_sugiyama_igraph_fidelity_packs_weak_components_independently() -> None:
