@@ -107,26 +107,15 @@ class ClusterTree:
             Cluster names ordered so every child appears before its parent.
         """
         ordered: list[str] = []
-
-        def visit(name: str) -> None:
-            """Append ``name`` after all children have been visited.
-
-            Parameters
-            ----------
-            name : str
-                Cluster name to traverse.
-
-            Returns
-            -------
-            None
-                The traversal appends into ``ordered``.
-            """
-            for child_name in self.children_per_cluster[name]:
-                visit(child_name)
-            ordered.append(name)
-
-        for root_name in self.roots:
-            visit(root_name)
+        stack: list[tuple[str, bool]] = [(root_name, False) for root_name in reversed(self.roots)]
+        while stack:
+            name, children_done = stack.pop()
+            if children_done:
+                ordered.append(name)
+                continue
+            stack.append((name, True))
+            for child_name in reversed(self.children_per_cluster[name]):
+                stack.append((child_name, False))
         return tuple(ordered)
 
     def top_down_order(self) -> Tuple[str, ...]:
@@ -138,26 +127,12 @@ class ClusterTree:
             Cluster names ordered so every parent appears before descendants.
         """
         ordered: list[str] = []
-
-        def visit(name: str) -> None:
-            """Append ``name`` before all children are visited.
-
-            Parameters
-            ----------
-            name : str
-                Cluster name to traverse.
-
-            Returns
-            -------
-            None
-                The traversal appends into ``ordered``.
-            """
+        stack = list(reversed(self.roots))
+        while stack:
+            name = stack.pop()
             ordered.append(name)
-            for child_name in self.children_per_cluster[name]:
-                visit(child_name)
-
-        for root_name in self.roots:
-            visit(root_name)
+            for child_name in reversed(self.children_per_cluster[name]):
+                stack.append(child_name)
         return tuple(ordered)
 
 
@@ -341,7 +316,11 @@ def cluster_subtree(tree: ClusterTree, name: str) -> Tuple[str, ...]:
     tuple[str, ...]
         Cluster names in preorder, including ``name``.
     """
-    ordered = [name]
-    for child_name in tree.children_per_cluster[name]:
-        ordered.extend(cluster_subtree(tree, child_name))
+    ordered: list[str] = []
+    stack = [name]
+    while stack:
+        current = stack.pop()
+        ordered.append(current)
+        for child_name in reversed(tree.children_per_cluster[current]):
+            stack.append(child_name)
     return tuple(ordered)
