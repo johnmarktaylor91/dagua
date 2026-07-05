@@ -85,7 +85,8 @@ The requested full neato family <=300, seeds 100-199 benchmark was not run in th
 
 ## Commit
 
-- `10a6a9f` (`fix(neato): tune disconnected component seeds`)
+- Implementation commit: `00bd57a` (`fix(neato): tune disconnected component seeds`)
+- Notes SHA is the follow-up documentation commit containing this correction.
 
 ## Concerns
 
