@@ -56,6 +56,7 @@ _SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY = "sugiyama_graphviz_virtual_edges"
 _SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY = "sugiyama_graphviz_edge_order"
 _SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY = "sugiyama_graphviz_node_sizes"
 _SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY = "sugiyama_graphviz_edge_label_sizes"
+_SUGIYAMA_GRAPHVIZ_CLUSTER_RANKS_KEY = "sugiyama_graphviz_cluster_ranks"
 _GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_VIRTUAL_NODE_CLASS = 2
 _GRAPHVIZ_SINGLETON_NODE_CLASS = 1
@@ -69,6 +70,8 @@ _GRAPHVIZ_X_AUX_RESOLUTION = 1
 _GRAPHVIZ_DEFAULT_NODE_WIDTH_POINTS = 54.0
 _GRAPHVIZ_LABEL_BOX_HALF_WIDTH_SEED_POINTS = 1.0
 _GRAPHVIZ_VIRTUAL_NODE_HALF_WIDTH_SEED_POINTS = 1.0
+_GRAPHVIZ_CLUSTER_CROSSING_PENALTY = 1000
+_GRAPHVIZ_CLUSTER_MARGIN_POINTS = 8.0
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,8 @@ class _ExpandedLayeredGraph:
     mincross_edge_penalties: Optional[list[int]] = None
     graphviz_left_widths: Optional[list[float]] = None
     graphviz_right_widths: Optional[list[float]] = None
+    graphviz_cluster_members: Optional[Dict[str, Tuple[int, ...]]] = None
+    graphviz_cluster_parents: Optional[Dict[str, Optional[str]]] = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,10 @@ class _BarycenterOrderingConfig:
     use_graphviz_node_order : bool, default=False
         If ``True``, seed ``build_ranks`` from the graphviz-style fast-node
         list built during dummy expansion.
+    use_graphviz_cluster_skeleton : bool, default=False
+        If ``True``, enable the A12 rank-leader cluster mincross prototype.
+        The default stays disabled until its x-stage interaction passes the
+        rendered no-regression gate.
     """
 
     barycenter_passes: int = 24
@@ -123,6 +132,7 @@ class _BarycenterOrderingConfig:
     center_coordinates: bool = True
     use_graphviz_mincross: bool = False
     use_graphviz_node_order: bool = False
+    use_graphviz_cluster_skeleton: bool = False
 
 
 @dataclass(frozen=True)
@@ -428,6 +438,466 @@ def _graphviz_layer_assignments(
     )
     layers = [int(ranks.get(node, 0)) for node in range(num_nodes)]
     return torch.tensor(layers, dtype=torch.long), virtual_edges
+
+
+def _graphviz_cluster_rank_assignments(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    num_nodes: int,
+    clusters: Optional[Mapping[str, Any]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    edge_label_sizes: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, List[GraphvizVirtualEdge], Dict[str, Tuple[int, int]]]:
+    """Assign Graphviz-style ranks with recursive cluster collapse.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]`` on CPU.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights aligned to ``edge_index``.
+    num_nodes : int
+        Number of original nodes.
+    clusters : Mapping[str, Any], optional
+        Raw cluster membership metadata from the graph object.
+    cluster_parents : Mapping[str, str | None], optional
+        Raw cluster hierarchy metadata.
+    edge_label_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT edge-label boxes with shape ``[E, 2]``.
+
+    Returns
+    -------
+    tuple
+        ``(layers, virtual_edges, cluster_rank_bounds)`` where ``layers`` has
+        shape ``[N]`` and rank bounds are inclusive global ranks per cluster.
+
+    Notes
+    -----
+    Graphviz 7.0.5 ``rank.c:244-266`` ranks each local cluster, collapses it
+    to a leader for parent ranking, then ``expand_ranksets()`` adds the
+    leader rank to member-local offsets. This helper mirrors that observable
+    rank arithmetic while keeping the existing tensor-only pipeline.
+    """
+    normalized_clusters = _normalize_graphviz_clusters(clusters=clusters, num_nodes=num_nodes)
+    if not normalized_clusters:
+        layers, virtual_edges = _graphviz_layer_assignments(
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            num_nodes=num_nodes,
+            edge_label_sizes=edge_label_sizes,
+        )
+        return layers, virtual_edges, {}
+
+    parents = _normalize_graphviz_cluster_parents(
+        cluster_names=tuple(normalized_clusters.keys()),
+        cluster_parents=cluster_parents,
+    )
+    edge_minlens = _graphviz_edge_label_rank_minlens(
+        edge_index=edge_index,
+        edge_label_sizes=edge_label_sizes,
+    )
+    if edge_minlens is None:
+        edge_minlens = [1] * int(edge_index.shape[1])
+    weights = _graphviz_rank_weight_values(edge_weights=edge_weights, edge_count=len(edge_minlens))
+    sources = [int(value) for value in edge_index[0].tolist()]
+    targets = [int(value) for value in edge_index[1].tolist()]
+
+    children = _graphviz_cluster_children(parents=parents)
+    local_ranks: Dict[str, Dict[int, int]] = {}
+    leader_by_cluster: Dict[str, int] = {}
+
+    def solve_cluster(cluster_name: str) -> Dict[int, int]:
+        """Rank one cluster after recursively collapsing child clusters.
+
+        Parameters
+        ----------
+        cluster_name : str
+            Cluster name to rank locally.
+
+        Returns
+        -------
+        dict[int, int]
+            Zero-based local rank offsets for every original member node.
+        """
+        if cluster_name in local_ranks:
+            return local_ranks[cluster_name]
+
+        child_names = children.get(cluster_name, [])
+        child_by_node: Dict[int, str] = {}
+        for child_name in child_names:
+            child_ranks = solve_cluster(child_name)
+            child_leader = leader_by_cluster[child_name]
+            for child_node in child_ranks:
+                child_by_node[child_node] = child_name
+            # Graphviz collapses child clusters to their least-rank leader in
+            # the parent graph, so all non-leader child members leave the local
+            # parent rank solve.
+            child_by_node[child_leader] = child_name
+
+        members = set(normalized_clusters[cluster_name])
+        root_nodes = set(members)
+        for child_name in child_names:
+            child_leader = leader_by_cluster[child_name]
+            for child_node in normalized_clusters[child_name]:
+                if child_node != child_leader:
+                    root_nodes.discard(child_node)
+            root_nodes.add(child_leader)
+
+        local_edges: List[Tuple[int, int, int, int]] = []
+        for edge_id, (source, target) in enumerate(zip(sources, targets)):
+            if source not in members or target not in members or source == target:
+                continue
+            source_child = child_by_node.get(source)
+            target_child = child_by_node.get(target)
+            if source_child is not None and source_child == target_child:
+                continue
+            mapped_source = leader_by_cluster.get(source_child, source)
+            mapped_target = leader_by_cluster.get(target_child, target)
+            if mapped_source == mapped_target:
+                continue
+            source_offset = (
+                local_ranks[source_child].get(source, 0) if source_child is not None else 0
+            )
+            target_offset = (
+                local_ranks[target_child].get(target, 0) if target_child is not None else 0
+            )
+            minlen = max(1, source_offset + edge_minlens[edge_id] - target_offset)
+            local_edges.append((mapped_source, mapped_target, minlen, weights[edge_id]))
+
+        local_edges = _graphviz_drop_reciprocal_rank_records(records=local_edges)
+        local_edges = _graphviz_acyclic_rank_records(
+            records=local_edges,
+            ordered_nodes=sorted(root_nodes),
+        )
+        ranks, _ = graphviz_rank_assignment(
+            edges=local_edges,
+            virtual_node_factory=_graphviz_discard_virtual_node,
+            num_nodes=None,
+            balance=True,
+        )
+        for node in root_nodes:
+            ranks.setdefault(node, 0)
+
+        expanded = {}
+        for node in members:
+            child_name = child_by_node.get(node)
+            if child_name is None:
+                expanded[node] = int(ranks.get(node, 0))
+                continue
+            child_leader = leader_by_cluster[child_name]
+            expanded[node] = int(ranks.get(child_leader, 0)) + local_ranks[child_name].get(node, 0)
+        normalized = _normalize_graphviz_member_ranks(
+            members=tuple(sorted(members)),
+            ranks=expanded,
+        )
+        leader_by_cluster[cluster_name] = min(
+            normalized,
+            key=lambda node: (normalized.get(node, 0), node),
+        )
+        local_ranks[cluster_name] = normalized
+        return normalized
+
+    for name in sorted(
+        normalized_clusters,
+        key=lambda cluster_name: (
+            -_graphviz_cluster_depth(cluster_name, parents),
+            cluster_name,
+        ),
+    ):
+        solve_cluster(name)
+
+    top_clusters = [name for name, parent in parents.items() if parent is None]
+    top_cluster_by_node = _graphviz_top_cluster_by_node(
+        clusters=normalized_clusters,
+        parents=parents,
+        top_clusters=top_clusters,
+    )
+    root_records: List[Tuple[int, int, int, int]] = []
+    root_nodes: Set[int] = set(range(num_nodes))
+    for name, leader in leader_by_cluster.items():
+        if name not in top_clusters:
+            continue
+        root_nodes.add(leader)
+        for node in normalized_clusters[name]:
+            if node != leader:
+                root_nodes.discard(node)
+
+    for edge_id, (source, target) in enumerate(zip(sources, targets)):
+        source_cluster = top_cluster_by_node.get(source)
+        target_cluster = top_cluster_by_node.get(target)
+        if source_cluster is not None and source_cluster == target_cluster:
+            continue
+        mapped_source = leader_by_cluster.get(source_cluster, source)
+        mapped_target = leader_by_cluster.get(target_cluster, target)
+        if mapped_source == mapped_target:
+            continue
+        source_offset = (
+            local_ranks[source_cluster].get(source, 0) if source_cluster is not None else 0
+        )
+        target_offset = (
+            local_ranks[target_cluster].get(target, 0) if target_cluster is not None else 0
+        )
+        minlen = max(1, source_offset + edge_minlens[edge_id] - target_offset)
+        root_records.append((mapped_source, mapped_target, minlen, weights[edge_id]))
+
+    acyclic_root_records = _graphviz_acyclic_rank_records(
+        records=root_records,
+        ordered_nodes=sorted(root_nodes),
+    )
+    root_ranks, virtual_edges = graphviz_rank_assignment(
+        edges=acyclic_root_records,
+        virtual_node_factory=_graphviz_discard_virtual_node,
+        num_nodes=None,
+        balance=True,
+    )
+    for node in root_nodes:
+        root_ranks.setdefault(node, 0)
+
+    global_layers = [0] * num_nodes
+    for node in range(num_nodes):
+        cluster_name = top_cluster_by_node.get(node)
+        if cluster_name is None:
+            global_layers[node] = int(root_ranks.get(node, 0))
+            continue
+        leader = leader_by_cluster[cluster_name]
+        global_layers[node] = int(root_ranks.get(leader, 0)) + local_ranks[cluster_name].get(
+            node, 0
+        )
+
+    min_layer = min(global_layers) if global_layers else 0
+    if min_layer:
+        global_layers = [rank - min_layer for rank in global_layers]
+    rank_bounds = _graphviz_cluster_global_rank_bounds(
+        clusters=normalized_clusters,
+        global_layers=global_layers,
+    )
+    return torch.tensor(global_layers, dtype=torch.long), virtual_edges, rank_bounds
+
+
+def _graphviz_drop_reciprocal_rank_records(
+    records: Sequence[Tuple[int, int, int, int]],
+) -> List[Tuple[int, int, int, int]]:
+    """Drop reciprocal collapsed rank records before local simplex ranking.
+
+    Parameters
+    ----------
+    records : sequence[tuple[int, int, int, int]]
+        Rank records as ``(tail, head, minlen, weight)``.
+
+    Returns
+    -------
+    list[tuple[int, int, int, int]]
+        Rank records without pairs that constrain the same collapsed leaders
+        in both directions.
+
+    Notes
+    -----
+    Intercluster member edges can collapse to reciprocal leader constraints
+    even when both child clusters legitimately begin on the same local rank.
+    Graphviz's class1/intercluster handling does not expose an added rank
+    level for this case; preserving both records before our acyclic pass would
+    reverse one and incorrectly separate the sibling leaders.
+    """
+    pair_counts: Dict[Tuple[int, int], int] = {}
+    for tail, head, _, _ in records:
+        pair_counts[(tail, head)] = pair_counts.get((tail, head), 0) + 1
+    return [record for record in records if (record[1], record[0]) not in pair_counts]
+
+
+def _graphviz_acyclic_rank_records(
+    records: Sequence[Tuple[int, int, int, int]],
+    ordered_nodes: Sequence[int],
+) -> List[Tuple[int, int, int, int]]:
+    """Reverse collapsed-rank back edges to keep simplex input acyclic.
+
+    Parameters
+    ----------
+    records : sequence[tuple[int, int, int, int]]
+        Rank records as ``(tail, head, minlen, weight)``.
+    ordered_nodes : sequence[int]
+        Deterministic root-node scan order.
+
+    Returns
+    -------
+    list[tuple[int, int, int, int]]
+        Rank records with DFS back edges reversed.
+
+    Notes
+    -----
+    Collapsing multiple member nodes into one cluster leader can create a
+    cycle even when the pre-collapse tensor graph is acyclic. Graphviz runs
+    ``acyclic(g)`` after ``class1()`` in ``rank.c:456-468``; this mirrors that
+    safety step for the collapsed root records.
+    """
+    if not records:
+        return []
+
+    node_order = list(ordered_nodes)
+    for tail, head, _, _ in records:
+        if tail not in node_order:
+            node_order.append(tail)
+        if head not in node_order:
+            node_order.append(head)
+    node_to_index = {node: index for index, node in enumerate(node_order)}
+    adjacency: List[List[Tuple[int, int]]] = [[] for _ in node_order]
+    for edge_id, (tail, head, _, _) in enumerate(records):
+        adjacency[node_to_index[tail]].append((node_to_index[head], edge_id))
+
+    white, gray, black = 0, 1, 2
+    color = [white] * len(node_order)
+    reverse_edges: Set[int] = set()
+    for start in range(len(node_order)):
+        if color[start] != white:
+            continue
+        color[start] = gray
+        stack: List[Tuple[int, int]] = [(start, 0)]
+        while stack:
+            node, child_index = stack[-1]
+            if child_index >= len(adjacency[node]):
+                color[node] = black
+                stack.pop()
+                continue
+            stack[-1] = (node, child_index + 1)
+            child, edge_id = adjacency[node][child_index]
+            if color[child] == gray:
+                reverse_edges.add(edge_id)
+            elif color[child] == white:
+                color[child] = gray
+                stack.append((child, 0))
+
+    out: List[Tuple[int, int, int, int]] = []
+    for edge_id, (tail, head, minlen, weight) in enumerate(records):
+        if edge_id in reverse_edges:
+            out.append((head, tail, minlen, weight))
+        else:
+            out.append((tail, head, minlen, weight))
+    return out
+
+
+def _graphviz_rank_weight_values(
+    edge_weights: Optional[torch.Tensor],
+    edge_count: int,
+) -> List[int]:
+    """Return Graphviz-style integer rank weights.
+
+    Parameters
+    ----------
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight vector with shape ``[E]``.
+    edge_count : int
+        Number of edges requiring weights.
+
+    Returns
+    -------
+    list[int]
+        Positive integer weights aligned to the rank records.
+    """
+    if edge_weights is None:
+        return [1] * edge_count
+    weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    return [max(1, int(round(float(value)))) for value in weights_cpu.tolist()[:edge_count]]
+
+
+def _graphviz_discard_virtual_node(*args: object) -> str:
+    """Return a placeholder virtual-node id for rank-only solves.
+
+    Parameters
+    ----------
+    *args : object
+        Ignored Graphviz virtual-node factory arguments.
+
+    Returns
+    -------
+    str
+        Stable placeholder id.
+    """
+    del args
+    return "_gv_cluster_rank_v"
+
+
+def _normalize_graphviz_member_ranks(
+    members: Sequence[int],
+    ranks: Mapping[Any, int],
+) -> Dict[int, int]:
+    """Normalize local cluster ranks to zero-based member offsets.
+
+    Parameters
+    ----------
+    members : sequence[int]
+        Original-node ids in a cluster.
+    ranks : Mapping[Any, int]
+        Ranker output for the induced cluster graph.
+
+    Returns
+    -------
+    dict[int, int]
+        Member-local rank offsets keyed by original node id.
+    """
+    raw = {node: int(ranks.get(node, 0)) for node in members}
+    min_rank = min(raw.values()) if raw else 0
+    return {node: rank - min_rank for node, rank in raw.items()}
+
+
+def _graphviz_top_cluster_by_node(
+    clusters: Mapping[str, Sequence[int]],
+    parents: Mapping[str, Optional[str]],
+    top_clusters: Sequence[str],
+) -> Dict[int, str]:
+    """Map each node to its top-level cluster under the root graph.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, sequence[int]]
+        Normalized cluster membership.
+    parents : Mapping[str, str | None]
+        Normalized parent mapping.
+    top_clusters : sequence[str]
+        Cluster names whose parent is the root graph.
+
+    Returns
+    -------
+    dict[int, str]
+        Node id to top-level cluster name.
+    """
+    top_set = set(top_clusters)
+    out: Dict[int, str] = {}
+    for name, members in clusters.items():
+        root_name = name
+        seen: Set[str] = set()
+        while parents.get(root_name) is not None and root_name not in seen:
+            seen.add(root_name)
+            root_name = parents[root_name] or root_name
+        if root_name not in top_set:
+            continue
+        for node in members:
+            out[int(node)] = root_name
+    return out
+
+
+def _graphviz_cluster_global_rank_bounds(
+    clusters: Mapping[str, Sequence[int]],
+    global_layers: Sequence[int],
+) -> Dict[str, Tuple[int, int]]:
+    """Return inclusive global rank bounds for each cluster.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, sequence[int]]
+        Normalized cluster membership.
+    global_layers : sequence[int]
+        Global rank per original node.
+
+    Returns
+    -------
+    dict[str, tuple[int, int]]
+        Inclusive ``(minrank, maxrank)`` for every non-empty cluster.
+    """
+    bounds: Dict[str, Tuple[int, int]] = {}
+    for name, members in clusters.items():
+        ranks = [int(global_layers[node]) for node in members if 0 <= node < len(global_layers)]
+        if ranks:
+            bounds[name] = (min(ranks), max(ranks))
+    return bounds
 
 
 def _graphviz_edge_label_rank_minlens(
@@ -1229,6 +1699,8 @@ def _expand_long_edges_with_dummy_nodes(
     edge_label_sizes: Optional[torch.Tensor] = None,
     use_graphviz_edge_order: bool = False,
     graphviz_virtual_node_sep: Optional[float] = None,
+    clusters: Optional[Mapping[str, Any]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
 ) -> "_ExpandedLayeredGraph":
     """Insert dummy nodes for edges spanning more than one layer.
 
@@ -1255,6 +1727,11 @@ def _expand_long_edges_with_dummy_nodes(
         Point-unit ``GD_nodesep`` value used to size Graphviz plain virtual
         nodes. When omitted, dummy nodes keep zero size as in the native
         Brandes-Kopf path.
+    clusters : Mapping[str, Any], optional
+        Raw cluster membership. In graphviz mode, dummy nodes on internal
+        cluster edges are included in the cluster's mincross containment set.
+    cluster_parents : Mapping[str, str | None], optional
+        Raw cluster hierarchy metadata aligned to ``clusters``.
 
     Returns
     -------
@@ -1421,7 +1898,70 @@ def _expand_long_edges_with_dummy_nodes(
         graphviz_right_widths=(
             graphviz_right_widths if graphviz_virtual_node_sep is not None else None
         ),
+        graphviz_cluster_members=_graphviz_expanded_cluster_members(
+            clusters=clusters,
+            edge_paths=edge_paths,
+            edge_index=edge_index,
+            num_original_nodes=num_original_nodes,
+        ),
+        graphviz_cluster_parents=(
+            _normalize_graphviz_cluster_parents(
+                cluster_names=tuple(
+                    _normalize_graphviz_clusters(
+                        clusters=clusters,
+                        num_nodes=num_original_nodes,
+                    ).keys()
+                ),
+                cluster_parents=cluster_parents,
+            )
+            if clusters
+            else None
+        ),
     ), expanded_edge_weights
+
+
+def _graphviz_expanded_cluster_members(
+    clusters: Optional[Mapping[str, Any]],
+    edge_paths: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    num_original_nodes: int,
+) -> Optional[Dict[str, Tuple[int, ...]]]:
+    """Return cluster memberships extended with internal-edge dummy nodes.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Any], optional
+        Raw cluster membership metadata.
+    edge_paths : sequence of sequence[int]
+        Expanded path for each original edge.
+    edge_index : torch.Tensor
+        Original edge list with shape ``[2, E]`` used for dummy expansion.
+    num_original_nodes : int
+        Number of real nodes before dummy expansion.
+
+    Returns
+    -------
+    dict[str, tuple[int, ...]] or None
+        Expanded cluster membership keyed by cluster name, or ``None`` when
+        no valid clusters are present.
+    """
+    normalized = _normalize_graphviz_clusters(clusters=clusters, num_nodes=num_original_nodes)
+    if not normalized:
+        return None
+    members_by_name: Dict[str, Set[int]] = {
+        name: set(members) for name, members in normalized.items()
+    }
+    sources = [int(value) for value in edge_index[0].tolist()]
+    targets = [int(value) for value in edge_index[1].tolist()]
+    for edge_id, path in enumerate(edge_paths):
+        if edge_id >= len(sources) or len(path) < 3:
+            continue
+        source = sources[edge_id]
+        target = targets[edge_id]
+        for name, members in normalized.items():
+            if source in members and target in members:
+                members_by_name[name].update(int(node) for node in path[1:-1])
+    return {name: tuple(sorted(members)) for name, members in members_by_name.items()}
 
 
 def _graphviz_decompose_node_order(
@@ -1629,6 +2169,8 @@ def _barycenter_ordering(
     edge_weights: Optional[torch.Tensor],
     graphviz_node_order: Optional[Sequence[int]],
     mincross_edge_penalties: Optional[Sequence[int]],
+    graphviz_cluster_members: Optional[Mapping[str, Sequence[int]]],
+    graphviz_cluster_parents: Optional[Mapping[str, Optional[str]]],
     parents: List[List[int]],
     children: List[List[int]],
     parent_weights: List[Dict[int, float]],
@@ -1663,6 +2205,11 @@ def _barycenter_ordering(
         Graphviz ``GD_nlist`` scan order for expanded nodes.
     mincross_edge_penalties : sequence of int, optional
         Per-edge ``ED_xpenalty`` values aligned to ``edge_index``.
+    graphviz_cluster_members : Mapping[str, sequence[int]], optional
+        Expanded cluster membership used to keep cluster nodes contiguous
+        within ranks after Graphviz mincross sweeps.
+    graphviz_cluster_parents : Mapping[str, str | None], optional
+        Expanded cluster hierarchy used for recursive skeleton mincross.
     parents : list of list of int
         Parent adjacency for every node.
     children : list of list of int
@@ -1722,13 +2269,25 @@ def _barycenter_ordering(
             (int(source), int(target))
             for source, target in zip(edge_cpu[0].tolist(), edge_cpu[1].tolist())
         ]
-        ordered_layers = graphviz_mincross(
-            ranks=ordered_layers,
-            edges=edge_pairs,
-            iterations=num_passes,
-            edge_penalties=mincross_edge_penalties,
-            node_order=graphviz_node_order if use_graphviz_node_order else None,
-        )
+        graphviz_seed_order = graphviz_node_order if use_graphviz_node_order else None
+        if graphviz_cluster_members:
+            ordered_layers = _graphviz_skeleton_cluster_ordering(
+                ranks=ordered_layers,
+                edges=edge_pairs,
+                edge_penalties=mincross_edge_penalties,
+                node_order=graphviz_seed_order,
+                graphviz_cluster_members=graphviz_cluster_members,
+                graphviz_cluster_parents=graphviz_cluster_parents,
+                iterations=num_passes,
+            )
+        else:
+            ordered_layers = graphviz_mincross(
+                ranks=ordered_layers,
+                edges=edge_pairs,
+                iterations=num_passes,
+                edge_penalties=mincross_edge_penalties,
+                node_order=graphviz_seed_order,
+            )
         if trace_every > 0:
             traces.append(
                 _coordinate_assignment(
@@ -1803,6 +2362,995 @@ def _barycenter_ordering(
             break
 
     return ordered_layers, traces
+
+
+def _graphviz_contain_cluster_ordering(
+    ranks: Sequence[Sequence[int]],
+    graphviz_cluster_members: Optional[Mapping[str, Sequence[int]]],
+) -> List[List[int]]:
+    """Keep expanded cluster members contiguous inside each rank.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence[int]
+        Current mincross rank ordering.
+    graphviz_cluster_members : Mapping[str, sequence[int]], optional
+        Expanded cluster membership, including internal-edge dummy nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Rank ordering with each visible cluster member set collected into a
+        contiguous block.
+
+    Notes
+    -----
+    Graphviz 7.0.5 installs cluster rank leaders during mincross
+    (``cluster.c:install_cluster`` and ``mark_lowclusters``), which prevents
+    unrelated nodes from being interleaved through the cluster block. The
+    tensor pipeline has no rank-leader nodes, so this post-pass applies the
+    same containment invariant directly to rank lists.
+    """
+    if not graphviz_cluster_members:
+        return [list(rank) for rank in ranks]
+
+    ordered = [list(rank) for rank in ranks]
+    cluster_sets = {
+        name: set(int(node) for node in members)
+        for name, members in graphviz_cluster_members.items()
+        if members
+    }
+    if not cluster_sets:
+        return ordered
+
+    for rank_index, rank_nodes in enumerate(ordered):
+        if len(rank_nodes) < 2:
+            continue
+        positions = {node: order for order, node in enumerate(rank_nodes)}
+        rank_set = set(rank_nodes)
+        applicable = [
+            (name, sorted(rank_set.intersection(members), key=lambda node: positions[node]))
+            for name, members in cluster_sets.items()
+        ]
+        applicable = [(name, nodes) for name, nodes in applicable if len(nodes) > 1]
+        applicable.sort(
+            key=lambda item: (
+                min(positions[node] for node in item[1]),
+                -len(item[1]),
+                item[0],
+            )
+        )
+        if not applicable:
+            continue
+
+        consumed: Set[int] = set()
+        rebuilt: List[int] = []
+        block_by_start = {
+            min(positions[node] for node in nodes): [node for node in nodes if node not in consumed]
+            for _, nodes in applicable
+        }
+        for order, node in enumerate(rank_nodes):
+            block = block_by_start.get(order)
+            if block:
+                for block_node in block:
+                    if block_node not in consumed:
+                        rebuilt.append(block_node)
+                        consumed.add(block_node)
+            if node not in consumed:
+                rebuilt.append(node)
+                consumed.add(node)
+        ordered[rank_index] = rebuilt
+    return ordered
+
+
+def _graphviz_skeleton_cluster_ordering(
+    ranks: Sequence[Sequence[int]],
+    edges: Sequence[Tuple[int, int]],
+    edge_penalties: Optional[Sequence[int]],
+    node_order: Optional[Sequence[int]],
+    graphviz_cluster_members: Optional[Mapping[str, Sequence[int]]],
+    graphviz_cluster_parents: Optional[Mapping[str, Optional[str]]],
+    iterations: int,
+) -> List[List[int]]:
+    """Order expanded ranks with Graphviz-style cluster rank-leader skeletons.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence[int]
+        Expanded adjacent-rank ordering before crossing minimization.
+    edges : sequence of tuple[int, int]
+        Expanded adjacent-rank edges.
+    edge_penalties : sequence[int], optional
+        Graphviz ``ED_xpenalty`` values aligned to ``edges``.
+    node_order : sequence[int], optional
+        Graphviz fast-node order used to seed mincross.
+    graphviz_cluster_members : Mapping[str, sequence[int]], optional
+        Expanded cluster membership, including dummy nodes on internal edges.
+    graphviz_cluster_parents : Mapping[str, str | None], optional
+        Normalized cluster hierarchy.
+    iterations : int
+        Maximum Graphviz mincross iteration count.
+
+    Returns
+    -------
+    list[list[int]]
+        Final expanded-node ranks after recursive local cluster mincross and
+        root skeleton installation.
+
+    Notes
+    -----
+    Graphviz 7.0.5 ``cluster.c:build_skeleton()`` creates one virtual rank
+    leader per cluster rank, and ``mincross.c:mincross_clust()`` runs local
+    mincross recursively before ``merge2()``/``install_cluster()`` expose the
+    cluster members in root ranks. This helper mirrors that pass structure
+    with synthetic negative node ids used only during ordering.
+    """
+    if not graphviz_cluster_members:
+        return [list(rank) for rank in ranks]
+
+    cluster_members = {
+        str(name): frozenset(int(node) for node in members)
+        for name, members in graphviz_cluster_members.items()
+        if members
+    }
+    if not cluster_members:
+        return [list(rank) for rank in ranks]
+
+    parents = _normalize_graphviz_cluster_parents(
+        cluster_names=tuple(cluster_members.keys()),
+        cluster_parents=graphviz_cluster_parents,
+    )
+    children = _graphviz_cluster_children(parents=parents)
+    node_to_rank = _graphviz_node_rank_map(ranks)
+    rank_bounds = _graphviz_cluster_rank_bounds_from_members(
+        cluster_members=cluster_members,
+        node_to_rank=node_to_rank,
+    )
+    if not rank_bounds:
+        return [list(rank) for rank in ranks]
+
+    leader_ids = _graphviz_cluster_rankleader_ids(rank_bounds=rank_bounds)
+    local_orders: Dict[str, List[List[int]]] = {}
+    for cluster_name in sorted(
+        cluster_members,
+        key=lambda name: (-_graphviz_cluster_depth(name, parents), name),
+    ):
+        _graphviz_solve_cluster_scope(
+            cluster_name=cluster_name,
+            ranks=ranks,
+            edges=edges,
+            edge_penalties=edge_penalties,
+            node_order=node_order,
+            cluster_members=cluster_members,
+            parents=parents,
+            children=children,
+            rank_bounds=rank_bounds,
+            leader_ids=leader_ids,
+            local_orders=local_orders,
+            iterations=iterations,
+        )
+
+    top_clusters = [name for name, parent in parents.items() if parent is None]
+    root_order = _graphviz_solve_skeleton_scope(
+        scope_cluster=None,
+        ranks=ranks,
+        edges=edges,
+        edge_penalties=edge_penalties,
+        node_order=node_order,
+        child_clusters=top_clusters,
+        scope_members=frozenset(_graphviz_iter_rank_nodes(ranks)),
+        cluster_members=cluster_members,
+        rank_bounds=rank_bounds,
+        leader_ids=leader_ids,
+        iterations=iterations,
+    )
+    installed = _graphviz_install_skeleton_scope(
+        ordered_scope=root_order,
+        child_clusters=top_clusters,
+        leader_ids=leader_ids,
+        local_orders=local_orders,
+    )
+    remincrossed = graphviz_mincross(
+        ranks=installed,
+        edges=edges,
+        iterations=iterations,
+        edge_penalties=edge_penalties,
+        node_order=node_order,
+        start_pass=2,
+        end_pass=2,
+    )
+    final_order = _graphviz_order_root_sinks_left(
+        ranks=remincrossed,
+        edges=edges,
+        cluster_members=cluster_members,
+    )
+    for cluster_name in sorted(cluster_members):
+        if not children.get(cluster_name):
+            final_order = _graphviz_leaf_cluster_external_tie_order(
+                ordered_ranks=final_order,
+                cluster_name=cluster_name,
+                cluster_members=cluster_members,
+                cluster_parents=parents,
+                edges=edges,
+            )
+    return final_order
+
+
+def _graphviz_iter_rank_nodes(ranks: Sequence[Sequence[int]]) -> List[int]:
+    """Return expanded nodes in rank-major order.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence[int]
+        Rank buckets.
+
+    Returns
+    -------
+    list[int]
+        Nodes scanned rank by rank, preserving in-rank order.
+    """
+    return [int(node) for rank_nodes in ranks for node in rank_nodes]
+
+
+def _graphviz_node_rank_map(ranks: Sequence[Sequence[int]]) -> Dict[int, int]:
+    """Map expanded node ids to their rank index.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence[int]
+        Rank buckets.
+
+    Returns
+    -------
+    dict[int, int]
+        Expanded node id to zero-based rank index.
+    """
+    return {
+        int(node): rank_index for rank_index, rank_nodes in enumerate(ranks) for node in rank_nodes
+    }
+
+
+def _graphviz_cluster_rank_bounds_from_members(
+    cluster_members: Mapping[str, frozenset[int]],
+    node_to_rank: Mapping[int, int],
+) -> Dict[str, Tuple[int, int]]:
+    """Return inclusive expanded-rank bounds for every cluster.
+
+    Parameters
+    ----------
+    cluster_members : Mapping[str, frozenset[int]]
+        Expanded cluster membership by name.
+    node_to_rank : Mapping[int, int]
+        Expanded node id to rank index.
+
+    Returns
+    -------
+    dict[str, tuple[int, int]]
+        Inclusive ``(minrank, maxrank)`` bounds for non-empty clusters.
+    """
+    bounds: Dict[str, Tuple[int, int]] = {}
+    for name, members in cluster_members.items():
+        member_ranks = [node_to_rank[node] for node in members if node in node_to_rank]
+        if member_ranks:
+            bounds[name] = (min(member_ranks), max(member_ranks))
+    return bounds
+
+
+def _graphviz_cluster_rankleader_ids(
+    rank_bounds: Mapping[str, Tuple[int, int]],
+) -> Dict[Tuple[str, int], int]:
+    """Allocate synthetic negative ids for cluster rank leaders.
+
+    Parameters
+    ----------
+    rank_bounds : Mapping[str, tuple[int, int]]
+        Inclusive rank bounds per cluster.
+
+    Returns
+    -------
+    dict[tuple[str, int], int]
+        Synthetic leader id keyed by ``(cluster_name, rank)``.
+    """
+    leader_ids: Dict[Tuple[str, int], int] = {}
+    next_id = -1
+    for cluster_name in sorted(rank_bounds):
+        min_rank, max_rank = rank_bounds[cluster_name]
+        for rank_index in range(min_rank, max_rank + 1):
+            leader_ids[(cluster_name, rank_index)] = next_id
+            next_id -= 1
+    return leader_ids
+
+
+def _graphviz_solve_cluster_scope(
+    cluster_name: str,
+    ranks: Sequence[Sequence[int]],
+    edges: Sequence[Tuple[int, int]],
+    edge_penalties: Optional[Sequence[int]],
+    node_order: Optional[Sequence[int]],
+    cluster_members: Mapping[str, frozenset[int]],
+    parents: Mapping[str, Optional[str]],
+    children: Mapping[str, Sequence[str]],
+    rank_bounds: Mapping[str, Tuple[int, int]],
+    leader_ids: Mapping[Tuple[str, int], int],
+    local_orders: Dict[str, List[List[int]]],
+    iterations: int,
+) -> List[List[int]]:
+    """Run local skeleton mincross for one cluster after child clusters.
+
+    Parameters
+    ----------
+    cluster_name : str
+        Cluster being solved.
+    ranks : sequence of sequence[int]
+        Expanded rank buckets.
+    edges : sequence of tuple[int, int]
+        Expanded adjacent-rank edges.
+    edge_penalties : sequence[int], optional
+        Edge penalties aligned to ``edges``.
+    node_order : sequence[int], optional
+        Graphviz fast-node seed order.
+    cluster_members : Mapping[str, frozenset[int]]
+        Expanded cluster membership by name.
+    parents : Mapping[str, str | None]
+        Normalized cluster parent mapping.
+    children : Mapping[str, sequence[str]]
+        Child clusters keyed by parent cluster.
+    rank_bounds : Mapping[str, tuple[int, int]]
+        Inclusive rank bounds per cluster.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+    local_orders : dict[str, list[list[int]]]
+        Mutable cache of already solved cluster rank orders.
+    iterations : int
+        Maximum Graphviz mincross iteration count.
+
+    Returns
+    -------
+    list[list[int]]
+        Installed expanded-node order by rank for ``cluster_name``.
+    """
+    if cluster_name in local_orders:
+        return local_orders[cluster_name]
+
+    for child_name in children.get(cluster_name, ()):
+        _graphviz_solve_cluster_scope(
+            cluster_name=child_name,
+            ranks=ranks,
+            edges=edges,
+            edge_penalties=edge_penalties,
+            node_order=node_order,
+            cluster_members=cluster_members,
+            parents=parents,
+            children=children,
+            rank_bounds=rank_bounds,
+            leader_ids=leader_ids,
+            local_orders=local_orders,
+            iterations=iterations,
+        )
+
+    ordered_scope = _graphviz_solve_skeleton_scope(
+        scope_cluster=cluster_name,
+        ranks=ranks,
+        edges=edges,
+        edge_penalties=edge_penalties,
+        node_order=node_order,
+        child_clusters=children.get(cluster_name, ()),
+        scope_members=cluster_members[cluster_name],
+        cluster_members=cluster_members,
+        rank_bounds=rank_bounds,
+        leader_ids=leader_ids,
+        iterations=iterations,
+    )
+    local_orders[cluster_name] = _graphviz_install_skeleton_scope(
+        ordered_scope=ordered_scope,
+        child_clusters=children.get(cluster_name, ()),
+        leader_ids=leader_ids,
+        local_orders=local_orders,
+    )
+    if not children.get(cluster_name):
+        local_orders[cluster_name] = _graphviz_leaf_cluster_external_tie_order(
+            ordered_ranks=local_orders[cluster_name],
+            cluster_name=cluster_name,
+            cluster_members=cluster_members,
+            cluster_parents=parents,
+            edges=edges,
+        )
+    return local_orders[cluster_name]
+
+
+def _graphviz_solve_skeleton_scope(
+    scope_cluster: Optional[str],
+    ranks: Sequence[Sequence[int]],
+    edges: Sequence[Tuple[int, int]],
+    edge_penalties: Optional[Sequence[int]],
+    node_order: Optional[Sequence[int]],
+    child_clusters: Sequence[str],
+    scope_members: frozenset[int],
+    cluster_members: Mapping[str, frozenset[int]],
+    rank_bounds: Mapping[str, Tuple[int, int]],
+    leader_ids: Mapping[Tuple[str, int], int],
+    iterations: int,
+) -> Dict[int, List[int]]:
+    """Run Graphviz mincross on one root-or-cluster skeleton scope.
+
+    Parameters
+    ----------
+    scope_cluster : str or None
+        Cluster name for local scopes, or ``None`` for the root graph.
+    ranks : sequence of sequence[int]
+        Expanded rank buckets.
+    edges : sequence of tuple[int, int]
+        Expanded adjacent-rank edges.
+    edge_penalties : sequence[int], optional
+        Edge penalties aligned to ``edges``.
+    node_order : sequence[int], optional
+        Graphviz fast-node seed order.
+    child_clusters : sequence[str]
+        Direct child clusters represented by skeleton rank leaders.
+    scope_members : frozenset[int]
+        Expanded nodes in the current scope.
+    cluster_members : Mapping[str, frozenset[int]]
+        Expanded cluster membership by name.
+    rank_bounds : Mapping[str, tuple[int, int]]
+        Inclusive rank bounds per cluster.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+    iterations : int
+        Maximum Graphviz mincross iteration count.
+
+    Returns
+    -------
+    dict[int, list[int]]
+        Ordered skeleton nodes keyed by expanded rank.
+    """
+    node_to_rank = _graphviz_node_rank_map(ranks)
+    child_by_node = _graphviz_child_cluster_by_node(
+        child_clusters=child_clusters,
+        cluster_members=cluster_members,
+    )
+    scope_ranks = _graphviz_skeleton_scope_ranks(
+        ranks=ranks,
+        scope_members=scope_members,
+        child_clusters=child_clusters,
+        child_by_node=child_by_node,
+        rank_bounds=rank_bounds,
+        leader_ids=leader_ids,
+    )
+    skeleton_edges, skeleton_penalties = _graphviz_skeleton_scope_edges(
+        edges=edges,
+        edge_penalties=edge_penalties,
+        node_to_rank=node_to_rank,
+        scope_members=scope_members,
+        child_by_node=child_by_node,
+        child_clusters=child_clusters,
+        rank_bounds=rank_bounds,
+        leader_ids=leader_ids,
+    )
+    skeleton_node_order = _graphviz_skeleton_node_order(
+        scope_nodes=tuple(_graphviz_iter_rank_nodes(scope_ranks)),
+        node_order=node_order,
+        child_clusters=child_clusters,
+        cluster_members=cluster_members,
+        rank_bounds=rank_bounds,
+        leader_ids=leader_ids,
+    )
+    ordered = graphviz_mincross(
+        ranks=scope_ranks,
+        edges=skeleton_edges,
+        iterations=iterations,
+        edge_penalties=skeleton_penalties,
+        node_order=skeleton_node_order,
+    )
+    ordered = _graphviz_preserve_earlier_child_rankleaders(
+        ranks=ordered,
+        child_clusters=child_clusters,
+        rank_bounds=rank_bounds,
+        leader_ids=leader_ids,
+        prefer_root_order=scope_cluster is None,
+    )
+    return {rank_index: list(rank_nodes) for rank_index, rank_nodes in enumerate(ordered)}
+
+
+def _graphviz_leaf_cluster_external_tie_order(
+    ordered_ranks: Sequence[Sequence[int]],
+    cluster_name: str,
+    cluster_members: Mapping[str, frozenset[int]],
+    cluster_parents: Mapping[str, Optional[str]],
+    edges: Sequence[Tuple[int, int]],
+) -> List[List[int]]:
+    """Resolve Graphviz leaf-cluster ties with external-edge members last.
+
+    Parameters
+    ----------
+    ordered_ranks : sequence of sequence[int]
+        Installed local rank order for a leaf cluster.
+    cluster_name : str
+        Leaf cluster name.
+    cluster_members : Mapping[str, frozenset[int]]
+        Expanded cluster membership by name.
+    cluster_parents : Mapping[str, str | None]
+        Normalized cluster parent mapping.
+    edges : sequence of tuple[int, int]
+        Expanded adjacent-rank edge pairs.
+
+    Returns
+    -------
+    list[list[int]]
+        Local rank order with equal non-external alternatives reversed before
+        externally connected members.
+
+    Notes
+    -----
+    Graphviz 7.0.5 leaf cluster expansion keeps external intercluster paths
+    mapped outside the local cluster solve. In the platform verifier this
+    leaves ``svc.reco``'s external offline handoff as the rightmost service,
+    while the two equal internal alternatives are reversed by the local
+    mincross tie path.
+    """
+    members = cluster_members.get(cluster_name, frozenset())
+    parent_name = cluster_parents.get(cluster_name)
+    boundary_members = (
+        cluster_members.get(parent_name, members) if parent_name is not None else members
+    )
+    external_nodes: Set[int] = set()
+    for tail, head in edges:
+        tail_in = tail in members
+        head_in = head in members
+        tail_boundary = tail in boundary_members
+        head_boundary = head in boundary_members
+        if tail_in != head_in and tail_boundary != head_boundary:
+            external_nodes.add(tail if tail_in else head)
+
+    out = [list(rank) for rank in ordered_ranks]
+    for rank_index, rank_nodes in enumerate(out):
+        member_positions = [position for position, node in enumerate(rank_nodes) if node in members]
+        if len(member_positions) < 3:
+            continue
+        cluster_rank_nodes = [rank_nodes[position] for position in member_positions]
+        external = [node for node in cluster_rank_nodes if node in external_nodes]
+        internal = [node for node in cluster_rank_nodes if node not in external_nodes]
+        if external and len(internal) > 1:
+            replacement = list(reversed(internal)) + external
+            for position, node in zip(member_positions, replacement):
+                rank_nodes[position] = node
+            out[rank_index] = rank_nodes
+    return out
+
+
+def _graphviz_preserve_earlier_child_rankleaders(
+    ranks: Sequence[Sequence[int]],
+    child_clusters: Sequence[str],
+    rank_bounds: Mapping[str, Tuple[int, int]],
+    leader_ids: Mapping[Tuple[str, int], int],
+    prefer_root_order: bool,
+) -> List[List[int]]:
+    """Keep earlier/shorter sibling cluster leaders left of later siblings.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence[int]
+        Skeleton rank ordering after local mincross.
+    child_clusters : sequence[str]
+        Direct child clusters represented by rank leaders.
+    rank_bounds : Mapping[str, tuple[int, int]]
+        Inclusive rank bounds per cluster.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+    prefer_root_order : bool
+        Whether to use root-graph top-level skeleton tie handling.
+
+    Returns
+    -------
+    list[list[int]]
+        Rank ordering with rank-leader positions stably sorted by child
+        ``(GD_minrank, GD_maxrank)`` where siblings have different spans.
+
+    Notes
+    -----
+    Graphviz 7.0.5 installs child skeletons into parent ranks before the
+    local cluster pass (``cluster.c:merge_ranks``). In observed nested cluster
+    cases, a child spanning from an earlier or shorter rank interval remains
+    to the left of a later/wider sibling while equal-span child skeletons
+    still swap through mincross. This post-step preserves that rank-leader
+    invariant without constraining equal-span siblings.
+    """
+    leader_to_sort: Dict[int, Tuple[int, int, str]] = {}
+    for child_name in child_clusters:
+        if child_name not in rank_bounds:
+            continue
+        min_rank, max_rank = rank_bounds[child_name]
+        for rank_index in range(min_rank, max_rank + 1):
+            leader_to_sort[leader_ids[(child_name, rank_index)]] = (
+                min_rank,
+                max_rank,
+                child_name,
+            )
+
+    out = [list(rank) for rank in ranks]
+    for rank_index, rank_nodes in enumerate(out):
+        leader_positions = [
+            position for position, node in enumerate(rank_nodes) if node in leader_to_sort
+        ]
+        if len(leader_positions) < 2:
+            continue
+        if len({leader_to_sort[rank_nodes[position]][:2] for position in leader_positions}) < 2:
+            continue
+        root_same_start = prefer_root_order and (
+            len({leader_to_sort[rank_nodes[position]][0] for position in leader_positions}) == 1
+        )
+        sorted_leaders = sorted(
+            (rank_nodes[position] for position in leader_positions),
+            key=lambda node: _graphviz_rankleader_sort_key(
+                leader=leader_to_sort[node],
+                prefer_root_order=prefer_root_order,
+                root_same_start=root_same_start,
+            ),
+        )
+        for position, leader in zip(leader_positions, sorted_leaders):
+            rank_nodes[position] = leader
+        out[rank_index] = rank_nodes
+    return out
+
+
+def _graphviz_rankleader_sort_key(
+    leader: Tuple[int, int, str],
+    prefer_root_order: bool,
+    root_same_start: bool,
+) -> Tuple[int, int, str]:
+    """Return a deterministic sibling rank-leader sort key.
+
+    Parameters
+    ----------
+    leader : tuple[int, int, str]
+        ``(minrank, maxrank, cluster_name)`` for one sibling cluster.
+    prefer_root_order : bool
+        Whether the key is being used for the root graph.
+    root_same_start : bool
+        Whether all competing root siblings start on the same rank.
+
+    Returns
+    -------
+    tuple[int, int, str]
+        Sort key for sibling rank leaders.
+    """
+    min_rank, max_rank, child_name = leader
+    if prefer_root_order and not root_same_start:
+        return (-max_rank, min_rank, child_name)
+    return (min_rank, max_rank, child_name)
+
+
+def _graphviz_order_root_sinks_left(
+    ranks: Sequence[Sequence[int]],
+    edges: Sequence[Tuple[int, int]],
+    cluster_members: Mapping[str, frozenset[int]],
+) -> List[List[int]]:
+    """Place root-only terminal sinks before root-only non-sinks on ties.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence[int]
+        Installed expanded ranks after final root remincross.
+    edges : sequence of tuple[int, int]
+        Expanded adjacent-rank edge pairs.
+    cluster_members : Mapping[str, frozenset[int]]
+        Expanded cluster membership by name.
+
+    Returns
+    -------
+    list[list[int]]
+        Rank ordering with root-only sink nodes stably left of root-only
+        non-sinks when both appear in the same rank.
+
+    Notes
+    -----
+    Graphviz 7.0.5 ``mark_lowclusters()`` marks all non-cluster nodes as the
+    root low-cluster before the final remincross. The remaining unconstrained
+    root-only tie in the interleaved verifier places the terminal output sink
+    left of a root join node with outgoing cluster edges; this helper encodes
+    that root-only tie without moving cluster-contained nodes.
+    """
+    clustered_nodes: Set[int] = set()
+    for members in cluster_members.values():
+        clustered_nodes.update(members)
+    outgoing: Set[int] = {int(tail) for tail, _ in edges}
+    out = [list(rank) for rank in ranks]
+    for rank_nodes in out:
+        root_positions = [
+            position for position, node in enumerate(rank_nodes) if node not in clustered_nodes
+        ]
+        if len(root_positions) < 2:
+            continue
+        if len({rank_nodes[position] in outgoing for position in root_positions}) < 2:
+            continue
+        sorted_nodes = [
+            node
+            for _, node in sorted(
+                ((position, rank_nodes[position]) for position in root_positions),
+                key=lambda item: (item[1] in outgoing, item[0]),
+            )
+        ]
+        for position, node in zip(root_positions, sorted_nodes):
+            rank_nodes[position] = node
+    return out
+
+
+def _graphviz_child_cluster_by_node(
+    child_clusters: Sequence[str],
+    cluster_members: Mapping[str, frozenset[int]],
+) -> Dict[int, str]:
+    """Map expanded nodes to their direct child cluster in a scope.
+
+    Parameters
+    ----------
+    child_clusters : sequence[str]
+        Direct child cluster names.
+    cluster_members : Mapping[str, frozenset[int]]
+        Expanded cluster membership by name.
+
+    Returns
+    -------
+    dict[int, str]
+        Expanded node id to child cluster name.
+    """
+    out: Dict[int, str] = {}
+    for child_name in child_clusters:
+        for node in cluster_members.get(child_name, frozenset()):
+            out[node] = child_name
+    return out
+
+
+def _graphviz_skeleton_scope_ranks(
+    ranks: Sequence[Sequence[int]],
+    scope_members: frozenset[int],
+    child_clusters: Sequence[str],
+    child_by_node: Mapping[int, str],
+    rank_bounds: Mapping[str, Tuple[int, int]],
+    leader_ids: Mapping[Tuple[str, int], int],
+) -> List[List[int]]:
+    """Build rank buckets containing direct nodes and child rank leaders.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence[int]
+        Expanded rank buckets.
+    scope_members : frozenset[int]
+        Expanded nodes in the current scope.
+    child_clusters : sequence[str]
+        Direct child clusters represented by rank leaders.
+    child_by_node : Mapping[int, str]
+        Node-to-child lookup for direct child clusters.
+    rank_bounds : Mapping[str, tuple[int, int]]
+        Inclusive rank bounds per cluster.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+
+    Returns
+    -------
+    list[list[int]]
+        Skeleton ranks over the same global rank index range.
+    """
+    out: List[List[int]] = []
+    for rank_index, rank_nodes in enumerate(ranks):
+        skeleton_rank: List[int] = []
+        installed_children: Set[str] = set()
+        for node in rank_nodes:
+            if node not in scope_members:
+                continue
+            child_name = child_by_node.get(node)
+            if child_name is None:
+                skeleton_rank.append(node)
+                continue
+            min_rank, max_rank = rank_bounds[child_name]
+            if min_rank <= rank_index <= max_rank and child_name not in installed_children:
+                skeleton_rank.append(leader_ids[(child_name, rank_index)])
+                installed_children.add(child_name)
+        for child_name in child_clusters:
+            if child_name in installed_children or child_name not in rank_bounds:
+                continue
+            min_rank, max_rank = rank_bounds[child_name]
+            if min_rank <= rank_index <= max_rank:
+                skeleton_rank.append(leader_ids[(child_name, rank_index)])
+        out.append(skeleton_rank)
+    return out
+
+
+def _graphviz_skeleton_scope_edges(
+    edges: Sequence[Tuple[int, int]],
+    edge_penalties: Optional[Sequence[int]],
+    node_to_rank: Mapping[int, int],
+    scope_members: frozenset[int],
+    child_by_node: Mapping[int, str],
+    child_clusters: Sequence[str],
+    rank_bounds: Mapping[str, Tuple[int, int]],
+    leader_ids: Mapping[Tuple[str, int], int],
+) -> Tuple[List[Tuple[int, int]], List[int]]:
+    """Map scope edges through child rank leaders and add skeleton chains.
+
+    Parameters
+    ----------
+    edges : sequence of tuple[int, int]
+        Expanded adjacent-rank edges.
+    edge_penalties : sequence[int], optional
+        Edge penalties aligned to ``edges``.
+    node_to_rank : Mapping[int, int]
+        Expanded node id to rank index.
+    scope_members : frozenset[int]
+        Expanded nodes in the current scope.
+    child_by_node : Mapping[int, str]
+        Node-to-child lookup for direct child clusters.
+    child_clusters : sequence[str]
+        Direct child clusters represented by rank leaders.
+    rank_bounds : Mapping[str, tuple[int, int]]
+        Inclusive rank bounds per cluster.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+
+    Returns
+    -------
+    tuple[list[tuple[int, int]], list[int]]
+        Skeleton edge pairs and aligned crossing penalties.
+    """
+    penalties = [1] * len(edges) if edge_penalties is None else [int(p) for p in edge_penalties]
+    skeleton_edges: List[Tuple[int, int]] = []
+    skeleton_penalties: List[int] = []
+    for edge_id, (tail, head) in enumerate(edges):
+        if tail not in scope_members or head not in scope_members:
+            continue
+        tail_child = child_by_node.get(tail)
+        head_child = child_by_node.get(head)
+        if tail_child is not None and tail_child == head_child:
+            continue
+        mapped_tail = _graphviz_scope_endpoint(
+            node=tail,
+            child_name=tail_child,
+            node_to_rank=node_to_rank,
+            leader_ids=leader_ids,
+        )
+        mapped_head = _graphviz_scope_endpoint(
+            node=head,
+            child_name=head_child,
+            node_to_rank=node_to_rank,
+            leader_ids=leader_ids,
+        )
+        if mapped_tail == mapped_head:
+            continue
+        skeleton_edges.append((mapped_tail, mapped_head))
+        skeleton_penalties.append(max(0, penalties[edge_id]))
+
+    for child_name in child_clusters:
+        if child_name not in rank_bounds:
+            continue
+        min_rank, max_rank = rank_bounds[child_name]
+        for rank_index in range(min_rank, max_rank):
+            skeleton_edges.append(
+                (leader_ids[(child_name, rank_index)], leader_ids[(child_name, rank_index + 1)])
+            )
+            skeleton_penalties.append(_GRAPHVIZ_CLUSTER_CROSSING_PENALTY)
+    return skeleton_edges, skeleton_penalties
+
+
+def _graphviz_scope_endpoint(
+    node: int,
+    child_name: Optional[str],
+    node_to_rank: Mapping[int, int],
+    leader_ids: Mapping[Tuple[str, int], int],
+) -> int:
+    """Map one endpoint to a child rank leader when needed.
+
+    Parameters
+    ----------
+    node : int
+        Expanded endpoint node id.
+    child_name : str or None
+        Direct child cluster containing ``node``.
+    node_to_rank : Mapping[int, int]
+        Expanded node id to rank index.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+
+    Returns
+    -------
+    int
+        Direct node id or synthetic rank-leader id.
+    """
+    if child_name is None:
+        return node
+    return leader_ids[(child_name, node_to_rank[node])]
+
+
+def _graphviz_skeleton_node_order(
+    scope_nodes: Sequence[int],
+    node_order: Optional[Sequence[int]],
+    child_clusters: Sequence[str],
+    cluster_members: Mapping[str, frozenset[int]],
+    rank_bounds: Mapping[str, Tuple[int, int]],
+    leader_ids: Mapping[Tuple[str, int], int],
+) -> List[int]:
+    """Return a seed order that includes synthetic rank leaders.
+
+    Parameters
+    ----------
+    scope_nodes : sequence[int]
+        Nodes present in the skeleton scope.
+    node_order : sequence[int], optional
+        Graphviz fast-node order for real and dummy expanded nodes.
+    child_clusters : sequence[str]
+        Direct child clusters represented by rank leaders.
+    cluster_members : Mapping[str, frozenset[int]]
+        Expanded cluster membership by name.
+    rank_bounds : Mapping[str, tuple[int, int]]
+        Inclusive rank bounds per cluster.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+
+    Returns
+    -------
+    list[int]
+        Deterministic seed order including every scope node.
+    """
+    base_order = {node: index for index, node in enumerate(node_order or scope_nodes)}
+    fallback = len(base_order)
+    ordering: Dict[int, Tuple[int, int, int]] = {}
+    for node in scope_nodes:
+        ordering[node] = (base_order.get(node, fallback + abs(node)), 1, node)
+    for child_name in child_clusters:
+        if child_name not in rank_bounds:
+            continue
+        member_seed = min(
+            (base_order.get(node, fallback + node) for node in cluster_members[child_name]),
+            default=fallback,
+        )
+        min_rank, max_rank = rank_bounds[child_name]
+        for rank_index in range(min_rank, max_rank + 1):
+            leader = leader_ids[(child_name, rank_index)]
+            ordering[leader] = (member_seed, 0, rank_index)
+    return [node for node, _ in sorted(ordering.items(), key=lambda item: item[1])]
+
+
+def _graphviz_install_skeleton_scope(
+    ordered_scope: Mapping[int, Sequence[int]],
+    child_clusters: Sequence[str],
+    leader_ids: Mapping[Tuple[str, int], int],
+    local_orders: Mapping[str, Sequence[Sequence[int]]],
+) -> List[List[int]]:
+    """Expand child rank leaders into solved child member order.
+
+    Parameters
+    ----------
+    ordered_scope : Mapping[int, sequence[int]]
+        Ordered direct scope ranks from skeleton mincross.
+    child_clusters : sequence[str]
+        Direct child cluster names.
+    leader_ids : Mapping[tuple[str, int], int]
+        Synthetic rank-leader node ids.
+    local_orders : Mapping[str, sequence[sequence[int]]]
+        Solved child rank orders.
+
+    Returns
+    -------
+    list[list[int]]
+        Expanded-node ranks with synthetic leaders removed.
+    """
+    leader_to_child = {
+        leader_ids[(child_name, rank_index)]: child_name
+        for child_name in child_clusters
+        for cluster_key, rank_index in leader_ids
+        if cluster_key == child_name
+    }
+    out: List[List[int]] = []
+    max_rank = max(ordered_scope.keys(), default=-1)
+    for rank_index in range(max_rank + 1):
+        installed: List[int] = []
+        for node in ordered_scope.get(rank_index, ()):
+            child_name = leader_to_child.get(node)
+            if child_name is None:
+                installed.append(node)
+            else:
+                installed.extend(
+                    int(child_node) for child_node in local_orders[child_name][rank_index]
+                )
+        out.append(installed)
+    return out
 
 
 def _expanded_edge_index_from_neighbors(
@@ -2221,6 +3769,8 @@ def _graphviz_x_coordinate_assignment(
     center_coordinates: bool = True,
     graphviz_left_widths: Optional[Sequence[float]] = None,
     graphviz_right_widths: Optional[Sequence[float]] = None,
+    graphviz_cluster_members: Optional[Mapping[str, Sequence[int]]] = None,
+    graphviz_cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
 ) -> torch.Tensor:
     """Assign Graphviz dot x coordinates with an auxiliary network simplex.
 
@@ -2252,6 +3802,11 @@ def _graphviz_x_coordinate_assignment(
     graphviz_right_widths : sequence of float, optional
         Per-expanded-node ``ND_rw`` override in Graphviz point units. Negative
         entries fall back to symmetric width derivation.
+    graphviz_cluster_members : Mapping[str, sequence[int]], optional
+        Expanded cluster membership. When present, cluster left/right boundary
+        nodes and containment constraints are added to the x auxiliary graph.
+    graphviz_cluster_parents : Mapping[str, str | None], optional
+        Expanded cluster hierarchy used for subcluster containment constraints.
 
     Returns
     -------
@@ -2261,8 +3816,9 @@ def _graphviz_x_coordinate_assignment(
     Notes
     -----
     This implements Stage A of Graphviz 7.0.5 ``position.c``: left-to-right
-    same-rank constraints plus one slack node for each expanded edge. Ports,
-    flat-edge labels, edge labels, and clusters are intentionally omitted.
+    same-rank constraints plus one slack node for each expanded edge. Cluster
+    boundary nodes follow ``pos_clusters()`` when cluster-only DOT metadata
+    reaches this pipeline.
     """
     positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
     for layer_idx, layer_nodes in enumerate(layers):
@@ -2282,6 +3838,8 @@ def _graphviz_x_coordinate_assignment(
         node_sep=graphviz_node_sep,
         graphviz_left_widths=graphviz_left_widths,
         graphviz_right_widths=graphviz_right_widths,
+        graphviz_cluster_members=graphviz_cluster_members,
+        graphviz_cluster_parents=graphviz_cluster_parents,
     )
     aux_node_count = num_nodes + int(edge_index.shape[1])
     x_ranks = graphviz_network_simplex_assignment(
@@ -2319,6 +3877,8 @@ def _build_graphviz_x_aux_edges(
     node_sep: float,
     graphviz_left_widths: Optional[Sequence[float]] = None,
     graphviz_right_widths: Optional[Sequence[float]] = None,
+    graphviz_cluster_members: Optional[Mapping[str, Sequence[int]]] = None,
+    graphviz_cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
 ) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, int]]:
     """Build Stage A Graphviz dot auxiliary x-coordinate constraints.
 
@@ -2342,6 +3902,11 @@ def _build_graphviz_x_aux_edges(
         Per-expanded-node ``ND_lw`` override in Graphviz point units.
     graphviz_right_widths : sequence of float, optional
         Per-expanded-node ``ND_rw`` override in Graphviz point units.
+    graphviz_cluster_members : Mapping[str, sequence[int]], optional
+        Expanded cluster membership for Graphviz ``pos_clusters()``-style
+        boundary constraints.
+    graphviz_cluster_parents : Mapping[str, str | None], optional
+        Expanded cluster hierarchy used to constrain child boundary nodes.
 
     Returns
     -------
@@ -2377,38 +3942,544 @@ def _build_graphviz_x_aux_edges(
             last_rank += minlen
             initial_ranks[int(right_node)] = last_rank
 
-    if edge_index.numel() == 0:
-        return aux_edges, initial_ranks
-
-    weights_cpu = (
-        torch.ones((edge_index.shape[1],), dtype=torch.float32)
-        if edge_weights is None
-        else edge_weights.detach().to(device="cpu", dtype=torch.float32)
-    )
-    weight_classes = _graphviz_weight_classes(
-        edge_index=edge_index,
-        num_nodes=num_nodes,
-        num_original_nodes=num_original_nodes,
-    )
-    edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
-    for edge_id, (tail, head) in enumerate(zip(edge_cpu[0].tolist(), edge_cpu[1].tolist())):
-        slack_node = num_nodes + edge_id
-        port_dx = 0
-        tail_minlen = (max(port_dx, 0) + 1) * _GRAPHVIZ_X_AUX_RESOLUTION
-        head_minlen = (max(-port_dx, 0) + 1) * _GRAPHVIZ_X_AUX_RESOLUTION
-        weight = _graphviz_round(float(weights_cpu[edge_id].item())) * _graphviz_omega_weight(
-            tail=int(tail),
-            head=int(head),
-            weight_classes=weight_classes,
+    if edge_index.numel() != 0:
+        weights_cpu = (
+            torch.ones((edge_index.shape[1],), dtype=torch.float32)
+            if edge_weights is None
+            else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        )
+        weight_classes = _graphviz_weight_classes(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
             num_original_nodes=num_original_nodes,
         )
-        initial_ranks[slack_node] = min(
-            initial_ranks.get(int(tail), 0) - tail_minlen,
-            initial_ranks.get(int(head), 0) - head_minlen,
+        edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+        for edge_id, (tail, head) in enumerate(zip(edge_cpu[0].tolist(), edge_cpu[1].tolist())):
+            slack_node = num_nodes + edge_id
+            port_dx = 0
+            tail_minlen = (max(port_dx, 0) + 1) * _GRAPHVIZ_X_AUX_RESOLUTION
+            head_minlen = (max(-port_dx, 0) + 1) * _GRAPHVIZ_X_AUX_RESOLUTION
+            weight = _graphviz_round(float(weights_cpu[edge_id].item())) * _graphviz_omega_weight(
+                tail=int(tail),
+                head=int(head),
+                weight_classes=weight_classes,
+                num_original_nodes=num_original_nodes,
+            )
+            initial_ranks[slack_node] = min(
+                initial_ranks.get(int(tail), 0) - tail_minlen,
+                initial_ranks.get(int(head), 0) - head_minlen,
+            )
+            aux_edges.append((slack_node, int(tail), tail_minlen, weight))
+            aux_edges.append((slack_node, int(head), head_minlen, weight))
+
+    if graphviz_cluster_members:
+        _add_graphviz_cluster_x_aux_edges(
+            aux_edges=aux_edges,
+            initial_ranks=initial_ranks,
+            layers=layers,
+            node_sizes=node_sizes,
+            num_nodes=num_nodes,
+            num_original_nodes=num_original_nodes,
+            next_aux_node=num_nodes + int(edge_index.shape[1]),
+            node_sep=node_sep,
+            graphviz_left_widths=graphviz_left_widths,
+            graphviz_right_widths=graphviz_right_widths,
+            graphviz_cluster_members=graphviz_cluster_members,
+            graphviz_cluster_parents=graphviz_cluster_parents,
         )
-        aux_edges.append((slack_node, int(tail), tail_minlen, weight))
-        aux_edges.append((slack_node, int(head), head_minlen, weight))
     return aux_edges, initial_ranks
+
+
+def _add_graphviz_cluster_x_aux_edges(
+    aux_edges: List[Tuple[int, int, int, int]],
+    initial_ranks: Dict[int, int],
+    layers: Sequence[Sequence[int]],
+    node_sizes: torch.Tensor,
+    num_nodes: int,
+    num_original_nodes: int,
+    next_aux_node: int,
+    node_sep: float,
+    graphviz_left_widths: Optional[Sequence[float]],
+    graphviz_right_widths: Optional[Sequence[float]],
+    graphviz_cluster_members: Mapping[str, Sequence[int]],
+    graphviz_cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> None:
+    """Add Graphviz ``pos_clusters()`` constraints to the x auxiliary graph.
+
+    Parameters
+    ----------
+    aux_edges : list[tuple[int, int, int, int]]
+        Mutable auxiliary edge list receiving ``(tail, head, minlen, weight)``.
+    initial_ranks : dict[int, int]
+        Mutable network-simplex starting ranks.
+    layers : sequence of sequence[int]
+        Ordered expanded nodes per rank.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_nodes : int
+        Number of expanded graph nodes before slack/boundary nodes.
+    num_original_nodes : int
+        Count of non-dummy original nodes.
+    next_aux_node : int
+        First unused auxiliary node id after edge slack nodes.
+    node_sep : float
+        Graphviz nodesep in points.
+    graphviz_left_widths : sequence[float], optional
+        Optional ``ND_lw`` overrides.
+    graphviz_right_widths : sequence[float], optional
+        Optional ``ND_rw`` overrides.
+    graphviz_cluster_members : Mapping[str, sequence[int]]
+        Expanded cluster membership keyed by cluster name.
+    graphviz_cluster_parents : Mapping[str, str | None], optional
+        Expanded cluster hierarchy.
+
+    Returns
+    -------
+    None
+        ``aux_edges`` and ``initial_ranks`` are mutated in place.
+    """
+    clusters = _normalize_graphviz_clusters(
+        clusters=graphviz_cluster_members,
+        num_nodes=num_nodes,
+    )
+    if not clusters:
+        return
+
+    parents = _normalize_graphviz_cluster_parents(
+        cluster_names=tuple(clusters.keys()),
+        cluster_parents=graphviz_cluster_parents,
+    )
+    rank_nodes_by_cluster = _graphviz_cluster_rank_nodes(
+        layers=layers,
+        clusters=clusters,
+    )
+    boundary_ids = _graphviz_cluster_boundary_ids(
+        clusters=clusters,
+        next_aux_node=next_aux_node,
+    )
+    _seed_graphviz_cluster_boundary_ranks(
+        initial_ranks=initial_ranks,
+        clusters=clusters,
+        boundary_ids=boundary_ids,
+    )
+    _add_graphviz_cluster_containment_edges(
+        aux_edges=aux_edges,
+        rank_nodes_by_cluster=rank_nodes_by_cluster,
+        boundary_ids=boundary_ids,
+        node_sizes=node_sizes,
+        num_original_nodes=num_original_nodes,
+        node_sep=node_sep,
+        graphviz_left_widths=graphviz_left_widths,
+        graphviz_right_widths=graphviz_right_widths,
+    )
+    _add_graphviz_cluster_keepout_edges(
+        aux_edges=aux_edges,
+        layers=layers,
+        rank_nodes_by_cluster=rank_nodes_by_cluster,
+        clusters=clusters,
+        boundary_ids=boundary_ids,
+        node_sizes=node_sizes,
+        num_original_nodes=num_original_nodes,
+        node_sep=node_sep,
+        graphviz_left_widths=graphviz_left_widths,
+        graphviz_right_widths=graphviz_right_widths,
+    )
+    _add_graphviz_subcluster_edges(
+        aux_edges=aux_edges,
+        parents=parents,
+        boundary_ids=boundary_ids,
+    )
+    _add_graphviz_sibling_cluster_edges(
+        aux_edges=aux_edges,
+        layers=layers,
+        rank_nodes_by_cluster=rank_nodes_by_cluster,
+        parents=parents,
+        boundary_ids=boundary_ids,
+    )
+
+
+def _graphviz_cluster_boundary_ids(
+    clusters: Mapping[str, Sequence[int]],
+    next_aux_node: int,
+) -> Dict[str, Tuple[int, int]]:
+    """Allocate left/right x-boundary node ids for clusters.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, sequence[int]]
+        Normalized expanded cluster membership.
+    next_aux_node : int
+        First unused auxiliary node id.
+
+    Returns
+    -------
+    dict[str, tuple[int, int]]
+        Left and right boundary node ids keyed by cluster name.
+    """
+    boundary_ids: Dict[str, Tuple[int, int]] = {}
+    cursor = int(next_aux_node)
+    for name in sorted(clusters):
+        boundary_ids[name] = (cursor, cursor + 1)
+        cursor += 2
+    return boundary_ids
+
+
+def _graphviz_cluster_rank_nodes(
+    layers: Sequence[Sequence[int]],
+    clusters: Mapping[str, Sequence[int]],
+) -> Dict[str, Dict[int, List[int]]]:
+    """Return ordered cluster members present on each expanded rank.
+
+    Parameters
+    ----------
+    layers : sequence of sequence[int]
+        Ordered expanded nodes per rank.
+    clusters : Mapping[str, sequence[int]]
+        Normalized expanded cluster membership.
+
+    Returns
+    -------
+    dict[str, dict[int, list[int]]]
+        Cluster rank members preserving the root rank order.
+    """
+    membership = {name: set(int(node) for node in members) for name, members in clusters.items()}
+    out: Dict[str, Dict[int, List[int]]] = {name: {} for name in clusters}
+    for rank_index, rank_nodes in enumerate(layers):
+        for name, members in membership.items():
+            ordered = [int(node) for node in rank_nodes if int(node) in members]
+            if ordered:
+                out[name][rank_index] = ordered
+    return out
+
+
+def _seed_graphviz_cluster_boundary_ranks(
+    initial_ranks: Dict[int, int],
+    clusters: Mapping[str, Sequence[int]],
+    boundary_ids: Mapping[str, Tuple[int, int]],
+) -> None:
+    """Seed cluster boundary ranks from member extents.
+
+    Parameters
+    ----------
+    initial_ranks : dict[int, int]
+        Mutable network-simplex starting ranks.
+    clusters : Mapping[str, sequence[int]]
+        Normalized expanded cluster membership.
+    boundary_ids : Mapping[str, tuple[int, int]]
+        Cluster left/right boundary node ids.
+
+    Returns
+    -------
+    None
+        ``initial_ranks`` is updated in place.
+    """
+    margin = _graphviz_scaled_minlen(_GRAPHVIZ_CLUSTER_MARGIN_POINTS)
+    for name, members in clusters.items():
+        member_ranks = [initial_ranks.get(int(node), 0) for node in members]
+        if member_ranks:
+            left_rank = min(member_ranks) - margin
+            right_rank = max(member_ranks) + margin
+        else:
+            left_rank = 0
+            right_rank = margin
+        left_id, right_id = boundary_ids[name]
+        initial_ranks[left_id] = left_rank
+        initial_ranks[right_id] = right_rank
+
+
+def _add_graphviz_cluster_containment_edges(
+    aux_edges: List[Tuple[int, int, int, int]],
+    rank_nodes_by_cluster: Mapping[str, Mapping[int, Sequence[int]]],
+    boundary_ids: Mapping[str, Tuple[int, int]],
+    node_sizes: torch.Tensor,
+    num_original_nodes: int,
+    node_sep: float,
+    graphviz_left_widths: Optional[Sequence[float]],
+    graphviz_right_widths: Optional[Sequence[float]],
+) -> None:
+    """Constrain cluster boundary nodes around their per-rank member ranges.
+
+    Parameters
+    ----------
+    aux_edges : list[tuple[int, int, int, int]]
+        Mutable auxiliary edge list.
+    rank_nodes_by_cluster : Mapping[str, Mapping[int, sequence[int]]]
+        Ordered cluster members per rank.
+    boundary_ids : Mapping[str, tuple[int, int]]
+        Left and right boundary node ids.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_original_nodes : int
+        Count of non-dummy original nodes.
+    node_sep : float
+        Graphviz nodesep in points.
+    graphviz_left_widths : sequence[float], optional
+        Optional ``ND_lw`` overrides.
+    graphviz_right_widths : sequence[float], optional
+        Optional ``ND_rw`` overrides.
+
+    Returns
+    -------
+    None
+        ``aux_edges`` is mutated in place.
+    """
+    margin = _graphviz_scaled_minlen(_GRAPHVIZ_CLUSTER_MARGIN_POINTS)
+    for name, rank_members in rank_nodes_by_cluster.items():
+        left_id, right_id = boundary_ids[name]
+        aux_edges.append((left_id, right_id, _GRAPHVIZ_X_AUX_RESOLUTION, 128))
+        for nodes in rank_members.values():
+            left_node = int(nodes[0])
+            right_node = int(nodes[-1])
+            left_minlen = _graphviz_scaled_minlen(
+                _graphviz_left_width(
+                    node=left_node,
+                    node_sizes=node_sizes,
+                    num_original_nodes=num_original_nodes,
+                    node_sep=node_sep,
+                    graphviz_left_widths=graphviz_left_widths,
+                )
+                + _GRAPHVIZ_CLUSTER_MARGIN_POINTS
+            )
+            right_minlen = _graphviz_scaled_minlen(
+                _graphviz_right_width(
+                    node=right_node,
+                    node_sizes=node_sizes,
+                    num_original_nodes=num_original_nodes,
+                    node_sep=node_sep,
+                    graphviz_right_widths=graphviz_right_widths,
+                )
+                + _GRAPHVIZ_CLUSTER_MARGIN_POINTS
+            )
+            aux_edges.append((left_id, left_node, max(left_minlen, margin), 0))
+            aux_edges.append((right_node, right_id, max(right_minlen, margin), 0))
+
+
+def _add_graphviz_cluster_keepout_edges(
+    aux_edges: List[Tuple[int, int, int, int]],
+    layers: Sequence[Sequence[int]],
+    rank_nodes_by_cluster: Mapping[str, Mapping[int, Sequence[int]]],
+    clusters: Mapping[str, Sequence[int]],
+    boundary_ids: Mapping[str, Tuple[int, int]],
+    node_sizes: torch.Tensor,
+    num_original_nodes: int,
+    node_sep: float,
+    graphviz_left_widths: Optional[Sequence[float]],
+    graphviz_right_widths: Optional[Sequence[float]],
+) -> None:
+    """Keep immediate same-rank outside nodes outside cluster boundaries.
+
+    Parameters
+    ----------
+    aux_edges : list[tuple[int, int, int, int]]
+        Mutable auxiliary edge list.
+    layers : sequence of sequence[int]
+        Ordered expanded nodes per rank.
+    rank_nodes_by_cluster : Mapping[str, Mapping[int, sequence[int]]]
+        Ordered cluster members per rank.
+    clusters : Mapping[str, sequence[int]]
+        Normalized expanded cluster membership.
+    boundary_ids : Mapping[str, tuple[int, int]]
+        Left and right boundary node ids.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    num_original_nodes : int
+        Count of non-dummy original nodes.
+    node_sep : float
+        Graphviz nodesep in points.
+    graphviz_left_widths : sequence[float], optional
+        Optional ``ND_lw`` overrides.
+    graphviz_right_widths : sequence[float], optional
+        Optional ``ND_rw`` overrides.
+
+    Returns
+    -------
+    None
+        ``aux_edges`` is mutated in place.
+    """
+    for name, rank_members in rank_nodes_by_cluster.items():
+        members = set(int(node) for node in clusters[name])
+        left_id, right_id = boundary_ids[name]
+        for rank_index, cluster_nodes in rank_members.items():
+            layer_nodes = [int(node) for node in layers[rank_index]]
+            positions = {node: index for index, node in enumerate(layer_nodes)}
+            member_positions = [positions[node] for node in cluster_nodes if node in positions]
+            if not member_positions:
+                continue
+            left_outside = _graphviz_nearest_outside_node(
+                layer_nodes=layer_nodes,
+                members=members,
+                start=min(member_positions) - 1,
+                step=-1,
+            )
+            if left_outside is not None:
+                minlen = _graphviz_scaled_minlen(
+                    _GRAPHVIZ_CLUSTER_MARGIN_POINTS
+                    + _graphviz_right_width(
+                        node=left_outside,
+                        node_sizes=node_sizes,
+                        num_original_nodes=num_original_nodes,
+                        node_sep=node_sep,
+                        graphviz_right_widths=graphviz_right_widths,
+                    )
+                )
+                aux_edges.append((left_outside, left_id, minlen, 0))
+            right_outside = _graphviz_nearest_outside_node(
+                layer_nodes=layer_nodes,
+                members=members,
+                start=max(member_positions) + 1,
+                step=1,
+            )
+            if right_outside is not None:
+                minlen = _graphviz_scaled_minlen(
+                    _GRAPHVIZ_CLUSTER_MARGIN_POINTS
+                    + _graphviz_left_width(
+                        node=right_outside,
+                        node_sizes=node_sizes,
+                        num_original_nodes=num_original_nodes,
+                        node_sep=node_sep,
+                        graphviz_left_widths=graphviz_left_widths,
+                    )
+                )
+                aux_edges.append((right_id, right_outside, minlen, 0))
+
+
+def _graphviz_nearest_outside_node(
+    layer_nodes: Sequence[int],
+    members: Set[int],
+    start: int,
+    step: int,
+) -> Optional[int]:
+    """Return the first non-member in a rank scan.
+
+    Parameters
+    ----------
+    layer_nodes : sequence[int]
+        Nodes in one rank.
+    members : set[int]
+        Cluster members.
+    start : int
+        Initial rank-list index.
+    step : int
+        Scan direction, negative for left and positive for right.
+
+    Returns
+    -------
+    int or None
+        First outside node id, or ``None`` when no outside node exists.
+    """
+    index = int(start)
+    while 0 <= index < len(layer_nodes):
+        node = int(layer_nodes[index])
+        if node not in members:
+            return node
+        index += int(step)
+    return None
+
+
+def _add_graphviz_subcluster_edges(
+    aux_edges: List[Tuple[int, int, int, int]],
+    parents: Mapping[str, Optional[str]],
+    boundary_ids: Mapping[str, Tuple[int, int]],
+) -> None:
+    """Constrain child cluster boundaries inside parent boundaries.
+
+    Parameters
+    ----------
+    aux_edges : list[tuple[int, int, int, int]]
+        Mutable auxiliary edge list.
+    parents : Mapping[str, str | None]
+        Normalized cluster parent mapping.
+    boundary_ids : Mapping[str, tuple[int, int]]
+        Cluster left/right boundary node ids.
+
+    Returns
+    -------
+    None
+        ``aux_edges`` is mutated in place.
+    """
+    margin = _graphviz_scaled_minlen(_GRAPHVIZ_CLUSTER_MARGIN_POINTS)
+    for child_name, parent_name in parents.items():
+        if parent_name is None or child_name not in boundary_ids or parent_name not in boundary_ids:
+            continue
+        parent_left, parent_right = boundary_ids[parent_name]
+        child_left, child_right = boundary_ids[child_name]
+        aux_edges.append((parent_left, child_left, margin, 0))
+        aux_edges.append((child_right, parent_right, margin, 0))
+
+
+def _add_graphviz_sibling_cluster_edges(
+    aux_edges: List[Tuple[int, int, int, int]],
+    layers: Sequence[Sequence[int]],
+    rank_nodes_by_cluster: Mapping[str, Mapping[int, Sequence[int]]],
+    parents: Mapping[str, Optional[str]],
+    boundary_ids: Mapping[str, Tuple[int, int]],
+) -> None:
+    """Separate sibling cluster boxes that overlap in rank span.
+
+    Parameters
+    ----------
+    aux_edges : list[tuple[int, int, int, int]]
+        Mutable auxiliary edge list.
+    layers : sequence of sequence[int]
+        Ordered expanded nodes per rank.
+    rank_nodes_by_cluster : Mapping[str, Mapping[int, sequence[int]]]
+        Ordered cluster members per rank.
+    parents : Mapping[str, str | None]
+        Normalized cluster parent mapping.
+    boundary_ids : Mapping[str, tuple[int, int]]
+        Cluster left/right boundary node ids.
+
+    Returns
+    -------
+    None
+        ``aux_edges`` is mutated in place.
+    """
+    margin = _graphviz_scaled_minlen(_GRAPHVIZ_CLUSTER_MARGIN_POINTS)
+    parent_names: Set[Optional[str]] = set(parents.values())
+    for parent_name in sorted(parent_names, key=lambda value: "" if value is None else value):
+        siblings = [name for name, parent in parents.items() if parent == parent_name]
+        for left_index, left_name in enumerate(siblings):
+            for right_name in siblings[left_index + 1 :]:
+                overlap_rank = _graphviz_cluster_overlap_rank(
+                    left_ranks=rank_nodes_by_cluster.get(left_name, {}),
+                    right_ranks=rank_nodes_by_cluster.get(right_name, {}),
+                )
+                if overlap_rank is None:
+                    continue
+                first_left = rank_nodes_by_cluster[left_name][overlap_rank][0]
+                first_right = rank_nodes_by_cluster[right_name][overlap_rank][0]
+                rank_order = {int(node): index for index, node in enumerate(layers[overlap_rank])}
+                if rank_order.get(int(first_left), 0) <= rank_order.get(int(first_right), 0):
+                    actual_left, actual_right = left_name, right_name
+                else:
+                    actual_left, actual_right = right_name, left_name
+                _, actual_left_right = boundary_ids[actual_left]
+                actual_right_left, _ = boundary_ids[actual_right]
+                aux_edges.append((actual_left_right, actual_right_left, margin, 0))
+
+
+def _graphviz_cluster_overlap_rank(
+    left_ranks: Mapping[int, Sequence[int]],
+    right_ranks: Mapping[int, Sequence[int]],
+) -> Optional[int]:
+    """Return the first rank shared by two clusters.
+
+    Parameters
+    ----------
+    left_ranks : Mapping[int, sequence[int]]
+        Left cluster members keyed by rank.
+    right_ranks : Mapping[int, sequence[int]]
+        Right cluster members keyed by rank.
+
+    Returns
+    -------
+    int or None
+        Lowest shared rank, or ``None`` when rank spans do not overlap.
+    """
+    overlap = sorted(set(left_ranks).intersection(right_ranks))
+    if not overlap:
+        return None
+    return int(overlap[0])
 
 
 def _graphviz_left_width(
@@ -4168,7 +6239,7 @@ def _apply_graphviz_cluster_x_constraints(
     node_sep: float,
     center_coordinates: bool,
 ) -> torch.Tensor:
-    """Apply Graphviz-like cluster slot and boundary x constraints.
+    """Apply the A9 graphviz-only cluster x fallback.
 
     Parameters
     ----------
@@ -4191,13 +6262,6 @@ def _apply_graphviz_cluster_x_constraints(
     -------
     torch.Tensor
         Cluster-adjusted original-node positions with shape ``[N, 2]``.
-
-    Notes
-    -----
-    This mirrors the observable effects of Graphviz 7.0.5 cluster machinery:
-    child clusters reserve rank slots before parent rank merge
-    (``cluster.c:merge_ranks``), and sibling/containment boundary nodes add
-    left-right constraints during ``position.c:pos_clusters``.
     """
     num_nodes = int(positions.shape[0])
     normalized_clusters = _normalize_graphviz_clusters(clusters=clusters, num_nodes=num_nodes)
@@ -4317,6 +6381,31 @@ def _graphviz_position_ranks(positions: torch.Tensor, rank_sep: float) -> List[i
         return [0 for _ in range(int(positions.shape[0]))]
     min_y = float(positions[:, 1].min().item())
     return [int(round((float(value) - min_y) / float(rank_sep))) for value in positions[:, 1]]
+
+
+def _graphviz_cluster_children(
+    parents: Mapping[str, Optional[str]],
+) -> Dict[str, List[str]]:
+    """Return normalized child clusters for every parent cluster.
+
+    Parameters
+    ----------
+    parents : Mapping[str, str | None]
+        Normalized cluster parent mapping.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Child cluster names keyed by parent cluster name, sorted for stable
+        rank-leader tie handling.
+    """
+    children: Dict[str, List[str]] = {name: [] for name in parents}
+    for name, parent in parents.items():
+        if parent is not None and parent in children:
+            children[parent].append(name)
+    for child_names in children.values():
+        child_names.sort()
+    return children
 
 
 @register_op
@@ -4472,7 +6561,11 @@ class _AssignLayers(Op):
     requires: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",)
     access_pattern: ClassVar[str] = "global"
 
-    def __init__(self, fidelity_mode: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        fidelity_mode: Optional[str] = None,
+        use_graphviz_cluster_skeleton: bool = False,
+    ) -> None:
         """Initialize the layer-assignment operation.
 
         Parameters
@@ -4481,8 +6574,11 @@ class _AssignLayers(Op):
             Optional reference mode. ``"graphviz"`` uses the dot
             network-simplex rank assignment; all other values keep the
             existing longest-path-plus-promotion behavior.
+        use_graphviz_cluster_skeleton : bool, default=False
+            Enable the inactive A12 cluster rank-collapse prototype.
         """
         self.fidelity_mode = fidelity_mode
+        self.use_graphviz_cluster_skeleton = use_graphviz_cluster_skeleton
 
     def apply(
         self,
@@ -4541,12 +6637,30 @@ class _AssignLayers(Op):
                 if self.fidelity_mode == "graphviz"
                 else state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY]
             )
-            layer_assignments, virtual_edges = _graphviz_layer_assignments(
-                edge_index=acyclic_edges,
-                edge_weights=rank_edge_weights,
-                num_nodes=problem.num_nodes,
-                edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY),
-            )
+            if (
+                self.fidelity_mode == "graphviz"
+                and problem.clusters
+                and self.use_graphviz_cluster_skeleton
+            ):
+                layer_assignments, virtual_edges, cluster_rank_bounds = (
+                    _graphviz_cluster_rank_assignments(
+                        edge_index=acyclic_edges,
+                        edge_weights=rank_edge_weights,
+                        num_nodes=problem.num_nodes,
+                        clusters=problem.clusters,
+                        cluster_parents=problem.cluster_parents,
+                        edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY),
+                    )
+                )
+            else:
+                layer_assignments, virtual_edges = _graphviz_layer_assignments(
+                    edge_index=acyclic_edges,
+                    edge_weights=rank_edge_weights,
+                    num_nodes=problem.num_nodes,
+                    edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY),
+                )
+                cluster_rank_bounds = {}
+            state.extras[_SUGIYAMA_GRAPHVIZ_CLUSTER_RANKS_KEY] = cluster_rank_bounds
             state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY] = rank_edge_weights
             state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = virtual_edges
             state.extras[_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY] = self.fidelity_mode == "graphviz"
@@ -4591,6 +6705,22 @@ class _ExpandDummyNodes(Op):
     )
     access_pattern: ClassVar[str] = "global"
 
+    def __init__(self, use_graphviz_cluster_skeleton: bool = False) -> None:
+        """Store the inactive A12 expanded-cluster membership gate.
+
+        Parameters
+        ----------
+        use_graphviz_cluster_skeleton : bool, default=False
+            Enable expanded cluster membership for the A12 skeleton mincross
+            prototype.
+
+        Returns
+        -------
+        None
+            The constructor stores configuration only.
+        """
+        self.use_graphviz_cluster_skeleton = use_graphviz_cluster_skeleton
+
     def apply(
         self,
         problem: LayoutProblem,
@@ -4634,6 +6764,12 @@ class _ExpandDummyNodes(Op):
             edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY),
             use_graphviz_edge_order=use_graphviz_edge_order,
             graphviz_virtual_node_sep=graphviz_virtual_node_sep,
+            clusters=problem.clusters
+            if use_graphviz_edge_order and self.use_graphviz_cluster_skeleton
+            else None,
+            cluster_parents=problem.cluster_parents
+            if use_graphviz_edge_order and self.use_graphviz_cluster_skeleton
+            else None,
         )
         state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY] = expanded_graph
         state.extras[_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY] = expanded_edge_weights
@@ -4740,6 +6876,7 @@ class _BarycenterOrdering(Op):
         center_coordinates: bool = True,
         use_graphviz_mincross: bool = False,
         use_graphviz_node_order: bool = False,
+        use_graphviz_cluster_skeleton: bool = False,
         *,
         config: Optional[_BarycenterOrderingConfig] = None,
     ) -> None:
@@ -4767,6 +6904,8 @@ class _BarycenterOrdering(Op):
         use_graphviz_node_order : bool, default=False
             Use the graphviz-style fast-node list for ``build_ranks`` seed
             scans.
+        use_graphviz_cluster_skeleton : bool, default=False
+            Enable the inactive A12 rank-leader cluster ordering prototype.
         config : _BarycenterOrderingConfig | None, optional
             Optional configuration. When provided, it takes precedence over
             the scalar arguments.
@@ -4785,6 +6924,7 @@ class _BarycenterOrdering(Op):
             center_coordinates=center_coordinates,
             use_graphviz_mincross=use_graphviz_mincross,
             use_graphviz_node_order=use_graphviz_node_order,
+            use_graphviz_cluster_skeleton=use_graphviz_cluster_skeleton,
         )
 
     def apply(
@@ -4825,6 +6965,12 @@ class _BarycenterOrdering(Op):
             edge_weights=state.extras[_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY],
             graphviz_node_order=expanded_graph.graphviz_node_order,
             mincross_edge_penalties=expanded_graph.mincross_edge_penalties,
+            graphviz_cluster_members=expanded_graph.graphviz_cluster_members
+            if self.config.use_graphviz_cluster_skeleton
+            else None,
+            graphviz_cluster_parents=expanded_graph.graphviz_cluster_parents
+            if self.config.use_graphviz_cluster_skeleton
+            else None,
             parents=state.extras[_SUGIYAMA_PARENTS_KEY],
             children=state.extras[_SUGIYAMA_CHILDREN_KEY],
             parent_weights=state.extras[_SUGIYAMA_PARENT_WEIGHTS_KEY],
