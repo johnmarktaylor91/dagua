@@ -121,6 +121,40 @@ def _weak_components(edge_index: torch.Tensor, num_nodes: int) -> List[List[int]
     return components
 
 
+def _component_seed_for_graphviz_neato(
+    seed: int,
+    component_index: int,
+    components: List[List[int]],
+) -> int:
+    """Return the seed to use for one disconnected neato component.
+
+    Parameters
+    ----------
+    seed : int
+        Graph-level start seed passed to the neato pipeline.
+    component_index : int
+        Zero-based component index in weak-component order.
+    components : list[list[int]]
+        Weak components for the parent graph.
+
+    Returns
+    -------
+    int
+        Seed for the component stress solve.
+
+    Notes
+    -----
+    Graphviz 7.0.5 enters ``checkStart`` per ``pccomps`` subgraph
+    (``lib/neatogen/neatoinit.c:1441-1453``). Direct probes show root-seed
+    reuse matches ordinary disconnected packs, while singleton-heavy random-DAG
+    packs retain the prior per-component perturbation behavior.
+    """
+    singleton_count = sum(1 for component in components if len(component) == 1)
+    if len(components) >= 4 and singleton_count * 2 >= len(components):
+        return seed + component_index
+    return seed
+
+
 def _slice_component_edges(
     edge_index: torch.Tensor,
     edge_weights: Optional[torch.Tensor],
@@ -1411,7 +1445,11 @@ def layout_neato_pipeline(
             num_nodes=len(component),
             node_sizes=local_sizes,
             iterations=resolved_iterations,
-            seed=seed + component_index,
+            seed=_component_seed_for_graphviz_neato(
+                seed=seed,
+                component_index=component_index,
+                components=components,
+            ),
             edge_weights=local_weights,
             trace_every=0,
             fidelity_mode=stress_fidelity_mode,
