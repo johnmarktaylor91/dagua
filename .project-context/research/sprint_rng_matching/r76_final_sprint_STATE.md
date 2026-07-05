@@ -821,3 +821,12 @@ for retries. 2-attempt max per work item, then park documented.
   graphs; the seed rule closed disconnected. Sixth family closed by oracle repair.
   random_dag_200 patient retry running (100 watchdog rows). REMAINING IN FLIGHT: A11c
   big-tail, F3 prism, monster bench, neato-rd200.
+- 2026-07-05 ~15:00 ET: ***IGRAPH SUGIYAMA FAMILY COMPLETELY CLOSED.*** A11c: GLPK >1000
+  gate VERIFIED faithful (igraph source + empirical); 52 far rows = stale-ledger artifacts
+  (52/70 <0.01 with current code); fresh big-tail bench 6600/6600 incl rgg_2000 gv-fidelity
+  at 3.2h (H1 fixes holding at scale). A11d (merged): last law = component packing advances
+  by max-X of the DUMMY-EXPANDED component, no per-component re-normalization (5bfed0b);
+  ***18/18 close rows now <0.01, raw-equal to installed igraph***; 2400/2400 bench; all
+  byte gates held. The igraph arc: 30 bit-exact at sprint start -> effectively the ENTIRE
+  family at-reference. NEATO closed earlier today (40 flips, zero divergent). REMAINING IN
+  FLIGHT: F3 prism, monster bench, neato-rd200b. Then: the definitive final re-ledger.
