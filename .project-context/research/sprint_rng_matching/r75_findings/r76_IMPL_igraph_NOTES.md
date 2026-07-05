@@ -392,3 +392,279 @@ the task safety constraints prohibited graphviz-fidelity path changes.
 - Igraph's horizontal compaction recursion can exceed Python's default
   recursion depth after dummy expansion; a temporary recursion-limit guard is
   required to preserve source-shaped behavior on larger graphs.
+
+## A11: BK second-order
+
+### Cluster table
+
+Source ledger:
+`/home/jtaylor/projects/dagua/eval_output/fidelity_definitive_r77/OFFICIAL_R77_LEDGER.md`.
+The official named-cause registry contains 145 rows for
+`igraph Sugiyama GLPK-solved then BK/dummy residual from wired r77 data`, grouped
+as 29 graph classes with five variants each:
+
+| Graph class | Rows |
+|---|---:|
+| `ba_2000` | 5 |
+| `ba_500` | 5 |
+| `ba_5000` | 5 |
+| `chung_lu_150` | 5 |
+| `citation_dag_300` | 5 |
+| `clustered_medium_5x20` | 5 |
+| `dense_pair_50` | 5 |
+| `densenet_block` | 5 |
+| `dependency_500` | 5 |
+| `dependency_graph_100` | 5 |
+| `extreme_mixed_width_transformer` | 5 |
+| `heavy_tail_weights_50` | 5 |
+| `hexagonal_lattice_42` | 5 |
+| `hub_and_spoke_3x20` | 5 |
+| `hub_skip_superfan` | 5 |
+| `hub_spoke_10x20` | 5 |
+| `hub_spoke_5x50` | 5 |
+| `interleaved_cluster_crosstalk` | 5 |
+| `planar_60` | 5 |
+| `powerlaw_2000` | 5 |
+| `powerlaw_500` | 5 |
+| `protein_ppi_200` | 5 |
+| `random_dag_200` | 5 |
+| `random_dag_50` | 5 |
+| `regular_4_40` | 5 |
+| `scale_free_ba_120` | 5 |
+| `small_world_500` | 5 |
+| `weighted_clusters_3x10` | 5 |
+| `width_skew_late_merge` | 5 |
+
+### Per-quantity bisection
+
+The second-order portable quantity found in this pass is dummy-chain creation
+order for small acyclic igraph-fidelity DAGs. Igraph constructs the
+dummy-expanded Sugiyama subgraph by scanning component-local source vertices and
+then outgoing edge ids before ordering and BK placement
+(`/home/jtaylor/projects/_references/igraph/src/layout/sugiyama.c:379-472`).
+Dagua's igraph path was still creating dummy chains in global edge-list order.
+
+Runtime probes showed that switching this order globally regressed the A7
+`real_karate_34` exact row, so the port is conservatively gated to
+`fidelity_mode="igraph"` and original non-loop inputs with `N <= 20` that are
+already acyclic. That covers the proven small-DAG dummy-order class without
+touching the GLPK/social exact class.
+
+An attempted no-neighbor barycenter source-parity edit was reverted because it
+did not improve the named probes and broke the karate exact regression.
+
+### Port
+
+Changed files:
+
+- `dagua/layout/ops/sugiyama.py`: added an igraph-only dummy edge processing
+  mode, stored a small-acyclic-DAG guard during igraph layer assignment, and
+  applied source-vertex dummy-chain ordering during dummy expansion only when
+  that guard is true.
+- `dagua/layout/ops/pipelines/sugiyama.py`: wires
+  `_ExpandDummyNodes(use_igraph_edge_order=True)` only for
+  `fidelity_mode="igraph"`.
+- `tests/test_layout/test_sugiyama_fidelity.py`: adds a DenseNet exact-layout
+  regression against installed python-igraph.
+
+### Before/after d_R
+
+Direct installed-igraph probe using anisotropic Procrustes distance:
+
+| Row | A7/old status | A11 d_R | Status |
+|---|---:|---:|---|
+| `densenet_block::classic_sugiyama_default` | divergent | 0.000000000 | ported |
+| `densenet_block::classic_sugiyama_passes4` | divergent | 0.000000000 | ported |
+| `densenet_block::classic_sugiyama_passes48` | divergent | 0.000000000 | ported |
+| `densenet_block::classic_sugiyama_tight` | divergent | 0.000000000 | ported |
+| `densenet_block::classic_sugiyama_wide` | divergent | 0.000000000 | ported |
+| `width_skew_late_merge::classic_sugiyama_default` | 0.298854126 | 0.000000000 | ported |
+| `width_skew_late_merge::classic_sugiyama_passes4` | divergent | 0.000000000 | ported |
+| `width_skew_late_merge::classic_sugiyama_passes48` | divergent | 0.000000000 | ported |
+| `width_skew_late_merge::classic_sugiyama_tight` | divergent | 0.000000000 | ported |
+| `width_skew_late_merge::classic_sugiyama_wide` | divergent | 0.000000000 | ported |
+| `hexagonal_lattice_42::classic_sugiyama_default` | 0.144675773 | 0.144675773 | residual |
+| `hub_skip_superfan::classic_sugiyama_default` | divergent | 0.406700151 | residual |
+
+Gate probe result: 10 of 12 rows under `d_R < 0.01`.
+
+Default-row sub-300 scan after the port:
+
+- Ported: `densenet_block`, `extreme_mixed_width_transformer`,
+  `hub_and_spoke_3x20`, `hub_spoke_10x20`, `hub_spoke_5x50`,
+  `interleaved_cluster_crosstalk`, `width_skew_late_merge`.
+- Still residual: `chung_lu_150`, `citation_dag_300`,
+  `clustered_medium_5x20`, `dense_pair_50`, `dependency_graph_100`,
+  `heavy_tail_weights_50`, `hexagonal_lattice_42`, `hub_skip_superfan`,
+  `planar_60`, `protein_ppi_200`, `random_dag_200`, `random_dag_50`,
+  `regular_4_40`, `scale_free_ba_120`, `weighted_clusters_3x10`.
+- Skipped by the sub-300 probe: `ba_2000`, `ba_500`, `ba_5000`,
+  `dependency_500`, `powerlaw_2000`, `powerlaw_500`, `small_world_500`.
+
+### Gate evidence
+
+Passed:
+
+- `ruff check . --fix` -> `All checks passed!`
+- `mypy --follow-imports=silent dagua/cli.py` -> `Success: no issues found in 1 source file`
+- `pytest tests/test_layout/test_sugiyama_fidelity.py -q -x` ->
+  `20 passed, 3 warnings in 1.03s`
+- `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q` ->
+  `70 passed, 3109 deselected, 34 warnings in 26.10s`
+
+Not completed in this pass:
+
+- Instrumented python-igraph build: source tarball downloaded to
+  `/tmp/dagua_bk2_igraph_sdist/igraph-1.0.0.tar.gz`, but the build was not
+  completed.
+- Bit-exact 10x3 sample, graphviz-fidelity byte sample, final Tier 2 pytest,
+  full family benchmark, and commit were not completed.
+
+### Concerns
+
+This is partial A11 work, not completion of the full contract. The small-DAG
+dummy-order class is ported and guarded, but the `hexagonal_lattice_42` class
+and dense/random/hub residual classes still need a first-difference dump and a
+separate named quantity. The full 145-row residual set is therefore not closed.
+
+### Knowledge
+
+Dummy node ids and expanded edge ids are BK-visible in igraph because Type-1
+conflict marking is edge-id ordinal and horizontal compaction works on the
+dummy-expanded graph. For small acyclic DAGs, matching igraph's source-vertex
+dummy-chain creation order is enough to collapse the DenseNet and
+width-skew-late-merge classes.
+
+## A11b: principled chain order
+
+### Source-derived rule
+
+The A11 `N <= 20` dummy-chain guard was removed. It was a probe fit, not an
+igraph rule.
+
+The matching igraph 1.0.0 source was unpacked read-only under
+`/tmp/igraph-src-r78-bk2` and instrumented from a writable copy under
+`/tmp/igraph-instrument-r78-bk2`. In
+`vendor/source/igraph/src/layout/sugiyama.c:379-433`, igraph constructs the
+dummy-expanded graph by scanning each component-local original vertex `i` in
+ascending id order, calling `igraph_incident(graph, &neis, i, IGRAPH_OUT,
+IGRAPH_LOOPS)`, then appending the dummy chain for each long outgoing incidence.
+Lines 403-418 flip the chain endpoints when the solved layer direction is
+upward, but the chain keeps the original outgoing incidence scan slot.
+
+Python igraph 1.0.0 returns `incident(v, mode="out")` in adjacent-vertex order,
+not input edge-id order. The exact port is therefore:
+
+1. Store the original source, original target, and original edge id before
+   layer-direction flipping.
+2. Create dummy chains by original source vertex ascending.
+3. Within each source bucket, use original target ascending, then original edge
+   id as a stable tie-breaker.
+4. Apply the layer-direction orientation only to the chain endpoints, not to the
+   scan key.
+
+This is size-free and applies to cyclic and acyclic igraph-fidelity graphs.
+
+### Karate bisection
+
+The broad A11 attempt regressed `real_karate_34` because it grouped chains by
+oriented source and edge id after layer-direction flipping. That changes the id
+slots for feedback-arc-flipped chains. Instrumented C dumps showed that igraph
+still schedules those chains from the original outgoing incidence slot and only
+then reverses the chain geometry if the solved layers require it.
+
+After porting original `(source, target, edge_id)` scan keys, the same probe kept
+`real_karate_34::classic_sugiyama_default` bit-exact while preserving the
+DenseNet and width-skew exact rows.
+
+### Remaining classes
+
+`hexagonal_lattice_42` and `hub_skip_superfan` were not separate BK balancing
+quantities. Their residuals came from the same missing target-sorted incidence
+rule. Instrumented expanded-edge dumps showed the first mismatch immediately:
+
+| Graph | Igraph expanded prefix | Previous Dagua expanded prefix |
+|---|---|---|
+| `hexagonal_lattice_42` | `0 1, 0 7, 1 8, 2 3, 2 42` | `0 7, 0 1, 1 8, 2 42, 2 3` |
+| `hub_skip_superfan` | source buckets sorted by target before dummy ids | source buckets followed original edge order |
+
+Once the dummy ids matched, BK per-direction candidates and median-4 balancing
+matched for both representatives; no extra x-stage quantity was needed.
+
+### Before/after d_R
+
+Direct installed-igraph probes were batched in fresh subprocesses to avoid the
+known segfault path.
+
+| Row | A11 d_R | A11b d_R | Status |
+|---|---:|---:|---|
+| `densenet_block::classic_sugiyama_default` | 0.000000000 | 0.000000000 | stayed exact |
+| `densenet_block::classic_sugiyama_passes4` | 0.000000000 | 0.000000000 | stayed exact |
+| `densenet_block::classic_sugiyama_passes48` | 0.000000000 | 0.000000000 | stayed exact |
+| `densenet_block::classic_sugiyama_tight` | 0.000000000 | 0.000000000 | stayed exact |
+| `densenet_block::classic_sugiyama_wide` | 0.000000000 | 0.000000000 | stayed exact |
+| `width_skew_late_merge::classic_sugiyama_default` | 0.000000000 | 0.000000000 | stayed exact |
+| `width_skew_late_merge::classic_sugiyama_passes4` | 0.000000000 | 0.000000000 | stayed exact |
+| `width_skew_late_merge::classic_sugiyama_passes48` | 0.000000000 | 0.000000000 | stayed exact |
+| `width_skew_late_merge::classic_sugiyama_tight` | 0.000000000 | 0.000000000 | stayed exact |
+| `width_skew_late_merge::classic_sugiyama_wide` | 0.000000000 | 0.000000000 | stayed exact |
+| `hexagonal_lattice_42::classic_sugiyama_default` | 0.144675773 | 0.000000000 | ported |
+| `hub_skip_superfan::classic_sugiyama_default` | 0.406700151 | 0.000000000 | ported |
+| `real_karate_34::classic_sugiyama_default` | 0.000000000 | 0.000000000 | stayed exact |
+
+Gate probe result: 13 of 13 rows under `d_R < 0.01`.
+
+### Gate evidence
+
+Passed:
+
+- `ruff check . --fix` -> `All checks passed!`
+- `mypy --follow-imports=silent dagua/cli.py` ->
+  `Success: no issues found in 1 source file`
+- `pytest tests/test_layout/test_sugiyama_fidelity.py -q -x` ->
+  `23 passed, 3 warnings in 1.41s`
+- `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q` ->
+  `73 passed, 3109 deselected, 34 warnings in 21.02s`
+- no-swiglpk fallback:
+  `pytest tests/test_layout/test_sugiyama_fidelity.py::test_sugiyama_igraph_glpk_import_absence_keeps_scipy_fallback -q`
+  -> `1 passed, 3 warnings in 0.06s`
+- 10-row bit-exact sample x 3 seeds: all byte-identical.
+- 5 graphviz-fidelity rows x 3 seeds: all byte-identical.
+
+Final Tier 2:
+
+- `pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"`
+  stopped at the known pre-existing cosmetic render failure:
+  `tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border`
+  with `assert 0 >= 2`.
+- Output before stop:
+  `1 failed, 266 passed, 88 deselected, 1 xfailed, 63 warnings in 218.04s`.
+
+### Commits and bench
+
+Implementation commit:
+
+- `508afd4 fix(layout): match igraph dummy chain incidence order`
+
+Documentation commit:
+
+- This commit records the A11b evidence and benchmark line.
+
+Bench command:
+
+```bash
+python3 scripts/run_benchmark.py --engines classic_sugiyama --variants --max-nodes 300 --seeds 100 --seed-start 100 --workers 5 --timeout 3600 --watchdog-timeout 7200 --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_bk2
+```
+
+Bench result:
+
+- `/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_bk2/summary.md`
+- `51600 total, 51600 ok, 0 skipped, 0 errors, 0 timeouts`
+
+### Knowledge
+
+For igraph Sugiyama fidelity, dummy-chain ordering is original-out-incidence
+ordering, not oriented-edge ordering and not input edge ordering. The original
+target vertex is part of that order because igraph's outgoing incidence list is
+adjacent-vertex sorted. Feedback-arc orientation only changes chain direction;
+it does not move the chain to the reversed endpoint's scan bucket.
