@@ -619,6 +619,36 @@ def test_sugiyama_igraph_fidelity_packs_weak_components_independently() -> None:
     assert torch.allclose(positions[:, 1], torch.tensor([0.0, 1.0, 0.0, 1.0]))
 
 
+def test_sugiyama_igraph_component_packing_counts_dummy_margin() -> None:
+    """Igraph component packing should advance by the expanded subgraph width."""
+    edge_index = torch.tensor(
+        [
+            [0, 1, 0],
+            [1, 2, 2],
+        ],
+        dtype=torch.long,
+    )
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="igraph",
+    )
+
+    expected = torch.tensor(
+        [
+            [0.5, 0.0],
+            [0.0, 1.0],
+            [0.5, 2.0],
+            [2.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    assert torch.equal(positions, expected)
+
+
 def test_sugiyama_igraph_fidelity_ignores_node_width_spacing_by_default() -> None:
     """Igraph fidelity mode should use hgap-only compaction by default."""
     edge_index = torch.empty((2, 0), dtype=torch.long)
