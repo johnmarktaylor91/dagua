@@ -3712,7 +3712,7 @@ def _place_compaction_block(
     shift: List[float],
     x: List[Optional[float]],
 ) -> None:
-    """Recursively place one aligned block during horizontal compaction.
+    """Place one aligned block during horizontal compaction.
 
     Parameters
     ----------
@@ -3742,31 +3742,19 @@ def _place_compaction_block(
     if x[block_root] is not None:
         return
 
-    x[block_root] = 0.0
-    current = block_root
-    while True:
-        layer_nodes = layers[rank_of[current]]
-        position = pos_of[current]
-        if position > 0:
-            left_neighbor = layer_nodes[position - 1]
-            left_root = root[left_neighbor]
-            _place_compaction_block(
-                block_root=left_root,
-                layers=layers,
-                root=root,
-                align=align,
-                rank_of=rank_of,
-                pos_of=pos_of,
-                node_sizes=node_sizes,
-                node_sep=node_sep,
-                sink=sink,
-                shift=shift,
-                x=x,
-            )
-            if sink[block_root] == block_root:
-                sink[block_root] = sink[left_root]
+    stack: List[Tuple[int, int, Optional[int], Optional[int]]] = [
+        (block_root, block_root, None, None)
+    ]
+    while stack:
+        active_root, current, left_neighbor, left_root = stack.pop()
+        if x[active_root] is None:
+            x[active_root] = 0.0
 
-            block_x = 0.0 if x[block_root] is None else x[block_root]
+        if left_neighbor is not None and left_root is not None:
+            if sink[active_root] == active_root:
+                sink[active_root] = sink[left_root]
+
+            block_x = 0.0 if x[active_root] is None else x[active_root]
             left_x = 0.0 if x[left_root] is None else x[left_root]
             minimum_gap = _minimum_separation(
                 left_node=left_neighbor,
@@ -3774,17 +3762,32 @@ def _place_compaction_block(
                 node_sizes=node_sizes,
                 node_sep=node_sep,
             )
-            if sink[block_root] != sink[left_root]:
+            if sink[active_root] != sink[left_root]:
                 shift[sink[left_root]] = min(
                     shift[sink[left_root]],
                     block_x - left_x - minimum_gap,
                 )
             else:
-                x[block_root] = max(block_x, left_x + minimum_gap)
+                x[active_root] = max(block_x, left_x + minimum_gap)
+
+            next_current = align[current]
+            if next_current != active_root:
+                stack.append((active_root, next_current, None, None))
+            continue
+
+        layer_nodes = layers[rank_of[current]]
+        position = pos_of[current]
+        if position > 0:
+            next_left_neighbor = layer_nodes[position - 1]
+            next_left_root = root[next_left_neighbor]
+            stack.append((active_root, current, next_left_neighbor, next_left_root))
+            if x[next_left_root] is None:
+                stack.append((next_left_root, next_left_root, None, None))
+            continue
 
         current = align[current]
-        if current == block_root:
-            break
+        if current != active_root:
+            stack.append((active_root, current, None, None))
 
 
 def _minimum_separation(
@@ -3925,36 +3928,21 @@ def _flatten_graphviz_cluster_members(members: Any) -> Tuple[int, ...]:
         Sorted unique node ids found in ``members``.
     """
     out: Set[int] = set()
-
-    def visit(value: Any) -> None:
-        """Collect integer leaves from one nested membership value.
-
-        Parameters
-        ----------
-        value : Any
-            Current nested value.
-
-        Returns
-        -------
-        None
-            The function mutates ``out`` in the enclosing scope.
-        """
+    stack: List[Any] = [members]
+    while stack:
+        value = stack.pop()
         if isinstance(value, Mapping):
-            for child in value.values():
-                visit(child)
-            return
+            stack.extend(reversed(tuple(value.values())))
+            continue
         if isinstance(value, (str, bytes)):
-            return
+            continue
         try:
             out.add(int(value))
-            return
+            continue
         except (TypeError, ValueError):
             pass
         if isinstance(value, (Sequence, set, frozenset)):
-            for child in value:
-                visit(child)
-
-    visit(members)
+            stack.extend(reversed(tuple(value)))
     return tuple(sorted(out))
 
 
