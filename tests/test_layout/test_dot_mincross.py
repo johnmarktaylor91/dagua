@@ -5,13 +5,59 @@ from __future__ import annotations
 import pytest
 import torch
 
-from dagua.eval.competitors.classic_competitor import _graphviz_dot_node_box
+from dagua.eval.competitors.classic_competitor import (
+    _graphviz_dot_node_box,
+    _graphviz_dot_node_sizes,
+)
+from dagua.eval.graphs import get_test_graphs
 from dagua.layout.ops._dot_mincross import graphviz_mincross
-from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
+from dagua.layout.ops.pipelines.sugiyama import build_sugiyama_pipeline, layout_sugiyama_pipeline
+from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.sugiyama import (
     _expand_long_edges_with_dummy_nodes,
+    _graphviz_contain_cluster_ordering,
     _graphviz_decompose_node_order,
 )
+
+
+def _cluster_skeleton_visible_order(graph_name: str) -> list[list[int]]:
+    """Return visible rank order from the inactive A12 cluster skeleton path.
+
+    Parameters
+    ----------
+    graph_name : str
+        Name from the evaluation graph registry.
+
+    Returns
+    -------
+    list[list[int]]
+        Original-node ids by non-empty expanded rank.
+    """
+    graphs = {test_graph.name: test_graph.graph for test_graph in get_test_graphs(max_nodes=300)}
+    graph = graphs[graph_name]
+    state = SolveState()
+    state.extras["sugiyama_graphviz_node_sizes"] = _graphviz_dot_node_sizes(graph=graph)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+    )
+    pipeline = build_sugiyama_pipeline(
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        center_coordinates=False,
+        graphviz_enable_cluster_skeleton=True,
+    )
+    final_state = pipeline.apply(problem, state, RuntimeContext(plan=ExecutionPlan()))
+    ordered_layers = final_state.extras["sugiyama_ordered_layers"]
+    return [
+        [int(node) for node in layer if int(node) < graph.num_nodes]
+        for layer in ordered_layers
+        if any(int(node) < graph.num_nodes for node in layer)
+    ]
 
 
 def test_graphviz_mincross_two_rank_golden_order() -> None:
@@ -60,6 +106,45 @@ def test_graphviz_mincross_counts_sparse_wide_rank_edges() -> None:
 
     assert ordering[0] == [0, 1]
     assert sorted(ordering[1]) == [2, 3, 4, 5, 6]
+
+
+def test_graphviz_cluster_containment_keeps_rank_blocks_contiguous() -> None:
+    """Collect same-rank cluster members into one mincross block."""
+    ranks = [[0, 1, 2, 3], [4, 5]]
+
+    ordering = _graphviz_contain_cluster_ordering(
+        ranks=ranks,
+        graphviz_cluster_members={"cluster_c": (0, 2, 3)},
+    )
+
+    assert ordering == [[0, 2, 3, 1], [4, 5]]
+
+
+def test_graphviz_cluster_skeleton_flag_preserves_interleaved_order() -> None:
+    """Keep the A12c interleaved-cluster ordering verifier behind a flag."""
+    assert _cluster_skeleton_visible_order("interleaved_cluster_crosstalk") == [
+        [0],
+        [2, 1],
+        [5, 3, 8, 9],
+        [6, 4, 10],
+        [11, 7],
+    ]
+
+
+def test_graphviz_cluster_skeleton_flag_preserves_platform_order() -> None:
+    """Pin the inactive platform skeleton state without the removed x tie."""
+    assert _cluster_skeleton_visible_order("kitchen_sink_platform_graph") == [
+        [16, 12],
+        [17, 13],
+        [0, 14],
+        [1, 15],
+        [2],
+        [3, 5, 4],
+        [6],
+        [7, 10],
+        [8, 11],
+        [9],
+    ]
 
 
 def test_graphviz_decompose_order_discovers_virtual_nodes_from_real_roots() -> None:
