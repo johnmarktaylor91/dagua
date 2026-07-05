@@ -97,3 +97,54 @@ Follow-up spec:
   fdp_stage_compare.json); first divergence is fdp_xLayout prism/GTS overlap expansion
   (overlap="9:prism", tries=9) BEFORE putGraphs/finalCC. Named portable-with-effort:
   requires a prism-equivalent overlap expansion. -> F3 dispatched.
+
+## S3: sgd2 hang + closure
+
+Root cause:
+- The reported native hang was a practical hang, not an unbounded Python loop. `real_football_115` seed 113 reached `native_start`, entered SGD2 step 0, and then spent the run inside the tiny crossing-detector MLP (`LayerNorm`, `Linear`, Adam) under PyTorch's default CPU intra-op thread pool.
+- Reference semantics are a fixed `for range(max_iter)` loop in `/tmp/graph-drawing/gd2.py`; it is bounded by `max_iter=2000`. The defect was Dagua running the same fixed tiny-kernel workload with multi-thread overhead large enough to project to about 50-60 minutes for one seed.
+- File/line: `dagua/layout/ops/sgd2_multi.py:59` adds `_cpu_thread_guard`; `dagua/layout/ops/sgd2_multi.py:2418` applies it only for CPU crossing criteria. The paired reference adapter mirrors the same guard at `dagua/eval/competitors/sgd2_multi_competitor.py:95` and `dagua/eval/competitors/sgd2_multi_competitor.py:557` so native/reference comparisons use the same CPU kernel mode.
+
+Fix:
+- CPU runs with `crossings` or `crossing_angle_maximization` now execute the SGD2 optimization loop with `torch.set_num_threads(1)`, restoring the previous thread count afterward.
+- This preserves the reference `max_iter` bound and avoids the tiny-batch thread-pool slow path. It intentionally changes the CPU floating-point execution mode for crossing workloads; non-crossing SGD2 criteria do not enter the guard.
+- Code commit: `1f317c1` (`fix(layout): bound sgd2 crossing CPU threading`).
+
+Hang check:
+
+| Graph | Seed | Variant | Before | After |
+| --- | ---: | --- | --- | --- |
+| `real_football_115` | 113 | `classic_sgd2_multi_with_crossing` | R2 observed `native_start` stall >60 min | completed in 26.624s, hash `b4ef1b0b74ab455cd4b66069a9400369f4e0e3201de03b20b3071582763e2792` |
+
+100-seed paired closure artifacts:
+- `/tmp/r78_r2/sgd2_pair_results_s3_real.jsonl`
+- `/tmp/r78_r2/sgd2_pair_results_s3_wide.jsonl`
+
+| Row | Seeds | Exact | Divergent | First-batch parity | Verdict |
+| --- | ---: | ---: | ---: | --- | --- |
+| `real_football_115::classic_sgd2_multi_with_crossing` | 100-199 | 100 | 0 | stress/crossings/init all true | identical |
+| `wide_1_100_1::classic_sgd2_multi_with_crossing` | 100-199 | 97 | 3 | stress/crossings/init all true | named divergence after matched first batches |
+
+`wide_1_100_1` named divergences:
+
+| Seed | Max abs delta | RMS delta | Native metrics | Reference metrics |
+| ---: | ---: | ---: | --- | --- |
+| 157 | 3.994778633 | 0.393614441 | crossings 387, stress 0.741953424 | crossings 421, stress 0.741764044 |
+| 184 | 1.184412003 | 0.206326425 | crossings 469, stress 0.708211760 | crossings 603, stress 0.710824322 |
+| 190 | 0.047194958 | 0.007997223 | crossings 1326, stress 0.685131618 | crossings 1314, stress 0.685130248 |
+
+Byte gates:
+- R2 pre-fix completed default-thread seeds remain recorded in `/tmp/r78_r2/sgd2_pair_results.jsonl` (14/14 exact).
+- S3 fixed-mode native/reference byte gate: `real_football_115` seeds 100-199 exact; `wide_1_100_1` seeds 100-156, 158-183, 185-189, 191-199 exact.
+- Pre/post byte identity for crossing workloads is not retained because the fix changes the CPU kernel threading mode. The tradeoff was required to make the reference-bounded 2000-step crossing run complete in sane time. First-batch RNG parity remained true for all 200 S3 paired seeds, including the three wide-row divergences.
+
+Test results:
+- `ruff check . --fix`: passed.
+- `mypy --follow-imports=silent dagua/cli.py`: passed (`Success: no issues found in 1 source file`; unused pyproject section note for `dagua.layout.multilevel`).
+- `pytest -k "sgd2" -x --tb=short -q`: passed, 50 passed, 3128 deselected, 42 warnings.
+- `pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"`: stopped on known pre-existing cosmetic failure `tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border` (`assert 0 >= 2`) after 266 passed, 88 deselected, 1 xfailed, 63 warnings.
+- `pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q`: attempted; process was terminated after about 90 minutes of CPU-bound runtime under heavy concurrent benchmark load, with no assertion failure emitted before termination.
+
+Concerns:
+- The S3 fix closes the hang, but crossing-workload byte output is now defined by the single-thread CPU execution mode. That is why the full closure is exact for `real_football_115` but exposes three late-optimizer divergences on `wide_1_100_1` despite matched initial batches.
+- The three wide-row divergences are not sampling divergences; first-batch hashes match for stress, crossings, and initialization. The next investigation should instrument per-step hashes/losses around seeds 157, 184, and 190 if those remaining deltas matter.
