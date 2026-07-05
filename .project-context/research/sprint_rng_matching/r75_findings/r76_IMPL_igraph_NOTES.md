@@ -793,3 +793,148 @@ Igraph 1.0.0's Sugiyama scale gate is source-backed and empirically active:
 directed graphs with `N <= 1000` use the GLPK rank LP, while directed graphs
 with `N > 1000` use the Eades feedback-order fallback. The current Dagua
 fallback mirrors that behavior at 2000 nodes.
+
+## A11d: the last 18
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-close18`
+Branch: `r78/close18`
+
+### Scope and row list
+
+The requested
+`.project-context/research/sprint_rng_matching/r76_scratch/r78_igraph_close18.txt`
+was not present on `develop`. The row set was reconstructed from the A11c split
+and a fresh subprocess-batched installed-igraph probe: among the four named
+small classes, 20 igraph variants were measured, two were already exact on
+`develop` (`dependency_graph_100::passes4` and `er_100::passes48`), and the
+remaining 18 were the close rows with `d_R >= 0.01`.
+
+All four named classes have multiple weak components:
+
+| Graph | Components | Close rows |
+|---|---:|---:|
+| `dependency_graph_100` | 2 | 4 |
+| `er_100` | 4 | 4 |
+| `multi_component_80` | 7 | 5 |
+| `parallel_cycles_4x5` | 4 | 5 |
+
+### Bisection
+
+Same-process Dagua-vs-installed-igraph probing showed every row had
+`component_aligned_rmsd = 0.0`. Ranks, layer orders, dummy-chain order, BK runs,
+and component-local final coordinates already matched after A11b. The first
+diverging quantity was the X offset assigned between weak components.
+
+Installed igraph lays out each weak component independently, writes real
+vertices as `layout[i, 0] + dx`, and then advances the component margin from the
+maximum X coordinate across the whole dummy-expanded subgraph, not only visible
+original vertices. Source cite:
+`/home/jtaylor/projects/_references/igraph/src/layout/sugiyama.c:475-523`.
+
+Dagua was left-normalizing each component and advancing `dx` from original-node
+positions only. This was enough to keep each component shape exact while making
+the packed whole-graph shape close but non-exact.
+
+Named law: igraph Sugiyama component packing uses the dummy-expanded component
+right margin and preserves each component's local X origin.
+
+### Port
+
+Changed files:
+
+- `dagua/layout/ops/pipelines/sugiyama.py`: replaced the igraph-only component
+  packing recursion with a helper that reads `_SUGIYAMA_EXPANDED_POSITIONS_KEY`
+  from the component pipeline, writes component positions without per-component
+  min-X normalization, and advances `dx` by `max(expanded_x) + hgap`.
+- `tests/test_layout/test_sugiyama_fidelity.py`: added a four-node regression
+  where a long-edge dummy extends the component margin past visible real nodes.
+
+The fix is gated to `fidelity_mode="igraph"` and only the existing weak-
+component packing path consumes it. Graphviz-fidelity, default non-igraph
+Sugiyama, eval scoring, and reference runners were not changed.
+
+Implementation commit: `5bfed0b` (`fix(sugiyama): match igraph component packing margins`).
+
+### Before/after d_R
+
+References were invoked in fresh subprocesses to avoid the known repeated
+installed-igraph segfault path. Distance is Procrustes `d_R`; after values were
+also raw position-equal to installed igraph.
+
+| Row | Before | After |
+|---|---:|---:|
+| `dependency_graph_100::default` | 0.026904936 | 0.000000000 |
+| `dependency_graph_100::passes48` | 0.064910123 | 0.000000000 |
+| `dependency_graph_100::tight` | 0.026904936 | 0.000000000 |
+| `dependency_graph_100::wide` | 0.026904936 | 0.000000000 |
+| `er_100::default` | 0.012408200 | 0.000000000 |
+| `er_100::passes4` | 0.025780826 | 0.000000000 |
+| `er_100::tight` | 0.012408200 | 0.000000000 |
+| `er_100::wide` | 0.012408200 | 0.000000000 |
+| `multi_component_80::default` | 0.023915041 | 0.000000000 |
+| `multi_component_80::passes4` | 0.023915041 | 0.000000000 |
+| `multi_component_80::passes48` | 0.023915041 | 0.000000000 |
+| `multi_component_80::tight` | 0.023915041 | 0.000000000 |
+| `multi_component_80::wide` | 0.023915041 | 0.000000000 |
+| `parallel_cycles_4x5::default` | 0.137120839 | 0.000000000 |
+| `parallel_cycles_4x5::passes4` | 0.137120839 | 0.000000000 |
+| `parallel_cycles_4x5::passes48` | 0.137120839 | 0.000000000 |
+| `parallel_cycles_4x5::tight` | 0.137120839 | 0.000000000 |
+| `parallel_cycles_4x5::wide` | 0.137120839 | 0.000000000 |
+
+Gate result: 18 of 18 close rows under `d_R < 0.01`; all 18 raw-equal. The two
+already-near rows (`dependency_graph_100::passes4`, `er_100::passes48`) stayed
+raw-equal.
+
+### Gate evidence
+
+Passed:
+
+- `ruff check . --fix` -> `All checks passed!`
+- `pytest tests/test_layout/test_sugiyama_fidelity.py -q -x` ->
+  `24 passed, 3 warnings in 1.27s`
+- `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q` ->
+  `79 passed, 3111 deselected, 50 warnings in 123.21s`
+- no-swiglpk fallback:
+  `pytest tests/test_layout/test_sugiyama_fidelity.py::test_sugiyama_igraph_glpk_import_absence_keeps_scipy_fallback -q`
+  -> `1 passed, 3 warnings in 0.06s`
+- 10-row igraph byte-identity sample x 3 seeds against detached `develop`:
+  30 rows, 0 hash differences.
+- 5-row graphviz-fidelity byte-identity sample x 3 seeds against detached
+  `develop`: 15 rows, 0 hash differences.
+
+Final Tier 2:
+
+- `pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"`
+  stopped at the known pre-existing cosmetic render failure:
+  `tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border`
+  with `assert 0 >= 2`.
+- Output before stop:
+  `1 failed, 266 passed, 88 deselected, 1 xfailed, 63 warnings in 210.59s`.
+
+### Benchmark
+
+Command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python -u scripts/run_benchmark.py --engines classic_sugiyama --variants --graphs dependency_graph_100,er_100,multi_component_80,parallel_cycles_4x5 --max-nodes 0 --seeds 100 --seed-start 100 --workers 4 --timeout 3600 --watchdog-timeout 7200 --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_close18
+```
+
+Result:
+
+- `/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_close18/summary.md`
+- `2400 total, 2400 ok, 0 skipped, 0 errors, 0 timeouts`
+
+### Documentation commit
+
+- This commit records the A11d bisection, port, gate evidence, and benchmark
+  line.
+
+### Knowledge
+
+For igraph Sugiyama, weak-component packing is BK-visible even when each
+component is exact. The inter-component margin is computed from the
+dummy-expanded component layout, including dummy vertices that may lie to the
+right of all original vertices, and components are not re-left-normalized before
+adding the running `dx`.
