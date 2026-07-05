@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -14,6 +14,7 @@ from dagua.layout.ops.state import (
     SolveState,
 )
 from dagua.layout.ops.sugiyama import (
+    _SUGIYAMA_EXPANDED_POSITIONS_KEY,
     _AssignLayers,
     _BarycenterOrdering,
     _BuildEdgeRoutes,
@@ -490,33 +491,104 @@ def _layout_igraph_packed_components(
             component=component,
         )
         component_sizes = node_sizes[component] if node_sizes is not None else None
-        component_pos = cast(
-            torch.Tensor,
-            layout_sugiyama_pipeline(
-                edge_index=component_edges.to(device=edge_index.device),
-                num_nodes=len(component),
-                node_sizes=component_sizes,
-                rank_sep=rank_sep,
-                node_sep=node_sep,
-                seed=seed,
-                barycenter_passes=barycenter_passes,
-                edge_weights=(
-                    None
-                    if component_weights is None
-                    else component_weights.to(device=edge_index.device)
-                ),
-                fidelity_mode="igraph",
-                use_node_sizes_for_spacing=use_node_sizes_for_spacing,
-                center_coordinates=center_coordinates,
-                config=config,
+        component_pos, component_max_x = _layout_igraph_component_for_packing(
+            edge_index=component_edges.to(device=edge_index.device),
+            num_nodes=len(component),
+            node_sizes=component_sizes,
+            rank_sep=rank_sep,
+            node_sep=node_sep,
+            seed=seed,
+            barycenter_passes=barycenter_passes,
+            edge_weights=(
+                None
+                if component_weights is None
+                else component_weights.to(device=edge_index.device)
             ),
-        ).to(device=output_device, dtype=torch.float32)
+            use_node_sizes_for_spacing=use_node_sizes_for_spacing,
+            center_coordinates=center_coordinates,
+        )
+        component_pos = component_pos.to(device=output_device, dtype=torch.float32)
         if component_pos.numel() > 0:
-            component_pos[:, 0] -= float(component_pos[:, 0].min().item())
             component_pos[:, 0] += dx
-            dx += float(component_pos[:, 0].max().item()) - dx + node_sep
+            dx += component_max_x + node_sep
         packed[component] = component_pos
     return packed
+
+
+def _layout_igraph_component_for_packing(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    rank_sep: float,
+    node_sep: float,
+    seed: int,
+    barycenter_passes: int,
+    edge_weights: Optional[torch.Tensor],
+    use_node_sizes_for_spacing: bool,
+    center_coordinates: bool,
+) -> Tuple[torch.Tensor, float]:
+    """Lay out one igraph component and return its expanded right margin.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Component-local graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of original nodes ``N`` in the component.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``.
+    rank_sep : float
+        Vertical center-to-center spacing between layers.
+    node_sep : float
+        Horizontal gap between nodes and packed components.
+    seed : int
+        Seed retained for API compatibility.
+    barycenter_passes : int
+        Maximum number of crossing-minimization sweeps.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight vector with shape ``[E]``.
+    use_node_sizes_for_spacing : bool
+        Whether component layouts should include node widths.
+    center_coordinates : bool
+        Whether the component pipeline should center horizontal coordinates.
+
+    Returns
+    -------
+    tuple of torch.Tensor and float
+        Original-node positions with shape ``[N, 2]`` and the maximum local
+        X coordinate over real plus dummy vertices.
+    """
+    problem_node_sizes = node_sizes if use_node_sizes_for_spacing else None
+    output_device = edge_index.device
+    if problem_node_sizes is not None:
+        output_device = problem_node_sizes.device
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=problem_node_sizes,
+        edge_weights=edge_weights,
+        seed=seed,
+    )
+    state = SolveState()
+    ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
+    pipeline = build_sugiyama_pipeline(
+        rank_sep=rank_sep,
+        node_sep=node_sep,
+        barycenter_passes=barycenter_passes,
+        seed=seed,
+        fidelity_mode="igraph",
+        center_coordinates=center_coordinates,
+    )
+    final_state = pipeline.apply(problem, state, ctx)
+    if final_state.pos is None:
+        raise RuntimeError("Sugiyama component pipeline did not produce final positions.")
+
+    expanded_positions = final_state.extras.get(_SUGIYAMA_EXPANDED_POSITIONS_KEY)
+    if not isinstance(expanded_positions, torch.Tensor) or expanded_positions.numel() == 0:
+        component_max_x = 0.0
+    else:
+        component_max_x = float(expanded_positions[:, 0].max().item())
+    return final_state.pos, component_max_x
 
 
 def _slice_component_edges(
