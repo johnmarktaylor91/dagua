@@ -784,3 +784,19 @@ for retries. 2-attempt max per work item, then park documented.
   policy; on disk in eval_output/). Housekeeping backlog for a rainy day: gate_3
   calibration; ~7 pre-existing test failures; recursion-limit on 2000+ sugiyama; watcher
   session-tagging (issue filed). THE LIMIT, REACHED HONESTLY.
+- 2026-07-05 ~10:00 ET: r78 ROLLING. A11b MERGED: dummy-chain law derived (original
+  outgoing incidence order; feedback-arc flips = direction only); size gate removed; probe
+  13/13; ***igraph bit-exact 141->257, far 152->52, zero regressions***
+  (r78_bk2.jsonl). H1 recursion fixes MERGED (huge-graph crash class dead). Superior line
+  MERGED: G2 gem trace = full match at iters100 budget, first split last-bit roundoff at
+  round 115/2000 (27 gem rows likely stale-scoring; monster campaign resolves). R2
+  merged w/ reconstructed evidence (MY ERROR: worktree --force removal destroyed the
+  uncommitted section; recovered from primary artifacts, now banked in r78_evidence/;
+  lesson: check worktree status before ANY --force removal): sgd2 2 rows byte-identical
+  14/14 paired seeds, blocked by DAGUA-SIDE HANG (real_football_115 seed 113,
+  native_start) -> S3 dispatched; sfdp 8 = measured spline-occupancy boundary (terminal);
+  fdp 14 = fdp_xLayout prism/GTS overlap expansion -> F3 dispatched (scipy Delaunay
+  sanctioned). A12 clusters: rounds 1-3 = rank parity + ORDERING parity (dot count 5
+  exact) verified; round 4 (A12d, x-stage integration) in flight. Neato: connected
+  near-exact vs live binary (stale-era refs suspected for all 54); fresh both-sides bench
+  in flight. Monster campaign grinding.
