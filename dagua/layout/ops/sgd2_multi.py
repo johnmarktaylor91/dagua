@@ -13,8 +13,9 @@ from __future__ import annotations
 import math
 import random
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Dict, Optional, Tuple
+from typing import Callable, ClassVar, Dict, Iterator, Optional, Tuple
 
 import numpy as np
 import torch
@@ -52,6 +53,46 @@ _CROSSING_DETECTOR_TRAIN_STEPS = 2
 _CROSSING_DETECTOR_LR = 0.01
 _UNREACHED = -1
 _CROSSING_CRITERIA = frozenset({"crossings", "crossing_angle_maximization"})
+_CROSSING_CPU_THREADS = 1
+
+
+@contextmanager
+def _cpu_thread_guard(enabled: bool) -> Iterator[None]:
+    """Temporarily run tiny CPU crossing-detector kernels single-threaded.
+
+    Parameters
+    ----------
+    enabled : bool
+        Whether to apply the thread limit.
+
+    Yields
+    ------
+    Iterator[None]
+        Context around the crossing-heavy optimization loop.
+
+    Notes
+    -----
+    The upstream GD2 crossing objective repeatedly trains a small MLP on
+    128-row mini-batches. On multi-threaded CPU builds, PyTorch's default
+    intra-op pool can dominate those tiny LayerNorm/Linear/Adam kernels and
+    turn a fixed 2,000-step run into a practical hang. The reference loop is
+    fixed by ``max_iter``; this guard preserves that bound while avoiding the
+    thread-pool slow path.
+    """
+    if not enabled:
+        yield
+        return
+
+    previous_threads = torch.get_num_threads()
+    if previous_threads <= _CROSSING_CPU_THREADS:
+        yield
+        return
+
+    torch.set_num_threads(_CROSSING_CPU_THREADS)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(previous_threads)
 
 
 class SmoothSteps:
@@ -2374,11 +2415,13 @@ class _RunSGD2MultiOptimization(Op):
         )
         state.extras["sgd2_multi_run_state"] = run_state
 
-        for _ in range(self.steps):
-            if state.converged:
-                break
-            self._opt_step.apply(problem, state, ctx)
-            self._convergence_check.apply(problem, state, ctx)
+        guard_enabled = device.type == "cpu" and bool(_CROSSING_CRITERIA & active_names)
+        with _cpu_thread_guard(guard_enabled):
+            for _ in range(self.steps):
+                if state.converged:
+                    break
+                self._opt_step.apply(problem, state, ctx)
+                self._convergence_check.apply(problem, state, ctx)
 
         state.pos = positions.detach().to(dtype=torch.float32)
         state.converged = True
