@@ -800,3 +800,17 @@ for retries. 2-attempt max per work item, then park documented.
   exact) verified; round 4 (A12d, x-stage integration) in flight. Neato: connected
   near-exact vs live binary (stale-era refs suspected for all 54); fresh both-sides bench
   in flight. Monster campaign grinding.
+- 2026-07-05 ~12:30 ET: r78 ROLLING (2). A12e/A12f CLUSTER TERMINAL (merged): round 5
+  enumerated the complete aux-x structural diff (4 constructs); round 6 proved them COUPLED
+  -- all require a first-class graphviz x-inventory model (node classes, saved edge
+  lineage, ED_to_orig, borders, label metrics) threaded through
+  _build_graphviz_x_aux_edges. 6 rounds total; rank+ordering parity VERIFIED and banked
+  behind the skeleton flag; the 20 rows keep A9/A10 gains + the terminal spec dossier.
+  S3 SGD2 CLOSED (merged): "hang" = PyTorch tiny-kernel thread-pool pathology on the
+  crossing MLP (50-60 min/seed); fixed via scoped single-threading (1f317c1). CLOSURE:
+  real_football_115 100/100 EXACT vs reference; wide_1_100_1 97/100 exact + 3 seeds
+  diverging after matched first batches (float-chaos class). Caveat documented: threading
+  change alters crossing-workload float behavior (old path never terminated; exactness is
+  vs the REFERENCE, which is the standard). Two of two evidence-thin rows now dispositioned
+  with instrument-grade closure. IN FLIGHT: A11c big-tail, F3 prism, neato bench, monster
+  bench (9.3%).
