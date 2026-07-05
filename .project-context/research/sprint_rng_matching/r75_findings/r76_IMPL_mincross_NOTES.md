@@ -1722,3 +1722,24 @@ Done line:
 - The report `d_R` for these rows is the free-aspect distributional
   Procrustes distance; plain isotropic Procrustes gives misleading numbers for
   the cluster x-boundary path.
+
+## H1: iterative rewrites for huge graphs
+
+Call sites changed:
+- `dagua/layout/ops/sugiyama.py:_place_compaction_block` no longer recurses through left-neighbor block dependencies during Graphviz horizontal compaction. It now uses explicit stack frames so child block placement resumes the same post-child sink/shift update.
+- `dagua/layout/ops/sugiyama.py:_flatten_graphviz_cluster_members` now flattens nested graphviz cluster metadata with an explicit stack.
+- `dagua/layout/ops/pipelines/dot_rank.py:_find_subtree` now performs iterative union-find root lookup with path compression.
+- `dagua/layout/ops/cluster_geometry.py:ClusterTree.bottom_up_order`, `ClusterTree.top_down_order`, and `cluster_subtree` now use explicit stacks for hierarchy walks.
+
+Intentionally not changed:
+- Igraph-prefixed recursion remains untouched per H1 safety constraints. A direct self-recursion scan of the Sugiyama/dot-rank/cluster files now reports only `_igraph_qsort_indices` and `_igraph_place_compaction_block`.
+
+Evidence:
+- Byte-identity gate passed against archived `HEAD` for `binary_tree`, `dense_pair_50`, and `weighted_karate_34` under `classic_sugiyama_graphviz_fidelity`, seeds 0, 1, and 2. Raw tensor SHA-256 output was identical pre/post for all nine rows.
+- `ba_2000` graphviz-fidelity completed without crash for seeds 0, 1, and 2. Runtimes observed: 834.216s, 844.299s, and 743.014s; each produced finite `(2000, 2)` positions.
+- `rgg_2000` graphviz-fidelity did not complete within the practical per-turn verification window. Seed 0 remained CPU-active for roughly 40 minutes and was manually stopped; seeds 1 and 2 were not run. No recursion traceback was observed, but this gate is incomplete.
+- `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q`: 69 passed, 3109 deselected, 34 warnings.
+- `ruff check . --fix`: All checks passed.
+
+Commit:
+- Not created. The H1 monster gate is incomplete because `rgg_2000` did not finish, and the task required gates before commit.
