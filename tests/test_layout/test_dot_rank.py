@@ -9,6 +9,7 @@ from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
     _build_graphviz_x_aux_edges,
     _expand_long_edges_with_dummy_nodes,
+    _graphviz_cluster_rank_assignments,
 )
 
 
@@ -124,6 +125,28 @@ def test_sugiyama_graphviz_fidelity_uses_network_simplex_layers() -> None:
     assert default_pos[0, 1] != default_pos[3, 1]
 
 
+def test_graphviz_cluster_rank_assignment_uses_member_local_offsets() -> None:
+    """Collapse a ranked cluster through its leader before parent ranking."""
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2],
+            [1, 3, 0],
+        ],
+        dtype=torch.long,
+    )
+
+    layers, _, cluster_bounds = _graphviz_cluster_rank_assignments(
+        edge_index=edge_index,
+        edge_weights=None,
+        num_nodes=4,
+        clusters={"cluster_c": [0, 1]},
+        cluster_parents={"cluster_c": None},
+    )
+
+    assert layers.tolist() == [1, 2, 0, 3]
+    assert cluster_bounds == {"cluster_c": (1, 2)}
+
+
 def test_sugiyama_graphviz_fidelity_uses_dot_x_simplex() -> None:
     """Use Graphviz dot x-network-simplex only for graphviz fidelity mode."""
     edge_index = torch.tensor(
@@ -200,3 +223,27 @@ def test_graphviz_virtual_node_width_seed_matches_lr_minlen() -> None:
 
     assert expanded_graph.node_sizes[4, 0].item() == 74.0
     assert 146 in [edge[2] for edge in aux_edges if edge[3] == 0]
+
+
+def test_graphviz_cluster_x_aux_edges_use_boundary_nodes() -> None:
+    """Add cluster containment and sibling separation inside the x aux graph."""
+    node_sizes = torch.full((4, 2), 54.0, dtype=torch.float32)
+
+    aux_edges, initial_ranks = _build_graphviz_x_aux_edges(
+        layers=[[0, 1], [2, 3]],
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_weights=None,
+        node_sizes=node_sizes,
+        num_nodes=4,
+        num_original_nodes=4,
+        node_sep=72.0,
+        graphviz_cluster_members={"left": (0, 2), "right": (1, 3)},
+        graphviz_cluster_parents={"left": None, "right": None},
+    )
+
+    assert initial_ranks[4] < initial_ranks[0]
+    assert initial_ranks[5] > initial_ranks[2]
+    assert (4, 0, 35, 0) in aux_edges
+    assert (2, 5, 35, 0) in aux_edges
+    assert (5, 6, 8, 0) in aux_edges
+    assert (4, 5, 1, 128) in aux_edges
