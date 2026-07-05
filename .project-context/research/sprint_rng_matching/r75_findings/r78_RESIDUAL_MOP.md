@@ -109,6 +109,7 @@ Fix:
 - CPU runs with `crossings` or `crossing_angle_maximization` now execute the SGD2 optimization loop with `torch.set_num_threads(1)`, restoring the previous thread count afterward.
 - This preserves the reference `max_iter` bound and avoids the tiny-batch thread-pool slow path. It intentionally changes the CPU floating-point execution mode for crossing workloads; non-crossing SGD2 criteria do not enter the guard.
 - Code commit: `1f317c1` (`fix(layout): bound sgd2 crossing CPU threading`).
+- Report commit: `0bd4efe` (`docs(r78): record sgd2 hang closure`).
 
 Hang check:
 
