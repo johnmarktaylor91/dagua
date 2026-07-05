@@ -231,3 +231,122 @@ No code was refactored, so no newly unreachable code was identified.
     measure.
 - For GEM, the missing artifact is a bounded temporary OGDF runner trace for one 500-node
   row (`ba_500` seed 100 is the natural representative).
+
+## G2: gem ba_500 trace
+
+Scope:
+
+- Representative row: `ba_500::classic_gem_iters100`, seed `100`.
+- Graph source: `make_scale_free(n=500, m=3, seed=42)`, exported through the same
+  `_graph_edges()` path used by the OGDF competitor adapter.
+- Input size: 500 nodes, 1494 oriented edges. GEM consumes the edges as undirected
+  adjacency entries internally.
+- Runner: temporary copy under `/tmp/gem-trace` only. The committed
+  `scripts/ogdf_runner.cpp` and `/home/jtaylor/tools/ogdf-src` were not modified.
+
+Trace method:
+
+- The temporary runner mirrored OGDF `GEMLayout::call()` directly: same
+  `GraphCopy`, `connectedComponents`, `SList::permute`, `std::minstd_rand(randomSeed())`,
+  disturbance `uniform_int_distribution`, `computeImpulse`, and `updateNode` sequence.
+- The Dagua-side mirror used the current OGDF-fidelity GEM helpers in the same process:
+  runner-style glibc initial positions, `_ogdf_gem_rng_seed(100)`,
+  `_ogdf_permutation`, `_build_ogdf_adjacency`, default OGDF node dimensions, and the
+  scalar per-node update loop.
+- Per-update JSONL fields included node id, RNG seed, RNG draw counts, permutation draws,
+  disturbance draws, position before/after, raw impulse, scaled move, local/global
+  temperature, barycenter, desired length, and node weight.
+
+Trace results:
+
+| Budget | Compared updates | First divergence | Final coordinate check |
+| --- | ---: | --- | --- |
+| `gemRounds=100` | 100 / 100 | none | raw RMSD `7.105427357601002e-16`; max abs `1.4210854715202004e-14` |
+| `gemRounds=2000` extension | 2000 / 2000 | update 115, `raw_impulse` last-bit split | raw RMSD `1.1184606172532277e-11`; max abs `2.5362112410221016e-10` |
+
+Complete iters100 trace excerpt:
+
+| Updates | Node order | RNG/draw counts | Position/update fields |
+| ---: | --- | --- | --- |
+| 0-99 | identical | identical | identical within printed double precision |
+
+First strict split in the 2000-update extension:
+
+| Field | OGDF trace | Dagua trace |
+| --- | ---: | ---: |
+| update | 115 | 115 |
+| node | 15 | 15 |
+| RNG seed | 281717827 | 281717827 |
+| draw count before disturbance | 730 | 730 |
+| position before | `[4.6, 14.8]` | `[4.6, 14.8]` |
+| barycenter before | `[83485.69262219609, 86262.35519126788]` | `[83485.69262219609, 86262.35519126788]` |
+| raw impulse | `[-10314.740060455928, -11445.89956158023]` | `[-10314.740060455919, -11445.899561580223]` |
+| scaled move | `[-8.033354069012047, -8.914326805871971]` | `[-8.033354069012047, -8.914326805871971]` |
+| position after | `[-3.433354069012047, 5.88567319412803]` | `[-3.433354069012047, 5.88567319412803]` |
+| local temperature before/after | `12` / `12` | `12.0` / `12.0` |
+| global temperature before/after | `12` / `12` | `12.0` / `12.0` |
+
+Surrounding split diagnostics:
+
+| Update | Node | RNG same | Max raw-impulse delta | Max move delta | Max position-after delta |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 110 | 143 | yes | `9.094947017729282e-13` | `1.7763568394002505e-15` | `3.552713678800501e-15` |
+| 111 | 442 | yes | `0.0` | `1.7763568394002505e-15` | `1.7763568394002505e-15` |
+| 112 | 276 | yes | `0.0` | `1.7763568394002505e-15` | `0.0` |
+| 113 | 472 | yes | `2.2737367544323206e-13` | `8.881784197001252e-16` | `0.0` |
+| 114 | 487 | yes | `0.0` | `1.7763568394002505e-15` | `1.7763568394002505e-15` |
+| 115 | 15 | yes | `9.094947017729282e-12` | `0.0` | `0.0` |
+| 116 | 382 | yes | `0.0` | `1.7763568394002505e-15` | `1.4210854715202004e-14` |
+
+Verdict:
+
+- No nameable GEM operation mismatch was found for the representative 500-node row.
+- The complete `iters100` run has no first-diverging update: the traced updates and final
+  packed coordinates match current Dagua to double-roundoff noise.
+- The first strict split found by extending the same trace to `gemRounds=2000` is a
+  raw-impulse last-bit arithmetic difference at update 115. Node order, RNG seed, RNG draw
+  counts, disturbance draws, positions, barycenter, local temperature, global temperature,
+  desired length, and node weight are identical at that point.
+- The split is consistent with accumulated floating-point arithmetic in the force summation,
+  not a portable missing operation or tie-break. The current Dagua GEM fidelity path is
+  already instrument-matched for this row class.
+- No port was made and no commit was created for GEM code.
+
+Gate evidence:
+
+```bash
+/tmp/gem-trace/ogdf_runner_trace \
+  --input /tmp/gem-trace/ba_500_seed100_gem100.json \
+  --trace-output /tmp/gem-trace/ogdf_trace.jsonl \
+  --trace-limit 100 \
+  --output /tmp/gem-trace/ogdf_positions.json
+# completed
+
+# Dagua mirror trace over the same 100 updates:
+# all 100 matched
+
+/tmp/gem-trace/ogdf_runner_trace \
+  --input /tmp/gem-trace/ba_500_seed100_gem100.json \
+  --gem-rounds 2000 \
+  --trace-output /tmp/gem-trace/ogdf_trace_2000.jsonl \
+  --trace-limit 2000 \
+  --output /tmp/gem-trace/ogdf_positions_2000.json
+# first strict split: update 115 raw_impulse
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+# All checks passed!
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+# pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+# Success: no issues found in 1 source file
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest \
+  tests/test_layout/test_gem_fidelity.py tests/test_pipeline_gem.py -x --tb=short -q
+# 19 passed, 3 warnings in 2.57s
+
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q \
+  -m "not slow and not benchmark and not rare"
+# stopped at known pre-existing double-border smoke:
+# FAILED tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border
+# 1 failed, 266 passed, 88 deselected, 1 xfailed, 63 warnings in 194.17s
+```
