@@ -936,11 +936,14 @@ def _find_subtree(subtrees: List[_Subtree], subtree_id: int) -> int:
     int
         Root subtree id.
     """
-    parent = subtrees[subtree_id].parent
-    if parent != subtree_id:
-        parent = _find_subtree(subtrees=subtrees, subtree_id=parent)
-        subtrees[subtree_id].parent = parent
-    return parent
+    path: List[int] = []
+    current = subtree_id
+    while subtrees[current].parent != current:
+        path.append(current)
+        current = subtrees[current].parent
+    for path_id in path:
+        subtrees[path_id].parent = current
+    return current
 
 
 def _tree_adjust(
