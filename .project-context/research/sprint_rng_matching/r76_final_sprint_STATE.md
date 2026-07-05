@@ -776,3 +776,11 @@ for retries. 2-attempt max per work item, then park documented.
   (4), sfdp disc random_dag rows, umap floor row(s); r76_maar_final + parts of prior
   rescores SUPERSEDED by r77_randomdag.jsonl. REMAINING: era regen (engine ~3/10) -> era
   rescore -> comprehensive r77 ledger refresh + RESULTS addendum + memory + close.
+- 2026-07-05 ~00:15 ET: ***r77 CLOSED. CAMPAIGN CLOSED.*** Final ledger published+merged
+  (a3a2701 -> develop 8234626): MODE_B_BIT_EXACT 80->186, DIVERGENT_NAMED_CAUSE 335->249,
+  stale-refs 27->3, zero bare divergent, gate_5 0/40, determinism green, all 69 random_dag
+  rows on canonical realization. All branches merged, all worktrees swept (develop+main
+  only). Memory updated. Oversized generated artifacts intentionally untracked (hook
+  policy; on disk in eval_output/). Housekeeping backlog for a rainy day: gate_3
+  calibration; ~7 pre-existing test failures; recursion-limit on 2000+ sugiyama; watcher
+  session-tagging (issue filed). THE LIMIT, REACHED HONESTLY.
