@@ -78,3 +78,22 @@ Follow-up spec:
   - Dagua: `criteria={"stress": 1.0, "crossings": 0.5}`, `steps=2000`, `lr=0.01`, `grad_clamp=5.0`, `fidelity_mode=True`.
   - Reference: `criteria_weights={"stress": 1.0, "crossings": 0.5}`, `max_iter=2000`, `optimizer_kwargs={"lr": 0.01}`, `grad_clamp=5.0`.
 - Persist per-seed position hashes, stress, crossing count, and paired deltas. A closure verdict requires either 100 paired ok seeds or a named first divergence from optimizer/loss sampling.
+
+## R2 execution (RECONSTRUCTED -- original section lost to a worktree removal before
+## commit, my orchestration error; primary artifacts preserved in
+## ../r78_evidence/ and the full transcript in the r78_cx_r2 codex log)
+
+- SGD2 (2 evidence-thin rows): paired same-process probe, params matched. All completed
+  paired seeds BYTE-IDENTICAL (real_football_115 seeds 100-112 + wide_1_100_1 seed 100 =
+  14/14; artifact sgd2_pair_results.jsonl). Full 100-seed closure blocked by a DAGUA-SIDE
+  HANG: real_football_115 seed 113 stalls indefinitely (>60 min) at phase native_start,
+  confirmed by phase-logged rerun. -> S3 dispatched (hang root-cause + closure).
+- SFDP (8 label-box residual rows): instrumented pack.c comparison (artifact
+  sfdp_pack_compare.json): C pack differs at grid step/cell/perimeter/order, and
+  doSplines=1 SPLINE occupancy is not reproducible by dagua's straight-edge fallback on
+  these graphs. Terminal disposition: spline-aware pack occupancy = routing-port boundary;
+  measured per graph.
+- FDP (5+9 rows): fdp_tLayout MATCHES on representatives (artifact
+  fdp_stage_compare.json); first divergence is fdp_xLayout prism/GTS overlap expansion
+  (overlap="9:prism", tries=9) BEFORE putGraphs/finalCC. Named portable-with-effort:
+  requires a prism-equivalent overlap expansion. -> F3 dispatched.
