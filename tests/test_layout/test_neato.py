@@ -90,3 +90,69 @@ def test_neato_connected_graph_skips_component_packer(
     )
 
     assert torch.equal(result, torch.zeros((3, 2), dtype=torch.float64))
+
+
+def test_neato_disconnected_components_reuse_graphviz_start_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary disconnected neato components reuse the graph-level start seed."""
+    observed_seeds: list[int] = []
+
+    def fake_stress_pipeline(**kwargs: object) -> torch.Tensor:
+        """Record component seeds and return a finite component layout."""
+        observed_seeds.append(int(kwargs["seed"]))
+        num_nodes = int(kwargs["num_nodes"])
+        return torch.zeros((num_nodes, 2), dtype=torch.float64)
+
+    def fake_pack_component_positions(**kwargs: object) -> torch.Tensor:
+        """Return a stable parent layout after component solving."""
+        num_nodes = int(kwargs["num_nodes"])
+        return torch.zeros((num_nodes, 2), dtype=torch.float64)
+
+    monkeypatch.setattr(neato, "layout_stress_majorization_pipeline", fake_stress_pipeline)
+    monkeypatch.setattr(neato, "_pack_component_positions", fake_pack_component_positions)
+    edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+
+    result = neato.layout_neato_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        seed=123,
+        pack=True,
+        fidelity_mode=False,
+    )
+
+    assert torch.equal(result, torch.zeros((4, 2), dtype=torch.float64))
+    assert observed_seeds == [123, 123]
+
+
+def test_neato_singleton_heavy_components_keep_random_dag_seed_perturbation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Singleton-heavy disconnected neato graphs keep per-component seed offsets."""
+    observed_seeds: list[int] = []
+
+    def fake_stress_pipeline(**kwargs: object) -> torch.Tensor:
+        """Record component seeds and return a finite component layout."""
+        observed_seeds.append(int(kwargs["seed"]))
+        num_nodes = int(kwargs["num_nodes"])
+        return torch.zeros((num_nodes, 2), dtype=torch.float64)
+
+    def fake_pack_component_positions(**kwargs: object) -> torch.Tensor:
+        """Return a stable parent layout after component solving."""
+        num_nodes = int(kwargs["num_nodes"])
+        return torch.zeros((num_nodes, 2), dtype=torch.float64)
+
+    monkeypatch.setattr(neato, "layout_stress_majorization_pipeline", fake_stress_pipeline)
+    monkeypatch.setattr(neato, "_pack_component_positions", fake_pack_component_positions)
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+
+    result = neato.layout_neato_pipeline(
+        edge_index=edge_index,
+        num_nodes=10,
+        seed=123,
+        pack=True,
+        fidelity_mode=False,
+    )
+
+    assert torch.equal(result, torch.zeros((10, 2), dtype=torch.float64))
+    assert observed_seeds == [123, 124, 125, 126, 127, 128, 129, 130, 131]
