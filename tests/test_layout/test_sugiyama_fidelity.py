@@ -5,11 +5,12 @@ import importlib
 import pytest
 import torch
 
-from dagua.eval.graphs import make_real_karate_graph
+from dagua.eval.graphs import _make_hexagonal_lattice_graph, make_real_karate_graph
 from dagua.graph import DaguaGraph
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
     _build_graphviz_x_aux_edges,
+    _edge_processing_order,
     _expand_long_edges_with_dummy_nodes,
     _graphviz_layer_assignments,
     _igraph_eades_layer_assignments,
@@ -41,6 +42,40 @@ def _moe_router_sparse_edge_index() -> torch.Tensor:
         ("combine", "output"),
     ]
     graph = DaguaGraph.from_edge_list(edges)
+    return graph.edge_index.detach().cpu().to(dtype=torch.long)
+
+
+def _hub_skip_superfan_edge_index() -> torch.Tensor:
+    """Return the eval-catalog hub skip superfan edge index.
+
+    Returns
+    -------
+    torch.Tensor
+        Directed edge list with shape ``[2, E]`` in ``DaguaGraph`` node order.
+    """
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("input", "s0"),
+            ("s0", "s1"),
+            ("s1", "s2"),
+            ("s2", "s3"),
+            ("s3", "s4"),
+            ("s4", "s5"),
+            ("s5", "output"),
+            ("s1", "hub"),
+            ("hub", "x0"),
+            ("hub", "x1"),
+            ("hub", "x2"),
+            ("hub", "x3"),
+            ("x0", "s3"),
+            ("x1", "s4"),
+            ("x2", "s5"),
+            ("x3", "output"),
+            ("hub", "output"),
+            ("s0", "x2"),
+            ("s2", "x3"),
+        ]
+    )
     return graph.edge_index.detach().cpu().to(dtype=torch.long)
 
 
@@ -263,6 +298,108 @@ def test_sugiyama_igraph_bk_alignment_matches_installed_igraph_on_karate() -> No
     )
 
     assert torch.equal(positions, reference)
+
+
+def test_sugiyama_igraph_dummy_order_matches_installed_igraph_on_densenet() -> None:
+    """Igraph dummy-chain order should match installed igraph on a dense DAG."""
+    igraph = pytest.importorskip("igraph")
+    layers = ["input"] + [f"dense_{index}" for index in range(6)] + ["output"]
+    edges = [
+        (layers[source], layers[target])
+        for target in range(1, len(layers) - 1)
+        for source in range(target)
+    ]
+    edges.append((layers[-2], layers[-1]))
+    graph = DaguaGraph.from_edge_list(edges)
+    edge_index = graph.edge_index.detach().cpu().to(dtype=torch.long)
+    reference_graph = igraph.Graph(
+        n=graph.num_nodes,
+        edges=list(zip(edge_index[0].tolist(), edge_index[1].tolist())),
+        directed=True,
+    )
+    reference = torch.tensor(
+        reference_graph.layout("sugiyama", maxiter=24, vgap=1.0, hgap=1.0).coords,
+        dtype=torch.float32,
+    )
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=graph.num_nodes,
+        rank_sep=1.0,
+        node_sep=1.0,
+        barycenter_passes=24,
+        fidelity_mode="igraph",
+    )
+
+    assert torch.equal(positions, reference)
+
+
+@pytest.mark.parametrize(
+    ("edge_index", "num_nodes"),
+    [
+        (
+            _make_hexagonal_lattice_graph(rows=6, cols=7)
+            .edge_index.detach()
+            .cpu()
+            .to(dtype=torch.long),
+            42,
+        ),
+        (_hub_skip_superfan_edge_index(), 13),
+    ],
+)
+def test_sugiyama_igraph_incident_order_matches_installed_igraph(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> None:
+    """Igraph dummy-chain order should sort outgoing incidences by target."""
+    igraph = pytest.importorskip("igraph")
+    reference_graph = igraph.Graph(
+        n=num_nodes,
+        edges=list(zip(edge_index[0].tolist(), edge_index[1].tolist())),
+        directed=True,
+    )
+    reference = torch.tensor(
+        reference_graph.layout("sugiyama", maxiter=100, vgap=1.0, hgap=1.0).coords,
+        dtype=torch.float32,
+    )
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        rank_sep=1.0,
+        node_sep=1.0,
+        barycenter_passes=100,
+        fidelity_mode="igraph",
+    )
+
+    assert torch.equal(positions, reference)
+
+
+def test_sugiyama_igraph_dummy_order_uses_original_tail_for_flipped_edges() -> None:
+    """Flipped igraph chains should keep original outgoing incidence order."""
+    oriented_edges = torch.tensor(
+        [
+            [0, 1, 0, 2],
+            [2, 2, 3, 3],
+        ],
+        dtype=torch.long,
+    )
+    original_tail_sources = torch.tensor([0, 3, 0, 0], dtype=torch.long)
+    original_head_targets = torch.tensor([2, 2, 3, 1], dtype=torch.long)
+    original_edge_ids = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+
+    edge_order = _edge_processing_order(
+        edge_index=oriented_edges,
+        num_nodes=4,
+        use_graphviz_edge_order=False,
+        use_igraph_edge_order=True,
+        igraph_edge_order_sources=original_tail_sources,
+        igraph_edge_order_targets=original_head_targets,
+        igraph_edge_order_ids=original_edge_ids,
+        created_node_order=[],
+    )
+
+    assert edge_order == [3, 0, 2, 1]
 
 
 def test_sugiyama_igraph_glpk_falls_back_above_1000_nodes() -> None:
