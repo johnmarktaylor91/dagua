@@ -668,3 +668,128 @@ ordering, not oriented-edge ordering and not input edge ordering. The original
 target vertex is part of that order because igraph's outgoing incidence list is
 adjacent-vertex sorted. Feedback-arc orientation only changes chain direction;
 it does not move the chain to the reversed endpoint's scan bucket.
+
+## A11c: big-graph tail
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-bigtail`
+Branch: `r78/bigtail`
+
+### Gate audit
+
+Installed python-igraph is `1.0.0`.
+
+Source verdict: installed igraph has a directed GLPK size gate. The vertical
+Sugiyama placement path uses GLPK only when `igraph_is_directed(graph)` and
+`no_of_nodes <= 1000`; directed graphs above that gate call
+`igraph_i_feedback_arc_set_eades(...)` instead. Source cite:
+`/home/jtaylor/projects/_references/igraph/src/layout/sugiyama.c:552-665`.
+
+Empirical rank audit on installed igraph:
+
+| Probe | Nodes | Edges | Installed behavior | Runtime |
+|---|---:|---:|---|---:|
+| `er_500` | 500 | 1230 | matched Dagua GLPK gate, not Eades (`diff_vs_eades=138`) | 0.037s |
+| `er_2000` | 2000 | 5936 | matched Dagua gate and Eades exactly (`diff_vs_eades=0`) | 0.124s |
+
+Dagua's current `>1000` Eades fallback mirrors installed igraph. No gate fix
+was needed.
+
+### Current-code probes
+
+Assumption for "1 seed then 3": seed 42 for the single-seed pass, then seeds
+42, 43, and 44 for the three-seed pass. All probes ran Dagua and installed
+igraph in the same Python process for the default variant.
+
+| Graph | 1-seed d_R | 3-seed d_R values | Max d_R |
+|---|---:|---|---:|
+| `ba_500` | 0.000000000 | 0.000000000, 0.000000000, 0.000000000 | 0.000000000 |
+| `er_2000` | 0.000000000 | 0.000000000, 0.000000000, 0.000000000 | 0.000000000 |
+| `dependency_500` | 0.000000000 | 0.000000000, 0.000000000, 0.000000000 | 0.000000000 |
+| `sbm_8x100` | 0.000000000 | 0.000000000, 0.000000000, 0.000000000 | 0.000000000 |
+
+No instrumented igraph bisection or port was needed for the big-tail classes:
+all requested current-code probes were exact under the `d_R < 0.01` gate.
+
+### Stale-vs-real split
+
+The manifest at
+`/home/jtaylor/projects/dagua/.project-context/research/sprint_rng_matching/r76_scratch/r78_igraph_tail.txt`
+has 70 rows. It contradicts the task text: 18 rows are <=100-node graphs
+(`dependency_graph_100`, `er_100`, `multi_component_80`,
+`parallel_cycles_4x5`), not >300-node graphs.
+
+Fresh seed-42 subprocess-batched measurement against installed igraph:
+
+| Bucket | Rows | Current-code status |
+|---|---:|---|
+| Actual >300-node tail rows | 52 | all near/exact, `d_R < 0.01` |
+| Small manifest rows | 18 | still far, `d_R >= 0.01` |
+| Total manifest rows | 70 | 52 near, 18 far, 0 errors |
+
+Per-graph maxima:
+
+| Graph | Rows | Max d_R |
+|---|---:|---:|
+| `ba_2000` | 5 | 0.000000000 |
+| `ba_500` | 5 | 0.000000000 |
+| `dependency_500` | 5 | 0.002373531 |
+| `er_2000` | 5 | 0.000000000 |
+| `er_500` | 5 | 0.000000000 |
+| `powerlaw_2000` | 5 | 0.000000000 |
+| `powerlaw_500` | 5 | 0.000000000 |
+| `rgg_2000` | 4 | 0.000000000 |
+| `rgg_500` | 5 | 0.000000000 |
+| `sbm_8x100` | 3 | 0.000000000 |
+| `small_world_500` | 5 | 0.000000000 |
+| `dependency_graph_100` | 4 | 0.064910123 |
+| `er_100` | 4 | 0.025780826 |
+| `multi_component_80` | 5 | 0.023915041 |
+| `parallel_cycles_4x5` | 5 | 0.137120839 |
+
+Verdict: the big-graph tail ledger positions were stale-code artifacts. The
+small manifest rows are real residuals, but they are not part of the >300-node
+tail called out in this task.
+
+### Gate and benchmark evidence
+
+No code changes were made, so the code-change regression gate was not run.
+The relevant measurement gates were:
+
+- current-code requested probes: all four classes exact for 3 seeds.
+- 70-row manifest probe: `70 ok`, `52 d_R < 0.01`, `18 d_R >= 0.01`, `0 errors`.
+- big-tail benchmark:
+  `6600 total, 6600 ok, 0 skipped, 0 errors, 0 timeouts`.
+
+Benchmark command:
+
+```bash
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python -u scripts/run_benchmark.py --variants --engines classic_sugiyama --seed-refs igraph_sugiyama --graphs ba_500,ba_2000,er_500,er_2000,powerlaw_500,powerlaw_2000,rgg_500,rgg_2000,small_world_500,dependency_500,sbm_8x100 --max-nodes 0 --seeds 100 --seed-start 100 --workers 4 --timeout 21600 --watchdog-timeout 28800 --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_bigtail
+```
+
+Result files:
+
+- `/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_bigtail/results.json`
+- `/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_bigtail/summary.md`
+
+Variant note: the project registry expands `classic_sugiyama --variants` to
+six variants, including `classic_sugiyama_graphviz_fidelity`. That graphviz
+variant is outside the igraph-tail manifest but was included by the requested
+benchmark command and completed cleanly. The slowest group was
+`rgg_2000::classic_sugiyama_graphviz_fidelity` at 11377.9s for its 100-seed
+group, still inside the authorized timeout.
+
+### Commits
+
+Implementation commit: none; no code change was required.
+
+Documentation commit:
+
+- This commit records the A11c audit, probe, split, and benchmark evidence.
+
+### Knowledge
+
+Igraph 1.0.0's Sugiyama scale gate is source-backed and empirically active:
+directed graphs with `N <= 1000` use the GLPK rank LP, while directed graphs
+with `N > 1000` use the Eades feedback-order fallback. The current Dagua
+fallback mirrors that behavior at 2000 nodes.
