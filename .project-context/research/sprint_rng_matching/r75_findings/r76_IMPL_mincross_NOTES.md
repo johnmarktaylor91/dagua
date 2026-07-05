@@ -2361,3 +2361,285 @@ instead of running the family benchmark.
 - The mixed wrapper guard remains the critical safety boundary: mixed
   label+cluster rows must pass neither label nor cluster metadata until the
   combined dot machinery is ported.
+
+## A12e: full-chain x
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-xstage`
+Branch: `r78/xstage`
+Commit shas: none. The full-chain aux-x structural parity gate did not pass,
+so no production change, commit, or family benchmark was made.
+
+### Reference instrumentation
+
+Built an instrumented Graphviz reference from the pinned 7.0.5 source copied
+to `/tmp/gv750-xstage` and built at `/tmp/gv750-xstage-build`. The local
+system CMake was too old, so `/home/jtaylor/anaconda3/bin/cmake` 3.27.6 was
+used. Pango/Cairo discovery was disabled in the temporary copy to avoid a
+static link DSO failure; this means text metrics are useful for structural
+direction but not acceptable as a final rendered parity source.
+
+Instrumentation was added only to the temporary `lib/dotgen/position.c`:
+
+- Dump before `rank(g, 2, nsiter2(g))`, immediately after `create_aux_edges(g)`.
+- Dump after the final `rank(g, 2, nsiter2(g))`, before `set_xcoords(g)`.
+- Each dump includes root rank order, cluster `ln`/`rn` boundary ids, every
+  `GD_nlist` node with kind/rank/order/lw/rw, and every aux edge with
+  tail/head/minlen/weight.
+
+DOT inputs were generated directly from the three registry definitions using
+the production Graphviz adapter DOT serializer, with:
+
+```text
+GV_XSTAGE_DUMP=1 /tmp/gv750-xstage-build/cmd/dot/dot -Tjson \
+  -Gmaxiter=24 -Granksep=1.0 -Gnodesep=1.0 <graph>.dot
+```
+
+Raw dump evidence created during the run:
+
+| Graph | Trace lines | XSTAGE records | Trace sha256 | JSON sha256 |
+|---|---:|---:|---|---|
+| `clustered_longlabel_handoffs` | 204 | 204 | `8b61144716002fccff1ca24637514d2210518ceb3ac9185dcdd502b501d3d643` | `d1c0931d9132c7f3a045ce416b691e779d3928c2a558510bfd3efd0a3e58a6aa` |
+| `interleaved_cluster_crosstalk` | 322 | 322 | `cf01304aeddb5a36cb923e06756bf469feed3232d3c23d02652c9a10ec46c3fd` | `ac67054537a2ed469f2dcab8f55829b26e5d9b3c841845f2584e36677b1b5d63` |
+| `kitchen_sink_platform_graph` | 362 | 362 | `c8be7b81aad38c9a730c2131159f468061340d19d691029b1e742e2b784db9ed` | `d4292a24e0c85d200b52dbe54eae794b47e3d7e70a54e54690d13cb93882ad33` |
+
+### Structural diff
+
+Dagua was probed by running the production pipeline with
+`graphviz_enable_cluster_skeleton=True`, then dumping
+`_build_graphviz_x_aux_edges()` from the same post-ordering state. A
+conservative local patch was also tried that passed expanded cluster
+membership into `_graphviz_x_coordinate_assignment()` and counted aux nodes
+from actual endpoints. It executed on all three graphs, but structural parity
+still failed. The patch was reverted because a partial x mechanism is not an
+acceptable deliverable for this round.
+
+Initial aux graph summary:
+
+| Graph | Dot nodes | Dagua nodes | Dot edges | Dagua edges | Dot clusters | Dagua boundary nodes |
+|---|---:|---:|---:|---:|---:|---:|
+| `clustered_longlabel_handoffs` | 35 | 33 | 53 | 49 | 3 | 6 |
+| `interleaved_cluster_crosstalk` | 45 | 39 | 104 | 96 | 5 | 10 |
+| `kitchen_sink_platform_graph` | 51 | 49 | 113 | 106 | 5 | 10 |
+
+Node-class differences:
+
+| Graph | Dot node classes | Dagua equivalent |
+|---|---|---|
+| `clustered_longlabel_handoffs` | 10 normal, 3 virtual, 22 slack | 13 expanded, 14 edge slack, 6 boundary |
+| `interleaved_cluster_crosstalk` | 12 normal, 2 virtual, 31 slack | 12 expanded, 17 edge slack, 10 boundary |
+| `kitchen_sink_platform_graph` | 18 normal, 1 virtual, 32 slack | 19 expanded, 20 edge slack, 10 boundary |
+
+Dominant constraint histogram differences, shown as `(minlen, weight)`:
+
+| Graph | Dot-only examples | Dagua-only examples |
+|---|---|---|
+| `clustered_longlabel_handoffs` | `(8,0)x4`, `(63,128)x2`, `(104,128)x1`, `(146,0)x2` | `(1,128)x3`, `(69,0)x2`, `(144,0)x2`, `(315,0)x1` |
+| `interleaved_cluster_crosstalk` | `(8,0)x2`, `(54,128)x1`, `(55,128)x1`, `(57,128)x1`, `(70,0)x5` | `(1,128)x5`, `(69,0)x5`, `(139,0)x3`, `(156,0)x1` |
+| `kitchen_sink_platform_graph` | `(8,0)x8`, `(48,128)x1`, `(56,128)x1`, `(63,128)x1`, `(80,0)x6` | `(1,128)x5`, `(61,0)x3`, `(79,0)x6`, `(189,0)x1` |
+
+Every structural difference found:
+
+- Dagua does not feed cluster membership into the production aux x solve. The
+  current default cluster path still solves non-cluster aux x, then applies
+  `_apply_graphviz_cluster_x_constraints()` in output space.
+- Passing cluster membership into the aux builder is not sufficient: Dagua's
+  aux node count currently stops at edge slack nodes, while Graphviz appends
+  cluster boundary nodes after slack nodes. A local fix for node counting was
+  required before the probe could solve.
+- Graphviz has additional virtual nodes in the x-stage dump on all three
+  rows. These are not represented in Dagua's skeleton-mode x aux graph with
+  the same node classes and edge incidence.
+- Graphviz's cluster compaction edges reuse the `ln -> rn` edge created by
+  `make_lrvn()` when a cluster label/border width is present, then add weight
+  128. Dagua creates a synthetic `(minlen=1, weight=128)` compaction edge
+  instead, losing the label-width minlen. This accounts for the `(63,128)`,
+  `(104,128)`, `(54,128)`, `(55,128)`, `(57,128)`, `(48,128)`, `(56,128)`,
+  and related dot-only constraints.
+- Graphviz emits many `(8,0)` margin constraints from `contain_nodes()`,
+  `contain_subclust()`, and `separate_subclust()`. Dagua emits fewer of these
+  and replaces several with boundary/member constraints derived from expanded
+  rank ranges.
+- Graphviz keepout uses only normal nodes or unrelated virtual nodes
+  (`vnode_not_related_to()`); Dagua's keepout scan treats any non-member rank
+  node as an outside node. The dump rows show the resulting edge-count and
+  minlen differences even before rendered comparison.
+- Dagua minlen values differ by one or more points on label-sized nodes
+  because the probe build without Pango is not an exact text-metric authority,
+  but the larger class of missing/replaced constraints remains independent of
+  that metric drift.
+
+### Attempted port and stop reason
+
+The following local-only changes were tried and reverted:
+
+- Pass `expanded_graph.graphviz_cluster_members` and
+  `expanded_graph.graphviz_cluster_parents` into `_graphviz_x_coordinate_assignment()`
+  when `graphviz_enable_cluster_skeleton=True`.
+- Compute aux node count as one plus the maximum endpoint or initial-rank key,
+  rather than `expanded_nodes + expanded_edges`.
+- Skip `_apply_graphviz_cluster_x_constraints()` when skeleton aux x is active.
+- Set `graphviz_enable_cluster_skeleton=True` in the classic Graphviz wrapper
+  for cluster-only rows.
+
+This made the three public pipeline probes execute without crashing, but did
+not reach structural parity. Shipping it would be another piecewise x-stage
+mechanism, so the production code was restored to the guarded develop state.
+
+### Gate evidence
+
+Passed diagnostic smoke only:
+
+```text
+clustered_longlabel_handoffs (10, 2) 0.0 1.3555446863174438
+interleaved_cluster_crosstalk (12, 2) -0.08637526631355286 3.311051845550537
+kitchen_sink_platform_graph (18, 2) -0.8307634592056274 1.7852576971054077
+```
+
+Required gates not run after structural parity failed:
+
+- Rendered 8-row d_R gate.
+- 5 plain + 5 label-only + 5 igraph byte-identical gate.
+- `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q`.
+- `ruff check . --fix`.
+- Family benchmark to
+  `/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_xstage`.
+
+### Assumptions
+
+- Treated aux-x structural parity as the hard first gate. Once it failed, the
+  default-on wrapper change, commit, and benchmark were not allowed.
+- Treated the no-Pango Graphviz build as valid for edge/node inventory and
+  pass-order evidence, but not as final text-metric evidence for rendered
+  parity.
+- Treated the direct graph constructors copied from `dagua/eval/graphs.py` as
+  equivalent to the registry rows because the full registry loader was too
+  slow for this diagnostic loop.
+
+### Concerns
+
+- The next attempt should instrument a Pango-linked Graphviz build or patch
+  the installed 7.0.5 build path so text-size minlens are exact.
+- Dagua needs a first-class model of Graphviz x-stage virtual/slack/boundary
+  node classes before any default-on skeleton x path can pass the full-chain
+  gate.
+- The existing `_add_graphviz_cluster_x_aux_edges()` is useful scaffolding but
+  is not a faithful `make_lrvn()`/`contain_nodes()`/`keepout_othernodes()`
+  port yet.
+
+### Knowledge
+
+- The A9 output-space cluster pass is confirmed as a second x mechanism. It
+  must be superseded, not combined, when skeleton-mode aux x becomes faithful.
+- Wiring cluster members into the aux solver exposes the missing aux-node-count
+  guard immediately; boundary nodes are allocated after edge slack nodes.
+- The most resistant difference is Graphviz's cluster label/border compaction
+  edge reuse: `make_lrvn()` can create an `ln -> rn` edge with label width and
+  `contain_clustnodes()` then increases that same edge's weight by 128.
+
+## A12f: checklist port
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-xstage`
+Branch: `r78/xstage`
+Commit shas: none. The four-item checklist did not clear the structural
+aux-graph gate, so no production code, wrapper default, commit, or family
+benchmark was made.
+
+### Source checkpoints
+
+- `lib/dotgen/position.c:171-188`: `make_aux_edge()` creates fast aux edges
+  and rounds minlen at edge creation.
+- `lib/dotgen/position.c:191-205`: `allocate_aux_edges()` snapshots
+  `ND_save_in` and `ND_save_out` before x-stage aux edges are added.
+- `lib/dotgen/position.c:323-347`: `make_edge_pairs()` creates one slack
+  node for every saved outgoing edge and seeds its initial rank from the saved
+  endpoints.
+- `lib/dotgen/position.c:351-361`: `contain_clustnodes()` calls
+  `contain_nodes()` and then either increases the existing `ln -> rn` edge
+  weight by 128 or creates a fallback `(1,128)` compaction edge.
+- `lib/dotgen/position.c:391-422`: `keepout_othernodes()` only keeps out
+  normal nodes or virtual nodes accepted by `vnode_not_related_to()`.
+- `lib/dotgen/position.c:431-447` and `455-479`: subcluster containment and
+  sibling separation use the cluster boundary nodes and the cluster margin.
+- `lib/dotgen/position.c:1153-1185`: `make_lrvn()` creates `ln`/`rn`
+  slacknodes and, when cluster label/border width exists, creates the reusable
+  `ln -> rn` label-width edge.
+- `lib/dotgen/position.c:1187-1214`: `contain_nodes()` adds per-rank
+  `ln -> first` and `last -> rn` constraints using `ND_lw`, `ND_rw`,
+  `G_margin`, and `GD_border`.
+
+### Checklist result
+
+| Item | Status | Evidence |
+|---|---|---|
+| Virtual/slack/boundary node inventory | Resists port | Dot has extra virtual/slack nodes not representable from Dagua's current expanded graph. A12e dump counts: `clustered_longlabel_handoffs` dot 35 nodes vs Dagua 33, `interleaved_cluster_crosstalk` 45 vs 39, `kitchen_sink_platform_graph` 51 vs 49. Node classes differ as dot normal/virtual/slack, while Dagua has expanded/edge-slack/boundary only. |
+| Cluster label compaction minlen reuse | Blocked by item 1 and missing border metrics | Dot reuses a `make_lrvn()` label-width `ln -> rn` edge and adds weight 128. Dagua emits synthetic `(1,128)` compaction edges, producing dot-only `(63,128)`, `(104,128)`, `(54,128)`, `(55,128)`, `(57,128)`, `(48,128)`, and `(56,128)` constraints. |
+| Keepout semantics | Blocked by missing virtual lineage | Dot's `vnode_not_related_to()` follows `ED_to_orig` through saved edge lists before accepting a virtual outside node. Dagua cannot make the same normal/unrelated-virtual distinction from node ids and cluster membership alone. |
+| Margin constraint counts | Blocked by the same boundary/lineage model | Dot emits `(8,0)` constraints from `contain_nodes()`, `contain_subclust()`, and `separate_subclust()` against exact boundary nodes and rank lists. Dagua emits fewer margin constraints and replaces several with expanded-member constraints. |
+
+### Structural parity table
+
+Initial aux graph summaries from the A12e instrumented dump remain the
+terminal boundary for A12f:
+
+| Graph | Dot nodes | Dagua nodes | Dot edges | Dagua edges | Dot-only histogram examples | Dagua-only histogram examples |
+|---|---:|---:|---:|---:|---|---|
+| `clustered_longlabel_handoffs` | 35 | 33 | 53 | 49 | `(8,0)x4`, `(63,128)x2`, `(104,128)x1`, `(146,0)x2` | `(1,128)x3`, `(69,0)x2`, `(144,0)x2`, `(315,0)x1` |
+| `interleaved_cluster_crosstalk` | 45 | 39 | 104 | 96 | `(8,0)x2`, `(54,128)x1`, `(55,128)x1`, `(57,128)x1`, `(70,0)x5` | `(1,128)x5`, `(69,0)x5`, `(139,0)x3`, `(156,0)x1` |
+| `kitchen_sink_platform_graph` | 51 | 49 | 113 | 106 | `(8,0)x8`, `(48,128)x1`, `(56,128)x1`, `(63,128)x1`, `(80,0)x6` | `(1,128)x5`, `(61,0)x3`, `(79,0)x6`, `(189,0)x1` |
+
+### Stop reason
+
+The resisting construct is item 1: the Graphviz x-stage inventory cannot be
+mirrored by adding the four edge families to the current Dagua aux builder.
+Graphviz's aux graph is built after `allocate_aux_edges()` snapshots the
+pre-aux edge lists; later `make_edge_pairs()`, `make_lrvn()`,
+`contain_nodes()`, `keepout_othernodes()`, `contain_subclust()`, and
+`separate_subclust()` all depend on that saved edge/node identity. Dagua's
+current skeleton-mode aux graph has original and dummy expanded nodes, edge
+slack nodes, and synthetic boundary nodes, but it does not retain Graphviz's
+normal/virtual/slack node classes or `ED_to_orig` lineage for virtual nodes.
+Without that inventory, item 3 cannot decide Graphviz-equivalent keepout
+eligibility, item 2 cannot safely reuse the exact `ln -> rn` label/border edge,
+and item 4 cannot match the `(8,0)` margin count.
+
+Partial patches already tried in A12e -- passing cluster members into the aux
+solve, counting aux nodes from max endpoint, skipping the A9 output-space pass
+when skeleton aux x is active, and enabling the wrapper for cluster-only rows
+-- made the three probes execute but did not reach structural parity. Repeating
+those patches would ship the piecewise mechanism this terminal round forbids.
+
+### Gate evidence
+
+Structural parity failed before solving. The rendered d_R gate, standard
+byte-identity samples, `pytest tests/ -k "sugiyama or mincross or dot_rank"
+-x -q`, `ruff check . --fix`, and the <=300 family benchmark were not run,
+because the spec says to stop at structural parity when a checklist item
+resists.
+
+### Assumptions
+
+- Treated the A12e instrumented dump tables as the current structural evidence
+  because production code has not changed since that failed parity probe.
+- Treated commits as required only after gate pass. No gate passed, so no
+  commit was made.
+- Treated the A9 output-space cluster pass as still authoritative for default
+  cluster-only rows until a faithful aux-x mechanism exists.
+
+### Concerns
+
+- A future pass needs a first-class Graphviz x-stage model carrying node class,
+  saved in/out edge lists, `ED_to_orig` lineage, cluster `GD_border` widths,
+  and cluster label metrics into `_build_graphviz_x_aux_edges()`.
+- The current helper `_add_graphviz_cluster_x_aux_edges()` remains useful
+  scaffolding but is not a faithful port boundary for these four constructs.
+
+### Knowledge
+
+- The four checklist items are not independent once checked against the dump:
+  label compaction, keepout, and margin counts all depend on the missing
+  x-stage inventory model.
+- The correct terminal disposition for the 20 cluster rows is to preserve the
+  existing guarded path and not default-on skeleton aux x until aux structural
+  parity is demonstrated.
