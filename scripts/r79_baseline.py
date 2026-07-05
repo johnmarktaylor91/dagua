@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing as mp
+import os
 import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -21,9 +23,6 @@ from dagua.eval.graphs import TestGraph, get_test_graphs
 from dagua.metrics import composite_auto, evaluate
 
 OUTPUT_DIR = Path("eval_output/r79_baseline")
-POSITIONS_DIR = OUTPUT_DIR / "positions"
-RESULTS_PATH = OUTPUT_DIR / "results.json"
-REPORT_PATH = OUTPUT_DIR / "BASELINE.md"
 SEED = 42
 TIMEOUT_SECONDS = 120.0
 TIE_BAND = 0.5
@@ -80,6 +79,23 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=OUTPUT_DIR,
         help="Baseline output directory.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from results.rows.jsonl in the staging store.",
+    )
+    parser.add_argument(
+        "--graphs",
+        nargs="+",
+        default=None,
+        help="Optional graph-name filter for targeted verification runs.",
+    )
+    parser.add_argument(
+        "--engines",
+        nargs="+",
+        default=None,
+        help="Optional engine-name filter for targeted verification runs.",
     )
     return parser.parse_args()
 
@@ -213,6 +229,217 @@ def write_results(output_dir: Path, payload: Dict[str, Any]) -> None:
         handle.write("\n")
 
 
+def rows_path(output_dir: Path) -> Path:
+    """Return the JSONL path for incrementally completed rows.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Baseline output directory.
+
+    Returns
+    -------
+    Path
+        Path to ``results.rows.jsonl``.
+    """
+    return output_dir / "results.rows.jsonl"
+
+
+def append_row(output_dir: Path, row: Dict[str, Any]) -> None:
+    """Append one completed row to the resumable JSONL store.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Baseline output directory.
+    row : Dict[str, Any]
+        Completed result row.
+
+    Returns
+    -------
+    None
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with rows_path(output_dir).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True))
+        handle.write("\n")
+
+
+def load_jsonl_rows(output_dir: Path) -> List[Dict[str, Any]]:
+    """Load completed rows from ``results.rows.jsonl``.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Baseline output directory.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Rows in append order.
+    """
+    path = rows_path(output_dir)
+    if not path.is_file():
+        return []
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped:
+                rows.append(json.loads(stripped))
+    return rows
+
+
+def write_jsonl_rows(output_dir: Path, rows: Sequence[Dict[str, Any]]) -> None:
+    """Rewrite the JSONL row store with a known row sequence.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Baseline output directory.
+    rows : Sequence[Dict[str, Any]]
+        Rows to persist.
+
+    Returns
+    -------
+    None
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with rows_path(output_dir).open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True))
+            handle.write("\n")
+
+
+def staging_dir(output_dir: Path) -> Path:
+    """Return the temporary store path used before atomic publish.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Final baseline output directory.
+
+    Returns
+    -------
+    Path
+        Sibling staging directory.
+    """
+    return output_dir.with_name(f"{output_dir.name}.tmp")
+
+
+def previous_dir(output_dir: Path) -> Path:
+    """Return the temporary backup path used during atomic publish.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Final baseline output directory.
+
+    Returns
+    -------
+    Path
+        Sibling directory that briefly holds the previous store.
+    """
+    return output_dir.with_name(f"{output_dir.name}.prev")
+
+
+def _write_worker_message(result_path: str, message: Dict[str, Any]) -> None:
+    """Write a child-process result message and flush it to disk.
+
+    Parameters
+    ----------
+    result_path : str
+        JSON file path for the child result message.
+    message : Dict[str, Any]
+        JSON-serializable result metadata.
+
+    Returns
+    -------
+    None
+    """
+    with open(result_path, "w", encoding="utf-8") as handle:
+        json.dump(message, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _external_layout_worker(
+    graph: Any,
+    engine_name: str,
+    temp_position_path: str,
+    result_path: str,
+) -> None:
+    """Run one external layout in an isolated child process.
+
+    Parameters
+    ----------
+    graph : Any
+        ``DaguaGraph`` to lay out.
+    engine_name : str
+        External competitor name.
+    temp_position_path : str
+        Path where successful positions are written by the child.
+    result_path : str
+        JSON file used to return non-crash status metadata to the parent.
+
+    Returns
+    -------
+    None
+    """
+    try:
+        competitor = get_competitor(engine_name)
+        if competitor is None:
+            _write_worker_message(
+                result_path,
+                {
+                    "status": "ERROR",
+                    "runtime_s": 0.0,
+                    "error": "adapter not registered",
+                    "temp_positions_path": None,
+                },
+            )
+            os._exit(0)
+        try:
+            result: CompetitorResult = competitor.layout(graph, timeout=TIMEOUT_SECONDS, seed=SEED)
+        except Exception as exc:  # noqa: BLE001
+            _write_worker_message(
+                result_path,
+                {
+                    "status": "ERROR",
+                    "runtime_s": 0.0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "temp_positions_path": None,
+                },
+            )
+            os._exit(0)
+        if result.pos is None:
+            _write_worker_message(
+                result_path,
+                {
+                    "status": "ERROR",
+                    "runtime_s": float(result.runtime_seconds),
+                    "error": result.error or "adapter returned no positions",
+                    "temp_positions_path": None,
+                },
+            )
+            os._exit(0)
+        positions = result.pos.detach().cpu().to(dtype=torch.float32)
+        torch.save(positions, temp_position_path)
+        _write_worker_message(
+            result_path,
+            {
+                "status": "OK",
+                "runtime_s": float(result.runtime_seconds),
+                "error": result.error,
+                "temp_positions_path": temp_position_path,
+            },
+        )
+        os._exit(0)
+    except BaseException:
+        os._exit(1)
+
+
 def build_corpus() -> List[TestGraph]:
     """Build the benchmark corpus once and filter it to small graphs.
 
@@ -340,6 +567,163 @@ def make_skip_row(
     }
 
 
+def make_error_row(
+    test_graph: TestGraph,
+    engine_name: str,
+    runtime_s: float,
+    error: str,
+    status_detail: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create an ERROR row for one graph-engine pair.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Benchmark graph metadata.
+    engine_name : str
+        Engine name.
+    runtime_s : float
+        Runtime recorded before the error was reported.
+    error : str
+        Error detail for the row.
+    status_detail : Optional[str], default=None
+        Optional machine-readable status detail such as ``"timeout"``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Results row.
+    """
+    row = {
+        "graph": test_graph.name,
+        "population": graph_population(test_graph.name),
+        "engine": engine_name,
+        "status": "ERROR",
+        "runtime_s": float(runtime_s),
+        "metrics": {},
+        "composite": None,
+        "positions_path": None,
+        "nodes": test_graph.graph.num_nodes,
+        "edges": int(test_graph.graph.edge_index.shape[1]),
+        "error": error,
+    }
+    if status_detail is not None:
+        row["status_detail"] = status_detail
+    return row
+
+
+def external_layout_result(
+    test_graph: TestGraph,
+    engine_name: str,
+    output_dir: Path,
+) -> Tuple[Optional[CompetitorResult], Optional[Dict[str, Any]]]:
+    """Run one external layout in a short-lived child process.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Benchmark graph metadata.
+    engine_name : str
+        External competitor name.
+    output_dir : Path
+        Baseline output directory used for temporary position files.
+
+    Returns
+    -------
+    Tuple[Optional[CompetitorResult], Optional[Dict[str, Any]]]
+        Successful layout result for parent-side metrics, or an ERROR row.
+    """
+    context = mp.get_context("fork")
+    temp_path = output_dir / "positions" / (
+        f".{safe_component(test_graph.name)}__{safe_component(engine_name)}.child.pt"
+    )
+    result_path = output_dir / "positions" / (
+        f".{safe_component(test_graph.name)}__{safe_component(engine_name)}.child.json"
+    )
+    temp_path.parent.mkdir(parents=True, exist_ok=True)
+    for path in (temp_path, result_path):
+        if path.exists():
+            path.unlink()
+    process = context.Process(
+        target=_external_layout_worker,
+        args=(test_graph.graph, engine_name, str(temp_path), str(result_path)),
+    )
+    start = time.perf_counter()
+    process.start()
+    process.join(TIMEOUT_SECONDS)
+    elapsed = time.perf_counter() - start
+    if process.is_alive():
+        process.terminate()
+        process.join(5.0)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        if temp_path.exists():
+            temp_path.unlink()
+        if result_path.exists():
+            result_path.unlink()
+        return None, make_error_row(
+            test_graph,
+            engine_name,
+            elapsed,
+            "timeout",
+            status_detail="timeout",
+        )
+    exitcode = process.exitcode
+    if exitcode is not None and exitcode < 0:
+        if temp_path.exists():
+            temp_path.unlink()
+        if result_path.exists():
+            result_path.unlink()
+        return None, make_error_row(
+            test_graph,
+            engine_name,
+            elapsed,
+            f"crash(signal {-exitcode})",
+        )
+    if not result_path.is_file():
+        if temp_path.exists():
+            temp_path.unlink()
+        detail = f"child exited {exitcode}" if exitcode is not None else "child exited"
+        return None, make_error_row(test_graph, engine_name, elapsed, detail)
+    with result_path.open("r", encoding="utf-8") as handle:
+        message = json.load(handle)
+    result_path.unlink()
+    if exitcode not in (0, None):
+        if temp_path.exists():
+            temp_path.unlink()
+        detail = f"child exited {exitcode}" if exitcode is not None else "child exited"
+        return None, make_error_row(test_graph, engine_name, elapsed, detail)
+    if message.get("status") != "OK":
+        if temp_path.exists():
+            temp_path.unlink()
+        return None, make_error_row(
+            test_graph,
+            engine_name,
+            float(message.get("runtime_s") or elapsed),
+            str(message.get("error") or "external child error"),
+        )
+    position_path = message.get("temp_positions_path")
+    if not position_path or not Path(str(position_path)).is_file():
+        return None, make_error_row(
+            test_graph,
+            engine_name,
+            float(message.get("runtime_s") or elapsed),
+            "external child returned no position file",
+        )
+    positions = torch.load(str(position_path), map_location="cpu")
+    Path(str(position_path)).unlink()
+    return (
+        CompetitorResult(
+            name=engine_name,
+            pos=positions,
+            runtime_seconds=float(message.get("runtime_s") or elapsed),
+            error=message.get("error"),
+        ),
+        None,
+    )
+
+
 def run_engine(
     test_graph: TestGraph,
     competitor: CompetitorBase,
@@ -362,22 +746,17 @@ def run_engine(
         Results row.
     """
     graph = test_graph.graph
-    try:
-        result: CompetitorResult = competitor.layout(graph, timeout=TIMEOUT_SECONDS, seed=SEED)
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "graph": test_graph.name,
-            "population": graph_population(test_graph.name),
-            "engine": competitor.name,
-            "status": "ERROR",
-            "runtime_s": 0.0,
-            "metrics": {},
-            "composite": None,
-            "positions_path": None,
-            "nodes": graph.num_nodes,
-            "edges": int(graph.edge_index.shape[1]),
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+    if competitor.name in EXTERNAL_ENGINE_NAMES:
+        result, error_row = external_layout_result(test_graph, competitor.name, output_dir)
+        if error_row is not None:
+            return error_row
+        if result is None:
+            return make_error_row(test_graph, competitor.name, 0.0, "external child failed")
+    else:
+        try:
+            result = competitor.layout(graph, timeout=TIMEOUT_SECONDS, seed=SEED)
+        except Exception as exc:  # noqa: BLE001
+            return make_error_row(test_graph, competitor.name, 0.0, f"{type(exc).__name__}: {exc}")
 
     base_row = {
         "graph": test_graph.name,
@@ -654,7 +1033,155 @@ def generate_report(output_dir: Path, payload: Dict[str, Any]) -> None:
     (output_dir / "BASELINE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_full(output_dir: Path, graphs: List[TestGraph]) -> Dict[str, Any]:
+def complete_keys(output_dir: Path) -> Set[Tuple[str, str]]:
+    """Return resumable graph-engine keys already complete in JSONL.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Baseline output directory.
+
+    Returns
+    -------
+    Set[Tuple[str, str]]
+        Completed row keys. OK rows require their positions file to exist.
+    """
+    keys: Set[Tuple[str, str]] = set()
+    for row in load_jsonl_rows(output_dir):
+        key = row_key(row)
+        if row.get("status") == "OK":
+            position_path = row.get("positions_path")
+            if position_path and (output_dir / str(position_path)).is_file():
+                keys.add(key)
+        elif row.get("status") in {"ERROR", "SKIP"}:
+            keys.add(key)
+    return keys
+
+
+def filter_graphs(graphs: List[TestGraph], graph_names: Optional[Sequence[str]]) -> List[TestGraph]:
+    """Filter the corpus by optional graph names.
+
+    Parameters
+    ----------
+    graphs : List[TestGraph]
+        Full benchmark corpus.
+    graph_names : Optional[Sequence[str]]
+        Names to keep, or ``None`` for all graphs.
+
+    Returns
+    -------
+    List[TestGraph]
+        Filtered benchmark corpus.
+    """
+    if graph_names is None:
+        return graphs
+    wanted = set(graph_names)
+    selected = [graph for graph in graphs if graph.name in wanted]
+    missing = sorted(wanted - {graph.name for graph in selected})
+    if missing:
+        raise RuntimeError(f"unknown graph filter(s): {missing}")
+    return selected
+
+
+def filter_engines(
+    engine_names: Sequence[str],
+    selected_names: Optional[Sequence[str]],
+) -> List[str]:
+    """Filter benchmark engines by optional names.
+
+    Parameters
+    ----------
+    engine_names : Sequence[str]
+        Full engine list.
+    selected_names : Optional[Sequence[str]]
+        Names to keep, or ``None`` for all engines.
+
+    Returns
+    -------
+    List[str]
+        Filtered engine list.
+    """
+    if selected_names is None:
+        return list(engine_names)
+    wanted = set(selected_names)
+    unknown = sorted(wanted - set(engine_names))
+    if unknown:
+        raise RuntimeError(f"unknown engine filter(s): {unknown}")
+    return [engine_name for engine_name in engine_names if engine_name in wanted]
+
+
+def prepare_full_store(output_dir: Path, resume: bool) -> Path:
+    """Prepare the staging store for a full baseline run.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Final baseline output directory.
+    resume : bool
+        Whether to preserve an existing staging row log.
+
+    Returns
+    -------
+    Path
+        Staging directory where the run should write.
+    """
+    work_dir = staging_dir(output_dir)
+    if resume:
+        if not work_dir.exists() and output_dir.exists():
+            shutil.copytree(output_dir, work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "positions").mkdir(parents=True, exist_ok=True)
+        return work_dir
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    (work_dir / "positions").mkdir(parents=True, exist_ok=True)
+    return work_dir
+
+
+def prepare_dagua_only_store(output_dir: Path, graphs: List[TestGraph], resume: bool) -> Path:
+    """Prepare the staging store for a Dagua-only rerun.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Final baseline output directory.
+    graphs : List[TestGraph]
+        Graphs whose Dagua rows will be rerun.
+    resume : bool
+        Whether to preserve a partially rerun staging store.
+
+    Returns
+    -------
+    Path
+        Staging directory where the run should write.
+    """
+    work_dir = staging_dir(output_dir)
+    if not resume or not work_dir.exists():
+        if work_dir.exists():
+            shutil.rmtree(work_dir)
+        shutil.copytree(output_dir, work_dir)
+        existing = load_existing_results(work_dir)
+        graph_names = {graph.name for graph in graphs}
+        external_rows = [
+            row
+            for row in existing["rows"]
+            if row.get("engine") != "dagua" or row.get("graph") not in graph_names
+        ]
+        for graph in graphs:
+            dagua_path = work_dir / position_relpath(graph.name, "dagua")
+            if dagua_path.exists():
+                dagua_path.unlink()
+        write_jsonl_rows(work_dir, external_rows)
+    (work_dir / "positions").mkdir(parents=True, exist_ok=True)
+    return work_dir
+
+
+def run_full(
+    output_dir: Path,
+    graphs: List[TestGraph],
+    engine_names: Sequence[str],
+    resume: bool,
+) -> Tuple[Dict[str, Any], Path]:
     """Run the complete r79 baseline from scratch.
 
     Parameters
@@ -663,30 +1190,41 @@ def run_full(output_dir: Path, graphs: List[TestGraph]) -> Dict[str, Any]:
         Baseline output directory.
     graphs : List[TestGraph]
         Corpus graphs.
+    engine_names : Sequence[str]
+        Engines to run.
+    resume : bool
+        Whether to skip complete rows in the staging JSONL store.
 
     Returns
     -------
-    Dict[str, Any]
-        Results payload.
+    Tuple[Dict[str, Any], Path]
+        Results payload and staging directory.
     """
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    (output_dir / "positions").mkdir(parents=True, exist_ok=True)
-    availability = engine_availability(ENGINE_NAMES)
-    rows: List[Dict[str, Any]] = []
+    work_dir = prepare_full_store(output_dir, resume)
+    availability = engine_availability(engine_names)
+    skipped_keys = complete_keys(work_dir) if resume else set()
     for test_graph in graphs:
-        for engine_name in ENGINE_NAMES:
+        for engine_name in engine_names:
+            if (test_graph.name, engine_name) in skipped_keys:
+                print(f"SKIP existing {test_graph.name} {engine_name}", flush=True)
+                continue
             competitor = get_competitor(engine_name)
             info = availability[engine_name]
             if competitor is None or not info["available"]:
-                rows.append(make_skip_row(test_graph, engine_name, str(info.get("reason"))))
+                row = make_skip_row(test_graph, engine_name, str(info.get("reason")))
+                append_row(work_dir, row)
                 continue
             print(f"RUN {test_graph.name} {engine_name}", flush=True)
-            rows.append(run_engine(test_graph, competitor, output_dir))
-    return build_payload(rows, graphs, availability)
+            append_row(work_dir, run_engine(test_graph, competitor, work_dir))
+    rows = sorted(load_jsonl_rows(work_dir), key=lambda row: (row["graph"], row["engine"]))
+    return build_payload(rows, graphs, availability, engine_names), work_dir
 
 
-def run_dagua_only(output_dir: Path, graphs: List[TestGraph]) -> Dict[str, Any]:
+def run_dagua_only(
+    output_dir: Path,
+    graphs: List[TestGraph],
+    resume: bool,
+) -> Tuple[Dict[str, Any], Path]:
     """Rerun only Dagua rows while preserving frozen external rows.
 
     Parameters
@@ -695,33 +1233,37 @@ def run_dagua_only(output_dir: Path, graphs: List[TestGraph]) -> Dict[str, Any]:
         Baseline output directory.
     graphs : List[TestGraph]
         Corpus graphs.
+    resume : bool
+        Whether to skip complete Dagua rows in the staging JSONL store.
 
     Returns
     -------
-    Dict[str, Any]
-        Updated results payload.
+    Tuple[Dict[str, Any], Path]
+        Updated results payload and staging directory.
     """
-    existing = load_existing_results(output_dir)
+    work_dir = prepare_dagua_only_store(output_dir, graphs, resume)
+    existing = load_existing_results(work_dir)
     availability = dict(existing["metadata"].get("engine_availability", {}))
     availability["dagua"] = engine_availability(["dagua"])["dagua"]
-    external_rows = [row for row in existing["rows"] if row.get("engine") != "dagua"]
-    for path in (output_dir / "positions").glob("*__dagua.pt"):
-        path.unlink()
     competitor = get_competitor("dagua")
     if competitor is None:
         raise RuntimeError("dagua adapter not registered")
-    dagua_rows = []
+    skipped_keys = complete_keys(work_dir) if resume else set()
     for test_graph in graphs:
+        if (test_graph.name, "dagua") in skipped_keys:
+            print(f"SKIP existing {test_graph.name} dagua", flush=True)
+            continue
         print(f"RUN {test_graph.name} dagua", flush=True)
-        dagua_rows.append(run_engine(test_graph, competitor, output_dir))
-    rows = sorted([*external_rows, *dagua_rows], key=lambda row: (row["graph"], row["engine"]))
-    return build_payload(rows, graphs, availability)
+        append_row(work_dir, run_engine(test_graph, competitor, work_dir))
+    rows = sorted(load_jsonl_rows(work_dir), key=lambda row: (row["graph"], row["engine"]))
+    return build_payload(rows, graphs, availability, ENGINE_NAMES), work_dir
 
 
 def build_payload(
     rows: List[Dict[str, Any]],
     graphs: List[TestGraph],
     availability: Dict[str, Dict[str, Any]],
+    engine_names: Sequence[str],
 ) -> Dict[str, Any]:
     """Build the persisted results payload.
 
@@ -733,6 +1275,8 @@ def build_payload(
         Corpus graphs.
     availability : Dict[str, Dict[str, Any]]
         Engine availability metadata.
+    engine_names : Sequence[str]
+        Engines included in the payload.
 
     Returns
     -------
@@ -751,11 +1295,42 @@ def build_payload(
             "legacy_count": legacy_count,
             "extended_count": extended_count,
             "new_graph_names": sorted(R79_NEW_GRAPH_NAMES),
-            "engine_names": ENGINE_NAMES,
+            "engine_names": list(engine_names),
             "engine_availability": availability,
         },
         "rows": rows,
     }
+
+
+def publish_store(work_dir: Path, output_dir: Path) -> None:
+    """Atomically publish a validated staging store.
+
+    Parameters
+    ----------
+    work_dir : Path
+        Validated staging directory.
+    output_dir : Path
+        Final baseline output directory.
+
+    Returns
+    -------
+    None
+    """
+    backup_dir = previous_dir(output_dir)
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    try:
+        if output_dir.exists():
+            output_dir.rename(backup_dir)
+        work_dir.rename(output_dir)
+    except Exception:
+        if output_dir.exists() and output_dir != work_dir:
+            shutil.rmtree(output_dir)
+        if backup_dir.exists() and not output_dir.exists():
+            backup_dir.rename(output_dir)
+        raise
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
 
 
 def main() -> int:
@@ -769,16 +1344,19 @@ def main() -> int:
     args = parse_args()
     output_dir: Path = args.output_dir
     start = time.perf_counter()
-    graphs = build_corpus()
+    graphs = filter_graphs(build_corpus(), args.graphs)
+    engine_names = filter_engines(ENGINE_NAMES, args.engines)
     print(f"Corpus <=500 nodes: {len(graphs)}", flush=True)
     if args.dagua_only:
-        payload = run_dagua_only(output_dir, graphs)
+        payload, work_dir = run_dagua_only(output_dir, graphs, bool(args.resume))
     else:
-        payload = run_full(output_dir, graphs)
+        payload, work_dir = run_full(output_dir, graphs, engine_names, bool(args.resume))
     payload["metadata"]["wall_time_s"] = round(time.perf_counter() - start, 3)
-    write_results(output_dir, payload)
-    validate_store(output_dir)
-    generate_report(output_dir, payload)
+    write_results(work_dir, payload)
+    validate_store(work_dir)
+    generate_report(work_dir, payload)
+    validate_store(work_dir)
+    publish_store(work_dir, output_dir)
     validate_store(output_dir)
     print(f"Wrote {output_dir / 'results.json'}", flush=True)
     print(f"Wrote {output_dir / 'BASELINE.md'}", flush=True)
