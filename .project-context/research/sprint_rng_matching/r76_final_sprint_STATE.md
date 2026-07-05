@@ -814,3 +814,10 @@ for retries. 2-attempt max per work item, then park documented.
   vs the REFERENCE, which is the standard). Two of two evidence-thin rows now dispositioned
   with instrument-grade closure. IN FLIGHT: A11c big-tail, F3 prism, neato bench, monster
   bench (9.3%).
+- 2026-07-05 ~13:30 ET: ***NEATO CLOSED: 46 identical + 1 equivalent + 2 insufficient,
+  ZERO divergent; 40 formerly-divergent flipped*** (r78_neato.jsonl, fresh both-sides
+  seeds 100-199 + component-seed fix 00bd57a merged). The r75 "CG/drand48/packing" named
+  cause for 54 rows is RETIRED -- stale-era references were the entire story on connected
+  graphs; the seed rule closed disconnected. Sixth family closed by oracle repair.
+  random_dag_200 patient retry running (100 watchdog rows). REMAINING IN FLIGHT: A11c
+  big-tail, F3 prism, monster bench, neato-rd200.
