@@ -111,7 +111,7 @@ def build_sugiyama_pipeline(
         _ResolveNodeSizes(),
         _PrepareAcyclicEdges(),
         _AssignLayers(fidelity_mode=fidelity_mode if use_graphviz_rank else fidelity_mode),
-        _ExpandDummyNodes(),
+        _ExpandDummyNodes(use_igraph_edge_order=use_igraph_fidelity),
         _BuildNeighborStructures(),
         _BarycenterOrdering(
             barycenter_passes=barycenter_passes,
