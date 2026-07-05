@@ -43,6 +43,7 @@ def build_sugiyama_pipeline(
     fidelity_mode: Optional[str] = None,
     fidelity_dtype: torch.dtype = torch.float32,
     center_coordinates: bool = True,
+    graphviz_enable_cluster_skeleton: bool = False,
 ) -> Pipeline:
     """Build a Sugiyama layered graph-drawing pipeline.
 
@@ -85,6 +86,8 @@ def build_sugiyama_pipeline(
         stable-order early stop and incidence-average barycenters.
     center_coordinates : bool, default=True
         Whether to translate the final horizontal span to be centered at zero.
+    graphviz_enable_cluster_skeleton : bool, default=False
+        Enable the inactive A12 cluster rank/mincross prototype.
 
     Returns
     -------
@@ -110,8 +113,11 @@ def build_sugiyama_pipeline(
         _StoreSpacingParams(rank_sep=rank_sep, node_sep=node_sep),
         _ResolveNodeSizes(),
         _PrepareAcyclicEdges(),
-        _AssignLayers(fidelity_mode=fidelity_mode if use_graphviz_rank else fidelity_mode),
-        _ExpandDummyNodes(),
+        _AssignLayers(
+            fidelity_mode=fidelity_mode if use_graphviz_rank else fidelity_mode,
+            use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
+        ),
+        _ExpandDummyNodes(use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton),
         _BuildNeighborStructures(),
         _BarycenterOrdering(
             barycenter_passes=barycenter_passes,
@@ -122,6 +128,7 @@ def build_sugiyama_pipeline(
             center_coordinates=center_coordinates,
             use_graphviz_mincross=use_graphviz_mincross,
             use_graphviz_node_order=use_graphviz_node_order,
+            use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
         ),
         _CoordinateAssignment(
             center_coordinates=center_coordinates,
@@ -155,6 +162,7 @@ def layout_sugiyama_pipeline(
     clusters: Optional[Dict[str, Any]] = None,
     cluster_parents: Optional[Dict[str, Optional[str]]] = None,
     graphviz_apply_cluster_constraints: bool = False,
+    graphviz_enable_cluster_skeleton: bool = False,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -222,6 +230,9 @@ def layout_sugiyama_pipeline(
         ``clusters``. The benchmark wrapper enables this only for cluster-only
         DOT inputs; mixed cluster plus edge-label DOT inputs must remain on the
         pre-A9 path until the combined Graphviz machinery is ported.
+    graphviz_enable_cluster_skeleton : bool, default=False
+        Enable the inactive A12 cluster rank/mincross prototype. It remains
+        opt-in because the x-stage integration is not benchmark-safe yet.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -325,6 +336,7 @@ def layout_sugiyama_pipeline(
         fidelity_mode=fidelity_mode,
         fidelity_dtype=fidelity_dtype,
         center_coordinates=center_coordinates,
+        graphviz_enable_cluster_skeleton=graphviz_enable_cluster_skeleton,
     )
     final_state = pipeline.apply(problem, state, ctx)
 
