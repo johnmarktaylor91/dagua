@@ -40,6 +40,10 @@ _SUGIYAMA_RESOLVED_SIZES_KEY = "sugiyama_resolved_sizes"
 _SUGIYAMA_ACYCLIC_EDGES_KEY = "sugiyama_acyclic_edges"
 _SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY = "sugiyama_acyclic_edge_weights"
 _SUGIYAMA_REVERSED_MASK_KEY = "sugiyama_reversed_mask"
+_SUGIYAMA_IGRAPH_SOURCE_ORDER_KEY = "sugiyama_igraph_source_order"
+_SUGIYAMA_IGRAPH_SCAN_SOURCES_KEY = "sugiyama_igraph_scan_sources"
+_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY = "sugiyama_igraph_scan_targets"
+_SUGIYAMA_IGRAPH_SCAN_EDGE_IDS_KEY = "sugiyama_igraph_scan_edge_ids"
 _SUGIYAMA_LAYER_ASSIGNMENTS_KEY = "sugiyama_layer_assignments"
 _SUGIYAMA_EXPANDED_GRAPH_KEY = "sugiyama_expanded_graph"
 _SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY = "sugiyama_expanded_edge_weights"
@@ -1092,7 +1096,14 @@ def _orient_edges_by_layers(
     edge_index: torch.Tensor,
     layer_assignments: torch.Tensor,
     edge_weights: Optional[torch.Tensor],
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+) -> Tuple[
+    torch.Tensor,
+    Optional[torch.Tensor],
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Orient original edges downward according to igraph layer memberships.
 
     Parameters
@@ -1108,13 +1119,21 @@ def _orient_edges_by_layers(
     -------
     tuple
         Downward edge list, aligned weights, and reversal mask for retained
-        non-horizontal edges.
+        non-horizontal edges, followed by the original tail vertex, original
+        head vertex, and original edge id for each retained edge. Igraph
+        creates dummy chains while scanning original OUT incidences, even when
+        a chain is later flipped by layer direction.
     """
     sources: List[int] = []
     targets: List[int] = []
     weights: List[float] = []
     reversed_values: List[bool] = []
+    scan_sources: List[int] = []
+    scan_targets: List[int] = []
+    scan_edge_ids: List[int] = []
     for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        original_source = int(source)
+        original_target = int(target)
         source_layer = int(layer_assignments[source].item())
         target_layer = int(layer_assignments[target].item())
         if source_layer == target_layer:
@@ -1126,13 +1145,23 @@ def _orient_edges_by_layers(
             reversed_values.append(False)
         sources.append(source)
         targets.append(target)
+        scan_sources.append(original_source)
+        scan_targets.append(original_target)
+        scan_edge_ids.append(edge_id)
         if edge_weights is not None:
             weights.append(float(edge_weights[edge_id].item()))
 
     oriented_edges = torch.tensor([sources, targets], dtype=torch.long)
     oriented_weights = None if edge_weights is None else torch.tensor(weights, dtype=torch.float32)
     reversed_mask = torch.tensor(reversed_values, dtype=torch.bool)
-    return oriented_edges, oriented_weights, reversed_mask
+    return (
+        oriented_edges,
+        oriented_weights,
+        reversed_mask,
+        torch.tensor(scan_sources, dtype=torch.long),
+        torch.tensor(scan_targets, dtype=torch.long),
+        torch.tensor(scan_edge_ids, dtype=torch.long),
+    )
 
 
 def _group_nodes_by_layer(layer_assignments: torch.Tensor, num_nodes: int) -> List[List[int]]:
@@ -1228,6 +1257,10 @@ def _expand_long_edges_with_dummy_nodes(
     edge_weights: Optional[torch.Tensor] = None,
     edge_label_sizes: Optional[torch.Tensor] = None,
     use_graphviz_edge_order: bool = False,
+    use_igraph_edge_order: bool = False,
+    igraph_edge_order_sources: Optional[torch.Tensor] = None,
+    igraph_edge_order_targets: Optional[torch.Tensor] = None,
+    igraph_edge_order_ids: Optional[torch.Tensor] = None,
     graphviz_virtual_node_sep: Optional[float] = None,
 ) -> "_ExpandedLayeredGraph":
     """Insert dummy nodes for edges spanning more than one layer.
@@ -1251,6 +1284,20 @@ def _expand_long_edges_with_dummy_nodes(
     use_graphviz_edge_order : bool, default=False
         Whether to create virtual chains by scanning original tail nodes then
         each tail's outgoing edges, matching Graphviz ``class2()``.
+    use_igraph_edge_order : bool, default=False
+        Whether to create dummy chains by scanning source vertices and each
+        vertex's outgoing edge ids, matching igraph's component-local
+        Sugiyama subgraph construction.
+    igraph_edge_order_sources : torch.Tensor, optional
+        Original tail vertex for each retained edge, shape ``[E]``. Igraph
+        scans original outgoing incidences before flipping upward chains; when
+        omitted, the oriented edge source is used.
+    igraph_edge_order_targets : torch.Tensor, optional
+        Original head vertex for each retained edge, shape ``[E]``. Igraph's
+        outgoing incidence list orders edges by adjacent target vertex.
+    igraph_edge_order_ids : torch.Tensor, optional
+        Original edge id for each retained edge, shape ``[E]``. Used as the
+        stable tie-breaker after the target vertex.
     graphviz_virtual_node_sep : float, optional
         Point-unit ``GD_nodesep`` value used to size Graphviz plain virtual
         nodes. When omitted, dummy nodes keep zero size as in the native
@@ -1283,6 +1330,10 @@ def _expand_long_edges_with_dummy_nodes(
         edge_index=edge_index,
         num_nodes=num_original_nodes,
         use_graphviz_edge_order=use_graphviz_edge_order,
+        use_igraph_edge_order=use_igraph_edge_order,
+        igraph_edge_order_sources=igraph_edge_order_sources,
+        igraph_edge_order_targets=igraph_edge_order_targets,
+        igraph_edge_order_ids=igraph_edge_order_ids,
         created_node_order=created_node_order,
     )
     sources = edge_index[0].tolist()
@@ -1481,6 +1532,10 @@ def _edge_processing_order(
     edge_index: torch.Tensor,
     num_nodes: int,
     use_graphviz_edge_order: bool,
+    use_igraph_edge_order: bool,
+    igraph_edge_order_sources: Optional[torch.Tensor],
+    igraph_edge_order_targets: Optional[torch.Tensor],
+    igraph_edge_order_ids: Optional[torch.Tensor],
     created_node_order: list[int],
 ) -> List[int]:
     """Return edge-chain creation order and record real-node creation.
@@ -1493,6 +1548,17 @@ def _edge_processing_order(
         Number of original graph nodes.
     use_graphviz_edge_order : bool
         Whether to match Graphviz ``class2()`` installation order.
+    use_igraph_edge_order : bool
+        Whether to match igraph's vertex-then-outgoing-edge scan during dummy
+        subgraph construction.
+    igraph_edge_order_sources : torch.Tensor, optional
+        Original tail vertex per retained edge. This differs from
+        ``edge_index[0]`` for chains flipped after igraph's layer assignment.
+    igraph_edge_order_targets : torch.Tensor, optional
+        Original head vertex per retained edge, used to match igraph's sorted
+        outgoing incidence order.
+    igraph_edge_order_ids : torch.Tensor, optional
+        Original edge id per retained edge, used as the target-order tie-break.
     created_node_order : list[int]
         Mutable creation-order list. In graphviz mode this function appends
         real nodes at the same point that ``class2()`` calls ``fast_node()``
@@ -1503,7 +1569,34 @@ def _edge_processing_order(
         Edge indices in the order their virtual chains should be created.
     """
     if not use_graphviz_edge_order:
-        return list(range(int(edge_index.shape[1])))
+        if not use_igraph_edge_order:
+            return list(range(int(edge_index.shape[1])))
+        outgoing: List[List[int]] = [[] for _ in range(num_nodes)]
+        sources = (
+            edge_index[0].tolist()
+            if igraph_edge_order_sources is None
+            else igraph_edge_order_sources.detach().to(device="cpu", dtype=torch.long).tolist()
+        )
+        targets = (
+            None
+            if igraph_edge_order_targets is None
+            else igraph_edge_order_targets.detach().to(device="cpu", dtype=torch.long).tolist()
+        )
+        original_ids = (
+            list(range(int(edge_index.shape[1])))
+            if igraph_edge_order_ids is None
+            else igraph_edge_order_ids.detach().to(device="cpu", dtype=torch.long).tolist()
+        )
+        for edge_idx, source in enumerate(sources):
+            source_id = int(source)
+            if 0 <= source_id < num_nodes:
+                outgoing[source_id].append(edge_idx)
+        if targets is not None:
+            for source_edges in outgoing:
+                source_edges.sort(
+                    key=lambda edge_idx: (int(targets[edge_idx]), int(original_ids[edge_idx]))
+                )
+        return [edge_idx for source_edges in outgoing for edge_idx in source_edges]
 
     outgoing: List[List[int]] = [[] for _ in range(num_nodes)]
     sources = edge_index[0].tolist()
@@ -3037,7 +3130,11 @@ def _igraph_vertical_alignment(
             node = layer_nodes[node_position]
             if align[node] != node:
                 continue
-            neighbors = children[node] if reverse else parents[node]
+            # igraph_neighbors() returns adjacent vertex IDs in ascending order,
+            # independent of the expanded edge insertion order that built the
+            # adjacency lists. Median ties in BK vertical alignment can see
+            # that ordering, so preserve it here.
+            neighbors = sorted(children[node] if reverse else parents[node])
             medians = _igraph_alignment_medians(
                 neighbors=neighbors,
                 initial_x=initial_x,
@@ -4468,6 +4565,9 @@ class _AssignLayers(Op):
     writes: ClassVar[Tuple[str, ...]] = (
         f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
         f"extras.{_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY}",
+        f"extras.{_SUGIYAMA_IGRAPH_SCAN_SOURCES_KEY}",
+        f"extras.{_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY}",
+        f"extras.{_SUGIYAMA_IGRAPH_SCAN_EDGE_IDS_KEY}",
     )
     requires: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",)
     access_pattern: ClassVar[str] = "global"
@@ -4525,7 +4625,14 @@ class _AssignLayers(Op):
                 edge_weights=original_weights,
                 is_directed=_resolve_igraph_sugiyama_directed(problem),
             )
-            oriented_edges, oriented_weights, reversed_mask = _orient_edges_by_layers(
+            (
+                oriented_edges,
+                oriented_weights,
+                reversed_mask,
+                scan_sources,
+                scan_targets,
+                scan_edge_ids,
+            ) = _orient_edges_by_layers(
                 edge_index=original_edges,
                 layer_assignments=layer_assignments,
                 edge_weights=original_weights,
@@ -4533,6 +4640,10 @@ class _AssignLayers(Op):
             state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY] = oriented_edges
             state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY] = oriented_weights
             state.extras[_SUGIYAMA_REVERSED_MASK_KEY] = reversed_mask
+            state.extras[_SUGIYAMA_IGRAPH_SOURCE_ORDER_KEY] = True
+            state.extras[_SUGIYAMA_IGRAPH_SCAN_SOURCES_KEY] = scan_sources
+            state.extras[_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY] = scan_targets
+            state.extras[_SUGIYAMA_IGRAPH_SCAN_EDGE_IDS_KEY] = scan_edge_ids
             state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = []
             state.extras[_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY] = False
         elif self.fidelity_mode in {"dot", "graphviz_dot", "graphviz"}:
@@ -4578,6 +4689,9 @@ class _ExpandDummyNodes(Op):
         f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
         f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",
         f"extras.{_SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY}",
+        f"extras.{_SUGIYAMA_IGRAPH_SCAN_SOURCES_KEY}",
+        f"extras.{_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY}",
+        f"extras.{_SUGIYAMA_IGRAPH_SCAN_EDGE_IDS_KEY}",
     )
     writes: ClassVar[Tuple[str, ...]] = (
         f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
@@ -4590,6 +4704,22 @@ class _ExpandDummyNodes(Op):
         f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",
     )
     access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, use_igraph_edge_order: bool = False) -> None:
+        """Initialize dummy-expansion ordering options.
+
+        Parameters
+        ----------
+        use_igraph_edge_order : bool, default=False
+            Whether to scan source vertices and their outgoing edge ids when
+            creating dummy chains, matching igraph's Sugiyama subgraph build.
+
+        Returns
+        -------
+        None
+            The constructor stores the ordering option.
+        """
+        self.use_igraph_edge_order = use_igraph_edge_order
 
     def apply(
         self,
@@ -4616,6 +4746,8 @@ class _ExpandDummyNodes(Op):
         del ctx
 
         use_graphviz_edge_order = bool(state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY, False))
+        use_igraph_source_order = bool(state.extras.get(_SUGIYAMA_IGRAPH_SOURCE_ORDER_KEY, False))
+        use_igraph_edge_order = self.use_igraph_edge_order and use_igraph_source_order
         node_sizes = state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY]
         if use_graphviz_edge_order:
             node_sizes = state.extras.get(_SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY, node_sizes)
@@ -4633,6 +4765,10 @@ class _ExpandDummyNodes(Op):
             edge_weights=state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY],
             edge_label_sizes=state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY),
             use_graphviz_edge_order=use_graphviz_edge_order,
+            use_igraph_edge_order=use_igraph_edge_order,
+            igraph_edge_order_sources=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_SOURCES_KEY),
+            igraph_edge_order_targets=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY),
+            igraph_edge_order_ids=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_EDGE_IDS_KEY),
             graphviz_virtual_node_sep=graphviz_virtual_node_sep,
         )
         state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY] = expanded_graph
