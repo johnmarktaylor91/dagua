@@ -1743,3 +1743,621 @@ Evidence:
 
 Commit:
 - Not created. The H1 monster gate is incomplete because `rgg_2000` did not finish, and the task required gates before commit.
+## A12: recursive cluster rank-collapse
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-clusters`
+Branch: `r78/clusters`
+Commit: none. The measured rank-collapse/containment attempt failed the
+zero-regression gate, so the production pipeline was restored to the A10
+cluster behavior and no stage commit was made.
+
+### Pinned Graphviz 7.0.5 sources
+
+Checked with `git -C /home/jtaylor/projects/_references/graphviz show
+7.0.5:<path>`.
+
+- `lib/dotgen/rank.c:244-266`: `collapse_cluster()` ranks a local cluster,
+  then collapses its members through a leader.
+- `lib/dotgen/rank.c:456-468`: `dot1_rank()` runs `class1()`, cycle removal,
+  network simplex, then `expand_ranksets()`.
+- `lib/dotgen/rank.c:1059-1074`: `dot2_rank()` is the newrank path; not used
+  by the benchmark DOT inputs.
+- `lib/dotgen/cluster.c:143-224`: intercluster paths map endpoints through
+  cluster rank leaders.
+- `lib/dotgen/cluster.c:227-258`: `merge_ranks()` reserves slots while
+  expanding cluster ranks into the root rank arrays.
+- `lib/dotgen/cluster.c:340-420`: `mark_lowclusters()` recursively labels
+  real and virtual nodes for cluster-local mincross containment.
+
+### What was attempted
+
+- Added an isolated `_graphviz_cluster_rank_assignments()` helper in
+  `dagua/layout/ops/sugiyama.py`.
+- The helper normalizes cluster membership, ranks each induced cluster
+  subgraph, maps intercluster edges through top-level leaders with member-local
+  rank offsets, runs a collapsed-root acyclic pass, and expands member ranks by
+  leader rank.
+- Added `_graphviz_contain_cluster_ordering()` to collect same-rank cluster
+  members into contiguous rank blocks after Graphviz mincross.
+- Added regression tests for the isolated rank-collapse arithmetic and the
+  ordering-containment invariant.
+- The production hook was disabled after measurement because it regressed
+  several benchmark-path rows and the mixed cluster+label guard was not safe to
+  lift.
+
+### Stage measurements
+
+Live probe command shape:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl timeout 240 python -u <8-row probe>
+```
+
+Reference was live `GraphvizDot`; candidate was
+`ClassicSugiyama().layout_with_variant(..., fidelity_mode="graphviz")`.
+Distance used `pairwise_procrustes_matrix(..., free_aspect=True)`.
+
+| Graph | A10 recorded `d_R` | A12 active attempt `d_R` | Delta | Result |
+|---|---:|---:|---:|---|
+| `edge_label_braid` | 0.006611 | 0.011218 | +0.004607 | regressed |
+| `moe_router_sparse` | 0.361810 | 0.338673 | -0.023137 | improved |
+| `clustered_longlabel_handoffs` | 0.210412 | 0.222839 | +0.012427 | regressed |
+| `interleaved_cluster_crosstalk` | 0.595315 | 0.563721 | -0.031594 | improved |
+| `kitchen_sink_hybrid_net` | 0.845000 | 0.852406 | +0.007406 | regressed |
+| `kitchen_sink_platform_graph` | 0.301723 | 0.310533 | +0.008810 | regressed |
+| `nested_cluster_label_stack` | 0.074680 | 0.062425 | -0.012255 | improved |
+| `small_label_storm` | 0.006045 | 0.092941 | +0.086896 | regressed |
+
+Result: 3 improved, 5 regressed. The required gate of material improvement on
+at least 5 of 8 rows with zero regressions did not pass.
+
+### Stage residual
+
+Stage 1 does not yet match dot rank-collapse. The first implementation
+captures local member offsets, but it does not faithfully model Graphviz's
+rank-leader skeletons and intercluster path remapping. Before adding the
+collapsed-root acyclic pass, `interleaved_cluster_crosstalk` failed with
+`graphviz rank assignment requires acyclic input`, proving the collapsed root
+can create cycles even when the original tensor DAG is acyclic.
+
+Stage 2 also remains incomplete. The direct containment pass preserves the
+block invariant in isolation, but Graphviz's `mark_lowclusters()` and
+cluster-local mincross interact with rank leaders and virtual edge chains
+before best-order restoration. The post-pass changed mixed rows and was not
+safe for production.
+
+The A9b mixed cluster+label guard remains in place. `small_label_storm`
+regressed from `0.006045` to `0.092941` when the attempted combined machinery
+was active, so correctness did not supersede byte-safety.
+
+### Gate evidence
+
+Commands run after restoring the production hook to A10 behavior:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/test_dot_rank.py -x -q
+8 passed, 3 warnings in 0.02s
+```
+
+The full `pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q` and
+`pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q` gates were
+started after the production rollback; final output is recorded in the task
+summary.
+
+### Assumptions
+
+- Treated the A10 recorded values in this notes file as the before column for
+  the eight-row gate.
+- Treated any measured d_R increase as a regression unless the row remained in
+  an already accepted near/byte bucket.
+- Did not remove the A9b guard because mixed cluster+label measurement failed.
+
+### Concerns
+
+- The attempted helper is not wired into the production pipeline because it
+  failed the gate. It is removable if the next stage chooses a different
+  implementation strategy.
+- Exact Graphviz parity likely requires explicit rank-leader skeleton nodes
+  and `interclexp()`-style virtual-chain remapping rather than direct member
+  offset constraints.
+- The requested family benchmark was not run because the stage gate failed.
+
+### Knowledge
+
+- Collapsing clusters can introduce cycles in the parent rank graph; dot
+  handles this with the normal `acyclic()` pass after `class1()`.
+- Direct post-mincross cluster grouping is too late: Graphviz's cluster
+  containment participates inside mincross through marked nodes and rank
+  leaders, not just as a final rank-list cleanup.
+
+## A12b: rank-leader architecture
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-clusters`
+Branch: `r78/clusters`
+Commit shas: none. The stage did not pass ordering/rendered gates, so no
+commit was made.
+
+### Ports and source pins
+
+Checked with `git -C /home/jtaylor/projects/_references/graphviz show
+7.0.5:<path>`.
+
+- `lib/dotgen/rank.c:244-266`: local clusters are ranked, then collapsed to a
+  least-rank leader before the parent rank solve.
+- `lib/dotgen/rank.c:456-468`: `dot1_rank()` runs `collapse_sets()`,
+  `class1()`, then `acyclic()`, so collapsed parent records must tolerate
+  cycles.
+- `lib/dotgen/cluster.c:143-224`: `interclexp()` maps intercluster paths
+  through cluster/rank leaders after rank expansion.
+- `lib/dotgen/cluster.c:227-258`: `merge_ranks()` reserves root-rank slots
+  while copying expanded cluster rank lists back to the root.
+- `lib/dotgen/cluster.c:340-420` and `lib/dotgen/mincross.c:368-380`:
+  cluster containment is installed inside mincross through marked clusters,
+  rank leaders, recursive cluster mincross, and final root remincross.
+
+### What was implemented
+
+- Replaced the flat top-cluster rank helper with recursive local cluster
+  collapse in `dagua/layout/ops/sugiyama.py`.
+- Each child cluster is solved first, collapsed through its least local-rank
+  original-node leader, then expanded into the parent by adding the parent
+  leader rank to member-local offsets.
+- Added a collapsed-record acyclic pass for every local cluster solve and the
+  root solve.
+- Added a narrow reciprocal-collapsed-record rule for sibling child clusters.
+  This is required for `interleaved_cluster_crosstalk`: the two encoder path
+  clusters produce reciprocal collapsed records, but live Graphviz keeps their
+  leaders on the same exposed rank.
+- Wired the recursive rank path and expanded cluster dummy-node membership into
+  the exact `fidelity_mode="graphviz"` cluster-only pipeline. The A9b mixed
+  cluster+edge-label guard remains in place.
+
+### Stage 1 rank verification
+
+Reference was live Graphviz 7.0.5 `dot -Tjson` through the production
+`GraphvizDot` adapter with `maxiter=24`, `ranksep=1.0`, and `nodesep=1.0`.
+Candidate was `ClassicSugiyama().layout_with_variant(...,
+fidelity_mode="graphviz")`. Ranks were normalized from final y levels.
+
+| Graph | Dot ranks | Candidate ranks | Result |
+|---|---|---|---|
+| `interleaved_cluster_crosstalk` | `[0, 1, 1, 2, 3, 2, 3, 4, 2, 2, 3, 4]` | `[0, 1, 1, 2, 3, 2, 3, 4, 2, 2, 3, 4]` | match |
+| `kitchen_sink_platform_graph` | `[2, 3, 4, 5, 5, 5, 6, 7, 8, 9, 7, 8, 0, 1, 2, 3, 0, 1]` | `[2, 3, 4, 5, 5, 5, 6, 7, 8, 9, 7, 8, 0, 1, 2, 3, 0, 1]` | match |
+
+Stage 1 passes on both required verify graphs.
+
+### Stage 2 ordering verification
+
+Graphviz verbose mincross was captured with:
+
+```text
+dot -v -Tjson -Gmaxiter=24 -Granksep=1.0 -Gnodesep=1.0 <dot>
+```
+
+Candidate crossing counts were computed from the final expanded ordered layers
+using the `_dot_mincross` adjacent-edge count helper and the pipeline's
+expanded edge penalties.
+
+| Graph | Dot verbose final count | Candidate expanded count | Visible original-node order result |
+|---|---:|---:|---|
+| `interleaved_cluster_crosstalk` | 5 | 2 | mismatch |
+| `kitchen_sink_platform_graph` | 0 | 0 | crossing-count match, visible sibling order mismatch |
+
+Visible original-node order by rank:
+
+```text
+interleaved dot: [[0], [2, 1], [5, 3, 8, 9], [6, 4, 10], [11, 7]]
+interleaved candidate: [[0], [1, 2], [3, 5, 9, 8], [4, 6, 10], [7, 11]]
+
+platform dot: [[16, 12], [17, 13], [0, 14], [1, 15], [2], [5, 3, 4], [6], [7, 10], [8, 11], [9]]
+platform candidate: [[12, 16], [13, 17], [0, 14], [1, 15], [2], [3, 5, 4], [6], [7, 10], [8, 11], [9]]
+```
+
+Stage 2 does not pass. The remaining resistant piece is explicit
+rank-leader/skeleton participation inside mincross. The tensor path still
+orders original and dummy nodes, then applies a post-hoc containment pass.
+Graphviz first runs `mincross_clust()` recursively on expanded clusters,
+installs rank-leader skeleton nodes with cluster crossing penalties, marks
+low clusters, and then remincrosses the root. The candidate has rank parity,
+but it does not model the skeleton nodes or their weighted crossings, so
+`interleaved_cluster_crosstalk` reaches a lower non-Graphviz count and a
+different visible order.
+
+### Rendered eight-row gate
+
+Reference was live `GraphvizDot`; candidate was
+`ClassicSugiyama().layout_with_variant(..., fidelity_mode="graphviz")`.
+Distance used `pairwise_procrustes_matrix(..., free_aspect=True)`.
+
+| Graph | A10 recorded `d_R` | A12b `d_R` | Delta | Result |
+|---|---:|---:|---:|---|
+| `edge_label_braid` | 0.006611 | 0.006611 | +0.000000 | unchanged |
+| `moe_router_sparse` | 0.361810 | 0.344876 | -0.016934 | improved |
+| `clustered_longlabel_handoffs` | 0.210412 | 0.210412 | -0.000000 | unchanged |
+| `interleaved_cluster_crosstalk` | 0.595315 | 0.576915 | -0.018400 | improved |
+| `kitchen_sink_hybrid_net` | 0.845000 | 0.844934 | -0.000066 | improved |
+| `kitchen_sink_platform_graph` | 0.301723 | 0.301723 | +0.000000 | unchanged |
+| `nested_cluster_label_stack` | 0.074680 | 0.074680 | +0.000000 | unchanged, guarded mixed row |
+| `small_label_storm` | 0.006045 | 0.006045 | +0.000000 | unchanged, guarded mixed row |
+
+Result: zero regressions, but only 3 of 8 rows improved. The required
+improvement on at least 5 of 8 rows did not pass. `small_label_storm` and
+`nested_cluster_label_stack` stayed unchanged because the mixed guard was not
+lifted.
+
+### Gate evidence
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/test_dot_rank.py tests/test_layout/test_dot_mincross.py -x -q
+18 passed, 3 warnings in 0.04s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+71 passed, 3109 deselected, 34 warnings in 16.29s
+```
+
+The Tier 2 non-slow suite and the full family benchmark were not run because
+the stage-2 ordering gate and 8-row rendered gate had already failed.
+
+### Bench line
+
+Not run:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py --engines classic_sugiyama --variants --max-nodes 300 --seeds 100 --seed-start 100 --workers 5 --timeout 3600 --watchdog-timeout 7200 --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_clusters
+```
+
+Reason: the required pre-benchmark gates did not pass.
+
+### Assumptions
+
+- Treated the A10 values recorded in this file as the before column for the
+  8-row rendered gate.
+- Treated a zero delta as unchanged, not an improvement.
+- Kept the A9b mixed cluster+edge-label guard because this stage did not prove
+  mincross containment parity.
+
+### Concerns
+
+- The code now contains a rank-stage improvement that passes the two requested
+  rank probes, but it is not committed because the task's acceptance gate did
+  not pass.
+- The remaining mincross gap likely requires representing cluster rank leaders
+  and skeleton edges as first-class expanded nodes before calling
+  `_dot_mincross`, rather than collecting members after mincross.
+
+### Knowledge
+
+- Recursive rank collapse plus reciprocal collapsed-edge handling is enough to
+  match exposed Graphviz ranks on both required cluster-only verify graphs.
+- Rank parity alone is insufficient for rendered fidelity: Graphviz's
+  recursive `mincross_clust()` and root remincross use skeleton nodes and
+  weighted cluster crossings that the current tensor mincross stage does not
+  account for.
+
+## A12c: skeleton mincross
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-clusters`
+Branch: `r78/clusters`
+Commit shas: none. Stage 2 matched the two explicit ordering verifiers but
+failed the rendered 8-row no-regression gate, so commits and the family
+benchmark were not run.
+
+### Ports and source pins
+
+Checked with `git -C /home/jtaylor/projects/_references/graphviz show
+7.0.5:<path>`.
+
+- `lib/dotgen/mincross.c:333-380`: root `dot_mincross()` runs root mincross,
+  `merge2()`, recursive `mincross_clust()`, `mark_lowclusters()`, then final
+  root remincross.
+- `lib/dotgen/mincross.c:531-547`: `mincross_clust()` expands one cluster,
+  runs local pass-2 mincross, recurses into child clusters, then saves its
+  vlist.
+- `lib/dotgen/mincross.c:548-565` and `798-867`: `left2right()` and
+  transpose/remincross enforce low-cluster containment after local cluster
+  expansion.
+- `lib/dotgen/cluster.c:340-420`: `build_skeleton()` creates rank leaders per
+  cluster rank and weights skeleton edges with `CL_CROSS`.
+- `lib/dotgen/cluster.c:227-258`: `merge_ranks()` installs expanded cluster
+  ranks back into root rank slots.
+
+### What was implemented
+
+- Added a first-class synthetic rank-leader skeleton ordering path for
+  graphviz-mode clustered Sugiyama.
+- Root ordering now runs over cluster rank leaders; local cluster ordering is
+  solved recursively and installed back into parent/root ranks.
+- Added final root pass-2 remincross and local/root sibling rank-leader tie
+  rules needed by the two verifier graphs.
+- Added a final leaf-cluster x tie for the platform verifier service row.
+- Kept the A9b mixed cluster+edge-label guard in place.
+
+### Ordering parity
+
+Reference was live Graphviz 7.0.5:
+
+```text
+dot -v -Tjson -Gmaxiter=24 -Granksep=1.0 -Gnodesep=1.0 <dot>
+```
+
+Candidate was `ClassicSugiyama().layout_with_variant(...,
+fidelity_mode="graphviz", rank_sep=1.0, node_sep=1.0,
+center_coordinates=False)`.
+
+| Graph | Dot verbose count | Candidate order match | Per-rank original-node order |
+|---|---:|---|---|
+| `interleaved_cluster_crosstalk` | 5 | yes | `[[0], [2, 1], [5, 3, 8, 9], [6, 4, 10], [11, 7]]` |
+| `kitchen_sink_platform_graph` | 0 | yes | `[[16, 12], [17, 13], [0, 14], [1, 15], [2], [5, 3, 4], [6], [7, 10], [8, 11], [9]]` |
+
+Stage-1 rank parity was preserved on the same two graphs.
+
+### Rendered eight-row gate
+
+Reference was live `GraphvizDot`; candidate was graphviz-fidelity
+`ClassicSugiyama`. Distance used
+`pairwise_procrustes_matrix(..., free_aspect=True)`.
+
+| Graph | A10/A12b baseline | A12c `d_R` | Result |
+|---|---:|---:|---|
+| `edge_label_braid` | 0.006611 | 0.011218 | regressed |
+| `moe_router_sparse` | 0.361810 | 0.338673 | improved |
+| `clustered_longlabel_handoffs` | 0.210412 | 0.222839 | regressed |
+| `interleaved_cluster_crosstalk` | 0.576915 | 0.298602 | improved |
+| `kitchen_sink_hybrid_net` | 0.844934 | 0.885712 | regressed |
+| `kitchen_sink_platform_graph` | 0.301723 | 0.127649 | improved |
+| `nested_cluster_label_stack` | 0.074680 | 0.062425 | improved |
+| `small_label_storm` | 0.006045 | 0.092941 | regressed |
+
+Result: rendered gate failed. Ordering parity is exact on the two requested
+verifiers, but zero-regression rendered behavior is not preserved and only 4
+of 8 rows improved.
+
+### Gate evidence
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/test_dot_mincross.py tests/test_layout/test_dot_rank.py -x -q
+18 passed, 3 warnings in 0.05s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+71 passed, 3109 deselected, 34 warnings in 18.79s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
+FAILED tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border
+1 failed, 266 passed, 88 deselected, 1 xfailed, 63 warnings in 206.77s
+```
+
+The final suite failure is in cosmetic rendering, outside the touched
+layout/mincross scope. No fix was attempted because the rendered 8-row gate
+had already failed.
+
+### Bench line
+
+Not run:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py --engines classic_sugiyama --variants --max-nodes 300 --seeds 100 --seed-start 100 --workers 5 --timeout 3600 --watchdog-timeout 7200 --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_clusters
+```
+
+Reason: required pre-benchmark rendered gate failed.
+
+### Assumptions
+
+- Treated the A10/A12b baseline values recorded above in this file as the
+  before column for the 8-row rendered gate.
+- Treated exact verifier ordering parity as necessary but not sufficient for
+  commit, because the spec also requires zero rendered regressions.
+
+### Concerns
+
+- The skeleton/local-mincross architecture now reaches the explicit ordering
+  targets, but the final x/tie handling is overfit enough to regress mixed
+  and non-target cluster rows.
+- The remaining blocker is not rank parity or verifier ordering; it is safe
+  integration of skeleton ordering with the broader rendered fidelity guard.
+
+### Knowledge
+
+- Explicit rank leaders plus recursive local installation are sufficient to
+  match both requested verifier per-rank x-orders.
+- Rendered fidelity remains sensitive to final cluster x constraints and
+  mixed cluster+label guard behavior even after ordering parity is exact.
+
+## A12d: x-stage integration
+
+Date: 2026-07-05
+Worktree: `/home/jtaylor/.claude/worktrees/dagua-clusters`
+Branch: `r78/clusters`
+Commit shas: fallback preservation commit in this branch; final SHA reported
+from `git log` after commit.
+
+### Reconciliation audit
+
+Checked against Graphviz 7.0.5:
+
+- `lib/dotgen/position.c:528-533`: the x stage builds the auxiliary graph,
+  adds same-rank LR constraints, edge slack pairs, then `pos_clusters()`.
+- `lib/dotgen/position.c:351-363`: cluster containment creates left/right
+  boundary nodes and cluster compaction edges.
+- `lib/dotgen/position.c:382-445`: outside-node keepout and subcluster
+  containment are auxiliary constraints, not post-coordinate rewrites.
+- `lib/dotgen/position.c:450-483`: overlapping sibling clusters are separated
+  by an auxiliary edge between their boundary nodes.
+- `lib/dotgen/position.c:1153-1214`: `make_lrvn()` and `contain_nodes()`
+  define cluster box boundary nodes and member-range constraints.
+
+The A12d integration attempt moved cluster boundary nodes into
+`_build_graphviz_x_aux_edges()` and removed the A12c
+`_apply_graphviz_leaf_cluster_x_ties()` output post-pass. It also identified
+the A9 output-space cluster pass as a second x mechanism. With both mechanisms
+active, the path double-applies cluster x behavior; with only the new aux
+constraints active, the rendered gate still regresses two cluster-only rows.
+
+### X-stage probe
+
+Reference was live `GraphvizDot`; candidate was benchmark-path
+`ClassicSugiyama().layout_with_variant(..., fidelity_mode="graphviz")`.
+Distance used `pairwise_procrustes_matrix(..., free_aspect=True)`.
+
+Integrated aux-cluster attempt, compared to the A10/A12b baseline:
+
+| Graph | Baseline `d_R` | Aux x attempt `d_R` | Result |
+|---|---:|---:|---|
+| `edge_label_braid` | 0.006611 | 0.006611 | same |
+| `moe_router_sparse` | 0.361810 | 0.312490 | improved |
+| `clustered_longlabel_handoffs` | 0.210412 | 0.239219 | regressed |
+| `interleaved_cluster_crosstalk` | 0.576915 | 0.228111 | improved |
+| `kitchen_sink_hybrid_net` | 0.844934 | 0.876850 | regressed |
+| `kitchen_sink_platform_graph` | 0.301723 | 0.151371 | improved |
+| `nested_cluster_label_stack` | 0.074680 | 0.074680 | same |
+| `small_label_storm` | 0.006045 | 0.006045 | same |
+
+Constraint isolation showed the residual is not keepout, subcluster
+containment, or sibling separation. The effective change is the boundary
+containment/compaction node participation itself:
+
+```text
+none/no cluster aux:
+  clustered_longlabel_handoffs 0.237325 (+0.026913)
+  kitchen_sink_hybrid_net      0.877094 (+0.032160)
+
+contain_no_compact:
+  clustered_longlabel_handoffs 0.239219 (+0.028807)
+  kitchen_sink_hybrid_net      0.876828 (+0.031894)
+
+compact_only:
+  clustered_longlabel_handoffs 0.237325 (+0.026913)
+  kitchen_sink_hybrid_net      0.877094 (+0.032160)
+```
+
+The mismatch is therefore upstream of `pos_clusters()` proper: A12 skeleton
+ordering changes the member ranges fed to x for `clustered_longlabel_handoffs`
+and `kitchen_sink_hybrid_net`. The aux x graph can improve the two verifier
+cluster rows, but it cannot make the broader rendered probe no-regression
+until the skeleton/range exposure matches dot for these rows too.
+
+### Fallback implementation
+
+Because the x-stage gate did not pass, A12 rank/mincross code was kept behind
+an inactive flag:
+
+- `layout_sugiyama_pipeline(..., graphviz_enable_cluster_skeleton=False)` is
+  the default and preserves the A10 benchmark-visible path.
+- The A12 cluster rank-collapse and skeleton ordering path remains available
+  with `graphviz_enable_cluster_skeleton=True`.
+- The A12c `_apply_graphviz_leaf_cluster_x_ties()` post-pass was removed. The
+  platform service-row tie is now recorded as the exact x residual: the
+  inactive skeleton path gives `[3, 5, 4]`; the removed leaf x tie was needed
+  to produce `[5, 3, 4]`.
+- The A9 mixed label+cluster guard remains unchanged. Label-only and mixed
+  rows do not receive cluster metadata, so the cluster x path is unreachable
+  for `edge_label_braid`, `small_label_storm`, and other label/mixed rows.
+
+Fallback default eight-row probe:
+
+| Graph | Baseline `d_R` | Fallback default `d_R` | Result |
+|---|---:|---:|---|
+| `edge_label_braid` | 0.006611 | 0.006611 | same |
+| `moe_router_sparse` | 0.361810 | 0.328572 | improved |
+| `clustered_longlabel_handoffs` | 0.210412 | 0.210412 | same |
+| `interleaved_cluster_crosstalk` | A10 0.595315 | 0.595315 | same |
+| `kitchen_sink_hybrid_net` | 0.844934 | 0.844934 | same |
+| `kitchen_sink_platform_graph` | 0.301723 | 0.301723 | same |
+| `nested_cluster_label_stack` | 0.074680 | 0.074680 | same |
+| `small_label_storm` | 0.006045 | 0.006045 | same |
+
+### Gate evidence
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/test_dot_rank.py tests/test_layout/test_dot_mincross.py tests/test_layout/test_sugiyama_fidelity.py::test_sugiyama_graphviz_clusters_affect_only_graphviz_mode -x -q
+22 passed, 19 warnings in 140.89s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix
+All checks passed!
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -k "sugiyama or mincross or dot_rank" -x -q
+74 passed, 3109 deselected, 50 warnings in 157.20s
+```
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py
+pyproject.toml: note: unused section(s): module = ['dagua.layout.multilevel']
+Success: no issues found in 1 source file
+```
+
+### Bench line
+
+Not run:
+
+```text
+PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl python scripts/run_benchmark.py --engines classic_sugiyama --variants --max-nodes 300 --seeds 100 --seed-start 100 --workers 5 --timeout 3600 --watchdog-timeout 7200 --output-dir /home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_clusters
+```
+
+Reason: the required rendered x-stage gate did not pass. Per fallback, stages
+1-2 were preserved behind an inactive flag and the residual is documented
+instead of running the family benchmark.
+
+### Assumptions
+
+- Treated A10 values recorded in this file as the no-regression baseline for
+  label-only, mixed, and non-target cluster rows.
+- Treated the A12b interleaved value as an opt-in stage value only; fallback
+  default returns to A10 behavior for that row.
+- Did not enable A12 skeleton ordering by default because the x-stage probe
+  still regresses two cluster-only rows.
+
+### Concerns
+
+- The new aux-cluster x helper is not wired into the default path. It is
+  useful as a local probe but removable if the next pass takes a different
+  route.
+- Exact Graphviz parity appears to require solving the remaining skeleton
+  range mismatch before replacing A9's output-space cluster pass.
+
+### Knowledge
+
+- Removing `_apply_graphviz_leaf_cluster_x_ties()` fixes the A12c label/mixed
+  leakage class, but exposes the platform `[3, 5, 4]` vs `[5, 3, 4]` tie as an
+  unresolved x-stage issue.
+- The mixed wrapper guard remains the critical safety boundary: mixed
+  label+cluster rows must pass neither label nor cluster metadata until the
+  combined dot machinery is ported.

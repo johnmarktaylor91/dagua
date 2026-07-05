@@ -39,6 +39,8 @@ def graphviz_mincross(
     iterations: int = 24,
     edge_penalties: Optional[Sequence[int]] = None,
     node_order: Optional[Sequence[int]] = None,
+    start_pass: int = 0,
+    end_pass: int = 2,
 ) -> List[List[int]]:
     """Order nodes within ranks using Graphviz dot's mincross heuristic.
 
@@ -61,6 +63,11 @@ def graphviz_mincross(
     node_order : sequence of int, optional
         Graph node-list order used by Graphviz ``build_ranks`` seeding. When
         omitted, nodes are iterated in supplied rank order.
+    start_pass : int, default=0
+        First Graphviz mincross pass to run. Root mincross starts at pass 0;
+        local cluster mincross uses pass 2 after cluster expansion.
+    end_pass : int, default=2
+        Last Graphviz mincross pass to run.
 
     Returns
     -------
@@ -87,12 +94,25 @@ def graphviz_mincross(
         return base_ranks
 
     max_iter = max(int(iterations), 0)
+    start_pass = max(0, int(start_pass))
+    end_pass = min(_MAX_INITIAL_PASSES, int(end_pass))
+    if start_pass > end_pass:
+        return base_ranks
+
     best_cross: Optional[int] = None
     best_ranks: List[List[int]] = [list(rank) for rank in base_ranks]
     current_cross = 0
     ordered_ranks = [list(rank) for rank in base_ranks]
+    if start_pass > 1:
+        current_cross = _count_crossings(
+            ranks=ordered_ranks,
+            edges=adjacent_edges,
+            node_to_rank=node_to_rank,
+        )
+        best_cross = current_cross
+        best_ranks = [list(rank) for rank in ordered_ranks]
 
-    for pass_index in range(_MAX_INITIAL_PASSES + 1):
+    for pass_index in range(start_pass, end_pass + 1):
         if pass_index < _MAX_INITIAL_PASSES:
             max_this_pass = min(_MAX_INITIAL_PASS_ITERATIONS, max_iter)
             ordered_ranks = _build_ranks(
