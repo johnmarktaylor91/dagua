@@ -204,6 +204,13 @@ class LayoutConfig:
     # Conservative DAG gate keeps this out of cyclic, flat, tree, chain, and
     # multi-component cases unless there is only one isolated tail node.
     brandes_koepf_refine: bool = True
+    # Default-on R79 P2C layered polish. Row snapping removes gradient-created
+    # micro-ranks after ordering, and cluster compaction adds cluster interval
+    # gaps after BK only for clustered layered graphs.
+    layered_rank_row_snap: bool = True
+    cluster_aware_x_compaction: bool = True
+    tiny_multiedge_rank_sep_cap: bool = True
+    tiny_multiedge_rank_sep_max: float = 240.0
     # Split long-span DAG edges into dummy-node chains inside
     # dagua_native. This public kill switch lets benchmarks isolate routing
     # regressions without reverting the whole feature.
@@ -212,6 +219,7 @@ class LayoutConfig:
     # default dagua_native pipeline. Each weak component is solved
     # independently and tiled unless a conservative safety gate disables it.
     decompose_components: bool = True
+    component_tiling_crossing_risk: bool = True
 
     # Multilevel coarsening (default: N > 20K)
     multilevel_threshold: int = 20000
