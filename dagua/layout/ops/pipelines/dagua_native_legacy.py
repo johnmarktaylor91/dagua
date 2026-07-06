@@ -35,6 +35,10 @@ from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, StallCount, 
 from dagua.layout.ops.coordinate import (
     BrandesKoepfHorizontalRefine,
     BrandesKoepfHorizontalRefineConfig,
+    ClusterAwareXCompaction,
+    ClusterAwareXCompactionConfig,
+    RankRowSnap,
+    RankRowSnapConfig,
 )
 from dagua.layout.ops.distance import (
     PivotDistanceQueries,
@@ -56,6 +60,8 @@ from dagua.layout.ops.optimize import (
     OptimizerZeroGrad,
 )
 from dagua.layout.ops.ordering import (
+    ClusterContiguousOrder,
+    ClusterContiguousOrderConfig,
     MedianSweep,
     MedianSweepConfig,
     TransposeHeuristic,
@@ -1174,6 +1180,13 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             ]
         )
     crossing_reduction_ops.append(
+        ClusterContiguousOrder(
+            ClusterContiguousOrderConfig(
+                enabled=bool(getattr(config, "cluster_aware_x_compaction", True))
+            )
+        )
+    )
+    crossing_reduction_ops.append(
         BrandesKoepfHorizontalRefine(
             BrandesKoepfHorizontalRefineConfig(
                 node_sep=resolved_node_sep,
@@ -1181,6 +1194,26 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                 structure=structure,
             )
         )
+    )
+    crossing_reduction_ops.extend(
+        [
+            ClusterAwareXCompaction(
+                ClusterAwareXCompactionConfig(
+                    enabled=bool(getattr(config, "cluster_aware_x_compaction", True)),
+                    node_sep=resolved_node_sep,
+                    cluster_gap_multiplier=0.75,
+                    min_clusters=1,
+                    min_long_edge_fraction=0.25,
+                )
+            ),
+            RankRowSnap(
+                RankRowSnapConfig(
+                    enabled=bool(getattr(config, "layered_rank_row_snap", True)),
+                    is_acyclic=is_acyclic,
+                    min_layers=10,
+                )
+            ),
+        ]
     )
     # Sprint 2: branch on N. V-cycle above threshold; flat below.
     use_vcycle = bool(getattr(config, "_dagua_native_use_vcycle", False))

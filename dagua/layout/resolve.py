@@ -157,6 +157,65 @@ def resolve_topology_aware_aspect(
     return 0.25, 1.0
 
 
+def duplicate_edge_multiplicity(edge_index: torch.Tensor) -> int:
+    """Return the maximum duplicate multiplicity of non-self directed edges.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    int
+        Maximum count for a repeated ``(source, target)`` pair. Empty graphs
+        and graphs without duplicates return ``1``.
+    """
+    if edge_index.numel() == 0:
+        return 1
+    counts: dict[tuple[int, int], int] = {}
+    for source, target in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        if source == target:
+            continue
+        key = (int(source), int(target))
+        counts[key] = counts.get(key, 0) + 1
+    return max(counts.values(), default=1)
+
+
+def cap_tiny_multiedge_rank_sep(
+    config: LayoutConfig,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    resolved_rank_sep: float,
+) -> float:
+    """Cap rank spacing for tiny DAGs with duplicate edges.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Effective layout configuration.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    resolved_rank_sep : float
+        Rank separation after adaptive and topology-aware scaling.
+
+    Returns
+    -------
+    float
+        Possibly capped rank separation.
+    """
+    if not bool(getattr(config, "tiny_multiedge_rank_sep_cap", True)):
+        return resolved_rank_sep
+    if bool(getattr(config, "_dagua_native_has_clusters", False)):
+        return resolved_rank_sep
+    if num_nodes > 10 or duplicate_edge_multiplicity(edge_index) <= 1:
+        return resolved_rank_sep
+    cap = float(getattr(config, "tiny_multiedge_rank_sep_max", 240.0))
+    return min(resolved_rank_sep, cap)
+
+
 def final_projection_iterations(num_nodes: int) -> int:
     """Return the native engine's final overlap-projection iteration count."""
     if num_nodes <= 50:
@@ -349,6 +408,12 @@ def prepare_pipeline_config(
         )
     target_aspect, rank_sep_multiplier = resolve_topology_aware_aspect(structure)
     resolved_rank_sep *= rank_sep_multiplier
+    resolved_rank_sep = cap_tiny_multiedge_rank_sep(
+        config=effective_config,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        resolved_rank_sep=resolved_rank_sep,
+    )
 
     stall_limit, rel_threshold = stall_config(num_nodes=num_nodes)
     setattr(effective_config, "_dagua_native_steps", resolved_steps)
