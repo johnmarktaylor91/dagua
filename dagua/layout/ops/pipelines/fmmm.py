@@ -2836,6 +2836,14 @@ _GRAPHVIZ_FDP_DEFAULT_TFACT = 1.0
 _GRAPHVIZ_FDP_DEFAULT_C = 0.0
 _GRAPHVIZ_FDP_DEFAULT_X_C = 1.5
 _GRAPHVIZ_FDP_DEFAULT_X_TRIES = 9
+_GRAPHVIZ_FDP_DEFAULT_PRISM_TRIES = 9
+_GRAPHVIZ_FDP_DEFAULT_PRISM_SCALING = -4.0
+_GRAPHVIZ_FDP_PRISM_EXPAND_MAX = 1.5
+_GRAPHVIZ_FDP_PRISM_EXPAND_MIN = 1.0
+_GRAPHVIZ_FDP_PRISM_EPSILON = 0.0001
+_GRAPHVIZ_FDP_PRISM_SCALE_MAX_ITERS = 15
+_GRAPHVIZ_FDP_PRISM_STRESS_TOL = 0.001
+_GRAPHVIZ_FDP_PRISM_MACHINE_ACC = 1.0e-12
 _GRAPHVIZ_FDP_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS = 4.0
 _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES = 0.75
@@ -5488,6 +5496,697 @@ def _graphviz_fdp_node_size_lists_in_inches(
     return widths, heights
 
 
+def _graphviz_fdp_prism_half_size_lists_in_inches(
+    node_sizes: Optional[torch.Tensor],
+    num_nodes: int,
+) -> Tuple[List[float], List[float]]:
+    """Return Graphviz PRISM half-sizes in internal inch units.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor, optional
+        Node sizes in points with shape ``[N, 2]``.
+    num_nodes : int
+        Number of local nodes.
+
+    Returns
+    -------
+    tuple[list[float], list[float]]
+        Half-widths and half-heights including Graphviz's default FDP
+        additive separation, in internal inches.
+    """
+    widths, heights = _graphviz_fdp_node_size_lists_in_inches(node_sizes, num_nodes)
+    return [width / 2.0 for width in widths], [height / 2.0 for height in heights]
+
+
+def _graphviz_fdp_prism_overlap_edges(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    half_widths: Sequence[float],
+    half_heights: Sequence[float],
+    check_overlap_only: bool = False,
+) -> set[tuple[int, int]]:
+    """Return overlapping rectangle pairs using Graphviz's strict interval test.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    half_widths : Sequence[float]
+        Node half-widths in Graphviz internal inches.
+    half_heights : Sequence[float]
+        Node half-heights in Graphviz internal inches.
+    check_overlap_only : bool, default=False
+        Return after the first pair when only the existence of an overlap is
+        needed.
+
+    Returns
+    -------
+    set[tuple[int, int]]
+        Undirected overlapping pairs with ``left < right``.
+    """
+    edges: set[tuple[int, int]] = set()
+    num_nodes = len(x_positions)
+    for source in range(num_nodes):
+        for target in range(source + 1, num_nodes):
+            if (
+                abs(x_positions[source] - x_positions[target])
+                < half_widths[source] + half_widths[target]
+                and abs(y_positions[source] - y_positions[target])
+                < half_heights[source] + half_heights[target]
+            ):
+                edges.add((source, target))
+                if check_overlap_only:
+                    return edges
+    return edges
+
+
+def _graphviz_fdp_prism_has_overlap(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    half_widths: Sequence[float],
+    half_heights: Sequence[float],
+) -> bool:
+    """Return whether any PRISM-expanded node rectangles overlap.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    half_widths : Sequence[float]
+        Node half-widths in Graphviz internal inches.
+    half_heights : Sequence[float]
+        Node half-heights in Graphviz internal inches.
+
+    Returns
+    -------
+    bool
+        ``True`` if at least one strict rectangle overlap exists.
+    """
+    return bool(
+        _graphviz_fdp_prism_overlap_edges(
+            x_positions=x_positions,
+            y_positions=y_positions,
+            half_widths=half_widths,
+            half_heights=half_heights,
+            check_overlap_only=True,
+        )
+    )
+
+
+def _graphviz_fdp_prism_scale_lists(
+    x_positions: List[float],
+    y_positions: List[float],
+    scale: float,
+) -> None:
+    """Scale PRISM coordinate lists around Graphviz's origin.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    scale : float
+        Multiplicative scale factor.
+
+    Returns
+    -------
+    None
+        Updates coordinate lists in place.
+    """
+    for node_index in range(len(x_positions)):
+        x_positions[node_index] *= scale
+        y_positions[node_index] *= scale
+
+
+def _graphviz_fdp_prism_delaunay_edges(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+) -> set[tuple[int, int]]:
+    """Build the PRISM proximity graph using SciPy Delaunay triangulation.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+
+    Returns
+    -------
+    set[tuple[int, int]]
+        Undirected Delaunay-neighbor pairs with ``left < right``.
+    """
+    num_nodes = len(x_positions)
+    if num_nodes < 2:
+        return set()
+    if num_nodes < 4:
+        return {
+            (source, target)
+            for source in range(num_nodes)
+            for target in range(source + 1, num_nodes)
+        }
+
+    import numpy as np
+    from scipy.spatial import Delaunay, QhullError
+
+    points = np.column_stack(
+        [
+            np.asarray(x_positions, dtype=float),
+            np.asarray(y_positions, dtype=float),
+        ]
+    )
+    try:
+        triangulation = Delaunay(points)
+    except QhullError:
+        try:
+            triangulation = Delaunay(points, qhull_options="QJ")
+        except QhullError:
+            return {
+                (source, target)
+                for source in range(num_nodes)
+                for target in range(source + 1, num_nodes)
+            }
+
+    edges: set[tuple[int, int]] = set()
+    for simplex in triangulation.simplices:
+        vertices = [int(vertex) for vertex in simplex]
+        for first, second in ((0, 1), (1, 2), (2, 0)):
+            source = vertices[first]
+            target = vertices[second]
+            if source == target:
+                continue
+            if source > target:
+                source, target = target, source
+            edges.add((source, target))
+    return edges
+
+
+def _graphviz_fdp_prism_graph_edges(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    half_widths: Sequence[float],
+    half_heights: Sequence[float],
+    neighborhood_only: bool,
+) -> set[tuple[int, int]]:
+    """Return Graphviz PRISM's proximity graph for one smoother pass.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    half_widths : Sequence[float]
+        Node half-widths in Graphviz internal inches.
+    half_heights : Sequence[float]
+        Node half-heights in Graphviz internal inches.
+    neighborhood_only : bool
+        When ``True``, use only Delaunay neighbors. When ``False``, add exact
+        current-overlap edges, matching ``OverlapSmoother_new``.
+
+    Returns
+    -------
+    set[tuple[int, int]]
+        Undirected proximity pairs with ``left < right``.
+    """
+    edges = _graphviz_fdp_prism_delaunay_edges(x_positions, y_positions)
+    if not neighborhood_only:
+        edges.update(
+            _graphviz_fdp_prism_overlap_edges(
+                x_positions=x_positions,
+                y_positions=y_positions,
+                half_widths=half_widths,
+                half_heights=half_heights,
+            )
+        )
+    return edges
+
+
+def _graphviz_fdp_prism_average_edge_length(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    edge_index: torch.Tensor,
+) -> float:
+    """Return the average source-target length used by PRISM initial scaling.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Mean Euclidean edge length, or ``0.0`` when no non-loop edge exists.
+    """
+    if edge_index.numel() == 0:
+        return 0.0
+    edges: set[tuple[int, int]] = set()
+    for edge_id in range(int(edge_index.shape[1])):
+        source = int(edge_index[0, edge_id].item())
+        target = int(edge_index[1, edge_id].item())
+        if source == target:
+            continue
+        if source > target:
+            source, target = target, source
+        edges.add((source, target))
+    if not edges:
+        return 0.0
+    total = 0.0
+    for source, target in edges:
+        total += math.hypot(
+            x_positions[source] - x_positions[target],
+            y_positions[source] - y_positions[target],
+        )
+    return total / len(edges)
+
+
+def _graphviz_fdp_prism_apply_initial_scaling(
+    x_positions: List[float],
+    y_positions: List[float],
+    half_widths: Sequence[float],
+    half_heights: Sequence[float],
+    edge_index: torch.Tensor,
+    initial_scaling: float,
+) -> None:
+    """Apply Graphviz ``remove_overlap`` initial edge-length scaling.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    half_widths : Sequence[float]
+        Node half-widths in Graphviz internal inches.
+    half_heights : Sequence[float]
+        Node half-heights in Graphviz internal inches.
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    initial_scaling : float
+        Graphviz PRISM ``overlap_scaling`` value. Negative values scale the
+        current average edge length to ``abs(value) * avg_label_size``.
+
+    Returns
+    -------
+    None
+        Updates coordinate lists in place.
+    """
+    if initial_scaling == 0.0:
+        return
+    average_length = _graphviz_fdp_prism_average_edge_length(x_positions, y_positions, edge_index)
+    if average_length <= _FDP_EPSILON:
+        return
+    if initial_scaling < 0.0:
+        average_label_size = sum(
+            half_widths[node_index] + half_heights[node_index]
+            for node_index in range(len(x_positions))
+        ) / max(len(x_positions), 1)
+        target_length = -initial_scaling * average_label_size
+    else:
+        target_length = initial_scaling
+    _graphviz_fdp_prism_scale_lists(x_positions, y_positions, target_length / average_length)
+
+
+def _graphviz_fdp_prism_overlap_scaling(
+    x_positions: List[float],
+    y_positions: List[float],
+    half_widths: Sequence[float],
+    half_heights: Sequence[float],
+    scale_start: float,
+    scale_stop: float,
+    epsilon: float,
+    max_iterations: int,
+) -> float:
+    """Run Graphviz PRISM bisection scaling until boxes are disjoint.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    half_widths : Sequence[float]
+        Node half-widths in Graphviz internal inches.
+    half_heights : Sequence[float]
+        Node half-heights in Graphviz internal inches.
+    scale_start : float
+        Lower scaling bracket.
+    scale_stop : float
+        Upper scaling bracket, or a negative value to auto-discover it.
+    epsilon : float
+        Termination bracket width.
+    max_iterations : int
+        Maximum bisection iterations.
+
+    Returns
+    -------
+    float
+        Final scale applied to the coordinate lists.
+    """
+    if scale_start <= 0.0:
+        scale_start = 0.0
+    else:
+        _graphviz_fdp_prism_scale_lists(x_positions, y_positions, scale_start)
+        if not _graphviz_fdp_prism_has_overlap(
+            x_positions,
+            y_positions,
+            half_widths,
+            half_heights,
+        ):
+            return scale_start
+        _graphviz_fdp_prism_scale_lists(x_positions, y_positions, 1.0 / scale_start)
+
+    if scale_stop < 0.0:
+        scale_stop = epsilon if scale_start == 0.0 else scale_start
+        _graphviz_fdp_prism_scale_lists(x_positions, y_positions, scale_stop)
+        while True:
+            scale_stop *= 2.0
+            _graphviz_fdp_prism_scale_lists(x_positions, y_positions, 2.0)
+            if not _graphviz_fdp_prism_has_overlap(
+                x_positions,
+                y_positions,
+                half_widths,
+                half_heights,
+            ):
+                break
+        _graphviz_fdp_prism_scale_lists(x_positions, y_positions, 1.0 / scale_stop)
+
+    scale_best = scale_stop
+    iteration = 0
+    while iteration < max_iterations and scale_stop - scale_start > epsilon:
+        iteration += 1
+        scale = 0.5 * (scale_start + scale_stop)
+        _graphviz_fdp_prism_scale_lists(x_positions, y_positions, scale)
+        overlap = _graphviz_fdp_prism_has_overlap(
+            x_positions,
+            y_positions,
+            half_widths,
+            half_heights,
+        )
+        _graphviz_fdp_prism_scale_lists(x_positions, y_positions, 1.0 / scale)
+        if overlap:
+            scale_start = scale
+        else:
+            scale_best = scale
+            scale_stop = scale
+    _graphviz_fdp_prism_scale_lists(x_positions, y_positions, scale_best)
+    return scale_best
+
+
+def _graphviz_fdp_prism_ideal_distances(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    half_widths: Sequence[float],
+    half_heights: Sequence[float],
+    edges: set[tuple[int, int]],
+) -> tuple[list[tuple[int, int, float, bool]], float, float]:
+    """Compute Graphviz PRISM ideal distances for proximity edges.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    half_widths : Sequence[float]
+        Node half-widths in Graphviz internal inches.
+    half_heights : Sequence[float]
+        Node half-heights in Graphviz internal inches.
+    edges : set[tuple[int, int]]
+        Undirected proximity graph edges.
+
+    Returns
+    -------
+    tuple[list[tuple[int, int, float, bool]], float, float]
+        Edge records ``(source, target, ideal_distance, expands)``, maximum
+        overlap factor, and minimum overlap factor.
+    """
+    records: list[tuple[int, int, float, bool]] = []
+    max_overlap = 0.0
+    min_overlap = 1.0e10
+    for source, target in sorted(edges):
+        x_delta = abs(x_positions[source] - x_positions[target])
+        y_delta = abs(y_positions[source] - y_positions[target])
+        width = half_widths[source] + half_widths[target]
+        height = half_heights[source] + half_heights[target]
+        distance = math.hypot(
+            x_positions[source] - x_positions[target],
+            y_positions[source] - y_positions[target],
+        )
+        if (
+            x_delta < _GRAPHVIZ_FDP_PRISM_MACHINE_ACC * width
+            and y_delta < _GRAPHVIZ_FDP_PRISM_MACHINE_ACC * height
+        ):
+            records.append((source, target, math.hypot(width, height), True))
+            max_overlap = 2.0
+            min_overlap = min(min_overlap, 2.0)
+            continue
+        if x_delta < _GRAPHVIZ_FDP_PRISM_MACHINE_ACC * width:
+            factor = height / y_delta
+        elif y_delta < _GRAPHVIZ_FDP_PRISM_MACHINE_ACC * height:
+            factor = width / x_delta
+        else:
+            factor = min(width / x_delta, height / y_delta)
+        if factor > 1.0:
+            factor = max(factor, 1.001)
+        max_overlap = max(max_overlap, factor)
+        min_overlap = min(min_overlap, factor)
+        bounded = min(_GRAPHVIZ_FDP_PRISM_EXPAND_MAX, factor)
+        bounded = max(_GRAPHVIZ_FDP_PRISM_EXPAND_MIN, bounded)
+        records.append((source, target, bounded * distance, factor > 1.0))
+    return records, max_overlap, min_overlap
+
+
+def _graphviz_fdp_prism_stress_step(
+    x_positions: List[float],
+    y_positions: List[float],
+    records: Sequence[tuple[int, int, float, bool]],
+) -> float:
+    """Run one Graphviz-style PRISM stress-majorization update.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    records : Sequence[tuple[int, int, float, bool]]
+        PRISM ideal-distance records as returned by
+        :func:`_graphviz_fdp_prism_ideal_distances`.
+
+    Returns
+    -------
+    float
+        Root mean square coordinate displacement from the previous positions.
+    """
+    num_nodes = len(x_positions)
+    if num_nodes <= 1 or not records:
+        return 0.0
+
+    import numpy as np
+    from scipy import sparse
+    from scipy.sparse import linalg as sparse_linalg
+
+    old = np.column_stack(
+        [
+            np.asarray(x_positions, dtype=float),
+            np.asarray(y_positions, dtype=float),
+        ]
+    )
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    rhs = np.zeros((num_nodes, 2), dtype=float)
+    diagonal = np.zeros(num_nodes, dtype=float)
+    for source, target, ideal_distance, expands in records:
+        current_delta = old[source] - old[target]
+        current_distance = float(np.hypot(current_delta[0], current_delta[1]))
+        if current_distance <= _FDP_EPSILON or ideal_distance <= _FDP_EPSILON:
+            continue
+        weight_scale = 100.0 if expands else 1.0
+        weight = weight_scale / (ideal_distance * ideal_distance)
+        diagonal[source] += weight
+        diagonal[target] += weight
+        rows.extend([source, target])
+        cols.extend([target, source])
+        data.extend([-weight, -weight])
+        rhs_delta = weight * ideal_distance * current_delta / current_distance
+        rhs[source] += rhs_delta
+        rhs[target] -= rhs_delta
+
+    rows.extend(range(num_nodes))
+    cols.extend(range(num_nodes))
+    data.extend(float(value) for value in diagonal)
+    laplacian = sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
+    if num_nodes == 2:
+        reduced = laplacian[1:, 1:].tocsc()
+    else:
+        reduced = laplacian[1:, 1:].tocsr()
+    new_positions = np.zeros_like(old)
+    for axis in range(2):
+        try:
+            solved = sparse_linalg.spsolve(reduced, rhs[1:, axis])
+        except Exception:
+            solved = np.linalg.lstsq(reduced.toarray(), rhs[1:, axis], rcond=None)[0]
+        new_positions[1:, axis] = np.asarray(solved, dtype=float)
+    new_positions += old.mean(axis=0, keepdims=True) - new_positions.mean(axis=0, keepdims=True)
+    rms = float(np.sqrt(np.mean((new_positions - old) ** 2)))
+    for node_index in range(num_nodes):
+        x_positions[node_index] = float(new_positions[node_index, 0])
+        y_positions[node_index] = float(new_positions[node_index, 1])
+    return rms
+
+
+def _graphviz_fdp_prism_remove_overlap_lists(
+    x_positions: List[float],
+    y_positions: List[float],
+    half_widths: Sequence[float],
+    half_heights: Sequence[float],
+    edge_index: torch.Tensor,
+    ntry: int = _GRAPHVIZ_FDP_DEFAULT_PRISM_TRIES,
+    initial_scaling: float = _GRAPHVIZ_FDP_DEFAULT_PRISM_SCALING,
+    do_shrinking: bool = True,
+) -> None:
+    """Remove FDP overlaps with Graphviz PRISM's proximity-stress loop.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    half_widths : Sequence[float]
+        Node half-widths in Graphviz internal inches.
+    half_heights : Sequence[float]
+        Node half-heights in Graphviz internal inches.
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    ntry : int, default=_GRAPHVIZ_FDP_DEFAULT_PRISM_TRIES
+        Maximum PRISM smoother passes. The FDP default ``overlap="9:prism"``
+        bounds this fidelity port to the same named-stage budget.
+    initial_scaling : float, default=_GRAPHVIZ_FDP_DEFAULT_PRISM_SCALING
+        Graphviz ``overlap_scaling`` default.
+    do_shrinking : bool, default=True
+        Whether to allow the final full-overlap pass to shrink whitespace when
+        no overlaps remain.
+
+    Returns
+    -------
+    None
+        Updates coordinate lists in place.
+    """
+    if len(x_positions) <= 1 or ntry <= 0:
+        return
+    _graphviz_fdp_prism_apply_initial_scaling(
+        x_positions=x_positions,
+        y_positions=y_positions,
+        half_widths=half_widths,
+        half_heights=half_heights,
+        edge_index=edge_index,
+        initial_scaling=initial_scaling,
+    )
+
+    residual = 100000.0
+    neighborhood_only = True
+    shrink = False
+    for _iteration in range(ntry):
+        edges = _graphviz_fdp_prism_graph_edges(
+            x_positions=x_positions,
+            y_positions=y_positions,
+            half_widths=half_widths,
+            half_heights=half_heights,
+            neighborhood_only=neighborhood_only,
+        )
+        records, max_overlap, _min_overlap = _graphviz_fdp_prism_ideal_distances(
+            x_positions=x_positions,
+            y_positions=y_positions,
+            half_widths=half_widths,
+            half_heights=half_heights,
+            edges=edges,
+        )
+        if max_overlap < 1.0 and shrink:
+            scale_start = min(1.0, max_overlap * 1.0001)
+            _graphviz_fdp_prism_overlap_scaling(
+                x_positions=x_positions,
+                y_positions=y_positions,
+                half_widths=half_widths,
+                half_heights=half_heights,
+                scale_start=scale_start,
+                scale_stop=1.0,
+                epsilon=_GRAPHVIZ_FDP_PRISM_EPSILON,
+                max_iterations=_GRAPHVIZ_FDP_PRISM_SCALE_MAX_ITERS,
+            )
+            max_overlap = 1.0
+        if max_overlap <= 1.0 or residual < _GRAPHVIZ_FDP_PRISM_STRESS_TOL:
+            if not neighborhood_only:
+                break
+            residual = 100000.0
+            neighborhood_only = False
+            shrink = do_shrinking
+            continue
+        residual = _graphviz_fdp_prism_stress_step(x_positions, y_positions, records)
+
+
+def _graphviz_fdp_prism_overlap(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+    ntry: int = _GRAPHVIZ_FDP_DEFAULT_PRISM_TRIES,
+) -> torch.Tensor:
+    """Apply Graphviz FDP's PRISM overlap-removal stage.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Positions in Graphviz internal inches with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor, optional
+        Node sizes in points with shape ``[N, 2]``.
+    ntry : int, default=_GRAPHVIZ_FDP_DEFAULT_PRISM_TRIES
+        Maximum PRISM smoother passes.
+
+    Returns
+    -------
+    torch.Tensor
+        PRISM-adjusted positions in Graphviz internal inches with shape
+        ``[N, 2]``.
+    """
+    num_nodes = int(positions.shape[0])
+    if num_nodes <= 1:
+        return positions
+    cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
+    x_positions = [float(cpu_positions[node_index, 0].item()) for node_index in range(num_nodes)]
+    y_positions = [float(cpu_positions[node_index, 1].item()) for node_index in range(num_nodes)]
+    half_widths, half_heights = _graphviz_fdp_prism_half_size_lists_in_inches(
+        node_sizes,
+        num_nodes,
+    )
+    _graphviz_fdp_prism_remove_overlap_lists(
+        x_positions=x_positions,
+        y_positions=y_positions,
+        half_widths=half_widths,
+        half_heights=half_heights,
+        edge_index=edge_index.detach().to(device="cpu", dtype=torch.long),
+        ntry=ntry,
+    )
+    return _graphviz_fdp_positions_from_lists(x_positions, y_positions).to(
+        device=positions.device,
+        dtype=positions.dtype,
+    )
+
+
 def _graphviz_fdp_x_overlap_lists(
     x_positions: Sequence[float],
     y_positions: Sequence[float],
@@ -6135,6 +6834,11 @@ def _graphviz_fdp_component_layout(
         node_sizes=node_sizes,
         edge_weights=edge_weights,
         xpms=xpms,
+    )
+    positions = _graphviz_fdp_prism_overlap(
+        positions=positions,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
     )
     result = positions * _GRAPHVIZ_FDP_POINTS_PER_INCH
     if flip_y:
