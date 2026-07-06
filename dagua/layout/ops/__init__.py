@@ -261,6 +261,7 @@ _EXPECTED_OP_MODULES = (
     "sfdp",
     "sgd2_multi",
     "spatial_hash",
+    "scc",
     "stress",
     "stress_sgd",
     "sugiyama",
