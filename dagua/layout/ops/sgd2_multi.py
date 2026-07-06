@@ -2347,11 +2347,19 @@ class _RunSGD2MultiOptimization(Op):
         active_names = state.extras["sgd2_active_names"]
         num_nodes = problem.num_nodes
 
-        # Initialize positions -- matches classic: randn * sqrt(N)
-        positions = torch.nn.Parameter(
-            torch.randn((num_nodes, 2), device=device, dtype=torch.float32)
-            * math.sqrt(float(num_nodes))
-        )
+        # Existing callers enter with no position tensor, preserving the
+        # classic random initialization. Native stress enters here after
+        # Stress-SGD, so the late multicriteria phase can refine rather than
+        # restart the layout.
+        if state.pos is not None:
+            initial_positions = state.pos.detach().to(device=device, dtype=torch.float32).clone()
+            if initial_positions.shape != (num_nodes, 2):
+                raise ValueError("SGD2 warm-start positions must have shape [N, 2].")
+        else:
+            initial_positions = torch.randn(
+                (num_nodes, 2), device=device, dtype=torch.float32
+            ) * math.sqrt(float(num_nodes))
+        positions = torch.nn.Parameter(initial_positions)
 
         # The reference constructs the neural detector for every GD2 instance,
         # even when no crossing criterion is active.  Preserving that RNG
