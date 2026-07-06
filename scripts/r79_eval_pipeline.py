@@ -14,7 +14,7 @@ import torch
 
 import dagua
 from dagua.config import LayoutConfig
-from dagua.eval.graphs import TestGraph, get_test_graphs
+from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_directed
 from dagua.metrics import composite_auto, evaluate
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,7 +23,6 @@ from r79_baseline import (  # noqa: E402
     SEED,
     TIE_BAND,
     graph_best_external,
-    is_semantically_directed,
     json_clean,
     position_relpath,
     safe_component,

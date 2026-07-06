@@ -19,8 +19,8 @@ import torch
 
 from dagua.eval.competitors import get_competitor
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult
-from dagua.eval.graphs import TestGraph, get_test_graphs
-from dagua.metrics import composite_auto, evaluate
+from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_directed
+from dagua.metrics import composite_auto, composite_large, evaluate
 
 OUTPUT_DIR = Path("eval_output/r79_baseline")
 SEED = 42
@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         "--dagua-only",
         action="store_true",
         help="Rerun only Dagua rows against frozen external rows and positions.",
+    )
+    parser.add_argument(
+        "--rescore-only",
+        action="store_true",
+        help="Recompute composites from stored metrics without rerunning layouts.",
     )
     parser.add_argument(
         "--output-dir",
@@ -499,22 +504,6 @@ def engine_availability(engine_names: Sequence[str]) -> Dict[str, Dict[str, Any]
     return availability
 
 
-def is_semantically_directed(test_graph: TestGraph) -> bool:
-    """Return whether graph direction should affect the composite score.
-
-    Parameters
-    ----------
-    test_graph : TestGraph
-        Graph metadata and topology.
-
-    Returns
-    -------
-    bool
-        ``False`` only for graphs tagged as undirected.
-    """
-    return "undirected" not in test_graph.tags
-
-
 def row_key(row: Dict[str, Any]) -> Tuple[str, str]:
     """Return the graph-engine key for a results row.
 
@@ -634,11 +623,15 @@ def external_layout_result(
         Successful layout result for parent-side metrics, or an ERROR row.
     """
     context = mp.get_context("fork")
-    temp_path = output_dir / "positions" / (
-        f".{safe_component(test_graph.name)}__{safe_component(engine_name)}.child.pt"
+    temp_path = (
+        output_dir
+        / "positions"
+        / (f".{safe_component(test_graph.name)}__{safe_component(engine_name)}.child.pt")
     )
-    result_path = output_dir / "positions" / (
-        f".{safe_component(test_graph.name)}__{safe_component(engine_name)}.child.json"
+    result_path = (
+        output_dir
+        / "positions"
+        / (f".{safe_component(test_graph.name)}__{safe_component(engine_name)}.child.json")
     )
     temp_path.parent.mkdir(parents=True, exist_ok=True)
     for path in (temp_path, result_path):
@@ -907,6 +900,155 @@ def summarize_wtl(rows: List[Dict[str, Any]], population: str) -> Tuple[int, int
     return wins, ties, losses
 
 
+def score_stored_metrics(row: Dict[str, Any], test_graph: TestGraph) -> float:
+    """Recompute a row composite from persisted metrics and graph semantics.
+
+    Parameters
+    ----------
+    row : Dict[str, Any]
+        Stored benchmark row containing a ``metrics`` mapping.
+    test_graph : TestGraph
+        Corpus graph metadata used to resolve semantic directedness.
+
+    Returns
+    -------
+    float
+        Recomputed composite score.
+    """
+    metrics = row.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError(f"row {row_key(row)} has no metric dictionary")
+    clean_metrics = {str(key): value for key, value in metrics.items() if value is not None}
+    full_fields = {"crossing_rate", "sampled_stress", "angular_res_mean_deg"}
+    if full_fields.issubset(clean_metrics):
+        return float(composite_auto(clean_metrics, is_semantically_directed(test_graph)))
+    return float(composite_large(clean_metrics))
+
+
+def rescore_rows(
+    rows: Sequence[Dict[str, Any]],
+    graphs: Sequence[TestGraph],
+) -> List[Dict[str, Any]]:
+    """Return rows with OK composites recomputed from stored metric payloads.
+
+    Parameters
+    ----------
+    rows : Sequence[Dict[str, Any]]
+        Stored result rows.
+    graphs : Sequence[TestGraph]
+        Benchmark graph metadata.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Rows with recomputed ``composite`` values for successful layouts.
+    """
+    graph_by_name = {graph.name: graph for graph in graphs}
+    rescored: List[Dict[str, Any]] = []
+    for row in rows:
+        new_row = dict(row)
+        if row.get("status") == "OK" and row.get("composite") is not None:
+            graph = graph_by_name.get(str(row.get("graph")))
+            if graph is None:
+                raise RuntimeError(f"stored row references unknown graph: {row.get('graph')}")
+            new_row["composite"] = score_stored_metrics(row, graph)
+        rescored.append(new_row)
+    return rescored
+
+
+def wtl_table(rows: List[Dict[str, Any]]) -> Dict[str, Tuple[int, int, int]]:
+    """Summarize Dagua W/T/L for every reporting population.
+
+    Parameters
+    ----------
+    rows : List[Dict[str, Any]]
+        Result rows to summarize.
+
+    Returns
+    -------
+    Dict[str, Tuple[int, int, int]]
+        Win, tie, and loss counts keyed by population.
+    """
+    return {population: summarize_wtl(rows, population) for population in ("legacy", "extended")}
+
+
+def biggest_composite_movers(
+    old_rows: Sequence[Dict[str, Any]],
+    new_rows: Sequence[Dict[str, Any]],
+    limit: int = 12,
+) -> List[Dict[str, Any]]:
+    """Find the largest absolute composite changes after semantic rescoring.
+
+    Parameters
+    ----------
+    old_rows : Sequence[Dict[str, Any]]
+        Rows before rescoring.
+    new_rows : Sequence[Dict[str, Any]]
+        Rows after rescoring.
+    limit : int, default=12
+        Maximum number of movers to return.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Largest row-level composite deltas.
+    """
+    old_by_key = {row_key(row): row for row in old_rows if row.get("composite") is not None}
+    movers: List[Dict[str, Any]] = []
+    for row in new_rows:
+        key = row_key(row)
+        old_row = old_by_key.get(key)
+        if old_row is None or row.get("composite") is None:
+            continue
+        before = float(old_row["composite"])
+        after = float(row["composite"])
+        delta = after - before
+        if abs(delta) <= 1e-9:
+            continue
+        movers.append(
+            {
+                "graph": key[0],
+                "engine": key[1],
+                "before": before,
+                "after": after,
+                "delta": delta,
+            }
+        )
+    return sorted(movers, key=lambda item: abs(float(item["delta"])), reverse=True)[:limit]
+
+
+def directedness_audit(graphs: Sequence[TestGraph]) -> List[Dict[str, str]]:
+    """Build graph-level directedness verdicts for the report.
+
+    Parameters
+    ----------
+    graphs : Sequence[TestGraph]
+        Benchmark corpus.
+
+    Returns
+    -------
+    List[Dict[str, str]]
+        Directedness verdicts sorted by graph name.
+    """
+    rows: List[Dict[str, str]] = []
+    for graph in graphs:
+        verdict = "directed" if is_semantically_directed(graph) else "undirected"
+        if "undirected" in graph.tags:
+            reason = (
+                "storage orientation is arbitrary for social, random, mesh, or symmetric structure"
+            )
+        elif "dag" in graph.tags or "dependency" in graph.tags:
+            reason = "construction encodes DAG/dependency flow"
+        elif graph.name.startswith(("linear_", "deep_", "random_dag_", "r79_directed_scc_")):
+            reason = "construction encodes directed path, DAG, or SCC semantics"
+        elif any(tag in graph.tags for tag in {"neural-net", "wide-parallel", "skip-heavy"}):
+            reason = "construction encodes dataflow-style source-to-sink edges"
+        else:
+            reason = "construction uses explicit source-to-target flow semantics"
+        rows.append({"graph": graph.name, "verdict": verdict, "reason": reason})
+    return sorted(rows, key=lambda item: item["graph"])
+
+
 def per_graph_comparison(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build per-graph Dagua-vs-best-external comparison rows.
 
@@ -999,6 +1141,56 @@ def generate_report(output_dir: Path, payload: Dict[str, Any]) -> None:
         wins, ties, losses_count = summarize_wtl(rows, population)
         lines.append(f"| {population} | {wins} | {ties} | {losses_count} |")
 
+    semantics_fix = payload["metadata"].get("semantics_fix")
+    if isinstance(semantics_fix, dict):
+        lines.extend(
+            [
+                "",
+                "## Semantic Directedness Fix",
+                "",
+                "| Population | Before W/T/L | After W/T/L |",
+                "| --- | ---: | ---: |",
+            ]
+        )
+        before_wtl = semantics_fix.get("before_wtl", {})
+        after_wtl = wtl_table(rows)
+        for population in ("legacy", "extended"):
+            before = before_wtl.get(population, [0, 0, 0])
+            after = after_wtl[population]
+            lines.append(
+                "| {population} | {before_w}/{before_t}/{before_l} | "
+                "{after_w}/{after_t}/{after_l} |".format(
+                    population=population,
+                    before_w=int(before[0]),
+                    before_t=int(before[1]),
+                    before_l=int(before[2]),
+                    after_w=after[0],
+                    after_t=after[1],
+                    after_l=after[2],
+                )
+            )
+        movers = semantics_fix.get("biggest_movers", [])
+        if movers:
+            lines.extend(
+                [
+                    "",
+                    "### Biggest Composite Movers",
+                    "",
+                    "| Graph | Engine | Before | After | Delta |",
+                    "| --- | --- | ---: | ---: | ---: |",
+                ]
+            )
+            for mover in movers:
+                lines.append(
+                    "| {graph} | {engine} | {before:.3f} | {after:.3f} | {delta:.3f} |".format(
+                        graph=mover["graph"],
+                        engine=mover["engine"],
+                        before=float(mover["before"]),
+                        after=float(mover["after"]),
+                        delta=float(mover["delta"]),
+                    )
+                )
+
     lines.extend(
         [
             "",
@@ -1028,6 +1220,20 @@ def generate_report(output_dir: Path, payload: Dict[str, Any]) -> None:
 
     if payload["metadata"].get("positions_note"):
         lines.extend(["", "## Position Store", "", str(payload["metadata"]["positions_note"])])
+
+    audit_rows = payload["metadata"].get("directedness_audit", [])
+    if audit_rows:
+        lines.extend(
+            [
+                "",
+                "## Directedness Audit",
+                "",
+                "| Graph | Verdict | Reason |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for item in audit_rows:
+            lines.append(f"| {item['graph']} | {item['verdict']} | {item['reason']} |")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "BASELINE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1243,6 +1449,7 @@ def run_dagua_only(
     """
     work_dir = prepare_dagua_only_store(output_dir, graphs, resume)
     existing = load_existing_results(work_dir)
+    semantics_fix = existing["metadata"].get("semantics_fix")
     availability = dict(existing["metadata"].get("engine_availability", {}))
     availability["dagua"] = engine_availability(["dagua"])["dagua"]
     competitor = get_competitor("dagua")
@@ -1256,7 +1463,7 @@ def run_dagua_only(
         print(f"RUN {test_graph.name} dagua", flush=True)
         append_row(work_dir, run_engine(test_graph, competitor, work_dir))
     rows = sorted(load_jsonl_rows(work_dir), key=lambda row: (row["graph"], row["engine"]))
-    return build_payload(rows, graphs, availability, ENGINE_NAMES), work_dir
+    return build_payload(rows, graphs, availability, ENGINE_NAMES, semantics_fix), work_dir
 
 
 def build_payload(
@@ -1264,6 +1471,7 @@ def build_payload(
     graphs: List[TestGraph],
     availability: Dict[str, Dict[str, Any]],
     engine_names: Sequence[str],
+    semantics_fix: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the persisted results payload.
 
@@ -1277,6 +1485,8 @@ def build_payload(
         Engine availability metadata.
     engine_names : Sequence[str]
         Engines included in the payload.
+    semantics_fix : Optional[Dict[str, Any]], optional
+        Directedness-fix metadata to preserve across Dagua-only reruns.
 
     Returns
     -------
@@ -1285,18 +1495,24 @@ def build_payload(
     """
     legacy_count = sum(1 for graph in graphs if graph_population(graph.name) == "legacy")
     extended_count = sum(1 for graph in graphs if graph_population(graph.name) == "extended")
+    metadata: Dict[str, Any] = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "git_sha": git_sha(),
+        "seed": SEED,
+        "timeout_s": TIMEOUT_SECONDS,
+        "graph_count": len(graphs),
+        "legacy_count": legacy_count,
+        "extended_count": extended_count,
+        "new_graph_names": sorted(R79_NEW_GRAPH_NAMES),
+        "engine_names": list(engine_names),
+        "engine_availability": availability,
+        "directedness_audit": directedness_audit(graphs),
+    }
+    if semantics_fix is not None:
+        metadata["semantics_fix"] = semantics_fix
     return {
         "metadata": {
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "git_sha": git_sha(),
-            "seed": SEED,
-            "timeout_s": TIMEOUT_SECONDS,
-            "graph_count": len(graphs),
-            "legacy_count": legacy_count,
-            "extended_count": extended_count,
-            "new_graph_names": sorted(R79_NEW_GRAPH_NAMES),
-            "engine_names": list(engine_names),
-            "engine_availability": availability,
+            **metadata,
         },
         "rows": rows,
     }
@@ -1333,6 +1549,54 @@ def publish_store(work_dir: Path, output_dir: Path) -> None:
         shutil.rmtree(backup_dir)
 
 
+def rescore_existing_store(output_dir: Path, graphs: List[TestGraph]) -> Dict[str, Any]:
+    """Recompute stored composites in place without rerunning any layout.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Existing baseline output directory.
+    graphs : List[TestGraph]
+        Current benchmark corpus metadata with corrected directedness tags.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Updated results payload.
+    """
+    payload = load_existing_results(output_dir)
+    old_rows = list(payload["rows"])
+    old_baseline = output_dir / "BASELINE.md"
+    archived_baseline = output_dir / "BASELINE_pre_semantics_fix.md"
+    if old_baseline.is_file() and not archived_baseline.exists():
+        shutil.copy2(old_baseline, archived_baseline)
+
+    new_rows = rescore_rows(old_rows, graphs)
+    availability = dict(payload["metadata"].get("engine_availability", {}))
+    semantics_fix = {
+        "before_wtl": {key: list(value) for key, value in wtl_table(old_rows).items()},
+        "after_wtl": {key: list(value) for key, value in wtl_table(new_rows).items()},
+        "biggest_movers": biggest_composite_movers(old_rows, new_rows),
+        "archived_baseline": str(archived_baseline.relative_to(output_dir)),
+    }
+    updated = build_payload(
+        rows=sorted(new_rows, key=lambda row: (row["graph"], row["engine"])),
+        graphs=graphs,
+        availability=availability,
+        engine_names=payload["metadata"].get("engine_names", ENGINE_NAMES),
+        semantics_fix=semantics_fix,
+    )
+    updated["metadata"]["positions_note"] = payload["metadata"].get(
+        "positions_note",
+        "Positions were not rerun for the semantic directedness rescore.",
+    )
+    write_results(output_dir, updated)
+    write_jsonl_rows(output_dir, updated["rows"])
+    validate_store(output_dir)
+    generate_report(output_dir, updated)
+    return updated
+
+
 def main() -> int:
     """Run the r79 baseline CLI.
 
@@ -1347,6 +1611,12 @@ def main() -> int:
     graphs = filter_graphs(build_corpus(), args.graphs)
     engine_names = filter_engines(ENGINE_NAMES, args.engines)
     print(f"Corpus <=500 nodes: {len(graphs)}", flush=True)
+    if args.rescore_only:
+        payload = rescore_existing_store(output_dir, graphs)
+        print(f"Rescored rows: {len(payload['rows'])}", flush=True)
+        print(f"Wrote {output_dir / 'results.json'}", flush=True)
+        print(f"Wrote {output_dir / 'BASELINE.md'}", flush=True)
+        return 0
     if args.dagua_only:
         payload, work_dir = run_dagua_only(output_dir, graphs, bool(args.resume))
     else:
