@@ -32,6 +32,7 @@ from dagua.layout.ops.pipelines.native_planar import (
     PlanarityFailure,
     build_native_planar_pipeline,
 )
+from dagua.layout.ops.pipelines.native_stress import build_native_stress_pipeline
 from dagua.layout.ops.pipelines.native_tree import build_native_tree_pipeline
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
 from dagua.layout.ops.preprocess import DetectComponents
@@ -1183,10 +1184,18 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     -------
     str
         One of ``"tree"``, ``"layered_dag"``, ``"force_directed"``,
-        ``"hybrid"``, or ``"legacy_monolith"``.
+        ``"hybrid"``, ``"stress"``, or ``"legacy_monolith"``.
     """
     forced = _selected_force_pipeline(config)
-    if forced in {"tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"}:
+    if forced in {
+        "tree",
+        "layered_dag",
+        "force_directed",
+        "hybrid",
+        "planar",
+        "stress",
+        "legacy_monolith",
+    }:
         return forced
     if structure is None:
         return "layered_dag"
@@ -1243,6 +1252,8 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         return build_native_planar_pipeline(config)
     if selected == "force_directed":
         return build_native_force_directed_pipeline(config)
+    if selected == "stress":
+        return build_native_stress_pipeline(config)
     if selected == "hybrid":
         return build_native_hybrid_pipeline(config)
     return build_native_layered_dag_pipeline(config)

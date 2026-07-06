@@ -249,6 +249,7 @@ _EXPECTED_OP_MODULES = (
     "loss_classic",
     "loss_engine",
     "maxent_stress",
+    "native_stress",
     "neulay",
     "optimize",
     "ordering",

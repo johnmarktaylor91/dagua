@@ -92,7 +92,15 @@ class LayoutConfig:
     # accepted as kill switches, but auto dispatch should be controlled
     # through this single selector.
     force_pipeline: Optional[
-        Literal["tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"]
+        Literal[
+            "tree",
+            "layered_dag",
+            "force_directed",
+            "hybrid",
+            "planar",
+            "stress",
+            "legacy_monolith",
+        ]
     ] = None
     # Best-of-polish edge-equalize after the native pipeline
     # converges. The gradient pipeline saturates on edge_length_variance

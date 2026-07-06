@@ -63,6 +63,49 @@ def test_registered_pipeline_dispatch_produces_finite_positions(algorithm: str) 
     assert torch.isfinite(pos).all()
 
 
+def test_native_stress_pipeline_is_seed_deterministic() -> None:
+    """``native_stress`` should produce identical coordinates for the same seed."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("n0", "n1"),
+            ("n1", "n2"),
+            ("n2", "n3"),
+            ("n3", "n0"),
+            ("n0", "n2"),
+        ]
+    )
+    config = LayoutConfig(algorithm="native_stress", seed=123, steps=4)
+
+    first = dagua.layout(graph, config)
+    second = dagua.layout(graph, config)
+
+    assert torch.equal(first, second)
+
+
+def test_dagua_native_force_pipeline_stress_dispatches() -> None:
+    """``force_pipeline='stress'`` should expose native stress without auto-routing it."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("n0", "n1"),
+            ("n1", "n2"),
+            ("n2", "n3"),
+            ("n3", "n0"),
+        ]
+    )
+    pos = dagua.layout(
+        graph,
+        LayoutConfig(
+            algorithm="dagua_native",
+            force_pipeline="stress",
+            seed=42,
+            steps=3,
+        ),
+    )
+
+    assert pos.shape == (graph.num_nodes, 2)
+    assert torch.isfinite(pos).all()
+
+
 def test_explicit_dagua_native_forwards_user_config_to_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
