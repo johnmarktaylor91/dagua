@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from dagua.layout.classic._graph_distances import (
@@ -20,8 +21,15 @@ from dagua.layout.ops.distance import (
     PivotSelection,
     PivotSelectionConfig,
 )
+from dagua.layout.ops.native_stress import (
+    InflateStressTargetDistances,
+    PrepareWarmStartStressMajorization,
+    RunWarmStartStressSGDApproximateSchedule,
+    RunWarmStartStressSGDApproximateScheduleConfig,
+)
 from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.taxonomy import OpCategory, get_op_class
 
 
 def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
@@ -109,6 +117,76 @@ def test_bfs_distances_match_reference_and_handle_disconnected_graphs() -> None:
     assert state.distance_matrix is not None
     assert torch.equal(state.distance_matrix, expected)
     assert state.distance_matrix[0].tolist() == [0, 1, 2, -1, -1]
+
+
+def test_inflate_stress_target_distances_updates_adjacent_exact_terms() -> None:
+    """Size-aware stress inflation should only update adjacent pair targets."""
+    problem = _problem([(0, 1), (1, 2)], num_nodes=3)
+    problem.node_sizes = torch.tensor(
+        [[6.0, 8.0], [0.0, 10.0], [2.0, 0.0]],
+        dtype=torch.float32,
+    )
+    state = SolveState()
+    state.extras["stress_sgd_sources"] = torch.tensor([0, 0, 1]).numpy()
+    state.extras["stress_sgd_targets"] = torch.tensor([1, 2, 2]).numpy()
+    state.extras["stress_sgd_distances"] = torch.tensor([1.0, 2.0, 1.0]).numpy()
+
+    InflateStressTargetDistances().apply(problem, state, RuntimeContext())
+
+    distances = torch.as_tensor(state.extras["stress_sgd_distances"])
+    weights = torch.as_tensor(state.extras["stress_sgd_weights"])
+    assert torch.allclose(distances, torch.tensor([11.0, 2.0, 7.0]))
+    assert torch.allclose(weights, 1.0 / distances.square())
+
+
+def test_prepare_warm_start_stress_majorization_inflates_dense_targets() -> None:
+    """Warm-start SMACOF preparation should reuse positions and size-aware targets."""
+    problem = _problem([(0, 1)], num_nodes=2)
+    problem.node_sizes = torch.tensor([[2.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
+    state = SolveState(pos=torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32))
+
+    PrepareWarmStartStressMajorization().apply(problem, state, RuntimeContext())
+
+    assert state.distance_matrix is not None
+    assert torch.allclose(
+        state.distance_matrix,
+        torch.tensor([[0.0, 3.0], [3.0, 0.0]], dtype=state.distance_matrix.dtype),
+    )
+    assert "sm_current_positions" in state.extras
+
+
+def test_warm_start_approximate_stress_sgd_keeps_existing_positions() -> None:
+    """Approximate native-stress SGD should refine from ``state.pos``."""
+    problem = _problem([(0, 1), (1, 2), (2, 3)], num_nodes=4)
+    warm_start = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.2], [2.0, 0.1], [3.0, 0.0]],
+        dtype=torch.float32,
+    )
+    state = SolveState(
+        pos=warm_start.clone(),
+        distance_matrix=torch.tensor(
+            [[0.0, 1.0, 2.0, 3.0], [3.0, 2.0, 1.0, 0.0]],
+            dtype=torch.float32,
+        ),
+    )
+    state.extras["stress_sgd_exact_mode"] = False
+    state.extras["stress_sgd_num_nodes"] = 4
+    state.extras["stress_sgd_device"] = torch.device("cpu")
+    state.extras["stress_sgd_rng"] = np.random.RandomState(23)
+
+    RunWarmStartStressSGDApproximateSchedule(
+        RunWarmStartStressSGDApproximateScheduleConfig(steps=0)
+    ).apply(problem, state, RuntimeContext())
+
+    assert state.pos is not None
+    assert torch.equal(state.pos, warm_start)
+
+
+def test_native_stress_warm_start_approximate_op_is_registered() -> None:
+    """Native-stress support ops should be discoverable in the op registry."""
+    op_class = get_op_class("native_stress_warm_start_approximate_schedule")
+
+    assert op_class.category == OpCategory.OPTIMIZE
 
 
 def test_bfs_distances_support_per_source_queries() -> None:
