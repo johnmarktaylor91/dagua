@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 
@@ -797,6 +797,289 @@ class SpectralOrderConfig:
     """
 
     max_iterations: int = 32
+
+
+@dataclass(frozen=True)
+class ClusterContiguousOrderConfig:
+    """Configuration for :class:`ClusterContiguousOrder`.
+
+    Parameters
+    ----------
+    enabled : bool, default=True
+        Master switch for the class-predicated cluster ordering pass.
+    min_clusters : int, default=2
+        Minimum number of valid clusters required before ordering changes.
+    """
+
+    enabled: bool = True
+    min_clusters: int = 2
+
+
+def _valid_cluster_members(
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    num_nodes: int,
+) -> Dict[str, frozenset[int]]:
+    """Return valid integer members for each non-empty cluster.
+
+    Parameters
+    ----------
+    clusters : mapping[str, sequence[int]] | None
+        Cluster metadata from the layout problem.
+    num_nodes : int
+        Number of active original nodes.
+
+    Returns
+    -------
+    dict[str, frozenset[int]]
+        Cluster names mapped to in-range node ids.
+    """
+    if not clusters:
+        return {}
+
+    valid: Dict[str, frozenset[int]] = {}
+    for name, members in clusters.items():
+        indices: set[int] = set()
+        for member in members:
+            node = int(member)
+            if 0 <= node < num_nodes:
+                indices.add(node)
+        if indices:
+            valid[str(name)] = frozenset(indices)
+    return valid
+
+
+def _passes_cluster_order_structure_gate(problem: LayoutProblem, cluster_count: int) -> bool:
+    """Return whether cluster ordering should run for this graph class.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs.
+    cluster_count : int
+        Count of valid non-empty clusters.
+
+    Returns
+    -------
+    bool
+        ``True`` for small directed-acyclic multi-cluster layered DAGs.
+    """
+    structure = problem.structure
+    if structure is not None and not bool(
+        getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+    ):
+        return False
+    return cluster_count >= 5 and problem.num_nodes <= 120
+
+
+def _cluster_children(
+    cluster_names: Sequence[str],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> Dict[Optional[str], List[str]]:
+    """Group cluster names by parent.
+
+    Parameters
+    ----------
+    cluster_names : sequence[str]
+        Valid cluster names.
+    cluster_parents : mapping[str, str | None] | None
+        Optional nested-cluster parent metadata.
+
+    Returns
+    -------
+    dict[str | None, list[str]]
+        Parent name to child cluster names. Invalid parents are treated as
+        roots.
+    """
+    names = set(cluster_names)
+    children: Dict[Optional[str], List[str]] = {None: []}
+    for name in cluster_names:
+        raw_parent = cluster_parents.get(name) if cluster_parents is not None else None
+        parent = str(raw_parent) if raw_parent in names else None
+        children.setdefault(parent, []).append(name)
+        children.setdefault(name, [])
+    return children
+
+
+def _stable_cluster_position(
+    nodes: Sequence[int],
+    positions: Mapping[int, int],
+) -> int:
+    """Return the current leftmost position for a cluster-like node set.
+
+    Parameters
+    ----------
+    nodes : sequence[int]
+        Node ids represented by the cluster or singleton group.
+    positions : mapping[int, int]
+        Current in-layer positions keyed by node id.
+
+    Returns
+    -------
+    int
+        Minimum current position, or a large sentinel for empty groups.
+    """
+    present = [positions[node] for node in nodes if node in positions]
+    if not present:
+        return 10**12
+    return min(present)
+
+
+def _cluster_order_for_layer(
+    layer_nodes: Sequence[int],
+    cluster_members: Mapping[str, frozenset[int]],
+    children_by_parent: Mapping[Optional[str], Sequence[str]],
+) -> List[int]:
+    """Return one layer ordered with nested cluster subtrees contiguous.
+
+    Parameters
+    ----------
+    layer_nodes : sequence[int]
+        Current nodes in a single layer.
+    cluster_members : mapping[str, frozenset[int]]
+        Valid cluster membership sets.
+    children_by_parent : mapping[str | None, sequence[str]]
+        Nested cluster child mapping.
+
+    Returns
+    -------
+    list[int]
+        Reordered layer nodes. Nodes inside a cluster subtree are emitted
+        contiguously while preserving current left-to-right sibling order.
+    """
+    layer_set = set(layer_nodes)
+    positions = {node: index for index, node in enumerate(layer_nodes)}
+
+    def emit_cluster(cluster_name: str) -> List[int]:
+        """Emit direct leaves and child clusters for one cluster.
+
+        Parameters
+        ----------
+        cluster_name : str
+            Cluster whose layer-local members should be ordered.
+
+        Returns
+        -------
+        list[int]
+            Layer-local nodes in stable nested-cluster order.
+        """
+        child_names = list(children_by_parent.get(cluster_name, ()))
+        child_union: set[int] = set()
+        for child_name in child_names:
+            child_union.update(cluster_members.get(child_name, frozenset()))
+        direct_nodes = [
+            node
+            for node in layer_nodes
+            if node in cluster_members[cluster_name] and node not in child_union
+        ]
+        groups: List[Tuple[int, List[int]]] = []
+        if direct_nodes:
+            groups.append((_stable_cluster_position(direct_nodes, positions), direct_nodes))
+        for child_name in child_names:
+            child_nodes = emit_cluster(child_name)
+            if child_nodes:
+                groups.append((_stable_cluster_position(child_nodes, positions), child_nodes))
+        groups.sort(key=lambda item: item[0])
+        return [node for _, nodes in groups for node in nodes]
+
+    root_names = list(children_by_parent.get(None, ()))
+    clustered_nodes: set[int] = set()
+    top_groups: List[Tuple[int, List[int]]] = []
+    for root_name in root_names:
+        root_nodes = emit_cluster(root_name)
+        if root_nodes:
+            clustered_nodes.update(root_nodes)
+            top_groups.append((_stable_cluster_position(root_nodes, positions), root_nodes))
+
+    for node in layer_nodes:
+        if node not in clustered_nodes and node in layer_set:
+            top_groups.append((positions[node], [node]))
+    top_groups.sort(key=lambda item: item[0])
+    return [node for _, nodes in top_groups for node in nodes]
+
+
+@register_op
+class ClusterContiguousOrder(Op):
+    """Make same-layer cluster members contiguous before coordinate compaction."""
+
+    name: ClassVar[str] = "cluster_contiguous_order"
+    category: ClassVar[OpCategory] = OpCategory.ORDERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering", "pos")
+    writes: ClassVar[Tuple[str, ...]] = ("ordering", "pos")
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[ClusterContiguousOrderConfig] = None) -> None:
+        """Store the cluster-contiguity configuration.
+
+        Parameters
+        ----------
+        config : ClusterContiguousOrderConfig | None, optional
+            Optional op configuration.
+        """
+        self.config = config or ClusterContiguousOrderConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Group cluster members contiguously within every populated layer.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs containing optional cluster metadata.
+        state : SolveState
+            Mutable solve state with layer assignments and optional positions.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this deterministic op.
+
+        Returns
+        -------
+        SolveState
+            Updated state with a cluster-contiguous ordering when the graph has
+            at least ``min_clusters`` valid clusters. Non-clustered graphs are
+            returned unchanged.
+        """
+        del ctx
+
+        if not self.config.enabled:
+            return state
+        cluster_members = _valid_cluster_members(problem.clusters, problem.num_nodes)
+        if len(cluster_members) < self.config.min_clusters:
+            return state
+        if not _passes_cluster_order_structure_gate(problem, len(cluster_members)):
+            return state
+
+        _, layers_cpu, num_nodes = _resolve_active_layered_graph(problem, state)
+        ordering_cpu = _resolve_initial_ordering(
+            layers_cpu=layers_cpu,
+            state=state,
+            num_nodes=num_nodes,
+        )
+        ordered_layers = _initial_ordered_layers(layers_cpu, ordering=ordering_cpu)
+        children = _cluster_children(tuple(cluster_members), problem.cluster_parents)
+        reordered_layers = [
+            _cluster_order_for_layer(
+                layer_nodes=layer_nodes,
+                cluster_members=cluster_members,
+                children_by_parent=children,
+            )
+            for layer_nodes in ordered_layers
+        ]
+        state.ordering = _ordering_from_layers(
+            ordered_layers=reordered_layers,
+            num_nodes=num_nodes,
+            device=_target_device(problem, state),
+        )
+        _apply_ordering_to_positions(
+            state=state,
+            layers_cpu=layers_cpu,
+            ordering_cpu=state.ordering.detach().to(device="cpu", dtype=torch.long),
+            num_nodes=num_nodes,
+        )
+        return state
 
 
 @register_op
