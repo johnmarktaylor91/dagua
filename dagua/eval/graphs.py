@@ -62,6 +62,23 @@ def get_test_graphs(
     return all_graphs
 
 
+def is_semantically_directed(test_graph: TestGraph) -> bool:
+    """Return whether edge direction should affect directed layout scoring.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Graph metadata and topology.
+
+    Returns
+    -------
+    bool
+        ``False`` for graphs tagged ``"undirected"`` because their stored edge
+        orientation is an implementation artifact rather than graph semantics.
+    """
+    return "undirected" not in test_graph.tags
+
+
 def _build_all_test_graphs() -> List[TestGraph]:
     """Build the complete test graph collection.
 
@@ -297,7 +314,7 @@ def make_real_karate_graph() -> TestGraph:
     return TestGraph(
         name="real_karate_34",
         graph=graph,
-        tags={"social", "community", "real-world"},
+        tags={"social", "community", "real-world", "undirected"},
         description="Zachary's Karate Club social network oriented into a DAG",
         source="networkx",
         expected_challenges="Community separation with hub-heavy social structure",
@@ -386,7 +403,7 @@ def _make_weighted_clusters(
     return TestGraph(
         name=f"weighted_clusters_{n_clusters}x{cluster_size}",
         graph=_finalize_generated_graph(graph),
-        tags={"weighted", "community", "synthetic"},
+        tags={"weighted", "community", "synthetic", "undirected"},
         description="3 clusters of 10 with heavy intra / light inter edges",
         source="synthetic",
         expected_challenges="Cluster separation proportional to weight ratio",
@@ -413,7 +430,7 @@ def make_weighted_karate_graph() -> TestGraph:
     return TestGraph(
         name="weighted_karate_34",
         graph=graph,
-        tags={"weighted", "social", "community", "real-world"},
+        tags={"weighted", "social", "community", "real-world", "undirected"},
         description="Zachary's Karate Club with degree-based interaction weights",
         source="networkx",
         expected_challenges="Weight-aware community separation with hub structure",
@@ -458,7 +475,7 @@ def _make_r79_weighted_community_graph(seed: int = 79) -> TestGraph:
     return TestGraph(
         name="r79_weighted_community_4x18",
         graph=_finalize_generated_graph(graph),
-        tags={"r79_ext", "weighted", "community", "clustered", "synthetic"},
+        tags={"r79_ext", "weighted", "community", "clustered", "synthetic", "undirected"},
         description="R79 weighted planted-community graph with light inter-block bridges",
         source="synthetic",
         expected_challenges="Separating communities while honoring strong weighted ties",
@@ -502,7 +519,7 @@ def _make_r79_weighted_mesh_graph(rows: int = 10, cols: int = 12, seed: int = 79
     return TestGraph(
         name="r79_weighted_mesh_10x12",
         graph=_finalize_generated_graph(graph),
-        tags={"r79_ext", "weighted", "grid", "mesh", "synthetic"},
+        tags={"r79_ext", "weighted", "grid", "mesh", "synthetic", "undirected"},
         description="R79 weighted 10x12 mesh with deterministic diagonal shortcuts",
         source="synthetic",
         expected_challenges="Maintaining mesh regularity with anisotropic edge weights",
@@ -631,7 +648,7 @@ def _make_r79_weighted_small_world(n: int = 120, seed: int = 79) -> TestGraph:
     return TestGraph(
         name="r79_weighted_small_world_120",
         graph=_finalize_generated_graph(graph),
-        tags={"r79_ext", "weighted", "small-world", "cyclic", "synthetic"},
+        tags={"r79_ext", "weighted", "small-world", "cyclic", "synthetic", "undirected"},
         description="R79 weighted small-world ring with weak rewired shortcuts",
         source="synthetic",
         expected_challenges="Short-path cyclic structure with mixed edge strengths",
@@ -665,7 +682,7 @@ def _make_r79_weighted_ladder(rungs: int = 40) -> TestGraph:
     return TestGraph(
         name="r79_weighted_ladder_40",
         graph=_finalize_generated_graph(graph),
-        tags={"r79_ext", "weighted", "linear", "synthetic"},
+        tags={"r79_ext", "weighted", "linear", "synthetic", "undirected"},
         description="R79 weighted ladder with asymmetric rail strengths",
         source="synthetic",
         expected_challenges="Preserving parallel rails under strongly unequal weights",
@@ -702,7 +719,7 @@ def _make_r79_weighted_bipartite(seed: int = 79) -> TestGraph:
     return TestGraph(
         name="r79_weighted_bipartite_16x24",
         graph=_finalize_generated_graph(graph),
-        tags={"r79_ext", "weighted", "bipartite", "wide-parallel", "synthetic"},
+        tags={"r79_ext", "weighted", "bipartite", "wide-parallel", "synthetic", "undirected"},
         description="R79 weighted bipartite graph with one dominant target per source",
         source="synthetic",
         expected_challenges="Crossing pressure under uneven weighted bipartite links",
@@ -973,7 +990,7 @@ def make_real_lesmis_graph() -> TestGraph:
     return TestGraph(
         name=name,
         graph=graph,
-        tags={"social", "community", "real-world", "weighted"},
+        tags={"social", "community", "real-world", "weighted", "undirected"},
         description=description,
         source="networkx",
         expected_challenges="Dense local communities and a nontrivial social core",
@@ -1014,7 +1031,7 @@ def make_real_football_graph(seed: int = 42) -> TestGraph:
     return TestGraph(
         name="real_football_115",
         graph=graph,
-        tags={"social", "community", "real-world"},
+        tags={"social", "community", "real-world", "undirected"},
         description=description,
         source=source,
         expected_challenges="Strong communities with enough inter-group edges to stress separation",
@@ -1044,7 +1061,7 @@ def make_erdos_renyi(n: int, p: float = 0.02, seed: int = 42) -> TestGraph:
     return TestGraph(
         name=f"er_{n}",
         graph=graph,
-        tags={"erdos-renyi", "random"},
+        tags={"erdos-renyi", "random", "undirected"},
         description=f"Erdos-Renyi random graph with {n} nodes and p={p}",
         source="networkx",
         expected_challenges="Unstructured connectivity with weak layering cues",
@@ -1074,7 +1091,7 @@ def make_random_geometric(n: int, radius: float = 0.15, seed: int = 42) -> TestG
     return TestGraph(
         name=f"rgg_{n}",
         graph=graph,
-        tags={"geometric", "spatial", "random"},
+        tags={"geometric", "spatial", "random", "undirected"},
         description=f"Random geometric graph with {n} nodes and radius {radius}",
         source="networkx",
         expected_challenges="Spatial locality, clustered neighborhoods, and irregular density",
@@ -1117,7 +1134,7 @@ def make_sbm(
     return TestGraph(
         name=f"sbm_{n_communities}x{community_size}",
         graph=graph,
-        tags={"community", "clustered", "random"},
+        tags={"community", "clustered", "random", "undirected"},
         description=(
             f"Stochastic block model with {n_communities} communities of {community_size} nodes"
         ),
@@ -1437,7 +1454,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="grid_5x5",
             graph=g,
-            tags={"diamond", "large-dense"},
+            tags={"diamond", "large-dense", "undirected"},
             description="5x5 grid DAG with horizontal and vertical edges",
             expected_challenges="Grid regularity, many crossing opportunities",
         )
@@ -2561,7 +2578,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="planar_60",
             graph=_make_planar_nested_cycles_graph(rings=5, nodes_per_ring=12),
-            tags={"planar", "dense"},
+            tags={"planar", "dense", "undirected"},
             description=(
                 "Planar 60-node graph built from concentric cycles with triangulated spokes"
             ),
@@ -2574,7 +2591,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="regular_3_30",
             graph=_make_regular_graph(degree=3, num_nodes=30, seed=42),
-            tags={"regular", "sparse"},
+            tags={"regular", "sparse", "undirected"},
             description="Deterministic random 3-regular graph on 30 nodes",
             expected_challenges="Uniform local degree without obvious hierarchy or hubs",
         )
@@ -2585,7 +2602,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="regular_4_40",
             graph=_make_regular_graph(degree=4, num_nodes=40, seed=42),
-            tags={"regular"},
+            tags={"regular", "undirected"},
             description="Deterministic random 4-regular graph on 40 nodes",
             expected_challenges="Degree-uniform structure with moderate density and few landmarks",
         )
@@ -2596,7 +2613,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="triangular_lattice_36",
             graph=_make_triangular_lattice_graph(rows=6, cols=6),
-            tags={"grid", "lattice", "planar"},
+            tags={"grid", "lattice", "planar", "undirected"},
             description="6x6 triangular lattice patch with right/down/down-right links",
             expected_challenges="Maintaining regular spacing across a high-degree planar mesh",
         )
@@ -2607,7 +2624,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="hexagonal_lattice_42",
             graph=_make_hexagonal_lattice_graph(rows=6, cols=7),
-            tags={"grid", "lattice", "planar", "sparse"},
+            tags={"grid", "lattice", "planar", "sparse", "undirected"},
             description="6x7 honeycomb lattice patch with degree-3 interior structure",
             expected_challenges="Showing the hexagonal rhythm instead of collapsing rows together",
         )
@@ -2618,7 +2635,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="protein_ppi_200",
             graph=_make_protein_ppi_graph(seed=42),
-            tags={"scale-free", "clustered", "biological"},
+            tags={"scale-free", "clustered", "biological", "undirected"},
             description=(
                 "Protein-protein interaction graph with a scale-free core and dense modules"
             ),
@@ -2644,7 +2661,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="sierpinski_42",
             graph=_make_sierpinski_graph(depth=3),
-            tags={"fractal", "planar", "sparse"},
+            tags={"fractal", "planar", "sparse", "undirected"},
             description="Depth-3 Sierpinski triangle graph",
             expected_challenges="Recursive self-similarity across multiple scales",
         )
@@ -2655,7 +2672,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="chung_lu_150",
             graph=_make_chung_lu_graph(num_nodes=150, seed=42),
-            tags={"scale-free", "clustered", "random"},
+            tags={"scale-free", "clustered", "random", "undirected"},
             description="Chung-Lu style random graph with heavy-tailed expected degrees",
             expected_challenges="Hub dominance combined with locally clustered neighborhoods",
         )
@@ -2666,7 +2683,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="multi_component_80",
             graph=_make_multi_component_graph(),
-            tags={"disconnected", "multi-component"},
+            tags={"disconnected", "multi-component", "undirected"},
             description="Disconnected graph with components sized 40, 20, 10, 5, 3, and 2",
             expected_challenges=(
                 "Packing very uneven connected components without losing small ones"
@@ -2679,7 +2696,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="random_bipartite_60",
             graph=_make_random_bipartite_graph(left_size=30, right_size=30, num_edges=90, seed=42),
-            tags={"bipartite", "random"},
+            tags={"bipartite", "random", "undirected"},
             description="Random 30x30 bipartite graph with ninety cross-partition edges",
             expected_challenges="Crossing minimization under dense two-layer connectivity",
         )
@@ -2690,7 +2707,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="heavy_tail_weights_50",
             graph=_make_heavy_tail_weight_graph(num_nodes=50, seed=42),
-            tags={"weighted", "random"},
+            tags={"weighted", "random", "undirected"},
             description="Connected random graph with heavy-tailed log-normal edge weights",
             expected_challenges=(
                 "Respecting a few dominant weighted links without collapsing the graph"
@@ -2703,7 +2720,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="petersen_10",
             graph=_make_petersen_graph(),
-            tags={"regular", "famous", "small"},
+            tags={"regular", "famous", "small", "undirected"},
             description="Classic Petersen graph with deterministic acyclic orientation",
             expected_challenges="Symmetry breaking on a famous small non-planar regular graph",
         )
@@ -4776,21 +4793,21 @@ def _expanded_structural_graphs() -> List[TestGraph]:
         TestGraph(
             name="scale_free_ba_120",
             graph=make_scale_free(n=120, m=3, seed=42),
-            tags={"scale-free", "large-sparse"},
+            tags={"scale-free", "large-sparse", "undirected"},
             description="Barabasi-Albert style preferential-attachment DAG",
             expected_challenges="High-degree hubs, edge bundling, and hub dominance",
         ),
         TestGraph(
             name="grid_rect_6x8",
             graph=make_grid(6, 8, seed=42),
-            tags={"grid", "diamond"},
+            tags={"grid", "diamond", "undirected"},
             description="Rectangular 6x8 grid DAG with right/down edges",
             expected_challenges="Regular spacing, local ordering, and dense local crossings",
         ),
         TestGraph(
             name="complete_bipartite_8x12",
             graph=make_complete_bipartite(8, 12, seed=42),
-            tags={"bipartite", "wide-parallel"},
+            tags={"bipartite", "wide-parallel", "undirected"},
             description="Complete bipartite K(8,12) layered DAG",
             expected_challenges="Crossing minimization between two dense layers",
         ),
@@ -4881,7 +4898,7 @@ def _expanded_structural_graphs() -> List[TestGraph]:
         TestGraph(
             name="small_world_100",
             graph=make_small_world(100, 4, 0.1, seed=42),
-            tags={"small-world", "cyclic"},
+            tags={"small-world", "cyclic", "undirected"},
             description="Directed Watts-Strogatz small-world graph",
             expected_challenges="Short paths, cycles, and non-layered global geometry",
         ),
@@ -4920,21 +4937,21 @@ def _expanded_structural_graphs() -> List[TestGraph]:
             TestGraph(
                 name="ba_500",
                 graph=make_scale_free(n=500, m=3, seed=42),
-                tags={"scale-free", "large-sparse"},
+                tags={"scale-free", "large-sparse", "undirected"},
                 description="Barabasi-Albert style preferential-attachment DAG at 500 nodes",
                 expected_challenges="High-degree hubs at medium sparse scale",
             ),
             TestGraph(
                 name="ba_2000",
                 graph=make_scale_free(n=2000, m=3, seed=42),
-                tags={"scale-free", "large-sparse"},
+                tags={"scale-free", "large-sparse", "undirected"},
                 description="Barabasi-Albert style preferential-attachment DAG at 2,000 nodes",
                 expected_challenges="Hub dominance and long sparse spokes at larger scale",
             ),
             TestGraph(
                 name="ba_5000",
                 graph=make_scale_free(n=5000, m=4, seed=42),
-                tags={"scale-free", "large-sparse"},
+                tags={"scale-free", "large-sparse", "undirected"},
                 description="Barabasi-Albert style preferential-attachment DAG at 5,000 nodes",
                 expected_challenges="Extremely dominant hubs and bundled fan-in at scale",
             ),
@@ -4950,14 +4967,14 @@ def _expanded_structural_graphs() -> List[TestGraph]:
             TestGraph(
                 name="grid_20x20",
                 graph=make_grid(20, 20, seed=42),
-                tags={"grid", "mesh", "large-dense"},
+                tags={"grid", "mesh", "large-dense", "undirected"},
                 description="20x20 mesh-like grid DAG",
                 expected_challenges="Regular spacing over a moderately large mesh",
             ),
             TestGraph(
                 name="grid_50x50",
                 graph=make_grid(50, 50, seed=42),
-                tags={"grid", "mesh", "large-dense"},
+                tags={"grid", "mesh", "large-dense", "undirected"},
                 description="50x50 mesh-like grid DAG",
                 expected_challenges="Large regular mesh with dense local edge pressure",
             ),
@@ -4999,14 +5016,14 @@ def _expanded_structural_graphs() -> List[TestGraph]:
             TestGraph(
                 name="small_world_500",
                 graph=make_small_world(500, 6, 0.1, seed=42),
-                tags={"small-world", "cyclic"},
+                tags={"small-world", "cyclic", "undirected"},
                 description="Directed Watts-Strogatz small-world graph at 500 nodes",
                 expected_challenges="Short paths and cycles at medium scale",
             ),
             TestGraph(
                 name="small_world_2000",
                 graph=make_small_world(2000, 4, 0.05, seed=42),
-                tags={"small-world", "cyclic"},
+                tags={"small-world", "cyclic", "undirected"},
                 description="Directed Watts-Strogatz small-world graph at 2,000 nodes",
                 expected_challenges="Sparse cyclic structure with weak global layering cues",
             ),
