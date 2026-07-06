@@ -208,8 +208,12 @@ class HierarchyLevel:
         Nodes at the finer child level.
     edge_index : torch.Tensor | None
         Coarsened edges with shape ``[2, E_coarse]``.
+    edge_weights : torch.Tensor | None
+        Aggregated coarse edge weights with shape ``[E_coarse]``.
     node_sizes : torch.Tensor | None
         Coarsened node sizes.
+    node_masses : torch.Tensor | None
+        Aggregated fine-node counts represented by each coarse node.
     fine_to_coarse : torch.Tensor | None
         Mapping from fine to coarse node IDs with shape ``[N_fine]``.
     fine_layer_assignments : torch.Tensor | None
@@ -227,7 +231,9 @@ class HierarchyLevel:
     num_nodes: int
     num_fine: int
     edge_index: Optional[torch.Tensor] = None
+    edge_weights: Optional[torch.Tensor] = None
     node_sizes: Optional[torch.Tensor] = None
+    node_masses: Optional[torch.Tensor] = None
     fine_to_coarse: Optional[torch.Tensor] = None
     fine_layer_assignments: Optional[torch.Tensor] = None
     coarse_layer_assignments: Optional[torch.Tensor] = None
