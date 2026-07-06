@@ -130,3 +130,27 @@ def test_native_stress_ml_is_seed_deterministic() -> None:
     second = layout_native_stress_ml_pipeline(edge_index, 12, node_sizes, config=config, seed=23)
 
     assert torch.equal(first, second)
+
+
+def test_native_stress_ml_sampled_coarsest_fallback_is_deterministic() -> None:
+    """The sampled coarsest fallback should repeat exactly for a fixed seed."""
+    edge_index = _path_edge_index(80)
+    node_sizes = torch.ones((80, 2), dtype=torch.float32)
+    config = LayoutConfig(
+        algorithm_params={
+            "ml_min_nodes": 8,
+            "coarsest_nodes": 8,
+            "max_levels": 1,
+            "coarse_steps": 1,
+            "refine_steps": 1,
+            "overlap_max_nodes": 0,
+        },
+        seed=31,
+        steps=1,
+    )
+
+    first = layout_native_stress_ml_pipeline(edge_index, 80, node_sizes, config=config, seed=31)
+    second = layout_native_stress_ml_pipeline(edge_index, 80, node_sizes, config=config, seed=31)
+
+    assert torch.equal(first, second)
+    assert torch.isfinite(first).all()

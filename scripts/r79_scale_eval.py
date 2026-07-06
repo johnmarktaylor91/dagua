@@ -315,8 +315,9 @@ def run_engine(
     dict[str, Any]
         Result dictionary.
     """
-    queue: mp.Queue = mp.Queue()
-    process = mp.Process(
+    process_ctx = mp.get_context("spawn")
+    queue: mp.Queue = process_ctx.Queue()
+    process = process_ctx.Process(
         target=_layout_worker,
         args=(
             {
@@ -335,13 +336,15 @@ def run_engine(
     return result
 
 
-def _write_sfdp_dot(edge_index: torch.Tensor, path: Path) -> None:
+def _write_sfdp_dot(edge_index: torch.Tensor, num_nodes: int, path: Path) -> None:
     """Write an undirected DOT graph for Graphviz SFDP.
 
     Parameters
     ----------
     edge_index : torch.Tensor
         Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Total node count, including isolated nodes.
     path : pathlib.Path
         Output DOT path.
 
@@ -352,11 +355,116 @@ def _write_sfdp_dot(edge_index: torch.Tensor, path: Path) -> None:
     """
     with path.open("w", encoding="ascii") as handle:
         handle.write("graph G {\n")
-        for node in range(int(edge_index.max().item()) + 1 if edge_index.numel() else 0):
+        for node in range(num_nodes):
             handle.write(f"  {node};\n")
         for source, target in edge_index.t().tolist():
             handle.write(f"  {int(source)} -- {int(target)};\n")
         handle.write("}\n")
+
+
+def _fill_missing_sfdp_positions(
+    pos: torch.Tensor,
+    seen: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> list[str]:
+    """Fill missing SFDP positions from available graph neighbors.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Partially parsed position tensor with shape ``[N, 2]``.
+    seen : torch.Tensor
+        Boolean mask with shape ``[N]`` marking nodes present in plain output.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    list[str]
+        Warning messages describing any filled positions.
+    """
+    if bool(seen.all()):
+        return []
+
+    missing = torch.nonzero(~seen, as_tuple=False).squeeze(1)
+    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    if edge_index_cpu.numel() > 0:
+        src = edge_index_cpu[0]
+        tgt = edge_index_cpu[1]
+        for node in missing.tolist():
+            node_id = int(node)
+            from_src = src == node_id
+            from_tgt = tgt == node_id
+            neighbors = torch.cat([tgt[from_src], src[from_tgt]])
+            if neighbors.numel() == 0:
+                continue
+            known_neighbors = neighbors[seen[neighbors]]
+            if known_neighbors.numel() == 0:
+                continue
+            pos[node_id] = pos[known_neighbors].mean(dim=0)
+            seen[node_id] = True
+
+    if not bool(seen.all()):
+        fallback = (
+            pos[seen].mean(dim=0)
+            if bool(seen.any())
+            else torch.zeros((2,), dtype=pos.dtype, device=pos.device)
+        )
+        pos[~seen] = fallback
+        seen[~seen] = True
+
+    return [f"sfdp plain output omitted {int(missing.shape[0])} node positions; filled them"]
+
+
+def _parse_sfdp_plain(
+    output: str,
+    num_nodes: int,
+    edge_index: torch.Tensor,
+) -> tuple[torch.Tensor, list[str]]:
+    """Parse Graphviz plain output into a position tensor.
+
+    Parameters
+    ----------
+    output : str
+        Text emitted by ``sfdp -Tplain``.
+    num_nodes : int
+        Expected node count.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]`` used to fill omitted node rows.
+
+    Returns
+    -------
+    tuple[torch.Tensor, list[str]]
+        Position tensor with shape ``[N, 2]`` and non-fatal parse warnings.
+    """
+    pos = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    seen = torch.zeros((num_nodes,), dtype=torch.bool)
+    warnings: list[str] = []
+    extra_nodes = 0
+    malformed_nodes = 0
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[0] != "node":
+            continue
+        try:
+            node_id = int(parts[1].strip('"'))
+            x_pos = float(parts[2])
+            y_pos = float(parts[3])
+        except ValueError:
+            malformed_nodes += 1
+            continue
+        if 0 <= node_id < num_nodes:
+            pos[node_id, 0] = x_pos
+            pos[node_id, 1] = y_pos
+            seen[node_id] = True
+        else:
+            extra_nodes += 1
+    if extra_nodes > 0:
+        warnings.append(f"sfdp plain output included {extra_nodes} out-of-range node positions")
+    if malformed_nodes > 0:
+        warnings.append(f"sfdp plain output included {malformed_nodes} malformed node rows")
+    warnings.extend(_fill_missing_sfdp_positions(pos, seen, edge_index))
+    return pos, warnings
 
 
 def run_sfdp_reference(graph_type: str, num_nodes: int, seed: int) -> dict[str, Any]:
@@ -376,38 +484,75 @@ def run_sfdp_reference(graph_type: str, num_nodes: int, seed: int) -> dict[str, 
     dict[str, Any]
         Result or skip record.
     """
-    if num_nodes > 100_000 or shutil.which("sfdp") is None:
+    sfdp_path = shutil.which("sfdp")
+    if num_nodes > 100_000 or sfdp_path is None:
         return {
             "ok": False,
+            "status": "SKIP",
             "engine": "graphviz_sfdp",
             "graph_type": graph_type,
             "num_nodes": num_nodes,
             "skipped": True,
             "error": "sfdp unavailable or rung too large",
         }
-    edge_index = generate_graph(graph_type, num_nodes, seed)
-    with tempfile.TemporaryDirectory(prefix="dagua_sfdp_") as tmp:
-        dot_path = Path(tmp) / "graph.dot"
-        _write_sfdp_dot(edge_index, dot_path)
-        start = time.perf_counter()
-        proc = subprocess.run(
-            ["sfdp", "-Tplain", str(dot_path)],
-            stdout=subprocess.DEVNULL,
+    start = time.perf_counter()
+    sfdp_version = ""
+    try:
+        version_proc = subprocess.run(
+            [sfdp_path, "-V"],
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=900,
             check=False,
         )
-    return {
-        "ok": proc.returncode == 0,
-        "engine": "graphviz_sfdp",
-        "graph_type": graph_type,
-        "num_nodes": num_nodes,
-        "num_edges": int(edge_index.shape[1]),
-        "wall_seconds": time.perf_counter() - start,
-        "peak_rss_bytes": None,
-        "error": proc.stderr[-1000:] if proc.returncode != 0 else "",
-    }
+        sfdp_version = (version_proc.stderr or version_proc.stdout).strip()
+        edge_index = generate_graph(graph_type, num_nodes, seed)
+        node_sizes = torch.ones((num_nodes, 2), dtype=torch.float32)
+        with tempfile.TemporaryDirectory(prefix="dagua_sfdp_") as tmp:
+            dot_path = Path(tmp) / "graph.dot"
+            _write_sfdp_dot(edge_index, num_nodes, dot_path)
+            proc = subprocess.run(
+                [sfdp_path, "-Tplain", str(dot_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+        metrics: dict[str, float] = {}
+        warnings: list[str] = []
+        if proc.returncode == 0:
+            pos, warnings = _parse_sfdp_plain(proc.stdout, num_nodes, edge_index)
+            metrics = _evaluate_positions(pos, edge_index, node_sizes)
+        return {
+            "ok": proc.returncode == 0,
+            "status": "WARN" if warnings else ("OK" if proc.returncode == 0 else "ERROR"),
+            "engine": "graphviz_sfdp",
+            "graph_type": graph_type,
+            "num_nodes": num_nodes,
+            "num_edges": int(edge_index.shape[1]),
+            "wall_seconds": time.perf_counter() - start,
+            "peak_rss_bytes": None,
+            "metrics": metrics,
+            "sfdp_version": sfdp_version,
+            "warnings": warnings,
+            "error": proc.stderr[-1000:] if proc.returncode != 0 else "",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "ERROR",
+            "engine": "graphviz_sfdp",
+            "graph_type": graph_type,
+            "num_nodes": num_nodes,
+            "num_edges": None,
+            "wall_seconds": time.perf_counter() - start,
+            "peak_rss_bytes": None,
+            "metrics": {},
+            "sfdp_version": sfdp_version,
+            "warnings": [],
+            "error": repr(exc),
+        }
 
 
 def _check_heavy_run_memory(num_nodes: int) -> None:
@@ -458,6 +603,7 @@ def main() -> None:
             continue
         _check_heavy_run_memory(num_nodes)
         for graph_type in graph_types:
+            _check_heavy_run_memory(num_nodes)
             for engine in engines:
                 result = run_engine(
                     engine,
