@@ -136,3 +136,132 @@ reliably and the 1M sparse target completes inside 10 minutes. The current
 evidence supports using it only as an opt-in experimental scale path for sparse
 non-BA graphs around 20K-100K when the caller accepts skipped large overlap
 projection.
+
+## Round 2 - Aggressive Contraction And Reference Robustness
+
+Date: 2026-07-06
+
+Implementation deltas:
+
+- Replaced the ML path's plain heavy-edge hierarchy with registered
+  `AggressiveHybridCoarsen`. It keeps HEM when a level shrinks by at least 50%,
+  escalates to deterministic hub-star contraction when progress degrades, and
+  uses a final bucket contraction as a target cap guardrail.
+- Added registered `SampledCoarsestSolve` fallback for oversized coarsest
+  graphs: select deterministic hub-and-stride pivots, solve the sampled induced
+  graph, then place unsampled nodes by weighted-neighbor interpolation with a
+  deterministic grid fallback.
+- Hardened `scripts/r79_scale_eval.py` so Graphviz reference rows cannot crash
+  the ladder: `sfdp -Tplain` missing nodes are filled from neighbor centroids
+  when possible, out-of-range/malformed node rows become warnings, reference
+  exceptions become `status=ERROR` rows, and skipped references use
+  `status=SKIP`.
+- Switched the eval worker process context to `spawn`. A clean rerun exposed a
+  fork-after-Torch/SciPy/Graphviz deadlock on the second ML row; `spawn` avoided
+  inheriting native-library thread state and let the ladder complete.
+- DOT reference input now declares all `num_nodes`, including isolated trailing
+  nodes, instead of only declaring nodes present in edges.
+
+Artifacts:
+
+- `.project-context/research/r79_native/r79_scale_ladder_round2.json`
+
+Command:
+
+```text
+.venv/bin/python scripts/r79_scale_eval.py --output .project-context/research/r79_native/r79_scale_ladder_round2.json --graph-types sparse_er,scale_free_ba,grid_2d --engines native_stress_ml --include-sfdp --steps 20 --engine-timeout 900
+```
+
+Graphviz reference version:
+
+```text
+sfdp - graphviz version 7.0.5 (20221231.0122)
+```
+
+Scale ladder:
+
+| N | graph | engine | status | wall s | peak RSS GB | composite_large |
+|---:|---|---|---|---:|---:|---:|
+| 20,000 | sparse_er | native_stress_ml | ok | 122.46 | 0.84 | 28.23 |
+| 20,000 | sparse_er | graphviz_sfdp | OK | 62.05 | n/a | 31.53 |
+| 20,000 | scale_free_ba | native_stress_ml | ok | 108.42 | 5.70 | 18.99 |
+| 20,000 | scale_free_ba | graphviz_sfdp | OK | 54.34 | n/a | 32.03 |
+| 20,000 | grid_2d | native_stress_ml | ok | 336.72 | 0.77 | 21.00 |
+| 20,000 | grid_2d | graphviz_sfdp | OK | 37.82 | n/a | 29.83 |
+| 100,000 | sparse_er | native_stress_ml | ok | 289.79 | 1.60 | 28.32 |
+| 100,000 | sparse_er | graphviz_sfdp | OK | 351.12 | n/a | 31.59 |
+| 100,000 | scale_free_ba | native_stress_ml | ok | 333.13 | 19.83 | 19.92 |
+| 100,000 | scale_free_ba | graphviz_sfdp | OK | 313.57 | n/a | 31.94 |
+| 100,000 | grid_2d | native_stress_ml | timeout | 900.31 | 0.96 | n/a |
+| 100,000 | grid_2d | graphviz_sfdp | OK | 169.16 | n/a | 40.38 |
+| 1,000,000 | sparse_er | native_stress_ml | error | 139.67 | 77.01 | n/a |
+| 1,000,000 | scale_free_ba | native_stress_ml | timeout | 900.28 | 2.63 | n/a |
+| 1,000,000 | grid_2d | native_stress_ml | timeout | 900.29 | 2.29 | n/a |
+
+The 100K grid ML row logged completion of layout and entry into quick metrics
+before the watchdog timeout. The row is still reported as timeout because the
+current ladder measures layout plus quick-tier scoring in the child process.
+
+Contraction profiles:
+
+| graph | N | levels |
+|---|---:|---|
+| sparse_er | 1,000,000 | 1,000,000 -> 346,554 -> 145,784 -> 115,379 -> 78,107 -> 19,001 -> 2,376 -> 297 |
+| scale_free_ba | 1,000,000 | 1,000,000 -> 365,966 -> 181,063 -> 10,675 -> 1 |
+| grid_2d | 1,000,000 | 1,000,000 -> 500,000 -> 124,753 -> 41,420 -> 10,898 -> 2,569 -> 623 |
+
+Target verdicts:
+
+- Coarsest `<= 1000` on all 1M graph types: met by contraction profile.
+- 100K sparse `< 60s`: missed. Observed 289.79s including quick metrics.
+- 1M sparse `< 10 min` and `< 32GB`: missed. The row failed with no child
+  result after 139.67s and peak RSS 77.01GB.
+- 20K scale_free_ba `< 60s`: missed. Observed 108.42s.
+- Quality within 10% of SFDP at 20K/100K: missed on all completed comparisons
+  except 100K sparse is close but still ~10.4% lower by quick-tier
+  `composite_large` (28.32 vs 31.59). 20K sparse is ~10.5% lower, BA/grid are
+  much lower. These comparisons use `composite_large`, not full composite.
+- Reference coverage: all requested 20K and 100K SFDP rows completed with
+  `status=OK` in the clean rerun. The missing-node parser bug from the dead run
+  is covered by tests and would now produce `status=WARN` rather than crashing.
+
+Notes:
+
+- Overlap counts remain high at these scales because per-node overlap
+  resolution is intentionally skipped above `overlap_max_nodes`; this round did
+  not chase those counts.
+- The default-path 20K BA `RecursionError` was not trivially locatable in a
+  direct repro attempt; it ran for more than 90s without producing a traceback
+  and was stopped. No default-path fix was attempted.
+- Do not auto-route to `native_stress_ml` yet. Stronger contraction fixes the
+  coarsest-size stall, but refinement/metric time, BA quality, and 1M sparse
+  memory remain blockers.
+
+Verification:
+
+```text
+.venv/bin/python -m ruff check . --fix
+All checks passed!
+
+.venv/bin/python -m mypy --follow-imports=silent dagua/cli.py
+Success: no issues found in 1 source file
+
+.venv/bin/python -m pytest tests/test_r79_scale_eval.py tests/test_ops_coarsen.py tests/test_pipeline_native_stress_ml.py -x --tb=short -q
+40 passed, 1 warning in 4.32s
+
+.venv/bin/python -m pytest tests/test_graph.py -x --tb=short -q
+36 passed, 1 skipped, 1 warning in 0.78s
+```
+
+Broader targeted gate attempted:
+
+```text
+.venv/bin/python -m pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q
+FAILED tests/test_layout/test_cuda_activation.py::test_all_stages_fall_back_when_no_cuda
+RuntimeError: The NVIDIA driver on your system is too old (found version 12040).
+63 passed, 9 skipped before the failure; elapsed 1891.87s.
+```
+
+This failure is outside the P4 contraction/eval scope and reproduces a host CUDA
+fallback issue in `dagua/layout/engine.py` when `_layout_inner` receives
+`device="cuda"` on a runtime where `torch.cuda.is_available()` is false.

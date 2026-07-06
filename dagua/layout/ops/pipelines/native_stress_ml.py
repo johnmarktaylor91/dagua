@@ -10,8 +10,8 @@ from typing import Any, Optional, Union
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.layout.ops.base import Pipeline
-from dagua.layout.ops.coarsen import HeavyEdgeMatching
+from dagua.layout.ops.base import Op, Pipeline
+from dagua.layout.ops.coarsen import AggressiveHybridCoarsen, AggressiveHybridCoarsenConfig
 from dagua.layout.ops.distance import PivotDistanceQueries, PivotSelection, PivotSelectionConfig
 from dagua.layout.ops.embed import PivotMDSComputeCoordinates
 from dagua.layout.ops.native_stress import (
@@ -53,6 +53,7 @@ from dagua.layout.ops.stress_sgd import (
     PrepareStressSGDTerms,
     RunStressSGDExactSchedule,
 )
+from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.resolve import normalize_node_sizes
 
 _DEFAULT_ML_MIN_NODES = 5_000
@@ -92,6 +93,9 @@ class NativeStressMLConfig:
         Node cutoff below which the auto selector uses spatial-hash pairs.
     overlap_max_nodes : int, default=100000
         Maximum final node count for direct overlap projection.
+    coarsen_min_shrink_ratio : float, default=0.50
+        Fractional shrink threshold below which coarsening escalates from
+        heavy-edge matching to hub-star contraction.
     seed : int, default=42
         Deterministic seed.
     """
@@ -106,6 +110,7 @@ class NativeStressMLConfig:
     repulsion_mode: str = "auto"
     hash_repulsion_nodes: int = _DEFAULT_HASH_REPULSION_NODES
     overlap_max_nodes: int = _DEFAULT_OVERLAP_MAX_NODES
+    coarsen_min_shrink_ratio: float = 0.50
     seed: int = 42
 
 
@@ -252,6 +257,7 @@ def _resolve_ml_config(
         repulsion_mode=str(params.get("ml_repulsion_mode", params.get("repulsion_mode", "auto"))),
         hash_repulsion_nodes=int(params.get("hash_repulsion_nodes", _DEFAULT_HASH_REPULSION_NODES)),
         overlap_max_nodes=int(params.get("overlap_max_nodes", _DEFAULT_OVERLAP_MAX_NODES)),
+        coarsen_min_shrink_ratio=float(params.get("coarsen_min_shrink_ratio", 0.50)),
         seed=int(public_seed if public_seed is not None else 42),
     )
     if resolved.repulsion_mode not in {
@@ -269,6 +275,8 @@ def _resolve_ml_config(
         raise ValueError("refine_steps must be nonnegative.")
     if resolved.max_levels < 0:
         raise ValueError("max_levels must be nonnegative.")
+    if resolved.coarsen_min_shrink_ratio < 0.0 or resolved.coarsen_min_shrink_ratio >= 1.0:
+        raise ValueError("coarsen_min_shrink_ratio must be in [0, 1).")
     return resolved
 
 
@@ -517,6 +525,287 @@ def _build_coarsest_pipeline(
     )
 
 
+@dataclass(frozen=True)
+class SampledCoarsestSolveConfig:
+    """Configuration for :class:`SampledCoarsestSolve`.
+
+    Parameters
+    ----------
+    target_nodes : int
+        Maximum sampled pivot subset size.
+    native_config : NativeStressConfig
+        Native-stress configuration used for the sampled exact solve.
+    ml_config : NativeStressMLConfig
+        Multilevel settings carrying the approximate sample-size override.
+    """
+
+    target_nodes: int
+    native_config: NativeStressConfig
+    ml_config: NativeStressMLConfig
+
+
+def _sampled_coarsest_indices(problem: LayoutProblem, target_nodes: int) -> torch.Tensor:
+    """Select deterministic hub-and-stride pivots for a coarse fallback solve.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Coarsest graph that remains above the exact-solve cap.
+    target_nodes : int
+        Maximum number of sampled nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Sorted sampled node indices with shape ``[K]``.
+    """
+    sample_count = min(max(int(target_nodes), 1), problem.num_nodes)
+    if sample_count >= problem.num_nodes:
+        return torch.arange(problem.num_nodes, dtype=torch.long)
+
+    edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+    degrees = torch.zeros((problem.num_nodes,), dtype=torch.long)
+    if edge_index.numel() > 0:
+        degrees.scatter_add_(0, edge_index[0], torch.ones_like(edge_index[0]))
+        degrees.scatter_add_(0, edge_index[1], torch.ones_like(edge_index[1]))
+
+    hub_count = min(max(sample_count // 4, 1), sample_count)
+    hub_order = torch.argsort(degrees, descending=True, stable=True)[:hub_count]
+    selected = torch.zeros((problem.num_nodes,), dtype=torch.bool)
+    selected[hub_order] = True
+
+    if int(selected.sum().item()) < sample_count:
+        stride_positions = (
+            torch.linspace(
+                0,
+                problem.num_nodes - 1,
+                steps=sample_count * 2,
+                dtype=torch.float64,
+            )
+            .round()
+            .to(dtype=torch.long)
+        )
+        for node in stride_positions.tolist():
+            selected[int(node)] = True
+            if int(selected.sum().item()) >= sample_count:
+                break
+
+    if int(selected.sum().item()) < sample_count:
+        remaining = torch.nonzero(~selected, as_tuple=False).squeeze(1)
+        need = sample_count - int(selected.sum().item())
+        selected[remaining[:need]] = True
+
+    return torch.nonzero(selected, as_tuple=False).squeeze(1)
+
+
+def _induced_sample_problem(problem: LayoutProblem, sample_indices: torch.Tensor) -> LayoutProblem:
+    """Create the induced sampled problem for fallback coarsest solving.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Original oversized coarsest problem.
+    sample_indices : torch.Tensor
+        Sampled original node ids with shape ``[K]``.
+
+    Returns
+    -------
+    LayoutProblem
+        Induced problem whose node ids are local to ``sample_indices``.
+    """
+    sample_cpu = sample_indices.to(device="cpu", dtype=torch.long)
+    remap = torch.full((problem.num_nodes,), -1, dtype=torch.long)
+    remap[sample_cpu] = torch.arange(sample_cpu.shape[0], dtype=torch.long)
+    edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+    if edge_index.numel() == 0:
+        sample_edges = torch.empty((2, 0), dtype=torch.long)
+        sample_weights = None
+    else:
+        local_src = remap[edge_index[0]]
+        local_tgt = remap[edge_index[1]]
+        keep = (local_src >= 0) & (local_tgt >= 0) & (local_src != local_tgt)
+        sample_edges = torch.stack([local_src[keep], local_tgt[keep]], dim=0)
+        sample_weights = (
+            None
+            if problem.edge_weights is None
+            else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)[keep]
+        )
+
+    sample_sizes = (
+        None
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu")[sample_cpu].clone()
+    )
+    return LayoutProblem(
+        edge_index=sample_edges,
+        num_nodes=int(sample_cpu.shape[0]),
+        node_sizes=sample_sizes,
+        edge_weights=sample_weights,
+        seed=problem.seed,
+    )
+
+
+def _deterministic_grid_positions(
+    num_nodes: int,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Return deterministic fallback positions on a square grid.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of positions to generate.
+    dtype : torch.dtype, default=torch.float32
+        Output dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+    if num_nodes <= 0:
+        return torch.empty((0, 2), dtype=dtype)
+    width = int(torch.ceil(torch.sqrt(torch.tensor(float(num_nodes)))).item())
+    ids = torch.arange(num_nodes, dtype=torch.long)
+    x_pos = torch.remainder(ids, width).to(dtype=dtype)
+    y_pos = torch.div(ids, width, rounding_mode="floor").to(dtype=dtype)
+    return torch.stack([x_pos, y_pos], dim=1)
+
+
+def _interpolate_from_sample(
+    problem: LayoutProblem,
+    sample_indices: torch.Tensor,
+    sample_pos: torch.Tensor,
+    max_passes: int = 8,
+) -> torch.Tensor:
+    """Place unsampled coarse nodes from weighted neighbor positions.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Oversized coarsest problem.
+    sample_indices : torch.Tensor
+        Original node ids solved exactly with shape ``[K]``.
+    sample_pos : torch.Tensor
+        Solved sampled positions with shape ``[K, 2]``.
+    max_passes : int, default=8
+        Maximum graph-neighbor propagation passes before grid fallback.
+
+    Returns
+    -------
+    torch.Tensor
+        Interpolated full position tensor with shape ``[N, 2]``.
+    """
+    positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+    placed = torch.zeros((problem.num_nodes,), dtype=torch.bool)
+    sample_cpu = sample_indices.to(device="cpu", dtype=torch.long)
+    positions[sample_cpu] = sample_pos.detach().to(device="cpu", dtype=torch.float32)
+    placed[sample_cpu] = True
+
+    edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+    if edge_index.numel() > 0:
+        src = edge_index[0]
+        tgt = edge_index[1]
+        weights = (
+            torch.ones((edge_index.shape[1],), dtype=torch.float32)
+            if problem.edge_weights is None
+            else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        )
+        for _pass_index in range(max_passes):
+            unplaced_before = int((~placed).sum().item())
+            if unplaced_before == 0:
+                break
+            sums = torch.zeros_like(positions)
+            counts = torch.zeros((problem.num_nodes,), dtype=torch.float32)
+
+            src_to_tgt = placed[src] & ~placed[tgt]
+            if bool(src_to_tgt.any()):
+                weighted = weights[src_to_tgt].unsqueeze(1)
+                sums.index_add_(0, tgt[src_to_tgt], positions[src[src_to_tgt]] * weighted)
+                counts.index_add_(0, tgt[src_to_tgt], weights[src_to_tgt])
+
+            tgt_to_src = placed[tgt] & ~placed[src]
+            if bool(tgt_to_src.any()):
+                weighted = weights[tgt_to_src].unsqueeze(1)
+                sums.index_add_(0, src[tgt_to_src], positions[tgt[tgt_to_src]] * weighted)
+                counts.index_add_(0, src[tgt_to_src], weights[tgt_to_src])
+
+            newly_placed = (~placed) & (counts > 0.0)
+            if not bool(newly_placed.any()):
+                break
+            positions[newly_placed] = sums[newly_placed] / counts[newly_placed].unsqueeze(1)
+            placed[newly_placed] = True
+
+    if not bool(placed.all()):
+        fallback = _deterministic_grid_positions(problem.num_nodes)
+        positions[~placed] = fallback[~placed]
+
+    return positions
+
+
+@register_op
+class SampledCoarsestSolve(Op):
+    """Solve a bounded sampled subset and interpolate the remaining nodes."""
+
+    name = "sampled_coarsest_solve"
+    category = OpCategory.OPTIMIZE
+    writes = ("pos",)
+
+    def __init__(self, config: SampledCoarsestSolveConfig) -> None:
+        """Store sampled-solve settings.
+
+        Parameters
+        ----------
+        config : SampledCoarsestSolveConfig
+            Target size and native-stress solver settings.
+
+        Returns
+        -------
+        None
+            The operation stores the frozen config.
+        """
+        self.config = config
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run sampled fallback and write full coarsest positions.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Oversized coarsest graph.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Runtime context reused by the sampled exact solve.
+
+        Returns
+        -------
+        SolveState
+            State with ``pos`` shaped ``[problem.num_nodes, 2]``.
+        """
+        config = self.config
+        sample_indices = _sampled_coarsest_indices(problem, config.target_nodes)
+        sample_problem = _induced_sample_problem(problem, sample_indices)
+        if sample_problem.edge_index.numel() == 0:
+            sample_pos = _deterministic_grid_positions(sample_problem.num_nodes)
+        else:
+            sample_state = _build_coarsest_pipeline(
+                config.native_config,
+                config.ml_config,
+            ).apply(sample_problem, SolveState(), ctx)
+            if sample_state.pos is None:
+                raise RuntimeError("sampled coarsest solve did not produce positions.")
+            sample_pos = sample_state.pos
+        state.pos = _interpolate_from_sample(problem, sample_indices, sample_pos)
+        state.extras["sampled_coarsest_nodes"] = int(sample_indices.shape[0])
+        return state
+
+
 def _selected_repulsion_mode(num_nodes: int, config: NativeStressMLConfig) -> str:
     """Resolve the refinement repulsion approximation mode.
 
@@ -621,17 +910,30 @@ def _run_multilevel_connected(
         Final positions with shape ``[N, 2]``.
     """
     _assert_memory_budget(
-        "heavy-edge coarsen",
+        "aggressive hybrid coarsen",
         problem.num_nodes,
         problem.edge_index.shape[1],
         96,
         64,
     )
-    _log_stage("heavy-edge coarsen", problem.num_nodes, problem.edge_index.shape[1])
+    _log_stage("aggressive hybrid coarsen", problem.num_nodes, problem.edge_index.shape[1])
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(problem.edge_index.device)))
-    hierarchy_state = HeavyEdgeMatching().apply(problem, SolveState(), ctx)
+    hierarchy_state = AggressiveHybridCoarsen(
+        AggressiveHybridCoarsenConfig(
+            target=ml_config.coarsest_nodes,
+            max_levels=ml_config.max_levels,
+            min_shrink_ratio=ml_config.coarsen_min_shrink_ratio,
+        )
+    ).apply(problem, SolveState(), ctx)
     hierarchy = hierarchy_state.hierarchy or []
     selected_levels = _select_levels(hierarchy, ml_config)
+    profile_nodes = [problem.num_nodes, *(level.num_nodes for level in selected_levels)]
+    print(
+        "native_stress_ml: contraction profile "
+        + " -> ".join(f"{node_count:,}" for node_count in profile_nodes),
+        file=sys.stderr,
+        flush=True,
+    )
     if not selected_levels:
         native_config = _native_config_for_stage(
             num_nodes=problem.num_nodes,
@@ -665,7 +967,21 @@ def _run_multilevel_connected(
         overlap_iterations=0,
     )
     state = SolveState()
-    state = _build_coarsest_pipeline(coarse_config, ml_config).apply(coarse_problem, state, ctx)
+    if coarse_problem.num_nodes > ml_config.coarsest_nodes:
+        _log_stage(
+            "sampled coarsest fallback",
+            coarse_problem.num_nodes,
+            coarse_problem.edge_index.shape[1],
+        )
+        state = SampledCoarsestSolve(
+            SampledCoarsestSolveConfig(
+                target_nodes=ml_config.coarsest_nodes,
+                native_config=coarse_config,
+                ml_config=ml_config,
+            )
+        ).apply(coarse_problem, state, ctx)
+    else:
+        state = _build_coarsest_pipeline(coarse_config, ml_config).apply(coarse_problem, state, ctx)
     if state.pos is None:
         raise RuntimeError("native_stress_ml coarsest solve did not produce positions.")
 
@@ -816,6 +1132,8 @@ def layout_native_stress_ml_pipeline(
 
 __all__ = [
     "NativeStressMLConfig",
+    "SampledCoarsestSolve",
+    "SampledCoarsestSolveConfig",
     "layout_native_stress_ml_pipeline",
     "should_use_native_stress_ml",
 ]
