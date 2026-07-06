@@ -15,6 +15,9 @@ from dagua.layout.ops.pipelines.fmmm import (
     _fdp_node_boxes,
     _fdp_obstacle_vertices,
     _FdpCompoundEdgeAttachmentOp,
+    _graphviz_fdp_prism_delaunay_edges,
+    _graphviz_fdp_prism_overlap,
+    _graphviz_fdp_prism_overlap_edges,
     build_fmmm_pipeline,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -214,3 +217,74 @@ def test_fdp_compound_attachment_op_is_fidelity_only() -> None:
     assert result.extras[_FDP_COMPOUND_EDGE_ATTACHMENTS_KEY][0].tail_point == pytest.approx(
         (35.0, 0.0)
     )
+
+
+def test_fdp_prism_delaunay_edges_cover_triangle_neighbors() -> None:
+    """SciPy Delaunay should provide the PRISM proximity graph primitive.
+
+    Returns
+    -------
+    None
+        The assertion checks the expected complete triangle neighbor set.
+    """
+    edges = _graphviz_fdp_prism_delaunay_edges(
+        x_positions=[0.0, 1.0, 0.0],
+        y_positions=[0.0, 0.0, 1.0],
+    )
+
+    assert edges == {(0, 1), (0, 2), (1, 2)}
+
+
+def test_fdp_prism_overlap_stage_reduces_compact_component_overlaps() -> None:
+    """Graphviz FDP PRISM should expand a compact component before packing.
+
+    Returns
+    -------
+    None
+        The assertion verifies that the named overlap-removal stage moves a
+        compact component toward the Graphviz no-overlap target.
+    """
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+        ],
+        dtype=torch.float64,
+    )
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 3],
+            [1, 2, 3, 0],
+        ],
+        dtype=torch.long,
+    )
+    node_sizes = torch.full((4, 2), 72.0, dtype=torch.float64)
+    half_widths = [0.5 + (4.0 / 72.0)] * 4
+    half_heights = [0.5 + (4.0 / 72.0)] * 4
+
+    before = len(
+        _graphviz_fdp_prism_overlap_edges(
+            x_positions=[float(value) for value in positions[:, 0].tolist()],
+            y_positions=[float(value) for value in positions[:, 1].tolist()],
+            half_widths=half_widths,
+            half_heights=half_heights,
+        )
+    )
+    adjusted = _graphviz_fdp_prism_overlap(
+        positions=positions,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+    )
+    after = len(
+        _graphviz_fdp_prism_overlap_edges(
+            x_positions=[float(value) for value in adjusted[:, 0].tolist()],
+            y_positions=[float(value) for value in adjusted[:, 1].tolist()],
+            half_widths=half_widths,
+            half_heights=half_heights,
+        )
+    )
+
+    assert before == 6
+    assert after < before
