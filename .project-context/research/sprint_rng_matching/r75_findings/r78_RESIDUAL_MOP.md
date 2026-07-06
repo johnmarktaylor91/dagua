@@ -149,3 +149,119 @@ Test results:
 Concerns:
 - The S3 fix closes the hang, but crossing-workload byte output is now defined by the single-thread CPU execution mode. That is why the full closure is exact for `real_football_115` but exposes three late-optimizer divergences on `wide_1_100_1` despite matched initial batches.
 - The three wide-row divergences are not sampling divergences; first-batch hashes match for stress, crossings, and initialization. The next investigation should instrument per-step hashes/losses around seeds 157, 184, and 190 if those remaining deltas matter.
+
+## F3: prism parity
+
+Scope judgment:
+- Graphviz 7.0.5 FDP defaults to `overlap="9:prism"` in `lib/fdpgen/xlayout.c`
+  and runs that stage after `fdp_tLayout` and before component packing in
+  `lib/fdpgen/layout.c`.
+- The 7.0.5 PRISM path in `lib/neatogen/overlap.c` builds a proximity graph
+  from Delaunay triangulation (`call_tri` / GTS in Graphviz), adds exact
+  current-overlap edges for non-neighborhood smoothing, computes ideal
+  rectangle-separating distances, and iterates stress-model smoothing until
+  overlap disappears or `tries` is exhausted.
+- `lib/neatogen/adjust.c` supplies FDP node half-sizes plus the default
+  4-point separation and sets the negative prism scaling default
+  (`overlap_scaling=-4.0`) before smoothing.
+- Dagua already had overlap-removal machinery for other paths, but the
+  graphviz FDP fidelity path only had the earlier xLayout expansion
+  approximation after tLayout. It did not run PRISM's Delaunay proximity graph
+  plus sparse stress overlap smoother.
+- SciPy `scipy.spatial.Delaunay` is available in the environment and is an
+  acceptable computational primitive. No Graphviz or GTS runtime dependency is
+  introduced. The GTS-specific edge ordering did not prove load-bearing for the
+  representative R2 divergence, so the port was tractable.
+
+Port:
+- Commit: `49990fb` (`fix(fmmm): add graphviz fdp prism overlap removal`).
+- Added a Graphviz-FDP-only PRISM stage in
+  `dagua/layout/ops/pipelines/fmmm.py`, called from
+  `_graphviz_fdp_component_layout` after `_graphviz_fdp_xlayout` and before
+  point conversion / packing.
+- The stage uses SciPy Delaunay for the proximity graph, adds exact overlap
+  edges, applies the Graphviz negative scaling search, computes
+  rectangle-separating ideal distances, and solves one sparse stress step per
+  PRISM try.
+- Added focused regression tests in `tests/test_fmmm_fdp_ports.py` for
+  Delaunay-neighbor coverage and compact-component overlap reduction.
+
+Before / after evidence:
+
+5-seed smoke, seeds 100-104, output
+`/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_prism_smoke2`:
+
+| Graph | Bucket | Baseline mean RMSD | F3 mean RMSD | Movement |
+| --- | --- | ---: | ---: | ---: |
+| `parallel_cycles_4x5` | divergent | 0.224767 | 0.134715 | +0.090052 |
+| `protein_ppi_200` | divergent | 0.485783 | 0.053432 | +0.432351 |
+| `real_lesmis_77` | divergent | 0.753175 | 0.061856 | +0.691319 |
+| `recurrent_feedback_cell` | divergent | 0.241327 | 0.061508 | +0.179819 |
+| `sbm_5x50` | divergent | 0.668246 | 0.039185 | +0.629061 |
+
+100-seed gate, seeds 100-199, output
+`/home/jtaylor/projects/dagua/eval_output/benchmark_100seed_r78_prism`:
+
+| Graph | Bucket | Baseline mean RMSD | F3 mean RMSD | Median | p95 | Movement |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `parallel_cycles_4x5` | divergent | 0.224767 | 0.109967 | 0.114301 | 0.178736 | +0.114800 |
+| `protein_ppi_200` | divergent | 0.485783 | 0.048906 | 0.049501 | 0.063974 | +0.436877 |
+| `real_lesmis_77` | divergent | 0.753175 | 0.061418 | 0.063080 | 0.084481 | +0.691757 |
+| `recurrent_feedback_cell` | divergent | 0.241327 | 0.089503 | 0.085094 | 0.167199 | +0.151824 |
+| `sbm_5x50` | divergent | 0.668246 | 0.038407 | 0.043637 | 0.055678 | +0.629839 |
+| `ba_500` | superior | NA | 0.042692 | 0.043217 | 0.044330 | toward reference |
+| `er_500` | superior | NA | 0.041808 | 0.042358 | 0.043831 | toward reference |
+| `extreme_mixed_width_transformer` | superior | NA | 0.139821 | 0.139326 | 0.219528 | toward reference |
+| `grid_20x20` | superior | NA | 0.028606 | 0.029739 | 0.042664 | toward reference |
+| `hub_spoke_10x20` | superior | NA | 0.059861 | 0.059545 | 0.063756 | toward reference |
+| `hub_spoke_5x50` | superior | NA | 0.053402 | 0.052589 | 0.060228 | toward reference |
+| `powerlaw_500` | superior | NA | 0.041745 | 0.042028 | 0.044177 | toward reference |
+| `rgg_500` | superior | NA | 0.018599 | 0.015144 | 0.035744 | toward reference |
+| `small_world_500` | superior | NA | 0.036974 | 0.037225 | 0.042127 | toward reference |
+
+Gate evidence:
+- Main benchmark completed with `2800 total, 2800 ok, 0 skipped, 0 errors,
+  0 timeouts`; final audit found `2800` result rows, `2800` position tensors,
+  and zero empty tensor files.
+- Divergent-row gate passed: 5/5 divergent rows improved decisively.
+- Superior-row gate passed: 9/9 superior rows moved toward the Graphviz FDP
+  reference.
+- Previously identical FMMM guard: five rung-1 `classic_fmmm_steps10` rows
+  were tensor-exact against `ogdf_fmmm__for__classic_fmmm_steps10` at seed 100
+  (`asymmetric_hourglass_hub`, `binary_tree`, `bipartite_4_3_4`,
+  `braided_feedback_tails`, `center_port_backedge_hub`; all max_abs=0.0).
+- Connected FMMM probes unchanged: the PRISM stage is gated to
+  `classic_fmmm_graphviz_fdp_fidelity`; the OGDF FMMM guard above used
+  connected rows and stayed tensor-exact.
+
+Test results:
+- `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl ruff check . --fix`: passed.
+- `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl mypy --follow-imports=silent dagua/cli.py`:
+  passed (`Success: no issues found in 1 source file`).
+- `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_fmmm_fdp_ports.py -q`:
+  passed (`7 passed, 3 warnings`).
+- `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest -k "fmmm" -q`: passed
+  (`52 passed, 3128 deselected, 34 warnings`).
+- `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q`:
+  passed (`469 passed, 153 warnings`).
+- `PYTHONPATH=$PWD MPLCONFIGDIR=/tmp/mpl pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"`:
+  stopped on the known unrelated render smoke failure
+  `tests/test_cosmetic_node_features.py::TestRenderSmoke::test_render_with_double_border`
+  (`assert len(border_patches) >= 2`, observed `0`). This failure is outside
+  the FDP/FMMM scope and was not changed.
+
+Controversial choices:
+- SciPy Delaunay replaces Graphviz's GTS triangulation at runtime. It is used
+  only as a computational primitive and falls back to joggled Qhull, then to a
+  complete graph if the triangulation is degenerate.
+- PRISM smoothing uses a sparse Laplacian solve for the Graphviz stress-model
+  step instead of calling the reference implementation. This keeps Dagua free
+  of Graphviz/GTS runtime coupling while preserving the named stage behavior.
+
+Concerns:
+- The small-world 500-node FDP row is slow with the new PRISM smoother; the
+  final benchmark required a 420-second per-layout timeout and a 7200-second
+  watchdog. It completed without errors.
+- This is a PRISM-equivalent port, not a byte-for-byte GTS port. If future
+  evidence isolates a GTS-only triangulation tie as load-bearing, that would be
+  a separate boundary dossier.
