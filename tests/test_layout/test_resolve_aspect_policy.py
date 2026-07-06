@@ -133,3 +133,20 @@ def test_hexagonal_lattice_layout_moves_to_lattice_aspect() -> None:
 
     assert 0.04 <= aspect <= 0.12
     assert abs(aspect - 0.05) < abs(aspect - 0.25)
+
+
+def test_tiny_multiedge_rank_sep_is_capped() -> None:
+    """Tiny duplicate-edge DAGs should not inherit the full default rank spacing."""
+    edge_index = torch.tensor([[0, 0, 1], [1, 1, 2]], dtype=torch.long)
+    resolved = prepare_pipeline_config(
+        config=LayoutConfig(adaptive_spacing=False, rank_sep=240.0),
+        num_nodes=3,
+        edge_index=edge_index,
+        device="cpu",
+        layer_assignments=None,
+        prebuilt_layer_index=None,
+        graph_structure=None,
+        skip_classification=False,
+    )
+
+    assert getattr(resolved, "_dagua_native_rank_sep") == pytest.approx(240.0)

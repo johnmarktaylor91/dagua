@@ -12,6 +12,10 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.ops.base import Pipeline
+from dagua.layout.ops.coordinate import (
+    ComponentTilingCrossingRisk,
+    ComponentTilingCrossingRiskConfig,
+)
 from dagua.layout.ops.pipelines import dagua_native_legacy
 from dagua.layout.ops.pipelines._native_shared import (
     _prepare_native_config,
@@ -4557,6 +4561,7 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    setattr(effective_config, "_dagua_native_has_clusters", bool(clusters))
     if fidelity_mode is not None:
         setattr(effective_config, "fidelity_mode", fidelity_mode)
     effective_config.fidelity_dtype = fidelity_dtype
@@ -4896,6 +4901,20 @@ def layout_dagua_native_pipeline(
             and normalized_node_sizes is not None
         ):
             result = _best_of_polish(result, prepared_edge_index, normalized_node_sizes)
+        risk_state = ComponentTilingCrossingRisk(
+            ComponentTilingCrossingRiskConfig(
+                enabled=bool(getattr(prepared_config, "component_tiling_crossing_risk", True))
+            )
+        ).apply(
+            problem,
+            SolveState(
+                pos=result,
+                layers=getattr(prepared_config, "_dagua_native_layer_assignments", None),
+            ),
+            ctx,
+        )
+        if risk_state.pos is not None:
+            result = risk_state.pos.detach()
         if dot_cluster_fidelity:
             result = _apply_dot_cluster_fidelity_layout(
                 result,
