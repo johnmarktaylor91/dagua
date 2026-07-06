@@ -97,6 +97,7 @@ class LayoutConfig:
             "layered_dag",
             "force_directed",
             "hybrid",
+            "hybrid_v2",
             "planar",
             "stress",
             "legacy_monolith",
