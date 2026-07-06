@@ -690,6 +690,40 @@ def _aggregate_node_sizes(
     return coarse_sizes
 
 
+def _aggregate_node_masses(
+    fine_node_masses: torch.Tensor,
+    fine_to_coarse: torch.Tensor,
+    num_coarse_nodes: int,
+) -> torch.Tensor:
+    """Aggregate fine-node masses into coarse-node masses.
+
+    Parameters
+    ----------
+    fine_node_masses : torch.Tensor
+        Fine node masses with shape ``[N_fine]``.
+    fine_to_coarse : torch.Tensor
+        Fine-to-coarse mapping with shape ``[N_fine]``.
+    num_coarse_nodes : int
+        Number of coarse nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Coarse node masses with shape ``[N_coarse]``.
+    """
+    coarse_masses = torch.zeros(
+        (num_coarse_nodes,),
+        dtype=fine_node_masses.dtype,
+        device="cpu",
+    )
+    coarse_masses.scatter_add_(
+        0,
+        fine_to_coarse.to(device="cpu", dtype=torch.long),
+        fine_node_masses.to(device="cpu"),
+    )
+    return coarse_masses
+
+
 def _convert_multilevel_levels(levels: Sequence[_multilevel.CoarseLevel]) -> List[HierarchyLevel]:
     """Convert multilevel hierarchy levels into the ops-state schema.
 
@@ -710,7 +744,9 @@ def _convert_multilevel_levels(levels: Sequence[_multilevel.CoarseLevel]) -> Lis
                 num_nodes=level.num_nodes,
                 num_fine=level.num_fine,
                 edge_index=None if level.edge_index is None else level.edge_index.detach().cpu(),
+                edge_weights=None,
                 node_sizes=None if level.node_sizes is None else level.node_sizes.detach().cpu(),
+                node_masses=None,
                 fine_to_coarse=(
                     None if level.fine_to_coarse is None else level.fine_to_coarse.detach().cpu()
                 ),
@@ -1096,6 +1132,7 @@ class HeavyEdgeMatching(Op):
         )
         generator = _torch_generator(problem, ctx)
         current_sizes = _resolved_node_sizes(problem)
+        current_masses = torch.ones((problem.num_nodes,), dtype=torch.float32, device="cpu")
 
         hierarchy: List[HierarchyLevel] = []
         while True:
@@ -1109,17 +1146,25 @@ class HeavyEdgeMatching(Op):
                 fine_to_coarse,
                 coarse_graph.num_nodes,
             )
+            coarse_masses = _aggregate_node_masses(
+                current_masses,
+                fine_to_coarse,
+                coarse_graph.num_nodes,
+            )
             hierarchy.append(
                 HierarchyLevel(
                     num_nodes=coarse_graph.num_nodes,
                     num_fine=graph.num_nodes,
                     edge_index=coarse_graph.edge_index.clone(),
+                    edge_weights=coarse_graph.edge_weight.clone(),
                     node_sizes=coarse_sizes.clone(),
+                    node_masses=coarse_masses.clone(),
                     fine_to_coarse=fine_to_coarse.clone(),
                 )
             )
             graph = coarse_graph
             current_sizes = coarse_sizes
+            current_masses = coarse_masses
 
         state.hierarchy = hierarchy
         state.extras.pop(_SOLAR_STEPS_KEY, None)

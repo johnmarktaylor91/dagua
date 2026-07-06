@@ -216,6 +216,33 @@ def test_heavy_edge_matching_first_level_has_fewer_nodes_than_input() -> None:
     assert result.hierarchy[0].fine_to_coarse.shape == (problem.num_nodes,)
 
 
+def test_heavy_edge_matching_aggregates_weights_and_node_masses() -> None:
+    """Heavy-edge matching should preserve coarse weights and represented mass."""
+    num_nodes = 12
+    weights = torch.arange(1, num_nodes, dtype=torch.float32)
+    edge_index = torch.tensor(
+        [list(range(num_nodes - 1)), list(range(1, num_nodes))],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=torch.ones((num_nodes, 2), dtype=torch.float32),
+        edge_weights=weights,
+        seed=3,
+    )
+
+    state = HeavyEdgeMatching().apply(problem, SolveState(), RuntimeContext())
+
+    assert state.hierarchy is not None
+    assert state.hierarchy
+    level = state.hierarchy[0]
+    assert level.edge_weights is not None
+    assert level.node_masses is not None
+    assert torch.isclose(level.node_masses.sum(), torch.tensor(float(problem.num_nodes)))
+    assert float(level.edge_weights.sum().item()) <= float(problem.edge_weights.sum().item())
+
+
 def test_heavy_edge_matching_handles_two_node_graph() -> None:
     """HeavyEdgeMatching should handle the smallest connected graph without invalid output."""
     problem = _path_problem(2)
