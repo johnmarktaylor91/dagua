@@ -10,6 +10,8 @@ import torch
 from dagua.layout.classic.fmmm import _TYPE_MOON, _TYPE_PLANET, _TYPE_PLANET_WITH_MOONS, _TYPE_SUN
 from dagua.layout.ops import coarsen as coarsen_ops
 from dagua.layout.ops.coarsen import (
+    AggressiveHybridCoarsen,
+    AggressiveHybridCoarsenConfig,
     HeavyEdgeMatching,
     LayerAwareCoarsen,
     LayerAwareCoarsenConfig,
@@ -42,6 +44,65 @@ def _path_problem(num_nodes: int) -> LayoutProblem:
         num_nodes=num_nodes,
         node_sizes=torch.ones((num_nodes, 2), dtype=torch.float32),
         seed=7,
+    )
+
+
+def _star_problem(num_leaves: int) -> LayoutProblem:
+    """Create a hub-and-spoke graph for contraction tests.
+
+    Parameters
+    ----------
+    num_leaves : int
+        Number of leaves attached to the central hub.
+
+    Returns
+    -------
+    LayoutProblem
+        Star graph with unit node sizes.
+    """
+    sources = [0 for _ in range(num_leaves)]
+    targets = list(range(1, num_leaves + 1))
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_leaves + 1,
+        node_sizes=torch.ones((num_leaves + 1, 2), dtype=torch.float32),
+        seed=11,
+    )
+
+
+def _hub_chain_problem(num_hubs: int, leaves_per_hub: int) -> LayoutProblem:
+    """Create chained hubs with many satellites.
+
+    Parameters
+    ----------
+    num_hubs : int
+        Number of hub nodes.
+    leaves_per_hub : int
+        Number of leaves attached to each hub.
+
+    Returns
+    -------
+    LayoutProblem
+        Hub-heavy graph with unit node sizes.
+    """
+    sources: list[int] = []
+    targets: list[int] = []
+    next_leaf = num_hubs
+    for hub in range(num_hubs):
+        if hub + 1 < num_hubs:
+            sources.append(hub)
+            targets.append(hub + 1)
+        for _leaf_index in range(leaves_per_hub):
+            sources.append(hub)
+            targets.append(next_leaf)
+            next_leaf += 1
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=next_leaf,
+        node_sizes=torch.ones((next_leaf, 2), dtype=torch.float32),
+        seed=19,
     )
 
 
@@ -216,6 +277,33 @@ def test_heavy_edge_matching_first_level_has_fewer_nodes_than_input() -> None:
     assert result.hierarchy[0].fine_to_coarse.shape == (problem.num_nodes,)
 
 
+def test_heavy_edge_matching_aggregates_weights_and_node_masses() -> None:
+    """Heavy-edge matching should preserve coarse weights and represented mass."""
+    num_nodes = 12
+    weights = torch.arange(1, num_nodes, dtype=torch.float32)
+    edge_index = torch.tensor(
+        [list(range(num_nodes - 1)), list(range(1, num_nodes))],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=torch.ones((num_nodes, 2), dtype=torch.float32),
+        edge_weights=weights,
+        seed=3,
+    )
+
+    state = HeavyEdgeMatching().apply(problem, SolveState(), RuntimeContext())
+
+    assert state.hierarchy is not None
+    assert state.hierarchy
+    level = state.hierarchy[0]
+    assert level.edge_weights is not None
+    assert level.node_masses is not None
+    assert torch.isclose(level.node_masses.sum(), torch.tensor(float(problem.num_nodes)))
+    assert float(level.edge_weights.sum().item()) <= float(problem.edge_weights.sum().item())
+
+
 def test_heavy_edge_matching_handles_two_node_graph() -> None:
     """HeavyEdgeMatching should handle the smallest connected graph without invalid output."""
     problem = _path_problem(2)
@@ -255,6 +343,48 @@ def test_heavy_edge_matching_fine_to_coarse_maps_all_nodes_on_every_level() -> N
     state = HeavyEdgeMatching().apply(problem, SolveState(), RuntimeContext())
 
     assert state.hierarchy is not None
+    for level in state.hierarchy:
+        _assert_mapping_covers_all_nodes(level)
+
+
+@pytest.mark.parametrize(
+    ("problem", "target"),
+    [
+        (_star_problem(1999), 100),
+        (_hub_chain_problem(num_hubs=100, leaves_per_hub=20), 100),
+    ],
+)
+def test_aggressive_hybrid_coarsen_reaches_target_on_hub_graphs(
+    problem: LayoutProblem,
+    target: int,
+) -> None:
+    """AggressiveHybridCoarsen should guarantee the coarsest cap on hub-heavy graphs."""
+    state = AggressiveHybridCoarsen(
+        AggressiveHybridCoarsenConfig(target=target, max_levels=20)
+    ).apply(problem, SolveState(), RuntimeContext())
+
+    assert state.hierarchy is not None
+    assert state.hierarchy
+    assert state.hierarchy[-1].num_nodes <= target
+    for level in state.hierarchy:
+        _assert_mapping_covers_all_nodes(level)
+
+
+def test_aggressive_hybrid_coarsen_buckets_edgeless_residual_to_target() -> None:
+    """AggressiveHybridCoarsen should still cap edgeless graphs through bucket fallback."""
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=1000,
+        node_sizes=torch.ones((1000, 2), dtype=torch.float32),
+        seed=29,
+    )
+
+    state = AggressiveHybridCoarsen(AggressiveHybridCoarsenConfig(target=125, max_levels=20)).apply(
+        problem, SolveState(), RuntimeContext()
+    )
+
+    assert state.hierarchy is not None
+    assert state.hierarchy[-1].num_nodes <= 125
     for level in state.hierarchy:
         _assert_mapping_covers_all_nodes(level)
 
