@@ -333,8 +333,8 @@ def test_cluster_aware_false_keeps_legacy_flat_algorithm_path() -> None:
     assert torch.isfinite(positions).all()
 
 
-def test_default_native_cluster_aware_layout_does_not_warn_or_fall_back() -> None:
-    """Default native layout should use the recursive cluster driver."""
+def test_default_native_cluster_aware_layered_layout_warns_about_flat_fallback() -> None:
+    """Default native clustered DAG layout should warn about flat placement."""
     graph = _make_nested_clusters_graph()
     config = LayoutConfig(cluster_aware=True, steps=8, seed=42)
 
@@ -343,9 +343,11 @@ def test_default_native_cluster_aware_layout_does_not_warn_or_fall_back() -> Non
         positions = layout(graph, config)
 
     fallback_warnings = [
-        item for item in caught if "falling back to legacy flat placement" in str(item.message)
+        item
+        for item in caught
+        if "using flat native placement with cluster losses" in str(item.message)
     ]
-    assert fallback_warnings == []
+    assert len(fallback_warnings) == 1
     assert positions.shape == (graph.num_nodes, 2)
     assert torch.isfinite(positions).all()
     _assert_child_clusters_contained(graph, positions, config)
@@ -361,7 +363,10 @@ def test_native_stress_cluster_aware_layout_uses_recursive_driver() -> None:
         positions = layout(graph, config)
 
     fallback_warnings = [
-        item for item in caught if "falling back to legacy flat placement" in str(item.message)
+        item
+        for item in caught
+        if "falling back to legacy flat placement" in str(item.message)
+        or "using flat native placement with cluster losses" in str(item.message)
     ]
     assert fallback_warnings == []
     assert positions.shape == (graph.num_nodes, 2)
