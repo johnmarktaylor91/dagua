@@ -49,6 +49,10 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.native_hybrid",
         "layout_native_hybrid_pipeline",
     ),
+    "native_hybrid_v2": (
+        "dagua.layout.ops.pipelines.native_hybrid_v2",
+        "layout_native_hybrid_v2_pipeline",
+    ),
     "native_layered_dag": (
         "dagua.layout.ops.pipelines.native_layered_dag",
         "layout_native_layered_dag_pipeline",
