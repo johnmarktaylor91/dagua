@@ -14,6 +14,7 @@ import concurrent.futures
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -1063,6 +1064,7 @@ def run_payloads(payloads: list[ComboPayload], output_path: Path, workers: int) 
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=workers,
             initializer=configure_thread_environment,
+            mp_context=multiprocessing.get_context("spawn"),
         ) as executor:
             futures = [executor.submit(analyze_payload, payload) for payload in payloads]
             for future in concurrent.futures.as_completed(futures):
@@ -3002,7 +3004,10 @@ def run_deterministic_mode(
         if engine in ref_by_engine and (graph, engine) not in done
     ]
     print(f"[deterministic] resume: {len(done)} done, {len(work)} to run", flush=True)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as pool:
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=8,
+        mp_context=multiprocessing.get_context("spawn"),
+    ) as pool:
         futures = {
             pool.submit(
                 deterministic_row, refresh_dir, index, graph_data, graph, engine, ref, git_sha
