@@ -830,3 +830,22 @@ for retries. 2-attempt max per work item, then park documented.
   byte gates held. The igraph arc: 30 bit-exact at sprint start -> effectively the ENTIRE
   family at-reference. NEATO closed earlier today (40 flips, zero divergent). REMAINING IN
   FLIGHT: F3 prism, monster bench, neato-rd200b. Then: the definitive final re-ledger.
+
+## 2026-07-06 (evening): neato rd200 closed + prism merged + rescore-hang lesson
+- neato random_dag_200 fresh-dir retry (benchmark_100seed_r78_neato_rd200, 100/100 ok):
+  rescore verdict FIDELITY_IDENTICAL (100 matched seeds, stress D/R 0.0973/0.0973).
+  NEATO FAMILY FULLY CLOSED -- zero divergent rows.
+- r78/prism MERGED to develop (3328bb7). fdp 87-row rescore: 66 identical / 13 dist-eq /
+  5 superior / 3 flagged. Two of the flagged are real residuals (parallel_cycles_4x5
+  halved to 0.11; random_dag_200 fdp at 0.121 vs ref self-spread 0.125, near parity);
+  parallel_multiedge_bundle flip is a stale-overlay artifact (freshest dir r74_fixes
+  absent from the 7-dir rescore list) -- final full-overlay ledger will restore it.
+- GOTCHA (cost ~10h wall): definitive_fidelity_analysis.py ProcessPoolExecutor forks
+  after torch import; forked workers can inherit a locked mutex -> permanent futex_wait
+  deadlock (hit twice: workers=2 AND workers=1; parent+child both futex_wait, log frozen
+  at "overlay:" line, 0% CPU). Workaround: /tmp/r78_neato_serial_driver.py patches the
+  executor with an in-process serial stand-in; finished in minutes. Proper fix for a
+  housekeeping round: mp_context=spawn (or forkserver pre-torch) in run_payloads.
+- Monster bench rescoped 100->25 seeds per JMT ("25 seeds is plenty"): 77,040-run
+  universe, --resume credited prior work, ~14.4% as of resume. Remaining plan unchanged:
+  bench done -> THE definitive full-universe re-ledger (supersedes r77).
