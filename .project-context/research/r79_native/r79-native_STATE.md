@@ -54,3 +54,12 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   conflicts. HELD until adversarial review returns, then merge P5 + review-fixes together.
 - Adversarial merge-gate review (Opus subagent) still running over a33afa8..r79/native (~7k lines).
 - P6a stdcorpora harness landed 6bbf9a2 (unmerged, holdout-safe).
+
+## 2026-07-07 ~09:00: adversarial review SAFE TO MERGE; P5 + scc-fix merged
+- Opus review over full 7k-line diff: SAFE TO MERGE; default path empirically bit-identical; all heavy
+  subsystems off-default+gated. 5 findings, none blocking (recorded in r80 plan).
+- Fixed review finding #1 (partial): scc recursion-limit leak (save/restore). Full iterative-Tarjan -> r80.
+- MERGED P5 clusters + warning fix into r79/native (e02a2d2; only .pyc conflicts, resolved; untracked .pyc
+  going forward + added __pycache__ to .gitignore). Combined head: 58 scoped tests green, honest warning fires.
+- r79/native NOW = complete sprint. Remaining P6: docs rebuild, then merge-to-develop DECISION (coordinate
+  with fidelity tab -- do NOT unilaterally merge to shared develop).

@@ -100,3 +100,21 @@ hostname mismatch on their cert) -> no live corpus yet. FOLLOWUP: fetch Rome/Nor
 working mirror (GitHub mirrors of Rome-Lib exist; SuiteSparse via ssgetpy or sparse.tamu.edu),
 drop into eval_output/stdcorpora/, run scripts/r79_stdcorpora_eval.py. Harness works on any
 dropped-in corpus; no tuning against it (holdout).
+
+## Adversarial review findings (2026-07-07, Opus over a33afa8..r79/native; verdict SAFE TO MERGE)
+Default path empirically BIT-IDENTICAL to pre-sprint; all heavy subsystems off-by-default+gated.
+Deferred hardening items (none merge-blocking; address in r80):
+1. [PARTIALLY DONE] scc.py recursive Tarjan: recursion-limit LEAK fixed now (save/restore in finally,
+   commit on r79/native). STILL TODO before hybrid_v2 auto-routing: rewrite to ITERATIVE Tarjan
+   (explicit stack) to remove the deep-graph SEGFAULT risk (Python doesn't raise catchable
+   RecursionError past real C-stack depth).
+2. Quality knob cannot detect an explicitly-set multi_start_k=1 (== default sentinel) -> gets
+   overwritten by quality>=high. Documented limitation (LayoutConfig doesn't track constructor-set
+   fields). Fix: track explicitly-set fields, or use a sentinel default (None).
+3. native_stress_ml _assert_memory_budget uses a LINEAR (N+E)*3 estimate; under-counts if any
+   guarded stage is super-linear. Add an N^2 term or assert stages are O(N+E).
+4. native_stress_ml violates decomposable-ops: _hub_stride_sample/_induced_sample_problem/
+   _interpolate_from_sample/_apply_local_repulsion are private funcs, should be registered ops.
+5. CLARIFICATION: projection.py is NOT modified in r79/native -- the P3b3 projector fix lives on
+   r79/p3b-wip (unmerged). The merged head's shared _project_exact still has last-write-wins
+   advanced-index accumulation (converges because damped+iterated). r80 angle 3 lands the real fix.
