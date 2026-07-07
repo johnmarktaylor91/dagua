@@ -2845,9 +2845,38 @@ def _trace_torchlens_graph(name: str, model: Any, inputs: Any, torchlens_module:
     return _cached_torchlens_graph(
         name,
         lambda: DaguaGraph.from_torchlens(
-            torchlens_module.log_forward_pass(model, inputs, vis_mode="none")
+            _trace_torchlens_history(model, inputs, torchlens_module)
         ),
     )
+
+
+def _trace_torchlens_history(model: Any, inputs: Any, torchlens_module: Any) -> Any:
+    """Run a TorchLens trace across legacy and current public APIs.
+
+    Parameters
+    ----------
+    model : Any
+        PyTorch module to trace.
+    inputs : Any
+        Input batch forwarded to the model trace.
+    torchlens_module : Any
+        Imported TorchLens module exposing either ``log_forward_pass`` or
+        ``trace``.
+
+    Returns
+    -------
+    Any
+        TorchLens model-history object accepted by ``DaguaGraph.from_torchlens``.
+    """
+    trace_fn = getattr(torchlens_module, "log_forward_pass", None)
+    if trace_fn is not None:
+        try:
+            return trace_fn(model, inputs, vis_mode="none")
+        except TypeError as exc:
+            if "vis_mode" not in str(exc):
+                raise
+
+    return torchlens_module.trace(model, inputs)
 
 
 def _torchlens_graphs() -> List[TestGraph]:
