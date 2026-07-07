@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Tuple
 
 import torch
@@ -9,7 +10,11 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
-from dagua.layout.ops.cluster_geometry import ClusterLabelMetrics, compute_cluster_placement_bbox
+from dagua.layout.ops.cluster_geometry import (
+    ClusterLabelMetrics,
+    ClusterTree,
+    compute_cluster_placement_bbox,
+)
 
 
 def _make_nested_clusters_graph() -> DaguaGraph:
@@ -65,6 +70,33 @@ def _make_cluster_showcase_graph() -> DaguaGraph:
     return graph
 
 
+def _make_deep_direct_membership_graph() -> DaguaGraph:
+    """Build a depth-four cluster hierarchy using direct parent members.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph whose cluster metadata exercises direct-member and nested
+        descendant expansion.
+    """
+    graph = DaguaGraph(direction="TB")
+    for source, target in [
+        ("entry", "outer_leaf"),
+        ("outer_leaf", "middle_leaf"),
+        ("middle_leaf", "inner_leaf"),
+        ("inner_leaf", "core_a"),
+        ("inner_leaf", "core_b"),
+        ("core_a", "exit"),
+        ("core_b", "exit"),
+    ]:
+        graph.add_edge(source, target)
+    graph.add_cluster("outer", ["outer_leaf"])
+    graph.add_cluster("middle", ["middle_leaf"], parent="outer")
+    graph.add_cluster("inner", ["inner_leaf"], parent="middle")
+    graph.add_cluster("core", ["core_a", "core_b"], parent="inner")
+    return graph
+
+
 def _cluster_bbox(
     graph: DaguaGraph,
     positions: torch.Tensor,
@@ -91,7 +123,8 @@ def _cluster_bbox(
     """
     graph.compute_node_sizes()
     assert graph.node_sizes is not None
-    members = graph.clusters[cluster_name]
+    tree = ClusterTree.from_flat_membership(graph.clusters, graph.cluster_parents)
+    members = sorted(tree.descendants_per_cluster[cluster_name])
     box = compute_cluster_placement_bbox(
         inner_positions=positions[members].to(dtype=torch.float32),
         inner_sizes=graph.node_sizes[members].to(dtype=torch.float32),
@@ -197,6 +230,43 @@ def _layout_for_driver(graph: DaguaGraph) -> Tuple[torch.Tensor, LayoutConfig]:
     return layout(graph, config), config
 
 
+def _assert_child_clusters_contained(
+    graph: DaguaGraph,
+    positions: torch.Tensor,
+    config: LayoutConfig,
+) -> None:
+    """Assert every child cluster bbox is inside its parent bbox.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph containing nested cluster metadata.
+    positions : torch.Tensor
+        Layout positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Cluster padding configuration used for bbox reconstruction.
+
+    Returns
+    -------
+    None
+        The function raises an assertion failure when containment breaks.
+    """
+    tree = ClusterTree.from_flat_membership(graph.clusters, graph.cluster_parents)
+    boxes = {
+        cluster_name: _cluster_bbox(graph, positions, cluster_name, config)
+        for cluster_name in graph.clusters
+    }
+    for child_name, parent_name in tree.parents.items():
+        if parent_name is None:
+            continue
+        child = boxes[child_name]
+        parent = boxes[parent_name]
+        assert float(parent[0]) <= float(child[0]) + 1.0e-2
+        assert float(parent[1]) <= float(child[1]) + 1.0e-2
+        assert float(parent[2]) + 1.0e-2 >= float(child[2])
+        assert float(parent[3]) + 1.0e-2 >= float(child[3])
+
+
 def test_nested_clusters_have_disjoint_siblings_and_containment() -> None:
     """Nested siblings should be disjoint and structurally contained."""
     graph = _make_nested_clusters_graph()
@@ -261,3 +331,56 @@ def test_cluster_aware_false_keeps_legacy_flat_algorithm_path() -> None:
 
     assert positions.shape == (graph.num_nodes, 2)
     assert torch.isfinite(positions).all()
+
+
+def test_default_native_cluster_aware_layered_layout_warns_about_flat_fallback() -> None:
+    """Default native clustered DAG layout should warn about flat placement."""
+    graph = _make_nested_clusters_graph()
+    config = LayoutConfig(cluster_aware=True, steps=8, seed=42)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        positions = layout(graph, config)
+
+    fallback_warnings = [
+        item
+        for item in caught
+        if "using flat native placement with cluster losses" in str(item.message)
+    ]
+    assert len(fallback_warnings) == 1
+    assert positions.shape == (graph.num_nodes, 2)
+    assert torch.isfinite(positions).all()
+    _assert_child_clusters_contained(graph, positions, config)
+
+
+def test_native_stress_cluster_aware_layout_uses_recursive_driver() -> None:
+    """Explicit native stress should also support cluster-aware placement."""
+    graph = _make_cluster_showcase_graph()
+    config = LayoutConfig(algorithm="native_stress", cluster_aware=True, steps=8, seed=42)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        positions = layout(graph, config)
+
+    fallback_warnings = [
+        item
+        for item in caught
+        if "falling back to legacy flat placement" in str(item.message)
+        or "using flat native placement with cluster losses" in str(item.message)
+    ]
+    assert fallback_warnings == []
+    assert positions.shape == (graph.num_nodes, 2)
+    assert torch.isfinite(positions).all()
+    _assert_child_clusters_contained(graph, positions, config)
+
+
+def test_default_native_handles_four_level_nested_clusters() -> None:
+    """Recursive native placement should handle cluster depth greater than three."""
+    graph = _make_deep_direct_membership_graph()
+    config = LayoutConfig(cluster_aware=True, steps=8, seed=42)
+
+    positions = layout(graph, config)
+
+    assert positions.shape == (graph.num_nodes, 2)
+    assert torch.isfinite(positions).all()
+    _assert_child_clusters_contained(graph, positions, config)
