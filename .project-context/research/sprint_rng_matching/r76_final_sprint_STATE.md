@@ -849,3 +849,26 @@ for retries. 2-attempt max per work item, then park documented.
 - Monster bench rescoped 100->25 seeds per JMT ("25 seeds is plenty"): 77,040-run
   universe, --resume credited prior work, ~14.4% as of resume. Remaining plan unchanged:
   bench done -> THE definitive full-universe re-ledger (supersedes r77).
+
+## 2026-07-07: monster bench -> TARGETED cut (JMT decision)
+JMT: "targeted cut now, then when confident about the fidelity ceiling let the full thing
+grind for a week for due diligence." Full 240-engine x 15-graph monster bench (~6-10 day
+ETA, was at 19% = 14,725/77,040) STOPPED; exact command banked at
+r78_scratch/MONSTER_BENCH_FULL_CMD.txt for the later exhaustive documentation run.
+
+Ledger-gap inventory (from r77 per_combo.json, 3955 rows):
+- 87 big-graph INSUFFICIENT (all matched_seeds<30; 0 disconnected -> all fixable; 86/87
+  stochastic Mode A so no deterministic shortcut). 20 engines x 14 graphs; 34 on 2000-node.
+- 24 gem-stale (classic_gem_iters100/500/2000 on 8 x 500-node; stale pre-gem-fix scoring).
+- 180 SMALL-graph insufficient (22 engines x 80 graphs) -- SEPARATE fast concern, NOT part
+  of monster bench; pending WHY-insufficient triage before benching (ref-cant-do vs low-n).
+
+Targeted benches (fresh dirs, 35 seeds seed-start 100 -> clears the >=30 matched gate;
+JMT's "25 plenty" was confidence not the scorer's own gate):
+- FAST-BIG: benchmark_100seed_r78_targeted_fastbig, pid /tmp/r78_targeted_fastbig.pid,
+  21 eng x 9 (500-node) graphs, 4 workers. Covers 53 insuff + 24 gem.
+- SLOW: benchmark_100seed_r78_targeted_slow, pid /tmp/r78_targeted_slow.pid, 11 eng x 5
+  (2000-node) graphs, 5 workers, 6h/8h timeouts. Covers 34 insuff.
+Target combos for rescore: /tmp/r78_targeted_combos.txt (291). ba_5000 DROPPED (0 gaps).
+GOTCHA: run_benchmark --engines accepts specific variant_ids (classic_fr_steps200) and
+with --variants does NOT re-expand to siblings (verified run_benchmark.py:1013-1016).
