@@ -146,6 +146,14 @@ def _build_cluster_inner_pipeline(algorithm: str, config: LayoutConfig) -> Optio
         from dagua.layout.ops.pipelines.sfdp import build_sfdp_pipeline
 
         return build_sfdp_pipeline(steps=steps)
+    if normalized == "native_stress":
+        from dagua.layout.ops.base import Pipeline
+        from dagua.layout.ops.cluster_driver import NativeClusterLevelLayout
+
+        return Pipeline(
+            [NativeClusterLevelLayout(algorithm=normalized, config=config)],
+            name=f"{normalized}_cluster_inner",
+        )
     return None
 
 
@@ -1084,12 +1092,21 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             cluster_pos = _layout_cluster_aware_pipeline(graph, config)
             if cluster_pos is not None:
                 return cluster_pos
-            warnings.warn(
-                f"dagua.layout: cluster_aware=True is not yet supported for "
-                f"algorithm={config.algorithm!r}; falling back to legacy flat placement.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            if config.algorithm == "dagua_native":
+                warnings.warn(
+                    "dagua.layout: recursive cluster placement is not yet available for "
+                    "layered/DAG clusters with algorithm='dagua_native'; using flat native "
+                    "placement with cluster losses.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    f"dagua.layout: cluster_aware=True is not yet supported for "
+                    f"algorithm={config.algorithm!r}; falling back to legacy flat placement.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         kwargs: dict[str, object] = {
             "edge_index": graph.edge_index,
             "num_nodes": graph.num_nodes,
@@ -1133,6 +1150,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 pos = pipeline_fn(**kwargs)
                 direction = config.direction if config else getattr(graph, "direction", "TB")
                 pos = _apply_direction(pos, direction)
+                pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
                 pos = pos.to(dtype=torch.float32)
                 graph.cache_layout(pos)
                 return pos
@@ -1252,6 +1270,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         # Apply direction transform
         direction = config.direction if config else graph.direction
         pos = _apply_direction(pos, direction)
+        pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
         graph.cache_layout(pos)
         return pos
     finally:
@@ -1661,6 +1680,10 @@ def _layout_inner(
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
     execution_mode = _resolve_execution_mode(config, device, n)
+    if device == "cuda" and not torch.cuda.is_available():
+        if getattr(config, "verbose", False):
+            print("[dagua]   Layout solve: CPU fallback (no CUDA)", flush=True)
+        device = "cpu"
     resident_device = "cpu" if execution_mode == "subset_gpu" else device
     resident_device_type = torch.device(resident_device).type
     if node_sizes.ndim == 1:
@@ -3550,6 +3573,42 @@ def _apply_direction(pos: torch.Tensor, direction: str) -> torch.Tensor:
         result[:, 1] = pos[:, 0]
         return result
     return pos
+
+
+def _project_final_hard_pins(pos: torch.Tensor, flex: Any) -> torch.Tensor:
+    """Apply hard LayoutFlex pins to final returned coordinates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    flex : Any
+        Optional ``LayoutFlex``-like object whose ``pins`` keys have already
+        been resolved to integer node indices.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with hard-pinned coordinates overwritten. The input is
+        returned unchanged when no hard pins are present.
+    """
+    pins = getattr(flex, "pins", None)
+    if not pins:
+        return pos
+    projected: Optional[torch.Tensor] = None
+    for node_index, values in pins.items():
+        if not isinstance(node_index, int):
+            continue
+        if node_index < 0 or node_index >= int(pos.shape[0]):
+            continue
+        x_flex, y_flex = values
+        for axis, axis_flex in enumerate((x_flex, y_flex)):
+            if axis_flex is None or not bool(getattr(axis_flex, "is_hard", False)):
+                continue
+            if projected is None:
+                projected = pos.clone()
+            projected[node_index, axis] = float(axis_flex.target)
+    return pos if projected is None else projected
 
 
 def _resolve_flex_ids(config: LayoutConfig, graph) -> LayoutConfig:

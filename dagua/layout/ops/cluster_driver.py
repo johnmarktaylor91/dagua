@@ -61,6 +61,83 @@ class _PlacementItem:
 
 
 @dataclass(frozen=True)
+class NativeClusterLevelLayout(Op):
+    """Place one cluster-driver hierarchy level with a native pipeline.
+
+    The recursive cluster driver builds each hierarchy level as a flat local
+    problem whose nodes are either direct graph leaves or rigid child-cluster
+    placeholders. This op calls a native public pipeline entrypoint for that
+    local problem without forwarding cluster metadata, so dummy or refinement
+    machinery only sees level items and never recurses into placeholders.
+
+    Parameters
+    ----------
+    algorithm : str
+        Native algorithm entrypoint, currently ``"native_stress"``.
+    config : Any
+        Layout configuration copied by the native pipeline entrypoint before
+        it resolves per-level automatic settings.
+    """
+
+    algorithm: str
+    config: object
+
+    name = "native_cluster_level_layout"
+    category = OpCategory.CONTROL
+    reads = ("pos",)
+    writes = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run the selected native pipeline on one local placement problem.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Local hierarchy-level problem with placeholder nodes already
+            represented by node sizes.
+        state : SolveState
+            Current solve state. ``state.pos`` is forwarded as an optional
+            warm start when present.
+        ctx : RuntimeContext
+            Runtime context providing the requested execution device.
+
+        Returns
+        -------
+        SolveState
+            Updated state with ``pos`` set to local item centers.
+
+        Raises
+        ------
+        ValueError
+            If an unsupported native cluster algorithm is requested.
+        """
+        if problem.node_sizes is None:
+            raise ValueError("NativeClusterLevelLayout requires problem.node_sizes.")
+
+        normalized = self.algorithm.lower()
+        device = ctx.plan.device if ctx.plan.device is not None else "cpu"
+        if normalized == "native_stress":
+            from dagua.layout.ops.pipelines.native_stress import layout_native_stress_pipeline
+
+            state.pos = layout_native_stress_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                node_sizes=problem.node_sizes,
+                config=self.config,
+                device=device,
+                seed=problem.seed,
+                edge_weights=problem.edge_weights,
+            ).to(dtype=torch.float32)
+            return state
+        raise ValueError(f"Unsupported native cluster algorithm: {self.algorithm!r}")
+
+
+@dataclass(frozen=True)
 class ClusterAwareDriver(Op):
     """Wrap a leaf-placement pipeline into recursive cluster-aware placement.
 
@@ -335,17 +412,29 @@ class ClusterAwareDriver(Op):
         item_index = {item.key: local_index for local_index, item in enumerate(items)}
         owner_by_node = self._node_owner_at_level(tree, cluster_name, items)
         edges: list[tuple[int, int]] = []
-        for source, target in problem.edge_index.t().tolist():
+        edge_weights: list[float] = []
+        source_weights = problem.edge_weights
+        for edge_offset, (source, target) in enumerate(problem.edge_index.t().tolist()):
             source_owner = owner_by_node.get(int(source))
             target_owner = owner_by_node.get(int(target))
             if source_owner is None or target_owner is None or source_owner == target_owner:
                 continue
             edges.append((item_index[source_owner], item_index[target_owner]))
+            if source_weights is not None:
+                edge_weights.append(float(source_weights[int(edge_offset)].item()))
 
         if edges:
             edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+            sub_edge_weights = (
+                torch.tensor(edge_weights, dtype=torch.float32)
+                if source_weights is not None
+                else None
+            )
         else:
             edge_index = torch.empty((2, 0), dtype=torch.long)
+            sub_edge_weights = (
+                torch.empty((0,), dtype=torch.float32) if source_weights is not None else None
+            )
         node_sizes = torch.stack([item.size for item in items]).to(dtype=torch.float32)
         return LayoutProblem(
             edge_index=edge_index,
@@ -353,6 +442,7 @@ class ClusterAwareDriver(Op):
             node_sizes=node_sizes,
             direction=problem.direction,
             seed=problem.seed,
+            edge_weights=sub_edge_weights,
         )
 
     def _node_owner_at_level(
