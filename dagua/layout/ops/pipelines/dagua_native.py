@@ -31,6 +31,7 @@ from dagua.layout.ops.pipelines.native_force_directed import (
     layout_native_force_directed_pipeline,
 )
 from dagua.layout.ops.pipelines.native_hybrid import build_native_hybrid_pipeline
+from dagua.layout.ops.pipelines.native_hybrid_v2 import build_native_hybrid_v2_pipeline
 from dagua.layout.ops.pipelines.native_layered_dag import build_native_layered_dag_pipeline
 from dagua.layout.ops.pipelines.native_planar import (
     PlanarityFailure,
@@ -40,6 +41,11 @@ from dagua.layout.ops.pipelines.native_stress import build_native_stress_pipelin
 from dagua.layout.ops.pipelines.native_tree import build_native_tree_pipeline
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
 from dagua.layout.ops.preprocess import DetectComponents
+from dagua.layout.ops.scc import (
+    SCCPredicateStats,
+    compute_scc_predicate_stats,
+    hybrid_v2_predicate_matches,
+)
 from dagua.layout.ops.state import (
     ExecutionPlan,
     FlexConstraints,
@@ -1174,6 +1180,82 @@ def _selected_force_pipeline(config: LayoutConfig) -> Optional[str]:
     return str(value).lower()
 
 
+def _should_route_hybrid_v2(
+    structure: GraphStructure,
+    stats: Optional[SCCPredicateStats],
+    cyclicity_ratio: float,
+) -> bool:
+    """Return whether the SCC-condensation route should handle a graph.
+
+    Parameters
+    ----------
+    structure : GraphStructure
+        Classified graph topology.
+    stats : SCCPredicateStats, optional
+        SCC coverage summary computed for the original directed graph.
+    cyclicity_ratio : float
+        Existing feedback-arc cyclicity ratio.
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph is directed, meaningfully cyclic, and has a
+        dominant nontrivial SCC footprint.
+    """
+    if stats is None:
+        return False
+    if bool(getattr(structure, "is_directed_acyclic", True)):
+        return False
+    if cyclicity_ratio <= 0.0:
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+    return hybrid_v2_predicate_matches(stats)
+
+
+def _flat_stress_route_suppressed_by_hybrid_v2(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    graph_structure: Optional[GraphStructure],
+    config: LayoutConfig,
+) -> bool:
+    """Return whether hybrid-v2 should take precedence over flat stress.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed graph connectivity with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    graph_structure : GraphStructure, optional
+        Optional pre-classified graph metadata.
+    config : LayoutConfig
+        Effective layout configuration that can cache SCC stats.
+
+    Returns
+    -------
+    bool
+        ``True`` when the SCC-condensation predicate matches.
+    """
+    if not bool(getattr(config, "_dagua_native_enable_hybrid_v2_auto", False)):
+        return False
+
+    structure = graph_structure
+    if structure is None:
+        structure = classify_graph(edge_index, num_nodes)
+    if bool(getattr(structure, "is_directed_acyclic", True)):
+        return False
+    stats = getattr(config, "_dagua_native_scc_stats", None)
+    if stats is None:
+        stats = compute_scc_predicate_stats(edge_index, num_nodes)
+        setattr(config, "_dagua_native_scc_stats", stats)
+    return _should_route_hybrid_v2(
+        structure=structure,
+        stats=stats,
+        cyclicity_ratio=float(getattr(structure, "cyclicity_ratio", 0.0)),
+    )
+
+
 def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutConfig) -> str:
     """Choose a native sub-pipeline for one prepared problem.
 
@@ -1188,7 +1270,8 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     -------
     str
         One of ``"tree"``, ``"layered_dag"``, ``"force_directed"``,
-        ``"hybrid"``, ``"stress"``, or ``"legacy_monolith"``.
+        ``"hybrid"``, ``"hybrid_v2"``, ``"stress"``, or
+        ``"legacy_monolith"``.
     """
     forced = _selected_force_pipeline(config)
     if forced in {
@@ -1196,6 +1279,7 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
         "layered_dag",
         "force_directed",
         "hybrid",
+        "hybrid_v2",
         "planar",
         "stress",
         "legacy_monolith",
@@ -1218,6 +1302,15 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     if getattr(config, "try_planar_first", False) and bool(getattr(structure, "is_planar", False)):
         return "planar"
     cyclicity_ratio = float(getattr(structure, "cyclicity_ratio", 0.0))
+    scc_stats = getattr(config, "_dagua_native_scc_stats", None)
+    if bool(
+        getattr(config, "_dagua_native_enable_hybrid_v2_auto", False)
+    ) and _should_route_hybrid_v2(
+        structure=structure,
+        stats=scc_stats,
+        cyclicity_ratio=cyclicity_ratio,
+    ):
+        return "hybrid_v2"
     # Removed auto-route to force_directed. Empirically the
     # PivotMDS+Stress force pipeline loses to layered_dag/hybrid on every
     # cyclic benchmark candidate today (2026-04-24 measurement). Users can
@@ -1260,6 +1353,8 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         return build_native_stress_pipeline(config)
     if selected == "hybrid":
         return build_native_hybrid_pipeline(config)
+    if selected == "hybrid_v2":
+        return build_native_hybrid_v2_pipeline(config)
     return build_native_layered_dag_pipeline(config)
 
 
@@ -1443,6 +1538,16 @@ def _run_native_problem(
     if structure is None:
         structure = classify_graph(problem.edge_index, problem.num_nodes)
         problem.structure = structure
+    if (
+        bool(getattr(config, "_dagua_native_enable_hybrid_v2_auto", False))
+        and not bool(getattr(structure, "is_directed_acyclic", True))
+        and getattr(config, "_dagua_native_scc_stats", None) is None
+    ):
+        setattr(
+            config,
+            "_dagua_native_scc_stats",
+            compute_scc_predicate_stats(problem.edge_index, problem.num_nodes),
+        )
 
     selected = _choose_native_pipeline(structure=structure, config=config)
     if selected == "legacy_monolith":
@@ -4615,6 +4720,12 @@ def layout_dagua_native_pipeline(
         and num_nodes >= 20
         and edge_index is not None
         and edge_index.numel() > 0
+        and not _flat_stress_route_suppressed_by_hybrid_v2(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            graph_structure=graph_structure,
+            config=effective_config,
+        )
     ):
         try:
             from dagua.layout.cycle import detect_back_edges, make_acyclic_robust
