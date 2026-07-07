@@ -842,6 +842,111 @@ def _compact_x_by_layer(
     return out
 
 
+def _row_adjacent_required_spacing(
+    left_node: int,
+    right_node: int,
+    node_sizes: torch.Tensor,
+    min_gap: float,
+) -> float:
+    """Return the minimum same-row center spacing for a rendered node pair.
+
+    Parameters
+    ----------
+    left_node : int
+        Left node id in the row order.
+    right_node : int
+        Right node id in the row order.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    min_gap : float
+        Minimum visual gap added after the wider node extent.
+
+    Returns
+    -------
+    float
+        Required center-to-center x distance.
+    """
+    left_width = float(node_sizes[left_node, 0].item())
+    right_width = float(node_sizes[right_node, 0].item())
+    return max(left_width, right_width) + max(float(min_gap), 0.0)
+
+
+def _enforce_row_adjacent_min_spacing(
+    pos: torch.Tensor,
+    layers: torch.Tensor,
+    ordering: torch.Tensor,
+    node_sizes: torch.Tensor,
+    min_gap: float,
+) -> torch.Tensor:
+    """Expand crowded rank rows to a minimum adjacent center spacing.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    layers : torch.Tensor
+        CPU layer assignment tensor with shape ``[N]``.
+    ordering : torch.Tensor
+        CPU in-layer ordering tensor with shape ``[N]`` used as a stable
+        tie-breaker when x coordinates coincide.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    min_gap : float
+        Minimum visual gap added after the wider adjacent node width.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with row-adjacent x distances repaired. Uncrowded rows
+        are copied through exactly.
+    """
+    out = pos.detach().clone()
+    if layers.numel() == 0 or out.shape[0] <= 1:
+        return out
+
+    changed = False
+    pos_cpu = out.detach().to(device="cpu", dtype=torch.float32)
+    for layer_index in torch.unique(layers, sorted=True).tolist():
+        layer_nodes = torch.where(layers == int(layer_index))[0].tolist()
+        if len(layer_nodes) <= 1:
+            continue
+        layer_nodes.sort(
+            key=lambda node: (
+                float(pos_cpu[node, 0].item()),
+                int(ordering[node].item()),
+                node,
+            )
+        )
+        repaired_x = [float(pos_cpu[layer_nodes[0], 0].item())]
+        row_changed = False
+        for left_node, right_node in zip(layer_nodes, layer_nodes[1:]):
+            current_x = float(pos_cpu[right_node, 0].item())
+            required_x = repaired_x[-1] + _row_adjacent_required_spacing(
+                left_node=left_node,
+                right_node=right_node,
+                node_sizes=node_sizes,
+                min_gap=min_gap,
+            )
+            if current_x < required_x:
+                repaired_x.append(required_x)
+                row_changed = True
+            else:
+                repaired_x.append(current_x)
+        if not row_changed:
+            continue
+
+        original_midpoint = (
+            float(pos_cpu[layer_nodes[0], 0].item()) + float(pos_cpu[layer_nodes[-1], 0].item())
+        ) * 0.5
+        repaired_midpoint = (repaired_x[0] + repaired_x[-1]) * 0.5
+        shift = original_midpoint - repaired_midpoint
+        for node, x_value in zip(layer_nodes, repaired_x):
+            out[node, 0] = float(x_value + shift)
+        changed = True
+
+    return out if changed else pos.detach().clone()
+
+
 def _cluster_interval(pos: torch.Tensor, members: Sequence[int]) -> Tuple[float, float]:
     """Return a cluster x interval for valid members.
 
@@ -2084,12 +2189,22 @@ class RankRowSnapConfig:
         wide DAGs often use useful sub-rank vertical separation during the
         gradient polish; snapping them to only a few rows regresses protected
         wins.
+    node_sep : float, default=1.0
+        Node separation used to derive the default row-adjacent visual gap.
+    row_min_gap : float | None, default=None
+        Optional minimum visual gap for adjacent same-row centers after rank
+        snapping. When omitted, ``row_min_gap_fraction * node_sep`` is used.
+    row_min_gap_fraction : float, default=0.35
+        Fraction of ``node_sep`` used for the default adjacent-row visual gap.
     """
 
     enabled: bool = True
     is_acyclic: bool = True
     require_forward_edges: bool = True
     min_layers: int = 10
+    node_sep: float = 1.0
+    row_min_gap: Optional[float] = None
+    row_min_gap_fraction: float = 0.35
 
 
 @dataclass(frozen=True)
@@ -2111,6 +2226,12 @@ class ClusterAwareXCompactionConfig:
         the dossier's clustered layered failures while avoiding small
         cross-talk graphs where dense sibling links are better left to the
         gradient solution.
+    row_min_gap : float | None, default=None
+        Optional minimum visual gap for adjacent same-row centers after
+        cluster shifts. When omitted, ``row_min_gap_fraction * node_sep`` is
+        used.
+    row_min_gap_fraction : float, default=0.35
+        Fraction of ``node_sep`` used for the default adjacent-row visual gap.
     """
 
     enabled: bool = True
@@ -2118,6 +2239,8 @@ class ClusterAwareXCompactionConfig:
     cluster_gap_multiplier: float = 1.0
     min_clusters: int = 2
     min_long_edge_fraction: float = 0.25
+    row_min_gap: Optional[float] = None
+    row_min_gap_fraction: float = 0.35
 
 
 @dataclass(frozen=True)
@@ -2370,6 +2493,18 @@ class ClusterAwareXCompaction(Op):
                 depth=depth,
                 min_gap=min_gap,
             )
+        row_min_gap = (
+            float(self.config.row_min_gap)
+            if self.config.row_min_gap is not None
+            else float(self.config.node_sep) * float(self.config.row_min_gap_fraction)
+        )
+        compacted = _enforce_row_adjacent_min_spacing(
+            pos=compacted,
+            layers=layers_cpu,
+            ordering=ordering_cpu,
+            node_sizes=active_node_sizes,
+            min_gap=max(row_min_gap, 0.0),
+        )
         if compacted.numel() > 0:
             compacted[:, 0] -= (compacted[:, 0].min() + compacted[:, 0].max()) * 0.5
         state.pos = compacted.detach().to(device=state.pos.device, dtype=state.pos.dtype)
@@ -2425,7 +2560,10 @@ class RankRowSnap(Op):
         state.extras[_RANK_ROW_SNAP_APPLIED_KEY] = False
         if not self.config.enabled or not self.config.is_acyclic or state.pos is None:
             return state
-        active_num_nodes, active_edge_index, _ = _active_coordinate_graph(problem, state)
+        active_num_nodes, active_edge_index, active_node_sizes = _active_coordinate_graph(
+            problem,
+            state,
+        )
         layers_cpu = _validate_layers(state.layers, active_num_nodes)
         if int(torch.unique(layers_cpu).numel()) < self.config.min_layers:
             return state
@@ -2443,6 +2581,23 @@ class RankRowSnap(Op):
                 continue
             members = members_cpu.to(device=snapped.device)
             snapped[members, 1] = snapped[members, 1].median()
+        row_min_gap = (
+            float(self.config.row_min_gap)
+            if self.config.row_min_gap is not None
+            else float(self.config.node_sep) * float(self.config.row_min_gap_fraction)
+        )
+        ordering_cpu = (
+            _validate_ordering(state.ordering, active_num_nodes)
+            if state.ordering is not None
+            else _ordering_from_current_x(layers_cpu, snapped)
+        )
+        snapped = _enforce_row_adjacent_min_spacing(
+            pos=snapped,
+            layers=layers_cpu,
+            ordering=ordering_cpu,
+            node_sizes=active_node_sizes,
+            min_gap=max(row_min_gap, 0.0),
+        )
         state.pos = snapped
         state.extras[_RANK_ROW_SNAP_APPLIED_KEY] = True
         return state
