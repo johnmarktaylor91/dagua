@@ -341,7 +341,13 @@ def _tarjan_scc(adjacency: list[list[int]]) -> list[list[int]]:
         Components in deterministic discovery order.
     """
     num_nodes = len(adjacency)
-    sys.setrecursionlimit(max(sys.getrecursionlimit(), (2 * num_nodes) + 100))
+    # Recursive Tarjan needs headroom for deep graphs, but the limit is a global
+    # process setting -- raise it only for the duration of this call and restore it
+    # in the finally below so it never leaks into the rest of the session.
+    # (A future iterative Tarjan rewrite removes the deep-graph segfault risk entirely;
+    # required before hybrid_v2 is promoted to auto-routing. See r80 follow-up plan.)
+    _saved_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(_saved_recursion_limit, (2 * num_nodes) + 100))
     index = 0
     stack: list[int] = []
     on_stack = [False] * num_nodes
@@ -376,9 +382,12 @@ def _tarjan_scc(adjacency: list[list[int]]) -> list[list[int]]:
                 break
         components.append(component)
 
-    for node in range(num_nodes):
-        if indices[node] == -1:
-            strongconnect(node)
+    try:
+        for node in range(num_nodes):
+            if indices[node] == -1:
+                strongconnect(node)
+    finally:
+        sys.setrecursionlimit(_saved_recursion_limit)
     return components
 
 
