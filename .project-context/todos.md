@@ -1,6 +1,15 @@
 # Task & Bug Tracker
 
 ## Active Tasks
+- [ ] [HIGH] **Evaluate native algo on STANDARD graph-drawing corpora as a HELD-OUT set (r79 follow-up; JMT 2026-07-06).**
+  Once we are happy with the r79 native algorithm on our own 108-graph suite, run it (and the frozen
+  competitor roster) on the community-standard corpora: Rome graphs, North/AT&T DAGs, SuiteSparse
+  matrix collection samples. Score with ESTABLISHED metrics (normalized 10-metric suite, stress,
+  neighborhood preservation) alongside our composite. HOLDOUT DISCIPLINE: do NOT tune, route-flip, or
+  fix anything against these corpora before the first full evaluation -- they are the honest
+  generalization test (and the anti-overfitting check our own anti-gaming rules want). Doubles as the
+  evidence base if we pursue publication (router/portfolio result; see r79 session notes
+  ~/.claude/research/dagua/r79-native/). Natural slot: r79 P6 audit or immediately after merge.
 - [ ] [HIGH] **First-class `dagua.quality` + `dagua.compare` modules (productize the layout comparators).**
   JMT greenlit 2026-06-03: promote the layout-equivalence/quality metrics from internal eval utilities
   (`dagua/eval/equivalence_metrics.py`, committed f9d18e1 + per-component/per-axis extension) into a
