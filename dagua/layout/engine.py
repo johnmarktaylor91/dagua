@@ -1092,7 +1092,15 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             cluster_pos = _layout_cluster_aware_pipeline(graph, config)
             if cluster_pos is not None:
                 return cluster_pos
-            if config.algorithm != "dagua_native":
+            if config.algorithm == "dagua_native":
+                warnings.warn(
+                    "dagua.layout: recursive cluster placement is not yet available for "
+                    "layered/DAG clusters with algorithm='dagua_native'; using flat native "
+                    "placement with cluster losses.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            else:
                 warnings.warn(
                     f"dagua.layout: cluster_aware=True is not yet supported for "
                     f"algorithm={config.algorithm!r}; falling back to legacy flat placement.",

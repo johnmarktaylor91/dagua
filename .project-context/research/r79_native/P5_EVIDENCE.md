@@ -80,3 +80,9 @@ Generated 2-panel before/after PNGs, each `1800x812`:
 - Full recursive `dagua_native` driver with per-level native router reproduced no warning and passed containment, but regressed the sweep to legacy `49/9/35`, extended `6/1/8`; several clustered DAGs dropped more than 25 composite points.
 - Stress-only recursive placement for all default clustered graphs was worse on the clustered subset, with typical drops from 20 to 55 composite points.
 - Conclusion: recursive cluster support is safe to expose for `native_stress`, but layered/DAG recursive native placement remains a deeper algorithm issue.
+
+## Warning honesty fix
+
+- Restored a flat-placement warning when clustered `algorithm="dagua_native"` layouts do not enter the recursive cluster driver.
+- Kept the warning suppressed for explicit `algorithm="native_stress"` clustered layouts because that path is handled by `ClusterAwareDriver`.
+- The change only gates warning emission after recursive cluster dispatch returns `None`; layout geometry is unchanged.
