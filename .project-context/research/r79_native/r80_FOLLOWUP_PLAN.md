@@ -92,4 +92,11 @@ Sweep helpers: many stale branches can be swept after P6 merge per the branch-sw
 3. scripts/r79_baseline.py --dagua-only to confirm baseline.
 4. Pick the r80 angle (recommend projector-solo then route-to-own-force). Dispatch via codex
    with tight touched-file test gates + KNOWN_RED_TESTS.md deselects (NOT bare pytest -x).
-</content>
+
+## P6a harness status (2026-07-07)
+scripts/r79_stdcorpora_eval.py + loaders (.graph/.gml/.mtx) + tests BUILT and green on
+r79/p6a-stdcorpora (6bbf9a2). Fetch of graphdrawing.org/data/rome/rome.tar.gz FAILED (SSL
+hostname mismatch on their cert) -> no live corpus yet. FOLLOWUP: fetch Rome/North from a
+working mirror (GitHub mirrors of Rome-Lib exist; SuiteSparse via ssgetpy or sparse.tamu.edu),
+drop into eval_output/stdcorpora/, run scripts/r79_stdcorpora_eval.py. Harness works on any
+dropped-in corpus; no tuning against it (holdout).

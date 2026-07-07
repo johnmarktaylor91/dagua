@@ -85,4 +85,3 @@ merged is inert-by-default or baseline-neutral).
 - Cross-session watcher pkill hygiene kills other sessions' monitors -> ledger issue.
 - Full-suite `pytest tests/ -x` gates whack-a-mole for hours on pre-existing stale failures
   (P5 burned 11h) -> KNOWN_RED_TESTS.md + ledger issue; future gates scope to touched files.
-</content>
