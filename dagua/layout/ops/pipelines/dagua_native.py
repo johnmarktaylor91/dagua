@@ -53,7 +53,11 @@ from dagua.layout.ops.state import (
     RuntimeContext,
     SolveState,
 )
-from dagua.layout.resolve import build_flex_constraints, normalize_node_sizes
+from dagua.layout.resolve import (
+    build_flex_constraints,
+    normalize_node_sizes,
+    resolve_quality_budgets,
+)
 
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
 _DOT_DEFAULT_RANK_CENTER_SEP = 72.0
@@ -1589,6 +1593,7 @@ def _run_native_problem(
     if (
         getattr(config, "edge_equalize_polish", True)
         and _selected_force_pipeline(config) is None
+        and getattr(config, "time_budget_s", None) is None
         and selected in {"layered_dag", "tree", "hybrid", "force_directed"}
         and result.shape[0] >= 4
         and problem.edge_index.numel() > 0
@@ -1600,6 +1605,7 @@ def _run_native_problem(
             problem.edge_index,
             problem.node_sizes,
             cluster_ids=cluster_ids,
+            polish_battery=str(getattr(config, "_dagua_native_polish_battery", "full")),
         )
     return result
 
@@ -4315,6 +4321,7 @@ def _best_of_polish(
     margin: float = 0.1,
     *,
     cluster_ids: Optional[torch.Tensor] = None,
+    polish_battery: str = "full",
 ) -> torch.Tensor:
     """Try named polish candidates; return the best by composite.
 
@@ -4344,6 +4351,12 @@ def _best_of_polish(
         Node-size tensor with shape ``[N, 2]``.
     margin : float, default=0.1
         Minimum composite improvement to prefer a polished candidate.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids used by cluster-aware candidates.
+    polish_battery : str, default="full"
+        Quality-derived polish budget. ``"off"`` returns ``base_pos``;
+        ``"default"`` and ``"full"`` currently preserve the existing
+        class-gated candidate set.
 
     Returns
     -------
@@ -4351,6 +4364,9 @@ def _best_of_polish(
         Best position tensor with shape ``[N, 2]``.
     """
     from dagua.metrics import composite, full
+
+    if polish_battery == "off":
+        return base_pos
 
     def score(pos: torch.Tensor) -> float:
         torch.manual_seed(0)
@@ -4666,6 +4682,17 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    quality_budgets = resolve_quality_budgets(
+        float(getattr(effective_config, "quality", 0.5)),
+        num_nodes=num_nodes,
+    )
+    if (
+        int(getattr(effective_config, "multi_start_k", 1)) == 1
+        and not bool(getattr(effective_config, "_dagua_native_multi_start_resolved", False))
+        and getattr(effective_config, "time_budget_s", None) is None
+    ):
+        effective_config.multi_start_k = quality_budgets.multi_start_k
+        setattr(effective_config, "_dagua_native_multi_start_resolved", True)
     setattr(effective_config, "_dagua_native_has_clusters", bool(clusters))
     if fidelity_mode is not None:
         setattr(effective_config, "fidelity_mode", fidelity_mode)
@@ -4776,6 +4803,7 @@ def layout_dagua_native_pipeline(
                             # The picker margin gate handles regression risk.
                             if (
                                 getattr(effective_config, "edge_equalize_polish", True)
+                                and getattr(effective_config, "time_budget_s", None) is None
                                 and node_sizes is not None
                                 and stress_pos.shape[0] >= 4
                             ):
@@ -4783,6 +4811,13 @@ def layout_dagua_native_pipeline(
                                     stress_pos,
                                     edge_index,
                                     node_sizes,
+                                    polish_battery=str(
+                                        getattr(
+                                            effective_config,
+                                            "_dagua_native_polish_battery",
+                                            "full",
+                                        )
+                                    ),
                                 )
                             if dot_cluster_fidelity:
                                 stress_pos = _apply_dot_cluster_fidelity_layout(
@@ -4809,6 +4844,7 @@ def layout_dagua_native_pipeline(
             candidate_config = copy.copy(effective_config)
             candidate_config.seed = candidate_seed
             candidate_config.multi_start_k = 1
+            setattr(candidate_config, "_dagua_native_multi_start_resolved", True)
             candidate_pos = layout_dagua_native_pipeline(
                 edge_index=edge_index,
                 num_nodes=num_nodes,
@@ -5007,11 +5043,19 @@ def layout_dagua_native_pipeline(
         if (
             getattr(effective_config, "edge_equalize_polish", True)
             and _selected_force_pipeline(effective_config) is None
+            and getattr(effective_config, "time_budget_s", None) is None
             and result.shape[0] >= 4
             and prepared_edge_index.numel() > 0
             and normalized_node_sizes is not None
         ):
-            result = _best_of_polish(result, prepared_edge_index, normalized_node_sizes)
+            result = _best_of_polish(
+                result,
+                prepared_edge_index,
+                normalized_node_sizes,
+                polish_battery=str(
+                    getattr(prepared_config, "_dagua_native_polish_battery", "full")
+                ),
+            )
         risk_state = ComponentTilingCrossingRisk(
             ComponentTilingCrossingRiskConfig(
                 enabled=bool(getattr(prepared_config, "component_tiling_crossing_risk", True))

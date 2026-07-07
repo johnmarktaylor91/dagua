@@ -270,7 +270,7 @@ def test_synthetic_graphs_include_final_structural_additions() -> None:
         petersen.edge_index.reshape(-1),
         minlength=petersen.num_nodes,
     )
-    assert graphs["petersen_10"].tags == {"regular", "famous", "small"}
+    assert graphs["petersen_10"].tags == {"regular", "famous", "small", "undirected"}
     assert petersen.num_nodes == 10
     assert petersen_degree.tolist() == [3] * 10
 

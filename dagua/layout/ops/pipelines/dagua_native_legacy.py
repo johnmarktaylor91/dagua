@@ -89,6 +89,7 @@ from dagua.layout.resolve import (
     build_loss_ops,
     normalize_node_sizes,
     prepare_pipeline_config,
+    resolve_quality_budgets,
 )
 from dagua.utils import longest_path_layering
 
@@ -338,6 +339,7 @@ def build_gradient_core(
     overlap_interval: int,
     stall_limit: int,
     rel_threshold: float,
+    time_budget_s: Optional[float] = None,
 ) -> Pipeline:
     """Build the inner differentiable optimizer as a named sub-pipeline.
 
@@ -360,6 +362,9 @@ def build_gradient_core(
         Consecutive-no-improve steps before early break.
     rel_threshold : float
         Relative-loss threshold for stall detection.
+    time_budget_s : float, optional
+        Wall-clock budget in seconds. When exceeded after an optimization
+        step, the loop exits and downstream final polish still runs.
 
     Returns
     -------
@@ -392,6 +397,7 @@ def build_gradient_core(
                         StallCountConfig(
                             limit=stall_limit,
                             rel_threshold=rel_threshold,
+                            time_budget_s=time_budget_s,
                         ),
                     ),
                     EarlyBreak(lambda problem, state, ctx: state.converged),
@@ -414,6 +420,7 @@ def _build_refine_pipeline_factory(
     weight_config: InitAnnealingScheduleConfig,
     optimizer_type: str,
     lr: float,
+    time_budget_s: Optional[float] = None,
 ):
     """Return a factory that builds a refine pipeline with a given step count.
 
@@ -453,6 +460,7 @@ def _build_refine_pipeline_factory(
                     overlap_interval=overlap_interval,
                     stall_limit=stall_limit,
                     rel_threshold=rel_threshold,
+                    time_budget_s=time_budget_s,
                 ),
             ],
             name=f"vcycle_refine_level_{steps}",
@@ -1126,6 +1134,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
     )
     stall_limit = int(getattr(config, "_dagua_native_stall_limit", 5))
     rel_threshold = float(getattr(config, "_dagua_native_rel_threshold", 1.0e-4))
+    time_budget_s = getattr(config, "_dagua_native_time_budget_s", None)
     optimizer_type = str(getattr(config, "_dagua_native_optimizer_type", "adam"))
     losses = build_loss_ops(
         config=config,
@@ -1215,6 +1224,8 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             ),
         ]
     )
+    if time_budget_s is not None:
+        crossing_reduction_ops = []
     # Sprint 2: branch on N. V-cycle above threshold; flat below.
     use_vcycle = bool(getattr(config, "_dagua_native_use_vcycle", False))
     if use_vcycle:
@@ -1230,6 +1241,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             weight_config=weight_config,
             optimizer_type=optimizer_type,
             lr=config.lr,
+            time_budget_s=time_budget_s,
         )
         coarse_init_factory = _build_coarse_init_pipeline_factory(
             resolved_node_sep=resolved_node_sep,
@@ -1335,6 +1347,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                 overlap_interval=overlap_interval,
                 stall_limit=stall_limit,
                 rel_threshold=rel_threshold,
+                time_budget_s=time_budget_s,
             ),
             # Sprint 10: barycenter crossing-minimization polish.
             # Runs after gradient_core / V-cycle so continuous layout
@@ -1434,6 +1447,17 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    quality_budgets = resolve_quality_budgets(
+        float(getattr(effective_config, "quality", 0.5)),
+        num_nodes=num_nodes,
+    )
+    if (
+        int(getattr(effective_config, "multi_start_k", 1)) == 1
+        and not bool(getattr(effective_config, "_dagua_native_multi_start_resolved", False))
+        and getattr(effective_config, "time_budget_s", None) is None
+    ):
+        effective_config.multi_start_k = quality_budgets.multi_start_k
+        setattr(effective_config, "_dagua_native_multi_start_resolved", True)
 
     # Sprint-20d: stress route for degenerate-layering cyclic graphs.
     # Small-world / dense-cyclic graphs have no acyclic skeleton, so the
@@ -1510,6 +1534,7 @@ def layout_dagua_native_pipeline(
             candidate_config = copy.copy(effective_config)
             candidate_config.seed = candidate_seed
             candidate_config.multi_start_k = 1
+            setattr(candidate_config, "_dagua_native_multi_start_resolved", True)
             candidate_pos = layout_dagua_native_pipeline(
                 edge_index=edge_index,
                 num_nodes=num_nodes,

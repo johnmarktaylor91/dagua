@@ -35,6 +35,7 @@ def _should_use_ogdf_majorization(
     use_majorization: bool,
     use_entropy: bool,
     num_nodes: int,
+    edge_weights_provided: bool = False,
 ) -> bool:
     """Return whether maxent-stress should use OGDF stress fidelity.
 
@@ -48,6 +49,10 @@ def _should_use_ogdf_majorization(
         ignore this option while they are small enough for fidelity mode.
     num_nodes : int
         Number of nodes ``N`` in the graph.
+    edge_weights_provided : bool, default=False
+        Whether the caller supplied explicit edge weights. The OGDF-fidelity
+        branch models unit edge costs, so weighted calls use the gradient path
+        where Dijkstra distances are honored.
 
     Returns
     -------
@@ -55,7 +60,7 @@ def _should_use_ogdf_majorization(
         ``True`` when the request maps to OGDF ``StressMinimization``.
     """
     del use_entropy
-    return use_majorization and num_nodes <= _MAJORIZATION_NODE_LIMIT
+    return use_majorization and not edge_weights_provided and num_nodes <= _MAJORIZATION_NODE_LIMIT
 
 
 def _layout_ogdf_stress_majorization(
@@ -170,6 +175,7 @@ def build_maxent_stress_pipeline(
     use_entropy: bool = False,
     use_majorization: bool = True,
     num_nodes: int = 0,
+    edge_weights_provided: bool = False,
 ) -> Pipeline:
     """Build the classical maxent-stress dispatch pipeline.
 
@@ -199,6 +205,9 @@ def build_maxent_stress_pipeline(
         Whether to prefer majorization for eligible graphs.
     num_nodes : int, default=0
         Number of nodes used for branch dispatch.
+    edge_weights_provided : bool, default=False
+        Whether the caller supplied explicit edge weights. Weighted calls avoid
+        the OGDF-fidelity branch because it intentionally uses unit edge costs.
 
     Returns
     -------
@@ -212,6 +221,7 @@ def build_maxent_stress_pipeline(
         use_majorization=use_majorization,
         use_entropy=use_entropy,
         num_nodes=num_nodes,
+        edge_weights_provided=edge_weights_provided,
     ):
         return build_maxent_stress_majorization_pipeline(steps=steps)
     return build_maxent_stress_gradient_pipeline(
@@ -292,6 +302,7 @@ def layout_maxent_stress_pipeline(
         use_majorization=use_majorization,
         use_entropy=use_entropy,
         num_nodes=num_nodes,
+        edge_weights_provided=edge_weights is not None,
     ):
         return _layout_ogdf_stress_majorization(
             edge_index=edge_index,
@@ -308,6 +319,7 @@ def layout_maxent_stress_pipeline(
         use_entropy=use_entropy,
         use_majorization=use_majorization,
         num_nodes=num_nodes,
+        edge_weights_provided=edge_weights is not None,
     )
     problem = LayoutProblem(
         edge_index=edge_index,
