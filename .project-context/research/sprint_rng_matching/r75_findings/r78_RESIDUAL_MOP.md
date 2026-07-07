@@ -265,3 +265,39 @@ Concerns:
 - This is a PRISM-equivalent port, not a byte-for-byte GTS port. If future
   evidence isolates a GTS-only triangulation tie as load-bearing, that would be
   a separate boundary dossier.
+
+## Pool fork deadlock fix
+
+Repro signature: `scripts/definitive_fidelity_analysis.py --mode full` froze
+after `overlay: 8323 combos resolved, 3143 would have era-mixed under union
+semantics` with an empty JSONL when `ProcessPoolExecutor` used Linux `fork`
+after module-level `torch` import. Parent and worker were idle in
+`futex_wait_queue_me`; the same `random_dag_200::classic_neato` combo completed
+serially in minutes.
+
+Fix: both process pools now use
+`multiprocessing.get_context("spawn")`, so workers re-import the module instead
+of inheriting torch/native-thread mutex state. `configure_thread_environment`
+remains spawn-compatible; it only sets thread-count environment variables.
+The real `ComboPayload` for the hung combo passed `pickle.dumps`.
+
+Gate evidence:
+- Exact hung invocation with `--workers 2` completed and wrote
+  `/tmp/r78_pool_spawn_check.jsonl`.
+- The spawned row for `random_dag_200::classic_neato` was byte-identical to
+  `eval_output/fidelity_definitive/r78_neato_rd200.jsonl` after dropping
+  `git_sha`; `quality_identical_raw=True`, `quality_identical_exploratory=False`,
+  and `abs(stress_D_mean - stress_R_mean)=5.470043445976458e-10`.
+- Three-combo smoke
+  (`asymmetric_hourglass_hub::classic_fmmm_steps10`,
+  `asymmetric_hourglass_hub::classic_fmmm_graphviz_fdp_fidelity`,
+  `asymmetric_hourglass_hub::classic_fmmm_steps200`) completed with
+  `--workers 4` and `--workers 1`; rows were identical after dropping `git_sha`.
+- `ruff check scripts/definitive_fidelity_analysis.py --fix`: passed.
+- `pytest tests/ -k "fidelity or analysis" -x -q`: stopped on pre-existing
+  unrelated fidelity verdict debt:
+  `tests/test_fidelity_procrustes.py::test_procrustes_known_good_equivalent`
+  expected `strong_equivalent` but got `partial_match` after `38 passed,
+  2569 deselected`.
+
+Commit: PENDING
