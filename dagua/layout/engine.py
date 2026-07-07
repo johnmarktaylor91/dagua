@@ -1407,7 +1407,7 @@ def _resolve_execution_mode(
     requested_mode = getattr(config, "execution_mode", "auto")
     if requested_mode == "standard":
         return "standard"
-    if device != "cuda" or not torch.cuda.is_available():
+    if device != "cuda":
         return "standard"
     if requested_mode == "subset_gpu":
         return "subset_gpu"
@@ -1658,6 +1658,8 @@ def _layout_inner(
     import time as _time
 
     n = num_nodes
+    if device == "cuda" and not torch.cuda.is_available():
+        device = "cpu"
     execution_mode = _resolve_execution_mode(config, device, n)
     resident_device = "cpu" if execution_mode == "subset_gpu" else device
     resident_device_type = torch.device(resident_device).type

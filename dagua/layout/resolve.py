@@ -16,7 +16,9 @@ source of truth for config-time resolution.
 from __future__ import annotations
 
 import copy
-from typing import Any, List, Optional
+import math
+from dataclasses import dataclass
+from typing import Any, List, Literal, Optional
 
 import torch
 
@@ -48,6 +50,163 @@ from dagua.layout.ops.loss_engine import (
     SpacingConsistencyLossConfig,
 )
 from dagua.layout.ops.state import FlexConstraints
+
+
+@dataclass(frozen=True)
+class QualityBudgets:
+    """Resolved time-vs-quality budgets for native layout pipelines.
+
+    Parameters
+    ----------
+    step_multiplier : float
+        Multiplier applied to automatic step counts.
+    multi_start_k : int
+        Number of deterministic seeds to score in best-of-k native layout.
+    stress_n_pivots : int
+        Pivot count for native stress initialization, capped by graph size.
+    smacof_iters : int
+        Dense SMACOF polish iterations for native stress when under its node
+        cutoff.
+    polish_battery : {"off", "default", "full"}
+        Post-pipeline polish candidate budget.
+    ml_refine_multiplier : float
+        Multiplier for native-stress multilevel per-level refinement rounds.
+    barnes_hut_theta : float
+        Barnes-Hut opening angle budget for pipelines that consume it.
+    sampling_rate : float
+        Relative sampling budget for approximate large-graph refinements.
+
+    Notes
+    -----
+    Dagua does not currently track constructor-provided fields separately
+    from dataclass defaults. Callers therefore apply these budgets only when
+    a field still equals its default sentinel, such as ``steps == 0`` or an
+    omitted algorithm parameter.
+    """
+
+    step_multiplier: float
+    multi_start_k: int
+    stress_n_pivots: int
+    smacof_iters: int
+    polish_battery: Literal["off", "default", "full"]
+    ml_refine_multiplier: float
+    barnes_hut_theta: float
+    sampling_rate: float
+
+
+def _interp_piecewise(value: float, points: list[tuple[float, float]]) -> float:
+    """Linearly interpolate a scalar over sorted control points.
+
+    Parameters
+    ----------
+    value : float
+        Input value.
+    points : list[tuple[float, float]]
+        Sorted ``(x, y)`` control points.
+
+    Returns
+    -------
+    float
+        Interpolated output, clamped to the endpoint values.
+    """
+    if value <= points[0][0]:
+        return points[0][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if value <= x1:
+            ratio = (value - x0) / (x1 - x0)
+            return y0 + (y1 - y0) * ratio
+    return points[-1][1]
+
+
+def resolve_quality_budgets(quality: float, num_nodes: int = 0) -> QualityBudgets:
+    """Resolve public quality into concrete native layout budgets.
+
+    Parameters
+    ----------
+    quality : float
+        Normalized quality value in ``[0, 1]``.
+    num_nodes : int, default=0
+        Optional graph size used to cap pivot budgets. ``0`` means no graph
+        cap is available yet.
+
+    Returns
+    -------
+    QualityBudgets
+        Frozen budget bundle. Values are monotonic with quality; balanced
+        ``0.5`` preserves current default layered budgets.
+
+    Raises
+    ------
+    ValueError
+        If ``quality`` lies outside ``[0, 1]``.
+    """
+    q = float(quality)
+    if q < 0.0 or q > 1.0:
+        raise ValueError("quality must be in [0, 1].")
+
+    log_multiplier = _interp_piecewise(
+        q,
+        [
+            (0.0, math.log(0.4)),
+            (0.5, math.log(1.0)),
+            (0.75, math.log(2.0)),
+            (1.0, math.log(4.0)),
+        ],
+    )
+    pivot_target = int(
+        round(
+            _interp_piecewise(
+                q,
+                [
+                    (0.25, 32.0),
+                    (0.5, 64.0),
+                    (0.75, 128.0),
+                    (1.0, 256.0),
+                ],
+            )
+        )
+    )
+    if num_nodes > 0:
+        pivot_target = min(max(int(num_nodes), 1), pivot_target)
+
+    smacof_iters = int(
+        round(
+            _interp_piecewise(
+                q,
+                [
+                    (0.25, 0.0),
+                    (0.5, 4.0),
+                    (0.75, 24.0),
+                    (1.0, 50.0),
+                ],
+            )
+        )
+    )
+    if q < 0.35:
+        polish_battery: Literal["off", "default", "full"] = "off"
+    elif q >= 0.75:
+        polish_battery = "full"
+    else:
+        polish_battery = "default"
+    ml_refine_multiplier = _interp_piecewise(
+        q,
+        [
+            (0.25, 0.5),
+            (0.5, 1.0),
+            (0.75, 2.0),
+            (1.0, 3.0),
+        ],
+    )
+    return QualityBudgets(
+        step_multiplier=math.exp(log_multiplier),
+        multi_start_k=1 if q < 0.7 else (3 if q < 0.9 else 5),
+        stress_n_pivots=max(1, pivot_target),
+        smacof_iters=smacof_iters,
+        polish_battery=polish_battery,
+        ml_refine_multiplier=ml_refine_multiplier,
+        barnes_hut_theta=_interp_piecewise(q, [(0.0, 1.4), (0.5, 1.0), (1.0, 0.6)]),
+        sampling_rate=_interp_piecewise(q, [(0.0, 0.5), (0.5, 1.0), (1.0, 2.0)]),
+    )
 
 
 def normalize_node_sizes(node_sizes: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -369,6 +528,10 @@ def prepare_pipeline_config(
     consumes.
     """
     effective_config = copy.copy(config)
+    quality_budgets = resolve_quality_budgets(
+        float(getattr(effective_config, "quality", 0.5)),
+        num_nodes=num_nodes,
+    )
     structure: Optional[GraphStructure] = None
     if not skip_classification:
         structure = graph_structure
@@ -383,20 +546,31 @@ def prepare_pipeline_config(
             effective_config = override_for_tree(effective_config)
         if structure.family == GraphFamily.CHAIN:
             auto_steps = auto_layout_steps(num_nodes)
-            resolved_steps = min(
-                effective_config.steps if effective_config.steps > 0 else auto_steps,
-                50,
-            )
+            if effective_config.steps > 0:
+                resolved_steps = effective_config.steps
+            else:
+                resolved_steps = min(int(round(auto_steps * quality_budgets.step_multiplier)), 50)
         else:
             resolved_steps = (
                 effective_config.steps
                 if effective_config.steps > 0
-                else auto_layout_steps(num_nodes)
+                else int(round(auto_layout_steps(num_nodes) * quality_budgets.step_multiplier))
             )
     else:
         resolved_steps = (
-            effective_config.steps if effective_config.steps > 0 else auto_layout_steps(num_nodes)
+            effective_config.steps
+            if effective_config.steps > 0
+            else int(round(auto_layout_steps(num_nodes) * quality_budgets.step_multiplier))
         )
+    resolved_steps = max(resolved_steps, 1)
+
+    if (
+        int(getattr(effective_config, "multi_start_k", 1)) == 1
+        and not bool(getattr(effective_config, "_dagua_native_multi_start_resolved", False))
+        and effective_config.time_budget_s is None
+    ):
+        effective_config.multi_start_k = quality_budgets.multi_start_k
+        setattr(effective_config, "_dagua_native_multi_start_resolved", True)
 
     resolved_node_sep = effective_config.node_sep
     resolved_rank_sep = effective_config.rank_sep
@@ -417,6 +591,9 @@ def prepare_pipeline_config(
 
     stall_limit, rel_threshold = stall_config(num_nodes=num_nodes)
     setattr(effective_config, "_dagua_native_steps", resolved_steps)
+    setattr(effective_config, "_dagua_native_quality_budgets", quality_budgets)
+    setattr(effective_config, "_dagua_native_polish_battery", quality_budgets.polish_battery)
+    setattr(effective_config, "_dagua_native_time_budget_s", effective_config.time_budget_s)
     setattr(effective_config, "_dagua_native_node_sep", resolved_node_sep)
     setattr(effective_config, "_dagua_native_rank_sep", resolved_rank_sep)
     setattr(effective_config, "_dagua_native_target_aspect", target_aspect)
@@ -430,10 +607,13 @@ def prepare_pipeline_config(
         "_dagua_native_overlap_interval",
         overlap_interval(num_nodes=num_nodes, config=effective_config),
     )
+    resolved_final_projection_iterations = final_projection_iterations(num_nodes=num_nodes)
+    if effective_config.time_budget_s is not None:
+        resolved_final_projection_iterations = min(resolved_final_projection_iterations, 1)
     setattr(
         effective_config,
         "_dagua_native_final_projection_iterations",
-        final_projection_iterations(num_nodes=num_nodes),
+        resolved_final_projection_iterations,
     )
     setattr(effective_config, "_dagua_native_stall_limit", stall_limit)
     setattr(effective_config, "_dagua_native_rel_threshold", rel_threshold)
@@ -563,5 +743,7 @@ __all__ = [
     "override_for_tree",
     "prepare_flex_data",
     "prepare_pipeline_config",
+    "QualityBudgets",
+    "resolve_quality_budgets",
     "stall_config",
 ]
