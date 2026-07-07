@@ -8,9 +8,9 @@
     "routing_styles": "docs/glossary/figures/routing_styles.png",
     "flex_constraints": "docs/glossary/figures/flex_constraints.png"
   },
-  "public_api_count": 35,
-  "graph_method_count": 22,
-  "loss_count": 24,
+  "public_api_count": 48,
+  "graph_method_count": 33,
+  "loss_count": 29,
   "hyperparameter_count": 13,
   "glossary_terms": [
     "DAG",
