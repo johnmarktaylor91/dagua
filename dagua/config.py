@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 
@@ -31,12 +31,24 @@ class LayoutConfig:
 
     Parameters
     ----------
+    quality : float or str, default="balanced"
+        Public time-vs-quality knob. Names map to normalized floats:
+        ``draft=0.25``, ``balanced=0.5``, ``high=0.75``, and ``max=1.0``.
+        Numeric values must be in ``[0, 1]``. Existing explicit budget
+        fields still override budgets derived from this knob.
+    time_budget_s : float, optional
+        Optional wall-clock cap in seconds for the native gradient core. When
+        exceeded, the current step completes and cheap final projection/aspect
+        polish still runs.
     fidelity_dtype : torch.dtype, optional
         Internal dtype used only by fidelity-mode engine adapters. ``None``
         lets fidelity-mode pipelines default to ``torch.float64`` while
         non-fidelity paths remain ``torch.float32``. Public layout outputs
         remain ``float32``.
     """
+
+    quality: Union[float, str] = "balanced"
+    time_budget_s: Optional[float] = None
 
     # Spacing
     # Bumped 28 -> 60, 50 -> 80 after holdout sweep
@@ -367,6 +379,41 @@ class LayoutConfig:
     use_pipeline: bool = False
     algorithm: Optional[str] = None
     algorithm_params: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Normalize public quality/time fields after dataclass construction.
+
+        Parameters
+        ----------
+        None
+            Dataclass hook; all inputs are read from instance attributes.
+
+        Returns
+        -------
+        None
+            The method mutates ``quality`` to its normalized float value.
+        """
+        aliases = {
+            "draft": 0.25,
+            "balanced": 0.5,
+            "high": 0.75,
+            "max": 1.0,
+        }
+        raw_quality = self.quality
+        if isinstance(raw_quality, str):
+            key = raw_quality.lower()
+            if key not in aliases:
+                names = ", ".join(sorted(aliases))
+                raise ValueError(f"quality must be a float in [0, 1] or one of: {names}.")
+            normalized = aliases[key]
+        else:
+            normalized = float(raw_quality)
+        if normalized < 0.0 or normalized > 1.0:
+            raise ValueError("quality must be in [0, 1].")
+        self.quality = normalized
+
+        if self.time_budget_s is not None and self.time_budget_s <= 0.0:
+            raise ValueError("time_budget_s must be positive when provided.")
 
 
 # Registry of all tunable parameters with metadata

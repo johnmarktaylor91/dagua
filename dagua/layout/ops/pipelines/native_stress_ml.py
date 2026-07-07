@@ -54,7 +54,7 @@ from dagua.layout.ops.stress_sgd import (
     RunStressSGDExactSchedule,
 )
 from dagua.layout.ops.taxonomy import OpCategory, register_op
-from dagua.layout.resolve import normalize_node_sizes
+from dagua.layout.resolve import normalize_node_sizes, resolve_quality_budgets
 
 _DEFAULT_ML_MIN_NODES = 5_000
 _DEFAULT_ML_MIN_EDGES = 50_000
@@ -246,13 +246,18 @@ def _resolve_ml_config(
         return config
     params = getattr(config, "algorithm_params", {}) if config is not None else {}
     public_seed = getattr(config, "seed", seed) if config is not None else seed
+    budgets = resolve_quality_budgets(
+        float(getattr(config, "quality", 0.5)) if config is not None else 0.5,
+        num_nodes=0,
+    )
+    default_refine_steps = max(0, int(round(12 * budgets.ml_refine_multiplier)))
     resolved = NativeStressMLConfig(
         ml_min_nodes=int(params.get("ml_min_nodes", _DEFAULT_ML_MIN_NODES)),
         ml_min_edges=int(params.get("ml_min_edges", _DEFAULT_ML_MIN_EDGES)),
         coarsest_nodes=int(params.get("coarsest_nodes", _DEFAULT_COARSEST_NODES)),
         max_levels=int(params.get("max_levels", _DEFAULT_MAX_LEVELS)),
         coarse_steps=int(params.get("coarse_steps", 0)),
-        refine_steps=int(params.get("refine_steps", 12)),
+        refine_steps=int(params.get("refine_steps", default_refine_steps)),
         refine_sample_size=params.get("refine_sample_size", "auto"),
         repulsion_mode=str(params.get("ml_repulsion_mode", params.get("repulsion_mode", "auto"))),
         hash_repulsion_nodes=int(params.get("hash_repulsion_nodes", _DEFAULT_HASH_REPULSION_NODES)),

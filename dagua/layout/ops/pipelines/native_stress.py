@@ -52,7 +52,7 @@ from dagua.layout.ops.stress_sgd import (
     PrepareStressSGDTerms,
     RunStressSGDExactSchedule,
 )
-from dagua.layout.resolve import normalize_node_sizes
+from dagua.layout.resolve import QualityBudgets, normalize_node_sizes, resolve_quality_budgets
 
 _DEFAULT_EPS = 0.01
 _DEFAULT_MAX_EXACT_NODES = 10_000
@@ -118,6 +118,7 @@ class NativeStressConfig:
 def _resolve_native_stress_config(
     num_nodes: int,
     config: Optional[NativeStressConfig] = None,
+    quality_budgets: Optional[QualityBudgets] = None,
 ) -> NativeStressConfig:
     """Resolve automatic native-stress budgets.
 
@@ -127,6 +128,9 @@ def _resolve_native_stress_config(
         Number of graph nodes.
     config : NativeStressConfig, optional
         User-supplied configuration.
+    quality_budgets : QualityBudgets, optional
+        Public quality-derived budgets. Explicit config fields override these
+        values; omitted auto fields consume them.
 
     Returns
     -------
@@ -146,14 +150,20 @@ def _resolve_native_stress_config(
         raise ValueError("size_scale must be nonnegative.")
 
     safe_nodes = max(int(num_nodes), 1)
-    steps = base.steps if base.steps > 0 else int(min(180, max(40, 20 + 8 * math.sqrt(safe_nodes))))
+    budgets = quality_budgets or resolve_quality_budgets(0.5, num_nodes=safe_nodes)
+    auto_steps = int(min(180, max(40, 20 + 8 * math.sqrt(safe_nodes))))
+    steps = (
+        base.steps
+        if base.steps > 0
+        else max(1, int(round(float(auto_steps) * budgets.step_multiplier)))
+    )
     late_steps = (
         base.late_steps if base.late_steps > 0 else int(min(60, max(8, round(float(steps) * 0.18))))
     )
     n_pivots = (
         base.n_pivots
         if base.n_pivots > 0
-        else int(min(safe_nodes, max(8, math.sqrt(safe_nodes) * 4)))
+        else int(min(safe_nodes, max(1, budgets.stress_n_pivots)))
     )
     return NativeStressConfig(
         steps=steps,
@@ -433,24 +443,34 @@ def _config_from_public(
     public_steps = int(getattr(config, "steps", 0)) if config is not None else 0
     public_seed = getattr(config, "seed", seed) if config is not None else seed
     public_target_aspect = getattr(config, "_dagua_native_target_aspect", target_aspect)
+    budgets = getattr(config, "_dagua_native_quality_budgets", None)
+    if budgets is None:
+        budgets = resolve_quality_budgets(
+            float(getattr(config, "quality", 0.5)) if config is not None else 0.5,
+            num_nodes=num_nodes,
+        )
     raw_config = NativeStressConfig(
         steps=int(params.get("steps", public_steps)),
         late_steps=int(params.get("late_steps", 0)),
-        n_pivots=int(params.get("n_pivots", 0)),
+        n_pivots=int(params.get("n_pivots", budgets.stress_n_pivots)),
         eps=float(params.get("eps", _DEFAULT_EPS)),
         max_exact_nodes=int(params.get("max_exact_nodes", _DEFAULT_MAX_EXACT_NODES)),
         sample_size=params.get("sample_size", "auto"),
         size_aware=bool(params.get("size_aware", True)),
         size_scale=float(params.get("size_scale", 1.0)),
         repulsion_mode=str(params.get("repulsion_mode", "none")),
-        smacof_iters=int(params.get("smacof_iters", 4)),
+        smacof_iters=int(params.get("smacof_iters", budgets.smacof_iters)),
         smacof_max_nodes=int(params.get("smacof_max_nodes", _DEFAULT_SMACOF_MAX_NODES)),
         overlap_padding=float(params.get("overlap_padding", 2.0)),
         overlap_iterations=int(params.get("overlap_iterations", 10)),
         seed=int(public_seed if public_seed is not None else 42),
         target_aspect=public_target_aspect,
     )
-    return _resolve_native_stress_config(num_nodes=num_nodes, config=raw_config)
+    return _resolve_native_stress_config(
+        num_nodes=num_nodes,
+        config=raw_config,
+        quality_budgets=budgets,
+    )
 
 
 def _layout_components(
