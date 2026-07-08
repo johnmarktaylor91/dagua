@@ -1449,7 +1449,7 @@ class ClassicSpectral(_ClassicBase):
 
     name = "classic_spectral"
     max_nodes = 100_000
-    variant_param_names = frozenset({"normalization", "networkx_fidelity"})
+    variant_param_names = frozenset({"normalization", "networkx_fidelity", "fidelity_mode"})
 
     def layout(
         self,
@@ -1542,6 +1542,7 @@ class ClassicStressMajorization(_ClassicBase):
 
     name = "classic_stress_maj"
     max_nodes = 500
+    variant_param_names = frozenset({"iterations", "fidelity_mode"})
 
     def layout(
         self,
@@ -1710,7 +1711,7 @@ class ClassicLinLog(_ClassicBase):
 
     name = "classic_linlog"
     max_nodes = 50_000
-    variant_param_names = frozenset({"a", "r", "steps"})
+    variant_param_names = frozenset({"a", "r", "steps", "fidelity_mode"})
 
     def layout(
         self,
@@ -1885,6 +1886,7 @@ class ClassicMaxentStress(_ClassicBase):
 
     name = "classic_maxent_stress"
     max_nodes = 100_000
+    variant_param_names = frozenset({"steps", "alpha", "use_entropy"})
 
     def layout(
         self,
@@ -1944,6 +1946,7 @@ class ClassicDavidsonHarel(_ClassicBase):
 
     name = "classic_davidson_harel"
     max_nodes = 50
+    variant_param_names = frozenset({"rounds", "fidelity_mode"})
 
     def layout(
         self,
@@ -2358,7 +2361,7 @@ class ClassicSFDP(_ClassicBase):
 class ClassicUMAP(_ClassicBase):
     name = "classic_umap"
     max_nodes = 20_000
-    variant_param_names = frozenset({"n_neighbors", "min_dist", "spread"})
+    variant_param_names = frozenset({"n_neighbors", "min_dist", "spread", "fidelity_mode"})
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
@@ -2377,7 +2380,9 @@ class ClassicUMAP(_ClassicBase):
 class ClassicNeuLay(_ClassicBase):
     name = "classic_neulay"
     max_nodes = 50_000
-    variant_param_names = frozenset({"steps", "gcn_steps", "use_gcn", "lr", "radius"})
+    variant_param_names = frozenset(
+        {"steps", "gcn_steps", "use_gcn", "lr", "radius", "fidelity_mode"}
+    )
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
@@ -2418,6 +2423,9 @@ class ClassicNeuLay(_ClassicBase):
 class ClassicSGD2Multi(_ClassicBase):
     name = "classic_sgd2_multi"
     max_nodes = 10_000
+    variant_param_names = frozenset(
+        {"criteria", "steps", "lr", "grad_clamp", "batch_size", "fidelity_mode"}
+    )
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None

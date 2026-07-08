@@ -297,9 +297,11 @@ def test_classic_neulay_uses_full_two_phase_defaults(
 def test_classic_embedding_variant_param_names_match_registry_contract() -> None:
     """Classic embedding adapters should declare their supported override names."""
     assert ClassicTsNET.variant_param_names == frozenset({"perplexity", "steps", "fidelity_mode"})
-    assert ClassicUMAP.variant_param_names == frozenset({"n_neighbors", "min_dist", "spread"})
+    assert ClassicUMAP.variant_param_names == frozenset(
+        {"n_neighbors", "min_dist", "spread", "fidelity_mode"}
+    )
     assert ClassicNeuLay.variant_param_names == frozenset(
-        {"steps", "gcn_steps", "use_gcn", "lr", "radius"}
+        {"steps", "gcn_steps", "use_gcn", "lr", "radius", "fidelity_mode"}
     )
 
 
