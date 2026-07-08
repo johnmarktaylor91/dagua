@@ -15,14 +15,18 @@ from dagua.layout.ops.project import (
     MovementClampConfig,
     OverlapProjection,
     OverlapProjectionConfig,
+    OverlapProjectionGated,
+    OverlapProjectionGatedConfig,
 )
 from dagua.layout.ops.state import FlexConstraints, LayoutProblem, RuntimeContext, SolveState
+from dagua.metrics import count_overlaps
 
 
 def _make_problem(
     num_nodes: int = 2,
     node_sizes: torch.Tensor | None = None,
     flex: FlexConstraints | None = None,
+    edge_index: torch.Tensor | None = None,
 ) -> LayoutProblem:
     """Create a minimal layout problem for projection-op tests.
 
@@ -34,6 +38,8 @@ def _make_problem(
         Optional node-size tensor with shape ``[N, 2]``.
     flex : FlexConstraints, optional
         Optional flex constraints payload.
+    edge_index : torch.Tensor, optional
+        Optional edge tensor with shape ``[2, E]``. Defaults to no edges.
 
     Returns
     -------
@@ -41,7 +47,7 @@ def _make_problem(
         Minimal immutable problem instance.
     """
     return LayoutProblem(
-        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_index=edge_index if edge_index is not None else torch.empty((2, 0), dtype=torch.long),
         num_nodes=num_nodes,
         node_sizes=node_sizes,
         flex=flex,
@@ -97,7 +103,13 @@ def test_overlap_projection_honors_padding_when_separating_nodes() -> None:
     )
     state = SolveState(pos=torch.tensor([[0.0, 0.0], [0.0, 0.0]], dtype=torch.float32))
 
-    result = OverlapProjection(OverlapProjectionConfig(padding=1.0, iterations=20)).apply(
+    # iterations=40: the exact-path projector now accumulates pushes with
+    # index_add_ and applies a 0.7 damping factor each pass (r80/projector)
+    # to avoid overshoot when multiple overlapping pairs touch the same
+    # node in one pass. That damping also slows convergence on this trivial
+    # single-pair case (geometric decay 0.65/pass instead of 0.5/pass), so
+    # more passes are needed to land within the same numeric tolerance.
+    result = OverlapProjection(OverlapProjectionConfig(padding=1.0, iterations=40)).apply(
         problem,
         state,
         RuntimeContext(),
@@ -240,6 +252,71 @@ def test_overlap_projection_padding_configuration_changes_the_result() -> None:
     tight_sep = torch.linalg.vector_norm(tight.pos[0] - tight.pos[1]).item()
     loose_sep = torch.linalg.vector_norm(loose.pos[0] - loose.pos[1]).item()
     assert loose_sep > tight_sep
+
+
+def test_overlap_projection_gated_accepts_improving_projection() -> None:
+    """OverlapProjectionGated should keep the projected result when the proxy improves."""
+
+    problem = _make_problem(
+        num_nodes=2,
+        node_sizes=torch.tensor([[2.0, 2.0], [2.0, 2.0]], dtype=torch.float32),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+    )
+    initial = torch.tensor([[0.0, 0.0], [0.0, 0.0]], dtype=torch.float32)
+    state = SolveState(pos=initial.clone())
+
+    result = OverlapProjectionGated(OverlapProjectionGatedConfig(padding=1.0, iterations=20)).apply(
+        problem,
+        state,
+        RuntimeContext(),
+    )
+
+    assert result.pos is not None
+    assert not torch.allclose(result.pos, initial)
+    assert count_overlaps(result.pos, problem.node_sizes) == 0
+
+
+def test_overlap_projection_gated_reverts_when_proxy_regresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OverlapProjectionGated should revert to pre-projection positions on a regression."""
+
+    from dagua.layout.ops import project as project_module
+
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    problem = _make_problem(
+        num_nodes=3,
+        node_sizes=torch.tensor([[2.0, 2.0]] * 3, dtype=torch.float32),
+        edge_index=edge_index,
+    )
+    # Already non-overlapping and roughly equilateral -- projection has
+    # nothing useful to fix here.
+    initial = torch.tensor([[0.0, 0.0], [6.0, 0.0], [3.0, 5.2]], dtype=torch.float32)
+    state = SolveState(pos=initial.clone())
+
+    def _fake_project_overlaps(
+        pos: torch.Tensor,
+        node_sizes: torch.Tensor,
+        padding: float = 2.0,
+        iterations: int = 10,
+        layer_index: object = None,
+    ) -> torch.Tensor:
+        """Simulate a destructive projection: collapse one node onto another.
+
+        This wildly inflates edge-length CV without resolving any overlap
+        (there was none to begin with), so the proxy composite must regress.
+        """
+        del node_sizes, padding, iterations, layer_index
+        pos[2, 0] = 0.01
+        pos[2, 1] = 0.01
+        return pos
+
+    monkeypatch.setattr(project_module, "project_overlaps", _fake_project_overlaps)
+
+    result = OverlapProjectionGated().apply(problem, state, RuntimeContext())
+
+    assert result.pos is not None
+    torch.testing.assert_close(result.pos, initial)
 
 
 def test_hard_pin_projection_without_pins_is_a_noop() -> None:
