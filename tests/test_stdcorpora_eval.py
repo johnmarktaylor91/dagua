@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 from typing import Dict
 
-from scripts.r79_stdcorpora_eval import load_gml_file, load_graph_file, load_mtx_file
+from scripts.r79_stdcorpora_eval import (
+    load_gml_file,
+    load_graph_file,
+    load_graphml_file,
+    load_mtx_file,
+)
 
 
 def edge_count(path_graph: object) -> int:
@@ -82,6 +87,81 @@ def test_gml_loader_reads_networkx_fixture(tmp_path: Path) -> None:
 
     assert loaded.graph.num_nodes == 3
     assert edge_count(loaded) == 2
+    assert loaded.corpus == "north"
+    assert loaded.directed is True
+
+
+def test_graphml_loader_reads_rome_style_fixture(tmp_path: Path) -> None:
+    """Load a tiny undirected Rome-style GraphML fixture (Y-Files export shape).
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Pytest temporary directory.
+
+    Returns
+    -------
+    None
+    """
+    path = tmp_path / "rome" / "tiny.graphml"
+    path.parent.mkdir()
+    path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<graphml>\n"
+        '<graph edgedefault="undirected" id="G">\n'
+        '<node id="n0"/>\n'
+        '<node id="n1"/>\n'
+        '<node id="n2"/>\n'
+        '<edge id="e0" source="n0" target="n1"/>\n'
+        '<edge id="e1" source="n1" target="n2"/>\n'
+        "</graph>\n"
+        "</graphml>\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_graphml_file(path)
+
+    assert loaded.graph.num_nodes == 3
+    assert edge_count(loaded) == 2
+    assert loaded.corpus == "rome"
+    assert loaded.directed is False
+
+
+def test_graphml_loader_infers_north_directed_when_edgedefault_missing(tmp_path: Path) -> None:
+    """North GraphML exports omit ``edgedefault``; the loader must still mark them directed.
+
+    Real North/AT&T GraphML exports from graphdrawing.unipg.it omit the ``edgedefault``
+    attribute entirely, which makes NetworkX's ``is_directed()`` report ``False``. The
+    loader must fall back to the path-based ``north`` heuristic instead of trusting that
+    default, or every North DAG would silently score as undirected.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Pytest temporary directory.
+
+    Returns
+    -------
+    None
+    """
+    path = tmp_path / "north" / "tiny.graphml"
+    path.parent.mkdir()
+    path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<graphml>\n"
+        '<graph id="G">\n'
+        '<node id="n0"/>\n'
+        '<node id="n1"/>\n'
+        '<edge id="e0" source="n0" target="n1"/>\n'
+        "</graph>\n"
+        "</graphml>\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_graphml_file(path)
+
+    assert loaded.graph.num_nodes == 2
+    assert edge_count(loaded) == 1
     assert loaded.corpus == "north"
     assert loaded.directed is True
 
