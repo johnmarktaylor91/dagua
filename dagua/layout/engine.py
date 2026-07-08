@@ -1123,14 +1123,20 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             kwargs["steps"] = config.steps
 
         # Classify once here, where the real DaguaGraph is in scope, so an
-        # explicit graph.is_semantically_directed declaration (or the
-        # heuristic fallback) reaches routing. Headless pipelines below this
-        # point only ever see tensors, so this is the one place classify_graph
-        # can see ``graph=``; the resulting structure flows down through the
+        # explicit graph.is_semantically_directed declaration reaches
+        # routing. Headless pipelines below this point only ever see
+        # tensors, so this is the one place classify_graph can see
+        # ``graph=``; the resulting structure flows down through the
         # existing graph_structure kwarg the pipelines already accept.
-        if "graph_structure" in sig.parameters and "graph_structure" not in kwargs:
-            from dagua.layout.graph_classify import classify_graph
-
+        # Gated on an explicit declaration so undeclared graphs keep the
+        # exact prior code path (pipelines classify internally, including
+        # after fidelity-mode edge preprocessing, and the heuristic
+        # inference they run is already the fixed one).
+        if (
+            "graph_structure" in sig.parameters
+            and "graph_structure" not in kwargs
+            and getattr(graph, "is_semantically_directed", None) is not None
+        ):
             kwargs["graph_structure"] = classify_graph(
                 graph.edge_index,
                 graph.num_nodes,
@@ -1243,10 +1249,13 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
                 print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
 
-            # Classify with graph= here, where the real DaguaGraph is still in
-            # scope, so an explicit graph.is_semantically_directed declaration
-            # (or the heuristic fallback) reaches this legacy solve path too.
-            legacy_graph_structure = classify_graph(edge_index, n, graph=graph)
+            # Classify with graph= here, where the real DaguaGraph is still
+            # in scope, so an explicit graph.is_semantically_directed
+            # declaration reaches this legacy solve path too. Undeclared
+            # graphs keep the exact prior path (None -> _layout_inner
+            # classifies internally, identical inputs).
+            if getattr(graph, "is_semantically_directed", None) is not None:
+                legacy_graph_structure = classify_graph(edge_index, n, graph=graph)
 
             pos = _layout_inner(
                 edge_index,
