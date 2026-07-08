@@ -123,3 +123,20 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   knob (prioritize=<term> or explicit weights) plumbed into differentiable losses + candidate-selection composite.
   Ship with: API design note (public surface -> discuss shape with JMT before merge per project rules), docs,
   tests proving the knob actually changes engine selection on a frontier graph, default == today's weights.
+
+## 2026-07-08 ~16:00: S4 PORTFOLIO COMPLETE -- ALL GATES PASS. Best-or-tied 74 -> 87/108 (80.6%)
+- Verified from committed BASELINE.md in p2: legacy 56/8/29 -> 63/14/16; extended 8/2/5 unchanged.
+  Undirected best-or-tied 12 -> 25 (+13). ZERO WIN->LOSS flips. 7 commits on r80/undirected-portfolio.
+- Top flips: weighted_clusters_3x10 +22.98, regular_3_30 +22.02, petersen_10 +21.80, weighted_karate +19.44,
+  real_karate +18.68 (all LOSS->WIN); 7 LOSS->TIE (lattices/grids/multi-component).
+- Candidate win rates (39 undirected): incumbent 25, neato 12, sfdp 2. Every changed row matches its probe
+  candidate <0.05 (selection integrity).
+- Gate 2 proof: transformer_layer now infers DIRECTED (deep-layering span fix works); 5 directed graphs
+  bit-identical (max_delta 0.0).
+- Residuals: 14 undirected losses remain (structural: football/community/weighted_small_world); clustered
+  undirected (r79_undirected_sbm_*) never reaches route (cluster driver preempts) -- flat-sfdp candidate would
+  flip high_mix per probe -> follow-up; neato balanced cap n<=80 + >1500-node contest skip are probe-scoped.
+- Wall time: contest adds +2-14s per small undirected graph (benchmark undirected class ~2x) -- capped, acceptable.
+- Projector (S2) estimated to add +1-3 more on top (winners already at tie-band ceilings).
+- NEXT: await S2 sweep verdict -> merge order projector then portfolio into r79/native (no file overlap) ->
+  consolidated sweep -> S6/S7 drawing track -> P6 honesty batch -> holdout -> S8 aesthetic knob.
