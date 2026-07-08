@@ -50,9 +50,9 @@ SIZE_BINS = (
     ("201-1000", 201, 1000),
     (">1000", 1001, None),
 )
-PASSING_RUNGS = {"0", "1", "2", "2'", "3", "3Q"}
+PASSING_RUNGS = {"0", "1", "2", "2'", "2'w", "3", "3Q"}
 MODE_A_PASS_RUNGS = {"0", "1", "2"}
-MODE_B_PASS_RUNGS = {"0", "2'"}
+MODE_B_PASS_RUNGS = {"0", "2'", "2'w"}
 NO_CANONICAL_REFERENCE_RUNG = "NO_CANONICAL_REFERENCE"
 NO_CANONICAL_REFERENCE_BUCKET = "NO_CANONICAL_REFERENCE"
 QUALITY_BATTERY_FINAL_TIER = "final_3q"
@@ -1611,7 +1611,8 @@ def assign_headlines(
             entry
             for entry in entries
             if entry.on_domain
-            and entry.final_rung in {"0", "1", "2", "2'", "3", "3Q", "4", "INVARIANCE_EQUIVALENT"}
+            and entry.final_rung
+            in {"0", "1", "2", "2'", "2'w", "3", "3Q", "4", "INVARIANCE_EQUIVALENT"}
         ]
         escalation_entries = [
             entry for entry in entries if entry.bucket == "ESCALATION" and entry.on_domain
@@ -2466,7 +2467,7 @@ def evaluate_gate_positive_mode_b(finalized: dict[str, list[dict[str, Any]]]) ->
     """
     rows = [row for row in control_rows(finalized, ("modeb", "mode-b")) if row.get("mode") == "B"]
     informative = [row for row in rows if not bool(row.get("typicality_uninformative", False))]
-    pass_count = sum(1 for row in informative if str(row.get("final_rung")) in {"2'", "0"})
+    pass_count = sum(1 for row in informative if str(row.get("final_rung")) in {"2'", "2'w", "0"})
     rate = safe_percent(pass_count, len(informative))
     passed = len(informative) >= 30 and rate >= 95.0
     return {
@@ -2798,7 +2799,9 @@ def render_tiers(state: dict[str, Any]) -> str:
         "  placement, free-aspect scaling). Exact equality up to symmetry; basically faithful.",
         "  (JMT decision 2026-06-12; previously reported as a Tier-3 sub-rung.)",
         "- Tier 2: TIMEOUT only.",
-        "- Tier 3: rungs 1, 2, 2' plus rung 3 stress-only-equivalent loose 5% fallback.",
+        "- Tier 3: rungs 1, 2, 2', 2'w plus rung 3 stress-only-equivalent loose 5% fallback.",
+        "  (2'w = mode-B typicality-only: weak, non-primary; ~10% wrong-algorithm",
+        "  false-benign measured on gate-3 negatives, so it never counts as primary.)",
         "- Tier 3Q: quality-identical variance-tied battery on canonical references,",
         "  statistically different but drawing-quality indistinguishable.",
         "- Tier 4: rung 4 DIFFERENT.",
