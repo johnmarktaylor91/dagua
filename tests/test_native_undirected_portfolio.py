@@ -149,13 +149,22 @@ def test_collapsed_challenger_loses_to_sane_incumbent() -> None:
 
 
 def test_neato_contest_quality_gate() -> None:
-    """Candidate C joins only at quality >= high."""
+    """Candidate C joins at quality >= high, or at balanced for small graphs.
+
+    The balanced-quality node cap is probe-derived: every balanced-quality
+    contest win for neato in P8_PORTFOLIO_PROBE.md sits at n <= 80 where its
+    SMACOF loop converges in seconds; above the cap it is slow and never won.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import NEATO_BALANCED_NODE_CAP
+
     balanced = LayoutConfig(seed=42, quality="balanced")
     high = LayoutConfig(seed=42, quality="high")
 
-    assert _neato_in_contest(balanced) is False
-    assert _neato_in_contest(high) is True
+    assert _neato_in_contest(balanced, NEATO_BALANCED_NODE_CAP + 1) is False
+    assert _neato_in_contest(balanced, NEATO_BALANCED_NODE_CAP) is True
+    assert _neato_in_contest(high, NEATO_BALANCED_NODE_CAP + 1) is True
     assert NEATO_QUALITY_THRESHOLD == 0.75
+    assert NEATO_BALANCED_NODE_CAP == 80
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:

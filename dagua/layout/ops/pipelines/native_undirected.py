@@ -50,8 +50,13 @@ from dagua.layout.projection import project_overlaps
 MAX_CONTEST_NODES = 1500
 
 # Candidate C (neato) participates when the public quality knob resolves to
-# at least this value ("high" alias = 0.75).
+# at least this value ("high" alias = 0.75)...
 NEATO_QUALITY_THRESHOLD = 0.75
+# ...OR, at balanced quality, when the problem is small enough that neato's
+# SMACOF converges within seconds. Probe-derived (see _neato_in_contest and
+# P8_PORTFOLIO_PROBE.md): all balanced-quality neato contest wins are at
+# n <= 80 (max 8s); at n > 80 it costs 40-150s and never won a probe row.
+NEATO_BALANCED_NODE_CAP = 80
 
 # Degeneracy guard thresholds (see _candidate_is_degenerate).
 DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO = 0.5
@@ -290,20 +295,36 @@ def _resolved_quality(config: Optional[LayoutConfig]) -> float:
         return 0.5
 
 
-def _neato_in_contest(config: Optional[LayoutConfig]) -> bool:
+def _neato_in_contest(config: Optional[LayoutConfig], num_nodes: int) -> bool:
     """Return whether candidate C (neato + projection) joins the contest.
+
+    Two admission paths:
+
+    1. Quality >= high (0.75): neato always joins (up to the contest cap).
+    2. Balanced/lower quality with ``num_nodes <= NEATO_BALANCED_NODE_CAP``:
+       the Stage-1 probe (P8_PORTFOLIO_PROBE.md) shows every balanced-quality
+       contest neato ever wins sits at n <= 80, where its SMACOF loop
+       epsilon-exits in <= ~8s; on larger graphs it costs 40-150s and never
+       beat the sfdp/incumbent winner in any probe row. The cap keeps the
+       neato wins (karate, lattices, grids, petersen, multi-component)
+       inside the default wall-time envelope and leaves the slow never-wins
+       region to the explicit quality knob.
 
     Parameters
     ----------
     config : LayoutConfig, optional
         Prepared layout configuration.
+    num_nodes : int
+        Number of nodes in the current problem.
 
     Returns
     -------
     bool
-        ``True`` when quality resolves to at least ``"high"`` (0.75).
+        ``True`` when candidate C should run.
     """
-    return _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD
+    if _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD:
+        return True
+    return num_nodes <= NEATO_BALANCED_NODE_CAP
 
 
 def layout_native_undirected_portfolio(
@@ -401,7 +422,7 @@ def layout_native_undirected_portfolio(
         pass
 
     # Candidate C: our neato reimplementation + projection, quality-gated.
-    if _neato_in_contest(config):
+    if _neato_in_contest(config, n):
         try:
             from dagua.layout.ops.pipelines.neato import layout_neato_pipeline
 
@@ -495,6 +516,7 @@ def build_native_undirected_portfolio_pipeline(config: LayoutConfig) -> Pipeline
 
 __all__ = [
     "MAX_CONTEST_NODES",
+    "NEATO_BALANCED_NODE_CAP",
     "NEATO_QUALITY_THRESHOLD",
     "UndirectedPortfolioRoute",
     "UndirectedPortfolioRouteConfig",
