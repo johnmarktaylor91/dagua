@@ -173,7 +173,74 @@ class TestProjectOverlaps:
         ns = torch.tensor([[20.0, 10.0], [20.0, 10.0]], dtype=torch.float32)
         layer_index = build_layer_index(torch.tensor([0, 0], dtype=torch.long))
 
-        projected = project_overlaps(pos, ns, iterations=4, layer_index=layer_index)
+        # iterations=8 (was 4): the exact-path projector (n=2 <= 500, so
+        # layer_index is unused here) now damps accumulated pushes by 0.7
+        # each pass (r80/projector) to avoid overshoot on dense overlap
+        # cliques, which slows this single-pair case's convergence rate too.
+        projected = project_overlaps(pos, ns, iterations=8, layer_index=layer_index)
 
         assert projected.device.type == "cpu"
         assert count_overlaps(projected, ns) == 0
+
+
+def _make_dense_overlap_clique(
+    num_nodes: int = 30,
+    seed: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build a dense overlap clique: nodes nearly coincident, real label boxes.
+
+    Parameters
+    ----------
+    num_nodes : int, default=30
+        Number of nodes to place near-coincident.
+    seed : int, default=0
+        Deterministic RNG seed for the initial jitter.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Position tensor shaped ``[N, 2]`` (all nodes clustered within a
+        small radius of the origin) and a label-size node-size tensor
+        shaped ``[N, 2]`` (60x20, wider than the initial cluster radius so
+        every pair starts overlapping).
+    """
+    generator = torch.Generator().manual_seed(seed)
+    pos = torch.randn(num_nodes, 2, generator=generator) * 0.5
+    node_sizes = torch.full((num_nodes, 2), 60.0)
+    node_sizes[:, 1] = 20.0
+    return pos, node_sizes
+
+
+class TestExactProjectorConvergence:
+    """Convergence proof for the r80/projector accumulation fix.
+
+    Before r80, `_project_exact`'s advanced-index `+=` silently dropped
+    repeated node indices (last write wins), so dense overlap cliques never
+    converged -- see .project-context/research/r79_native/P3B2_STRESS_FORENSICS.md
+    (sbm_4x30 left 37+ overlaps after 50 iterations). This proves the fixed
+    accumulate-then-damp projector actually reaches zero overlaps on an
+    adversarial 30-node clique where every node starts overlapping every
+    other node.
+    """
+
+    def test_dense_clique_converges_to_zero_overlaps(self) -> None:
+        """A 30-node near-coincident clique should fully resolve within budget."""
+        pos, node_sizes = _make_dense_overlap_clique(num_nodes=30, seed=0)
+        initial_overlaps = count_overlaps(pos, node_sizes)
+        assert initial_overlaps > 400  # sanity: this really is a dense clique
+
+        projected = project_overlaps(pos.clone(), node_sizes, padding=2.0, iterations=200)
+
+        final_overlaps = count_overlaps(projected, node_sizes)
+        assert final_overlaps == 0, (
+            f"exact projector left {final_overlaps} overlaps unresolved "
+            f"(started from {initial_overlaps})"
+        )
+
+    def test_dense_clique_converges_across_seeds(self) -> None:
+        """Convergence should not depend on the particular initial jitter."""
+        for seed in range(10):
+            pos, node_sizes = _make_dense_overlap_clique(num_nodes=30, seed=seed)
+            projected = project_overlaps(pos.clone(), node_sizes, padding=2.0, iterations=200)
+            final_overlaps = count_overlaps(projected, node_sizes)
+            assert final_overlaps == 0, f"seed={seed} left {final_overlaps} overlaps unresolved"
