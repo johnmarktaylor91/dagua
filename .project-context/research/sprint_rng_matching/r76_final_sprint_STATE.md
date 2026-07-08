@@ -914,3 +914,40 @@ with --variants does NOT re-expand to siblings (verified run_benchmark.py:1013-1
      2486172, eval_output/benchmark_100seed_r78_small_umap (minutes).
 - Bench fleet now: nodrl 1646492, slow 1646493, drl 2486166, umap 2486172 (all nice 5).
 - Pending: harness adversarial audit agent (out); test rerun; commit of allowlist+guard fixes.
+
+## 2026-07-08 (cont 2): ADVERSARIAL AUDIT VERDICT -- not honestly finished yet; remediation running
+Audit agent (independent numpy Procrustes recomputes + full-ledger sweeps) + my own verification:
+- F1 HIGH (VERIFIED): FIDELITY_IDENTICAL tier = quality-TOST battery ONLY, no positional gate.
+  Within quality-flagged rows: 318 have per-seed matched-Procrustes >0.5; 76 FAILED the
+  harness's own dist_equivalent test; 776 exploratory-only (ref too self-dispersed). The
+  "73.4% identical" headline launders ~1.1k quality-only rows under an "IDENTICAL" name.
+  JMT's 3-level bar accepts quality-equivalent as a PASS -- the fix is HONEST NAMING+TIERING,
+  not necessarily new algo work.
+- F2 HIGH (VERIFIED mechanically, broader than agent's sample): benign verdicts certify
+  STALE CODE. 38 mds + 111 fmmm combos (118 currently benign) scored from dirs predating
+  behavior-changing fixes (mds 07-04 bc72627+, fmmm 06-22 7cf7f83). Lists persisted at
+  r78_scratch/r78_stale_code_combos.json (+winners.json = combo->winning-dir replay).
+- F3 MED (VERIFIED exactly): org_chart_1_5_4_8::classical_mds_default deterministic,
+  mean_diag_B=0.806, dist_equivalent=False, yet DISTRIBUTIONAL_EQUIVALENT via stress-only
+  quality gate. 9/36 DISTEQ rows have dist_equivalent==False.
+- F4 MED: gate_3_negative FAILED at r77 sign-off (90% vs 95%, 2/20 wrong-ref controls
+  benign) -- probe agent dispatched.
+- F5 MED: 53 seed-era-mismatch INSUFFICIENT rows (51 formerly benign) -- largely covered by
+  running targeted benches (same combos).
+- F6 LOW: MODE_B_BIT_EXACT is O(2)/similarity-invariant (+anisotropic for sugiyama); spot
+  checks found no laundering, but final docs must say "similarity-exact".
+- CLEAN: Procrustes math independently CONFIRMED; ledger rules obeyed 3955/3955; overlay
+  winner logic reproduces; no load failures; 45/45 node-count integrity; no 6th mechanical
+  oracle bug found.
+REMEDIATION IN FLIGHT:
+- benches: stale-mds rebench LAUNCHED (pid 2922194, 2 workers, r78_stale_mds; big-graph mds
+  already covered by nodrl/slow). fmmm stale rebench + sgd2-small + family-2 probe QUEUED
+  (box at load ~28/20; launch as benches land).
+- agents: gate_3_negative root-cause probe (sonnet); scripts/build_definitive_ledger.py
+  implementation (fable) = PERSISTED honest tier builder: MODE_B tiers kept, new
+  POSITIONAL_IDENTICAL (mean_diag_B<1e-3), DISTRIBUTIONAL_EQUIVALENT (dist_equivalent),
+  QUALITY_EQUIVALENT (raw|exploratory, replaces FIDELITY_IDENTICAL name), hard rules
+  (dist_equivalent=False never above quality tier; deterministic+large-dist needs named
+  cause; >=30 matched seeds), stale_code provenance flag, DIVERGENT_UNEXPLAINED must be 0.
+- final sequence: all benches land -> full rescore (291 targeted + umap8 + mds38 + fmmm111
+  + sgd2-65 + family2-113 + drl59 combos) -> build_definitive_ledger -> THE ledger.
