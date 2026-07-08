@@ -879,6 +879,12 @@ def _extract_component_problem(
             parent_indices
         ].clone()
 
+    # Propagate the parent's resolved semantic direction to component
+    # children: GraphStructure already carries ``is_semantically_directed``,
+    # and classify_graph's ``graph=`` override reads that same attribute
+    # name via getattr, so passing the parent structure directly keeps a
+    # user's undirected declaration (or the parent's own inference result)
+    # from being silently re-inferred per weak component.
     classified_structure = classify_graph(
         sub_edge_index.detach().to(device="cpu", dtype=torch.long),
         int(parent_indices.numel()),
@@ -887,6 +893,7 @@ def _extract_component_problem(
             if sub_layer_assignments is None
             else sub_layer_assignments.detach().to(device="cpu", dtype=torch.long)
         ),
+        graph=parent_problem.structure,
     )
     child_problem = LayoutProblem(
         edge_index=sub_edge_index,

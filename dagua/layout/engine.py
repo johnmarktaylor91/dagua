@@ -1122,6 +1122,21 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         if "steps" in sig.parameters:
             kwargs["steps"] = config.steps
 
+        # Classify once here, where the real DaguaGraph is in scope, so an
+        # explicit graph.is_semantically_directed declaration (or the
+        # heuristic fallback) reaches routing. Headless pipelines below this
+        # point only ever see tensors, so this is the one place classify_graph
+        # can see ``graph=``; the resulting structure flows down through the
+        # existing graph_structure kwarg the pipelines already accept.
+        if "graph_structure" in sig.parameters and "graph_structure" not in kwargs:
+            from dagua.layout.graph_classify import classify_graph
+
+            kwargs["graph_structure"] = classify_graph(
+                graph.edge_index,
+                graph.num_nodes,
+                graph=graph,
+            )
+
         # Forward user-facing state into the pipeline regardless of how the
         # algorithm was selected. Previously this block was gated on
         # ``remapped_from_default`` (i.e. ``algorithm=None``) which meant
@@ -1191,6 +1206,11 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
     # Handle cycles: reverse back edges so the engine sees a DAG
     graph._prepare_for_layout()
+    # Populated in the direct (non-multilevel) branch below, where the real
+    # DaguaGraph is in scope for classification; stays None for the
+    # multilevel path (multilevel_layout classifies internally) so the
+    # relax-pass _layout_inner call below falls back to its prior behavior.
+    legacy_graph_structure: Optional[GraphStructure] = None
     try:
         # Tier 2: Multilevel coarsening for large graphs (N > 20K default)
         # Coarsening is faster than direct optimization at this scale.
@@ -1223,6 +1243,11 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
                 print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
 
+            # Classify with graph= here, where the real DaguaGraph is still in
+            # scope, so an explicit graph.is_semantically_directed declaration
+            # (or the heuristic fallback) reaches this legacy solve path too.
+            legacy_graph_structure = classify_graph(edge_index, n, graph=graph)
+
             pos = _layout_inner(
                 edge_index,
                 n,
@@ -1235,6 +1260,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 ),
                 progress_context=ProgressContext(),
                 trace=trace,
+                graph_structure=legacy_graph_structure,
             )
 
         # Force-directed relaxation: re-run with w_dag=0 to soften rigid
@@ -1265,6 +1291,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 init_pos=pos,
                 progress_context=ProgressContext(),
                 trace=trace,
+                graph_structure=legacy_graph_structure,
             )
 
         # Apply direction transform
