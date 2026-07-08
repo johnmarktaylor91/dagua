@@ -108,3 +108,11 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   crossing path off the scoring route.
 - POLICY (Fable): ALL metric/fairness changes batch into ONE re-freeze at P6 (degeneracy guard + size-aware externals
   + composite_large undirected + full external rerun). No mid-sprint ruler changes; S2/S4 gate on the current ruler.
+
+## 2026-07-08 ~15:40: idea logged (JMT conversation): user-facing aesthetic priorities
+- Users can already tweak differentiable loss weights + write custom constraints (original-vision API).
+- GAP: portfolio SELECTION composite has fixed weights -> engine choice not steerable by user priorities.
+- IDEA (post-S4): aesthetic-priority knob (e.g. prioritize="crossings" | explicit term weights) plumbed into BOTH
+  the differentiable losses AND the candidate-selection composite. Nearly free once S4 lands (referee already
+  computes per-term scores). Candidate for r81. Pairs with quality knob (time axis) as the two user dials:
+  time-vs-quality and aesthetic-priority.
