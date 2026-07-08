@@ -375,6 +375,33 @@ def load_gml_file(path: Path) -> LoadedGraph:
     return build_graph(f"{corpus}/{path.stem}", corpus, len(nodes), edges, directed, path)
 
 
+def load_graphml_file(path: Path) -> LoadedGraph:
+    """Load a GraphML (XML) file through NetworkX.
+
+    Parameters
+    ----------
+    path : Path
+        Source GraphML file path.
+
+    Returns
+    -------
+    LoadedGraph
+        Loaded graph with zero-based node IDs.
+    """
+    try:
+        import networkx as nx
+    except ImportError as exc:
+        raise RuntimeError("networkx is required to read GraphML files") from exc
+
+    nx_graph = nx.read_graphml(path)
+    nodes = list(nx_graph.nodes())
+    node_to_index = {node: index for index, node in enumerate(nodes)}
+    edges = [(node_to_index[source], node_to_index[target]) for source, target in nx_graph.edges()]
+    corpus = infer_corpus(path)
+    directed = infer_directed(path, nx_graph.is_directed() if "north" not in corpus else None)
+    return build_graph(f"{corpus}/{path.stem}", corpus, len(nodes), edges, directed, path)
+
+
 def _load_mtx_with_scipy(path: Path) -> Tuple[int, List[Tuple[int, int]]]:
     """Load Matrix Market topology with SciPy.
 
@@ -469,7 +496,12 @@ def load_corpus(corpus_dir: Path, max_nodes: int) -> List[LoadedGraph]:
     List[LoadedGraph]
         Loaded graphs, sorted by corpus/name.
     """
-    loaders = {".graph": load_graph_file, ".gml": load_gml_file, ".mtx": load_mtx_file}
+    loaders = {
+        ".graph": load_graph_file,
+        ".gml": load_gml_file,
+        ".graphml": load_graphml_file,
+        ".mtx": load_mtx_file,
+    }
     graphs: List[LoadedGraph] = []
     for path in sorted(corpus_dir.rglob("*")):
         loader = loaders.get(path.suffix.lower())
