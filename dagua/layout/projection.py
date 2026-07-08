@@ -12,6 +12,7 @@ Sprint 3 scaling strategy:
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import torch
@@ -21,6 +22,20 @@ from dagua.utils import _cuda_stage_status_message, _is_cuda_oom_error, _vram_fi
 
 _GPU_PROJECTION_ARGSORT_BYTES_PER_NODE = 72
 _GPU_PROJECTION_VRAM_FRACTION = 0.60
+_EXACT_PROJECTION_DEFAULT_DAMPING = 0.7
+_EXACT_PROJECTION_STAGNATION_WINDOW = 3
+# Minimum fractional decrease in total overlap penetration depth for a pass
+# to count as "progress" (see `_project_exact`). A single slowly-converging
+# pair decays geometrically (~35% per pass at the default damping) and
+# should never be flagged stagnant; a genuinely deadlocked dense clique
+# decays by a fraction of a percent per pass once it plateaus, well under
+# this threshold.
+_EXACT_PROJECTION_STAGNATION_MIN_PROGRESS_RATIO = 0.01
+# Multiplicative safety margin on top of the theoretical minimum grid spacing
+# in `_grid_spread_residual_overlaps`. Without it, adjacent cells are placed
+# exactly at the overlap boundary and float32 rounding can leave a few pairs
+# just barely re-flagged as overlapping.
+_GRID_SPREAD_SAFETY_MARGIN = 1.01
 
 
 def _copy_layer_index_to_cpu(layer_index: Optional[LayerIndex]) -> Optional[LayerIndex]:
@@ -189,14 +204,141 @@ def project_overlaps(
     return pos
 
 
+def _grid_spread_residual_overlaps(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    node_indices: torch.Tensor,
+) -> None:
+    """Deterministically re-lay a stuck node subset onto a regular grid.
+
+    Damped pairwise pushes are a Jacobi-style simultaneous update: every
+    overlapping pair proposes a correction in the same pass, and dense
+    cliques can settle into a fixed point where those corrections cancel out
+    node-by-node even though pairwise overlaps remain (a well-known failure
+    mode of simultaneous, as opposed to sequential, separation forces). This
+    escape valve breaks that deadlock deterministically -- no RNG -- by
+    placing every node still touching an overlap onto a grid sized from the
+    largest box in the set plus padding (times a small float32 safety
+    margin), which is provably overlap-free among that set. Nodes outside
+    ``node_indices`` are left untouched; the caller's normal iterations
+    continue afterward to reconcile the moved subset with the rest of the
+    graph.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``. Updated in place for the rows in
+        ``node_indices``.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    padding : float
+        Extra spacing enforced between boxes.
+    node_indices : torch.Tensor
+        Indices of the nodes to re-lay, shaped ``[K]``.
+
+    Returns
+    -------
+    None
+        ``pos`` is updated in place.
+    """
+    k = int(node_indices.shape[0])
+    if k <= 1:
+        return
+
+    center = pos[node_indices].mean(dim=0)
+    n_cols = max(int(math.ceil(math.sqrt(float(k)))), 1)
+    n_rows = int(math.ceil(k / n_cols))
+    cell_w = (
+        float(node_sizes[node_indices, 0].max().item()) + padding
+    ) * _GRID_SPREAD_SAFETY_MARGIN
+    cell_h = (
+        float(node_sizes[node_indices, 1].max().item()) + padding
+    ) * _GRID_SPREAD_SAFETY_MARGIN
+
+    rank = torch.arange(k, device=pos.device)
+    col_idx = (rank % n_cols).to(pos.dtype)
+    row_idx = (rank // n_cols).to(pos.dtype)
+    grid_x = (col_idx - (n_cols - 1) / 2.0) * cell_w
+    grid_y = (row_idx - (n_rows - 1) / 2.0) * cell_h
+
+    pos[node_indices, 0] = center[0] + grid_x
+    pos[node_indices, 1] = center[1] + grid_y
+
+
 def _project_exact(
     pos: torch.Tensor,
     node_sizes: torch.Tensor,
     padding: float,
     iterations: int,
+    damping: float = _EXACT_PROJECTION_DEFAULT_DAMPING,
 ) -> None:
-    """Exact O(N^2) overlap projection for small graphs."""
+    """Exact O(N^2) overlap projection for small graphs.
+
+    Per-pass pushes are accumulated per node with ``index_add_`` over ALL
+    overlapping pairs before being applied. Plain advanced-index ``+=``
+    (``pos[x_r] += ...``) silently drops repeated indices -- last write wins
+    -- so on dense overlap cliques (many pairs sharing a node) most of the
+    intended displacement was discarded and the projector never converged.
+    ``index_add_`` accumulates every pair's contribution, then the summed
+    delta is scaled by ``damping`` to avoid overshoot from nodes touched by
+    many pairs at once.
+
+    The pass loop stops when the overlap count hits zero, when the total
+    pushed penetration depth (the sum of each overlapping pair's
+    to-be-resolved overlap along its push axis -- see below) fails to
+    shrink by at least ``_EXACT_PROJECTION_STAGNATION_MIN_PROGRESS_RATIO``
+    for ``_EXACT_PROJECTION_STAGNATION_WINDOW`` consecutive passes, or after
+    ``iterations`` passes -- whichever comes first.
+
+    Depth, not the raw overlap *count*, is the progress signal: count is a
+    poor proxy because a single slowly-converging pair can hold the same
+    count for many passes while its actual overlap keeps shrinking
+    geometrically every pass (verified against
+    ``tests/test_ops_project.py::test_overlap_projection_honors_padding_when_separating_nodes``,
+    where a literal count-based check misfired on iteration 3 of a
+    perfectly healthy two-node convergence and triggered the grid-spread
+    fallback below early). A plain strictly-decreasing check on depth has
+    the opposite problem: dense overlap cliques decay geometrically too,
+    just at a rate low enough (a fraction of a percent per pass once
+    plateaued, versus ~35% per pass for a healthy isolated pair at the
+    default damping) that they would still technically be "decreasing" for
+    hundreds of passes without ever getting usefully close to zero. The
+    relative-progress-ratio threshold below distinguishes the two: a
+    genuinely converging pair clears it every pass; a Jacobi-update
+    deadlock on a dense clique falls under it within a handful of passes.
+    On the first such stagnation (see
+    :func:`_grid_spread_residual_overlaps`), the still-overlapping node
+    subset is re-laid on a deterministic grid once, then ordinary damped
+    passes resume for the remaining budget so any overlaps that re-lay
+    introduces against untouched nodes get mopped up.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``. Updated in place.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    padding : float
+        Extra spacing enforced between boxes.
+    iterations : int
+        Maximum number of accumulated projection passes.
+    damping : float, default=0.7
+        Multiplier applied to the accumulated per-node push each pass.
+
+    Returns
+    -------
+    None
+        ``pos`` is updated in place.
+    """
     n = pos.shape[0]
+    if n <= 1 or iterations <= 0:
+        return
+
+    rows, cols = torch.triu_indices(n, n, offset=1, device=pos.device)
+    prev_overlap_depth: Optional[float] = None
+    stagnant_passes = 0
+    grid_spread_used = False
 
     for _ in range(iterations):
         dx = pos[:, 0].unsqueeze(1) - pos[:, 0].unsqueeze(0)
@@ -207,43 +349,75 @@ def _project_exact(
 
         overlap_x = min_dx - dx.abs()
         overlap_y = min_dy - dy.abs()
-        overlapping = (overlap_x > 0) & (overlap_y > 0)
-        overlapping.fill_diagonal_(False)
 
-        if not overlapping.any():
-            break
+        pair_overlap_x = overlap_x[rows, cols]
+        pair_overlap_y = overlap_y[rows, cols]
+        mask = (pair_overlap_x > 0) & (pair_overlap_y > 0)
 
-        rows, cols = torch.triu_indices(n, n, offset=1, device=pos.device)
-        mask = overlapping[rows, cols]
-
-        if not mask.any():
+        if not bool(mask.any()):
             break
 
         r = rows[mask]
         c = cols[mask]
-        ox = overlap_x[r, c]
-        oy = overlap_y[r, c]
+        ox = pair_overlap_x[mask]
+        oy = pair_overlap_y[mask]
+        pair_dx = dx[r, c]
+        pair_dy = dy[r, c]
 
         push_x = ox < oy
+        overlap_depth = float(torch.where(push_x, ox, oy).sum().item())
+
+        if prev_overlap_depth is not None:
+            progress_ratio = (prev_overlap_depth - overlap_depth) / max(prev_overlap_depth, 1.0e-9)
+            stagnant_passes = (
+                0
+                if progress_ratio >= _EXACT_PROJECTION_STAGNATION_MIN_PROGRESS_RATIO
+                else stagnant_passes + 1
+            )
+        prev_overlap_depth = overlap_depth
+
+        if stagnant_passes >= _EXACT_PROJECTION_STAGNATION_WINDOW and not grid_spread_used:
+            involved = torch.zeros(n, dtype=torch.bool, device=pos.device)
+            involved[r] = True
+            involved[c] = True
+            _grid_spread_residual_overlaps(
+                pos=pos,
+                node_sizes=node_sizes,
+                padding=padding,
+                node_indices=involved.nonzero(as_tuple=True)[0],
+            )
+            grid_spread_used = True
+            stagnant_passes = 0
+            prev_overlap_depth = None
+            continue
+
+        if stagnant_passes >= _EXACT_PROJECTION_STAGNATION_WINDOW:
+            break
+
+        delta = torch.zeros_like(pos)
 
         if push_x.any():
             x_r = r[push_x]
             x_c = c[push_x]
             x_push = ox[push_x] / 2
-            sign = torch.sign(dx[x_r, x_c])
+            sign = torch.sign(pair_dx[push_x])
             sign[sign == 0] = 1.0
-            pos[x_r, 0] += sign * x_push * 0.5
-            pos[x_c, 0] -= sign * x_push * 0.5
+            values = sign * x_push * 0.5
+            delta[:, 0].index_add_(0, x_r, values)
+            delta[:, 0].index_add_(0, x_c, -values)
 
         push_y = ~push_x
         if push_y.any():
             y_r = r[push_y]
             y_c = c[push_y]
             y_push = oy[push_y] / 2
-            sign = torch.sign(dy[y_r, y_c])
+            sign = torch.sign(pair_dy[push_y])
             sign[sign == 0] = 1.0
-            pos[y_r, 1] += sign * y_push * 0.5
-            pos[y_c, 1] -= sign * y_push * 0.5
+            values = sign * y_push * 0.5
+            delta[:, 1].index_add_(0, y_r, values)
+            delta[:, 1].index_add_(0, y_c, -values)
+
+        pos += delta * damping
 
 
 def _project_sweep(

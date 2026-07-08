@@ -8,6 +8,7 @@ monotonic acceptance safeguards for iterative solvers.
 from __future__ import annotations
 
 import inspect
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Optional, Tuple
@@ -19,12 +20,26 @@ from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
+from dagua.metrics import (
+    composite_auto,
+    count_overlaps_detailed,
+    dag_consistency,
+    edge_length_cv,
+    sampled_crossing_rate,
+)
 
 _MIN_MOVEMENT_NORM = 1.0e-12
 _MIN_BOUNDARY_EXTENT = 1.0
 _MONOTONE_OBJECTIVE_KEY = "monotone_objective"
 _MONOTONE_PREV_POS_KEY = "monotone_previous_pos"
 _MONOTONE_PREV_VALUE_KEY = "monotone_previous_value"
+# Fixed seed for the gate's proxy metrics -- matches the project convention
+# (see dagua.metrics.full()) of pinning sampled_crossing_rate's seed so
+# repeat scoring of the same positions is deterministic.
+_GATE_METRIC_SEED = 0
+_GATE_CROSSING_SAMPLES = 200_000
+
+log = logging.getLogger(__name__)
 
 
 def _require_positions(state: SolveState, op_name: str) -> torch.Tensor:
@@ -281,6 +296,220 @@ class OverlapProjection(Op):
             iterations=self.config.iterations,
             layer_index=layer_index,
         )
+        state.pos = positions
+        return state
+
+
+def _gate_is_semantically_directed(problem: LayoutProblem) -> bool:
+    """Conservative semantic-direction lookup for gate scoring.
+
+    Mirrors the ``direct_hint`` / ``structure_hint`` lookup chain used by
+    ``dagua.layout.ops.sugiyama._directed_igraph_fidelity_gate`` so the gate
+    agrees with the rest of the pipeline on whether a graph's edges carry
+    directional meaning. Defaults to directed (``True``) when no hint is
+    available, same conservative default as ``dagua.metrics.composite_auto``.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs, optionally carrying a direct
+        ``is_semantically_directed`` hint or one nested in ``problem.structure``.
+
+    Returns
+    -------
+    bool
+        Whether edges should be scored as semantically directed.
+    """
+    direct_hint = getattr(problem, "is_semantically_directed", None)
+    if direct_hint is not None:
+        return bool(direct_hint)
+    structure = getattr(problem, "structure", None)
+    structure_hint = getattr(structure, "is_semantically_directed", None)
+    if structure_hint is not None:
+        return bool(structure_hint)
+    return True
+
+
+def _overlap_gate_proxy_composite(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    direction: str,
+    is_semantically_directed: bool,
+) -> float:
+    """Cheap proxy composite for :class:`OverlapProjectionGated`.
+
+    Reuses the real ``composite_auto`` weighting from ``dagua.metrics`` on a
+    partial metric dict -- overlap count, sampled crossing rate (pinned to
+    the project's fixed metric seed), and edge-length CV -- so the formulas
+    are never reimplemented. On directed graphs, ``dag_consistency`` is
+    included too (also O(|E|), no sampling -- still cheap): overlap
+    projection can resolve overlaps by pushing a node against the graph's
+    top-to-bottom (or configured) direction, which the other three terms
+    cannot see at all but which a directed composite penalizes heavily.
+    Without this, the gate accepted projections that wrecked DAG
+    consistency on directed test graphs going through the native_stress
+    pipeline (caught by
+    ``tests/test_layout/test_quality_knob.py::test_quality_high_smoke_spends_more_and_scores_near_draft``).
+    The terms this proxy still omits (depth correlation, straightness,
+    angular resolution, cluster separation) fall back to ``composite``'s /
+    ``composite_undirected``'s own neutral or worst-case defaults on both
+    the before and after evaluation, so they contribute an identical
+    constant offset that cancels out of the accept/reject delta.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    direction : str
+        Layout direction (``"TB"``, ``"BT"``, ``"LR"``, or ``"RL"``) used for
+        the directed ``dag_consistency`` term.
+    is_semantically_directed : bool
+        Whether to score with ``composite`` (directed, includes
+        ``dag_consistency``) or ``composite_undirected``.
+
+    Returns
+    -------
+    float
+        Proxy composite score where higher is better.
+    """
+    pos_cpu = pos.detach().cpu()
+    edge_index_cpu = edge_index.detach().cpu()
+    node_sizes_cpu = node_sizes.detach().cpu()
+
+    overlap = count_overlaps_detailed(pos_cpu, node_sizes_cpu, seed=_GATE_METRIC_SEED)
+    crossings = sampled_crossing_rate(
+        pos_cpu,
+        edge_index_cpu,
+        n_samples=_GATE_CROSSING_SAMPLES,
+        seed=_GATE_METRIC_SEED,
+    )
+    cv = edge_length_cv(pos_cpu, edge_index_cpu)
+
+    proxy_metrics = {
+        "overlap_count": overlap["overlap_count"],
+        "crossing_rate": crossings["crossing_rate"],
+        "edge_length_cv": cv["edge_length_cv"],
+    }
+    if is_semantically_directed:
+        proxy_metrics.update(dag_consistency(pos_cpu, edge_index_cpu, direction=direction))
+    return composite_auto(proxy_metrics, is_semantically_directed=is_semantically_directed)
+
+
+@dataclass(frozen=True)
+class OverlapProjectionGatedConfig:
+    """Configuration for :class:`OverlapProjectionGated`.
+
+    Parameters
+    ----------
+    padding : float, default=2.0
+        Extra spacing enforced between node bounding boxes.
+    iterations : int, default=10
+        Maximum number of projection passes.
+    """
+
+    padding: float = 2.0
+    iterations: int = 10
+
+
+@register_op
+@dataclass(frozen=True)
+class OverlapProjectionGated(Op):
+    """Overlap projection with metric-gated acceptance.
+
+    Projection is a non-differentiable, potentially destructive constraint:
+    on dense overlap cliques the projector can trade a full overlap cleanup
+    for materially worse crossings or edge-length uniformity (see
+    ``.project-context/research/r79_native/P3B2_STRESS_FORENSICS.md``, fix
+    item 5). This op computes a cheap proxy composite before and after
+    projection using the real overlap/crossing/edge-length-CV metric
+    formulas and keeps the projected result only if the proxy does not
+    regress; otherwise it reverts to the pre-projection positions and logs a
+    debug line.
+    """
+
+    config: OverlapProjectionGatedConfig = field(default_factory=OverlapProjectionGatedConfig)
+
+    name: ClassVar[str] = "overlap_projection_gated"
+    category: ClassVar[OpCategory] = OpCategory.PROJECT
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Project overlaps, keeping the result only if the proxy improves or ties.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with either the projected positions (proxy accepted) or
+            the original pre-projection positions (proxy rejected).
+        """
+        del ctx
+
+        positions = _require_positions(state=state, op_name=self.name)
+        if problem.node_sizes is None or problem.node_sizes.numel() == 0:
+            return state
+
+        visible_positions, layer_index = _visible_original_positions(
+            problem=problem,
+            state=state,
+            positions=positions,
+        )
+        node_sizes = problem.node_sizes.to(
+            device=visible_positions.device,
+            dtype=visible_positions.dtype,
+        )
+        edge_index = problem.edge_index.to(device=visible_positions.device)
+        direction = getattr(problem, "direction", "TB")
+        is_directed = _gate_is_semantically_directed(problem)
+
+        before = visible_positions.detach().clone()
+        proxy_before = _overlap_gate_proxy_composite(
+            before, edge_index, node_sizes, direction, is_directed
+        )
+
+        candidate = visible_positions.detach().clone()
+        project_overlaps(
+            pos=candidate,
+            node_sizes=node_sizes,
+            padding=self.config.padding,
+            iterations=self.config.iterations,
+            layer_index=layer_index,
+        )
+        proxy_after = _overlap_gate_proxy_composite(
+            candidate, edge_index, node_sizes, direction, is_directed
+        )
+
+        if proxy_after >= proxy_before:
+            visible_positions.data.copy_(candidate)
+        else:
+            log.debug(
+                "%s rejected projection: proxy_before=%.4f proxy_after=%.4f "
+                "(reverting to pre-projection positions)",
+                self.name,
+                proxy_before,
+                proxy_after,
+            )
+
         state.pos = positions
         return state
 
