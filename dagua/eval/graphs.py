@@ -2310,7 +2310,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     try:
         import torch.nn as nn
         import torchlens as tl
-    except ImportError:
+    except Exception:
+        # torchlens is optional; a broken checkout (e.g. mid-merge SyntaxError)
+        # must not take down the whole graph corpus.
         return []
 
     graphs = []
@@ -2438,8 +2440,9 @@ def _torchlens_graphs() -> List[TestGraph]:
         simple_branching_cls: Any = SimpleBranching
         diamond_loop_cls: Any = DiamondLoop
         long_loop_cls: Any = LongLoop
-    except ImportError:
-        # Fall back: mark unavailable if TorchLens test models not importable.
+    except Exception:
+        # Fall back: mark unavailable if TorchLens test models not importable
+        # (including a broken torchlens checkout raising SyntaxError).
         nested_modules_cls = None
         simple_branching_cls = None
         diamond_loop_cls = None
