@@ -951,3 +951,34 @@ REMEDIATION IN FLIGHT:
   cause; >=30 matched seeds), stale_code provenance flag, DIVERGENT_UNEXPLAINED must be 0.
 - final sequence: all benches land -> full rescore (291 targeted + umap8 + mds38 + fmmm111
   + sgd2-65 + family2-113 + drl59 combos) -> build_definitive_ledger -> THE ledger.
+
+## 2026-07-08 (cont 3): session gap survived; SUGIYAMA BUCKET COLLAPSES; ledger builder done
+- Session interrupted by usage window; all 4 benches survived; 3 agents resumed via transcript.
+- stale_mds rebench DONE (1470/1470). sgd2-small rebench LAUNCHED (pid 3811071, 3 workers).
+- LEDGER BUILDER DONE (scripts/build_definitive_ledger.py + 24 tests, UNCOMMITTED pending
+  architect review). Honest re-tier of r77 data: positional-or-better 1,811 (bit-exact 186 +
+  identical-distance 40 + close 74 + positional-identical 1,511), distributional 1,146,
+  quality-only 50, superior 40, divergent-named 249, DIVERGENT_UNEXPLAINED 8, insufficient
+  221+22, no-canonical 405, stale-ref 3. Old FIDELITY_IDENTICAL 2,678 fans out to
+  1,511 positional + 1,117 distributional + 50 quality-only. The 8 unexplained: 4 fmmm
+  (stale-code family), 2 classical_mds (org_chart/wide_3_50_3 -- fresh data just benched),
+  2 sfdp parallel_cycles_4x5 (disconnected packing? needs probe).
+- SUGIYAMA 145-ROW BUCKET = 100% STALE CODE, ZERO RESIDUAL. Agent verified per-seed on
+  current develop: all 145 combos at d_R ~1e-15 (worst 1.015e-15 ba_5000). Ledger rows all
+  carry git_sha 6f141e1 (07-04) predating fixes 508afd4 (A11b dummy-chain order) + 5bfed0b
+  (A11d component packing) both 07-05. Post-fix positions already in r78_bk2 (51,600 ok) +
+  r78_close18 dirs. Closes via rescore alone -> add 145 combos (persisted at
+  r78_scratch/r78_sugiyama_145_combos.json) to final rescore list. Anti-delegation verified
+  (AST: no igraph imports); anisotropic scale tripwire 50.0x confirms distinct pipelines.
+- GATE3 PROBE VERDICT: 2 leaks = (1) unproduced phantom bool seed_tracking acted as benign
+  bypass in hand-compacted control rows (r75 compaction dodging 500KB hook) -- REMOVED from
+  assign_rung (committed this session; report.py:1759 consumer fails-conservative);
+  (2) mode-B non-near-det rung 2' has no positional/power floor (p_typ alone). Blunt d_R
+  floor REJECTED by measurement: would demote 66 real rows (46 neato d_R 0.05-1.1) whose
+  honest tier depends on the neato agent's in-flight verdict (drand48 per-seed matchable vs
+  genuine stochastic cloud). DECISION DEFERRED until neato lands. Candidate principled fix:
+  permutation-power negative control (permute ref node correspondence; if typicality can't
+  reject the scrambled ref, mark typicality_uninformative -> non-benign rung).
+- Remaining queue: fmmm stale rebench (launch at next capacity slot), family-2 probe (calm
+  box), neato agent, ledger-builder review, regenerate gate3 compact controls from
+  controls_full, final full rescore -> build_definitive_ledger -> sign-off.

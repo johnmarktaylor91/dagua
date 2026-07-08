@@ -364,7 +364,11 @@ def assign_rung(record: dict[str, Any]) -> tuple[str, list[str]]:
         record.get("quality_identical", False) or _q_lt(record.get("q_battery"), 0.05)
     )
     if mode == "A":
-        tracking = bool(record.get("seed_tracking", False)) or (
+        # Tracking must be earned from measured statistics. A bare boolean
+        # "seed_tracking" field has no producer in this codebase and acted as
+        # a silent benign-rung bypass in hand-compacted control files
+        # (r78 gate_3_negative audit); it is deliberately ignored.
+        tracking = (
             _q_lt(record.get("q_track"), 0.05) and float(record.get("track_ratio", math.inf)) <= 0.5
         )
         dist_equiv = bool(record.get("dist_equivalent", False))
