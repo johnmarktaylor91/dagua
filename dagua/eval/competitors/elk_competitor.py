@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -180,6 +180,74 @@ def _collect_elk_positions(
         _collect_elk_positions(child.get("children", []), positions, child_x, child_y)
 
 
+def _collect_elk_routes(
+    data: dict,
+    num_edges: int,
+) -> Optional[List[Optional[List[Tuple[float, float]]]]]:
+    """Parse ELK edge sections into per-edge polylines (r80-S6).
+
+    Every benchmark edge is submitted at root level with id ``e{idx}``, so
+    section coordinates are relative to the root and need no offsetting.
+    Each section contributes ``startPoint -> bendPoints... -> endPoint``.
+
+    Parameters
+    ----------
+    data : dict
+        Parsed ELK JSON output.
+    num_edges : int
+        Expected edge count.
+
+    Returns
+    -------
+    list | None
+        Per-edge polylines aligned to ``edge_index`` columns (``None``
+        entries for unrouted edges), or ``None`` when no edge carries
+        routing sections.
+    """
+    edges = data.get("edges")
+    if not isinstance(edges, list) or num_edges <= 0:
+        return None
+
+    routes: List[Optional[List[Tuple[float, float]]]] = [None] * num_edges
+    any_route = False
+    for edge_obj in edges:
+        if not isinstance(edge_obj, dict):
+            continue
+        edge_id = str(edge_obj.get("id", ""))
+        if not edge_id.startswith("e") or not edge_id[1:].isdigit():
+            continue
+        e_idx = int(edge_id[1:])
+        if e_idx >= num_edges:
+            continue
+        sections = edge_obj.get("sections")
+        if not isinstance(sections, list) or not sections:
+            continue
+        polyline: List[Tuple[float, float]] = []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            points = [section.get("startPoint")]
+            bend_points = section.get("bendPoints")
+            if isinstance(bend_points, list):
+                points.extend(bend_points)
+            points.append(section.get("endPoint"))
+            for point in points:
+                if not isinstance(point, dict):
+                    continue
+                try:
+                    xy = (float(point["x"]), float(point["y"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if polyline and polyline[-1] == xy:
+                    continue
+                polyline.append(xy)
+        if len(polyline) >= 2:
+            routes[e_idx] = polyline
+            any_route = True
+
+    return routes if any_route else None
+
+
 @register
 class ElkLayered(CompetitorBase):
     name = "elk_layered"
@@ -260,8 +328,15 @@ class ElkLayered(CompetitorBase):
             data = json.loads(result.stdout)
             pos = torch.zeros(n, 2)
             _collect_elk_positions(data.get("children", []), pos)
+            num_edges = graph.edge_index.shape[1] if graph.edge_index.numel() > 0 else 0
+            routes = _collect_elk_routes(data, int(num_edges))
 
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=pos,
+                runtime_seconds=elapsed,
+                routes=routes,
+            )
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
