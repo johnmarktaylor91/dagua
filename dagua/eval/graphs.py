@@ -53,6 +53,7 @@ def get_test_graphs(
         List of TestGraph objects.
     """
     all_graphs = _build_all_test_graphs()
+    _declare_semantic_direction(all_graphs)
 
     if tags:
         all_graphs = [g for g in all_graphs if g.tags & tags]
@@ -60,6 +61,22 @@ def get_test_graphs(
         all_graphs = [g for g in all_graphs if g.graph.num_nodes <= max_nodes]
 
     return all_graphs
+
+
+def _declare_semantic_direction(graphs: List[TestGraph]) -> None:
+    """Set ``graph.is_semantically_directed`` from corpus tags, in one place.
+
+    A real user with a known-undirected graph would declare it via
+    ``DaguaGraph.is_semantically_directed = False`` so layout routing can see
+    it (rather than relying on heuristic inference). The corpus mirrors that:
+    single source of truth is ``is_semantically_directed()`` -- the same
+    oracle the benchmark harness uses for scoring -- so declaration and
+    scoring never disagree. Directed graphs are left with the default
+    ``None`` (heuristic inference decides).
+    """
+    for test_graph in graphs:
+        if not is_semantically_directed(test_graph):
+            test_graph.graph.is_semantically_directed = False
 
 
 def is_semantically_directed(test_graph: TestGraph) -> bool:
