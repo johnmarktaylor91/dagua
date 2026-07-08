@@ -95,3 +95,16 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   r80/drawing-metrics, worktree dagua-native-p3. Invariance gate: frozen baseline must stay bit-identical.
 - S7 planned (after S6): wire orphaned edge optimizer into pipelines (edge_opt_steps config), node-bbox deflection
   in route_edges, edge-label search upgrade -- gated on composite_drawing evidence.
+
+## 2026-07-08 ~13:50: S1 harness audit DONE -- SOUND-WITH-CAVEATS (report: P8C_HARNESS_AUDIT.md)
+- W/T/L recounts exactly; store integrity, tie-band, seeded metric path clean.
+- HIGH-1: P3a "rescore only" claim partly false (er_500 positions changed in that commit; P1/P2c exercised).
+  Historical confound only; S0 re-sweep re-establishes current truth. Metadata snapshot drift noted.
+- HIGH-2: externals laid out size-BLIND but scored size-aware -> biases FOR dagua. FIX AT P6: pass node sizes to
+  graphviz/elk/dagre adapters + full external re-run (batch with S6 adapter changes; same files).
+- HIGH-3: degenerate-collapse exploit (point-collapse scores 65/100; 62/972 rows overlap>0 & composite>60; 0 verdicts
+  flip today). S4 told (SendMessage) to add a degeneracy guard to candidate acceptance. Composite guard itself -> P6.
+- MEDIUM-1: composite_large lacks undirected variant (dead code today; landmine for scale rounds). LOW-1: unseeded
+  crossing path off the scoring route.
+- POLICY (Fable): ALL metric/fairness changes batch into ONE re-freeze at P6 (degeneracy guard + size-aware externals
+  + composite_large undirected + full external rerun). No mid-sprint ruler changes; S2/S4 gate on the current ruler.
