@@ -982,3 +982,29 @@ REMEDIATION IN FLIGHT:
 - Remaining queue: fmmm stale rebench (launch at next capacity slot), family-2 probe (calm
   box), neato agent, ledger-builder review, regenerate gate3 compact controls from
   controls_full, final full rescore -> build_definitive_ledger -> sign-off.
+
+## 2026-07-08 (cont 4): NEATO BUCKET COLLAPSES; gate2+gate3 both 100%; builder committed
+- NEATO 54(+5 fdp)-ROW BUCKET: 58/59 close; named cause was WRONG for 86% (51/59 connected,
+  packing never ran). Real causes: SEED_42_ERA stale mode-B scoring vs one stale ref draw.
+  r78 already re-benched 36/54 (r78_neato.jsonl: 42 IDENT + 5 EQUIV + 2 INSUFF); agent
+  probed the other 18 fresh: per-seed rel-RMSD <= 6.2e-5 all seeds (floor = graphviz %.5g
+  export rounding, modeled at neato.py:727-731). Disconnected rows: per-component <=1.9e-4
+  (bit-exact class), pack arrangement differs but is outside the stress construct.
+  1 GENUINE FLOOR: parallel_cycles_4x5::fdp -- dagua stress 0.082 vs ref 0.134 (ref at its
+  own equilibrium 0.130) -> dagua strictly SUPERIOR, TOST fails on the superior side ->
+  superior-distinct/floor disposition at final adjudication. 16/18 missing combos have
+  fresh positions in benchmark_100seed_r78_neato; the last 2 (tl_resnet_2block,
+  tl_transformer_1layer x classic_neato) LAUNCHED pid 4075389 (r78_neato_tl).
+- GATE REDESIGN LANDED (b15d08b): mode-B rung 2' split -- strong 2' (near-det d_R<1e-3
+  positional) vs weak 2'w (typicality-only; high sensitivity, ~90% specificity; NEVER
+  primary). Rationale: no per-row statistic separates the 2 gate3 leaks (d_R 0.17-0.23)
+  from the 39 gate2 true positives (d_R 0.08-0.99); typicality is honest only as a weak
+  claim. Measured on controls_full: gate2 39/39=100%, gate3 20/20=100% (was 90%). Compact
+  controls/ regenerated mechanically from controls_full (kills the 2 fabricated mode-A rows
+  + phantom fields). Ledger builder unaffected (uses d_R gates, never rungs).
+- LEDGER BUILDER COMMITTED 6afec9c after architect review (24 tests, exact r77 count repro).
+- RESIDUAL REGISTRY MATH after today: 249 named-divergent -> sugiyama 145 close (stale code)
+  + neato/fdp 58 close (stale scoring) + 1 superior-floor = ~45 remaining named rows
+  (graphviz sugiyama rank-collapse 20, MDS eigenspace 12 confirmed floor, SFDP label-box 8,
+  drl float32 3, sgd2 era 2 to re-score). Final rescore must include: 291 targeted + 145
+  sugiyama + 59 neato/fdp combos + stale mds/fmmm lists + small-tier families.
