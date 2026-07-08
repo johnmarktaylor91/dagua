@@ -1302,8 +1302,19 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     # inferred) route to the portfolio contest, which runs the incumbent
     # selection below as candidate A plus dagua's own sfdp/neato
     # reimplementations as challengers, picking the honest-composite argmax.
-    # Trees/chains keep their fast path above this branch.
-    if getattr(structure, "is_semantically_directed", True) is False:
+    # Trees/chains keep their fast path above this branch, and the explicit
+    # try_planar_first opt-in (checked inside the baseline helper) also
+    # wins: a user who asked for planar gets planar.
+    # _dagua_native_suppress_portfolio is set by the contest itself when it
+    # re-enters this router to run its incumbent candidate: force_pipeline
+    # cannot be used for that because several polish stages are gated on
+    # force_pipeline being None, and the incumbent must reproduce today's
+    # default output exactly.
+    if (
+        getattr(structure, "is_semantically_directed", True) is False
+        and not bool(getattr(config, "_dagua_native_suppress_portfolio", False))
+        and not bool(getattr(config, "try_planar_first", False))
+    ):
         return "undirected_portfolio"
     return _choose_native_pipeline_baseline(structure=structure, config=config)
 

@@ -195,9 +195,15 @@ def test_auto_dispatch_selects_planar_for_planar_targets_and_layered_for_random_
     for graph in (hex_graph, sierpinski_graph, planar_graph):
         structure = classify_graph(graph.edge_index, graph.num_nodes)
         assert structure.is_planar
-        # Default: opt-out, so planar candidates take the layered path.
-        assert _choose_native_pipeline(structure, default_config) == "layered_dag"
-        # Explicit opt-in: planar selected.
+        # r80: planar candidates that the heuristic infers as undirected now
+        # route to the undirected portfolio contest by default (whose
+        # incumbent candidate is exactly the old layered default); graphs
+        # still inferred directed keep the layered path.
+        expected_default = (
+            "undirected_portfolio" if structure.is_semantically_directed is False else "layered_dag"
+        )
+        assert _choose_native_pipeline(structure, default_config) == expected_default
+        # Explicit opt-in wins over the portfolio: planar selected.
         assert _choose_native_pipeline(structure, planar_config) == "planar"
 
     random_structure = classify_graph(random_graph.edge_index, random_graph.num_nodes)

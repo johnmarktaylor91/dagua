@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, Optional, Tuple
+from typing import ClassVar, Dict, Optional, Tuple
 
 import torch
 
@@ -330,23 +330,18 @@ def layout_native_undirected_portfolio(
     torch.Tensor
         Selected positions with shape ``[N, 2]``.
     """
-    # Late imports avoid a circular import with dagua_native (which imports
+    # Late import avoids a circular import with dagua_native (which imports
     # this module lazily at its two dispatch points).
-    from dagua.layout.ops.pipelines.dagua_native import (
-        _choose_native_pipeline_baseline,
-        _run_native_problem,
-    )
-
-    structure: Any = problem.structure
-    baseline_selected = (
-        "layered_dag"
-        if structure is None
-        else _choose_native_pipeline_baseline(structure=structure, config=config)
-    )
+    from dagua.layout.ops.pipelines.dagua_native import _run_native_problem
 
     def _run_incumbent() -> torch.Tensor:
+        # Candidate A must be EXACTLY today's default output. Re-enter the
+        # router with the portfolio branch suppressed via a private attr --
+        # NOT via force_pipeline, because several polish stages (edge
+        # equalize best-of-polish, component-tiling polish) are gated on
+        # force_pipeline being None and would silently weaken the incumbent.
         incumbent_config = copy.copy(config)
-        incumbent_config.force_pipeline = baseline_selected
+        setattr(incumbent_config, "_dagua_native_suppress_portfolio", True)
         incumbent_state = SolveState(pos=None if state.pos is None else state.pos.detach().clone())
         return _run_native_problem(problem, incumbent_state, ctx, incumbent_config)
 
@@ -384,6 +379,12 @@ def layout_native_undirected_portfolio(
 
     # Candidate B: our sfdp reimplementation + projection. Weighted graphs
     # pass edge weights through unchanged (the pipeline handles them).
+    # steps mirrors the engine's pipeline dispatch (config.steps, default 0):
+    # the Stage-1 probe ran sfdp through the public engine path, which
+    # forwards config.steps -- 0 skips the per-level sequential refinement
+    # and keeps only the multilevel spring-electrical solve. The probe's
+    # headroom numbers correspond to THAT candidate (and it is ~100x
+    # cheaper than the standalone default of 500 refinement steps).
     try:
         from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
 
@@ -391,6 +392,7 @@ def layout_native_undirected_portfolio(
             edge_index=problem.edge_index,
             num_nodes=n,
             node_sizes=problem.node_sizes,
+            steps=max(int(getattr(config, "steps", 0) or 0), 0),
             seed=seed,
             edge_weights=problem.edge_weights,
         )
