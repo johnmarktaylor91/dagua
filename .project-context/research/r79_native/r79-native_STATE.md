@@ -80,3 +80,18 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   edges, reciprocity 0) and transformer_layer as UNDIRECTED (deep-layering rule backfires). AND classify_graph's
   graph= kwarg (explicit declaration path) is dropped at every real call site (engine.py:1809, resolve.py:540).
   S4 Stage 2 fixes both (declaration plumbing + span-aware deep-layering rule + corpus declaration from tags).
+
+## 2026-07-08 ~13:30: scope expanded (JMT: ALL placement-relevant elements -- routing, labels, shapes; only cosmetics excluded)
+- S3 DONE: holdout corpora live (Rome 152 / North 107 / SuiteSparse 15, 100% parse) on r79/p6a-stdcorpora ee16561.
+  Bonus finds: loaders silently skipped .graphml (fixed); North GraphML directedness defaulting fixed.
+- S5 recon DONE (report: P8B_FULL_ELEMENT_RECON.md). Headlines: (1) differentiable edge-routing optimizer
+  BezierControlPointOpt (6 loss terms) is built+tested but ORPHANED -- zero pipelines compose it; (2) 4 curve-aware
+  metrics computed but never scored (composite uses straight-line crossings only); (3) graphviz/ELK adapters DISCARD
+  native splines/labels at parse time (few hrs each to capture); (4) shape-aware layout = bbox-only, risky, deprioritized.
+- DESIGN CALL (Fable): placement composite stays FROZEN mid-sprint (S2/S4 gates depend on it). New SEPARATE
+  composite_drawing for full-drawing quality; post-placement improvements can't perturb node positions -> clean split.
+- S6 dispatched (sonnet): measurement layer -- routed-path crossing metric + bend count + composite_drawing +
+  graphviz/ELK spline capture + additive benchmark wiring + 10-graph drawing baseline probe. Branch
+  r80/drawing-metrics, worktree dagua-native-p3. Invariance gate: frozen baseline must stay bit-identical.
+- S7 planned (after S6): wire orphaned edge optimizer into pipelines (edge_opt_steps config), node-bbox deflection
+  in route_edges, edge-label search upgrade -- gated on composite_drawing evidence.
