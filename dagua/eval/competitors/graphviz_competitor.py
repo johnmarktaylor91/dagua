@@ -570,6 +570,9 @@ class GraphvizDot(_GraphvizBase):
     engine = "dot"
     max_nodes = 5_000
     supports_clusters = True
+    # hgap/vgap are translated to nodesep/ranksep in layout_with_variant;
+    # everything else is forwarded verbatim as a -G graph attribute.
+    variant_param_names = frozenset({"hgap", "vgap", "maxiter"})
 
     def layout(
         self,

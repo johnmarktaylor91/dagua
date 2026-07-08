@@ -872,3 +872,45 @@ JMT's "25 plenty" was confidence not the scorer's own gate):
 Target combos for rescore: /tmp/r78_targeted_combos.txt (291). ba_5000 DROPPED (0 gaps).
 GOTCHA: run_benchmark --engines accepts specific variant_ids (classic_fr_steps200) and
 with --variants does NOT re-expand to siblings (verified run_benchmark.py:1013-1016).
+
+## 2026-07-08: r78 resume (Fable session) -- benches relaunched, triage fleet out
+- Reboot never happened (uptime 5d); found slow-bench forkserver + 5 workers ORPHANED since
+  the 7/7 SIGTERM (PPID=1, ~30% CPU each for 29h, positions written past results.json flush).
+  Killed the tree + one idle nodrl forkserver. /tmp survived: combos file + logs intact.
+- Relaunched per RESUME_AFTER_REBOOT.md: nodrl (pid 1646492, 4 workers, resumed from 275/5670)
+  and slow (pid 1646493, workers 5->7, resumed from 475/1925). Exit monitors armed in-session.
+- Dispatched 4 Claude subagents (codex paused, credits): (A) drl grind-vs-perf-fix decision,
+  (B) small-tier 180-row WHY-insufficient triage, (C) NEW HAZARD probe -- bench log shows
+  "classic_maxent_stress received unrecognized variant params: alpha, steps, use_entropy"
+  (classic_competitor.py:750) => steps50 variant may have silently run as DEFAULT in all
+  historical benches; blast-radius + static cross-check of all variants vs pipeline configs,
+  (D) adversarial oracle/harness audit (independent Procrustes recompute spot-checks,
+  threshold laundering sweep, stale-shadowing check) per bisection-first standing rules.
+- Next after these land: drl + small-tier benches, rescore 291 combos (+any maxent redo),
+  DEFINITIVE FINAL RE-LEDGER (supersedes r77). Goal: JMT sign-off that fidelity work is DONE.
+
+## 2026-07-08 (cont): triage verdicts + drl/umap benches launched
+- MAXENT HAZARD RESOLVED BENIGN: variant params were ALWAYS applied (merge is unconditional;
+  warning is a missing variant_param_names allowlist). Empirically verified steps50 != default
+  and == direct pipeline call. NO ledger rows invalidated. Fixed allowlists on 8 classes in
+  classic_competitor.py (mechanically derived from VARIANT_REGISTRY; agent's per-class list
+  had minor errors -- computed sets are ground truth). Warning gone.
+- TORCHLENS TRAP: sibling ~/projects/torchlens checkout has unresolved merge conflicts
+  (someone's WIP -- NOT touched). dagua guards only caught ImportError; SyntaxError leaked
+  into test collection + graph corpus. Fixed: tests/conftest.py + dagua/eval/graphs.py
+  (2 sites) now catch Exception. sgd2_multi test "failures" were this, pre-existing.
+- DRL DECISION: GRIND (agent probe): 59 sparse combos / 2,065 runs, ~68.6 core-h. Perf-fix
+  rejected (hotspot _as_float32 is the bit-exactness mechanism; Gauss-Seidel sequential ->
+  vectorization provably unsafe; best 2-3x w/ high regression risk). LAUNCHED: pid 2486166,
+  4 workers, eval_output/benchmark_100seed_r78_targeted_drl, monitor armed.
+- SMALL TIER TRIAGE (186 rows, 3 families):
+  F1 sgd2_multi_with_crossing (65): stale pre-1f317c1 watchdog timeouts -> rebench ~4.1h
+     (cmd in agent report / r78_scratch notes). QUEUED after nodrl frees cores.
+  F2 22-engine watchdog family (113): same signature, NO confirmed fix; hypothesis = CPU
+     oversubscription during June escalation_final overnight. Bisection-first: 3-seed probe
+     (2 combos) MUST run on a CALM box -> queued after current benches; verdict gates the
+     1.4h full rebench.
+  F3 umap_nn30 (8): dagua side clean post-fix; REFERENCE runs missing. LAUNCHED: pid
+     2486172, eval_output/benchmark_100seed_r78_small_umap (minutes).
+- Bench fleet now: nodrl 1646492, slow 1646493, drl 2486166, umap 2486172 (all nice 5).
+- Pending: harness adversarial audit agent (out); test rerun; commit of allowlist+guard fixes.
