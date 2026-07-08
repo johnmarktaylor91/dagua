@@ -116,3 +116,10 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   the differentiable losses AND the candidate-selection composite. Nearly free once S4 lands (referee already
   computes per-term scores). Candidate for r81. Pairs with quality knob (time axis) as the two user dials:
   time-vs-quality and aesthetic-priority.
+
+## 2026-07-08 ~15:45: JMT directive -- aesthetic-priority knob PROMOTED into this sprint
+- No longer an r81 idea: after the original r80 plan completes (S2 projector + S4 portfolio landed and swept,
+  S6 drawing metrics, S7 routing improvements, P6 honesty batch), add stream S8: user-facing aesthetic-priority
+  knob (prioritize=<term> or explicit weights) plumbed into differentiable losses + candidate-selection composite.
+  Ship with: API design note (public surface -> discuss shape with JMT before merge per project rules), docs,
+  tests proving the knob actually changes engine selection on a frontier graph, default == today's weights.
