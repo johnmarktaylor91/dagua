@@ -63,3 +63,20 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   going forward + added __pycache__ to .gitignore). Combined head: 58 scoped tests green, honest warning fires.
 - r79/native NOW = complete sprint. Remaining P6: docs rebuild, then merge-to-develop DECISION (coordinate
   with fidelity tab -- do NOT unilaterally merge to shared develop).
+
+## 2026-07-08 ~morning: r80 KICKOFF (Fable back; JMT: cook until no obvious avenues left; Claude-only, no codex today)
+- S0: baseline re-verify on merged head ef4eef5 (P5 landed after last sweep) -- running, /tmp/r80_s0_baseline.log.
+- S1 (sonnet): adversarial harness/eval audit (rescore-path, oracle, determinism, composite exploits, frozen-store,
+  fairness, tie-band). Brief: briefs/r80_s1_harness_audit.md.
+- S2 (sonnet): convergent overlap projector (index_add_ accumulation + damping + iterate-to-zero) + metric-gated
+  acceptance op, branch r80/projector in dagua-native-p1. Brief: briefs/r80_s2_projector_fix.md.
+- S3 (sonnet): holdout corpora fetch (Rome/North/SuiteSparse mirrors) into p6a harness, dagua-native-p4. HOLDOUT --
+  no tuning. Brief: briefs/r80_s3_stdcorpora_fetch.md.
+- S4 (sonnet, FLAGSHIP): probe-gated undirected portfolio route (own sfdp/neato + projection + honest-composite
+  argmax selection), branch r80/undirected-portfolio in NEW worktree dagua-native-p2.
+  Brief: briefs/r80_s4_undirected_portfolio.md.
+- NEW CONFIRMED SEAM FINDING (Fable, probe 2026-07-08): layout-time _infer_semantically_directed mislabels
+  karate/sbm_4x30/ba_120/small_world_100/grid_5x5/weighted_community/weighted_small_world as DIRECTED (single-stored
+  edges, reciprocity 0) and transformer_layer as UNDIRECTED (deep-layering rule backfires). AND classify_graph's
+  graph= kwarg (explicit declaration path) is dropped at every real call site (engine.py:1809, resolve.py:540).
+  S4 Stage 2 fixes both (declaration plumbing + span-aware deep-layering rule + corpus declaration from tags).
