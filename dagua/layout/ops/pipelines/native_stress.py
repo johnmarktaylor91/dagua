@@ -96,6 +96,17 @@ class NativeStressConfig:
         Optional target aspect forwarded to ``AspectRatioFit``.
     seed : int, default=42
         Deterministic seed.
+    weight_transform : {"none", "inverse"}, default="none"
+        Edge-weight transform applied before weights become Dijkstra/pivot
+        target-distance costs (see ``BuildAdjacencyConfig.weight_transform``
+        in ``dagua/layout/ops/preprocess.py``). ``"none"`` preserves today's
+        default behavior everywhere (weights used as-is, i.e. as distances).
+        ``"inverse"`` (``1 / w``) treats weights as similarities instead --
+        used by the r80-S9 weighted-similarity portfolio challenger for
+        declared-undirected weighted graphs (community/social families
+        where heavy edges mean "close," not "far"; P3B2_STRESS_FORENSICS.md
+        Ranked Fix 4). Predicate-gated: only that challenger sets this to
+        ``"inverse"``, so default-path graphs are unaffected.
     """
 
     steps: int = 0
@@ -113,6 +124,7 @@ class NativeStressConfig:
     overlap_iterations: int = 10
     target_aspect: Optional[float] = None
     seed: int = 42
+    weight_transform: str = "none"
 
 
 def _resolve_native_stress_config(
@@ -140,6 +152,8 @@ def _resolve_native_stress_config(
     base = config or NativeStressConfig()
     if base.repulsion_mode not in {"none", "fa2_degree", "linlog"}:
         raise ValueError("repulsion_mode must be 'none', 'fa2_degree', or 'linlog'.")
+    if base.weight_transform not in {"none", "inverse"}:
+        raise ValueError("weight_transform must be 'none' or 'inverse'.")
     if base.sample_size != "auto" and (
         not isinstance(base.sample_size, int) or base.sample_size <= 0
     ):
@@ -181,6 +195,7 @@ def _resolve_native_stress_config(
         overlap_iterations=base.overlap_iterations,
         target_aspect=base.target_aspect,
         seed=base.seed,
+        weight_transform=base.weight_transform,
     )
 
 
@@ -222,7 +237,13 @@ def build_native_stress_pipeline(
     return Pipeline(
         [
             BuildAdjacency(
-                BuildAdjacencyConfig(weighted=True, dedup="min", format="list", directed=False)
+                BuildAdjacencyConfig(
+                    weighted=True,
+                    dedup="min",
+                    format="list",
+                    directed=False,
+                    weight_transform=resolved.weight_transform,
+                )
             ),
             PivotSelection(PivotSelectionConfig(n_pivots=resolved.n_pivots)),
             PivotDistanceQueries(),
@@ -465,6 +486,7 @@ def _config_from_public(
         overlap_iterations=int(params.get("overlap_iterations", 10)),
         seed=int(public_seed if public_seed is not None else 42),
         target_aspect=public_target_aspect,
+        weight_transform=str(params.get("weight_transform", "none")),
     )
     return _resolve_native_stress_config(
         num_nodes=num_nodes,

@@ -14,7 +14,7 @@ reference algorithms. Target aspiration: "works amazingly well for as broad a ra
 possible", ~95% best-or-tied.
 
 ## Headline outcome (honest)
-- Honest best-or-tied on the frozen 108-graph corpus: ~64/108 (legacy 56W/8T/29L +
+- Honest scoreboard on the frozen 108-graph corpus: 64 outright WINS + 10 ties = 74/108 best-or-tied, 34 losses (legacy 56W/8T/29L +
   extended 8W/2T/5L). This is DOWN from a pre-sprint 87/12/9 ONLY because we fixed an oracle
   bug (see P3a) that had been handing ~44 free composite points to layered engines on
   undirected graphs. The old number was partly fiction; this one is real.
@@ -85,4 +85,3 @@ merged is inert-by-default or baseline-neutral).
 - Cross-session watcher pkill hygiene kills other sessions' monitors -> ledger issue.
 - Full-suite `pytest tests/ -x` gates whack-a-mole for hours on pre-existing stale failures
   (P5 burned 11h) -> KNOWN_RED_TESTS.md + ledger issue; future gates scope to touched files.
-</content>
