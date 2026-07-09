@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import gc
 import json
 import math
 import multiprocessing as mp
@@ -34,6 +36,18 @@ REPORT_METRICS = (
     "crossing_rate",
     "edge_length_cv",
 )
+CORPUS_NAMES = ("rome", "north", "suitesparse", "misc")
+# Memory guard: the harness runs hundreds of in-process "dagua" layouts plus
+# thousands of forked external-engine subprocesses. r80 holdout run r80_holdout
+# was OOM-killed at anon-rss ~101GB (dmesg: pid=344661, total-vm ~1.86TB,
+# pgtables ~3.4GB -- evidence of leaked/fragmented native allocations, not a
+# Python-level container growing per row). GC_TRIM_INTERVAL_ROWS forces a full
+# gc pass + libc malloc_trim(0) periodically to return freed heap pages to the
+# OS. RSS_WARN_BYTES/RSS_ABORT_BYTES are a hard backstop so a still-unknown or
+# host-specific leak can never again silently exhaust the box.
+GC_TRIM_INTERVAL_ROWS = 10
+RSS_WARN_BYTES = 16 * 1024**3
+RSS_ABORT_BYTES = 32 * 1024**3
 ENGINE_NAMES = [
     "dagua",
     "graphviz_dot",
@@ -75,6 +89,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--engines", nargs="+", default=None)
     parser.add_argument("--graphs", nargs="+", default=None)
+    parser.add_argument(
+        "--corpus",
+        choices=CORPUS_NAMES,
+        default=None,
+        help="Restrict the run to one reporting corpus (rome, north, suitesparse, misc).",
+    )
     return parser.parse_args()
 
 
@@ -163,6 +183,40 @@ def json_clean(value: Any) -> Any:
     except (TypeError, ValueError):
         return str(value)
     return numeric if math.isfinite(numeric) else None
+
+
+def current_rss_bytes() -> Optional[int]:
+    """Return the current process resident set size in bytes.
+
+    Returns
+    -------
+    int | None
+        RSS in bytes, or ``None`` when ``psutil`` is unavailable.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    return int(psutil.Process(os.getpid()).memory_info().rss)
+
+
+def release_native_heap() -> None:
+    """Force a full GC pass and return freed heap pages to the OS.
+
+    Called periodically from the row loop to counter native-allocator
+    fragmentation from thousands of short-lived per-row tensors and forked
+    subprocess bookkeeping. Cheap relative to one layout call; safe to call
+    every row if ever needed.
+
+    Returns
+    -------
+    None
+    """
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (AttributeError, OSError):
+        pass
 
 
 def infer_corpus(path: Path) -> str:
@@ -858,56 +912,69 @@ def external_layout_result(
         args=(graph.graph, engine_name, str(temp_path), str(result_path)),
     )
     start = time.perf_counter()
-    process.start()
-    process.join(TIMEOUT_SECONDS)
-    elapsed = time.perf_counter() - start
-    if process.is_alive():
-        process.terminate()
-        process.join(5.0)
+    try:
+        process.start()
+        process.join(TIMEOUT_SECONDS)
+        elapsed = time.perf_counter() - start
+        if process.is_alive():
+            process.terminate()
+            process.join(5.0)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            for path in (temp_path, result_path):
+                if path.exists():
+                    path.unlink()
+            return None, make_error_row(graph, engine_name, elapsed, "timeout", "timeout")
+        exitcode = process.exitcode
+        if not result_path.is_file():
+            if temp_path.exists():
+                temp_path.unlink()
+            detail = f"child exited {exitcode}" if exitcode is not None else "child exited"
+            return None, make_error_row(graph, engine_name, elapsed, detail)
+        with result_path.open("r", encoding="utf-8") as handle:
+            message = json.load(handle)
+        result_path.unlink()
+        if message.get("status") != "OK":
+            if temp_path.exists():
+                temp_path.unlink()
+            return None, make_error_row(
+                graph,
+                engine_name,
+                float(message.get("runtime_s") or elapsed),
+                str(message.get("error") or "external child error"),
+            )
+        position_path = Path(str(message.get("temp_positions_path")))
+        if not position_path.is_file():
+            return None, make_error_row(
+                graph,
+                engine_name,
+                elapsed,
+                "external child returned no positions",
+            )
+        positions = torch.load(position_path, map_location="cpu")
+        position_path.unlink()
+        return (
+            CompetitorResult(
+                name=engine_name,
+                pos=positions,
+                runtime_seconds=float(message.get("runtime_s") or elapsed),
+                error=message.get("error"),
+            ),
+            None,
+        )
+    finally:
+        # Process objects retain OS-level handles (sentinel fd, pipe fds) until
+        # explicitly closed; over a ~19k-fork run (274 graphs x 8 external
+        # engines) never calling close() leaks those handles for the life of
+        # the parent process. See the module-level comment on RSS_ABORT_BYTES.
         if process.is_alive():
             process.kill()
             process.join()
-        for path in (temp_path, result_path):
-            if path.exists():
-                path.unlink()
-        return None, make_error_row(graph, engine_name, elapsed, "timeout", "timeout")
-    exitcode = process.exitcode
-    if not result_path.is_file():
-        if temp_path.exists():
-            temp_path.unlink()
-        detail = f"child exited {exitcode}" if exitcode is not None else "child exited"
-        return None, make_error_row(graph, engine_name, elapsed, detail)
-    with result_path.open("r", encoding="utf-8") as handle:
-        message = json.load(handle)
-    result_path.unlink()
-    if message.get("status") != "OK":
-        if temp_path.exists():
-            temp_path.unlink()
-        return None, make_error_row(
-            graph,
-            engine_name,
-            float(message.get("runtime_s") or elapsed),
-            str(message.get("error") or "external child error"),
-        )
-    position_path = Path(str(message.get("temp_positions_path")))
-    if not position_path.is_file():
-        return None, make_error_row(
-            graph,
-            engine_name,
-            elapsed,
-            "external child returned no positions",
-        )
-    positions = torch.load(position_path, map_location="cpu")
-    position_path.unlink()
-    return (
-        CompetitorResult(
-            name=engine_name,
-            pos=positions,
-            runtime_seconds=float(message.get("runtime_s") or elapsed),
-            error=message.get("error"),
-        ),
-        None,
-    )
+        try:
+            process.close()
+        except ValueError:
+            pass
 
 
 def run_engine(graph: LoadedGraph, competitor: CompetitorBase, output_dir: Path) -> Dict[str, Any]:
@@ -927,17 +994,33 @@ def run_engine(graph: LoadedGraph, competitor: CompetitorBase, output_dir: Path)
     Dict[str, Any]
         Completed result row.
     """
-    if competitor.name in EXTERNAL_ENGINE_NAMES:
-        result, error_row = external_layout_result(graph, competitor.name, output_dir)
-        if error_row is not None:
-            return error_row
-        if result is None:
-            return make_error_row(graph, competitor.name, 0.0, "external child failed")
-    else:
-        try:
-            result = competitor.layout(graph.graph, timeout=TIMEOUT_SECONDS, seed=SEED)
-        except Exception as exc:  # noqa: BLE001
-            return make_error_row(graph, competitor.name, 0.0, f"{type(exc).__name__}: {exc}")
+    # Every engine -- including "dagua" itself -- runs in a forked, isolated
+    # child process. This was NOT always true: "dagua" used to run directly
+    # in-process (competitor.layout() called inline, no fork, and its
+    # `timeout` argument was silently ignored -- DaguaCompetitor.layout()
+    # does `del timeout`). Live reproduction during the r80 OOM investigation
+    # confirmed the root cause: on certain dense small graphs (e.g.
+    # suitesparse/Journals, 124 nodes / 5972 edges, avg degree ~96) dagua's
+    # own layout optimizer runs far longer than on sparse graphs of similar
+    # node count -- multiple minutes with no enforced ceiling -- and its
+    # resident memory climbs the entire time it runs (observed tens of GB
+    # mid-run in a live repro before the process was killed as a
+    # precaution). The r80_holdout crash (OOM at anon-rss ~101GB, dmesg
+    # pid=344661) landed exactly on the first of these dense outlier graphs
+    # after 261 clean graphs. The underlying optimizer behavior lives in
+    # dagua/layout/ and is out of scope to fix here. Isolating "dagua" the
+    # same way as the other 8 engines means that unbounded runtime/memory
+    # growth is contained to a short-lived child process whose memory is
+    # released to the OS the instant it exits (killed at TIMEOUT_SECONDS if
+    # still running), so it can never accumulate in -- or take down -- the
+    # long-lived parent harness process. This also gives "dagua" the same
+    # TIMEOUT_SECONDS wall-clock enforcement the
+    # other engines already had (previously unenforced for "dagua").
+    result, error_row = external_layout_result(graph, competitor.name, output_dir)
+    if error_row is not None:
+        return error_row
+    if result is None:
+        return make_error_row(graph, competitor.name, 0.0, "external child failed")
 
     base_row = {
         "graph": graph.name,
@@ -1248,16 +1331,30 @@ def selected_engines(args: argparse.Namespace) -> List[str]:
     return engines
 
 
+class _MemoryGuardAbort(Exception):
+    """Raised internally to unwind the row loop once the RSS ceiling is hit."""
+
+
 def main() -> int:
     """Run the standard-corpora heldout harness.
 
     Returns
     -------
     int
-        Process exit status.
+        Process exit status. ``3`` when the run stopped early because of the
+        RSS abort guard (results up to that point are still published).
     """
     args = parse_args()
+    # Create the final output directory immediately so a user (or a watcher
+    # script) checking mid-run finds something, even before the first row
+    # lands in the staging directory below. The published results.json/
+    # STDCORPORA.md still only appear at publish_results() time, but
+    # results.rows.jsonl in the staging dir streams every row as it completes.
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
     graphs = load_corpus(args.corpus_dir, args.max_nodes)
+    if args.corpus:
+        graphs = [graph for graph in graphs if graph.corpus == args.corpus]
     if args.graphs:
         requested = set(args.graphs)
         graphs = [
@@ -1266,7 +1363,6 @@ def main() -> int:
             if graph.name in requested or Path(graph.name).name in requested
         ]
     if not graphs:
-        args.output_dir.mkdir(parents=True, exist_ok=True)
         readme = args.output_dir / "README.md"
         if not readme.exists():
             readme.write_text(
@@ -1299,24 +1395,57 @@ def main() -> int:
     completed_keys = {(str(row.get("graph")), str(row.get("engine"))) for row in completed}
 
     rows = list(completed)
-    for graph in graphs:
-        for engine_name in engines:
-            if args.dagua_only and engine_name != "dagua":
-                continue
-            key = (graph.name, engine_name)
-            if key in completed_keys:
-                continue
-            available = availability.get(engine_name, {"available": False, "reason": "not checked"})
-            competitor = get_competitor(engine_name)
-            if competitor is None or not available["available"]:
-                reason = str(available.get("reason") or "unavailable")
-                row = make_skip_row(graph, engine_name, reason)
-            else:
-                row = run_engine(graph, competitor, staging)
-            append_row(staging, row)
-            rows.append(row)
-            completed_keys.add(key)
-            print(f"{row['status']} {graph.name} {engine_name}")
+    rss_warned = False
+    aborted_reason: Optional[str] = None
+    row_index = 0
+    try:
+        for graph in graphs:
+            for engine_name in engines:
+                if args.dagua_only and engine_name != "dagua":
+                    continue
+                key = (graph.name, engine_name)
+                if key in completed_keys:
+                    continue
+                available = availability.get(
+                    engine_name, {"available": False, "reason": "not checked"}
+                )
+                competitor = get_competitor(engine_name)
+                if competitor is None or not available["available"]:
+                    reason = str(available.get("reason") or "unavailable")
+                    row = make_skip_row(graph, engine_name, reason)
+                else:
+                    row = run_engine(graph, competitor, staging)
+                append_row(staging, row)
+                rows.append(row)
+                completed_keys.add(key)
+                print(f"{row['status']} {graph.name} {engine_name}")
+                del row
+                row_index += 1
+
+                if row_index % GC_TRIM_INTERVAL_ROWS == 0:
+                    release_native_heap()
+                    rss = current_rss_bytes()
+                    if rss is not None:
+                        print(
+                            f"progress: {row_index} rows, RSS={rss / 1024**3:.2f}GB",
+                            file=sys.stderr,
+                        )
+                        if rss >= RSS_ABORT_BYTES:
+                            aborted_reason = (
+                                f"RSS {rss / 1024**3:.1f}GB >= abort ceiling "
+                                f"{RSS_ABORT_BYTES / 1024**3:.0f}GB after {row_index} rows"
+                            )
+                            print(f"ABORT: {aborted_reason}", file=sys.stderr)
+                            raise _MemoryGuardAbort(aborted_reason)
+                        if rss >= RSS_WARN_BYTES and not rss_warned:
+                            rss_warned = True
+                            print(
+                                f"WARNING: RSS {rss / 1024**3:.1f}GB >= warn threshold "
+                                f"{RSS_WARN_BYTES / 1024**3:.0f}GB after {row_index} rows",
+                                file=sys.stderr,
+                            )
+    except _MemoryGuardAbort:
+        pass
 
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1329,9 +1458,11 @@ def main() -> int:
         "engines": engines,
         "availability": availability,
         "rows": rows,
+        "aborted": aborted_reason is not None,
+        "aborted_reason": aborted_reason,
     }
     publish_results(args.output_dir, staging, payload)
-    return 0
+    return 3 if aborted_reason is not None else 0
 
 
 if __name__ == "__main__":
