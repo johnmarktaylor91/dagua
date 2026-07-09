@@ -176,3 +176,114 @@ def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
 
     assert pos.shape == (graph.num_nodes, 2)
     assert bool(torch.isfinite(pos).all())
+
+
+def _dense_clique_problem() -> tuple[torch.Tensor, torch.Tensor, LayoutProblem]:
+    """Build a 30-node dense-overlap-clique candidate and its problem.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, LayoutProblem]
+        Near-coincident positions, 60x20 label-size boxes, and a ring
+        problem carrying those sizes.
+    """
+    num_nodes = 30
+    generator = torch.Generator().manual_seed(0)
+    pos = torch.randn(num_nodes, 2, generator=generator) * 0.5
+    node_sizes = torch.full((num_nodes, 2), 60.0)
+    node_sizes[:, 1] = 20.0
+    edges = [(i, (i + 1) % num_nodes) for i in range(num_nodes)]
+    problem = LayoutProblem(
+        edge_index=torch.tensor(list(zip(*edges)), dtype=torch.long),
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+    )
+    return pos, node_sizes, problem
+
+
+def test_convergent_cleanup_variant_resolves_dense_overlaps() -> None:
+    """The convergent cleanup variant fully resolves a dense overlap clique.
+
+    A near-coincident 30-node candidate with real label boxes is a dense
+    overlap clique the legacy projector provably stalls on (P3B2
+    forensics). ``convergent=True`` must resolve it to zero -- that is the
+    variant's reason to exist in the contest. Trajectory risk is
+    referee-protected: the contest scores each variant against the
+    incumbent with the honest composite.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _project_candidate
+    from dagua.metrics import count_overlaps
+
+    pos, node_sizes, problem = _dense_clique_problem()
+    assert count_overlaps(pos, node_sizes) > 400  # sanity: dense clique
+
+    projected = _project_candidate(pos, problem, convergent=True)
+
+    assert count_overlaps(projected, node_sizes) == 0
+    # Input candidate tensor must not be mutated (contest reuses it for the
+    # other cleanup variant).
+    assert count_overlaps(pos, node_sizes) > 400
+
+
+def test_legacy_cleanup_variant_matches_trunk_call() -> None:
+    """The default cleanup variant reproduces the S4 trunk projection call.
+
+    The r80-S2b bisect proved the trunk's flagship portfolio wins
+    (petersen_10 79.0 etc.) are legacy-cleaned candidates; replacing that
+    cleanup silently removed them from the pool. The default
+    ``_project_candidate`` call must therefore stay bit-identical to the
+    trunk's ``project_overlaps(pos, node_sizes)``.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _project_candidate
+    from dagua.layout.projection import project_overlaps
+
+    pos, node_sizes, problem = _dense_clique_problem()
+
+    projected = _project_candidate(pos, problem)
+
+    trunk_call = pos.detach().clone().to(dtype=torch.float32)
+    project_overlaps(trunk_call, node_sizes.to(dtype=torch.float32))
+    torch.testing.assert_close(projected, trunk_call, rtol=0.0, atol=0.0)
+
+
+def test_contest_registers_both_cleanup_variants() -> None:
+    """Each challenger contributes BOTH cleanup variants to the contest.
+
+    Never replace a candidate -- add both and let the referee choose
+    (r80-S2b). Verified by spying on the contest's scoring calls during a
+    real portfolio run on a declared-undirected graph.
+    """
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    graph = _ring_with_chords()
+    scored_positions: list[torch.Tensor] = []
+    original_score = nu._score_undirected_candidate
+
+    def spy(pos, problem, cluster_ids):
+        scored_positions.append(pos.detach().clone())
+        return original_score(pos, problem, cluster_ids)
+
+    original_project = nu._project_candidate
+    project_calls: list[bool] = []
+
+    def spy_project(pos, problem, convergent=False):
+        project_calls.append(bool(convergent))
+        return original_project(pos, problem, convergent=convergent)
+
+    nu._score_undirected_candidate = spy
+    nu._project_candidate = spy_project
+    try:
+        from dagua.layout import layout
+
+        layout(graph, LayoutConfig(seed=42, device="cpu"))
+    finally:
+        nu._score_undirected_candidate = original_score
+        nu._project_candidate = original_project
+
+    # Every challenger cleanup ran both variants (False and True in pairs).
+    assert project_calls, "portfolio contest never cleaned a challenger"
+    assert project_calls.count(False) == project_calls.count(True)
+    # And the contest scored more candidates than incumbent + one-per-
+    # challenger (i.e., variants were ADDED, not substituted).
+    n_challengers = project_calls.count(False)
+    assert len(scored_positions) > 1 + n_challengers
