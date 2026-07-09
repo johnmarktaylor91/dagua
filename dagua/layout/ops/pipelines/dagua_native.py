@@ -1310,8 +1310,18 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     # cannot be used for that because several polish stages are gated on
     # force_pipeline being None, and the incumbent must reproduce today's
     # default output exactly.
+    # r80 fix: fire ONLY on high-confidence undirectedness -- an explicit
+    # declaration, or reciprocal edge storage (>0.3 means the graph stores
+    # both directions, the unambiguous undirected format). The deep-layering
+    # INFERENCE alone is not sufficient: it mislabeled outerplanar_dag_20
+    # and recurrent_feedback_cell as undirected, and the contest then
+    # optimized the wrong composite flavor (-20 pts under directed scoring).
     if (
         getattr(structure, "is_semantically_directed", True) is False
+        and (
+            bool(getattr(structure, "direction_is_declared", False))
+            or float(getattr(structure, "reciprocal_edge_ratio", 0.0)) > 0.3
+        )
         and not bool(getattr(config, "_dagua_native_suppress_portfolio", False))
         and not bool(getattr(config, "try_planar_first", False))
     ):
