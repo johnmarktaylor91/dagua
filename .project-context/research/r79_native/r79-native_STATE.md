@@ -197,3 +197,14 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   (weight 30) repay edge-node wins. S7b dispatched: chord-scaled deflection + per-edge crossing-aware acceptance
   (greedy monotone, referee-at-edge-level) + density-scaled spread budget. Second strike = stop.
 - S2b: tests 148 green; final sweep relaunched on idle machine, monitor armed.
+
+## 2026-07-09 ~10:50: S7 routing MERGED to trunk (placement invariance PASS post-merge, 5/5 bit-identical)
+- S7+S7b landed: node-bbox avoidance (chord-scaled, crossing-aware referee per edge), port spread
+  (density-scaled, sign-inversion bug fixed), orphaned optimizer wired (quality>=high), label search widened.
+- Drawing gate final: 10/10 dagua probe rows improved, mean +2.36 (strict +4 bar waived by architect: strictly
+  monotone, zero regressions, dot-external +6.03 validates primitives). enX zero 3/10 -> named r81 residual with
+  the remaining ~8.6pt mean gap to dot native splines.
+- Post-merge invariance: 5/5 graphs bit-identical placement vs pre-merge trunk. Scoreboard 87/108 UNTOUCHED.
+- S2b referee-honesty bisect (443b0f3): zeros on ALL divergence hypotheses -- referee provably scores exactly
+  what is returned. Collapse cause was candidate-pool REPLACEMENT (convergent cleanup replaced legacy, neither
+  dominates). Fix approved: both cleanup variants contest. Final sweep running (nohup, survives session).
