@@ -255,21 +255,28 @@ CHALLENGER_PROJECTION_ITERATIONS = 200
 def _project_candidate(
     pos: torch.Tensor,
     problem: LayoutProblem,
+    convergent: bool = False,
 ) -> torch.Tensor:
-    """Apply size-aware CONVERGENT overlap projection to one challenger.
+    """Apply size-aware overlap projection to one challenger candidate.
 
-    Uses the projector's existing public entry point with real node boxes,
-    with ``convergent=True`` (r80-S2b): the legacy default projector's
-    last-write-wins pushes stall on the dense overlap fields that
-    sfdp/neato candidates arrive with (P3B2 forensics: 37+ residual
-    overlaps on sbm_4x30 after 50 passes), leaving the 20-point no-overlap
-    composite term on the table. The convergent projector provably reaches
-    zero overlaps there. Trajectory risk is fully referee-protected on
-    this path: a candidate whose cleanup damages CV/crossings simply loses
-    the honest-composite contest to the incumbent (plus the degeneracy
-    guard rejects collapsed layouts outright), so unlike the default path
-    -- where r80-S2 showed unguarded convergent projection regressing
-    graphs -- a bad outcome here cannot ship.
+    Two cleanup variants exist and NEITHER dominates (r80-S2b petersen_10
+    bisect, P7_PROJECTOR_EVIDENCE.md):
+
+    - ``convergent=False``: the legacy projector call the S4 portfolio
+      shipped with (default padding/iterations). Its last-write-wins pushes
+      stall on dense overlap fields, but its trajectory produced the
+      trunk's flagship wins (petersen_10 79.0, weighted_karate_34 69.5,
+      weighted_clusters_3x10 68.1 -- all legacy-cleaned neato candidates).
+    - ``convergent=True``: the accumulate+damp+deadlock-re-lay projector
+      with a generous early-exit ceiling. Provably reaches zero overlaps
+      on dense cliques the legacy path stalls on (P3B2 forensics) and
+      produced the S2b sweep gains (planar_60 +19.9, regular_4_40 +15.4,
+      weighted_clusters sfdp +21.4 over legacy).
+
+    The contest therefore scores BOTH variants as separate candidates --
+    never replacing one with the other -- and lets the honest-composite
+    referee choose (the S2b regression came from replacing the legacy
+    variant instead of adding the convergent one alongside it).
 
     Parameters
     ----------
@@ -277,6 +284,8 @@ def _project_candidate(
         Candidate positions with shape ``[N, 2]``.
     problem : LayoutProblem
         Problem carrying node sizes.
+    convergent : bool, default=False
+        Select the convergent cleanup variant.
 
     Returns
     -------
@@ -287,12 +296,15 @@ def _project_candidate(
         return pos
     projected = pos.detach().clone().to(dtype=torch.float32)
     node_sizes = problem.node_sizes.to(device=projected.device, dtype=projected.dtype)
-    project_overlaps(
-        projected,
-        node_sizes,
-        iterations=CHALLENGER_PROJECTION_ITERATIONS,
-        convergent=True,
-    )
+    if convergent:
+        project_overlaps(
+            projected,
+            node_sizes,
+            iterations=CHALLENGER_PROJECTION_ITERATIONS,
+            convergent=True,
+        )
+    else:
+        project_overlaps(projected, node_sizes)
     return projected
 
 
@@ -409,16 +421,23 @@ def layout_native_undirected_portfolio(
     seed = int(problem.seed) if problem.seed is not None else 42
 
     def _add_challenger(name: str, raw_pos: torch.Tensor) -> None:
-        projected = _project_candidate(raw_pos, problem)
-        degenerate, _reason = _candidate_is_degenerate(
-            projected,
-            problem.node_sizes,
-            problem.edge_index,
-        )
-        if degenerate:
-            return
-        positions[name] = projected
-        scores[name] = _score_undirected_candidate(projected, problem, cluster_ids)
+        # Both cleanup variants enter the contest as separate candidates --
+        # never replace one with the other (r80-S2b bisect: replacing the
+        # legacy variant with the convergent one silently removed the
+        # trunk's petersen/karate/wclusters flagship candidates from the
+        # pool; neither variant dominates). The degeneracy guard applies to
+        # each variant independently.
+        for suffix, convergent in (("", False), ("_convergent", True)):
+            projected = _project_candidate(raw_pos, problem, convergent=convergent)
+            degenerate, _reason = _candidate_is_degenerate(
+                projected,
+                problem.node_sizes,
+                problem.edge_index,
+            )
+            if degenerate:
+                continue
+            positions[name + suffix] = projected
+            scores[name + suffix] = _score_undirected_candidate(projected, problem, cluster_ids)
 
     # Candidate B: our sfdp reimplementation + projection. Weighted graphs
     # pass edge weights through unchanged (the pipeline handles them).

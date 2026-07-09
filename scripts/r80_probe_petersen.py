@@ -65,11 +65,16 @@ def spy_score(pos, problem, cluster_ids):
     return score
 
 
-def spy_project(pos, problem):
+def spy_project(pos, problem, convergent=False):
     """Record challenger cleanup inputs/outputs and the problem tensors."""
-    out = _orig_project(pos, problem)
+    out = _orig_project(pos, problem, convergent=convergent)
     records["project"].append(
-        {"raw": pos.detach().clone(), "projected": out.detach().clone(), "problem": problem}
+        {
+            "raw": pos.detach().clone(),
+            "projected": out.detach().clone(),
+            "problem": problem,
+            "convergent": bool(convergent),
+        }
     )
     return out
 
