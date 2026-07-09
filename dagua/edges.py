@@ -1668,14 +1668,23 @@ def _deflect_around_nodes(
         # 3t(1-t)*offset at parameter t, which shrinks toward the chord
         # near the curve's endpoints -- so obstacles that sit close to
         # either endpoint need much larger offsets to actually clear.
-        # Grow aggressively but cap at a large multiple of the chord so a
-        # single far-off node can't blow the curve out arbitrarily.
+        # r80-S7b#1: chord-length-scaled cap. The offset may never exceed
+        # a fixed fraction of the chord: an offset comparable to or larger
+        # than the chord makes the curve loop back on itself (the lasso
+        # curls seen on short cluster-boundary edges in the S7 render
+        # review). Short edges therefore get proportionally small nudges;
+        # if the capped ladder cannot clear the box, the fallback below
+        # leaves the edge unchanged (bounded attempts, never loops).
         growth = (2.0, 4.5, 9.0, 16.0)
-        max_offset = max(chord_len * 1.5, base_offset * growth[-1])
+        max_offset = chord_len * 0.6
 
+        last_offset = None
         for attempt in range(max_attempts):
             factor = growth[min(attempt, len(growth) - 1)]
             offset = min(base_offset * factor, max_offset)
+            if offset == last_offset:
+                break  # ladder saturated at the chord cap; retrying is futile
+            last_offset = offset
             trial_cp1 = (cp1[0] + push_sign * perp_x * offset, cp1[1] + push_sign * perp_y * offset)
             trial_cp2 = (cp2[0] + push_sign * perp_x * offset, cp2[1] + push_sign * perp_y * offset)
             trial = BezierCurve(p0, trial_cp1, trial_cp2, p1)
@@ -1684,7 +1693,7 @@ def _deflect_around_nodes(
                 modified = True
                 break
         # else: dense neighborhood -- no clearing offset found within the
-        # attempt budget; leave the curve as-is for this node and move on
+        # attempt budget; leave the edge as-is for this node and move on
         # (never loop forever).
 
     if modified:
