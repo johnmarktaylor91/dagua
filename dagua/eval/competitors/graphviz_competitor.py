@@ -724,6 +724,15 @@ class _GraphvizBase(CompetitorBase):
             Layout result and timing information.
         """
         start = time.perf_counter()
+        # Size-aware fairness (r80-P6 follow-up): spring engines do not remove
+        # node overlaps unless overlap removal is requested -- passing real
+        # node sizes WITHOUT it makes sfdp/neato strictly worse (grid_20x20
+        # overlaps 1000 -> 1774). Graphviz's documented practice for sized
+        # nodes is overlap=prism, so size-aware runs get the engine at its
+        # documented best ("strongest honest external").
+        graph_attributes: Optional[dict[str, Any]] = None
+        if self.engine in {"sfdp", "neato", "fdp"} and size_aware_externals():
+            graph_attributes = {"overlap": "prism"}
         try:
             pos, routes, edge_label_positions = _coerce_layout_capture(
                 _layout_with_graphviz_engine(
@@ -731,6 +740,7 @@ class _GraphvizBase(CompetitorBase):
                     engine=self.engine,
                     timeout=timeout,
                     seed=seed,
+                    graph_attributes=graph_attributes,
                 )
             )
             elapsed = time.perf_counter() - start
