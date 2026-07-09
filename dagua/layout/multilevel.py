@@ -2014,7 +2014,7 @@ def multilevel_layout(
     levels: List[CoarseLevel] = []
     _original_graph_path: Optional[Path] = None
     try:
-        structure = classify_graph(cpu_ei, n, layer_assignments=precomputed_layers)
+        structure = classify_graph(cpu_ei, n, layer_assignments=precomputed_layers, graph=graph)
         if structure.family in {GraphFamily.TREE, GraphFamily.CHAIN}:
             _vlog(f"Phase 1/3: Tree fast path ({n:,} nodes, {structure.family.name.lower()})...")
             ei = cpu_ei.to(device)
