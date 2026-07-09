@@ -518,9 +518,45 @@ def _infer_semantically_directed(
     resolved_layers = _resolve_layer_assignments(edge_index, num_nodes, layer_assignments)
     num_layers, _, _, _ = _analyze_layers(resolved_layers, num_nodes)
     if num_layers > 0 and float(num_layers) / float(num_nodes) >= 0.4:
+        # Deep layering alone is ambiguous: mechanically-oriented undirected
+        # graphs (e.g. index-oriented dense graphs) and genuinely deep
+        # directed pipelines (e.g. a long chain of transformer blocks) can
+        # both produce num_layers close to num_nodes. Disambiguate using the
+        # fraction of edges whose layer span is exactly 1 (adjacent-layer):
+        # deep *chains* of meaningful stages are mostly adjacent-layer edges,
+        # while mechanically oriented graphs are not.
+        if _adjacent_layer_edge_fraction(edge_index, resolved_layers) >= 0.6:
+            return True
         return False
 
     return True
+
+
+def _adjacent_layer_edge_fraction(
+    edge_index: torch.Tensor,
+    layer_assignments: Optional[torch.Tensor],
+) -> float:
+    """Return the fraction of edges whose layer span (target - source) equals 1.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    layer_assignments : torch.Tensor, optional
+        Layer assignments shaped ``[N]``. When unavailable, returns ``0.0``
+        (treated as non-adjacent, preserving the conservative prior behavior).
+
+    Returns
+    -------
+    float
+        Fraction of edges with ``layer[target] - layer[source] == 1``.
+    """
+    if layer_assignments is None or edge_index.numel() == 0:
+        return 0.0
+    sources = edge_index[0]
+    targets = edge_index[1]
+    layer_span = layer_assignments[targets] - layer_assignments[sources]
+    return float((layer_span == 1).to(dtype=torch.float32).mean().item())
 
 
 def _derive_topology_tags(
