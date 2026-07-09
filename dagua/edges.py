@@ -1699,6 +1699,69 @@ def _deflect_around_nodes(
     return curve
 
 
+def _curve_polyline_samples(
+    curve: BezierCurve, sample_count: int = 10
+) -> List[Tuple[float, float]]:
+    """Return an explicit polyline approximation of a routed curve.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Curve to sample.
+    sample_count : int, default=10
+        Number of samples for bezier curves. Waypoint (ortho/taxi) curves
+        return their exact vertices instead of resampling.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Ordered points approximating the curve.
+    """
+    if curve.waypoints is not None:
+        return [(float(p[0]), float(p[1])) for p in curve.waypoints]
+    return [evaluate_bezier(curve, i / (sample_count - 1)) for i in range(sample_count)]
+
+
+def _label_path_crossings(
+    label_bbox: Rect,
+    owner_edge_idx: int,
+    curve_polylines: Sequence[Sequence[Tuple[float, float]]],
+    curve_path_bboxes: Sequence[Rect],
+) -> int:
+    """Count how many OTHER edges' routed paths cut through a label box.
+
+    The label's own edge is excluded -- a label sitting on its own curve is
+    expected, not a collision.
+
+    Parameters
+    ----------
+    label_bbox : tuple[float, float, float, float]
+        Candidate label bounds as ``(x_min, y_min, x_max, y_max)``.
+    owner_edge_idx : int
+        Index of the edge this label belongs to (skipped).
+    curve_polylines : sequence[sequence[tuple[float, float]]]
+        Pre-sampled polyline per edge (see :func:`_curve_polyline_samples`).
+    curve_path_bboxes : sequence[tuple[float, float, float, float]]
+        Pre-computed bbox per polyline, for a cheap AABB reject.
+
+    Returns
+    -------
+    int
+        Number of other edges whose path crosses ``label_bbox``.
+    """
+    lx0, ly0, lx1, ly1 = label_bbox
+    crossings = 0
+    for other_idx, poly in enumerate(curve_polylines):
+        if other_idx == owner_edge_idx:
+            continue
+        bx0, by0, bx1, by1 = curve_path_bboxes[other_idx]
+        if bx1 < lx0 or bx0 > lx1 or by1 < ly0 or by0 > ly1:
+            continue
+        if polyline_intersect_rect(poly, label_bbox) is not None:
+            crossings += 1
+    return crossings
+
+
 def place_edge_labels(
     curves: List[BezierCurve],
     positions: torch.Tensor,
@@ -1735,6 +1798,22 @@ def place_edge_labels(
         cx, cy = pos[i, 0].item(), pos[i, 1].item()
         node_bboxes.append((cx - hw, cy - hh, cx + hw, cy + hh))
 
+    # r80-S7#4: pre-sample every edge's path once so label candidates can be
+    # scored against label-vs-edge-path overlap too (previously only
+    # label-vs-node and label-vs-label were scored). Coarse per-curve bbox
+    # enables a cheap AABB reject before the exact polyline check.
+    curve_polylines: List[List[Tuple[float, float]]] = []
+    curve_path_bboxes: List[Rect] = []
+    for curve in curves:
+        # 20 samples (vs the 10-point default) so a label-sized box can't
+        # fall entirely between two consecutive samples on a long, nearly
+        # straight edge and go undetected.
+        poly = _curve_polyline_samples(curve, sample_count=20)
+        curve_polylines.append(poly)
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        curve_path_bboxes.append((min(xs), min(ys), max(xs), max(ys)))
+
     placed_bboxes: List[Tuple[float, float, float, float]] = []
 
     for e_idx, curve in enumerate(curves):
@@ -1758,7 +1837,12 @@ def place_edge_labels(
         best_pos = None
         best_overlap = float("inf")
 
-        t_offsets = [0.0, 0.1, -0.1, 0.2, -0.2] if label_avoidance else [0.0]
+        # r80-S7#4: widened t-offset ladder (was 5 candidates: 0, +-0.1,
+        # +-0.2) so labels have more positions along the curve to try
+        # before settling for a collision.
+        t_offsets = (
+            [0.0, 0.08, -0.08, 0.16, -0.16, 0.28, -0.28, 0.4, -0.4] if label_avoidance else [0.0]
+        )
         perp_scales = _label_offset_candidates(label_offset, allow_search=label_avoidance)
         side_signs = _label_side_candidates(label_side, allow_search=label_avoidance)
 
@@ -1798,6 +1882,16 @@ def place_edge_labels(
                         ox = max(0.0, min(lx1, pb[2]) - max(lx0, pb[0]))
                         oy = max(0.0, min(ly1, pb[3]) - max(ly0, pb[1]))
                         overlap += ox * oy
+
+                    # r80-S7#4: penalize label-vs-edge-path overlap (other
+                    # edges' routed curves cutting through this label),
+                    # scaled to the label's own area so one path crossing
+                    # costs roughly as much as a full label-vs-node overlap.
+                    label_bbox = (lx0, ly0, lx1, ly1)
+                    path_crossings = _label_path_crossings(
+                        label_bbox, e_idx, curve_polylines, curve_path_bboxes
+                    )
+                    overlap += path_crossings * lw * lh
 
                     if overlap < best_overlap:
                         best_overlap = overlap
@@ -1893,4 +1987,13 @@ def _label_offset_candidates(label_offset: float, allow_search: bool) -> List[fl
     base = max(1.0, float(label_offset))
     if not allow_search:
         return [base]
-    return [base, max(4.0, base * 1.5), max(2.0, base * 0.5)]
+    # r80-S7#4: widened perpendicular-nudge ladder (was 3 candidates) so
+    # dense graphs have more room to dodge nodes/labels/edge paths before
+    # falling back to the highest-overlap candidate.
+    return [
+        base,
+        max(4.0, base * 1.5),
+        max(2.0, base * 0.5),
+        max(6.0, base * 2.25),
+        max(1.0, base * 0.25),
+    ]
