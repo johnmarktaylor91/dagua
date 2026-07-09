@@ -21,6 +21,15 @@ class CompetitorResult:
     pos: Optional[torch.Tensor]  # [N, 2] or None if failed/timeout
     runtime_seconds: float
     error: Optional[str] = None
+    # OPTIONAL full-drawing capture (r80-S6). Adapters that do not capture
+    # routing/labels leave these as None; every consumer must treat absence
+    # as "no native geometry".
+    # Per-edge routed polyline in dagua coords, aligned to edge_index
+    # columns; None entries mean the engine emitted no route for that edge.
+    routes: Optional[List[Optional[List[tuple]]]] = None
+    # Per-edge label anchor (x, y) in dagua coords; None entries mean no
+    # native label position for that edge.
+    edge_label_positions: Optional[List[Optional[tuple]]] = None
 
 
 class CompetitorBase(ABC):
