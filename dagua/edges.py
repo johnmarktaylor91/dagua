@@ -760,6 +760,29 @@ def route_edges(
         node_shapes = [graph.get_style_for_node(i).shape for i in range(pos.shape[0])]
         edge_styles = [_get_route_edge_style(graph, i) for i in range(num_edges)]
 
+    # Spatial grid for node-avoidance deflection (deliverable r80-S7#1). Cell
+    # size tracks the mean node diagonal so each cell holds O(1) nodes on
+    # typical graphs; falls back to a constant for degenerate all-zero sizes.
+    num_nodes = pos.shape[0]
+    node_grid: Dict[Tuple[int, int], List[int]] = {}
+    grid_cell_size = 40.0
+    spread_scales: List[float] = []
+    if num_nodes > 0:
+        mean_diag = sum(math.hypot(w, h) for w, h in zip(widths, heights)) / num_nodes
+        if mean_diag > 1e-6:
+            grid_cell_size = mean_diag
+        node_grid = _build_node_grid(x_coords, y_coords, grid_cell_size)
+        # r80-S7b#3: per-node density scale for the port-spread budget.
+        spread_scales = _local_density_spread_scales(node_grid, grid_cell_size, x_coords, y_coords)
+
+    # r80-S7b#2: store of already-accepted routes for the crossing-aware
+    # acceptance referee (greedy monotone: each edge's S7 modifications are
+    # kept only if they do not create net new crossings against edges
+    # routed before it).
+    routed_polylines: List[List[Tuple[float, float]]] = []
+    routed_bboxes: List[Rect] = []
+    _REFEREE_SAMPLES = 12
+
     curves = []
     for e_idx in range(num_edges):
         s, t = src_indices[e_idx], tgt_indices[e_idx]
@@ -770,7 +793,11 @@ def route_edges(
 
         # Self-loops stay on the outward-facing side for the layout direction.
         if s == t:
-            curves.append(_compute_self_loop_curve(sx, sy, sw, sh, direction))
+            loop_curve = _compute_self_loop_curve(sx, sy, sw, sh, direction)
+            loop_poly = _curve_polyline_samples(loop_curve, sample_count=_REFEREE_SAMPLES)
+            routed_polylines.append(loop_poly)
+            routed_bboxes.append(_poly_bbox(loop_poly))
+            curves.append(loop_curve)
             continue
 
         # Per-edge style
@@ -833,6 +860,22 @@ def route_edges(
             # Graphviz's alternating spline lanes instead of stacking one-sided arcs.
             curvature = -curvature
 
+        # Port angular spread (r80-S7#2): bias the initial/final tangent by
+        # each port's rank among its peers on the same node face, so
+        # adjacent edges separate visually instead of leaving as a
+        # near-parallel bundle. Sign convention matches the existing
+        # neighbor-position sort (out_order/in_order) -- this only adds a
+        # secondary angular nudge on top of that primary ordering.
+        # r80-S7b#3: the 46-deg budget is scaled down per node in dense
+        # neighborhoods, where a wide fan buys port-angle score but pays
+        # more in edge-edge crossings.
+        src_bias_deg = _port_spread_bias_deg(
+            out_rank, out_total, max_spread_deg=46.0 * spread_scales[s]
+        )
+        tgt_bias_deg = _port_spread_bias_deg(
+            in_rank, in_total, max_spread_deg=46.0 * spread_scales[t]
+        )
+
         curve = _compute_curve(
             src_port_x,
             src_port_y,
@@ -841,6 +884,8 @@ def route_edges(
             direction,
             routing,
             curvature,
+            src_bias_deg,
+            tgt_bias_deg,
         )
 
         # Cluster-aware deflection: if the curve crosses a foreign cluster bbox,
@@ -855,6 +900,77 @@ def route_edges(
                 direction,
             )
 
+        # Baseline for the crossing-aware referee: the pre-S7 route (zero
+        # tangent bias, no node avoidance) with the same pre-existing
+        # cluster deflection applied. Only rebuilt when the tangent bias
+        # actually changed this edge; otherwise the pre-avoidance curve
+        # IS the baseline.
+        base_curve = curve
+        if routing == "bezier" and (src_bias_deg != 0.0 or tgt_bias_deg != 0.0):
+            base_curve = _compute_curve(
+                src_port_x,
+                src_port_y,
+                tgt_port_x,
+                tgt_port_y,
+                direction,
+                routing,
+                curvature,
+            )
+            if graph is not None and cluster_bboxes:
+                base_curve = _deflect_around_clusters(
+                    base_curve,
+                    s,
+                    t,
+                    node_cluster_set,
+                    cluster_bboxes,
+                    direction,
+                )
+
+        # Node-bbox avoidance: deflect bezier control points around any
+        # non-endpoint node the curve passes through. Bezier-only (r80-S7#1);
+        # ON by default, per-edge opt-out via EdgeStyle.avoid_nodes.
+        avoid_nodes = edge_style.avoid_nodes if edge_style is not None else True
+        if avoid_nodes and routing == "bezier" and num_nodes > 2:
+            curve = _deflect_around_nodes(
+                curve,
+                s,
+                t,
+                node_grid,
+                grid_cell_size,
+                x_coords,
+                y_coords,
+                widths,
+                heights,
+            )
+
+        # r80-S7b#2: crossing-aware acceptance (greedy monotone referee).
+        # If the S7 modifications (tangent bias and/or node deflection)
+        # changed this edge, keep them only when they do not create net
+        # new edge-edge crossings against the edges already routed --
+        # same referee philosophy as the placement portfolio, applied per
+        # edge. Deterministic; edges are judged in index order.
+        if routing == "bezier" and (curve.cp1 != base_curve.cp1 or curve.cp2 != base_curve.cp2):
+            cand_poly = _curve_polyline_samples(curve, sample_count=_REFEREE_SAMPLES)
+            cand_bbox = _poly_bbox(cand_poly)
+            base_poly = _curve_polyline_samples(base_curve, sample_count=_REFEREE_SAMPLES)
+            base_bbox = _poly_bbox(base_poly)
+            base_crossings = _count_route_crossings(
+                base_poly, base_bbox, routed_polylines, routed_bboxes
+            )
+            cand_crossings = _count_route_crossings(
+                cand_poly, cand_bbox, routed_polylines, routed_bboxes, stop_above=base_crossings
+            )
+            if cand_crossings > base_crossings:
+                curve = base_curve
+                accepted_poly, accepted_bbox = base_poly, base_bbox
+            else:
+                accepted_poly, accepted_bbox = cand_poly, cand_bbox
+        else:
+            accepted_poly = _curve_polyline_samples(curve, sample_count=_REFEREE_SAMPLES)
+            accepted_bbox = _poly_bbox(accepted_poly)
+
+        routed_polylines.append(accepted_poly)
+        routed_bboxes.append(accepted_bbox)
         curves.append(curve)
 
     return curves
@@ -1024,6 +1140,8 @@ def _compute_curve(
     direction: str = "TB",
     routing: str = "bezier",
     curvature: float = 0.4,
+    src_tangent_bias_deg: float = 0.0,
+    tgt_tangent_bias_deg: float = 0.0,
 ) -> BezierCurve:
     """Compute an edge curve for the requested routing mode.
 
@@ -1045,6 +1163,13 @@ def _compute_curve(
         ``"ortho"``, and ``"taxi"``.
     curvature : float, default=0.4
         Curvature factor for bezier routing.
+    src_tangent_bias_deg : float, default=0.0
+        Extra rotation (degrees) applied to the initial control point around
+        the source port, used to fan out adjacent edges leaving a shared
+        port face (port angular spread, r80-S7#2). Bezier routing only.
+    tgt_tangent_bias_deg : float, default=0.0
+        Same rotation applied to the final control point around the target
+        port.
 
     Returns
     -------
@@ -1057,7 +1182,9 @@ def _compute_curve(
         return _compute_ortho(sx, sy, tx, ty, direction)
     if routing == "taxi":
         return _compute_taxi(sx, sy, tx, ty, direction)
-    return _compute_bezier(sx, sy, tx, ty, direction, curvature)
+    return _compute_bezier(
+        sx, sy, tx, ty, direction, curvature, src_tangent_bias_deg, tgt_tangent_bias_deg
+    )
 
 
 def _compute_straight(
@@ -1176,10 +1303,15 @@ def _compute_bezier(
     ty: float,
     direction: str = "TB",
     curvature: float = 0.4,
+    src_tangent_bias_deg: float = 0.0,
+    tgt_tangent_bias_deg: float = 0.0,
 ) -> BezierCurve:
     """Compute cubic bezier control points based on edge geometry.
 
     curvature controls the offset factor: 0=straight, 1=maximum curve.
+    src_tangent_bias_deg/tgt_tangent_bias_deg rotate the initial/final
+    control points around their respective ports to fan adjacent edges
+    apart (port angular spread, r80-S7#2); 0 reproduces prior behavior.
     """
     dx = tx - sx
     dy = ty - sy
@@ -1231,7 +1363,124 @@ def _compute_bezier(
         cp1 = _reflect_point_across_line(cp1, (sx, sy), (tx, ty))
         cp2 = _reflect_point_across_line(cp2, (sx, sy), (tx, ty))
 
+    # r80-S7b: the rank-based bias assumes "positive rank offset = tilt
+    # toward larger neighbor x". Whether that means a CW or CCW rotation
+    # depends on which way the local tangent points, so derive the sign
+    # from the tangent itself (frame-independent). The original S7 code
+    # applied a fixed sign, which INVERTED the fan on up-going tangents:
+    # adjacent edges rotated toward each other and crossed right after
+    # leaving the node -- a direct source of the S7 dgrX regression.
+    if src_tangent_bias_deg:
+        sign = _spread_rotation_sign((cp1[0] - sx, cp1[1] - sy))
+        if sign != 0.0:
+            cp1 = _rotate_point_around(cp1, (sx, sy), src_tangent_bias_deg * sign)
+    if tgt_tangent_bias_deg:
+        sign = _spread_rotation_sign((cp2[0] - tx, cp2[1] - ty))
+        if sign != 0.0:
+            cp2 = _rotate_point_around(cp2, (tx, ty), tgt_tangent_bias_deg * sign)
+
     return BezierCurve((sx, sy), cp1, cp2, (tx, ty), routing="bezier", direction=direction)
+
+
+def _spread_rotation_sign(tangent: Tuple[float, float]) -> float:
+    """Return the rotation-sign multiplier that makes a POSITIVE rank bias
+    tilt a tangent toward LARGER neighbor coordinate.
+
+    For a CCW rotation by ``theta``, the first-order displacement of a
+    tangent ``(vx, vy)`` is ``(-vy, vx) * theta``. Ports are ranked by
+    neighbor x (and distributed low-to-high along the face), so:
+
+    - vertical-ish tangents (|vy| >= |vx|): rank spread acts on x; moving
+      x positive under positive bias needs ``theta * (-vy) > 0`` -> sign
+      is ``-sign(vy)``.
+    - horizontal-ish tangents: rank spread acts on y (ports run bottom to
+      top along the vertical face); moving y positive needs
+      ``theta * vx > 0`` -> sign is ``sign(vx)``.
+
+    Parameters
+    ----------
+    tangent : tuple[float, float]
+        Direction from the port toward its adjacent control point.
+
+    Returns
+    -------
+    float
+        ``+1.0``, ``-1.0``, or ``0.0`` for a degenerate tangent.
+    """
+    vx, vy = tangent
+    if abs(vy) >= abs(vx):
+        if vy > 0:
+            return -1.0
+        return 1.0 if vy < 0 else 0.0
+    return 1.0 if vx > 0 else -1.0
+
+
+def _rotate_point_around(
+    point: Tuple[float, float],
+    pivot: Tuple[float, float],
+    degrees: float,
+) -> Tuple[float, float]:
+    """Rotate ``point`` around ``pivot`` by ``degrees`` (counter-clockwise).
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Point to rotate.
+    pivot : tuple[float, float]
+        Center of rotation.
+    degrees : float
+        Rotation angle in degrees.
+
+    Returns
+    -------
+    tuple[float, float]
+        Rotated point.
+    """
+    if abs(degrees) < 1e-9:
+        return point
+    rad = math.radians(degrees)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    dx = point[0] - pivot[0]
+    dy = point[1] - pivot[1]
+    return (
+        pivot[0] + dx * cos_a - dy * sin_a,
+        pivot[1] + dx * sin_a + dy * cos_a,
+    )
+
+
+def _port_spread_bias_deg(
+    rank: int,
+    total: int,
+    max_spread_deg: float = 46.0,
+) -> float:
+    """Return a deterministic tangent-rotation bias for one port among peers.
+
+    Ports sharing a node face are ranked (see the neighbor-position sort in
+    :func:`route_edges`); this spreads their initial tangent angles evenly
+    around 0 so adjacent edges separate visually (port angular spread,
+    r80-S7#2) while preserving the existing rank order (crossing-reduction
+    property untouched -- this only adds a secondary angular nudge).
+
+    Parameters
+    ----------
+    rank : int
+        This port's rank among its ``total`` peers (0-indexed).
+    total : int
+        Number of ports sharing the same node face.
+    max_spread_deg : float, default=46.0
+        Total angular spread budget across all ranked ports; matches the
+        upper end of dot's observed 10-46 deg port angular resolution.
+
+    Returns
+    -------
+    float
+        Bias angle in degrees, 0.0 when there is nothing to spread
+        (``total <= 1``).
+    """
+    if total <= 1:
+        return 0.0
+    frac = (rank - (total - 1) / 2.0) / (total - 1)
+    return frac * max_spread_deg
 
 
 def _reflect_point_across_line(
@@ -1365,6 +1614,443 @@ def _deflect_around_clusters(
     return curve
 
 
+def _curve_samples_hit_rect(curve: BezierCurve, rect: Rect, sample_count: int = 9) -> bool:
+    """Return whether interior curve samples fall inside a rectangle.
+
+    Endpoints (t=0, t=1) are intentionally excluded since they legitimately
+    sit on the source/target node boundary.
+    """
+    for i in range(1, sample_count):
+        t = i / sample_count
+        pt = evaluate_bezier(curve, t)
+        if _point_in_rect(pt, rect):
+            return True
+    return False
+
+
+def _build_node_grid(
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    cell_size: float,
+) -> Dict[Tuple[int, int], List[int]]:
+    """Bucket node indices into a uniform grid for fast neighborhood queries.
+
+    Parameters
+    ----------
+    x_coords : sequence[float]
+        Node center X coordinates.
+    y_coords : sequence[float]
+        Node center Y coordinates.
+    cell_size : float
+        Grid cell edge length in data coordinates.
+
+    Returns
+    -------
+    dict[tuple[int, int], list[int]]
+        Mapping from grid cell to the node indices whose center falls in it.
+    """
+    grid: Dict[Tuple[int, int], List[int]] = {}
+    for idx, (x, y) in enumerate(zip(x_coords, y_coords)):
+        cell = (int(math.floor(x / cell_size)), int(math.floor(y / cell_size)))
+        grid.setdefault(cell, []).append(idx)
+    return grid
+
+
+def _grid_candidates(
+    bbox: Rect,
+    grid: Dict[Tuple[int, int], List[int]],
+    cell_size: float,
+) -> List[int]:
+    """Return deduplicated node indices whose grid cell overlaps ``bbox``.
+
+    Parameters
+    ----------
+    bbox : tuple[float, float, float, float]
+        Query bounds as ``(x_min, y_min, x_max, y_max)``.
+    grid : dict[tuple[int, int], list[int]]
+        Spatial grid built by :func:`_build_node_grid`.
+    cell_size : float
+        Grid cell edge length matching the grid's construction.
+
+    Returns
+    -------
+    list[int]
+        Candidate node indices near the query box.
+    """
+    x_min, y_min, x_max, y_max = bbox
+    cx_min = int(math.floor(x_min / cell_size))
+    cx_max = int(math.floor(x_max / cell_size))
+    cy_min = int(math.floor(y_min / cell_size))
+    cy_max = int(math.floor(y_max / cell_size))
+    seen: Set[int] = set()
+    for cx in range(cx_min, cx_max + 1):
+        for cy in range(cy_min, cy_max + 1):
+            for idx in grid.get((cx, cy), ()):
+                seen.add(idx)
+    return list(seen)
+
+
+def _local_density_spread_scales(
+    node_grid: Dict[Tuple[int, int], List[int]],
+    cell_size: float,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    sparse_count: float = 4.0,
+    floor: float = 0.3,
+) -> List[float]:
+    """Per-node scale factors that shrink the port-spread budget in dense areas.
+
+    r80-S7b#3: the full 46-deg fan is safe in roomy layouts (external
+    dot/elk positions) but creates edge-edge crossings in dagua's compact
+    corridors. Scale each node's spread budget by local crowding: count
+    neighbors in the 3x3 grid-cell block around the node (cell size is the
+    mean node diagonal, so this is roughly a 1.5-diagonal radius) and
+    shrink as ``sqrt(sparse_count / n_local)`` below a sparsity threshold
+    of ``sparse_count`` neighbors, with a hard floor so the fan never
+    fully collapses.
+
+    Parameters
+    ----------
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over node centers (see :func:`_build_node_grid`).
+    cell_size : float
+        Grid cell edge length used to build ``node_grid``.
+    x_coords, y_coords : sequence[float]
+        Node center coordinates, indexed by node id.
+    sparse_count : float, default=4.0
+        Neighbor count at or below which the full budget applies.
+    floor : float, default=0.3
+        Minimum scale in the densest neighborhoods.
+
+    Returns
+    -------
+    list[float]
+        Scale factor in ``[floor, 1.0]`` per node.
+    """
+    scales: List[float] = []
+    for x, y in zip(x_coords, y_coords):
+        cx = int(math.floor(x / cell_size))
+        cy = int(math.floor(y / cell_size))
+        n_local = -1  # exclude the node itself
+        for gx in range(cx - 1, cx + 2):
+            for gy in range(cy - 1, cy + 2):
+                n_local += len(node_grid.get((gx, gy), ()))
+        if n_local <= sparse_count:
+            scales.append(1.0)
+        else:
+            scales.append(max(floor, (sparse_count / n_local) ** 0.5))
+    return scales
+
+
+def _deflect_around_nodes(
+    curve: BezierCurve,
+    src_idx: int,
+    tgt_idx: int,
+    node_grid: Dict[Tuple[int, int], List[int]],
+    grid_cell_size: float,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    widths: Sequence[float],
+    heights: Sequence[float],
+    margin: float = 4.0,
+    max_attempts: int = 4,
+) -> BezierCurve:
+    """Deflect bezier control points around non-endpoint node bboxes.
+
+    Generalizes :func:`_deflect_around_clusters` to arbitrary chord
+    directions: pushes both control points perpendicular to the src->tgt
+    chord, away from whichever node the curve is passing through, growing
+    the offset over a bounded number of attempts. Deterministic (no RNG).
+    In dense neighborhoods where no bounded attempt clears the box, the
+    curve is left as-is for that node rather than looping forever.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Routed curve to adjust. Non-bezier (waypoint) curves pass through
+        unmodified -- ortho/taxi routing is out of scope for this pass.
+    src_idx : int
+        Source node index (excluded from avoidance).
+    tgt_idx : int
+        Target node index (excluded from avoidance).
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over all node centers (see :func:`_build_node_grid`).
+    grid_cell_size : float
+        Grid cell size used to build ``node_grid``.
+    x_coords, y_coords, widths, heights : sequence[float]
+        Per-node geometry, indexed by node id.
+    margin : float, default=4.0
+        Inflation added around each node bbox before intersection testing.
+    max_attempts : int, default=4
+        Number of growing-offset deflection attempts per blocking node
+        before giving up on that node (dense-neighborhood fallback).
+
+    Returns
+    -------
+    BezierCurve
+        Curve with control points deflected around blocking node bboxes,
+        or the original curve when no clearing deflection was found/needed.
+    """
+    if curve.waypoints is not None:
+        return curve
+
+    p0, p1 = curve.p0, curve.p1
+    dx = p1[0] - p0[0]
+    dy = p1[1] - p0[1]
+    chord_len = math.hypot(dx, dy)
+    if chord_len < 1e-6:
+        return curve
+
+    cp1 = list(curve.cp1)
+    cp2 = list(curve.cp2)
+
+    # Candidate nodes: grid cells overlapping the control polygon's bbox,
+    # inflated by margin plus a generous max-node-radius pad.
+    poly_xs = [p0[0], cp1[0], cp2[0], p1[0]]
+    poly_ys = [p0[1], cp1[1], cp2[1], p1[1]]
+    pad = grid_cell_size + margin
+    query_bbox = (
+        min(poly_xs) - pad,
+        min(poly_ys) - pad,
+        max(poly_xs) + pad,
+        max(poly_ys) + pad,
+    )
+    candidates = _grid_candidates(query_bbox, node_grid, grid_cell_size)
+
+    perp_x, perp_y = -dy / chord_len, dx / chord_len
+    modified = False
+
+    for node_idx in candidates:
+        if node_idx == src_idx or node_idx == tgt_idx:
+            continue
+        w, h = widths[node_idx], heights[node_idx]
+        if w <= 0.0 and h <= 0.0:
+            continue
+        cx, cy = x_coords[node_idx], y_coords[node_idx]
+        rect = (cx - w / 2 - margin, cy - h / 2 - margin, cx + w / 2 + margin, cy + h / 2 + margin)
+
+        current = BezierCurve(p0, (cp1[0], cp1[1]), (cp2[0], cp2[1]), p1)
+        if not _curve_samples_hit_rect(current, rect):
+            continue
+
+        side = (cx - p0[0]) * perp_x + (cy - p0[1]) * perp_y
+        push_sign = -1.0 if side >= 0.0 else 1.0
+        base_offset = max(w, h) / 2.0 + margin
+        # A uniform two-control-point push only displaces the curve by
+        # 3t(1-t)*offset at parameter t, which shrinks toward the chord
+        # near the curve's endpoints -- so obstacles that sit close to
+        # either endpoint need much larger offsets to actually clear.
+        # r80-S7b#1: chord-length-scaled cap. The offset may never exceed
+        # a fixed fraction of the chord: an offset comparable to or larger
+        # than the chord makes the curve loop back on itself (the lasso
+        # curls seen on short cluster-boundary edges in the S7 render
+        # review). Short edges therefore get proportionally small nudges;
+        # if the capped ladder cannot clear the box, the fallback below
+        # leaves the edge unchanged (bounded attempts, never loops).
+        growth = (2.0, 4.5, 9.0, 16.0)
+        max_offset = chord_len * 0.6
+
+        last_offset = None
+        for attempt in range(max_attempts):
+            factor = growth[min(attempt, len(growth) - 1)]
+            offset = min(base_offset * factor, max_offset)
+            if offset == last_offset:
+                break  # ladder saturated at the chord cap; retrying is futile
+            last_offset = offset
+            trial_cp1 = (cp1[0] + push_sign * perp_x * offset, cp1[1] + push_sign * perp_y * offset)
+            trial_cp2 = (cp2[0] + push_sign * perp_x * offset, cp2[1] + push_sign * perp_y * offset)
+            trial = BezierCurve(p0, trial_cp1, trial_cp2, p1)
+            if not _curve_samples_hit_rect(trial, rect):
+                cp1, cp2 = list(trial_cp1), list(trial_cp2)
+                modified = True
+                break
+        # else: dense neighborhood -- no clearing offset found within the
+        # attempt budget; leave the edge as-is for this node and move on
+        # (never loop forever).
+
+    if modified:
+        return BezierCurve(
+            p0,
+            (cp1[0], cp1[1]),
+            (cp2[0], cp2[1]),
+            p1,
+            routing=curve.routing,
+            direction=curve.direction,
+        )
+    return curve
+
+
+def _segments_cross(
+    a0: Tuple[float, float],
+    a1: Tuple[float, float],
+    b0: Tuple[float, float],
+    b1: Tuple[float, float],
+    eps: float = 1e-9,
+) -> bool:
+    """Return whether two segments intersect strictly in their interiors.
+
+    Endpoint contacts (t or u at 0/1, e.g. two edges sharing a port) and
+    parallel overlaps are NOT counted -- this mirrors how a human reads a
+    drawing: touching at a shared node is not a crossing.
+
+    Parameters
+    ----------
+    a0, a1 : tuple[float, float]
+        First segment endpoints.
+    b0, b1 : tuple[float, float]
+        Second segment endpoints.
+    eps : float, default=1e-9
+        Interior-strictness margin on both parameters.
+
+    Returns
+    -------
+    bool
+        ``True`` when the segments properly cross.
+    """
+    d1x = a1[0] - a0[0]
+    d1y = a1[1] - a0[1]
+    d2x = b1[0] - b0[0]
+    d2y = b1[1] - b0[1]
+    denom = d1x * d2y - d1y * d2x
+    if abs(denom) < eps:
+        return False
+    dx = b0[0] - a0[0]
+    dy = b0[1] - a0[1]
+    t = (dx * d2y - dy * d2x) / denom
+    u = (dx * d1y - dy * d1x) / denom
+    return eps < t < 1.0 - eps and eps < u < 1.0 - eps
+
+
+def _poly_bbox(poly: Sequence[Tuple[float, float]]) -> Rect:
+    """Return the axis-aligned bounding box of a polyline.
+
+    Parameters
+    ----------
+    poly : sequence[tuple[float, float]]
+        Polyline points.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounds as ``(x_min, y_min, x_max, y_max)``.
+    """
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _count_route_crossings(
+    poly: Sequence[Tuple[float, float]],
+    poly_bbox: Rect,
+    routed_polylines: Sequence[Sequence[Tuple[float, float]]],
+    routed_bboxes: Sequence[Rect],
+    stop_above: Optional[int] = None,
+) -> int:
+    """Count segment crossings between one polyline and already-routed edges.
+
+    Used by the r80-S7b#2 crossing-aware acceptance referee in
+    :func:`route_edges`. AABB reject per routed edge keeps the common case
+    cheap; ``stop_above`` allows early exit as soon as the count exceeds
+    the competing variant's count (the comparison outcome is then decided).
+
+    Parameters
+    ----------
+    poly : sequence[tuple[float, float]]
+        Candidate polyline.
+    poly_bbox : tuple[float, float, float, float]
+        Pre-computed bbox of ``poly``.
+    routed_polylines : sequence[sequence[tuple[float, float]]]
+        Polylines of already-accepted edges.
+    routed_bboxes : sequence[tuple[float, float, float, float]]
+        Their bboxes, index-aligned.
+    stop_above : int, optional
+        Early-exit threshold: return as soon as the count exceeds it.
+
+    Returns
+    -------
+    int
+        Number of properly-crossing segment pairs found (possibly truncated
+        at ``stop_above + 1`` when early exit triggers).
+    """
+    count = 0
+    lx0, ly0, lx1, ly1 = poly_bbox
+    n_seg = len(poly) - 1
+    for other_poly, (bx0, by0, bx1, by1) in zip(routed_polylines, routed_bboxes):
+        if bx1 < lx0 or bx0 > lx1 or by1 < ly0 or by0 > ly1:
+            continue
+        n_other = len(other_poly) - 1
+        for i in range(n_seg):
+            for j in range(n_other):
+                if _segments_cross(poly[i], poly[i + 1], other_poly[j], other_poly[j + 1]):
+                    count += 1
+                    if stop_above is not None and count > stop_above:
+                        return count
+    return count
+
+
+def _curve_polyline_samples(
+    curve: BezierCurve, sample_count: int = 10
+) -> List[Tuple[float, float]]:
+    """Return an explicit polyline approximation of a routed curve.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Curve to sample.
+    sample_count : int, default=10
+        Number of samples for bezier curves. Waypoint (ortho/taxi) curves
+        return their exact vertices instead of resampling.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Ordered points approximating the curve.
+    """
+    if curve.waypoints is not None:
+        return [(float(p[0]), float(p[1])) for p in curve.waypoints]
+    return [evaluate_bezier(curve, i / (sample_count - 1)) for i in range(sample_count)]
+
+
+def _label_path_crossings(
+    label_bbox: Rect,
+    owner_edge_idx: int,
+    curve_polylines: Sequence[Sequence[Tuple[float, float]]],
+    curve_path_bboxes: Sequence[Rect],
+) -> int:
+    """Count how many OTHER edges' routed paths cut through a label box.
+
+    The label's own edge is excluded -- a label sitting on its own curve is
+    expected, not a collision.
+
+    Parameters
+    ----------
+    label_bbox : tuple[float, float, float, float]
+        Candidate label bounds as ``(x_min, y_min, x_max, y_max)``.
+    owner_edge_idx : int
+        Index of the edge this label belongs to (skipped).
+    curve_polylines : sequence[sequence[tuple[float, float]]]
+        Pre-sampled polyline per edge (see :func:`_curve_polyline_samples`).
+    curve_path_bboxes : sequence[tuple[float, float, float, float]]
+        Pre-computed bbox per polyline, for a cheap AABB reject.
+
+    Returns
+    -------
+    int
+        Number of other edges whose path crosses ``label_bbox``.
+    """
+    lx0, ly0, lx1, ly1 = label_bbox
+    crossings = 0
+    for other_idx, poly in enumerate(curve_polylines):
+        if other_idx == owner_edge_idx:
+            continue
+        bx0, by0, bx1, by1 = curve_path_bboxes[other_idx]
+        if bx1 < lx0 or bx0 > lx1 or by1 < ly0 or by0 > ly1:
+            continue
+        if polyline_intersect_rect(poly, label_bbox) is not None:
+            crossings += 1
+    return crossings
+
+
 def place_edge_labels(
     curves: List[BezierCurve],
     positions: torch.Tensor,
@@ -1401,6 +2087,22 @@ def place_edge_labels(
         cx, cy = pos[i, 0].item(), pos[i, 1].item()
         node_bboxes.append((cx - hw, cy - hh, cx + hw, cy + hh))
 
+    # r80-S7#4: pre-sample every edge's path once so label candidates can be
+    # scored against label-vs-edge-path overlap too (previously only
+    # label-vs-node and label-vs-label were scored). Coarse per-curve bbox
+    # enables a cheap AABB reject before the exact polyline check.
+    curve_polylines: List[List[Tuple[float, float]]] = []
+    curve_path_bboxes: List[Rect] = []
+    for curve in curves:
+        # 20 samples (vs the 10-point default) so a label-sized box can't
+        # fall entirely between two consecutive samples on a long, nearly
+        # straight edge and go undetected.
+        poly = _curve_polyline_samples(curve, sample_count=20)
+        curve_polylines.append(poly)
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        curve_path_bboxes.append((min(xs), min(ys), max(xs), max(ys)))
+
     placed_bboxes: List[Tuple[float, float, float, float]] = []
 
     for e_idx, curve in enumerate(curves):
@@ -1424,7 +2126,12 @@ def place_edge_labels(
         best_pos = None
         best_overlap = float("inf")
 
-        t_offsets = [0.0, 0.1, -0.1, 0.2, -0.2] if label_avoidance else [0.0]
+        # r80-S7#4: widened t-offset ladder (was 5 candidates: 0, +-0.1,
+        # +-0.2) so labels have more positions along the curve to try
+        # before settling for a collision.
+        t_offsets = (
+            [0.0, 0.08, -0.08, 0.16, -0.16, 0.28, -0.28, 0.4, -0.4] if label_avoidance else [0.0]
+        )
         perp_scales = _label_offset_candidates(label_offset, allow_search=label_avoidance)
         side_signs = _label_side_candidates(label_side, allow_search=label_avoidance)
 
@@ -1464,6 +2171,16 @@ def place_edge_labels(
                         ox = max(0.0, min(lx1, pb[2]) - max(lx0, pb[0]))
                         oy = max(0.0, min(ly1, pb[3]) - max(ly0, pb[1]))
                         overlap += ox * oy
+
+                    # r80-S7#4: penalize label-vs-edge-path overlap (other
+                    # edges' routed curves cutting through this label),
+                    # scaled to the label's own area so one path crossing
+                    # costs roughly as much as a full label-vs-node overlap.
+                    label_bbox = (lx0, ly0, lx1, ly1)
+                    path_crossings = _label_path_crossings(
+                        label_bbox, e_idx, curve_polylines, curve_path_bboxes
+                    )
+                    overlap += path_crossings * lw * lh
 
                     if overlap < best_overlap:
                         best_overlap = overlap
@@ -1559,4 +2276,13 @@ def _label_offset_candidates(label_offset: float, allow_search: bool) -> List[fl
     base = max(1.0, float(label_offset))
     if not allow_search:
         return [base]
-    return [base, max(4.0, base * 1.5), max(2.0, base * 0.5)]
+    # r80-S7#4: widened perpendicular-nudge ladder (was 3 candidates) so
+    # dense graphs have more room to dodge nodes/labels/edge paths before
+    # falling back to the highest-overlap candidate.
+    return [
+        base,
+        max(4.0, base * 1.5),
+        max(2.0, base * 0.5),
+        max(6.0, base * 2.25),
+        max(1.0, base * 0.25),
+    ]

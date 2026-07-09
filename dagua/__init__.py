@@ -166,38 +166,18 @@ def draw(
     graph.compute_node_sizes()
     curves = route_edges(positions, graph.edge_index, graph.node_sizes, effective_direction, graph)
 
-    # Sprint 6: edge_routing takes precedence over edge_opt_steps. Only
-    # the "differentiable" mode runs optimize_edges; "heuristic" keeps
-    # the bezier curves that route_edges produced (zero gradient work).
-    if (
-        getattr(config, "edge_routing", "differentiable") == "differentiable"
-        and getattr(config, "edge_opt_steps", 0) >= 0
-    ):
-        # Sprint 6 r3: adaptive skip when the heuristic already produces
-        # a near-optimal routing. The Sprint 6 audit revealed that nested
-        # cluster graphs (nested_2lvl/3lvl/4lvl) have zero or very few
-        # edge-node crossings under heuristic routing, and CP refinement
-        # CREATES new crossings there (nested_2lvl went 0 -> 33 under
-        # Sprint-5 defaults; the heuristic path already respects cluster
-        # locality which the six CP losses don't model). Skipping when
-        # heuristic crossings < adaptive_skip_threshold (default 5) closes
-        # that regression without touching graph families where
-        # differentiable mode meaningfully wins.
-        from dagua.metrics import edge_node_crossing_count
+    # Sprint 6 (r80-S7#3 extended): edge_routing takes precedence over
+    # edge_opt_steps. Only the "differentiable" mode runs the refinement
+    # pass; "heuristic" keeps the bezier curves route_edges produced (zero
+    # gradient work). maybe_refine_routes() preserves the original Sprint 6
+    # adaptive-skip behavior at draft/balanced quality (< 0.75) and forces
+    # the pass on -- with the fuller BezierControlPointOpt loss weights --
+    # at high/max quality (>= 0.75). See dagua.layout.edge_optimization.
+    from dagua.layout.edge_optimization import maybe_refine_routes
 
-        heur_crossings = edge_node_crossing_count(
-            curves, positions, graph.node_sizes, graph.edge_index
-        )["edge_node_crossings"]
-        threshold = getattr(config, "edge_routing_auto_skip_threshold", 5)
-        has_rectilinear_routes = any(
-            getattr(curve, "routing", "bezier") in ("ortho", "taxi") for curve in curves
-        )
-        if heur_crossings >= threshold or has_rectilinear_routes:
-            from dagua.layout.edge_optimization import optimize_edges
-
-            curves = optimize_edges(
-                curves, positions, graph.edge_index, graph.node_sizes, config, graph
-            )
+    curves = maybe_refine_routes(
+        curves, positions, graph.edge_index, graph.node_sizes, config, graph
+    )
 
     label_positions = place_edge_labels(
         curves, positions, graph.node_sizes, graph.edge_labels, graph
