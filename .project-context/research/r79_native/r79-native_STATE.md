@@ -63,3 +63,121 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   going forward + added __pycache__ to .gitignore). Combined head: 58 scoped tests green, honest warning fires.
 - r79/native NOW = complete sprint. Remaining P6: docs rebuild, then merge-to-develop DECISION (coordinate
   with fidelity tab -- do NOT unilaterally merge to shared develop).
+
+## 2026-07-08 ~morning: r80 KICKOFF (Fable back; JMT: cook until no obvious avenues left; Claude-only, no codex today)
+- S0: baseline re-verify on merged head ef4eef5 (P5 landed after last sweep) -- running, /tmp/r80_s0_baseline.log.
+- S1 (sonnet): adversarial harness/eval audit (rescore-path, oracle, determinism, composite exploits, frozen-store,
+  fairness, tie-band). Brief: briefs/r80_s1_harness_audit.md.
+- S2 (sonnet): convergent overlap projector (index_add_ accumulation + damping + iterate-to-zero) + metric-gated
+  acceptance op, branch r80/projector in dagua-native-p1. Brief: briefs/r80_s2_projector_fix.md.
+- S3 (sonnet): holdout corpora fetch (Rome/North/SuiteSparse mirrors) into p6a harness, dagua-native-p4. HOLDOUT --
+  no tuning. Brief: briefs/r80_s3_stdcorpora_fetch.md.
+- S4 (sonnet, FLAGSHIP): probe-gated undirected portfolio route (own sfdp/neato + projection + honest-composite
+  argmax selection), branch r80/undirected-portfolio in NEW worktree dagua-native-p2.
+  Brief: briefs/r80_s4_undirected_portfolio.md.
+- NEW CONFIRMED SEAM FINDING (Fable, probe 2026-07-08): layout-time _infer_semantically_directed mislabels
+  karate/sbm_4x30/ba_120/small_world_100/grid_5x5/weighted_community/weighted_small_world as DIRECTED (single-stored
+  edges, reciprocity 0) and transformer_layer as UNDIRECTED (deep-layering rule backfires). AND classify_graph's
+  graph= kwarg (explicit declaration path) is dropped at every real call site (engine.py:1809, resolve.py:540).
+  S4 Stage 2 fixes both (declaration plumbing + span-aware deep-layering rule + corpus declaration from tags).
+
+## 2026-07-08 ~13:30: scope expanded (JMT: ALL placement-relevant elements -- routing, labels, shapes; only cosmetics excluded)
+- S3 DONE: holdout corpora live (Rome 152 / North 107 / SuiteSparse 15, 100% parse) on r79/p6a-stdcorpora ee16561.
+  Bonus finds: loaders silently skipped .graphml (fixed); North GraphML directedness defaulting fixed.
+- S5 recon DONE (report: P8B_FULL_ELEMENT_RECON.md). Headlines: (1) differentiable edge-routing optimizer
+  BezierControlPointOpt (6 loss terms) is built+tested but ORPHANED -- zero pipelines compose it; (2) 4 curve-aware
+  metrics computed but never scored (composite uses straight-line crossings only); (3) graphviz/ELK adapters DISCARD
+  native splines/labels at parse time (few hrs each to capture); (4) shape-aware layout = bbox-only, risky, deprioritized.
+- DESIGN CALL (Fable): placement composite stays FROZEN mid-sprint (S2/S4 gates depend on it). New SEPARATE
+  composite_drawing for full-drawing quality; post-placement improvements can't perturb node positions -> clean split.
+- S6 dispatched (sonnet): measurement layer -- routed-path crossing metric + bend count + composite_drawing +
+  graphviz/ELK spline capture + additive benchmark wiring + 10-graph drawing baseline probe. Branch
+  r80/drawing-metrics, worktree dagua-native-p3. Invariance gate: frozen baseline must stay bit-identical.
+- S7 planned (after S6): wire orphaned edge optimizer into pipelines (edge_opt_steps config), node-bbox deflection
+  in route_edges, edge-label search upgrade -- gated on composite_drawing evidence.
+
+## 2026-07-08 ~13:50: S1 harness audit DONE -- SOUND-WITH-CAVEATS (report: P8C_HARNESS_AUDIT.md)
+- W/T/L recounts exactly; store integrity, tie-band, seeded metric path clean.
+- HIGH-1: P3a "rescore only" claim partly false (er_500 positions changed in that commit; P1/P2c exercised).
+  Historical confound only; S0 re-sweep re-establishes current truth. Metadata snapshot drift noted.
+- HIGH-2: externals laid out size-BLIND but scored size-aware -> biases FOR dagua. FIX AT P6: pass node sizes to
+  graphviz/elk/dagre adapters + full external re-run (batch with S6 adapter changes; same files).
+- HIGH-3: degenerate-collapse exploit (point-collapse scores 65/100; 62/972 rows overlap>0 & composite>60; 0 verdicts
+  flip today). S4 told (SendMessage) to add a degeneracy guard to candidate acceptance. Composite guard itself -> P6.
+- MEDIUM-1: composite_large lacks undirected variant (dead code today; landmine for scale rounds). LOW-1: unseeded
+  crossing path off the scoring route.
+- POLICY (Fable): ALL metric/fairness changes batch into ONE re-freeze at P6 (degeneracy guard + size-aware externals
+  + composite_large undirected + full external rerun). No mid-sprint ruler changes; S2/S4 gate on the current ruler.
+
+## 2026-07-08 ~15:40: idea logged (JMT conversation): user-facing aesthetic priorities
+- Users can already tweak differentiable loss weights + write custom constraints (original-vision API).
+- GAP: portfolio SELECTION composite has fixed weights -> engine choice not steerable by user priorities.
+- IDEA (post-S4): aesthetic-priority knob (e.g. prioritize="crossings" | explicit term weights) plumbed into BOTH
+  the differentiable losses AND the candidate-selection composite. Nearly free once S4 lands (referee already
+  computes per-term scores). Candidate for r81. Pairs with quality knob (time axis) as the two user dials:
+  time-vs-quality and aesthetic-priority.
+
+## 2026-07-08 ~15:45: JMT directive -- aesthetic-priority knob PROMOTED into this sprint
+- No longer an r81 idea: after the original r80 plan completes (S2 projector + S4 portfolio landed and swept,
+  S6 drawing metrics, S7 routing improvements, P6 honesty batch), add stream S8: user-facing aesthetic-priority
+  knob (prioritize=<term> or explicit weights) plumbed into differentiable losses + candidate-selection composite.
+  Ship with: API design note (public surface -> discuss shape with JMT before merge per project rules), docs,
+  tests proving the knob actually changes engine selection on a frontier graph, default == today's weights.
+
+## 2026-07-08 ~16:00: S4 PORTFOLIO COMPLETE -- ALL GATES PASS. Best-or-tied 74 -> 87/108 (80.6%)
+- Verified from committed BASELINE.md in p2: legacy 56/8/29 -> 63/14/16; extended 8/2/5 unchanged.
+  Undirected best-or-tied 12 -> 25 (+13). ZERO WIN->LOSS flips. 7 commits on r80/undirected-portfolio.
+- Top flips: weighted_clusters_3x10 +22.98, regular_3_30 +22.02, petersen_10 +21.80, weighted_karate +19.44,
+  real_karate +18.68 (all LOSS->WIN); 7 LOSS->TIE (lattices/grids/multi-component).
+- Candidate win rates (39 undirected): incumbent 25, neato 12, sfdp 2. Every changed row matches its probe
+  candidate <0.05 (selection integrity).
+- Gate 2 proof: transformer_layer now infers DIRECTED (deep-layering span fix works); 5 directed graphs
+  bit-identical (max_delta 0.0).
+- Residuals: 14 undirected losses remain (structural: football/community/weighted_small_world); clustered
+  undirected (r79_undirected_sbm_*) never reaches route (cluster driver preempts) -- flat-sfdp candidate would
+  flip high_mix per probe -> follow-up; neato balanced cap n<=80 + >1500-node contest skip are probe-scoped.
+- Wall time: contest adds +2-14s per small undirected graph (benchmark undirected class ~2x) -- capped, acceptable.
+- Projector (S2) estimated to add +1-3 more on top (winners already at tie-band ceilings).
+- NEXT: await S2 sweep verdict -> merge order projector then portfolio into r79/native (no file overlap) ->
+  consolidated sweep -> S6/S7 drawing track -> P6 honesty batch -> holdout -> S8 aesthetic knob.
+
+## 2026-07-08 ~21:15: window reset; S4 MERGED to trunk; S2 verdict FAIL -> salvage dispatched
+- S2 gate-3 sweep FAILED honest: 64/10/34 -> 63/10/35, rgg_500 WIN->LOSS, net -13.5. Gate proxy saw 0 rejections
+  yet corpus regressed -> proxy blind spot (bisection target). Agent stopped per protocol. Do NOT merge as-is.
+- DECISION (Fable): salvage not rework. S4 merged into r79/native (38a13e1, import OK, store 63/14/16 + 8/2/5).
+  S2b dispatched: revert default rewiring (overlap_iterations back to 10), convergent projector becomes OPT-IN,
+  wired into portfolio CHALLENGER path only (referee protects); bisect rgg_500 gate blind spot first; sweep gate
+  vs NEW trunk baseline. Expected +1-3.
+- Consolidated confirm sweep running on merged trunk (/tmp/r80_merged_confirm.log).
+- S6 resumed: finishing probe evidence + invariance gates on p3.
+
+## 2026-07-08 ~20:35: S6 COMPLETE (all gates; invariance BIT-IDENTICAL) -> S7 dispatched
+- S6: composite_drawing shipped (weights: crossings 30/edge-node 20/labels 15/ports 12/overlap 10/curvature 8/
+  bends 5), routed_crossing_rate + bend_count, graphviz spline + ELK bendPoint capture, routes/*.pt store blob,
+  35 tests green, invariance proof 0/972 row diffs. 5 commits on r80/drawing-metrics. Durable mirror
+  ~/.claude/research/dagua/r80-drawing-metrics/.
+- HEADLINE: dot native splines lead all 10 probe graphs (~11 pts mean) BUT dagua POSITIONS beat dot 7/10 at
+  matched routing. Gap = router: node avoidance (dot 0 edge-node crossings everywhere; sfdp thousands) + port
+  angular spread (dot 10-46 deg vs dagua 0-4). ELK clustered-graph capture artifact flagged via coverage field.
+- S7 dispatched (sonnet, p3, branch r80/routing-improve off r80/drawing-metrics): node-bbox deflection default-on,
+  port spread, wire orphaned BezierControlPointOpt via edge_opt_steps at quality>=high, label search upgrade.
+  Gates: placement invariance bit-identical + probe >= 7/10 improved, mean +4, edge-node 0 on >= 8/10.
+- Merge plan: r80/drawing-metrics -> trunk after confirm sweep finishes; S2b and S7 merge after their gates.
+
+## 2026-07-09 ~00:45: REGRESSION FOUND+FIXED (architect, inline); drawing-metrics MERGED; fresh sweep running
+- Trunk confirm sweep exposed 2 movers (-22/-19): outerplanar_dag_20, recurrent_feedback_cell. Bisection:
+  deterministic on BOTH trunk and p2 -> not env, not load. ROOT CAUSE: S4's final gate sweep silently REUSED
+  STALE RESUME ROWS for these graphs (produced pre-neato-admission). True failure chain: undeclared directed
+  graphs -> deep-layering inference says undirected -> portfolio contest optimizes undirected composite ->
+  neato challenger wins wrong contest -> -20 under directed scoring. EXACTLY the belief-mismatch failure mode
+  flagged at S4 dispatch. Honest interim scoreboard was 86/108, one masked WIN->LOSS.
+- FIX d665600 (inline, architect): GraphStructure carries direction provenance (direction_is_declared,
+  reciprocal_edge_ratio); portfolio fires only on declared undirectedness OR reciprocity>0.3, never on
+  deep-layering inference alone. Verified: both movers restored to EXACT baseline (69.33/74.691), real_karate_34
+  portfolio win preserved (68.79). Unit test locks predicate. Also: detect-secrets now excludes eval_output
+  (git_sha false positives on every store refresh).
+- Harness hole filed in agent-issue ledger (HIGH): gate sweeps must be provably fresh (--no-resume or row
+  version stamping) -> P6 item.
+- 897dbe3: r80/drawing-metrics MERGED to trunk (additive, invariance-proven). composite_drawing available.
+- Fresh full dagua-only sweep running (/tmp/r80_trunk_final_sweep.log) -> expect 63/14/16 + 8/2/5 with no
+  stale rows. S2b notified to merge current trunk. S7 still in gates.

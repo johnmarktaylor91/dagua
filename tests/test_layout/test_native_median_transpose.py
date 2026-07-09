@@ -238,6 +238,13 @@ def test_dagua_native_dense_pair_50_reduces_crossings() -> None:
     """
     _, graph = make_sparse_dense_pair(n=50, seed=42)
     graph.compute_node_sizes()
+    # r80: dense_pair_50 is mechanically oriented and infers undirected, so
+    # the default router would send it to the undirected portfolio contest,
+    # where an sfdp challenger can win both runs and mask the flag under
+    # test. Declare the graph directed (the public routing override) so both
+    # configs take the exact pre-r80 layered path, keeping this a
+    # median-transpose mechanism test.
+    graph.is_semantically_directed = True
     baseline_config = LayoutConfig(
         seed=42,
         steps=80,
