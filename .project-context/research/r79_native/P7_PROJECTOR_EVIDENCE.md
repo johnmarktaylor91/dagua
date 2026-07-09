@@ -1,18 +1,177 @@
 # P7 Evidence: Convergent overlap projector + metric-gated acceptance (r80/projector)
 
-Branch: `r80/projector` (based at r79/native head ef4eef5).
-Brief: `.project-context/research/r79_native/briefs/r80_s2_projector_fix.md`.
+Branch: `r80/projector` (based at r79/native head ef4eef5; trunk 897dbe3
+merged for S2b).
+Brief: `.project-context/research/r79_native/briefs/r80_s2_projector_fix.md`
+(S2), superseded by the architect's S2b salvage directive.
 
-## Status: STOPPED AT GATE 1 PER BRIEF RULE (gate failed twice)
+## S2b salvage (2026-07-09): convergent projector is now OPT-IN, wired into portfolio challengers only
+
+Architect decision after the S2 sweep FAIL below: salvage, not rework.
+Commits (each stage separate):
+
+1. Merge trunk (897dbe3: S4 undirected portfolio + d665600 declared-
+   undirectedness fix + drawing-metrics) into r80/projector -- `0a71fce`.
+2. `191b209` -- default-path rewiring REVERTED. `_project_exact` is now a
+   dispatcher: default `convergent=False` runs the restored pre-r80 legacy
+   pass bit-for-bit (pinned by
+   `test_default_path_preserves_legacy_trajectory`, which also documents
+   the legacy dense-clique stall as intended default behavior);
+   `convergent=True` selects the accumulate+damp+deadlock-re-lay projector.
+   `native_stress.py` restored bit-identical to the r79/native base
+   (verified `git diff ef4eef5 -- ...native_stress.py` empty before the
+   trunk merge). `project_overlaps` gains a `convergent` passthrough.
+   `OverlapProjectionGated` stays registered+tested but is wired nowhere.
+3. `897c60f` -- portfolio challenger cleanup (`_project_candidate` in
+   `native_undirected.py`) now uses `convergent=True` with a 200-pass
+   early-exit ceiling. Rationale: challengers (sfdp/neato candidates)
+   arrive with dense overlap fields the legacy projector stalls on; the
+   honest-composite referee + degeneracy guard make a bad convergent
+   trajectory unshippable on this path (it simply loses the contest),
+   which is exactly the protection the default path lacks.
+
+### r80-S2 gate blind spot: BISECTED (task 4)
+
+Question: on rgg_500 the gated acceptance saw 0 rejections yet the final
+composite dropped enough to flip WIN->LOSS -- where exactly did the gate
+lose sight of the damage?
+
+Answer (instrumented call-site attribution, `scripts/r80_probe_callsites.py`
+on the pre-merge S2 code): **the gate was never in rgg_500's path at all.**
+Wrapping `project_overlaps` with a stack-sampling counter during a full
+dagua engine run shows:
+
+| graph | periodic_overlap_projection (ungated) | plain overlap_projection (ungated) | gated calls |
+|---|---:|---:|---:|
+| rgg_500 | 40 | 1 | 0 |
+| r79_weighted_hub_spoke_4x18 | 7 | 1 | 0 |
+
+Neither regressing graph routes through `native_stress`'s final projection
+(the only call site S2 gated). Their trajectories diverged across the MANY
+ungated `PeriodicOverlapProjection` invocations during optimization (plus
+one ungated final `OverlapProjection`); each pass reshapes the layout
+slightly differently under the convergent update, and the differences
+compound. So: NOT a proxy-vs-sweep terms/params/seed mismatch, NOT a
+later-stage (aspect_fit) undo -- a pure gate-coverage gap. "0 rejections"
+was vacuous.
+
+Mechanism per graph (`scripts/r80_probe_regression.py`):
+- r79_weighted_hub_spoke_4x18: the grid-spread deadlock valve fired once
+  with a 66-of-72-node residual set -- re-laying nearly the whole graph
+  onto a grid mid-optimization (depth rho -0.28, stress +0.088).
+- rgg_500: grid-spread never fired; 41 damped-accumulation calls compound
+  into CV +0.091 / crossings +0.009; runtime also doubled (294s -> 590s in
+  the probe) because the convergent exact pass is costlier at N=500.
+
+Implication for any future default-path fix: gating a single final
+projection cannot protect the default path; either every periodic
+projection call must be trajectory-safe by construction, or the gate must
+wrap the whole optimization stage. Recorded on `OverlapProjectionGated`'s
+docstring as well.
+
+## Historical: S2 sweep verdict (superseded by S2b salvage above)
+
+SWEEP GATE FAILED -- net -13.459, one W->L flip (rgg_500); stopped per
+architect decision tree.
+
+UPDATE (architect override of the earlier gate-1 stop): the corpus sweep
+(gate 3) was run as the arbiter. It FAILED acceptance: net composite delta
+-13.459 across 108 compared graphs and one WIN->LOSS flip (rgg_500). Per
+the decision tree, the quality-knob smoke test was NOT touched and no
+further fixes were attempted. Full per-graph table:
+`P7_SWEEP_DELTA_TABLE.md` (same directory). Details in "Sweep gate
+(gate 3)" below. The earlier gate-1 stop analysis is retained further down
+for the record.
+
+### Sweep gate (gate 3) results
+
+- Pre-change baseline: dagua rows produced at 10f01af (= branch base
+  ef4eef5 + one docs-only commit; zero `dagua/` changes -- verified with
+  `git log ef4eef5..10f01af -- dagua/`), snapshotted from the dagua-native
+  worktree store into
+  `eval_output/r79_baseline/results.pre_r80_at_base.json`.
+- Post-change: `scripts/r79_baseline.py --dagua-only` on r80/projector in
+  this worktree (112-graph corpus; 108 in common with the pre snapshot;
+  the 4 `tl_*` graphs are corpus drift, excluded from the math). Both
+  sides scored against the same frozen external rows; sprint TIE_BAND=0.5.
+- Comparison tool: `scripts/r80_projector_delta.py`.
+
+| summary | value |
+|---|---|
+| graphs compared | 108 |
+| net composite delta | **-13.459** |
+| pre W/T/L | 64/10/34 |
+| post W/T/L | 63/10/35 |
+| WIN->LOSS flips | 1 (rgg_500) |
+| graphs changed at all | 2 of 108 (all other dagua rows bit-identical) |
+
+The entire net regression comes from two graphs; 106/108 composites are
+identical to the pre-change baseline (their final projections either found
+zero overlaps at entry and early-exited, or their routes do not reach the
+exact projector), so the change's blast radius is narrow but negative.
+
+Per-term deltas for the two regressing graphs (pre -> post):
+
+rgg_500 (500 nodes, exact-path boundary; composite 53.486 -> 48.094,
+delta -5.392; W -> L; runtime 294s -> 454s):
+
+| term | pre | post | delta |
+|---|---:|---:|---:|
+| overlap_count | 0 | 0 | 0 |
+| crossing_rate | 0.0306 | 0.0393 | +0.0087 |
+| edge_length_cv | 0.6361 | 0.7274 | +0.0912 |
+| sampled_stress | 0.8595 | 0.8332 | -0.0264 |
+| angular_res_mean_deg | 0.2241 | 0.1697 | -0.0543 |
+
+r79_weighted_hub_spoke_4x18 (composite 75.497 -> 67.486, delta -8.011;
+stays W; runtime 21s -> 15s):
+
+| term | pre | post | delta |
+|---|---:|---:|---:|
+| overlap_count | 0 | 0 | 0 |
+| crossing_rate | 0.0222 | 0.0385 | +0.0162 |
+| edge_length_cv | 0.3711 | 0.4456 | +0.0745 |
+| sampled_stress | 0.6599 | 0.7475 | +0.0876 |
+| depth_spearman_rho | 0.6516 | 0.3757 | -0.2760 |
+| dag_consistency | 1.0000 | 0.9744 | -0.0256 |
+
+Diagnosis: on both graphs the OLD projector already reached zero overlaps;
+the new accumulate+damp projector reaches zero too but along a worse
+geometric trajectory, inflating CV/crossings (rgg_500) and
+stress/depth-correlation (hub_spoke). The overlap term itself is a wash --
+the change traded geometry quality for nothing on these graphs. Why the
+acceptance gate did not save us: the gate's proxy compares
+before-projection vs after-projection (its job is to reject projections
+that hurt); when the pre-projection state has overlaps, the +20 no-overlap
+term dominates the proxy and the projection is (correctly, by its own
+rule) accepted -- the gate cannot see that a DIFFERENT projector would
+have cleared the same overlaps more cheaply. The regression is in the
+projector trajectory, not the gate logic. (Mechanism probe below.)
+
+Fix directions for the next round (NOT taken, per stop rule):
+1. Restrict the grid-spread deadlock valve to genuinely dense small
+   residual sets (e.g., residual pair density above a threshold, or
+   residual set below ~50 nodes); on a 500-node near-converged layout a
+   grid re-lay is far too blunt.
+2. Consider damping only when a node participates in multiple pairs
+   (counts-aware scaling), so sparse-overlap graphs keep the old
+   trajectory exactly.
+3. Cap the exact-path iteration ceiling by N (200 passes at N=500 is
+   O(N^2)-per-pass expensive: rgg_500 runtime +160s).
+4. Gate refinement: also require per-term non-regression caps (CV,
+   crossings) when the overlap term is what flips the proxy.
+
+## Original gate-1 stop record (superseded by the sweep run above)
 
 Parts 1 and 2 are implemented, unit-proven, and lint-clean. One pre-existing
 smoke test in the gate-1 scope (`tests/test_layout/test_quality_knob.py::
 test_quality_high_smoke_spends_more_and_scores_near_draft`) fails with this
 diff and passed on the base commit (verified via `git stash` A/B). One fix
 attempt was made (directed-aware gate proxy, kept -- it closes a real blind
-spot); the test still fails, which is the second failure, so per the brief
-("STOP and report if a gate fails twice") the corpus sweep (gate 3) was NOT
-run and no further fixes were attempted. Diagnosis below.
+spot); the test still failed. The sweep verdict above supersedes the "smoke
+test jitter is orthogonal" hypothesis: the corpus shows the same signature
+(CV/crossings/stress inflation from the changed projector trajectory), so
+the smoke failure was an early true positive, not noise. Diagnosis below.
 
 ## What changed
 
@@ -154,16 +313,25 @@ flips, this single 6-node smoke tolerance is likely the thing to adjust.
 
 ## Rejected-gate statistics
 
-- Corpus sweep not run (stop rule), so no corpus-level rejection rate.
-- In all observed pipeline runs (quality-knob debug: 7 native_stress layout
-  calls with gate debug logging): 0 rejections -- the convergent projector
-  plus directed-aware proxy accepted every projection.
+- The sweep run was not instrumented for gate decisions (`log.debug` is not
+  captured by the baseline script), so no corpus-level rejection count.
+  Observable proxy: 106/108 dagua rows are bit-identical to pre-change,
+  which means their final projections were either no-ops (zero overlaps at
+  entry) or their routes never reach the gated native_stress call site; the
+  2 changed graphs were accepted projections (both post rows have
+  overlap_count 0, which rejected/unprojected positions would not
+  guarantee).
+- In all instrumented runs (quality-knob debug: 7 native_stress layout
+  calls with gate debug logging): 0 rejections.
 - The reject path is exercised and proven by
   `test_overlap_projection_gated_reverts_when_proxy_regresses` (destructive
   fake projection reverted bit-for-bit).
 
 ## W/T/L
 
-Not measured -- the gate-3 sweep was not run because gate 1 failed twice
-(see stop rule). Pre-change baseline W/T/L for r79/native remains
-64W/10T/34L (74/108 best-or-tied) per r79 SUMMARY.
+Measured by the gate-3 sweep (see "Sweep gate (gate 3) results" above):
+pre 64W/10T/34L -> post 63W/10T/35L; one WIN->LOSS flip (rgg_500); net
+composite delta -13.459 over 108 compared graphs. ACCEPTANCE: FAIL.
+Recommendation: do NOT merge r80/projector as-is; rework the projector
+trajectory per the fix-directions list, using the two named graphs plus
+the quality-knob smoke as fast regression probes.
