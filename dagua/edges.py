@@ -845,6 +845,15 @@ def route_edges(
             # Graphviz's alternating spline lanes instead of stacking one-sided arcs.
             curvature = -curvature
 
+        # Port angular spread (r80-S7#2): bias the initial/final tangent by
+        # each port's rank among its peers on the same node face, so
+        # adjacent edges separate visually instead of leaving as a
+        # near-parallel bundle. Sign convention matches the existing
+        # neighbor-position sort (out_order/in_order) -- this only adds a
+        # secondary angular nudge on top of that primary ordering.
+        src_bias_deg = _port_spread_bias_deg(out_rank, out_total)
+        tgt_bias_deg = _port_spread_bias_deg(in_rank, in_total)
+
         curve = _compute_curve(
             src_port_x,
             src_port_y,
@@ -853,6 +862,8 @@ def route_edges(
             direction,
             routing,
             curvature,
+            src_bias_deg,
+            tgt_bias_deg,
         )
 
         # Cluster-aware deflection: if the curve crosses a foreign cluster bbox,
@@ -1053,6 +1064,8 @@ def _compute_curve(
     direction: str = "TB",
     routing: str = "bezier",
     curvature: float = 0.4,
+    src_tangent_bias_deg: float = 0.0,
+    tgt_tangent_bias_deg: float = 0.0,
 ) -> BezierCurve:
     """Compute an edge curve for the requested routing mode.
 
@@ -1074,6 +1087,13 @@ def _compute_curve(
         ``"ortho"``, and ``"taxi"``.
     curvature : float, default=0.4
         Curvature factor for bezier routing.
+    src_tangent_bias_deg : float, default=0.0
+        Extra rotation (degrees) applied to the initial control point around
+        the source port, used to fan out adjacent edges leaving a shared
+        port face (port angular spread, r80-S7#2). Bezier routing only.
+    tgt_tangent_bias_deg : float, default=0.0
+        Same rotation applied to the final control point around the target
+        port.
 
     Returns
     -------
@@ -1086,7 +1106,9 @@ def _compute_curve(
         return _compute_ortho(sx, sy, tx, ty, direction)
     if routing == "taxi":
         return _compute_taxi(sx, sy, tx, ty, direction)
-    return _compute_bezier(sx, sy, tx, ty, direction, curvature)
+    return _compute_bezier(
+        sx, sy, tx, ty, direction, curvature, src_tangent_bias_deg, tgt_tangent_bias_deg
+    )
 
 
 def _compute_straight(
@@ -1205,10 +1227,15 @@ def _compute_bezier(
     ty: float,
     direction: str = "TB",
     curvature: float = 0.4,
+    src_tangent_bias_deg: float = 0.0,
+    tgt_tangent_bias_deg: float = 0.0,
 ) -> BezierCurve:
     """Compute cubic bezier control points based on edge geometry.
 
     curvature controls the offset factor: 0=straight, 1=maximum curve.
+    src_tangent_bias_deg/tgt_tangent_bias_deg rotate the initial/final
+    control points around their respective ports to fan adjacent edges
+    apart (port angular spread, r80-S7#2); 0 reproduces prior behavior.
     """
     dx = tx - sx
     dy = ty - sy
@@ -1260,7 +1287,80 @@ def _compute_bezier(
         cp1 = _reflect_point_across_line(cp1, (sx, sy), (tx, ty))
         cp2 = _reflect_point_across_line(cp2, (sx, sy), (tx, ty))
 
+    if src_tangent_bias_deg:
+        cp1 = _rotate_point_around(cp1, (sx, sy), src_tangent_bias_deg)
+    if tgt_tangent_bias_deg:
+        cp2 = _rotate_point_around(cp2, (tx, ty), tgt_tangent_bias_deg)
+
     return BezierCurve((sx, sy), cp1, cp2, (tx, ty), routing="bezier", direction=direction)
+
+
+def _rotate_point_around(
+    point: Tuple[float, float],
+    pivot: Tuple[float, float],
+    degrees: float,
+) -> Tuple[float, float]:
+    """Rotate ``point`` around ``pivot`` by ``degrees`` (counter-clockwise).
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Point to rotate.
+    pivot : tuple[float, float]
+        Center of rotation.
+    degrees : float
+        Rotation angle in degrees.
+
+    Returns
+    -------
+    tuple[float, float]
+        Rotated point.
+    """
+    if abs(degrees) < 1e-9:
+        return point
+    rad = math.radians(degrees)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    dx = point[0] - pivot[0]
+    dy = point[1] - pivot[1]
+    return (
+        pivot[0] + dx * cos_a - dy * sin_a,
+        pivot[1] + dx * sin_a + dy * cos_a,
+    )
+
+
+def _port_spread_bias_deg(
+    rank: int,
+    total: int,
+    max_spread_deg: float = 46.0,
+) -> float:
+    """Return a deterministic tangent-rotation bias for one port among peers.
+
+    Ports sharing a node face are ranked (see the neighbor-position sort in
+    :func:`route_edges`); this spreads their initial tangent angles evenly
+    around 0 so adjacent edges separate visually (port angular spread,
+    r80-S7#2) while preserving the existing rank order (crossing-reduction
+    property untouched -- this only adds a secondary angular nudge).
+
+    Parameters
+    ----------
+    rank : int
+        This port's rank among its ``total`` peers (0-indexed).
+    total : int
+        Number of ports sharing the same node face.
+    max_spread_deg : float, default=46.0
+        Total angular spread budget across all ranked ports; matches the
+        upper end of dot's observed 10-46 deg port angular resolution.
+
+    Returns
+    -------
+    float
+        Bias angle in degrees, 0.0 when there is nothing to spread
+        (``total <= 1``).
+    """
+    if total <= 1:
+        return 0.0
+    frac = (rank - (total - 1) / 2.0) / (total - 1)
+    return frac * max_spread_deg
 
 
 def _reflect_point_across_line(

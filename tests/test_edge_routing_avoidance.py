@@ -1,6 +1,7 @@
 """Tests for r80-S7 routing-quality deliverables: node-bbox avoidance,
 port angular spread, and label-vs-edge-path avoidance."""
 
+import pytest
 import torch
 
 from dagua.edges import (
@@ -8,10 +9,12 @@ from dagua.edges import (
     _build_node_grid,
     _curve_samples_hit_rect,
     _deflect_around_nodes,
+    _port_spread_bias_deg,
+    _rotate_point_around,
     route_edges,
 )
 from dagua.graph import DaguaGraph
-from dagua.metrics import edge_node_crossing_count
+from dagua.metrics import edge_node_crossing_count, port_angular_resolution
 from dagua.styles import EdgeStyle
 
 
@@ -91,3 +94,53 @@ class TestNodeBboxAvoidance:
         curves = route_edges(pos, ei, ns)
         assert len(curves) == 1
         assert isinstance(curves[0], BezierCurve)
+
+
+class TestPortAngularSpread:
+    def test_port_spread_bias_zero_for_single_port(self) -> None:
+        assert _port_spread_bias_deg(0, 1) == 0.0
+
+    def test_port_spread_bias_symmetric_and_ordered(self) -> None:
+        low = _port_spread_bias_deg(0, 3)
+        mid = _port_spread_bias_deg(1, 3)
+        high = _port_spread_bias_deg(2, 3)
+        assert low < mid < high
+        assert low == pytest.approx(-high)
+        assert mid == pytest.approx(0.0)
+
+    def test_hub_node_out_edges_gain_angular_separation(self) -> None:
+        """A node with several outgoing edges to distinct targets should
+        show a nonzero minimum port angle (the pre-r80-S7 implementation
+        always gave TB out-edges a purely-vertical initial tangent, which
+        collapses this metric to 0 deg for any fan-out >= 2)."""
+        g = DaguaGraph.from_edge_list([(0, 1), (0, 2), (0, 3), (0, 4)])
+        pos = torch.tensor(
+            [
+                [100.0, 0.0],
+                [0.0, 100.0],
+                [70.0, 100.0],
+                [130.0, 100.0],
+                [200.0, 100.0],
+            ]
+        )
+        ns = torch.tensor([[40.0, 20.0]] * 5)
+
+        curves = route_edges(pos, g.edge_index, ns, direction="TB", graph=g)
+        result = port_angular_resolution(curves, g.edge_index)
+        assert result["port_angular_res_mean_deg"] > 0.0
+
+    def test_bias_rotation_matches_manual_rotation(self) -> None:
+        rotated = _rotate_point_around((10.0, 0.0), (0.0, 0.0), 90.0)
+        assert rotated[0] == pytest.approx(0.0, abs=1e-6)
+        assert rotated[1] == pytest.approx(10.0, abs=1e-6)
+
+    def test_single_out_edge_keeps_straight_down_tangent(self) -> None:
+        """A node with exactly one outgoing edge (total=1) must be
+        unaffected -- there is nothing to spread against."""
+        pos = torch.tensor([[0.0, 0.0], [0.0, 100.0]])
+        ei = torch.tensor([[0], [1]])
+        ns = torch.tensor([[40.0, 20.0], [40.0, 20.0]])
+        curve = route_edges(pos, ei, ns, direction="TB")[0]
+        dx, dy = curve.cp1[0] - curve.p0[0], curve.cp1[1] - curve.p0[1]
+        assert dx == pytest.approx(0.0, abs=1e-6)
+        assert dy > 0.0
