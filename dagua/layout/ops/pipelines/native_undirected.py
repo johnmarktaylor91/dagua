@@ -245,14 +245,31 @@ def _score_undirected_candidate(
     return float(composite_auto(numeric, is_semantically_directed=False))
 
 
+# Convergent-cleanup pass budget for challenger candidates. The convergent
+# exact projector early-exits at zero overlaps or on measured stagnation,
+# so this ceiling is only consumed on hard overlap fields; the contest cap
+# (MAX_CONTEST_NODES) bounds the per-pass O(N^2) cost.
+CHALLENGER_PROJECTION_ITERATIONS = 200
+
+
 def _project_candidate(
     pos: torch.Tensor,
     problem: LayoutProblem,
 ) -> torch.Tensor:
-    """Apply size-aware overlap projection to one challenger candidate.
+    """Apply size-aware CONVERGENT overlap projection to one challenger.
 
     Uses the projector's existing public entry point with real node boxes,
-    exactly as the Stage-1 probe did.
+    with ``convergent=True`` (r80-S2b): the legacy default projector's
+    last-write-wins pushes stall on the dense overlap fields that
+    sfdp/neato candidates arrive with (P3B2 forensics: 37+ residual
+    overlaps on sbm_4x30 after 50 passes), leaving the 20-point no-overlap
+    composite term on the table. The convergent projector provably reaches
+    zero overlaps there. Trajectory risk is fully referee-protected on
+    this path: a candidate whose cleanup damages CV/crossings simply loses
+    the honest-composite contest to the incumbent (plus the degeneracy
+    guard rejects collapsed layouts outright), so unlike the default path
+    -- where r80-S2 showed unguarded convergent projection regressing
+    graphs -- a bad outcome here cannot ship.
 
     Parameters
     ----------
@@ -270,7 +287,12 @@ def _project_candidate(
         return pos
     projected = pos.detach().clone().to(dtype=torch.float32)
     node_sizes = problem.node_sizes.to(device=projected.device, dtype=projected.dtype)
-    project_overlaps(projected, node_sizes)
+    project_overlaps(
+        projected,
+        node_sizes,
+        iterations=CHALLENGER_PROJECTION_ITERATIONS,
+        convergent=True,
+    )
     return projected
 
 
