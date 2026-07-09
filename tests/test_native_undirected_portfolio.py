@@ -176,3 +176,36 @@ def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
 
     assert pos.shape == (graph.num_nodes, 2)
     assert bool(torch.isfinite(pos).all())
+
+
+def test_challenger_projection_is_convergent_and_resolves_dense_overlaps() -> None:
+    """Challenger cleanup uses the convergent projector (r80-S2b).
+
+    A near-coincident 30-node candidate with real label boxes is a dense
+    overlap clique the legacy default projector provably stalls on
+    (P3B2 forensics). The challenger cleanup pass must fully resolve it --
+    that is the whole point of wiring convergent=True into this path.
+    Trajectory risk is referee-protected: the contest scores the projected
+    candidate against the incumbent with the honest composite.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _project_candidate
+    from dagua.metrics import count_overlaps
+
+    num_nodes = 30
+    generator = torch.Generator().manual_seed(0)
+    pos = torch.randn(num_nodes, 2, generator=generator) * 0.5
+    node_sizes = torch.full((num_nodes, 2), 60.0)
+    node_sizes[:, 1] = 20.0
+    edges = [(i, (i + 1) % num_nodes) for i in range(num_nodes)]
+    problem = LayoutProblem(
+        edge_index=torch.tensor(list(zip(*edges)), dtype=torch.long),
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+    )
+    assert count_overlaps(pos, node_sizes) > 400  # sanity: dense clique
+
+    projected = _project_candidate(pos, problem)
+
+    assert count_overlaps(projected, node_sizes) == 0
+    # Input candidate tensor must not be mutated (contest may reuse it).
+    assert count_overlaps(pos, node_sizes) > 400
