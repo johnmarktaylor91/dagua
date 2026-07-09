@@ -128,6 +128,7 @@ class TestProjectOverlaps:
             padding: float,
             iterations: int,
             layer_index: object,
+            convergent: bool = False,
         ) -> None:
             """Raise CUDA OOM only for the initial GPU execution attempt."""
             if positions.device.type == "cuda":
@@ -138,6 +139,7 @@ class TestProjectOverlaps:
                 padding,
                 iterations,
                 layer_index,
+                convergent=convergent,
             )
 
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
