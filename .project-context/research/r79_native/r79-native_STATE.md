@@ -186,3 +186,14 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - Fresh dagua-only sweep on trunk 897dbe3 (post predicate-fix, post drawing-metrics merge): 63/14/16 legacy +
   8/2/5 extended, 0/108 movers vs committed store. Deterministic, no stale rows. 87/108 best-or-tied CERTIFIED.
 - Awaiting: S2b gate verdict (p1), S7 gate verdict (p3). Then: squeeze items, P6 honesty batch, holdout, audits, S8.
+
+## 2026-07-09 ~07:00: S7 verdict -- primitives WORK (externals +4..+6, 10/10 dot), dagua rows FAIL (compactness
+## interaction: lasso curls on short edges) -> S7b fix round dispatched
+- S7 landed 5 commits (node avoidance, port spread 1.1->10.4deg 10/10 PASS, optimizer wiring, label search, evidence).
+  Placement invariance PASS (bit-identical). Tests 213 green. Drawing gate FAIL 4/5 on dagua rows (mean -0.11 vs +4
+  needed) while external positions crush it (dot +6.15 10/10, elk +4.0, sfdp +4.07). Optimizer at balanced: NO
+  (226s@200 edges under contention; keep quality>=high).
+- Root cause: deflection offsets exceed chord scale on dagua's compact layouts -> curls -> edge-edge crossings
+  (weight 30) repay edge-node wins. S7b dispatched: chord-scaled deflection + per-edge crossing-aware acceptance
+  (greedy monotone, referee-at-edge-level) + density-scaled spread budget. Second strike = stop.
+- S2b: tests 148 green; final sweep relaunched on idle machine, monitor armed.
