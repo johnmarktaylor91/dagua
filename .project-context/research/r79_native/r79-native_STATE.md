@@ -150,3 +150,16 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   vs NEW trunk baseline. Expected +1-3.
 - Consolidated confirm sweep running on merged trunk (/tmp/r80_merged_confirm.log).
 - S6 resumed: finishing probe evidence + invariance gates on p3.
+
+## 2026-07-08 ~20:35: S6 COMPLETE (all gates; invariance BIT-IDENTICAL) -> S7 dispatched
+- S6: composite_drawing shipped (weights: crossings 30/edge-node 20/labels 15/ports 12/overlap 10/curvature 8/
+  bends 5), routed_crossing_rate + bend_count, graphviz spline + ELK bendPoint capture, routes/*.pt store blob,
+  35 tests green, invariance proof 0/972 row diffs. 5 commits on r80/drawing-metrics. Durable mirror
+  ~/.claude/research/dagua/r80-drawing-metrics/.
+- HEADLINE: dot native splines lead all 10 probe graphs (~11 pts mean) BUT dagua POSITIONS beat dot 7/10 at
+  matched routing. Gap = router: node avoidance (dot 0 edge-node crossings everywhere; sfdp thousands) + port
+  angular spread (dot 10-46 deg vs dagua 0-4). ELK clustered-graph capture artifact flagged via coverage field.
+- S7 dispatched (sonnet, p3, branch r80/routing-improve off r80/drawing-metrics): node-bbox deflection default-on,
+  port spread, wire orphaned BezierControlPointOpt via edge_opt_steps at quality>=high, label search upgrade.
+  Gates: placement invariance bit-identical + probe >= 7/10 improved, mean +4, edge-node 0 on >= 8/10.
+- Merge plan: r80/drawing-metrics -> trunk after confirm sweep finishes; S2b and S7 merge after their gates.
