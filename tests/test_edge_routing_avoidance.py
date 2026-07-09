@@ -7,10 +7,13 @@ import torch
 from dagua.edges import (
     BezierCurve,
     _build_node_grid,
+    _curve_polyline_samples,
     _curve_samples_hit_rect,
     _deflect_around_nodes,
+    _label_path_crossings,
     _port_spread_bias_deg,
     _rotate_point_around,
+    place_edge_labels,
     route_edges,
 )
 from dagua.graph import DaguaGraph
@@ -144,3 +147,65 @@ class TestPortAngularSpread:
         dx, dy = curve.cp1[0] - curve.p0[0], curve.cp1[1] - curve.p0[1]
         assert dx == pytest.approx(0.0, abs=1e-6)
         assert dy > 0.0
+
+
+class TestLabelPathAvoidance:
+    def test_curve_polyline_samples_bezier(self) -> None:
+        curve = BezierCurve((0.0, 0.0), (0.0, 33.0), (0.0, 66.0), (0.0, 100.0))
+        samples = _curve_polyline_samples(curve, sample_count=5)
+        assert len(samples) == 5
+        assert samples[0] == pytest.approx((0.0, 0.0))
+        assert samples[-1] == pytest.approx((0.0, 100.0))
+
+    def test_curve_polyline_samples_waypoints(self) -> None:
+        curve = BezierCurve(
+            (0.0, 0.0),
+            (0.0, 10.0),
+            (10.0, 10.0),
+            (10.0, 20.0),
+            waypoints=((0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 20.0)),
+        )
+        samples = _curve_polyline_samples(curve)
+        assert samples == [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 20.0)]
+
+    def test_label_path_crossings_detects_other_edge(self) -> None:
+        crossing_curve = BezierCurve((-50.0, 5.0), (-10.0, 5.0), (10.0, 5.0), (50.0, 5.0))
+        owner_curve = BezierCurve((0.0, -50.0), (0.0, -10.0), (0.0, 10.0), (0.0, 50.0))
+        # Dense sampling so the coarse-grid crossing check can't straddle a
+        # thin label box between two consecutive samples.
+        polylines = [
+            _curve_polyline_samples(crossing_curve, sample_count=40),
+            _curve_polyline_samples(owner_curve, sample_count=40),
+        ]
+        bboxes = []
+        for poly in polylines:
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            bboxes.append((min(xs), min(ys), max(xs), max(ys)))
+
+        label_bbox = (-5.0, -5.0, 5.0, 5.0)
+        # Owner is edge index 1 (the vertical curve); the OTHER edge (index
+        # 0, horizontal) crosses the label box and must be counted.
+        assert _label_path_crossings(label_bbox, 1, polylines, bboxes) == 1
+        # A curve must never count itself as a crossing of its own label.
+        self_only = [polylines[0]]
+        self_bbox = [bboxes[0]]
+        assert _label_path_crossings(label_bbox, 0, self_only, self_bbox) == 0
+
+    def test_place_edge_labels_avoids_crossing_edge_path(self) -> None:
+        """A label's naive anchor sitting on another edge's path should be
+        nudged to a candidate that avoids the crossing where possible."""
+        g = DaguaGraph.from_edge_list([("a", "b"), ("c", "d")])
+        g.edge_labels[0] = "label"
+
+        # Edge a->b is horizontal at y=0 (label anchors near its midpoint,
+        # y=0). Edge c->d is vertical, crossing straight through x=0 -- if
+        # the naive t=0.5 anchor for a->b sits at (0, 0) it is exactly on
+        # c->d's path.
+        pos = torch.tensor([[-60.0, 0.0], [60.0, 0.0], [0.0, -60.0], [0.0, 60.0]])
+        ns = torch.tensor([[20.0, 10.0]] * 4)
+
+        curves = route_edges(pos, g.edge_index, ns, direction="LR", graph=g)
+        label_positions = place_edge_labels(curves, pos, ns, g.edge_labels, graph=g)
+
+        assert label_positions[0] is not None
