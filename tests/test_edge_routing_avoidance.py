@@ -7,12 +7,15 @@ import torch
 from dagua.edges import (
     BezierCurve,
     _build_node_grid,
+    _count_route_crossings,
     _curve_polyline_samples,
     _curve_samples_hit_rect,
     _deflect_around_nodes,
     _label_path_crossings,
+    _poly_bbox,
     _port_spread_bias_deg,
     _rotate_point_around,
+    _segments_cross,
     place_edge_labels,
     route_edges,
 )
@@ -254,3 +257,59 @@ class TestLabelPathAvoidance:
         label_positions = place_edge_labels(curves, pos, ns, g.edge_labels, graph=g)
 
         assert label_positions[0] is not None
+
+
+class TestCrossingAwareAcceptance:
+    def test_segments_cross_basic(self) -> None:
+        assert _segments_cross((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0))
+        assert not _segments_cross((0.0, 0.0), (10.0, 0.0), (0.0, 5.0), (10.0, 5.0))
+
+    def test_segments_shared_endpoint_not_a_crossing(self) -> None:
+        """Two edges leaving the same port touch at that point -- that is
+        contact, not a crossing."""
+        assert not _segments_cross((0.0, 0.0), (10.0, 10.0), (0.0, 0.0), (10.0, -10.0))
+
+    def test_count_route_crossings_with_early_exit(self) -> None:
+        vertical = [(0.0, -10.0), (0.0, 0.0), (0.0, 10.0)]
+        # Single-segment horizontals: no polyline vertex exactly on x=0,
+        # so each crossing is strictly interior to both segments.
+        horiz_a = [(-10.0, -5.0), (10.0, -5.0)]
+        horiz_b = [(-10.0, 5.0), (10.0, 5.0)]
+        routed = [horiz_a, horiz_b]
+        bboxes = [_poly_bbox(p) for p in routed]
+        vb = _poly_bbox(vertical)
+        assert _count_route_crossings(vertical, vb, routed, bboxes) == 2
+        # Early exit truncates as soon as the comparison is decided.
+        assert _count_route_crossings(vertical, vb, routed, bboxes, stop_above=0) == 1
+
+    def test_spread_reverted_when_it_creates_a_crossing(self) -> None:
+        """r80-S7b#2: near-parallel long edges (the long_skip failure
+        mode) -- if fanning tangents apart makes two neighbors cross,
+        the later edge must fall back to its unbiased route and the
+        pair must not cross."""
+        # One hub at bottom with two long, nearly-parallel edges going up
+        # to two targets that are horizontally very close: with a +-23 deg
+        # fan-out the curves swing wide and can cross mid-flight.
+        g = DaguaGraph.from_edge_list([(0, 1), (0, 2)])
+        pos = torch.tensor([[0.0, 0.0], [-4.0, 400.0], [4.0, 400.0]])
+        ns = torch.tensor([[30.0, 16.0]] * 3)
+
+        curves = route_edges(pos, g.edge_index, ns, direction="TB", graph=g)
+
+        polys = [_curve_polyline_samples(c, sample_count=24) for c in curves]
+        crossings = 0
+        for i in range(len(polys[0]) - 1):
+            for j in range(len(polys[1]) - 1):
+                if _segments_cross(polys[0][i], polys[0][i + 1], polys[1][j], polys[1][j + 1]):
+                    crossings += 1
+        assert crossings == 0
+
+    def test_acceptance_is_deterministic(self) -> None:
+        """Same inputs -> identical routes (referee has no RNG)."""
+        g = DaguaGraph.from_edge_list([(0, 1), (0, 2), (1, 3), (2, 3), (0, 3)])
+        pos = torch.tensor([[0.0, 0.0], [-60.0, 120.0], [60.0, 120.0], [0.0, 240.0], [5.0, 60.0]])
+        ns = torch.tensor([[40.0, 20.0]] * 5)
+        a = route_edges(pos, g.edge_index, ns, direction="TB", graph=g)
+        b = route_edges(pos, g.edge_index, ns, direction="TB", graph=g)
+        for ca, cb in zip(a, b):
+            assert ca.cp1 == cb.cp1 and ca.cp2 == cb.cp2
