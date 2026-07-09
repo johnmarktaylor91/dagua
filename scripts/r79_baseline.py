@@ -22,7 +22,7 @@ from dagua.eval.competitors import get_competitor
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult
 from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_directed
 from dagua.eval.size_policy import set_size_aware_externals
-from dagua.metrics import composite_auto, composite_large, evaluate
+from dagua.metrics import composite_auto, composite_large, composite_large_undirected, evaluate
 
 OUTPUT_DIR = Path("eval_output/r79_baseline")
 SEED = 42
@@ -1046,7 +1046,10 @@ def score_stored_metrics(row: Dict[str, Any], test_graph: TestGraph) -> float:
     Backfills ``node_diag_mean`` from the current corpus graph when the
     stored metrics predate that field (r80-P6), so the degeneracy guard in
     ``composite``/``composite_undirected`` can evaluate even against frozen
-    pre-r80-P6 rows.
+    pre-r80-P6 rows. Also dispatches directed vs. undirected composites at
+    the large-graph (quick-tier-only) profile (r80-P6 S1 MEDIUM-1 fix):
+    previously this always used the directed ``composite_large`` regardless
+    of the graph's semantic direction.
 
     Parameters
     ----------
@@ -1066,10 +1069,13 @@ def score_stored_metrics(row: Dict[str, Any], test_graph: TestGraph) -> float:
     clean_metrics = {str(key): value for key, value in metrics.items() if value is not None}
     if "node_diag_mean" not in clean_metrics:
         clean_metrics["node_diag_mean"] = node_diag_mean_for_graph(test_graph)
+    directed = is_semantically_directed(test_graph)
     full_fields = {"crossing_rate", "sampled_stress", "angular_res_mean_deg"}
     if full_fields.issubset(clean_metrics):
-        return float(composite_auto(clean_metrics, is_semantically_directed(test_graph)))
-    return float(composite_large(clean_metrics))
+        return float(composite_auto(clean_metrics, directed))
+    if directed:
+        return float(composite_large(clean_metrics))
+    return float(composite_large_undirected(clean_metrics))
 
 
 def rescore_rows(
