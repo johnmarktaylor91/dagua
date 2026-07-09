@@ -21,6 +21,7 @@ import torch
 from dagua.eval.competitors import get_competitor
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult
 from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_directed
+from dagua.eval.size_policy import set_size_aware_externals
 from dagua.metrics import composite_auto, composite_large, evaluate
 
 OUTPUT_DIR = Path("eval_output/r79_baseline")
@@ -119,6 +120,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         nargs="+",
         default=None,
         help="Optional engine-name filter for targeted verification runs.",
+    )
+    parser.add_argument(
+        "--size-blind-externals",
+        action="store_true",
+        help=(
+            "Restore the old size-blind behavior for size-capable external "
+            "adapters (graphviz dot/sfdp/neato, elk_layered, dagre): every node "
+            "is laid out at a fixed placeholder size instead of its real "
+            "label-measured size. Kept ONLY for store-compatibility experiments "
+            "against pre-r80-P6 frozen data, which was produced size-blind "
+            "throughout. Default is size-aware (the honest comparison)."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -1763,6 +1776,7 @@ def main() -> int:
         Process exit status.
     """
     args = parse_args()
+    set_size_aware_externals(not bool(args.size_blind_externals))
     output_dir: Path = args.output_dir
     start = time.perf_counter()
     graphs = filter_graphs(build_corpus(), args.graphs)

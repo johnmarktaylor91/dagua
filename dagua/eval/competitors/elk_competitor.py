@@ -1,4 +1,12 @@
-"""ELK competitor adapter — elkjs via Node.js subprocess."""
+"""ELK competitor adapter — elkjs via Node.js subprocess.
+
+Size policy (r80-P6): elk_layered natively accepts per-node width/height in
+the JSON request, in the same point units dagua uses. When size-aware
+externals are enabled (the default; see ``dagua.eval.size_policy``), real
+per-node sizes from ``graph.node_sizes`` are submitted instead of the old
+hardcoded 120x40 placeholder box. ``--size-blind-externals`` restores the
+placeholder for store-compatibility experiments.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +18,39 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 import torch
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.size_policy import size_aware_externals
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
+
+_DEFAULT_NODE_WIDTH = 120.0
+_DEFAULT_NODE_HEIGHT = 40.0
+
+
+def _node_wh(graph: DaguaGraph, node_index: int) -> Tuple[float, float]:
+    """Return the width/height ELK should use for one node.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    node_index : int
+        Node index.
+
+    Returns
+    -------
+    Tuple[float, float]
+        ``(width, height)`` in point units: the real label-measured size
+        when ``graph.node_sizes`` is populated and size-aware externals are
+        enabled, otherwise the historical 120x40 placeholder.
+    """
+    if graph.node_sizes is not None and size_aware_externals():
+        return (
+            float(graph.node_sizes[node_index, 0].item()),
+            float(graph.node_sizes[node_index, 1].item()),
+        )
+    return (_DEFAULT_NODE_WIDTH, _DEFAULT_NODE_HEIGHT)
+
 
 _ELK_SCRIPT = r"""
 const ELK = require('elkjs');
@@ -119,7 +157,8 @@ def _build_elk_children(
         for node_index in _cluster_members(graph, cluster_name):
             if node_index in descendant_members or node_index in emitted_nodes:
                 continue
-            direct_members.append({"id": str(node_index), "width": 120, "height": 40})
+            node_w, node_h = _node_wh(graph, node_index)
+            direct_members.append({"id": str(node_index), "width": node_w, "height": node_h})
             emitted_nodes.add(node_index)
 
         cluster_entry: Dict[str, object] = {
@@ -134,7 +173,8 @@ def _build_elk_children(
     if parent_name is None:
         for node_index in range(graph.num_nodes):
             if node_index not in emitted_nodes:
-                children.append({"id": str(node_index), "width": 120, "height": 40})
+                node_w, node_h = _node_wh(graph, node_index)
+                children.append({"id": str(node_index), "width": node_w, "height": node_h})
 
     return children
 

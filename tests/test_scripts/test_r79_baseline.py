@@ -3,6 +3,7 @@
 Covers the r80-P6 stale-resume fix: row-level git-sha/timestamp provenance
 stamping, a loud warning when a resumed sweep reuses cached rows, and
 ``--fresh`` refusing to proceed if any row survives staging preparation.
+Also covers the ``--size-blind-externals`` CLI flag added alongside it.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from dagua.eval.size_policy import set_size_aware_externals, size_aware_externals
 from scripts import r79_baseline
 
 
@@ -171,3 +173,61 @@ def test_assert_fresh_store_refuses_cached_rows(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="remain resumable"):
         r79_baseline.assert_fresh_store(tmp_path)
+
+
+def test_parse_args_size_blind_externals_defaults_false() -> None:
+    """``--size-blind-externals`` defaults off (size-aware is the default).
+
+    Returns
+    -------
+    None
+    """
+    args = r79_baseline.parse_args([])
+    assert args.size_blind_externals is False
+
+
+def test_parse_args_size_blind_externals_flag_sets_true() -> None:
+    """``--size-blind-externals`` flips the flag on when passed.
+
+    Returns
+    -------
+    None
+    """
+    args = r79_baseline.parse_args(["--size-blind-externals"])
+    assert args.size_blind_externals is True
+
+
+def test_main_wires_size_blind_externals_into_size_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``main()`` propagates ``--size-blind-externals`` to the size policy.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to short-circuit ``main()`` after the size-policy wiring line so
+        this test does not need a real corpus or engine run.
+
+    Returns
+    -------
+    None
+    """
+
+    class _StopAfterWiring(Exception):
+        pass
+
+    original_parse_args = r79_baseline.parse_args
+
+    def fake_build_corpus():
+        raise _StopAfterWiring
+
+    monkeypatch.setattr(
+        r79_baseline, "parse_args", lambda: original_parse_args(["--size-blind-externals"])
+    )
+    monkeypatch.setattr(r79_baseline, "build_corpus", fake_build_corpus)
+    try:
+        with pytest.raises(_StopAfterWiring):
+            r79_baseline.main()
+        assert size_aware_externals() is False
+    finally:
+        set_size_aware_externals(True)

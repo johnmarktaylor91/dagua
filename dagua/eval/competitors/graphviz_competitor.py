@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set, Tuple
 import torch
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.size_policy import size_aware_externals
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -114,6 +115,15 @@ def _cluster_children(graph: DaguaGraph) -> Dict[Optional[str], List[str]]:
 def _node_statement(graph: DaguaGraph, index: int, indent: str) -> str:
     """Render a DOT node statement for one graph node.
 
+    When ``graph.node_sizes`` is populated and size-aware externals are
+    enabled (see ``dagua.eval.size_policy``), the node is also emitted with
+    real ``width``/``height`` (converted to Graphviz's inch convention) and
+    ``fixedsize=true`` so Graphviz's ``dot`` engine lays out the node at its
+    real label-measured size instead of auto-sizing to the label text --
+    this is the same size dagua's own composite score uses to count
+    overlaps, closing the size-blind-vs-size-aware scoring mismatch (S1
+    HIGH-2). With ``--size-blind-externals`` the old behavior is preserved.
+
     Parameters
     ----------
     graph : DaguaGraph
@@ -146,6 +156,14 @@ def _node_statement(graph: DaguaGraph, index: int, indent: str) -> str:
         attrs.append("shape=box")
         if style.shape == "roundrect":
             attrs.append('style="filled,rounded"')
+
+    if graph.node_sizes is not None and size_aware_externals():
+        # Graphviz uses inches, 72 points/inch (matches dagua's own point scale).
+        width_in = max(float(graph.node_sizes[index, 0].item()) / 72.0, 0.01)
+        height_in = max(float(graph.node_sizes[index, 1].item()) / 72.0, 0.01)
+        attrs.append(f"width={width_in:.4f}")
+        attrs.append(f"height={height_in:.4f}")
+        attrs.append("fixedsize=true")
 
     attrs_str = ", ".join(attrs)
     return f"{indent}n{index} [{attrs_str}];"
@@ -646,13 +664,16 @@ def _layout_with_graphviz_engine(
                 continue
             command.append(f"-G{key}={_graphviz_attribute_value(value)}")
 
+    node_sizes = None
+    if graph.node_sizes is not None and size_aware_externals():
+        node_sizes = graph.node_sizes
     with tempfile.NamedTemporaryFile(
         mode="w",
         suffix=".dot",
         delete=False,
         encoding="utf-8",
     ) as handle:
-        handle.write(to_dot(graph))
+        handle.write(to_dot(graph, node_sizes=node_sizes))
         dot_path = Path(handle.name)
 
     try:
