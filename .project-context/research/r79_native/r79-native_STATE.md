@@ -163,3 +163,21 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   port spread, wire orphaned BezierControlPointOpt via edge_opt_steps at quality>=high, label search upgrade.
   Gates: placement invariance bit-identical + probe >= 7/10 improved, mean +4, edge-node 0 on >= 8/10.
 - Merge plan: r80/drawing-metrics -> trunk after confirm sweep finishes; S2b and S7 merge after their gates.
+
+## 2026-07-09 ~00:45: REGRESSION FOUND+FIXED (architect, inline); drawing-metrics MERGED; fresh sweep running
+- Trunk confirm sweep exposed 2 movers (-22/-19): outerplanar_dag_20, recurrent_feedback_cell. Bisection:
+  deterministic on BOTH trunk and p2 -> not env, not load. ROOT CAUSE: S4's final gate sweep silently REUSED
+  STALE RESUME ROWS for these graphs (produced pre-neato-admission). True failure chain: undeclared directed
+  graphs -> deep-layering inference says undirected -> portfolio contest optimizes undirected composite ->
+  neato challenger wins wrong contest -> -20 under directed scoring. EXACTLY the belief-mismatch failure mode
+  flagged at S4 dispatch. Honest interim scoreboard was 86/108, one masked WIN->LOSS.
+- FIX d665600 (inline, architect): GraphStructure carries direction provenance (direction_is_declared,
+  reciprocal_edge_ratio); portfolio fires only on declared undirectedness OR reciprocity>0.3, never on
+  deep-layering inference alone. Verified: both movers restored to EXACT baseline (69.33/74.691), real_karate_34
+  portfolio win preserved (68.79). Unit test locks predicate. Also: detect-secrets now excludes eval_output
+  (git_sha false positives on every store refresh).
+- Harness hole filed in agent-issue ledger (HIGH): gate sweeps must be provably fresh (--no-resume or row
+  version stamping) -> P6 item.
+- 897dbe3: r80/drawing-metrics MERGED to trunk (additive, invariance-proven). composite_drawing available.
+- Fresh full dagua-only sweep running (/tmp/r80_trunk_final_sweep.log) -> expect 63/14/16 + 8/2/5 with no
+  stale rows. S2b notified to merge current trunk. S7 still in gates.
