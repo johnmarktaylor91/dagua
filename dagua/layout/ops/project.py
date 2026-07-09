@@ -410,10 +410,14 @@ class OverlapProjectionGatedConfig:
         Extra spacing enforced between node bounding boxes.
     iterations : int, default=10
         Maximum number of projection passes.
+    convergent : bool, default=True
+        Use the convergent exact-path projector (this op was designed to
+        gate that projector; see ``dagua.layout.projection.project_overlaps``).
     """
 
     padding: float = 2.0
     iterations: int = 10
+    convergent: bool = True
 
 
 @register_op
@@ -430,6 +434,13 @@ class OverlapProjectionGated(Op):
     formulas and keeps the projected result only if the proxy does not
     regress; otherwise it reverts to the pre-projection positions and logs a
     debug line.
+
+    NOT wired into any default pipeline as of r80-S2b: the r80-S2 sweep +
+    call-site attribution (P7_PROJECTOR_EVIDENCE.md) showed the composite
+    damage from projector-trajectory changes happens in the MANY ungated
+    ``periodic_overlap_projection`` calls during optimization, upstream of
+    any single final-stage gate, so gating only the final projection cannot
+    protect the default path. Registered and tested for future use.
     """
 
     config: OverlapProjectionGatedConfig = field(default_factory=OverlapProjectionGatedConfig)
@@ -494,6 +505,7 @@ class OverlapProjectionGated(Op):
             padding=self.config.padding,
             iterations=self.config.iterations,
             layer_index=layer_index,
+            convergent=self.config.convergent,
         )
         proxy_after = _overlap_gate_proxy_composite(
             candidate, edge_index, node_sizes, direction, is_directed
