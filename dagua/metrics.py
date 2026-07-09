@@ -1665,6 +1665,100 @@ def composite_large(metrics: Dict[str, float]) -> float:
     return score
 
 
+# Quick-mode fields retained by composite_large_undirected (direction-
+# sensitive fields dag_consistency/depth_spearman_rho/edge_straightness_mean_deg
+# are dropped, mirroring composite_undirected -- but unlike composite_undirected,
+# crossing_rate/angular_res_mean_deg/cluster_mean_sep_ratio are ALSO unavailable
+# at quick-tier, so only 2 of composite_undirected's 5 retained terms survive).
+_QUICK_AVAILABLE_FIELDS_UNDIRECTED = frozenset({"edge_length_cv", "overlap_count"})
+
+
+def composite_large_undirected(metrics: Dict[str, float]) -> float:
+    """Composite score for undirected graphs where only quick() is available.
+
+    r80-P6 (S1 MEDIUM-1): ``composite_large`` hardcoded the DIRECTED weight
+    scheme with no undirected counterpart -- any undirected N>2000 graph
+    scored through the large-tier path would have 30/100 points determined
+    by ``dag_consistency``, a metric that is meaningless for it. This
+    mirrors ``composite_undirected``'s term structure at the large-graph
+    tier.
+
+    Of ``composite_undirected``'s 5 retained terms (edge_length_cv,
+    overlap_count, crossing_rate, angular_resolution, cluster_separation),
+    only ``edge_length_cv`` and ``overlap_count`` are quick-tier available;
+    ``crossing_rate``, ``angular_res_mean_deg``, and cluster separation are
+    Tier-2/3 fields that ``quick()`` never computes (same reason
+    ``composite_large`` itself excludes them). This is NOT a proportional
+    rescale of composite_undirected's 40/20 weights (which would be a
+    non-round 66.67/33.33); it uses round numbers preserving the same
+    ~2:1 emphasis, matching composite_large's own hand-picked-round-numbers
+    convention rather than a strict rescale.
+
+    Weights (sum = 100):
+    - Edge length uniformity (1 - CV): 65
+    - No overlaps (binary): 35
+
+    No degeneracy guard is applied here (see ``composite()``'s guard docs);
+    the r80-P6 batch scopes that guard to ``composite``/``composite_undirected``/
+    ``composite_auto`` only.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping from ``quick()`` or equivalent.
+
+    Returns
+    -------
+    float
+        Weighted undirected large-tier composite score where higher is
+        better.
+
+    Raises
+    ------
+    ValueError
+        If a required quick-mode field is missing.
+    """
+    missing = [f for f in _QUICK_AVAILABLE_FIELDS_UNDIRECTED if f not in metrics]
+    if missing:
+        raise ValueError(
+            f"composite_large_undirected: missing required quick-mode fields: "
+            f"{missing}. Did you call quick() before scoring?"
+        )
+
+    score = 0.0
+    score += 65 * max(0.0, 1.0 - metrics["edge_length_cv"])
+    score += 35 * (1.0 if metrics["overlap_count"] == 0 else 0.0)
+    return score
+
+
+def composite_large_auto(
+    metrics: Dict[str, float], is_semantically_directed: Optional[bool] = None
+) -> float:
+    """Pick composite_large or composite_large_undirected by direction flag.
+
+    Mirrors ``composite_auto`` at the large-graph (quick-tier-only) profile.
+    When ``is_semantically_directed`` is True (or None, conservative
+    default), returns ``composite_large(metrics)``. When False, returns
+    ``composite_large_undirected(metrics)``.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping from ``quick()`` or equivalent.
+    is_semantically_directed : Optional[bool], optional
+        Whether the graph has a meaningful direction. ``None`` is treated as
+        directed to preserve the existing conservative behavior.
+
+    Returns
+    -------
+    float
+        Directed or undirected large-tier composite score.
+    """
+    if is_semantically_directed is None or is_semantically_directed:
+        return composite_large(metrics)
+    return composite_large_undirected(metrics)
+
+
 def composite_strict(metrics: Dict[str, float]) -> float:
     """Strict variant of ``composite()`` that refuses silent defaults.
 
