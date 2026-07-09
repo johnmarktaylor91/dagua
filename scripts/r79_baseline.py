@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import multiprocessing as mp
@@ -60,8 +61,14 @@ ENGINE_NAMES = [
 EXTERNAL_ENGINE_NAMES = [name for name in ENGINE_NAMES if name != "dagua"]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments.
+
+    Parameters
+    ----------
+    argv : Optional[Sequence[str]], optional
+        Argument vector to parse. ``None`` parses ``sys.argv[1:]`` (the CLI
+        default); tests pass an explicit list.
 
     Returns
     -------
@@ -85,10 +92,21 @@ def parse_args() -> argparse.Namespace:
         default=OUTPUT_DIR,
         help="Baseline output directory.",
     )
-    parser.add_argument(
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
         "--resume",
         action="store_true",
         help="Resume from results.rows.jsonl in the staging store.",
+    )
+    resume_group.add_argument(
+        "--fresh",
+        action="store_true",
+        help=(
+            "Provably-fresh sweep: clear/ignore any resumable staging store so no "
+            "row is silently reused from a prior (possibly stale, pre-code-change) "
+            "run. Mutually exclusive with --resume. Every row this run writes is "
+            "stamped with the current git SHA and timestamp regardless of this flag."
+        ),
     )
     parser.add_argument(
         "--graphs",
@@ -102,11 +120,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional engine-name filter for targeted verification runs.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
+@functools.lru_cache(maxsize=1)
 def git_sha() -> str:
     """Return the current git commit SHA.
+
+    Cached: the SHA cannot change mid-process, and this is called once per
+    written row (see ``append_row``) so an uncached ``subprocess.run`` per
+    row would be wasteful on large sweeps.
 
     Returns
     -------
@@ -250,8 +273,38 @@ def rows_path(output_dir: Path) -> Path:
     return output_dir / "results.rows.jsonl"
 
 
+def stamp_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of a row stamped with provenance for the current process.
+
+    Every row written to the resumable JSONL store carries the exact git SHA
+    and wall-clock time it was computed under. This makes stale-resume rows
+    detectable after the fact: if a later audit finds ``row_git_sha`` values
+    that predate a code change relevant to the metric, those rows are
+    provably stale and must be recomputed with ``--fresh``.
+
+    Parameters
+    ----------
+    row : Dict[str, Any]
+        Row about to be written.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A new dict with ``row_git_sha`` and ``row_written_at`` added. Does
+        not mutate ``row``.
+    """
+    return {
+        **row,
+        "row_git_sha": git_sha(),
+        "row_written_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+
+
 def append_row(output_dir: Path, row: Dict[str, Any]) -> None:
     """Append one completed row to the resumable JSONL store.
+
+    The row is stamped with the current git SHA and timestamp (see
+    ``stamp_row``) before it is written.
 
     Parameters
     ----------
@@ -266,8 +319,54 @@ def append_row(output_dir: Path, row: Dict[str, Any]) -> None:
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     with rows_path(output_dir).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, sort_keys=True))
+        handle.write(json.dumps(stamp_row(row), sort_keys=True))
         handle.write("\n")
+
+
+def warn_resumed_rows(skipped_keys: Set[Tuple[str, str]], resume: bool) -> None:
+    """Print a loud warning when a sweep reuses rows from a prior run.
+
+    Silent row reuse across a resumed sweep is the stale-resume hole this
+    batch closes: a partially-completed staging store can carry rows that
+    were computed under OLDER code than the current git SHA, and ``--resume``
+    would otherwise skip recomputing them without any signal to the operator.
+
+    Parameters
+    ----------
+    skipped_keys : Set[Tuple[str, str]]
+        Graph-engine keys that will be skipped because a matching row already
+        exists in the staging store.
+    resume : bool
+        Whether this run was invoked with ``--resume``. No warning is printed
+        when the run is not a resume (``skipped_keys`` should be empty in
+        that case, but the flag makes the no-op path explicit).
+
+    Returns
+    -------
+    None
+    """
+    if not resume or not skipped_keys:
+        return
+    banner = "=" * 78
+    print(banner, flush=True)
+    print(
+        f"WARNING: RESUMED RUN REUSING {len(skipped_keys)} CACHED ROW(S) FROM A "
+        "PRIOR STAGING STORE",
+        flush=True,
+    )
+    print(
+        "These rows were NOT recomputed under the current git SHA "
+        f"({git_sha()}). If code relevant to their metrics changed since they "
+        "were written, they are STALE. Use --fresh to force a provably fresh "
+        "sweep with zero cached rows.",
+        flush=True,
+    )
+    sample = sorted(skipped_keys)[:10]
+    print(
+        f"Sample reused keys ({min(10, len(skipped_keys))} of {len(skipped_keys)}): {sample}",
+        flush=True,
+    )
+    print(banner, flush=True)
 
 
 def load_jsonl_rows(output_dir: Path) -> List[Dict[str, Any]]:
@@ -1387,6 +1486,7 @@ def run_full(
     graphs: List[TestGraph],
     engine_names: Sequence[str],
     resume: bool,
+    fresh: bool = False,
 ) -> Tuple[Dict[str, Any], Path]:
     """Run the complete r79 baseline from scratch.
 
@@ -1399,7 +1499,13 @@ def run_full(
     engine_names : Sequence[str]
         Engines to run.
     resume : bool
-        Whether to skip complete rows in the staging JSONL store.
+        Whether to skip complete rows in the staging JSONL store. Must be
+        ``False`` when ``fresh`` is ``True`` (enforced by the CLI's
+        mutually-exclusive group).
+    fresh : bool, default=False
+        When ``True``, refuse to proceed if any row survives staging-store
+        preparation -- guarantees a provably fresh sweep with zero resumed
+        rows.
 
     Returns
     -------
@@ -1407,8 +1513,11 @@ def run_full(
         Results payload and staging directory.
     """
     work_dir = prepare_full_store(output_dir, resume)
+    if fresh:
+        assert_fresh_store(work_dir)
     availability = engine_availability(engine_names)
     skipped_keys = complete_keys(work_dir) if resume else set()
+    warn_resumed_rows(skipped_keys, resume)
     for test_graph in graphs:
         for engine_name in engine_names:
             if (test_graph.name, engine_name) in skipped_keys:
@@ -1426,10 +1535,44 @@ def run_full(
     return build_payload(rows, graphs, availability, engine_names), work_dir
 
 
+def assert_fresh_store(work_dir: Path) -> None:
+    """Refuse to proceed if the staging store still carries any cached rows.
+
+    ``--fresh`` clears the resume path (see ``prepare_full_store`` /
+    ``prepare_dagua_only_store`` with ``resume=False``), which should already
+    leave zero resumable rows. This is a belt-and-suspenders check so a
+    provably-fresh sweep cannot silently reuse rows even if that invariant
+    ever breaks.
+
+    Parameters
+    ----------
+    work_dir : Path
+        Staging directory prepared for the run.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    RuntimeError
+        If any graph-engine row is already complete in the staging store.
+    """
+    stale = complete_keys(work_dir)
+    if stale:
+        raise RuntimeError(
+            f"--fresh requested but {len(stale)} row(s) remain resumable in "
+            f"the staging store after preparation; refusing to reuse them: "
+            f"{sorted(stale)[:10]}"
+        )
+    print("FRESH RUN: staging store carries zero cached rows.", flush=True)
+
+
 def run_dagua_only(
     output_dir: Path,
     graphs: List[TestGraph],
     resume: bool,
+    fresh: bool = False,
 ) -> Tuple[Dict[str, Any], Path]:
     """Rerun only Dagua rows while preserving frozen external rows.
 
@@ -1440,7 +1583,11 @@ def run_dagua_only(
     graphs : List[TestGraph]
         Corpus graphs.
     resume : bool
-        Whether to skip complete Dagua rows in the staging JSONL store.
+        Whether to skip complete Dagua rows in the staging JSONL store. Must
+        be ``False`` when ``fresh`` is ``True``.
+    fresh : bool, default=False
+        When ``True``, refuse to proceed if any Dagua row survives staging
+        preparation.
 
     Returns
     -------
@@ -1448,6 +1595,15 @@ def run_dagua_only(
         Updated results payload and staging directory.
     """
     work_dir = prepare_dagua_only_store(output_dir, graphs, resume)
+    if fresh:
+        stale = {key for key in complete_keys(work_dir) if key[1] == "dagua"}
+        if stale:
+            raise RuntimeError(
+                f"--fresh requested but {len(stale)} dagua row(s) remain resumable "
+                f"in the staging store after preparation; refusing to reuse them: "
+                f"{sorted(stale)[:10]}"
+            )
+        print("FRESH RUN: staging store carries zero cached dagua rows.", flush=True)
     existing = load_existing_results(work_dir)
     semantics_fix = existing["metadata"].get("semantics_fix")
     availability = dict(existing["metadata"].get("engine_availability", {}))
@@ -1456,6 +1612,7 @@ def run_dagua_only(
     if competitor is None:
         raise RuntimeError("dagua adapter not registered")
     skipped_keys = complete_keys(work_dir) if resume else set()
+    warn_resumed_rows(skipped_keys, resume)
     for test_graph in graphs:
         if (test_graph.name, "dagua") in skipped_keys:
             print(f"SKIP existing {test_graph.name} dagua", flush=True)
@@ -1618,9 +1775,13 @@ def main() -> int:
         print(f"Wrote {output_dir / 'BASELINE.md'}", flush=True)
         return 0
     if args.dagua_only:
-        payload, work_dir = run_dagua_only(output_dir, graphs, bool(args.resume))
+        payload, work_dir = run_dagua_only(
+            output_dir, graphs, bool(args.resume), fresh=bool(args.fresh)
+        )
     else:
-        payload, work_dir = run_full(output_dir, graphs, engine_names, bool(args.resume))
+        payload, work_dir = run_full(
+            output_dir, graphs, engine_names, bool(args.resume), fresh=bool(args.fresh)
+        )
     payload["metadata"]["wall_time_s"] = round(time.perf_counter() - start, 3)
     write_results(work_dir, payload)
     validate_store(work_dir)
