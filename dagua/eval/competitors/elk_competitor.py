@@ -1,18 +1,56 @@
-"""ELK competitor adapter — elkjs via Node.js subprocess."""
+"""ELK competitor adapter — elkjs via Node.js subprocess.
+
+Size policy (r80-P6): elk_layered natively accepts per-node width/height in
+the JSON request, in the same point units dagua uses. When size-aware
+externals are enabled (the default; see ``dagua.eval.size_policy``), real
+per-node sizes from ``graph.node_sizes`` are submitted instead of the old
+hardcoded 120x40 placeholder box. ``--size-blind-externals`` restores the
+placeholder for store-compatibility experiments.
+"""
 
 from __future__ import annotations
 
 import json
 import subprocess
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.size_policy import size_aware_externals
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
+
+_DEFAULT_NODE_WIDTH = 120.0
+_DEFAULT_NODE_HEIGHT = 40.0
+
+
+def _node_wh(graph: DaguaGraph, node_index: int) -> Tuple[float, float]:
+    """Return the width/height ELK should use for one node.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    node_index : int
+        Node index.
+
+    Returns
+    -------
+    Tuple[float, float]
+        ``(width, height)`` in point units: the real label-measured size
+        when ``graph.node_sizes`` is populated and size-aware externals are
+        enabled, otherwise the historical 120x40 placeholder.
+    """
+    if graph.node_sizes is not None and size_aware_externals():
+        return (
+            float(graph.node_sizes[node_index, 0].item()),
+            float(graph.node_sizes[node_index, 1].item()),
+        )
+    return (_DEFAULT_NODE_WIDTH, _DEFAULT_NODE_HEIGHT)
+
 
 _ELK_SCRIPT = r"""
 const ELK = require('elkjs');
@@ -119,7 +157,8 @@ def _build_elk_children(
         for node_index in _cluster_members(graph, cluster_name):
             if node_index in descendant_members or node_index in emitted_nodes:
                 continue
-            direct_members.append({"id": str(node_index), "width": 120, "height": 40})
+            node_w, node_h = _node_wh(graph, node_index)
+            direct_members.append({"id": str(node_index), "width": node_w, "height": node_h})
             emitted_nodes.add(node_index)
 
         cluster_entry: Dict[str, object] = {
@@ -134,7 +173,8 @@ def _build_elk_children(
     if parent_name is None:
         for node_index in range(graph.num_nodes):
             if node_index not in emitted_nodes:
-                children.append({"id": str(node_index), "width": 120, "height": 40})
+                node_w, node_h = _node_wh(graph, node_index)
+                children.append({"id": str(node_index), "width": node_w, "height": node_h})
 
     return children
 
@@ -178,6 +218,74 @@ def _collect_elk_positions(
                 positions[node_index, 0] = child_x
                 positions[node_index, 1] = child_y
         _collect_elk_positions(child.get("children", []), positions, child_x, child_y)
+
+
+def _collect_elk_routes(
+    data: dict,
+    num_edges: int,
+) -> Optional[List[Optional[List[Tuple[float, float]]]]]:
+    """Parse ELK edge sections into per-edge polylines (r80-S6).
+
+    Every benchmark edge is submitted at root level with id ``e{idx}``, so
+    section coordinates are relative to the root and need no offsetting.
+    Each section contributes ``startPoint -> bendPoints... -> endPoint``.
+
+    Parameters
+    ----------
+    data : dict
+        Parsed ELK JSON output.
+    num_edges : int
+        Expected edge count.
+
+    Returns
+    -------
+    list | None
+        Per-edge polylines aligned to ``edge_index`` columns (``None``
+        entries for unrouted edges), or ``None`` when no edge carries
+        routing sections.
+    """
+    edges = data.get("edges")
+    if not isinstance(edges, list) or num_edges <= 0:
+        return None
+
+    routes: List[Optional[List[Tuple[float, float]]]] = [None] * num_edges
+    any_route = False
+    for edge_obj in edges:
+        if not isinstance(edge_obj, dict):
+            continue
+        edge_id = str(edge_obj.get("id", ""))
+        if not edge_id.startswith("e") or not edge_id[1:].isdigit():
+            continue
+        e_idx = int(edge_id[1:])
+        if e_idx >= num_edges:
+            continue
+        sections = edge_obj.get("sections")
+        if not isinstance(sections, list) or not sections:
+            continue
+        polyline: List[Tuple[float, float]] = []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            points = [section.get("startPoint")]
+            bend_points = section.get("bendPoints")
+            if isinstance(bend_points, list):
+                points.extend(bend_points)
+            points.append(section.get("endPoint"))
+            for point in points:
+                if not isinstance(point, dict):
+                    continue
+                try:
+                    xy = (float(point["x"]), float(point["y"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if polyline and polyline[-1] == xy:
+                    continue
+                polyline.append(xy)
+        if len(polyline) >= 2:
+            routes[e_idx] = polyline
+            any_route = True
+
+    return routes if any_route else None
 
 
 @register
@@ -260,8 +368,15 @@ class ElkLayered(CompetitorBase):
             data = json.loads(result.stdout)
             pos = torch.zeros(n, 2)
             _collect_elk_positions(data.get("children", []), pos)
+            num_edges = graph.edge_index.shape[1] if graph.edge_index.numel() > 0 else 0
+            routes = _collect_elk_routes(data, int(num_edges))
 
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=pos,
+                runtime_seconds=elapsed,
+                routes=routes,
+            )
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(

@@ -1,16 +1,16 @@
 {
-  "output_dir": "/home/jtaylor/projects/dagua/docs/glossary",
+  "output_dir": "docs/glossary",
   "figures": {
-    "pipeline_stages": "/home/jtaylor/projects/dagua/docs/glossary/figures/pipeline_stages.png",
-    "direction_modes": "/home/jtaylor/projects/dagua/docs/glossary/figures/direction_modes.png",
-    "spacing_sweep": "/home/jtaylor/projects/dagua/docs/glossary/figures/spacing_sweep.png",
-    "crossing_sweep": "/home/jtaylor/projects/dagua/docs/glossary/figures/crossing_sweep.png",
-    "routing_styles": "/home/jtaylor/projects/dagua/docs/glossary/figures/routing_styles.png",
-    "flex_constraints": "/home/jtaylor/projects/dagua/docs/glossary/figures/flex_constraints.png"
+    "pipeline_stages": "docs/glossary/figures/pipeline_stages.png",
+    "direction_modes": "docs/glossary/figures/direction_modes.png",
+    "spacing_sweep": "docs/glossary/figures/spacing_sweep.png",
+    "crossing_sweep": "docs/glossary/figures/crossing_sweep.png",
+    "routing_styles": "docs/glossary/figures/routing_styles.png",
+    "flex_constraints": "docs/glossary/figures/flex_constraints.png"
   },
-  "public_api_count": 35,
-  "graph_method_count": 22,
-  "loss_count": 24,
+  "public_api_count": 48,
+  "graph_method_count": 33,
+  "loss_count": 29,
   "hyperparameter_count": 13,
   "glossary_terms": [
     "DAG",

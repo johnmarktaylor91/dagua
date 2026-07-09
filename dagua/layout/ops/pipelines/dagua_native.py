@@ -1274,8 +1274,8 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     -------
     str
         One of ``"tree"``, ``"layered_dag"``, ``"force_directed"``,
-        ``"hybrid"``, ``"hybrid_v2"``, ``"stress"``, or
-        ``"legacy_monolith"``.
+        ``"hybrid"``, ``"hybrid_v2"``, ``"stress"``,
+        ``"undirected_portfolio"``, or ``"legacy_monolith"``.
     """
     forced = _selected_force_pipeline(config)
     if forced in {
@@ -1286,6 +1286,7 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
         "hybrid_v2",
         "planar",
         "stress",
+        "undirected_portfolio",
         "legacy_monolith",
     }:
         return forced
@@ -1297,6 +1298,59 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     small_tree_cutoff = int(getattr(config, "small_n_tree_cutoff", 64))
     if num_nodes <= small_tree_cutoff and family in {GraphFamily.TREE, GraphFamily.CHAIN}:
         return "tree"
+    # r80-S4: semantically-undirected graphs (declared by the user or
+    # inferred) route to the portfolio contest, which runs the incumbent
+    # selection below as candidate A plus dagua's own sfdp/neato
+    # reimplementations as challengers, picking the honest-composite argmax.
+    # Trees/chains keep their fast path above this branch, and the explicit
+    # try_planar_first opt-in (checked inside the baseline helper) also
+    # wins: a user who asked for planar gets planar.
+    # _dagua_native_suppress_portfolio is set by the contest itself when it
+    # re-enters this router to run its incumbent candidate: force_pipeline
+    # cannot be used for that because several polish stages are gated on
+    # force_pipeline being None, and the incumbent must reproduce today's
+    # default output exactly.
+    # r80 fix: fire ONLY on high-confidence undirectedness -- an explicit
+    # declaration, or reciprocal edge storage (>0.3 means the graph stores
+    # both directions, the unambiguous undirected format). The deep-layering
+    # INFERENCE alone is not sufficient: it mislabeled outerplanar_dag_20
+    # and recurrent_feedback_cell as undirected, and the contest then
+    # optimized the wrong composite flavor (-20 pts under directed scoring).
+    if (
+        getattr(structure, "is_semantically_directed", True) is False
+        and (
+            bool(getattr(structure, "direction_is_declared", False))
+            or float(getattr(structure, "reciprocal_edge_ratio", 0.0)) > 0.3
+        )
+        and not bool(getattr(config, "_dagua_native_suppress_portfolio", False))
+        and not bool(getattr(config, "try_planar_first", False))
+    ):
+        return "undirected_portfolio"
+    return _choose_native_pipeline_baseline(structure=structure, config=config)
+
+
+def _choose_native_pipeline_baseline(structure: GraphStructure, config: LayoutConfig) -> str:
+    """Choose the pre-portfolio (baseline) sub-pipeline for one problem.
+
+    This is the remainder of the routing logic that ran before the
+    undirected-portfolio branch existed. The portfolio route calls it to
+    compute its incumbent candidate, guaranteeing the contest can never
+    select something worse than what the router would have picked today.
+
+    Parameters
+    ----------
+    structure : GraphStructure
+        Classified graph topology (non-None; callers handle the None case).
+    config : LayoutConfig
+        Prepared layout configuration.
+
+    Returns
+    -------
+    str
+        One of ``"planar"``, ``"hybrid_v2"``, ``"force_directed"``,
+        ``"hybrid"``, or ``"layered_dag"``.
+    """
+    family = structure.family
     # Planar dispatch when the classifier confirms exact
     # planarity AND the user has explicitly opted in via try_planar_first.
     # Default is False because the current Schnyder-init + flat-stress
@@ -1359,6 +1413,12 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         return build_native_hybrid_pipeline(config)
     if selected == "hybrid_v2":
         return build_native_hybrid_v2_pipeline(config)
+    if selected == "undirected_portfolio":
+        from dagua.layout.ops.pipelines.native_undirected import (
+            build_native_undirected_portfolio_pipeline,
+        )
+
+        return build_native_undirected_portfolio_pipeline(config)
     return build_native_layered_dag_pipeline(config)
 
 
@@ -1564,6 +1624,21 @@ def _run_native_problem(
             config=config,
             seed=problem.seed,
             edge_weights=problem.edge_weights,
+        )
+    if selected == "undirected_portfolio":
+        # Early return like force_directed: the incumbent candidate runs the
+        # full baseline path (including its own polish battery) inside the
+        # contest, and challenger candidates must stay exactly as probed
+        # (pipeline + overlap projection, no extra post-polish).
+        from dagua.layout.ops.pipelines.native_undirected import (
+            layout_native_undirected_portfolio,
+        )
+
+        return layout_native_undirected_portfolio(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            config=config,
         )
 
     try:
