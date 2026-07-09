@@ -140,3 +140,13 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - Projector (S2) estimated to add +1-3 more on top (winners already at tie-band ceilings).
 - NEXT: await S2 sweep verdict -> merge order projector then portfolio into r79/native (no file overlap) ->
   consolidated sweep -> S6/S7 drawing track -> P6 honesty batch -> holdout -> S8 aesthetic knob.
+
+## 2026-07-08 ~21:15: window reset; S4 MERGED to trunk; S2 verdict FAIL -> salvage dispatched
+- S2 gate-3 sweep FAILED honest: 64/10/34 -> 63/10/35, rgg_500 WIN->LOSS, net -13.5. Gate proxy saw 0 rejections
+  yet corpus regressed -> proxy blind spot (bisection target). Agent stopped per protocol. Do NOT merge as-is.
+- DECISION (Fable): salvage not rework. S4 merged into r79/native (38a13e1, import OK, store 63/14/16 + 8/2/5).
+  S2b dispatched: revert default rewiring (overlap_iterations back to 10), convergent projector becomes OPT-IN,
+  wired into portfolio CHALLENGER path only (referee protects); bisect rgg_500 gate blind spot first; sweep gate
+  vs NEW trunk baseline. Expected +1-3.
+- Consolidated confirm sweep running on merged trunk (/tmp/r80_merged_confirm.log).
+- S6 resumed: finishing probe evidence + invariance gates on p3.
