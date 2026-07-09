@@ -760,6 +760,18 @@ def route_edges(
         node_shapes = [graph.get_style_for_node(i).shape for i in range(pos.shape[0])]
         edge_styles = [_get_route_edge_style(graph, i) for i in range(num_edges)]
 
+    # Spatial grid for node-avoidance deflection (deliverable r80-S7#1). Cell
+    # size tracks the mean node diagonal so each cell holds O(1) nodes on
+    # typical graphs; falls back to a constant for degenerate all-zero sizes.
+    num_nodes = pos.shape[0]
+    node_grid: Dict[Tuple[int, int], List[int]] = {}
+    grid_cell_size = 40.0
+    if num_nodes > 0:
+        mean_diag = sum(math.hypot(w, h) for w, h in zip(widths, heights)) / num_nodes
+        if mean_diag > 1e-6:
+            grid_cell_size = mean_diag
+        node_grid = _build_node_grid(x_coords, y_coords, grid_cell_size)
+
     curves = []
     for e_idx in range(num_edges):
         s, t = src_indices[e_idx], tgt_indices[e_idx]
@@ -853,6 +865,23 @@ def route_edges(
                 node_cluster_set,
                 cluster_bboxes,
                 direction,
+            )
+
+        # Node-bbox avoidance: deflect bezier control points around any
+        # non-endpoint node the curve passes through. Bezier-only (r80-S7#1);
+        # ON by default, per-edge opt-out via EdgeStyle.avoid_nodes.
+        avoid_nodes = edge_style.avoid_nodes if edge_style is not None else True
+        if avoid_nodes and routing == "bezier" and num_nodes > 2:
+            curve = _deflect_around_nodes(
+                curve,
+                s,
+                t,
+                node_grid,
+                grid_cell_size,
+                x_coords,
+                y_coords,
+                widths,
+                heights,
             )
 
         curves.append(curve)
@@ -1362,6 +1391,211 @@ def _deflect_around_clusters(
 
     if modified:
         return BezierCurve(p0, (cp1[0], cp1[1]), (cp2[0], cp2[1]), p1)
+    return curve
+
+
+def _curve_samples_hit_rect(curve: BezierCurve, rect: Rect, sample_count: int = 9) -> bool:
+    """Return whether interior curve samples fall inside a rectangle.
+
+    Endpoints (t=0, t=1) are intentionally excluded since they legitimately
+    sit on the source/target node boundary.
+    """
+    for i in range(1, sample_count):
+        t = i / sample_count
+        pt = evaluate_bezier(curve, t)
+        if _point_in_rect(pt, rect):
+            return True
+    return False
+
+
+def _build_node_grid(
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    cell_size: float,
+) -> Dict[Tuple[int, int], List[int]]:
+    """Bucket node indices into a uniform grid for fast neighborhood queries.
+
+    Parameters
+    ----------
+    x_coords : sequence[float]
+        Node center X coordinates.
+    y_coords : sequence[float]
+        Node center Y coordinates.
+    cell_size : float
+        Grid cell edge length in data coordinates.
+
+    Returns
+    -------
+    dict[tuple[int, int], list[int]]
+        Mapping from grid cell to the node indices whose center falls in it.
+    """
+    grid: Dict[Tuple[int, int], List[int]] = {}
+    for idx, (x, y) in enumerate(zip(x_coords, y_coords)):
+        cell = (int(math.floor(x / cell_size)), int(math.floor(y / cell_size)))
+        grid.setdefault(cell, []).append(idx)
+    return grid
+
+
+def _grid_candidates(
+    bbox: Rect,
+    grid: Dict[Tuple[int, int], List[int]],
+    cell_size: float,
+) -> List[int]:
+    """Return deduplicated node indices whose grid cell overlaps ``bbox``.
+
+    Parameters
+    ----------
+    bbox : tuple[float, float, float, float]
+        Query bounds as ``(x_min, y_min, x_max, y_max)``.
+    grid : dict[tuple[int, int], list[int]]
+        Spatial grid built by :func:`_build_node_grid`.
+    cell_size : float
+        Grid cell edge length matching the grid's construction.
+
+    Returns
+    -------
+    list[int]
+        Candidate node indices near the query box.
+    """
+    x_min, y_min, x_max, y_max = bbox
+    cx_min = int(math.floor(x_min / cell_size))
+    cx_max = int(math.floor(x_max / cell_size))
+    cy_min = int(math.floor(y_min / cell_size))
+    cy_max = int(math.floor(y_max / cell_size))
+    seen: Set[int] = set()
+    for cx in range(cx_min, cx_max + 1):
+        for cy in range(cy_min, cy_max + 1):
+            for idx in grid.get((cx, cy), ()):
+                seen.add(idx)
+    return list(seen)
+
+
+def _deflect_around_nodes(
+    curve: BezierCurve,
+    src_idx: int,
+    tgt_idx: int,
+    node_grid: Dict[Tuple[int, int], List[int]],
+    grid_cell_size: float,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    widths: Sequence[float],
+    heights: Sequence[float],
+    margin: float = 4.0,
+    max_attempts: int = 4,
+) -> BezierCurve:
+    """Deflect bezier control points around non-endpoint node bboxes.
+
+    Generalizes :func:`_deflect_around_clusters` to arbitrary chord
+    directions: pushes both control points perpendicular to the src->tgt
+    chord, away from whichever node the curve is passing through, growing
+    the offset over a bounded number of attempts. Deterministic (no RNG).
+    In dense neighborhoods where no bounded attempt clears the box, the
+    curve is left as-is for that node rather than looping forever.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Routed curve to adjust. Non-bezier (waypoint) curves pass through
+        unmodified -- ortho/taxi routing is out of scope for this pass.
+    src_idx : int
+        Source node index (excluded from avoidance).
+    tgt_idx : int
+        Target node index (excluded from avoidance).
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over all node centers (see :func:`_build_node_grid`).
+    grid_cell_size : float
+        Grid cell size used to build ``node_grid``.
+    x_coords, y_coords, widths, heights : sequence[float]
+        Per-node geometry, indexed by node id.
+    margin : float, default=4.0
+        Inflation added around each node bbox before intersection testing.
+    max_attempts : int, default=4
+        Number of growing-offset deflection attempts per blocking node
+        before giving up on that node (dense-neighborhood fallback).
+
+    Returns
+    -------
+    BezierCurve
+        Curve with control points deflected around blocking node bboxes,
+        or the original curve when no clearing deflection was found/needed.
+    """
+    if curve.waypoints is not None:
+        return curve
+
+    p0, p1 = curve.p0, curve.p1
+    dx = p1[0] - p0[0]
+    dy = p1[1] - p0[1]
+    chord_len = math.hypot(dx, dy)
+    if chord_len < 1e-6:
+        return curve
+
+    cp1 = list(curve.cp1)
+    cp2 = list(curve.cp2)
+
+    # Candidate nodes: grid cells overlapping the control polygon's bbox,
+    # inflated by margin plus a generous max-node-radius pad.
+    poly_xs = [p0[0], cp1[0], cp2[0], p1[0]]
+    poly_ys = [p0[1], cp1[1], cp2[1], p1[1]]
+    pad = grid_cell_size + margin
+    query_bbox = (
+        min(poly_xs) - pad,
+        min(poly_ys) - pad,
+        max(poly_xs) + pad,
+        max(poly_ys) + pad,
+    )
+    candidates = _grid_candidates(query_bbox, node_grid, grid_cell_size)
+
+    perp_x, perp_y = -dy / chord_len, dx / chord_len
+    modified = False
+
+    for node_idx in candidates:
+        if node_idx == src_idx or node_idx == tgt_idx:
+            continue
+        w, h = widths[node_idx], heights[node_idx]
+        if w <= 0.0 and h <= 0.0:
+            continue
+        cx, cy = x_coords[node_idx], y_coords[node_idx]
+        rect = (cx - w / 2 - margin, cy - h / 2 - margin, cx + w / 2 + margin, cy + h / 2 + margin)
+
+        current = BezierCurve(p0, (cp1[0], cp1[1]), (cp2[0], cp2[1]), p1)
+        if not _curve_samples_hit_rect(current, rect):
+            continue
+
+        side = (cx - p0[0]) * perp_x + (cy - p0[1]) * perp_y
+        push_sign = -1.0 if side >= 0.0 else 1.0
+        base_offset = max(w, h) / 2.0 + margin
+        # A uniform two-control-point push only displaces the curve by
+        # 3t(1-t)*offset at parameter t, which shrinks toward the chord
+        # near the curve's endpoints -- so obstacles that sit close to
+        # either endpoint need much larger offsets to actually clear.
+        # Grow aggressively but cap at a large multiple of the chord so a
+        # single far-off node can't blow the curve out arbitrarily.
+        growth = (2.0, 4.5, 9.0, 16.0)
+        max_offset = max(chord_len * 1.5, base_offset * growth[-1])
+
+        for attempt in range(max_attempts):
+            factor = growth[min(attempt, len(growth) - 1)]
+            offset = min(base_offset * factor, max_offset)
+            trial_cp1 = (cp1[0] + push_sign * perp_x * offset, cp1[1] + push_sign * perp_y * offset)
+            trial_cp2 = (cp2[0] + push_sign * perp_x * offset, cp2[1] + push_sign * perp_y * offset)
+            trial = BezierCurve(p0, trial_cp1, trial_cp2, p1)
+            if not _curve_samples_hit_rect(trial, rect):
+                cp1, cp2 = list(trial_cp1), list(trial_cp2)
+                modified = True
+                break
+        # else: dense neighborhood -- no clearing offset found within the
+        # attempt budget; leave the curve as-is for this node and move on
+        # (never loop forever).
+
+    if modified:
+        return BezierCurve(
+            p0,
+            (cp1[0], cp1[1]),
+            (cp2[0], cp2[1]),
+            p1,
+            routing=curve.routing,
+            direction=curve.direction,
+        )
     return curve
 
 
