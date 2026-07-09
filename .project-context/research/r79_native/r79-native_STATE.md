@@ -220,3 +220,16 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - S9 squeeze dispatched (sonnet, p1, r80/squeeze): clustered-undirected portfolio access (high_mix target) +
   weighted-similarity challenger variant. Acceptance vs 89-state, add-candidates-never-replace law.
 - After S9: full re-freeze (all engines, --fresh, size-aware+overlap=prism) -> holdout -> audits -> S8 knob.
+
+## 2026-07-09 ~14:15: S9 MERGED (90/108); prism landed; FULL RE-FREEZE LAUNCHED
+- S9 squeeze merged ed005e3: high_mix L->W (+6.5, matches S4 probe exactly); weighted-similarity variant in
+  (weighted_small_world +10.9, margin -17.3 -> -6.4, still L); zero regressions; nested_clusters unreachable
+  by construction. Gate store: 64/14/15 + 10/2/3 = 90/108 (83.3%).
+- Note from S9 worker: two of three sweep flips (planar_60, weighted_community) were S2b's, not S9's --
+  correctly attributed via parent-commit probes (stale-store confound caught AGAIN; --fresh now mandatory).
+- overlap=prism for size-aware sfdp/neato/fdp landed 661feb6 (validated: grid_20x20 sfdp 1774 -> 0 overlaps).
+- FULL RE-FREEZE RUNNING (PID 255617, /tmp/r80_refreeze.log): 108 graphs x 9 engines, --fresh, size-aware,
+  degeneracy-guarded composite. THE honest scoreboard. Expect W/T/L to move vs 90/108 (externals stronger).
+- QUEUE after re-freeze: holdout eval (Rome/North/SuiteSparse; p4 worktree + r79/p6a-stdcorpora harness ->
+  needs merge of trunk into it or run from trunk with corpora dir), audits (Opus visual + adversarial),
+  S8 aesthetic knob, docs rebuild, merge decision.
