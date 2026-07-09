@@ -766,11 +766,14 @@ def route_edges(
     num_nodes = pos.shape[0]
     node_grid: Dict[Tuple[int, int], List[int]] = {}
     grid_cell_size = 40.0
+    spread_scales: List[float] = []
     if num_nodes > 0:
         mean_diag = sum(math.hypot(w, h) for w, h in zip(widths, heights)) / num_nodes
         if mean_diag > 1e-6:
             grid_cell_size = mean_diag
         node_grid = _build_node_grid(x_coords, y_coords, grid_cell_size)
+        # r80-S7b#3: per-node density scale for the port-spread budget.
+        spread_scales = _local_density_spread_scales(node_grid, grid_cell_size, x_coords, y_coords)
 
     # r80-S7b#2: store of already-accepted routes for the crossing-aware
     # acceptance referee (greedy monotone: each edge's S7 modifications are
@@ -863,8 +866,15 @@ def route_edges(
         # near-parallel bundle. Sign convention matches the existing
         # neighbor-position sort (out_order/in_order) -- this only adds a
         # secondary angular nudge on top of that primary ordering.
-        src_bias_deg = _port_spread_bias_deg(out_rank, out_total)
-        tgt_bias_deg = _port_spread_bias_deg(in_rank, in_total)
+        # r80-S7b#3: the 46-deg budget is scaled down per node in dense
+        # neighborhoods, where a wide fan buys port-angle score but pays
+        # more in edge-edge crossings.
+        src_bias_deg = _port_spread_bias_deg(
+            out_rank, out_total, max_spread_deg=46.0 * spread_scales[s]
+        )
+        tgt_bias_deg = _port_spread_bias_deg(
+            in_rank, in_total, max_spread_deg=46.0 * spread_scales[t]
+        )
 
         curve = _compute_curve(
             src_port_x,
@@ -1678,6 +1688,58 @@ def _grid_candidates(
             for idx in grid.get((cx, cy), ()):
                 seen.add(idx)
     return list(seen)
+
+
+def _local_density_spread_scales(
+    node_grid: Dict[Tuple[int, int], List[int]],
+    cell_size: float,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    sparse_count: float = 4.0,
+    floor: float = 0.3,
+) -> List[float]:
+    """Per-node scale factors that shrink the port-spread budget in dense areas.
+
+    r80-S7b#3: the full 46-deg fan is safe in roomy layouts (external
+    dot/elk positions) but creates edge-edge crossings in dagua's compact
+    corridors. Scale each node's spread budget by local crowding: count
+    neighbors in the 3x3 grid-cell block around the node (cell size is the
+    mean node diagonal, so this is roughly a 1.5-diagonal radius) and
+    shrink as ``sqrt(sparse_count / n_local)`` below a sparsity threshold
+    of ``sparse_count`` neighbors, with a hard floor so the fan never
+    fully collapses.
+
+    Parameters
+    ----------
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over node centers (see :func:`_build_node_grid`).
+    cell_size : float
+        Grid cell edge length used to build ``node_grid``.
+    x_coords, y_coords : sequence[float]
+        Node center coordinates, indexed by node id.
+    sparse_count : float, default=4.0
+        Neighbor count at or below which the full budget applies.
+    floor : float, default=0.3
+        Minimum scale in the densest neighborhoods.
+
+    Returns
+    -------
+    list[float]
+        Scale factor in ``[floor, 1.0]`` per node.
+    """
+    scales: List[float] = []
+    for x, y in zip(x_coords, y_coords):
+        cx = int(math.floor(x / cell_size))
+        cy = int(math.floor(y / cell_size))
+        n_local = -1  # exclude the node itself
+        for gx in range(cx - 1, cx + 2):
+            for gy in range(cy - 1, cy + 2):
+                n_local += len(node_grid.get((gx, gy), ()))
+        if n_local <= sparse_count:
+            scales.append(1.0)
+        else:
+            scales.append(max(floor, (sparse_count / n_local) ** 0.5))
+    return scales
 
 
 def _deflect_around_nodes(
