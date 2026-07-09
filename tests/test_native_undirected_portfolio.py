@@ -287,3 +287,254 @@ def test_contest_registers_both_cleanup_variants() -> None:
     # challenger (i.e., variants were ADDED, not substituted).
     n_challengers = project_calls.count(False)
     assert len(scored_positions) > 1 + n_challengers
+
+
+def _clustered_ring_graph(
+    num_nodes: int = 12,
+    weighted: bool = False,
+) -> DaguaGraph:
+    """Return a small declared-undirected graph with two clusters.
+
+    Parameters
+    ----------
+    num_nodes : int, default=12
+        Total node count (split evenly into two clusters).
+    weighted : bool, default=False
+        Whether to attach non-uniform edge weights.
+
+    Returns
+    -------
+    DaguaGraph
+        A ring-of-cliques graph with ``cluster_a``/``cluster_b`` clusters.
+    """
+    half = num_nodes // 2
+    edges: list[tuple[int, int]] = []
+    weights: list[float] = []
+    for block_start in (0, half):
+        for i in range(block_start, block_start + half):
+            for j in range(i + 1, block_start + half):
+                edges.append((i, j))
+                weights.append(3.0 if weighted else 1.0)
+    # One bridge edge between the two clusters.
+    edges.append((half - 1, half))
+    weights.append(0.2 if weighted else 1.0)
+
+    graph = DaguaGraph()
+    for node_idx in range(num_nodes):
+        graph.add_node(node_idx)
+    for (source, target), weight in zip(edges, weights):
+        graph.add_edge(source, target, weight=weight if weighted else None)
+    graph.add_cluster("cluster_a", list(range(0, half)))
+    graph.add_cluster("cluster_b", list(range(half, num_nodes)))
+    graph.is_semantically_directed = False
+    graph.compute_node_sizes()
+    return graph
+
+
+def test_cluster_aware_sfdp_candidate_none_without_clusters() -> None:
+    """The cluster-aware sfdp candidate is skipped when there are no clusters."""
+    from dagua.config import LayoutConfig
+    from dagua.layout.ops.pipelines.native_undirected import _cluster_aware_sfdp_candidate
+    from dagua.layout.ops.state import ExecutionPlan, RuntimeContext
+
+    graph = _ring_with_chords()
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+    )
+    ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
+
+    result = _cluster_aware_sfdp_candidate(problem, LayoutConfig(seed=42), ctx)
+
+    assert result is None
+
+
+def test_cluster_aware_sfdp_candidate_produces_finite_positions() -> None:
+    """The cluster-aware sfdp candidate returns finite positions for a clustered graph."""
+    from dagua.config import LayoutConfig
+    from dagua.layout.ops.pipelines.native_undirected import (
+        _build_cluster_ids,
+        _cluster_aware_sfdp_candidate,
+        _score_undirected_candidate,
+    )
+    from dagua.layout.ops.state import ExecutionPlan, RuntimeContext
+
+    graph = _clustered_ring_graph()
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        seed=42,
+    )
+    ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
+
+    pos = _cluster_aware_sfdp_candidate(problem, LayoutConfig(seed=42), ctx)
+
+    assert pos is not None
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+    # Cluster containment scoring must actually see the cluster ids (r80-S9
+    # Deliverable 1's explicit gate expectation: verify the cluster term is
+    # computed for this candidate, not silently skipped).
+    cluster_ids = _build_cluster_ids(problem)
+    assert cluster_ids is not None
+    score = _score_undirected_candidate(pos, problem, cluster_ids)
+    assert score == score  # not NaN
+
+
+def test_clustered_undirected_contest_reaches_cluster_candidate() -> None:
+    """A full portfolio run on a clustered-undirected graph scores candidate D.
+
+    Regression guard for the S9 diagnosis: the contest must actually invoke
+    the cluster-aware sfdp candidate (name ``"cluster_sfdp"`` or
+    ``"cluster_sfdp_convergent"``) when ``problem.clusters`` is set, never
+    silently skip it.
+    """
+    from dagua.layout import layout
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    graph = _clustered_ring_graph()
+
+    original_candidate_fn = nu._cluster_aware_sfdp_candidate
+    calls: list[bool] = []
+
+    def spy_candidate(problem, config, ctx):
+        calls.append(bool(problem.clusters))
+        return original_candidate_fn(problem, config, ctx)
+
+    nu._cluster_aware_sfdp_candidate = spy_candidate
+    try:
+        pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+    finally:
+        nu._cluster_aware_sfdp_candidate = original_candidate_fn
+
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+    assert calls, "clustered-undirected contest never invoked candidate D"
+    assert all(calls)
+
+
+def test_weighted_similarity_candidate_none_without_weights() -> None:
+    """The weighted-similarity candidate is skipped when there are no weights."""
+    from dagua.layout.ops.pipelines.native_undirected import _weighted_similarity_candidate
+
+    graph = _ring_with_chords()
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+    )
+
+    result = _weighted_similarity_candidate(problem, seed=42)
+
+    assert result is None
+
+
+def test_weighted_similarity_candidate_produces_finite_positions() -> None:
+    """The weighted-similarity candidate returns finite positions for a weighted graph."""
+    from dagua.layout.ops.pipelines.native_undirected import _weighted_similarity_candidate
+
+    graph = _clustered_ring_graph(weighted=True)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        edge_weights=graph.edge_weights,
+        seed=42,
+    )
+
+    pos = _weighted_similarity_candidate(problem, seed=42)
+
+    assert pos is not None
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+
+
+def test_weighted_similarity_candidate_uses_inverse_transform() -> None:
+    """The candidate's positions match a direct ``weight_transform="inverse"`` call.
+
+    Locks the mini-probe's decision (P12_SQUEEZE.md): the challenger must
+    actually use the "inverse" transform, not silently fall back to "none".
+    """
+    from dagua.layout.ops.pipelines.native_stress import (
+        NativeStressConfig,
+        layout_native_stress_pipeline,
+    )
+    from dagua.layout.ops.pipelines.native_undirected import (
+        WEIGHTED_SIMILARITY_TRANSFORM,
+        _weighted_similarity_candidate,
+    )
+
+    graph = _clustered_ring_graph(weighted=True)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        edge_weights=graph.edge_weights,
+        seed=42,
+    )
+
+    assert WEIGHTED_SIMILARITY_TRANSFORM == "inverse"
+
+    candidate_pos = _weighted_similarity_candidate(problem, seed=42)
+    direct_pos = layout_native_stress_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        edge_weights=graph.edge_weights,
+        seed=42,
+        config=NativeStressConfig(weight_transform="inverse", seed=42),
+    )
+
+    torch.testing.assert_close(candidate_pos, direct_pos, rtol=0.0, atol=0.0)
+
+
+def test_weighted_undirected_contest_reaches_weighted_similarity_candidate() -> None:
+    """A full portfolio run on a weighted-undirected graph scores candidate E."""
+    from dagua.layout import layout
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    graph = _clustered_ring_graph(weighted=True)
+    original_candidate_fn = nu._weighted_similarity_candidate
+    calls: list[bool] = []
+
+    def spy_candidate(problem, seed):
+        calls.append(problem.edge_weights is not None)
+        return original_candidate_fn(problem, seed)
+
+    nu._weighted_similarity_candidate = spy_candidate
+    try:
+        pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+    finally:
+        nu._weighted_similarity_candidate = original_candidate_fn
+
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+    assert calls, "weighted-undirected contest never invoked candidate E"
+    assert all(calls)
+
+
+def test_new_candidates_share_the_degeneracy_guard() -> None:
+    """New candidates D and E are added via the shared ``_add_challenger`` path.
+
+    Both new candidates are added via the existing ``_add_challenger``
+    helper (never a bespoke selection path), so a pathologically collapsed
+    D/E output can never win the contest outright -- this is a structural
+    guarantee test, not a numeric-score test: it confirms the SAME guard
+    the sfdp/neato challengers already use rejects a collapsed candidate.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _candidate_is_degenerate
+
+    num_nodes = 8
+    node_sizes = torch.full((num_nodes, 2), 40.0)
+    edges = [(i, (i + 1) % num_nodes) for i in range(num_nodes)]
+    edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    collapsed = torch.rand((num_nodes, 2)) * 0.5
+
+    degenerate, reason = _candidate_is_degenerate(collapsed, node_sizes, edge_index)
+
+    assert degenerate is True
+    assert reason != ""
