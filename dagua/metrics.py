@@ -1391,6 +1391,52 @@ def within_layer_compactness(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+# r80-P6 degeneracy guard threshold: below this ratio of mean edge length to
+# mean node bounding-box diagonal, a layout is considered "point-collapsed"
+# rather than merely compact. See `_is_degenerate_scale` for the exploit this
+# closes (S1 HIGH-3: a fully collapsed layout trivially aces edge-length
+# uniformity and crossing-rate, scoring HIGHER than a normal random layout).
+DEGENERATE_SCALE_RATIO = 0.25
+
+
+def _is_degenerate_scale(metrics: Dict[str, float]) -> bool:
+    """Detect a point-collapsed layout from its metric summary.
+
+    When nodes have collapsed onto (near) the same point, every edge length
+    trivially converges to the same tiny value. That vacuously maximizes
+    ``edge_length_cv`` (coefficient of variation of an all-equal
+    distribution is 0, i.e. full length-uniformity credit) and
+    ``crossing_rate`` (zero-length segments never register as crossing
+    under the segment-intersection test), even though the layout is a
+    fully overlapping unreadable mess. Only the binary overlap term
+    correctly zeroes out on its own; this guard closes the other two.
+
+    Degenerate scale is defined as: mean edge length < 0.25 * mean node
+    bounding-box diagonal. Both quantities must be present in ``metrics``
+    (``edge_length_mean`` from ``edge_length_cv()``, ``node_diag_mean`` from
+    ``quick()``/``full()`` when node sizes were supplied) for the guard to
+    fire; metrics computed without node sizes, or predating this field,
+    conservatively report "not degenerate" (unchanged prior behavior).
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping.
+
+    Returns
+    -------
+    bool
+        ``True`` when the layout is at a degenerate (point-collapsed) scale.
+    """
+    edge_length_mean = metrics.get("edge_length_mean")
+    node_diag_mean = metrics.get("node_diag_mean")
+    if edge_length_mean is None or node_diag_mean is None:
+        return False
+    if float(node_diag_mean) <= 1e-8:
+        return False
+    return float(edge_length_mean) < DEGENERATE_SCALE_RATIO * float(node_diag_mean)
+
+
 def composite(metrics: Dict[str, float]) -> float:
     """Compute the directed 100-point composite quality score.
 
@@ -1416,14 +1462,22 @@ def composite(metrics: Dict[str, float]) -> float:
     - Stress (inverted sampled_stress): 10
     - Angular resolution: 5
     - Cluster separation: 6
+
+    Degeneracy guard (r80-P6): when the layout is at a point-collapsed
+    scale (see ``_is_degenerate_scale``), the edge length uniformity (18)
+    and crossing density (9) terms score 0 instead of their vacuous maxima.
     """
     score = 0.0
+    degenerate = _is_degenerate_scale(metrics)
 
     # DAG consistency (22) - most critical for directed graph readability.
     score += 22 * metrics.get("dag_consistency", 0.0)
 
-    # Edge length uniformity (18) - invert CV, cap at 1.0.
-    score += 18 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
+    # Edge length uniformity (18) - invert CV, cap at 1.0. Guarded: a
+    # point-collapsed layout trivially minimizes CV without being uniform
+    # in any meaningful sense.
+    if not degenerate:
+        score += 18 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
 
     # Depth correlation (13)
     score += 13 * max(0.0, metrics.get("depth_spearman_rho", 0.0))
@@ -1435,9 +1489,11 @@ def composite(metrics: Dict[str, float]) -> float:
     straight_deg = metrics.get("edge_straightness_mean_deg", 45.0)
     score += 9 * max(0.0, 1.0 - straight_deg / 45.0)
 
-    # Crossing density (9) - lower is better.
-    crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
-    score += 9 * crossing_score
+    # Crossing density (9) - lower is better. Guarded: zero-length segments
+    # never register as crossing, so a collapsed layout trivially aces this.
+    if not degenerate:
+        crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
+        score += 9 * crossing_score
 
     # Sampled stress (10) - lower graph-theoretic stress is better.
     stress_score = max(0.0, 1.0 - metrics.get("sampled_stress", 1.0))
@@ -1474,6 +1530,11 @@ def composite_undirected(metrics: Dict[str, float]) -> float:
     same clamping). See composite() for the per-metric formulas and clamp
     ranges.
 
+    Degeneracy guard (r80-P6): when the layout is at a point-collapsed
+    scale (see ``_is_degenerate_scale``), the edge length uniformity (40)
+    and crossing density (20) terms score 0 instead of their vacuous
+    maxima. See ``composite()`` for the full rationale.
+
     Parameters
     ----------
     metrics : Dict[str, float]
@@ -1485,16 +1546,19 @@ def composite_undirected(metrics: Dict[str, float]) -> float:
         Weighted undirected composite score where higher is better.
     """
     score = 0.0
+    degenerate = _is_degenerate_scale(metrics)
 
-    # Edge length uniformity (40) - invert CV, cap at 1.0
-    score += 40 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
+    # Edge length uniformity (40) - invert CV, cap at 1.0. Guarded.
+    if not degenerate:
+        score += 40 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
 
     # No overlaps (20) - binary
     score += 20 * (1.0 if metrics.get("overlap_count", 1) == 0 else 0.0)
 
-    # Crossing density (20) - lower is better
-    crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
-    score += 20 * crossing_score
+    # Crossing density (20) - lower is better. Guarded.
+    if not degenerate:
+        crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
+        score += 20 * crossing_score
 
     # Angular resolution (10)
     angle_score = min(1.0, metrics.get("angular_res_mean_deg", 20.0) / 40.0)
@@ -1694,6 +1758,13 @@ def quick(
     if node_sizes is not None:
         ns = _ensure_cpu(node_sizes)
         result.update(count_overlaps_detailed(pos, ns, seed=seed))
+        # Mean node bounding-box diagonal (r80-P6): used by the composite
+        # degeneracy guard to detect point-collapsed layouts, where edge
+        # length has collapsed to near-zero relative to node size. Depends
+        # only on node_sizes (label geometry), never on pos, so it is
+        # reproducible without re-running any layout.
+        diag = torch.sqrt(ns[:, 0] ** 2 + ns[:, 1] ** 2)
+        result["node_diag_mean"] = diag.mean().item() if diag.numel() > 0 else 0.0
 
     # Aspect ratio
     ns_arg = _ensure_cpu(node_sizes) if node_sizes is not None else None
