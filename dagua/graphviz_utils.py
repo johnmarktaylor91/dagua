@@ -26,7 +26,11 @@ if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
 
-def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
+def to_dot(
+    graph: DaguaGraph,
+    positions: Optional[torch.Tensor] = None,
+    node_sizes: Optional[torch.Tensor] = None,
+) -> str:
     """Convert a graph to DOT source.
 
     If positions are provided, they are emitted as ``pos="x,y!"`` attributes
@@ -41,6 +45,14 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
         Graph to export.
     positions : torch.Tensor | None, optional
         Optional node positions with shape ``[N, 2]`` in point units.
+    node_sizes : torch.Tensor | None, optional
+        Optional per-node ``[N, 2]`` width/height in point units (dagua's
+        native coordinate scale). When provided, each node is emitted with
+        ``width``/``height`` (converted to Graphviz's inch convention) and
+        ``fixedsize=true`` so Graphviz lays out the node at its real size
+        instead of auto-sizing to the label text. ``None`` (the default)
+        preserves the prior size-blind DOT output exactly -- existing
+        callers of this function are unaffected unless they opt in.
 
     Returns
     -------
@@ -54,6 +66,8 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
 
     if positions is not None:
         pos = positions.detach().cpu()
+    if node_sizes is not None:
+        sizes = node_sizes.detach().cpu()
 
     for i in range(graph.num_nodes):
         label = graph.node_labels[i].replace("\\", "\\\\").replace('"', '\\"')
@@ -80,6 +94,14 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
             x_inch = pos[i, 0].item() / 72.0
             y_inch = -pos[i, 1].item() / 72.0  # flip y
             attrs.append(f'pos="{x_inch},{y_inch}!"')
+
+        if node_sizes is not None:
+            # Graphviz uses inches, 72 points/inch (same convention as pos above).
+            width_in = max(float(sizes[i, 0].item()) / 72.0, 0.01)
+            height_in = max(float(sizes[i, 1].item()) / 72.0, 0.01)
+            attrs.append(f"width={width_in:.4f}")
+            attrs.append(f"height={height_in:.4f}")
+            attrs.append("fixedsize=true")
 
         attrs_str = ", ".join(attrs)
         lines.append(f"  n{i} [{attrs_str}];")
