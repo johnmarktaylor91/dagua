@@ -98,6 +98,51 @@ class TestNodeBboxAvoidance:
         assert len(curves) == 1
         assert isinstance(curves[0], BezierCurve)
 
+    def test_deflection_offset_never_exceeds_chord_fraction(self) -> None:
+        """r80-S7b#1: the applied control-point push must stay within
+        0.6x the chord length -- offsets comparable to the chord make the
+        curve loop back on itself (lasso curls)."""
+        curve = BezierCurve((0.0, 10.0), (0.0, 49.0), (0.0, 101.0), (0.0, 140.0))
+        grid = _build_node_grid([0.0, 0.0, 10.0], [0.0, 150.0, 70.0], 47.14)
+        out = _deflect_around_nodes(
+            curve,
+            0,
+            1,
+            grid,
+            47.14,
+            [0.0, 0.0, 10.0],
+            [0.0, 150.0, 70.0],
+            [40.0, 40.0, 50.0],
+            [20.0, 20.0, 30.0],
+        )
+        chord = 130.0
+        for orig, new in [(curve.cp1, out.cp1), (curve.cp2, out.cp2)]:
+            push = ((new[0] - orig[0]) ** 2 + (new[1] - orig[1]) ** 2) ** 0.5
+            assert push <= chord * 0.6 + 1e-9
+
+    def test_short_edge_uncleariable_blocker_left_unchanged_no_lasso(self) -> None:
+        """r80-S7b#1: a SHORT edge whose blocker cannot be cleared within
+        the chord-scaled cap must be left unchanged (previously the 16x
+        ladder blew the control points out to several times the chord,
+        producing loop-back curls)."""
+        # Chord length 40; blocker 60x60 dead-center: clearing needs a
+        # push far beyond 0.6*40=24, so the deflector must give up.
+        curve = BezierCurve((0.0, 0.0), (0.0, 12.0), (0.0, 28.0), (0.0, 40.0))
+        grid = _build_node_grid([0.0, 0.0, 0.0], [0.0, 40.0, 20.0], 40.0)
+        out = _deflect_around_nodes(
+            curve,
+            0,
+            1,
+            grid,
+            40.0,
+            [0.0, 0.0, 0.0],
+            [0.0, 40.0, 20.0],
+            [10.0, 10.0, 60.0],
+            [10.0, 10.0, 60.0],
+        )
+        assert out.cp1 == curve.cp1
+        assert out.cp2 == curve.cp2
+
 
 class TestPortAngularSpread:
     def test_port_spread_bias_zero_for_single_port(self) -> None:
