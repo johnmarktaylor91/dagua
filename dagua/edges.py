@@ -772,6 +772,14 @@ def route_edges(
             grid_cell_size = mean_diag
         node_grid = _build_node_grid(x_coords, y_coords, grid_cell_size)
 
+    # r80-S7b#2: store of already-accepted routes for the crossing-aware
+    # acceptance referee (greedy monotone: each edge's S7 modifications are
+    # kept only if they do not create net new crossings against edges
+    # routed before it).
+    routed_polylines: List[List[Tuple[float, float]]] = []
+    routed_bboxes: List[Rect] = []
+    _REFEREE_SAMPLES = 12
+
     curves = []
     for e_idx in range(num_edges):
         s, t = src_indices[e_idx], tgt_indices[e_idx]
@@ -782,7 +790,11 @@ def route_edges(
 
         # Self-loops stay on the outward-facing side for the layout direction.
         if s == t:
-            curves.append(_compute_self_loop_curve(sx, sy, sw, sh, direction))
+            loop_curve = _compute_self_loop_curve(sx, sy, sw, sh, direction)
+            loop_poly = _curve_polyline_samples(loop_curve, sample_count=_REFEREE_SAMPLES)
+            routed_polylines.append(loop_poly)
+            routed_bboxes.append(_poly_bbox(loop_poly))
+            curves.append(loop_curve)
             continue
 
         # Per-edge style
@@ -878,6 +890,32 @@ def route_edges(
                 direction,
             )
 
+        # Baseline for the crossing-aware referee: the pre-S7 route (zero
+        # tangent bias, no node avoidance) with the same pre-existing
+        # cluster deflection applied. Only rebuilt when the tangent bias
+        # actually changed this edge; otherwise the pre-avoidance curve
+        # IS the baseline.
+        base_curve = curve
+        if routing == "bezier" and (src_bias_deg != 0.0 or tgt_bias_deg != 0.0):
+            base_curve = _compute_curve(
+                src_port_x,
+                src_port_y,
+                tgt_port_x,
+                tgt_port_y,
+                direction,
+                routing,
+                curvature,
+            )
+            if graph is not None and cluster_bboxes:
+                base_curve = _deflect_around_clusters(
+                    base_curve,
+                    s,
+                    t,
+                    node_cluster_set,
+                    cluster_bboxes,
+                    direction,
+                )
+
         # Node-bbox avoidance: deflect bezier control points around any
         # non-endpoint node the curve passes through. Bezier-only (r80-S7#1);
         # ON by default, per-edge opt-out via EdgeStyle.avoid_nodes.
@@ -895,6 +933,34 @@ def route_edges(
                 heights,
             )
 
+        # r80-S7b#2: crossing-aware acceptance (greedy monotone referee).
+        # If the S7 modifications (tangent bias and/or node deflection)
+        # changed this edge, keep them only when they do not create net
+        # new edge-edge crossings against the edges already routed --
+        # same referee philosophy as the placement portfolio, applied per
+        # edge. Deterministic; edges are judged in index order.
+        if routing == "bezier" and (curve.cp1 != base_curve.cp1 or curve.cp2 != base_curve.cp2):
+            cand_poly = _curve_polyline_samples(curve, sample_count=_REFEREE_SAMPLES)
+            cand_bbox = _poly_bbox(cand_poly)
+            base_poly = _curve_polyline_samples(base_curve, sample_count=_REFEREE_SAMPLES)
+            base_bbox = _poly_bbox(base_poly)
+            base_crossings = _count_route_crossings(
+                base_poly, base_bbox, routed_polylines, routed_bboxes
+            )
+            cand_crossings = _count_route_crossings(
+                cand_poly, cand_bbox, routed_polylines, routed_bboxes, stop_above=base_crossings
+            )
+            if cand_crossings > base_crossings:
+                curve = base_curve
+                accepted_poly, accepted_bbox = base_poly, base_bbox
+            else:
+                accepted_poly, accepted_bbox = cand_poly, cand_bbox
+        else:
+            accepted_poly = _curve_polyline_samples(curve, sample_count=_REFEREE_SAMPLES)
+            accepted_bbox = _poly_bbox(accepted_poly)
+
+        routed_polylines.append(accepted_poly)
+        routed_bboxes.append(accepted_bbox)
         curves.append(curve)
 
     return curves
@@ -1287,12 +1353,56 @@ def _compute_bezier(
         cp1 = _reflect_point_across_line(cp1, (sx, sy), (tx, ty))
         cp2 = _reflect_point_across_line(cp2, (sx, sy), (tx, ty))
 
+    # r80-S7b: the rank-based bias assumes "positive rank offset = tilt
+    # toward larger neighbor x". Whether that means a CW or CCW rotation
+    # depends on which way the local tangent points, so derive the sign
+    # from the tangent itself (frame-independent). The original S7 code
+    # applied a fixed sign, which INVERTED the fan on up-going tangents:
+    # adjacent edges rotated toward each other and crossed right after
+    # leaving the node -- a direct source of the S7 dgrX regression.
     if src_tangent_bias_deg:
-        cp1 = _rotate_point_around(cp1, (sx, sy), src_tangent_bias_deg)
+        sign = _spread_rotation_sign((cp1[0] - sx, cp1[1] - sy))
+        if sign != 0.0:
+            cp1 = _rotate_point_around(cp1, (sx, sy), src_tangent_bias_deg * sign)
     if tgt_tangent_bias_deg:
-        cp2 = _rotate_point_around(cp2, (tx, ty), tgt_tangent_bias_deg)
+        sign = _spread_rotation_sign((cp2[0] - tx, cp2[1] - ty))
+        if sign != 0.0:
+            cp2 = _rotate_point_around(cp2, (tx, ty), tgt_tangent_bias_deg * sign)
 
     return BezierCurve((sx, sy), cp1, cp2, (tx, ty), routing="bezier", direction=direction)
+
+
+def _spread_rotation_sign(tangent: Tuple[float, float]) -> float:
+    """Return the rotation-sign multiplier that makes a POSITIVE rank bias
+    tilt a tangent toward LARGER neighbor coordinate.
+
+    For a CCW rotation by ``theta``, the first-order displacement of a
+    tangent ``(vx, vy)`` is ``(-vy, vx) * theta``. Ports are ranked by
+    neighbor x (and distributed low-to-high along the face), so:
+
+    - vertical-ish tangents (|vy| >= |vx|): rank spread acts on x; moving
+      x positive under positive bias needs ``theta * (-vy) > 0`` -> sign
+      is ``-sign(vy)``.
+    - horizontal-ish tangents: rank spread acts on y (ports run bottom to
+      top along the vertical face); moving y positive needs
+      ``theta * vx > 0`` -> sign is ``sign(vx)``.
+
+    Parameters
+    ----------
+    tangent : tuple[float, float]
+        Direction from the port toward its adjacent control point.
+
+    Returns
+    -------
+    float
+        ``+1.0``, ``-1.0``, or ``0.0`` for a degenerate tangent.
+    """
+    vx, vy = tangent
+    if abs(vy) >= abs(vx):
+        if vy > 0:
+            return -1.0
+        return 1.0 if vy < 0 else 0.0
+    return 1.0 if vx > 0 else -1.0
 
 
 def _rotate_point_around(
@@ -1706,6 +1816,114 @@ def _deflect_around_nodes(
             direction=curve.direction,
         )
     return curve
+
+
+def _segments_cross(
+    a0: Tuple[float, float],
+    a1: Tuple[float, float],
+    b0: Tuple[float, float],
+    b1: Tuple[float, float],
+    eps: float = 1e-9,
+) -> bool:
+    """Return whether two segments intersect strictly in their interiors.
+
+    Endpoint contacts (t or u at 0/1, e.g. two edges sharing a port) and
+    parallel overlaps are NOT counted -- this mirrors how a human reads a
+    drawing: touching at a shared node is not a crossing.
+
+    Parameters
+    ----------
+    a0, a1 : tuple[float, float]
+        First segment endpoints.
+    b0, b1 : tuple[float, float]
+        Second segment endpoints.
+    eps : float, default=1e-9
+        Interior-strictness margin on both parameters.
+
+    Returns
+    -------
+    bool
+        ``True`` when the segments properly cross.
+    """
+    d1x = a1[0] - a0[0]
+    d1y = a1[1] - a0[1]
+    d2x = b1[0] - b0[0]
+    d2y = b1[1] - b0[1]
+    denom = d1x * d2y - d1y * d2x
+    if abs(denom) < eps:
+        return False
+    dx = b0[0] - a0[0]
+    dy = b0[1] - a0[1]
+    t = (dx * d2y - dy * d2x) / denom
+    u = (dx * d1y - dy * d1x) / denom
+    return eps < t < 1.0 - eps and eps < u < 1.0 - eps
+
+
+def _poly_bbox(poly: Sequence[Tuple[float, float]]) -> Rect:
+    """Return the axis-aligned bounding box of a polyline.
+
+    Parameters
+    ----------
+    poly : sequence[tuple[float, float]]
+        Polyline points.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounds as ``(x_min, y_min, x_max, y_max)``.
+    """
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _count_route_crossings(
+    poly: Sequence[Tuple[float, float]],
+    poly_bbox: Rect,
+    routed_polylines: Sequence[Sequence[Tuple[float, float]]],
+    routed_bboxes: Sequence[Rect],
+    stop_above: Optional[int] = None,
+) -> int:
+    """Count segment crossings between one polyline and already-routed edges.
+
+    Used by the r80-S7b#2 crossing-aware acceptance referee in
+    :func:`route_edges`. AABB reject per routed edge keeps the common case
+    cheap; ``stop_above`` allows early exit as soon as the count exceeds
+    the competing variant's count (the comparison outcome is then decided).
+
+    Parameters
+    ----------
+    poly : sequence[tuple[float, float]]
+        Candidate polyline.
+    poly_bbox : tuple[float, float, float, float]
+        Pre-computed bbox of ``poly``.
+    routed_polylines : sequence[sequence[tuple[float, float]]]
+        Polylines of already-accepted edges.
+    routed_bboxes : sequence[tuple[float, float, float, float]]
+        Their bboxes, index-aligned.
+    stop_above : int, optional
+        Early-exit threshold: return as soon as the count exceeds it.
+
+    Returns
+    -------
+    int
+        Number of properly-crossing segment pairs found (possibly truncated
+        at ``stop_above + 1`` when early exit triggers).
+    """
+    count = 0
+    lx0, ly0, lx1, ly1 = poly_bbox
+    n_seg = len(poly) - 1
+    for other_poly, (bx0, by0, bx1, by1) in zip(routed_polylines, routed_bboxes):
+        if bx1 < lx0 or bx0 > lx1 or by1 < ly0 or by0 > ly1:
+            continue
+        n_other = len(other_poly) - 1
+        for i in range(n_seg):
+            for j in range(n_other):
+                if _segments_cross(poly[i], poly[i + 1], other_poly[j], other_poly[j + 1]):
+                    count += 1
+                    if stop_above is not None and count > stop_above:
+                        return count
+    return count
 
 
 def _curve_polyline_samples(
