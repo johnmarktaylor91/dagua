@@ -767,7 +767,13 @@ def route_edges(
     node_grid: Dict[Tuple[int, int], List[int]] = {}
     grid_cell_size = 40.0
     spread_scales: List[float] = []
-    if num_nodes > 0:
+    # Non-finite positions (already-divergent layouts) would raise inside the
+    # spatial-grid floor() math; pre-r80 the router rendered such layouts
+    # as-is, so preserve that behavior: skip avoidance/spread machinery.
+    positions_finite = all(
+        math.isfinite(x) and math.isfinite(y) for x, y in zip(x_coords, y_coords)
+    )
+    if num_nodes > 0 and positions_finite:
         mean_diag = sum(math.hypot(w, h) for w, h in zip(widths, heights)) / num_nodes
         if mean_diag > 1e-6:
             grid_cell_size = mean_diag
