@@ -103,13 +103,7 @@ def test_overlap_projection_honors_padding_when_separating_nodes() -> None:
     )
     state = SolveState(pos=torch.tensor([[0.0, 0.0], [0.0, 0.0]], dtype=torch.float32))
 
-    # iterations=40: the exact-path projector now accumulates pushes with
-    # index_add_ and applies a 0.7 damping factor each pass (r80/projector)
-    # to avoid overshoot when multiple overlapping pairs touch the same
-    # node in one pass. That damping also slows convergence on this trivial
-    # single-pair case (geometric decay 0.65/pass instead of 0.5/pass), so
-    # more passes are needed to land within the same numeric tolerance.
-    result = OverlapProjection(OverlapProjectionConfig(padding=1.0, iterations=40)).apply(
+    result = OverlapProjection(OverlapProjectionConfig(padding=1.0, iterations=20)).apply(
         problem,
         state,
         RuntimeContext(),
@@ -300,13 +294,14 @@ def test_overlap_projection_gated_reverts_when_proxy_regresses(
         padding: float = 2.0,
         iterations: int = 10,
         layer_index: object = None,
+        convergent: bool = False,
     ) -> torch.Tensor:
         """Simulate a destructive projection: collapse one node onto another.
 
         This wildly inflates edge-length CV without resolving any overlap
         (there was none to begin with), so the proxy composite must regress.
         """
-        del node_sizes, padding, iterations, layer_index
+        del node_sizes, padding, iterations, layer_index, convergent
         pos[2, 0] = 0.01
         pos[2, 1] = 0.01
         return pos
