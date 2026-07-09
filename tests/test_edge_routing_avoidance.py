@@ -313,3 +313,56 @@ class TestCrossingAwareAcceptance:
         b = route_edges(pos, g.edge_index, ns, direction="TB", graph=g)
         for ca, cb in zip(a, b):
             assert ca.cp1 == cb.cp1 and ca.cp2 == cb.cp2
+
+
+class TestDensityScaledSpread:
+    def test_sparse_neighborhood_keeps_full_budget(self) -> None:
+        from dagua.edges import _local_density_spread_scales
+
+        # 3 nodes far apart (each alone in its grid neighborhood).
+        xs = [0.0, 1000.0, 2000.0]
+        ys = [0.0, 0.0, 0.0]
+        grid = _build_node_grid(xs, ys, 45.0)
+        scales = _local_density_spread_scales(grid, 45.0, xs, ys)
+        assert scales == [1.0, 1.0, 1.0]
+
+    def test_dense_clump_shrinks_budget_with_floor(self) -> None:
+        from dagua.edges import _local_density_spread_scales
+
+        # 26 nodes stacked in one grid cell: n_local=25 per node.
+        xs = [10.0] * 26
+        ys = [10.0] * 26
+        grid = _build_node_grid(xs, ys, 45.0)
+        scales = _local_density_spread_scales(grid, 45.0, xs, ys)
+        expected = max(0.3, (4.0 / 25.0) ** 0.5)
+        assert all(abs(s - expected) < 1e-12 for s in scales)
+        assert all(0.3 <= s < 1.0 for s in scales)
+
+    def test_dense_hub_gets_smaller_fan_than_sparse_hub(self) -> None:
+        """Same hub fan-out, one embedded in a dense clump: its initial
+        tangents must spread strictly less than the sparse hub's."""
+        import math as _math
+
+        def hub_min_angle(extra_nodes: int) -> float:
+            edges = [(0, 1), (0, 2)]
+            g = DaguaGraph.from_edge_list(edges)
+            positions = [[0.0, 0.0], [-150.0, 300.0], [150.0, 300.0]]
+            sizes = [[30.0, 16.0]] * 3
+            for k in range(extra_nodes):
+                g.add_node(f"filler_{k}")
+                # Clump fillers right next to the hub (same grid cell zone).
+                positions.append([8.0 + (k % 3), -8.0 - (k // 3)])
+                sizes.append([30.0, 16.0])
+            pos = torch.tensor(positions)
+            ns = torch.tensor(sizes)
+            curves = route_edges(pos, g.edge_index, ns, direction="TB", graph=g)
+            angles = []
+            for c in curves:
+                dx = c.cp1[0] - c.p0[0]
+                dy = c.cp1[1] - c.p0[1]
+                angles.append(_math.atan2(dy, dx))
+            return abs(angles[0] - angles[1])
+
+        sparse = hub_min_angle(0)
+        dense = hub_min_angle(20)
+        assert dense < sparse
