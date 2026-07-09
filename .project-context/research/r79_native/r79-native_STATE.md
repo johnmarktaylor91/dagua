@@ -208,3 +208,15 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - S2b referee-honesty bisect (443b0f3): zeros on ALL divergence hypotheses -- referee provably scores exactly
   what is returned. Collapse cause was candidate-pool REPLACEMENT (convergent cleanup replaced legacy, neither
   dominates). Fix approved: both cleanup variants contest. Final sweep running (nohup, survives session).
+
+## 2026-07-09 ~12:30: S2b PASS -> MERGED (89/108); P6 impl MERGED; S9 squeeze dispatched
+- S2b final sweep: 64/14/15 + 9/2/4 = 89/108 (82.4%). 8 movers ALL POSITIVE net +70.8 (planar_60 +19.9 L->W,
+  regular_4_40 +15.4 L->W, random_bipartite +13.8, r79_weighted_community +12.2 L->W, er_500 +4.9). Strict
+  superset as predicted by the bisect. Merged 9b9afb3.
+- P6 honesty batch impl merged ddeeb74 (5 commits, first-pass gates): --fresh + row git-sha stamping;
+  size-aware graphviz/elk/dagre (+finding: sfdp needs -Goverlap= too -- fold overlap=prism into re-freeze
+  config, "strongest honest external" principle); degeneracy guard (blast radius 9/972 rows, ZERO verdict
+  flips); composite_large undirected variant. Re-freeze command in P11_HONESTY_BATCH.md.
+- S9 squeeze dispatched (sonnet, p1, r80/squeeze): clustered-undirected portfolio access (high_mix target) +
+  weighted-similarity challenger variant. Acceptance vs 89-state, add-candidates-never-replace law.
+- After S9: full re-freeze (all engines, --fresh, size-aware+overlap=prism) -> holdout -> audits -> S8 knob.
