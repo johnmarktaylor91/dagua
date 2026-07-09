@@ -110,7 +110,8 @@ def main() -> int:
         Process exit status (0 = acceptance met, 1 = not met).
     """
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("eval_output/r79_baseline")
-    pre_rows = load_rows(out_dir / "results.pre_r80_at_base.json")
+    pre_name = sys.argv[2] if len(sys.argv) > 2 else "results.pre_r80_at_base.json"
+    pre_rows = load_rows(out_dir / pre_name)
     post_rows = load_rows(out_dir / "results.json")
 
     pre_dagua = dagua_by_graph(pre_rows)

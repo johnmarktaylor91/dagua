@@ -5,6 +5,64 @@ merged for S2b).
 Brief: `.project-context/research/r79_native/briefs/r80_s2_projector_fix.md`
 (S2), superseded by the architect's S2b salvage directive.
 
+## S2b sweep FAIL bisect (2026-07-09): the referee is honest -- S2b REPLACED the winning cleanup variant instead of contesting it
+
+S2b gate sweep verdict (architect-evaluated): 61/13/19 + 9/2/4 = 85/108,
+down from trunk's 87; net composite +9.90 over 15 movers. Large gains
+(planar_60 +19.9, regular_4_40 +15.4, random_bipartite_60 +13.8,
+r79_weighted_community +12.2, er_500 +4.9) but three S4 flagship wins
+collapsed: petersen_10 79.0->58.3, weighted_karate_34 69.5->50.1,
+weighted_clusters_3x10 68.1->53.5.
+
+Instrumented end-to-end decomposition (`scripts/r80_probe_petersen.py`,
+run on all three collapsed graphs) rules out every scoring-divergence
+hypothesis:
+
+| check | petersen_10 | weighted_karate_34 | weighted_clusters_3x10 |
+|---|---:|---:|---:|
+| frame gap (contest score vs benchmark score, SAME positions) | +0.000 | +0.000 | +0.000 |
+| post-selection gap (benchmark: winner-as-selected vs final returned) | +0.000 | +0.000 | +0.000 |
+| final positions identical to winner-as-selected | yes | yes | yes |
+
+The contest scorer and the benchmark scorer agree term-for-term
+(node_sizes identical, direction identical, undirected flavor both sides,
+per-term tables all +0.0000), and NO post-selection stage (aspect_fit,
+packing, anything) touches the positions after scoring. The referee
+scores exactly what the user gets.
+
+The actual cause -- cleanup-variant replacement (challenger cleanup
+scores; contest frame == benchmark frame on every row):
+
+| graph / challenger | raw | legacy-cleaned | convergent-cleaned |
+|---|---:|---:|---:|
+| petersen_10 / sfdp | 33.4 | 54.4 | 52.7 |
+| petersen_10 / neato | 59.4 | **79.0** | 58.3 (selected) |
+| weighted_karate_34 / sfdp | 28.2 | 28.4 | 26.1 |
+| weighted_karate_34 / neato | 49.3 | **69.5** | 46.1 (lost to incumbent 50.1) |
+| weighted_clusters_3x10 / sfdp | 23.2 | 28.5 | **49.8** (+21.4!) |
+| weighted_clusters_3x10 / neato | 48.0 | **68.1** | 53.5 (selected) |
+
+The trunk's three flagship scores (79.0 / 69.5 / 68.1) are EXACTLY the
+legacy-cleaned neato candidates. S2b's `_project_candidate` change swapped
+the cleanup from legacy to convergent, so those candidates ceased to
+exist; the contest then honestly selected the best of what remained.
+Meanwhile the wclusters sfdp row (+21.4 for convergent) shows the inverse
+case -- the source of S2b's five big sweep gains. NEITHER cleanup variant
+dominates.
+
+Named cause: **candidate-pool regression, not referee dishonesty.** The
+fix that preserves both win classes: have each challenger contribute BOTH
+cleanup variants to the contest (equivalently: per challenger, clean both
+ways, score both with the same honest composite, keep the better -- the
+contest is argmax so both formulations select identically). Cost: one
+extra projection + one extra `full()` scoring call per challenger, bounded
+by the existing MAX_CONTEST_NODES cap. Expected effect: keeps the trunk's
+87 (legacy-cleaned candidates return to the pool) plus the S2b gains
+(convergent-cleaned candidates stay); the re-sweep verdict should be a
+strict superset of both.
+
+Status: reported to architect BEFORE any code change, per directive.
+
 ## S2b salvage (2026-07-09): convergent projector is now OPT-IN, wired into portfolio challengers only
 
 Architect decision after the S2 sweep FAIL below: salvage, not rework.
