@@ -67,6 +67,7 @@ def _run_projection_impl(
     padding: float,
     iterations: int,
     layer_index: Optional[LayerIndex],
+    convergent: bool = False,
 ) -> None:
     """Dispatch to the appropriate projection kernel for the current device.
 
@@ -82,6 +83,9 @@ def _run_projection_impl(
         Maximum number of projection passes.
     layer_index : LayerIndex, optional
         Layer information for layered sweep projection.
+    convergent : bool, default=False
+        Opt into the convergent exact-path projector (see
+        :func:`_project_exact`). Only affects the ``N <= 500`` exact path.
 
     Returns
     -------
@@ -89,7 +93,7 @@ def _run_projection_impl(
     """
     n = pos.shape[0]
     if n <= 500:
-        _project_exact(pos, node_sizes, padding, iterations)
+        _project_exact(pos, node_sizes, padding, iterations, convergent=convergent)
     elif layer_index is not None and pos.device.type == "cuda":
         _project_sweep_cuda(pos, node_sizes, padding, iterations, layer_index)
     elif layer_index is not None and n > 100_000_000:
@@ -106,6 +110,7 @@ def project_overlaps(
     padding: float = 2.0,
     iterations: int = 10,
     layer_index: Optional[LayerIndex] = None,
+    convergent: bool = False,
 ) -> torch.Tensor:
     """Push overlapping node bounding boxes apart in-place.
 
@@ -121,6 +126,16 @@ def project_overlaps(
         Maximum number of projection passes.
     layer_index : LayerIndex, optional
         Layer metadata used by the sweep-based projector.
+    convergent : bool, default=False
+        Opt into the convergent exact-path projector (accumulated damped
+        pushes + deterministic deadlock re-lay; see :func:`_project_exact`).
+        Default ``False`` preserves the legacy per-pass behavior
+        bit-for-bit. The r80-S2 sweep showed the convergent trajectory is
+        NOT universally better: wiring it into every default call site
+        regressed rgg_500 (-5.4) and r79_weighted_hub_spoke_4x18 (-8.0)
+        while changing nothing else, so it is exposed opt-in for callers
+        with a referee (e.g. the undirected-portfolio challenger cleanup)
+        or callers that genuinely face dense overlap cliques.
 
     Returns
     -------
@@ -179,7 +194,9 @@ def project_overlaps(
                         ),
                         flush=True,
                     )
-                _run_projection_impl(pos_cpu, ns_cpu, padding, iterations, li_cpu)
+                _run_projection_impl(
+                    pos_cpu, ns_cpu, padding, iterations, li_cpu, convergent=convergent
+                )
             except RuntimeError as exc:
                 if not _is_cuda_oom_error(exc):
                     raise
@@ -192,11 +209,15 @@ def project_overlaps(
                 pos_cpu = pos.detach().cpu()
                 ns_cpu = node_sizes.detach().cpu()
                 li_cpu = _copy_layer_index_to_cpu(layer_index)
-                _run_projection_impl(pos_cpu, ns_cpu, padding, iterations, li_cpu)
+                _run_projection_impl(
+                    pos_cpu, ns_cpu, padding, iterations, li_cpu, convergent=convergent
+                )
                 pos.data.copy_(pos_cpu.to(device))
                 return pos
         else:
-            _run_projection_impl(pos_cpu, ns_cpu, padding, iterations, li_cpu)
+            _run_projection_impl(
+                pos_cpu, ns_cpu, padding, iterations, li_cpu, convergent=convergent
+            )
 
         if run_on_cpu:
             pos.data.copy_(pos_cpu.to(device))
@@ -272,8 +293,140 @@ def _project_exact(
     padding: float,
     iterations: int,
     damping: float = _EXACT_PROJECTION_DEFAULT_DAMPING,
+    convergent: bool = False,
 ) -> None:
-    """Exact O(N^2) overlap projection for small graphs.
+    """Exact O(N^2) overlap projection for small graphs (dispatcher).
+
+    Selects between two pass implementations:
+
+    - ``convergent=False`` (default): the legacy per-pass update
+      (:func:`_project_exact_legacy`), preserved bit-for-bit. Its
+      advanced-index ``+=`` drops repeated node indices (last write wins),
+      so dense overlap cliques never fully resolve -- but its trajectory is
+      what every default pipeline was tuned against, and the r80-S2 sweep
+      proved swapping it out globally regresses real graphs (rgg_500 -5.4,
+      r79_weighted_hub_spoke_4x18 -8.0).
+    - ``convergent=True``: the accumulated, damped, deadlock-escaping
+      projector (:func:`_project_exact_convergent`) that provably reaches
+      zero overlaps on dense cliques. Opt-in for referee-protected callers
+      (undirected-portfolio challenger cleanup) and dense-clique scenarios.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``. Updated in place.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    padding : float
+        Extra spacing enforced between boxes.
+    iterations : int
+        Maximum number of projection passes.
+    damping : float, default=0.7
+        Convergent-path damping multiplier (ignored by the legacy path).
+    convergent : bool, default=False
+        Select the convergent implementation.
+
+    Returns
+    -------
+    None
+        ``pos`` is updated in place.
+    """
+    if convergent:
+        _project_exact_convergent(pos, node_sizes, padding, iterations, damping=damping)
+    else:
+        _project_exact_legacy(pos, node_sizes, padding, iterations)
+
+
+def _project_exact_legacy(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    iterations: int,
+) -> None:
+    """Legacy exact overlap projection (pre-r80 behavior, bit-for-bit).
+
+    KNOWN LIMITATION (kept deliberately): the advanced-index in-place adds
+    (``pos[x_r, 0] += ...``) are last-write-wins for repeated node indices,
+    NOT accumulating, so on dense overlap cliques most of the intended
+    displacement is dropped and the loop can stall with overlaps remaining
+    (P3B2 forensics, ranked fix item 1). Every default pipeline's tuning
+    and the r79 benchmark baselines assume THIS trajectory; use
+    ``convergent=True`` on the dispatcher to opt into the fixed projector.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``. Updated in place.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    padding : float
+        Extra spacing enforced between boxes.
+    iterations : int
+        Maximum number of projection passes.
+
+    Returns
+    -------
+    None
+        ``pos`` is updated in place.
+    """
+    n = pos.shape[0]
+
+    for _ in range(iterations):
+        dx = pos[:, 0].unsqueeze(1) - pos[:, 0].unsqueeze(0)
+        dy = pos[:, 1].unsqueeze(1) - pos[:, 1].unsqueeze(0)
+
+        min_dx = (node_sizes[:, 0].unsqueeze(1) + node_sizes[:, 0].unsqueeze(0)) / 2 + padding
+        min_dy = (node_sizes[:, 1].unsqueeze(1) + node_sizes[:, 1].unsqueeze(0)) / 2 + padding
+
+        overlap_x = min_dx - dx.abs()
+        overlap_y = min_dy - dy.abs()
+        overlapping = (overlap_x > 0) & (overlap_y > 0)
+        overlapping.fill_diagonal_(False)
+
+        if not overlapping.any():
+            break
+
+        rows, cols = torch.triu_indices(n, n, offset=1, device=pos.device)
+        mask = overlapping[rows, cols]
+
+        if not mask.any():
+            break
+
+        r = rows[mask]
+        c = cols[mask]
+        ox = overlap_x[r, c]
+        oy = overlap_y[r, c]
+
+        push_x = ox < oy
+
+        if push_x.any():
+            x_r = r[push_x]
+            x_c = c[push_x]
+            x_push = ox[push_x] / 2
+            sign = torch.sign(dx[x_r, x_c])
+            sign[sign == 0] = 1.0
+            pos[x_r, 0] += sign * x_push * 0.5
+            pos[x_c, 0] -= sign * x_push * 0.5
+
+        push_y = ~push_x
+        if push_y.any():
+            y_r = r[push_y]
+            y_c = c[push_y]
+            y_push = oy[push_y] / 2
+            sign = torch.sign(dy[y_r, y_c])
+            sign[sign == 0] = 1.0
+            pos[y_r, 1] += sign * y_push * 0.5
+            pos[y_c, 1] -= sign * y_push * 0.5
+
+
+def _project_exact_convergent(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    iterations: int,
+    damping: float = _EXACT_PROJECTION_DEFAULT_DAMPING,
+) -> None:
+    """Convergent exact O(N^2) overlap projection (opt-in).
 
     Per-pass pushes are accumulated per node with ``index_add_`` over ALL
     overlapping pairs before being applied. Plain advanced-index ``+=``

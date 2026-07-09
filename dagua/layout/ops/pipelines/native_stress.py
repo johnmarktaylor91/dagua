@@ -33,7 +33,7 @@ from dagua.layout.ops.postprocess import (
     PivotMDSFinalizePositions,
 )
 from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig, DetectComponents
-from dagua.layout.ops.project import OverlapProjectionGated, OverlapProjectionGatedConfig
+from dagua.layout.ops.project import OverlapProjection, OverlapProjectionConfig
 from dagua.layout.ops.sgd2_multi import (
     SmoothSteps,
     _InitSGD2MultiState,
@@ -90,13 +90,8 @@ class NativeStressConfig:
         Node cutoff for dense SMACOF polish.
     overlap_padding : float, default=2.0
         Padding used by overlap projection.
-    overlap_iterations : int, default=200
-        Number of final overlap projection passes. Generous by default so
-        the exact-path projector (N <= 500) has enough budget to actually
-        converge to zero overlaps on dense overlap cliques instead of
-        exiting early with overlaps still unresolved; the projector itself
-        stops as soon as it reaches zero overlaps or stalls, so this ceiling
-        is rarely fully consumed on well-behaved graphs.
+    overlap_iterations : int, default=10
+        Number of final overlap projection passes.
     target_aspect : float, optional
         Optional target aspect forwarded to ``AspectRatioFit``.
     seed : int, default=42
@@ -115,7 +110,7 @@ class NativeStressConfig:
     smacof_iters: int = 4
     smacof_max_nodes: int = _DEFAULT_SMACOF_MAX_NODES
     overlap_padding: float = 2.0
-    overlap_iterations: int = 200
+    overlap_iterations: int = 10
     target_aspect: Optional[float] = None
     seed: int = 42
 
@@ -300,8 +295,8 @@ def build_native_stress_pipeline(
                     name="native_stress_smacof_polish",
                 ),
             ),
-            OverlapProjectionGated(
-                OverlapProjectionGatedConfig(
+            OverlapProjection(
+                OverlapProjectionConfig(
                     padding=resolved.overlap_padding,
                     iterations=resolved.overlap_iterations,
                 )
@@ -467,7 +462,7 @@ def _config_from_public(
         smacof_iters=int(params.get("smacof_iters", budgets.smacof_iters)),
         smacof_max_nodes=int(params.get("smacof_max_nodes", _DEFAULT_SMACOF_MAX_NODES)),
         overlap_padding=float(params.get("overlap_padding", 2.0)),
-        overlap_iterations=int(params.get("overlap_iterations", 200)),
+        overlap_iterations=int(params.get("overlap_iterations", 10)),
         seed=int(public_seed if public_seed is not None else 42),
         target_aspect=public_target_aspect,
     )
