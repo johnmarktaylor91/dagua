@@ -81,3 +81,14 @@ vs economic vs pending), what changed this round, and what the monster due-dilig
    brain/sources/; then ~/.claude/scripts/file-for-review.sh <path> --label "dagua fidelity
    campaign close-out" --agent cc)
 3) This chat (full text in final message).
+
+## fam2_fast final error adjudication (2026-07-09 afternoon)
+- 785 skips = davidson_harel max_nodes=50 capacity -> INSUFFICIENT/capacity disposition
+  (evidence: engine class attr; igraph_davidson_harel reference has no such limit but our
+  50-node cap was a deliberate runtime bound; rows stay insufficient with documented reason).
+- 27 errors = stress_sgd fidelity mode REFUSES disconnected graphs (random_bipartite_60,
+  multi_component_80, er_100) -> domain-limit named disposition, deterministic, no retry.
+- ~39 errors = davidson_harel timeouts on 77-120 node graphs -> same capacity class.
+- 35 errors = classic_neato x citation_dag_300 all-seed watchdog timeout -> standalone
+  timing probe running (/tmp/r78_neato_citation_time.log); if single run >>1h => documented
+  timeout-floor; if a few hundred seconds => retry lane at long timeout when box calm.
