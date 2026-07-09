@@ -92,3 +92,10 @@ vs economic vs pending), what changed this round, and what the monster due-dilig
 - 35 errors = classic_neato x citation_dag_300 all-seed watchdog timeout -> standalone
   timing probe running (/tmp/r78_neato_citation_time.log); if single run >>1h => documented
   timeout-floor; if a few hundred seconds => retry lane at long timeout when box calm.
+
+## neato x citation_dag_300 resolution (2026-07-09 19:05)
+35 "timeout" errors were bookkeeping only: workers completed layouts AFTER deadline and saved
+positions (.pt mtimes 14:05-18:36, ~10min spacing = real ~700s runs, matches 706s standalone).
+Purge + retry triggered recover_results_from_positions -> 35 ok records reconstructed from
+genuine position files (runtime_seconds=None is the recovery signature). VERIFIED legitimate.
+fam2_fast final state: 3,609 ok + 785 DH-capacity skips + adjudicated stress_sgd/DH rows (no data).
