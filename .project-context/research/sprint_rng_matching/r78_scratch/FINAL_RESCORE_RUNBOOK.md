@@ -61,3 +61,12 @@ with evidence and moved to the named-cause sidecar.
   5) fam2_fmst --resume
 - Orphan-killed 3 init-parented forkservers post-SIGTERM (incl one 9h54m -- verify fdpfid/
   steps10 progress advances; if a lane stalls >30min with log silence, SIGTERM + resume it).
+
+## Queue state as of 2026-07-09 ~08:00
+- DONE CLEAN: steps10 (455/455, 0 err), maxent400 (210/210, 0 err), fdpfid complete-with-105-err
+  -> 105 error records PURGED from its results.json (backup .bak_pre_errorpurge); retry pending.
+- STILL RUNNING: nodrl (~57%+), drl (~83%+), maxent3 (~24%+).
+- DRAIN ORDER on exits (load <20 gate, 2-3 workers each, one launch per exit event):
+  1) s100_200 --resume  2) fdpfid retry (--resume, timeout 7200 for the grid combos)
+  3) maxent3: purge errors then --resume  4) fam2_fast: purge 12 errors then --resume
+  5) fam2_fmst --resume
