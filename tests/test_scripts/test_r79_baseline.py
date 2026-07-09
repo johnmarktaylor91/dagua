@@ -16,6 +16,7 @@ import torch
 from dagua.eval.graphs import TestGraph
 from dagua.eval.size_policy import set_size_aware_externals, size_aware_externals
 from dagua.graph import DaguaGraph
+from dagua.metrics import composite_large_undirected
 from scripts import r79_baseline
 
 
@@ -310,3 +311,39 @@ def test_score_stored_metrics_backfills_node_diag_mean_on_frozen_row() -> None:
     unguarded_score = r79_baseline.score_stored_metrics(unguarded_row, test_graph)
 
     assert guarded_score == pytest.approx(unguarded_score - 18.0 - 9.0)
+
+
+def test_score_stored_metrics_dispatches_undirected_at_large_tier() -> None:
+    """A large-tier undirected row uses composite_large_undirected, not composite_large.
+
+    r80-P6 S1 MEDIUM-1 regression test: before this fix, score_stored_metrics
+    always called the directed composite_large regardless of the graph's
+    semantic direction, silently scoring 30/100 points off a meaningless
+    dag_consistency value for undirected graphs.
+
+    Returns
+    -------
+    None
+    """
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    undirected_test_graph = TestGraph(name="undirected_large", graph=graph, tags={"undirected"})
+
+    # Quick-tier-only metrics (no crossing_rate/sampled_stress/angular_res_mean_deg),
+    # so score_stored_metrics must fall through to the large-tier path.
+    row = {
+        "graph": undirected_test_graph.name,
+        "metrics": {
+            "dag_consistency": 0.0,  # meaningless for undirected; must NOT be scored
+            "edge_length_cv": 0.0,
+            "depth_spearman_rho": -1.0,  # meaningless for undirected; must NOT be scored
+            "overlap_count": 0,
+            "edge_straightness_mean_deg": 45.0,  # meaningless for undirected; must NOT be scored
+        },
+    }
+
+    expected = composite_large_undirected({"edge_length_cv": 0.0, "overlap_count": 0})
+    assert r79_baseline.score_stored_metrics(row, undirected_test_graph) == pytest.approx(expected)
