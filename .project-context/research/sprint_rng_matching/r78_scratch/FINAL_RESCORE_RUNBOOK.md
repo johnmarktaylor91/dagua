@@ -70,3 +70,14 @@ with evidence and moved to the named-cause sidecar.
   1) s100_200 --resume  2) fdpfid retry (--resume, timeout 7200 for the grid combos)
   3) maxent3: purge errors then --resume  4) fam2_fast: purge 12 errors then --resume
   5) fam2_fmst --resume
+
+## Deliverable on completion (JMT directive 2026-07-09)
+Write ONE clear, complete close-out summary: exact standing (honest tier table with counts +
+percents), EXACT remaining gaps (every named-floor row with its evidence class: mathematical
+vs economic vs pending), what changed this round, and what the monster due-diligence bench
+(banked MONSTER_BENCH_FULL_CMD.txt) would still add. Deliver to THREE places:
+1) iMessage via ~/.claude/scripts/send-to-jmt.sh
+2) Obsidian vault (canonical: interfaces/queries/<date>-dagua-fidelity-closeout/ or
+   brain/sources/; then ~/.claude/scripts/file-for-review.sh <path> --label "dagua fidelity
+   campaign close-out" --agent cc)
+3) This chat (full text in final message).
