@@ -1012,8 +1012,41 @@ def summarize_wtl(rows: List[Dict[str, Any]], population: str) -> Tuple[int, int
     return wins, ties, losses
 
 
+def node_diag_mean_for_graph(test_graph: TestGraph) -> float:
+    """Compute the mean node bounding-box diagonal for a corpus graph.
+
+    Node sizes depend only on label/style geometry (font, padding, shape),
+    never on layout positions, so this is exactly reproducible from the
+    graph object alone without re-running any layout engine. That makes it
+    safe to backfill ``node_diag_mean`` when rescoring frozen metrics rows
+    that predate the r80-P6 degeneracy guard.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Corpus graph metadata.
+
+    Returns
+    -------
+    float
+        Mean ``sqrt(width^2 + height^2)`` across all nodes, or 0.0 for an
+        empty graph.
+    """
+    graph = test_graph.graph
+    graph.compute_node_sizes()
+    if graph.node_sizes is None or graph.node_sizes.shape[0] == 0:
+        return 0.0
+    diag = torch.sqrt(graph.node_sizes[:, 0] ** 2 + graph.node_sizes[:, 1] ** 2)
+    return float(diag.mean().item())
+
+
 def score_stored_metrics(row: Dict[str, Any], test_graph: TestGraph) -> float:
     """Recompute a row composite from persisted metrics and graph semantics.
+
+    Backfills ``node_diag_mean`` from the current corpus graph when the
+    stored metrics predate that field (r80-P6), so the degeneracy guard in
+    ``composite``/``composite_undirected`` can evaluate even against frozen
+    pre-r80-P6 rows.
 
     Parameters
     ----------
@@ -1031,6 +1064,8 @@ def score_stored_metrics(row: Dict[str, Any], test_graph: TestGraph) -> float:
     if not isinstance(metrics, dict):
         raise ValueError(f"row {row_key(row)} has no metric dictionary")
     clean_metrics = {str(key): value for key, value in metrics.items() if value is not None}
+    if "node_diag_mean" not in clean_metrics:
+        clean_metrics["node_diag_mean"] = node_diag_mean_for_graph(test_graph)
     full_fields = {"crossing_rate", "sampled_stress", "angular_res_mean_deg"}
     if full_fields.issubset(clean_metrics):
         return float(composite_auto(clean_metrics, is_semantically_directed(test_graph)))
