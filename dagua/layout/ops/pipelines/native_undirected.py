@@ -14,6 +14,16 @@ candidate CONTEST instead of betting on one pipeline:
   problem tensors, finished with size-aware overlap projection.
 - Candidate C: dagua's own bit-faithful neato reimplementation + projection,
   gated by the quality knob (see ``_neato_in_contest``).
+- Candidate D (r80-S9, cluster-aware graphs only): the recursive
+  ``ClusterAwareDriver`` running an sfdp inner pipeline, so clustered-
+  undirected graphs get a candidate that structurally places cluster
+  hierarchy levels instead of relying solely on the composite's cluster-
+  separation term (see ``_cluster_aware_sfdp_candidate``).
+- Candidate E (r80-S9, weighted graphs only): the native-stress core with
+  Dijkstra/pivot target distances built from similarity-transformed weights
+  (``weight_transform="inverse"``) instead of the default distance
+  semantics, for community/social weighted families where a heavy edge
+  means "close" (see ``_weighted_similarity_candidate``).
 
 All candidates are scored with the SAME honest composite the benchmark
 harness uses for undirected rows (``metrics.full`` + ``composite_auto``
@@ -361,6 +371,136 @@ def _neato_in_contest(config: Optional[LayoutConfig], num_nodes: int) -> bool:
     return num_nodes <= NEATO_BALANCED_NODE_CAP
 
 
+# r80-S9 Deliverable 2: weighted-similarity Dijkstra-target transform. A
+# 3-graph mini-probe (r79_weighted_small_world_120, r79_weighted_community_
+# 4x18, real_lesmis_77; see P12_SQUEEZE.md) compared "inverse" (1/w) against
+# an ad hoc 1/sqrt(w) transform on the raw and legacy-projected candidate
+# tiers (the convergent-projector tier washed out the difference -- 200
+# damped passes converge to the same overlap-free arrangement regardless of
+# the small-scale stress differences between transforms). "inverse" won 2 of
+# 3 graphs and never lost by more than 1.3 points on the graph it lost,
+# while both transforms beat the untransformed (today's default) distance
+# semantics on every graph. "inverse" is also the transform preprocess.py
+# already implements (BuildAdjacencyConfig.weight_transform), so no new
+# transform code is needed.
+WEIGHTED_SIMILARITY_TRANSFORM = "inverse"
+
+
+def _cluster_aware_sfdp_candidate(
+    problem: LayoutProblem,
+    config: LayoutConfig,
+    ctx: RuntimeContext,
+) -> Optional[torch.Tensor]:
+    """Run the recursive cluster-aware driver with an sfdp inner pipeline.
+
+    r80-S9 Deliverable 1, candidate B: clustered-undirected graphs (e.g. the
+    ``r79_undirected_sbm_*`` community corpus) reach this contest today
+    (the S4-era diagnosis that "the cluster driver preempts routing" no
+    longer applies for the ``dagua_native``/default algorithm -- verified
+    empirically, see P12_SQUEEZE.md), but candidate A (the incumbent) comes
+    from the FLAT native path with cluster-separation LOSS terms only, and
+    candidate B (flat sfdp, added below via ``_add_challenger``) also never
+    places clusters structurally -- both rely entirely on the scoring
+    composite's cluster term to reward containment after the fact. This
+    candidate instead PLACES each cluster hierarchy level with dagua's sfdp
+    reimplementation via the existing recursive ``ClusterAwareDriver``
+    (``dagua/layout/ops/cluster_driver.py`` -- the same machinery
+    ``dagua.layout.engine._layout_cluster_aware_pipeline`` uses for the
+    algorithms it natively supports; ``"dagua_native"``/``None`` is not one
+    of them, which is why clustered-undirected graphs never got this
+    candidate before). Returns ``None`` when there are no clusters on this
+    problem or the driver cannot be built.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared layout problem, expected to carry cluster metadata.
+    config : LayoutConfig
+        Prepared native configuration.
+    ctx : RuntimeContext
+        Shared execution context.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Candidate positions, or ``None`` when clusters are absent or the
+        driver could not run.
+    """
+    if not problem.clusters:
+        return None
+    from dagua.layout.engine import _build_cluster_inner_pipeline
+    from dagua.layout.ops.cluster_driver import ClusterAwareDriver
+
+    inner_pipeline = _build_cluster_inner_pipeline("sfdp", config)
+    if inner_pipeline is None:
+        return None
+    driver = ClusterAwareDriver(
+        inner_pipeline=inner_pipeline.ops,
+        # No DaguaGraph is available inside this headless contest to merge
+        # per-graph cluster_style.padding overrides the way
+        # engine._effective_cluster_side_padding does for the top-level
+        # cluster driver -- this candidate uses the raw config padding
+        # knobs. Documented limitation (P12_SQUEEZE.md): only affects this
+        # one candidate's geometry among several scored in the contest.
+        side_padding_pt=float(getattr(config, "cluster_side_padding_pt", 8.0)),
+        label_band_pt=float(getattr(config, "cluster_label_band_pt", 26.0)),
+        external_clearance_pt=float(getattr(config, "cluster_external_clearance_pt", 10.0)),
+        cluster_compactness_weight=float(getattr(config, "w_cluster", 1.0)),
+    )
+    driver_state = driver.apply(problem, SolveState(), ctx)
+    return driver_state.pos
+
+
+def _weighted_similarity_candidate(
+    problem: LayoutProblem,
+    seed: int,
+) -> Optional[torch.Tensor]:
+    """Run the native-stress core with weights treated as similarities.
+
+    r80-S9 Deliverable 2: for declared-undirected weighted graphs, the
+    default Dijkstra/pivot target-distance costs use edge weights AS
+    distances (``weight_transform="none"``) -- but for community/social
+    weighted families (this contest only ever runs for declared-undirected
+    graphs, exactly the family P3B2_STRESS_FORENSICS.md Ranked Fix 4 is
+    about) a heavier weight usually means a STRONGER/closer relationship,
+    not a longer one. This candidate reruns the native-stress core with
+    ``weight_transform="inverse"`` (``1 / w``, see
+    ``WEIGHTED_SIMILARITY_TRANSFORM`` for the mini-probe that picked it)
+    so heavy edges pull their endpoints together. Purely additive: it is
+    ONE MORE contest candidate, never a change to default weight handling
+    (``NativeStressConfig.weight_transform`` defaults to ``"none"``
+    everywhere else). Returns ``None`` when the problem carries no edge
+    weights.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared layout problem.
+    seed : int
+        Deterministic seed shared with the rest of the contest.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Candidate positions, or ``None`` when there are no edge weights.
+    """
+    if problem.edge_weights is None:
+        return None
+    from dagua.layout.ops.pipelines.native_stress import (
+        NativeStressConfig,
+        layout_native_stress_pipeline,
+    )
+
+    return layout_native_stress_pipeline(
+        edge_index=problem.edge_index,
+        num_nodes=int(problem.num_nodes),
+        node_sizes=problem.node_sizes,
+        edge_weights=problem.edge_weights,
+        seed=seed,
+        config=NativeStressConfig(weight_transform=WEIGHTED_SIMILARITY_TRANSFORM, seed=seed),
+    )
+
+
 def layout_native_undirected_portfolio(
     problem: LayoutProblem,
     state: SolveState,
@@ -478,6 +618,33 @@ def layout_native_undirected_portfolio(
         except Exception:  # noqa: BLE001
             pass
 
+    # Candidate D (r80-S9 Deliverable 1): cluster-aware sfdp driver, only
+    # for problems that actually carry cluster metadata. Adds a candidate
+    # that structurally places cluster hierarchy levels instead of relying
+    # on the composite's cluster-separation term alone (see
+    # _cluster_aware_sfdp_candidate). Never replaces the incumbent or the
+    # flat sfdp/neato challengers above.
+    if problem.clusters:
+        try:
+            cluster_sfdp_pos = _cluster_aware_sfdp_candidate(problem, config, ctx)
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            cluster_sfdp_pos = None
+        if cluster_sfdp_pos is not None:
+            _add_challenger("cluster_sfdp", cluster_sfdp_pos)
+
+    # Candidate E (r80-S9 Deliverable 2): weighted-similarity native-stress
+    # core, only for problems that carry edge weights. Adds a candidate
+    # whose Dijkstra/pivot target distances treat weights as similarities
+    # (see _weighted_similarity_candidate). Never changes default weight
+    # handling anywhere else.
+    if problem.edge_weights is not None:
+        try:
+            weighted_pos = _weighted_similarity_candidate(problem, seed)
+        except Exception:  # noqa: BLE001
+            weighted_pos = None
+        if weighted_pos is not None:
+            _add_challenger("weighted_similarity", weighted_pos)
+
     # Argmax selection; strict inequality means ties go to the incumbent.
     best_name = "incumbent"
     for name, score in scores.items():
@@ -559,6 +726,7 @@ __all__ = [
     "MAX_CONTEST_NODES",
     "NEATO_BALANCED_NODE_CAP",
     "NEATO_QUALITY_THRESHOLD",
+    "WEIGHTED_SIMILARITY_TRANSFORM",
     "UndirectedPortfolioRoute",
     "UndirectedPortfolioRouteConfig",
     "build_native_undirected_portfolio_pipeline",
