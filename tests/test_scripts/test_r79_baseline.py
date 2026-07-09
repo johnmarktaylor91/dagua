@@ -11,8 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 
+from dagua.eval.graphs import TestGraph
 from dagua.eval.size_policy import set_size_aware_externals, size_aware_externals
+from dagua.graph import DaguaGraph
 from scripts import r79_baseline
 
 
@@ -231,3 +234,79 @@ def test_main_wires_size_blind_externals_into_size_policy(
         assert size_aware_externals() is False
     finally:
         set_size_aware_externals(True)
+
+
+def _sized_test_graph() -> TestGraph:
+    """Build a tiny corpus-shaped ``TestGraph`` with known node sizes.
+
+    Returns
+    -------
+    TestGraph
+        Two-node directed graph with node sizes set directly (bypassing
+        ``compute_node_sizes()``'s label-measurement) so the expected mean
+        diagonal is exactly computable in the test.
+    """
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    return TestGraph(name="sized_test_graph", graph=graph)
+
+
+def test_node_diag_mean_for_graph_matches_manual_computation() -> None:
+    """The backfilled node_diag_mean matches sqrt(w^2+h^2) averaged by hand.
+
+    Returns
+    -------
+    None
+    """
+    test_graph = _sized_test_graph()
+    expected = (
+        torch.sqrt(test_graph.graph.node_sizes[:, 0] ** 2 + test_graph.graph.node_sizes[:, 1] ** 2)
+        .mean()
+        .item()
+    )
+
+    assert r79_baseline.node_diag_mean_for_graph(test_graph) == pytest.approx(expected)
+
+
+def test_score_stored_metrics_backfills_node_diag_mean_on_frozen_row() -> None:
+    """A frozen row without node_diag_mean gets the guard backfilled honestly.
+
+    This is the core deliverable-3 blast-radius mechanism: a pre-r80-P6 row
+    has no node_diag_mean, so score_stored_metrics must compute it fresh
+    from the graph rather than silently skip the degeneracy guard.
+
+    Returns
+    -------
+    None
+    """
+    test_graph = _sized_test_graph()
+    # A degenerate row: near-zero edge length relative to node size, with a
+    # vacuous CV=0/crossing_rate=0 the pre-guard formula would over-credit.
+    row = {
+        "graph": test_graph.name,
+        "metrics": {
+            "dag_consistency": 1.0,
+            "edge_length_cv": 0.0,
+            "depth_spearman_rho": 1.0,
+            "overlap_count": 5,
+            "edge_straightness_mean_deg": 0.0,
+            "crossing_rate": 0.0,
+            "sampled_stress": 0.0,
+            "angular_res_mean_deg": 40.0,
+            "edge_length_mean": 1e-6,  # collapsed relative to real node sizes
+        },
+    }
+    assert "node_diag_mean" not in row["metrics"]
+
+    guarded_score = r79_baseline.score_stored_metrics(row, test_graph)
+
+    # Without the backfill (and thus without the guard firing), edge_length_cv=0
+    # and crossing_rate=0 would vacuously max their terms (18 + 9 = 27 points).
+    unguarded_row = {**row, "metrics": {**row["metrics"]}}
+    del unguarded_row["metrics"]["edge_length_mean"]
+    unguarded_score = r79_baseline.score_stored_metrics(unguarded_row, test_graph)
+
+    assert guarded_score == pytest.approx(unguarded_score - 18.0 - 9.0)
