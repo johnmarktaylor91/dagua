@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import torch
 
@@ -275,8 +275,8 @@ def _layout_with_dot(
     graph: DaguaGraph,
     timeout: float,
     graph_attributes: Optional[Mapping[str, Any]] = None,
-) -> torch.Tensor:
-    """Run Graphviz `dot` on a graph and parse the resulting positions.
+):
+    """Run Graphviz `dot` on a graph and parse positions plus edge geometry.
 
     Parameters
     ----------
@@ -290,8 +290,11 @@ def _layout_with_dot(
 
     Returns
     -------
-    torch.Tensor
-        Node positions with shape ``[N, 2]``.
+    tuple
+        ``(positions, routes, edge_label_positions)`` where positions has
+        shape ``[N, 2]`` and the drawing fields may be ``None``. Callers must
+        normalize through :func:`_coerce_layout_capture` because tests stub
+        this helper with a bare tensor.
     """
     dot_str = _graph_to_dot(graph)
 
@@ -339,7 +342,8 @@ def _layout_with_dot(
             positions[node_index, 0] = float(x_str)
             positions[node_index, 1] = -float(y_str)
 
-    return positions
+    routes, edge_label_positions = _parse_graphviz_json_drawing(data, graph)
+    return positions, routes, edge_label_positions
 
 
 def _parse_graphviz_json_positions(data: dict[str, object], num_nodes: int) -> torch.Tensor:
@@ -378,13 +382,233 @@ def _parse_graphviz_json_positions(data: dict[str, object], num_nodes: int) -> t
     return positions
 
 
+# ---------------------------------------------------------------------------
+# Full-drawing capture (r80-S6): edge splines + edge label positions.
+#
+# Graphviz "pos" edge attributes carry a cubic B-spline emitted in piecewise
+# BEZIER form: an optional arrow endpoint prefix ("e,x,y" -- the true head
+# tip) and/or start prefix ("s,x,y"), followed by 3k+1 control points where
+# each consecutive (p0,p1,p2,p3), (p3,p4,p5,p6), ... quadruple is one cubic
+# bezier segment. We convert to a polyline by sampling each cubic segment
+# uniformly, then appending the "s"/"e" endpoints so the polyline covers the
+# full drawn path including the arrowhead tip. Y is negated to match dagua's
+# y-down convention (same flip as the node-position parser above).
+# ---------------------------------------------------------------------------
+
+_SPLINE_SAMPLES_PER_SEGMENT = 8
+
+
+def _parse_xdot_spline(pos_value: str) -> Optional[List[Tuple[float, float]]]:
+    """Parse a Graphviz edge ``pos`` attribute into a polyline.
+
+    Parameters
+    ----------
+    pos_value : str
+        Raw ``pos`` string, e.g. ``"e,39.8,121.1 84.4,173.8 73.7,161.1 ..."``.
+
+    Returns
+    -------
+    list[tuple[float, float]] | None
+        Sampled polyline in GRAPHVIZ coordinates (y-up), or ``None`` when the
+        string cannot be interpreted as a spline.
+    """
+    tokens = str(pos_value).split()
+    if not tokens:
+        return None
+
+    end_point: Optional[Tuple[float, float]] = None
+    start_point: Optional[Tuple[float, float]] = None
+    control_points: List[Tuple[float, float]] = []
+    try:
+        for token in tokens:
+            if token.startswith("e,"):
+                x_str, y_str = token[2:].split(",", maxsplit=1)
+                end_point = (float(x_str), float(y_str))
+            elif token.startswith("s,"):
+                x_str, y_str = token[2:].split(",", maxsplit=1)
+                start_point = (float(x_str), float(y_str))
+            else:
+                x_str, y_str = token.split(",", maxsplit=1)
+                control_points.append((float(x_str), float(y_str)))
+    except ValueError:
+        return None
+
+    if len(control_points) < 4 or (len(control_points) - 1) % 3 != 0:
+        return None
+
+    polyline: List[Tuple[float, float]] = []
+    if start_point is not None:
+        polyline.append(start_point)
+
+    n_segments = (len(control_points) - 1) // 3
+    for seg in range(n_segments):
+        p0 = control_points[3 * seg]
+        p1 = control_points[3 * seg + 1]
+        p2 = control_points[3 * seg + 2]
+        p3 = control_points[3 * seg + 3]
+        start_k = 0 if seg == 0 else 1  # skip duplicated joint points
+        for k in range(start_k, _SPLINE_SAMPLES_PER_SEGMENT):
+            t = k / (_SPLINE_SAMPLES_PER_SEGMENT - 1)
+            u = 1.0 - t
+            x = u**3 * p0[0] + 3 * u**2 * t * p1[0] + 3 * u * t**2 * p2[0] + t**3 * p3[0]
+            y = u**3 * p0[1] + 3 * u**2 * t * p1[1] + 3 * u * t**2 * p2[1] + t**3 * p3[1]
+            polyline.append((x, y))
+
+    if end_point is not None:
+        polyline.append(end_point)
+    return polyline if len(polyline) >= 2 else None
+
+
+def _edge_label_point(edge_obj: dict) -> Optional[Tuple[float, float]]:
+    """Extract an edge-label anchor from a Graphviz JSON edge object.
+
+    Prefers the ``lp`` attribute (label center); falls back to the first
+    ``_ldraw_`` op carrying a ``pt`` field.
+
+    Parameters
+    ----------
+    edge_obj : dict
+        One entry of the Graphviz JSON ``edges`` array.
+
+    Returns
+    -------
+    tuple[float, float] | None
+        Label anchor in GRAPHVIZ coordinates (y-up), or ``None``.
+    """
+    lp = edge_obj.get("lp")
+    if isinstance(lp, str) and "," in lp:
+        try:
+            x_str, y_str = lp.split(",", maxsplit=1)
+            return (float(x_str), float(y_str))
+        except ValueError:
+            pass
+    ldraw = edge_obj.get("_ldraw_")
+    if isinstance(ldraw, list):
+        for op in ldraw:
+            if isinstance(op, dict) and isinstance(op.get("pt"), list) and len(op["pt"]) >= 2:
+                try:
+                    return (float(op["pt"][0]), float(op["pt"][1]))
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
+def _parse_graphviz_json_drawing(
+    data: dict,
+    graph: DaguaGraph,
+) -> Tuple[
+    Optional[List[Optional[List[Tuple[float, float]]]]],
+    Optional[List[Optional[Tuple[float, float]]]],
+]:
+    """Parse edge splines and label anchors from a Graphviz JSON payload.
+
+    JSON edges reference node objects through ``tail``/``head`` gvids; each
+    JSON edge is matched to the next unassigned dagua edge with the same
+    (source, target) pair, which preserves input order for parallel edges.
+
+    Parameters
+    ----------
+    data : dict
+        Parsed ``dot -Tjson`` payload.
+    graph : DaguaGraph
+        Graph the layout was produced for (source of edge order).
+
+    Returns
+    -------
+    tuple
+        ``(routes, edge_label_positions)`` aligned to ``edge_index`` columns
+        in DAGUA coordinates (y-down), or ``(None, None)`` when the payload
+        carries no usable edge geometry.
+    """
+    num_edges = int(graph.edge_index.shape[1]) if graph.edge_index.numel() > 0 else 0
+    if num_edges == 0:
+        return None, None
+
+    objects = data.get("objects", [])
+    edges = data.get("edges", [])
+    if not isinstance(objects, list) or not isinstance(edges, list) or not edges:
+        return None, None
+
+    gvid_to_node: Dict[int, int] = {}
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        name = str(obj.get("name", ""))
+        if name.startswith("n") and name[1:].isdigit() and "_gvid" in obj:
+            gvid_to_node[int(obj["_gvid"])] = int(name[1:])
+
+    # Queue of dagua edge indices per (source, target), preserving order.
+    pair_queues: Dict[Tuple[int, int], List[int]] = {}
+    for e_idx in range(num_edges):
+        s = int(graph.edge_index[0, e_idx].item())
+        t = int(graph.edge_index[1, e_idx].item())
+        pair_queues.setdefault((s, t), []).append(e_idx)
+
+    routes: List[Optional[List[Tuple[float, float]]]] = [None] * num_edges
+    labels: List[Optional[Tuple[float, float]]] = [None] * num_edges
+    any_route = False
+    for edge_obj in edges:
+        if not isinstance(edge_obj, dict):
+            continue
+        tail = gvid_to_node.get(int(edge_obj.get("tail", -1)))
+        head = gvid_to_node.get(int(edge_obj.get("head", -1)))
+        if tail is None or head is None:
+            continue
+        queue = pair_queues.get((tail, head))
+        if not queue:
+            continue
+        e_idx = queue.pop(0)
+        pos_value = edge_obj.get("pos")
+        if isinstance(pos_value, str):
+            spline = _parse_xdot_spline(pos_value)
+            if spline is not None:
+                routes[e_idx] = [(x, -y) for x, y in spline]
+                any_route = True
+        label_point = _edge_label_point(edge_obj)
+        if label_point is not None:
+            labels[e_idx] = (label_point[0], -label_point[1])
+
+    if not any_route:
+        return None, None
+    any_label = any(lbl is not None for lbl in labels)
+    return routes, (labels if any_label else None)
+
+
+_LayoutCapture = Tuple[
+    torch.Tensor,
+    Optional[List[Optional[List[Tuple[float, float]]]]],
+    Optional[List[Optional[Tuple[float, float]]]],
+]
+
+
+def _coerce_layout_capture(result: Any) -> _LayoutCapture:
+    """Normalize a layout helper's return value to ``(pos, routes, labels)``.
+
+    Keeps backward compatibility with callers/tests that stub the layout
+    helpers to return a bare position tensor.
+
+    Parameters
+    ----------
+    result : Any
+        Either a position tensor or a ``(pos, routes, labels)`` triple.
+
+    Returns
+    -------
+    _LayoutCapture
+        Position tensor plus optional captured routes/labels.
+    """
+    if isinstance(result, torch.Tensor):
+        return result, None, None
+    return result
+
+
 def _layout_with_graphviz_engine(
     graph: DaguaGraph,
     engine: str,
     timeout: float,
     seed: Optional[int],
     graph_attributes: Optional[Mapping[str, Any]] = None,
-) -> torch.Tensor:
+):
     """Run a Graphviz engine and parse the resulting positions.
 
     Parameters
@@ -405,8 +629,11 @@ def _layout_with_graphviz_engine(
 
     Returns
     -------
-    torch.Tensor
-        Node positions with shape ``[N, 2]``.
+    tuple
+        ``(positions, routes, edge_label_positions)`` where positions has
+        shape ``[N, 2]`` and the drawing fields may be ``None``. Callers must
+        normalize through :func:`_coerce_layout_capture` because tests stub
+        this helper with a bare tensor.
     """
     from dagua.graphviz_utils import to_dot
 
@@ -441,7 +668,9 @@ def _layout_with_graphviz_engine(
     finally:
         dot_path.unlink(missing_ok=True)
 
-    return _parse_graphviz_json_positions(data, graph.num_nodes)
+    positions = _parse_graphviz_json_positions(data, graph.num_nodes)
+    routes, edge_label_positions = _parse_graphviz_json_drawing(data, graph)
+    return positions, routes, edge_label_positions
 
 
 class _GraphvizBase(CompetitorBase):
@@ -475,14 +704,22 @@ class _GraphvizBase(CompetitorBase):
         """
         start = time.perf_counter()
         try:
-            pos = _layout_with_graphviz_engine(
-                graph=graph,
-                engine=self.engine,
-                timeout=timeout,
-                seed=seed,
+            pos, routes, edge_label_positions = _coerce_layout_capture(
+                _layout_with_graphviz_engine(
+                    graph=graph,
+                    engine=self.engine,
+                    timeout=timeout,
+                    seed=seed,
+                )
             )
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=pos,
+                runtime_seconds=elapsed,
+                routes=routes,
+                edge_label_positions=edge_label_positions,
+            )
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -527,15 +764,23 @@ class _GraphvizBase(CompetitorBase):
         """
         start = time.perf_counter()
         try:
-            pos = _layout_with_graphviz_engine(
-                graph=graph,
-                engine=self.engine,
-                timeout=timeout,
-                seed=seed,
-                graph_attributes=variant_params,
+            pos, routes, edge_label_positions = _coerce_layout_capture(
+                _layout_with_graphviz_engine(
+                    graph=graph,
+                    engine=self.engine,
+                    timeout=timeout,
+                    seed=seed,
+                    graph_attributes=variant_params,
+                )
             )
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=pos,
+                runtime_seconds=elapsed,
+                routes=routes,
+                edge_label_positions=edge_label_positions,
+            )
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -600,9 +845,17 @@ class GraphvizDot(_GraphvizBase):
 
         start = time.perf_counter()
         try:
-            pos = _layout_with_dot(graph, timeout=timeout)
+            pos, routes, edge_label_positions = _coerce_layout_capture(
+                _layout_with_dot(graph, timeout=timeout)
+            )
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=pos,
+                runtime_seconds=elapsed,
+                routes=routes,
+                edge_label_positions=edge_label_positions,
+            )
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -660,13 +913,21 @@ class GraphvizDot(_GraphvizBase):
 
         start = time.perf_counter()
         try:
-            pos = _layout_with_dot(
-                graph,
-                timeout=timeout,
-                graph_attributes=graph_attributes or None,
+            pos, routes, edge_label_positions = _coerce_layout_capture(
+                _layout_with_dot(
+                    graph,
+                    timeout=timeout,
+                    graph_attributes=graph_attributes or None,
+                )
             )
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=pos,
+                runtime_seconds=elapsed,
+                routes=routes,
+                edge_label_positions=edge_label_positions,
+            )
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
