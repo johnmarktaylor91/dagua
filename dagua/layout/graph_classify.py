@@ -52,6 +52,14 @@ class GraphStructure:
     has_dominant_component: bool = True
     is_planar: Optional[bool] = None
     planar_embedding: Any = None
+    # Provenance of is_semantically_directed: True only when the graph
+    # object carried an explicit declaration. Routing that optimizes an
+    # undirected-flavored objective must not fire on low-confidence
+    # inference alone (r80: two directed graphs were mis-inferred as
+    # undirected and the portfolio picked a challenger that lost ~20
+    # composite points under directed scoring).
+    direction_is_declared: bool = False
+    reciprocal_edge_ratio: float = 0.0
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -704,6 +712,7 @@ def classify_graph(
             num_layers_effective=num_layers_effective,
             cyclicity_ratio=0.0,
             has_dominant_component=True,
+            direction_is_declared=explicit_direction is not None,
         )
 
     degree = _compute_degree(edge_index, num_nodes)
@@ -807,6 +816,8 @@ def classify_graph(
         has_dominant_component=has_dominant_component,
         is_planar=is_planar,
         planar_embedding=planar_embedding,
+        direction_is_declared=explicit_direction is not None,
+        reciprocal_edge_ratio=(_reciprocal_edge_ratio(edge_index) if num_nodes <= 100_000 else 0.0),
     )
 
 
