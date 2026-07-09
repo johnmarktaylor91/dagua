@@ -168,3 +168,42 @@ def test_infer_semantically_directed_mechanically_oriented_dense_graph_returns_f
         )
         is False
     )
+
+
+def test_portfolio_route_requires_declaration_or_reciprocity():
+    """Low-confidence inferred undirectedness must NOT trigger the portfolio.
+
+    r80 regression guard: outerplanar_dag_20 / recurrent_feedback_cell were
+    inferred undirected (no declaration, no reciprocal storage) and the
+    contest optimized the wrong composite flavor. The route may fire only on
+    an explicit declaration or reciprocal edge storage.
+    """
+    from dagua.config import LayoutConfig
+    from dagua.layout.graph_classify import GraphFamily, GraphStructure
+    from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
+
+    def structure(declared: bool, reciprocal: float) -> GraphStructure:
+        return GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=4,
+            num_layers=5,
+            avg_layer_width=4.0,
+            is_planar_hint=True,
+            is_semantically_directed=False,
+            direction_is_declared=declared,
+            reciprocal_edge_ratio=reciprocal,
+        )
+
+    config = LayoutConfig()
+    config._dagua_native_num_nodes = 40
+
+    assert _choose_native_pipeline(structure(False, 0.0), config) != "undirected_portfolio", (
+        "inference-only undirectedness must not reach the portfolio"
+    )
+    assert _choose_native_pipeline(structure(True, 0.0), config) == "undirected_portfolio", (
+        "declared undirected graphs route to the portfolio"
+    )
+    assert _choose_native_pipeline(structure(False, 0.6), config) == "undirected_portfolio", (
+        "reciprocal edge storage is a high-confidence undirected signal"
+    )
