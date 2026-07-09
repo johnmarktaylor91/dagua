@@ -33,3 +33,13 @@ with evidence and moved to the named-cause sidecar.
 ## 5. Gates: rerun definitive_fidelity_report gates over new chain; gate2+gate3 must both be 100% (post-b15d08b).
 
 ## 6. Then: honest headline table, STATE close-out, iMessage JMT.
+
+## Addendum 2026-07-08 evening: family-2 resolution + remaining launches
+- FAMILY-2 ROOT CAUSE: no bug. classic_maxent_stress default = 572s standalone on grid_20x20
+  (steps50 162s); June watchdog rows + probe failures were runtime-vs-timeout artifacts.
+- LAUNCHED: fam2_maxent3 (pid 1956834) + fam2_maxent400 (pid 1956835), 2h timeouts, ogdf_stress refs.
+- 57 drl rows covered by targeted_drl bench; maxent_steps50/stress_maj_iter50 500-node rows by nodrl.
+- STILL TO LAUNCH when a lane frees (fast tranche, ~3600s timeouts):
+  A) --engines classic_davidson_harel_rounds50,classic_davidson_harel_rounds100,classic_neato,classic_pivot_mds_50,classic_stress_sgd_eps001,classic_stress_sgd_eps01,classic_stress_sgd_steps300 --seed-refs igraph_davidson_harel,graphviz_neato,igraph_mds,ogdf_stress,sgd2 --graphs grid_rect_6x8,multi_component_80,org_chart_deep,random_bipartite_60,regular_4_40,sierpinski_42,sparse_pair_50,triangular_lattice_36,wide_single_layer_1_50_1,clustered_medium_5x20,er_100,real_lesmis_77,sbm_4x30,citation_dag_300,heavy_tail_weights_50 --workers 3 --output-dir eval_output/benchmark_100seed_r78_fam2_fast (NOTE: DH rows on >50-node graphs will skip on engine max_nodes -- that outcome is itself the adjudication evidence: capacity-limited, not divergent)
+  B) --engines classic_fmmm_steps10,classic_fmmm_steps100,classic_fmmm_steps200,classic_stress_maj_default,classic_stress_maj_iter500 --seed-refs ogdf_fmmm,graphviz_fdp,ogdf_stress --graphs chung_lu_150,citation_dag_300,compound_10x20,compound_dag_5x30,dependency_graph_100,hub_spoke_10x20,protein_ppi_200,multi_component_80,org_chart_deep,real_lesmis_77,rgg_100,small_world_100 --workers 2 --output-dir eval_output/benchmark_100seed_r78_fam2_fmst
+  (both: --variants --max-nodes 0 --seeds 35 --seed-start 100 --timeout 3600 --watchdog-timeout 7200 --resume)
