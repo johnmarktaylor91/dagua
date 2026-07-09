@@ -242,3 +242,16 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - Narrative: old-ruler 74->90 overstated (+16); honest-ruler 63->74 (+11 genuine). The ruler got FAIRER while
   the algo got BETTER; both truths now separately quantified.
 - Holdout eval running (p4). Then: audits, S8 knob, docs, merge decision.
+
+## 2026-07-09 ~16:20: holdout OOM'd (101GB RSS, 40 rows from done, nothing written) -> fix+rerun dispatched;
+## ENDGAME LAUNCHED (3 parallel agents)
+- Holdout death: oom-kill confirmed via dmesg (pid 344661, anon-rss ~101GB). Script buffers ALL rows in memory,
+  writes only at end, output dir never created. Agent dispatched: incremental jsonl + RSS guard + leak fix +
+  per-corpus sequential rerun (rome/north/ss).
+- Adversarial merge-gate review dispatched (OPUS, read-only): full ef4eef5..HEAD diff, 7 attack surfaces
+  (portfolio predicate escapes, contest integrity, projector opt-in defaults, routing crash surfaces, metric
+  guards, fairness plumbing leaks, API drift). Verdict gates merge-to-develop.
+- S8 aesthetic knob dispatched (sonnet, p3, r80/s8-aesthetic-knob): priority profile -> selection reweight +
+  loss multipliers; default-identity gate; API shape presented for JMT sign-off BEFORE merge.
+- Remaining after: visual audit (Opus, after S8/renders), docs rebuild, merge decision (coordinate with
+  fidelity tab -- no unilateral develop merge).
