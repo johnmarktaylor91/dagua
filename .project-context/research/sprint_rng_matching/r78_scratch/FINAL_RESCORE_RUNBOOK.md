@@ -43,3 +43,21 @@ with evidence and moved to the named-cause sidecar.
   A) --engines classic_davidson_harel_rounds50,classic_davidson_harel_rounds100,classic_neato,classic_pivot_mds_50,classic_stress_sgd_eps001,classic_stress_sgd_eps01,classic_stress_sgd_steps300 --seed-refs igraph_davidson_harel,graphviz_neato,igraph_mds,ogdf_stress,sgd2 --graphs grid_rect_6x8,multi_component_80,org_chart_deep,random_bipartite_60,regular_4_40,sierpinski_42,sparse_pair_50,triangular_lattice_36,wide_single_layer_1_50_1,clustered_medium_5x20,er_100,real_lesmis_77,sbm_4x30,citation_dag_300,heavy_tail_weights_50 --workers 3 --output-dir eval_output/benchmark_100seed_r78_fam2_fast (NOTE: DH rows on >50-node graphs will skip on engine max_nodes -- that outcome is itself the adjudication evidence: capacity-limited, not divergent)
   B) --engines classic_fmmm_steps10,classic_fmmm_steps100,classic_fmmm_steps200,classic_stress_maj_default,classic_stress_maj_iter500 --seed-refs ogdf_fmmm,graphviz_fdp,ogdf_stress --graphs chung_lu_150,citation_dag_300,compound_10x20,compound_dag_5x30,dependency_graph_100,hub_spoke_10x20,protein_ppi_200,multi_component_80,org_chart_deep,real_lesmis_77,rgg_100,small_world_100 --workers 2 --output-dir eval_output/benchmark_100seed_r78_fam2_fmst
   (both: --variants --max-nodes 0 --seeds 35 --seed-start 100 --timeout 3600 --watchdog-timeout 7200 --resume)
+
+## Addendum 2026-07-09 morning: SELF-INFLICTED OVERSUBSCRIPTION INCIDENT + repair plan
+- Overnight fleet (22 workers) x torch intra-op threads (~165% CPU/worker) -> load 80-90 ->
+  run inflation -> ~257 TIMEOUT ERRORS: maxent3 140, fdpfid 105, fam2_fast 12. SAME mechanism
+  as June family-2 artifacts. Lesson: worker budget must count THREADS not workers;
+  cap fleet at ~8-10 workers total.
+- --resume SKIPS non-ok records (run_benchmark.py:~1443) -> errors are POISONED in-dir.
+  REPAIR (per dir, AFTER its bench exits): backup results.json; drop records with
+  status in (error, timeout); relaunch same command with --resume (records absent -> retried).
+- STOPPED early to shed load (resume-safe): fam2_fast, fam2_fmst, fmmm_s100_200.
+- RELAUNCH QUEUE (strictly one-at-a-time as lanes finish, verify load <20 before each):
+  1) fdpfid error-retry (after it exits; ~3 combos worth)
+  2) maxent3 error-retry (4 combos; 2 workers, 7200s timeouts held)
+  3) fmmm_s100_200 --resume (245 runs left)
+  4) fam2_fast --resume (+12-error purge)
+  5) fam2_fmst --resume
+- Orphan-killed 3 init-parented forkservers post-SIGTERM (incl one 9h54m -- verify fdpfid/
+  steps10 progress advances; if a lane stalls >30min with log silence, SIGTERM + resume it).
