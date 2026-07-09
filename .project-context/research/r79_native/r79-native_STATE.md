@@ -181,3 +181,8 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - 897dbe3: r80/drawing-metrics MERGED to trunk (additive, invariance-proven). composite_drawing available.
 - Fresh full dagua-only sweep running (/tmp/r80_trunk_final_sweep.log) -> expect 63/14/16 + 8/2/5 with no
   stale rows. S2b notified to merge current trunk. S7 still in gates.
+
+## 2026-07-09 ~05:00: TRUNK CERTIFIED -- fresh full sweep, ZERO movers, 87/108 stands
+- Fresh dagua-only sweep on trunk 897dbe3 (post predicate-fix, post drawing-metrics merge): 63/14/16 legacy +
+  8/2/5 extended, 0/108 movers vs committed store. Deterministic, no stale rows. 87/108 best-or-tied CERTIFIED.
+- Awaiting: S2b gate verdict (p1), S7 gate verdict (p3). Then: squeeze items, P6 honesty batch, holdout, audits, S8.
