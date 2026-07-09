@@ -233,3 +233,12 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - QUEUE after re-freeze: holdout eval (Rome/North/SuiteSparse; p4 worktree + r79/p6a-stdcorpora harness ->
   needs merge of trunk into it or run from trunk with corpora dir), audits (Opus visual + adversarial),
   S8 aesthetic knob, docs rebuild, merge decision.
+
+## 2026-07-09 ~15:40: HONEST RULER + COUNTERFACTUAL COMPLETE (P13, f75e9e4)
+- Post-fairness frozen store: 52/13/28 + 6/3/6 = 74/108. sfdp 0 overlaps on all 108 (prism); 972/972 rows fresh.
+- Counterfactual (pre-sprint positions, same ruler): 55/8/45 = 63/108. TRUE SPRINT VALUE: +11/108, ZERO
+  regressions, all 11 flips L->W/T, all undirected-class. Bit-identical recompute proves dagua composites
+  untouched by honesty work (clean isolation of algo gain vs ruler tightening).
+- Narrative: old-ruler 74->90 overstated (+16); honest-ruler 63->74 (+11 genuine). The ruler got FAIRER while
+  the algo got BETTER; both truths now separately quantified.
+- Holdout eval running (p4). Then: audits, S8 knob, docs, merge decision.
