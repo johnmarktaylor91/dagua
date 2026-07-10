@@ -128,16 +128,66 @@ def test_healthy_spread_candidate_passes_guard() -> None:
     assert reason == ""
 
 
-def test_far_flung_isolated_node_is_rejected_by_spread_guard() -> None:
-    """A challenger flinging a degree-0 node trips the isolated-spread guard."""
-    ring_nodes = 10
-    num_nodes = ring_nodes + 1  # node 10 has no edges (degree-0 isolate)
+def _ring_plus_isolate(
+    isolate_distance: float,
+    ring_nodes: int = 50,
+    ring_radius: float = 100.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    """Build a ring layout plus one degree-0 isolate at a chosen distance.
+
+    Parameters
+    ----------
+    isolate_distance : float
+        Distance of the isolated node from the ring center (origin).
+    ring_nodes : int, default=50
+        Connected ring size. Large enough that the isolate barely shifts
+        the centroid, keeping the measured ratio close to the nominal one.
+    ring_radius : float, default=100.0
+        Ring radius.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]
+        Positions ``[N, 2]``, node sizes ``[N, 2]``, edge index ``[2, E]``,
+        and the isolate's measured centroid-distance / median-distance ratio
+        (the exact quantity the guard evaluates).
+    """
     edges = [(i, (i + 1) % ring_nodes) for i in range(ring_nodes)]
     edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
-    node_sizes = torch.full((num_nodes, 2), 2.0)
     angles = torch.arange(ring_nodes, dtype=torch.float32) * (2 * torch.pi / ring_nodes)
-    ring_pos = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * 100.0
-    pos = torch.cat([ring_pos, torch.tensor([[2000.0, 0.0]])], dim=0)
+    ring_pos = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * ring_radius
+    pos = torch.cat([ring_pos, torch.tensor([[isolate_distance, 0.0]])], dim=0)
+    node_sizes = torch.full((ring_nodes + 1, 2), 2.0)
+    distances = torch.linalg.vector_norm(pos - pos.mean(dim=0, keepdim=True), dim=1)
+    ratio = float(distances[-1].item()) / float(torch.median(distances).item())
+    return pos, node_sizes, edge_index, ratio
+
+
+def test_isolated_node_at_5x_median_passes_spread_guard() -> None:
+    """A degree-0 node at ~5x median distance is peripheral, NOT pathological.
+
+    r80 round-3 calibration (measured on the old store): legitimate isolate
+    placements reach 5.4x median (er_500 periphery 0.5-4.8x,
+    multi_component_80 tiles 2.8-2.9x); the pathology class starts at 15.1x.
+    The 8x threshold must PASS peripheral placement.
+    """
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=510.0)
+    assert 4.0 < ratio < 6.0  # sanity: this case sits in the legitimate band
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is False
+    assert reason == ""
+
+
+def test_isolated_node_at_15x_median_is_rejected_by_spread_guard() -> None:
+    """A degree-0 node at ~15x median distance is the fling pathology.
+
+    Matches the measured random_bipartite_60 pathology floor (15.1x, range
+    15-21x on the old store). The 8x threshold must REJECT it.
+    """
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=1600.0)
+    assert 12.0 < ratio < 18.0  # sanity: this case sits in the pathological band
 
     degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
 
