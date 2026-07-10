@@ -273,3 +273,39 @@ L->T/W; the flip is not real to a human reader.
   /tmp/r80_singleton_sweep5.log. Acceptance: EXACTLY ONE mover vs the
   committed 74/108 store -- random_bipartite_60's honest reversion. Results
   pending -- architect to harvest.
+
+## Evidence -- r80 singleton fix FINAL design: repair, not default (round 4)
+
+* Round-3 analysis (architect): the 8x threshold is right, but UNCONDITIONAL
+  challenger packing was what still moved er_500 (-4.9, honest S2b win lost)
+  and multi_component_80 (-11.0). Their isolates sat at a legitimate
+  2.8-4.8x median, yet packing rewrote their layouts and the composite mildly
+  preferred the original moderate spread.
+* Final design: packing is a REPAIR, not a default.
+  - sfdp/neato challengers revert to raw full-problem solves (the pre-fix
+    call shape), so below-threshold graphs produce byte-identical candidates
+    to the committed 74/108 store.
+  - _repair_flung_isolates (native_undirected.py): fires ONLY when
+    _max_isolated_spread_ratio > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO (8.0).
+    On fire, each weak component keeps its raw internal geometry and
+    components are re-tiled adjacent via the existing shared
+    _tile_component_positions tiler + AspectRatioFit. Repair-then-rescore:
+    the contest referee scores the repaired version.
+  - Applied at the shared _add_challenger entry, so ALL challenger families
+    (sfdp, neato, cluster_sfdp, weighted_similarity) get the same backstop.
+  - Guard check 3 (8x isolated-fling rejection) kept as a backstop behind
+    the repair; formula deduped into _max_isolated_spread_ratio.
+  - The unconditional per-component packed-challenger runner from round 1
+    was removed (dead code under the final design).
+* Tests: round-3 5x-pass / 15x-reject guard tests kept. New:
+  below-threshold layout is BYTE-IDENTICAL through the repair path (same
+  tensor object, torch.equal); above-threshold repair re-tiles the isolate
+  under 8x and passes the full degeneracy guard. End-to-end
+  random_bipartite_60 and synthetic-singleton 3x-median assertions still
+  pass. Full file: 28 passed. ruff clean.
+* Gate sweep: default output dir, --dagua-only --fresh, log
+  /tmp/r80_singleton_sweep6.log. Acceptance: EXACTLY ONE mover vs the
+  committed 74/108 store -- random_bipartite_60's honest reversion
+  (er_500 and multi_component_80 byte-identical: no trigger, no packing).
+  FINAL ROUND per architect: any other mover -> stop and report, do not
+  iterate. Results pending -- architect to harvest.
