@@ -343,6 +343,26 @@ def _igraph_mds_single_from_distances(
         lower=False,
         check_finite=False,
     )
+    if int(eigenvalues.shape[0]) < 2:
+        # LAPACK ``dsyevr`` with ``range='I'`` can silently return ``m = 0``
+        # eigenpairs with ``info == 0`` on heavily degenerate spectra (for
+        # example the 1-50-1 layered benchmark graph, whose top eigenvalue has
+        # multiplicity ~49). SciPy's ``eigh`` then slices to empty arrays
+        # without raising, which previously produced an all-zeros layout.
+        # The failure depends on the LAPACK workspace size SciPy requests, so
+        # retry with a full decomposition (``range='A'`` path) and keep the
+        # two largest algebraic eigenpairs -- the same selection igraph asks
+        # its vendored LAPACK 3.4.2 for. The specific basis inside a
+        # degenerate top eigenspace remains implementation-dependent, as
+        # documented in ``build_classical_mds_pipeline``.
+        eigenvalues, eigenvectors = scipy.linalg.eigh(
+            gram,
+            driver="evr",
+            lower=False,
+            check_finite=False,
+        )
+        eigenvalues = eigenvalues[num_nodes - 2 :]
+        eigenvectors = eigenvectors[:, num_nodes - 2 :]
 
     coordinates = np.zeros((num_nodes, 2), dtype=np.float64)
     selected_count = int(eigenvalues.shape[0])
