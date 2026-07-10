@@ -4814,6 +4814,11 @@ def layout_dagua_native_pipeline(
     # closing the -8.51 gap to igraph_sugiyama).
     if (
         _selected_force_pipeline(effective_config) is None
+        and not (
+            graph_structure is not None
+            and getattr(graph_structure, "is_semantically_directed", True) is False
+            and bool(getattr(graph_structure, "direction_is_declared", False))
+        )
         and not _is_graphviz_dot_flat_fidelity_mode(
             getattr(effective_config, "fidelity_mode", None)
         )
