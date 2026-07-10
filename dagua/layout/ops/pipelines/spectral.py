@@ -118,7 +118,12 @@ def build_spectral_pipeline(
         fidelity_mode=fidelity_mode,
         networkx_fidelity=networkx_fidelity,
     )
-    effective_normalization = "unnormalized" if networkx_mode else normalization
+    # NetworkX's spectral_layout uses the unnormalized Laplacian by DEFAULT, but the
+    # random-walk / explicitly-normalized variants must reach the requested matrix.
+    # Only override the default ("symmetric") -- honor any explicit normalization.
+    effective_normalization = (
+        "unnormalized" if networkx_mode and normalization == "symmetric" else normalization
+    )
     return Pipeline(
         [
             SpectralPrepareState(
