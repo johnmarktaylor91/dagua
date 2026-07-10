@@ -251,3 +251,25 @@ L->T/W; the flip is not real to a human reader.
   /tmp/r80_singleton_sweep4.log. Acceptance: only random_bipartite_60 moves vs
   the 74/108 store (its honest reversion); zero other movers. Results pending
   -- architect to harvest.
+
+## Evidence -- r80 singleton guard threshold RECALIBRATED to 8x (round 3)
+
+* Round-2 verdict (architect, fling measurements on the OLD store positions):
+  the 3x isolated-node threshold conflated peripheral placement with
+  catastrophic fling. Measured isolate distances as multiples of median
+  centroid distance: random_bipartite_60 pathology 15-21x; multi_component_80
+  isolates a sane 2.8-2.9x; er_500 isolates 0.5-4.8x (peripheral, visually
+  fine). Max legitimate observed 5.4x vs min pathological 15.1x.
+* Change: DEGENERACY_MAX_ISOLATED_SPREAD_RATIO 3.0 -> 8.0
+  (native_undirected.py constants block). 8x sits in the measured separation
+  gap with margin both ways; the pathology class is order-of-magnitude fling,
+  not peripheral placement. Rationale documented at the constant.
+* Tests: new parametric helper builds a 50-node ring + one degree-0 isolate at
+  a chosen centroid-distance ratio. A ~5x isolate PASSES the guard (peripheral
+  band); a ~15x isolate is REJECTED (pathology band). Each test asserts its
+  measured ratio sits in the intended band before checking the verdict.
+  Full file: 26 passed. ruff clean.
+* Gate sweep relaunched: default output dir, --dagua-only --fresh, log
+  /tmp/r80_singleton_sweep5.log. Acceptance: EXACTLY ONE mover vs the
+  committed 74/108 store -- random_bipartite_60's honest reversion. Results
+  pending -- architect to harvest.

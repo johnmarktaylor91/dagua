@@ -76,7 +76,13 @@ DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO = 0.5
 # global max/median radius test also rejects legitimately-dispersed structure
 # (multi_component_80 -11.0, er_500 real win -> loss -4.9, scale_free_ba_120
 # -1.9). Non-isolated spread is legitimate layout structure and is not judged.
-DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 3.0
+# Threshold 8.0: the pathology class is ORDER-OF-MAGNITUDE fling, not
+# peripheral placement. Measured on the r80 store: legitimate isolate
+# placements reach 5.4x median at most (er_500 periphery 0.5-4.8x,
+# multi_component_80 tiles 2.8-2.9x), while the pathological
+# random_bipartite_60 fling starts at 15.1x (measured 15-21x). 8x sits in
+# the measured separation gap with margin on both sides.
+DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 8.0
 
 
 @dataclass(frozen=True)
