@@ -259,9 +259,9 @@ def test_contest_registers_both_cleanup_variants() -> None:
     scored_positions: list[torch.Tensor] = []
     original_score = nu._score_undirected_candidate
 
-    def spy(pos, problem, cluster_ids):
+    def spy(pos, problem, cluster_ids, aesthetic_profile=None):
         scored_positions.append(pos.detach().clone())
-        return original_score(pos, problem, cluster_ids)
+        return original_score(pos, problem, cluster_ids, aesthetic_profile)
 
     original_project = nu._project_candidate
     project_calls: list[bool] = []
