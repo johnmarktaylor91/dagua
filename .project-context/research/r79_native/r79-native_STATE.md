@@ -269,3 +269,11 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   (recommended c: preset + dict override).
 - REMAINING: holdout verdict (recovery ~1.5h) -> P14; singleton sweep gate; docs rebuild; final summary + memory
   + branch sweep + merge proposal.
+
+## 2026-07-10 ~07:15: HOLDOUT VERDICT -- 200/271 (73.8%) BEST-OR-TIED, GENERALIZATION CONFIRMED (P14)
+- rome 65.1% (33/66/53), north 91.6% (90/8/9), suitesparse 25.0% (3/0/9). Holdout 73.8% > iteration 68.5%:
+  NO overfitting -- the anti-overfit discipline (per-graph runtime adaptation, zero holdout tuning) paid off.
+- North result = layered core world-class out-of-sample. Mesh weakness reproduces exactly as predicted (honest).
+- Singleton-fix gate sweep relaunched (default store dir; custom dir lacked frozen externals). Pending.
+- Remaining: singleton gate + merge + trunk re-anchor; docs rebuild; final summary/memory/branch-sweep/merge
+  proposal. S8 awaits JMT API pick.
