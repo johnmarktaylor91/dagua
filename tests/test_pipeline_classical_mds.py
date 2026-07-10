@@ -317,6 +317,37 @@ class TestClassicalMDSPipelineFidelity:
 
         assert torch.equal(positions, expected)
 
+    def test_igraph_fidelity_survives_degenerate_top_eigenspace(self) -> None:
+        """A 1-50-1 layered graph must not collapse to an all-zeros layout.
+
+        The double-centered Gram matrix of this graph has a top eigenvalue of
+        multiplicity 50. LAPACK ``dsyevr`` with ``range='I'`` can silently
+        return zero eigenpairs (``m = 0`` with ``info == 0``) on that spectrum
+        depending on workspace size, and SciPy's ``eigh`` surfaces that as
+        empty arrays without raising. Regression guard for the r78
+        ``wide_single_layer_1_50_1`` all-zeros bug.
+        """
+        hub_edges = [(0, mid) for mid in range(1, 51)] + [(mid, 51) for mid in range(1, 51)]
+        edge_index = _edge_index_from_edges(hub_edges)
+
+        positions = layout_classical_mds_pipeline(
+            edge_index=edge_index,
+            num_nodes=52,
+            seed=100,
+            igraph_fidelity=True,
+            fidelity_dtype=torch.float64,
+        )
+
+        assert positions.shape == (52, 2)
+        assert torch.isfinite(positions).all()
+        norm = torch.linalg.norm(positions)
+        # igraph scaling normalizes the raw embedding: two sqrt(2)-length
+        # columns give Frobenius norm 2, scaled by 50 -> 100.
+        assert torch.isclose(norm, torch.tensor(100.0, dtype=torch.float64))
+        # Rank-2: both output columns must be non-degenerate.
+        assert torch.linalg.norm(positions[:, 0]) > 1.0
+        assert torch.linalg.norm(positions[:, 1]) > 1.0
+
     def test_build_classical_mds_pipeline_matches_classic_on_complete_graph(self) -> None:
         """The raw pipeline object should match classic classical MDS on a dense graph."""
         edge_index = _complete_edge_index(5)
