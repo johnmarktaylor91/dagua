@@ -22,6 +22,8 @@ from dagua.layout.ops.native_stress import (
     ResetConvergence,
     RunWarmStartStressSGDApproximateSchedule,
     RunWarmStartStressSGDApproximateScheduleConfig,
+    ScaleStressTargetDistances,
+    ScaleStressTargetDistancesConfig,
 )
 from dagua.layout.ops.pipelines._native_shared import (
     _extract_component_problem,
@@ -107,6 +109,18 @@ class NativeStressConfig:
         where heavy edges mean "close," not "far"; P3B2_STRESS_FORENSICS.md
         Ranked Fix 4). Predicate-gated: only that challenger sets this to
         ``"inverse"``, so default-path graphs are unaffected.
+    target_unit : {"hops", "points"}, default="hops"
+        Unit of the stress target distances. ``"hops"`` preserves today's
+        behavior (bare graph distances; adjacent pairs get node radii added
+        by size-aware inflation while non-adjacent pairs stay at 2-5 units
+        against ~28pt node boxes -- an internal contradiction that forces
+        the raw solve into overlap soup; r81-P2 measured 2838/7140 pairs
+        overlapping on sbm_4x30). ``"points"`` scales every target
+        representation by the mean adjacent summed node radii via
+        ``ScaleStressTargetDistances`` before inflation, so the optimizer
+        solves in the same unit the node boxes live in (measured composite
+        gains +3..+49 on the undirected loser class; opt-in, default path
+        bit-identical).
     """
 
     steps: int = 0
@@ -125,6 +139,7 @@ class NativeStressConfig:
     target_aspect: Optional[float] = None
     seed: int = 42
     weight_transform: str = "none"
+    target_unit: str = "hops"
 
 
 def _resolve_native_stress_config(
@@ -154,6 +169,8 @@ def _resolve_native_stress_config(
         raise ValueError("repulsion_mode must be 'none', 'fa2_degree', or 'linlog'.")
     if base.weight_transform not in {"none", "inverse"}:
         raise ValueError("weight_transform must be 'none' or 'inverse'.")
+    if base.target_unit not in {"hops", "points"}:
+        raise ValueError("target_unit must be 'hops' or 'points'.")
     if base.sample_size != "auto" and (
         not isinstance(base.sample_size, int) or base.sample_size <= 0
     ):
@@ -196,6 +213,7 @@ def _resolve_native_stress_config(
         target_aspect=base.target_aspect,
         seed=base.seed,
         weight_transform=base.weight_transform,
+        target_unit=base.target_unit,
     )
 
 
@@ -234,6 +252,19 @@ def build_native_stress_pipeline(
             [0.0, 0.06 if resolved.repulsion_mode == "fa2_degree" else 0.10],
         )
 
+    # Point-unit target scaling (r81-P2): inserted only when opted in so the
+    # default "hops" pipeline op list stays literally identical. Each stage
+    # that materializes targets gets its own scaling pass BEFORE size-aware
+    # inflation; the SMACOF polish picks the unit up from state.extras.
+    point_unit = resolved.target_unit == "points"
+
+    def _unit_scale_op(*targets: str) -> list:
+        return (
+            [ScaleStressTargetDistances(ScaleStressTargetDistancesConfig(targets=targets))]
+            if point_unit
+            else []
+        )
+
     return Pipeline(
         [
             BuildAdjacency(
@@ -247,6 +278,7 @@ def build_native_stress_pipeline(
             ),
             PivotSelection(PivotSelectionConfig(n_pivots=resolved.n_pivots)),
             PivotDistanceQueries(),
+            *_unit_scale_op("pivot"),
             InflateStressTargetDistances(
                 InflateStressTargetDistancesConfig(
                     enabled=resolved.size_aware,
@@ -257,6 +289,7 @@ def build_native_stress_pipeline(
             PivotMDSFinalizePositions(),
             InitializeStressSGDState(independent_shuffle_rng=True),
             PrepareStressSGDTerms(max_exact_nodes=resolved.max_exact_nodes),
+            *_unit_scale_op("exact"),
             InflateStressTargetDistances(
                 InflateStressTargetDistancesConfig(
                     enabled=resolved.size_aware,
@@ -280,6 +313,7 @@ def build_native_stress_pipeline(
                 batch_size=128,
                 criteria_schedules=criteria_schedules,
             ),
+            *_unit_scale_op("sgd2"),
             _RunSGD2MultiOptimization(
                 steps=resolved.late_steps,
                 lr=0.08,
@@ -487,6 +521,7 @@ def _config_from_public(
         seed=int(public_seed if public_seed is not None else 42),
         target_aspect=public_target_aspect,
         weight_transform=str(params.get("weight_transform", "none")),
+        target_unit=str(params.get("target_unit", "hops")),
     )
     return _resolve_native_stress_config(
         num_nodes=num_nodes,
