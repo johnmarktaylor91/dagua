@@ -900,7 +900,13 @@ def external_layout_result(
     Tuple[CompetitorResult | None, Dict[str, Any] | None]
         Successful result, or an error row.
     """
-    context = mp.get_context("fork")
+    # dagua's child runs the torch optimizer: fork-after-torch-import
+    # deadlocks (known gotcha, see ba1dc95 spawn-context pool fix in the
+    # main repo). r80 holdout symptom: first dagua row OK (forked before
+    # the parent imported torch for scoring), every later fork hung until
+    # timeout. External engines exec subprocess binaries and stay on fork
+    # (spawn would cost ~10s torch re-import per child for nothing).
+    context = mp.get_context("spawn" if engine_name == "dagua" else "fork")
     temp_path = output_dir / "positions" / f".{safe_component(graph.name)}__{engine_name}.child.pt"
     result_path = output_dir / "positions" / f".{safe_component(graph.name)}__{engine_name}.json"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
