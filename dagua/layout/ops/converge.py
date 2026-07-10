@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import ClassVar, Optional, Tuple
 
@@ -15,6 +16,7 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 _PREV_POS_KEY = "converge_prev_pos"
 _FR_LAST_DELTA_POS_KEY = "fr_last_delta_pos"
 _STALL_LAST_LOSS_KEY = "stall_last_loss"
+_STALL_START_TIME_KEY = "stall_start_time_s"
 
 
 def _relative_window_difference(loss_window: list[float]) -> float:
@@ -494,11 +496,15 @@ class StallCountConfig:
         Relative-improvement threshold below which a step counts as stalled.
     denominator_floor : float, default=1e-12
         Safety floor used when normalizing the relative-loss change.
+    time_budget_s : float, optional
+        Wall-clock budget in seconds. When exceeded after a step, convergence
+        is set so the current ``Repeat`` exits and downstream polish runs.
     """
 
     limit: int = 5
     rel_threshold: float = 1.0e-4
     denominator_floor: float = 1.0e-12
+    time_budget_s: Optional[float] = None
 
 
 @register_op
@@ -569,6 +575,16 @@ class StallCount(Op):
             raise ValueError("StallCount limit must be non-negative.")
         if self.config.rel_threshold < 0.0:
             raise ValueError("StallCount rel_threshold must be non-negative.")
+        if self.config.time_budget_s is not None and self.config.time_budget_s <= 0.0:
+            raise ValueError("StallCount time_budget_s must be positive when provided.")
+
+        start_time = state.extras.get(_STALL_START_TIME_KEY)
+        now = time.monotonic()
+        if start_time is None:
+            state.extras[_STALL_START_TIME_KEY] = now
+        elif self.config.time_budget_s is not None:
+            elapsed = now - float(start_time)
+            state.converged = state.converged or elapsed >= float(self.config.time_budget_s)
 
         current_loss = float(state.prev_loss)
         previous_loss = state.extras.get(_STALL_LAST_LOSS_KEY)

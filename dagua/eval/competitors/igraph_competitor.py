@@ -1,4 +1,12 @@
-"""igraph competitor adapters for selected layered and force-directed layouts."""
+"""igraph competitor adapters for selected layered and force-directed layouts.
+
+Size policy (r80-P6): igraph's layout algorithms do not accept per-node
+size hints, so these adapters are SIZE-BLIND regardless of
+``dagua.eval.size_policy.size_aware_externals()``. Their positions are
+still scored against dagua's real label-measured ``node_sizes`` (like every
+other engine), so their overlap term simply reflects that they were never
+told how big the nodes actually are.
+"""
 
 from __future__ import annotations
 
