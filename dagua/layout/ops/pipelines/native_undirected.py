@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
 
 import torch
 
@@ -52,6 +52,9 @@ from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from dagua.layout.aesthetics import AestheticProfile
 
 # Above this size the contest is skipped and the incumbent runs alone.
 # Documented cap: the Stage-1 probe only produced candidate data up to 500
@@ -213,6 +216,7 @@ def _score_undirected_candidate(
     pos: torch.Tensor,
     problem: LayoutProblem,
     cluster_ids: Optional[torch.Tensor],
+    aesthetic_profile: Optional["AestheticProfile"] = None,
 ) -> float:
     """Score one candidate with the benchmark's honest undirected composite.
 
@@ -222,6 +226,14 @@ def _score_undirected_candidate(
     self-deterministic for fixed positions (sampled crossing rate seeds its
     own generator), so selection is reproducible.
 
+    r80-S8: when ``aesthetic_profile`` is ``None`` (the default, unset knob)
+    this calls ``composite_auto`` exactly as before -- no wrapper, no extra
+    float ops, bit-identical to pre-knob behavior. When a profile is
+    resolved, every candidate in the contest is scored with
+    ``dagua.layout.aesthetics.reweighted_composite`` and that SAME profile
+    object (see ``layout_native_undirected_portfolio``), which is required
+    for contest fairness.
+
     Parameters
     ----------
     pos : torch.Tensor
@@ -230,6 +242,10 @@ def _score_undirected_candidate(
         Problem carrying topology and node sizes.
     cluster_ids : torch.Tensor, optional
         Optional per-node cluster ids for the cluster-separation term.
+    aesthetic_profile : AestheticProfile, optional
+        Resolved aesthetic-priority profile shared by every candidate in
+        the current contest. ``None`` preserves the exact pre-knob scoring
+        path.
 
     Returns
     -------
@@ -252,7 +268,12 @@ def _score_undirected_candidate(
     numeric = {
         key: float(value) for key, value in metrics.items() if isinstance(value, (int, float))
     }
-    return float(composite_auto(numeric, is_semantically_directed=False))
+    if aesthetic_profile is None:
+        return float(composite_auto(numeric, is_semantically_directed=False))
+
+    from dagua.layout.aesthetics import reweighted_composite
+
+    return reweighted_composite(numeric, is_directed=False, profile=aesthetic_profile)
 
 
 # Convergent-cleanup pass budget for challenger candidates. The convergent
@@ -549,6 +570,15 @@ def layout_native_undirected_portfolio(
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
         return incumbent_pos
 
+    # r80-S8: the aesthetic profile was resolved ONCE in
+    # prepare_pipeline_config and stashed on this (already-prepared) config.
+    # Reusing that exact object -- rather than re-resolving here -- is what
+    # guarantees every candidate in this contest is scored under the
+    # identical profile (fairness). `None` when the knob is unset.
+    aesthetic_profile: Optional["AestheticProfile"] = getattr(
+        config, "_dagua_native_aesthetic_profile", None
+    )
+
     cluster_ids = _build_cluster_ids(problem)
     scores: Dict[str, float] = {}
     positions: Dict[str, torch.Tensor] = {}
@@ -556,7 +586,9 @@ def layout_native_undirected_portfolio(
     # Candidate A: the incumbent is ALWAYS eligible (degeneracy guard applies
     # to challengers only).
     positions["incumbent"] = incumbent_pos
-    scores["incumbent"] = _score_undirected_candidate(incumbent_pos, problem, cluster_ids)
+    scores["incumbent"] = _score_undirected_candidate(
+        incumbent_pos, problem, cluster_ids, aesthetic_profile
+    )
 
     seed = int(problem.seed) if problem.seed is not None else 42
 
@@ -577,7 +609,9 @@ def layout_native_undirected_portfolio(
             if degenerate:
                 continue
             positions[name + suffix] = projected
-            scores[name + suffix] = _score_undirected_candidate(projected, problem, cluster_ids)
+            scores[name + suffix] = _score_undirected_candidate(
+                projected, problem, cluster_ids, aesthetic_profile
+            )
 
     # Candidate B: our sfdp reimplementation + projection. Weighted graphs
     # pass edge weights through unchanged (the pipeline handles them).
