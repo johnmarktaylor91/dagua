@@ -128,6 +128,7 @@ class TestProjectOverlaps:
             padding: float,
             iterations: int,
             layer_index: object,
+            convergent: bool = False,
         ) -> None:
             """Raise CUDA OOM only for the initial GPU execution attempt."""
             if positions.device.type == "cuda":
@@ -138,6 +139,7 @@ class TestProjectOverlaps:
                 padding,
                 iterations,
                 layer_index,
+                convergent=convergent,
             )
 
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
@@ -177,3 +179,95 @@ class TestProjectOverlaps:
 
         assert projected.device.type == "cpu"
         assert count_overlaps(projected, ns) == 0
+
+
+def _make_dense_overlap_clique(
+    num_nodes: int = 30,
+    seed: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build a dense overlap clique: nodes nearly coincident, real label boxes.
+
+    Parameters
+    ----------
+    num_nodes : int, default=30
+        Number of nodes to place near-coincident.
+    seed : int, default=0
+        Deterministic RNG seed for the initial jitter.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Position tensor shaped ``[N, 2]`` (all nodes clustered within a
+        small radius of the origin) and a label-size node-size tensor
+        shaped ``[N, 2]`` (60x20, wider than the initial cluster radius so
+        every pair starts overlapping).
+    """
+    generator = torch.Generator().manual_seed(seed)
+    pos = torch.randn(num_nodes, 2, generator=generator) * 0.5
+    node_sizes = torch.full((num_nodes, 2), 60.0)
+    node_sizes[:, 1] = 20.0
+    return pos, node_sizes
+
+
+class TestExactProjectorConvergence:
+    """Convergence proof for the opt-in convergent exact projector (r80-S2b).
+
+    The legacy `_project_exact` per-pass update uses advanced-index `+=`,
+    which silently drops repeated node indices (last write wins), so dense
+    overlap cliques never converge -- see
+    .project-context/research/r79_native/P3B2_STRESS_FORENSICS.md (sbm_4x30
+    left 37+ overlaps after 50 iterations). ``convergent=True`` opts into
+    the accumulate-then-damp projector that provably reaches zero overlaps
+    on an adversarial 30-node clique where every node starts overlapping
+    every other node. The DEFAULT stays legacy: the r80-S2 sweep showed the
+    convergent trajectory regresses some default-path graphs, so it is
+    exposed only to referee-protected callers (portfolio challengers).
+    """
+
+    def test_dense_clique_converges_to_zero_overlaps(self) -> None:
+        """A 30-node near-coincident clique should fully resolve within budget."""
+        pos, node_sizes = _make_dense_overlap_clique(num_nodes=30, seed=0)
+        initial_overlaps = count_overlaps(pos, node_sizes)
+        assert initial_overlaps > 400  # sanity: this really is a dense clique
+
+        projected = project_overlaps(
+            pos.clone(), node_sizes, padding=2.0, iterations=200, convergent=True
+        )
+
+        final_overlaps = count_overlaps(projected, node_sizes)
+        assert final_overlaps == 0, (
+            f"convergent exact projector left {final_overlaps} overlaps unresolved "
+            f"(started from {initial_overlaps})"
+        )
+
+    def test_dense_clique_converges_across_seeds(self) -> None:
+        """Convergence should not depend on the particular initial jitter."""
+        for seed in range(10):
+            pos, node_sizes = _make_dense_overlap_clique(num_nodes=30, seed=seed)
+            projected = project_overlaps(
+                pos.clone(), node_sizes, padding=2.0, iterations=200, convergent=True
+            )
+            final_overlaps = count_overlaps(projected, node_sizes)
+            assert final_overlaps == 0, f"seed={seed} left {final_overlaps} overlaps unresolved"
+
+    def test_default_path_preserves_legacy_trajectory(self) -> None:
+        """Default (non-convergent) projection must match pre-r80 behavior.
+
+        Regression pin for the r80-S2b revert: the default exact path must
+        keep the legacy last-write-wins trajectory bit-for-bit (the r79
+        benchmark baselines and every default pipeline's tuning assume it),
+        including its known inability to fully resolve dense cliques.
+        """
+        pos, node_sizes = _make_dense_overlap_clique(num_nodes=30, seed=0)
+
+        default_projected = project_overlaps(pos.clone(), node_sizes, padding=2.0, iterations=50)
+        # The legacy trajectory stalls on the dense clique (last-write-wins
+        # drops most of the accumulated push) -- residual overlaps expected.
+        assert count_overlaps(default_projected, node_sizes) > 0
+
+        from dagua.layout.projection import _project_exact_legacy
+
+        legacy = pos.clone()
+        with torch.no_grad():
+            _project_exact_legacy(legacy, node_sizes, 2.0, 50)
+        torch.testing.assert_close(default_projected, legacy, rtol=0.0, atol=0.0)

@@ -146,6 +146,14 @@ def _build_cluster_inner_pipeline(algorithm: str, config: LayoutConfig) -> Optio
         from dagua.layout.ops.pipelines.sfdp import build_sfdp_pipeline
 
         return build_sfdp_pipeline(steps=steps)
+    if normalized == "native_stress":
+        from dagua.layout.ops.base import Pipeline
+        from dagua.layout.ops.cluster_driver import NativeClusterLevelLayout
+
+        return Pipeline(
+            [NativeClusterLevelLayout(algorithm=normalized, config=config)],
+            name=f"{normalized}_cluster_inner",
+        )
     return None
 
 
@@ -1084,12 +1092,21 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             cluster_pos = _layout_cluster_aware_pipeline(graph, config)
             if cluster_pos is not None:
                 return cluster_pos
-            warnings.warn(
-                f"dagua.layout: cluster_aware=True is not yet supported for "
-                f"algorithm={config.algorithm!r}; falling back to legacy flat placement.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            if config.algorithm == "dagua_native":
+                warnings.warn(
+                    "dagua.layout: recursive cluster placement is not yet available for "
+                    "layered/DAG clusters with algorithm='dagua_native'; using flat native "
+                    "placement with cluster losses.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    f"dagua.layout: cluster_aware=True is not yet supported for "
+                    f"algorithm={config.algorithm!r}; falling back to legacy flat placement.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         kwargs: dict[str, object] = {
             "edge_index": graph.edge_index,
             "num_nodes": graph.num_nodes,
@@ -1104,6 +1121,27 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         sig = inspect.signature(pipeline_fn)
         if "steps" in sig.parameters:
             kwargs["steps"] = config.steps
+
+        # Classify once here, where the real DaguaGraph is in scope, so an
+        # explicit graph.is_semantically_directed declaration reaches
+        # routing. Headless pipelines below this point only ever see
+        # tensors, so this is the one place classify_graph can see
+        # ``graph=``; the resulting structure flows down through the
+        # existing graph_structure kwarg the pipelines already accept.
+        # Gated on an explicit declaration so undeclared graphs keep the
+        # exact prior code path (pipelines classify internally, including
+        # after fidelity-mode edge preprocessing, and the heuristic
+        # inference they run is already the fixed one).
+        if (
+            "graph_structure" in sig.parameters
+            and "graph_structure" not in kwargs
+            and getattr(graph, "is_semantically_directed", None) is not None
+        ):
+            kwargs["graph_structure"] = classify_graph(
+                graph.edge_index,
+                graph.num_nodes,
+                graph=graph,
+            )
 
         # Forward user-facing state into the pipeline regardless of how the
         # algorithm was selected. Previously this block was gated on
@@ -1133,6 +1171,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 pos = pipeline_fn(**kwargs)
                 direction = config.direction if config else getattr(graph, "direction", "TB")
                 pos = _apply_direction(pos, direction)
+                pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
                 pos = pos.to(dtype=torch.float32)
                 graph.cache_layout(pos)
                 return pos
@@ -1173,6 +1212,11 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
     # Handle cycles: reverse back edges so the engine sees a DAG
     graph._prepare_for_layout()
+    # Populated in the direct (non-multilevel) branch below, where the real
+    # DaguaGraph is in scope for classification; stays None for the
+    # multilevel path (multilevel_layout classifies internally) so the
+    # relax-pass _layout_inner call below falls back to its prior behavior.
+    legacy_graph_structure: Optional[GraphStructure] = None
     try:
         # Tier 2: Multilevel coarsening for large graphs (N > 20K default)
         # Coarsening is faster than direct optimization at this scale.
@@ -1205,6 +1249,14 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
                 print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
 
+            # Classify with graph= here, where the real DaguaGraph is still
+            # in scope, so an explicit graph.is_semantically_directed
+            # declaration reaches this legacy solve path too. Undeclared
+            # graphs keep the exact prior path (None -> _layout_inner
+            # classifies internally, identical inputs).
+            if getattr(graph, "is_semantically_directed", None) is not None:
+                legacy_graph_structure = classify_graph(edge_index, n, graph=graph)
+
             pos = _layout_inner(
                 edge_index,
                 n,
@@ -1217,6 +1269,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 ),
                 progress_context=ProgressContext(),
                 trace=trace,
+                graph_structure=legacy_graph_structure,
             )
 
         # Force-directed relaxation: re-run with w_dag=0 to soften rigid
@@ -1247,11 +1300,13 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 init_pos=pos,
                 progress_context=ProgressContext(),
                 trace=trace,
+                graph_structure=legacy_graph_structure,
             )
 
         # Apply direction transform
         direction = config.direction if config else graph.direction
         pos = _apply_direction(pos, direction)
+        pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
         graph.cache_layout(pos)
         return pos
     finally:
@@ -1407,7 +1462,7 @@ def _resolve_execution_mode(
     requested_mode = getattr(config, "execution_mode", "auto")
     if requested_mode == "standard":
         return "standard"
-    if device != "cuda" or not torch.cuda.is_available():
+    if device != "cuda":
         return "standard"
     if requested_mode == "subset_gpu":
         return "subset_gpu"
@@ -1658,7 +1713,13 @@ def _layout_inner(
     import time as _time
 
     n = num_nodes
+    if device == "cuda" and not torch.cuda.is_available():
+        device = "cpu"
     execution_mode = _resolve_execution_mode(config, device, n)
+    if device == "cuda" and not torch.cuda.is_available():
+        if getattr(config, "verbose", False):
+            print("[dagua]   Layout solve: CPU fallback (no CUDA)", flush=True)
+        device = "cpu"
     resident_device = "cpu" if execution_mode == "subset_gpu" else device
     resident_device_type = torch.device(resident_device).type
     if node_sizes.ndim == 1:
@@ -3548,6 +3609,42 @@ def _apply_direction(pos: torch.Tensor, direction: str) -> torch.Tensor:
         result[:, 1] = pos[:, 0]
         return result
     return pos
+
+
+def _project_final_hard_pins(pos: torch.Tensor, flex: Any) -> torch.Tensor:
+    """Apply hard LayoutFlex pins to final returned coordinates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    flex : Any
+        Optional ``LayoutFlex``-like object whose ``pins`` keys have already
+        been resolved to integer node indices.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with hard-pinned coordinates overwritten. The input is
+        returned unchanged when no hard pins are present.
+    """
+    pins = getattr(flex, "pins", None)
+    if not pins:
+        return pos
+    projected: Optional[torch.Tensor] = None
+    for node_index, values in pins.items():
+        if not isinstance(node_index, int):
+            continue
+        if node_index < 0 or node_index >= int(pos.shape[0]):
+            continue
+        x_flex, y_flex = values
+        for axis, axis_flex in enumerate((x_flex, y_flex)):
+            if axis_flex is None or not bool(getattr(axis_flex, "is_hard", False)):
+                continue
+            if projected is None:
+                projected = pos.clone()
+            projected[node_index, axis] = float(axis_flex.target)
+    return pos if projected is None else projected
 
 
 def _resolve_flex_ids(config: LayoutConfig, graph) -> LayoutConfig:
