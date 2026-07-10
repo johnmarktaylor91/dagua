@@ -3235,6 +3235,18 @@ def _draw_node_border_path(
         fill_zorder=2.05,
         border_zorder=2.05,
     )
+    from matplotlib.patches import PathPatch
+
+    patch = PathPatch(
+        path,
+        facecolor="none",
+        edgecolor=edgecolor,
+        linewidth=max(float(getattr(style, "stroke_width", 0.0)), 0.0),
+        capstyle=_mpl_capstyle(str(getattr(style, "stroke_cap", "butt"))),
+        joinstyle=str(getattr(style, "stroke_join", "miter")),
+        zorder=2.06,
+    )
+    ax.add_patch(patch)
 
 
 def _requires_custom_node_rendering(style: Any) -> bool:
@@ -5530,6 +5542,19 @@ def _draw_nodes(
                         )
                         border_paths.append(annular_path(border_outer_path, border_inner_path))
                         border_colors.append(edgecolor)
+                        if int(style.border_count) >= 2:
+                            inner_path = inset_shape_path(
+                                shape_spec,
+                                border_width * _DOUBLE_BORDER_INSET_FACTOR,
+                            )
+                            inner_outer_path, inner_inner_path = _solid_border_ring_paths(
+                                shape_spec,
+                                inner_path,
+                                border_width,
+                                border_position,
+                            )
+                            border_paths.append(annular_path(inner_outer_path, inner_inner_path))
+                            border_colors.append(edgecolor)
                     else:
                         border_outer_path, border_inner_path = _solid_border_ring_paths(
                             shape_spec,
@@ -5539,6 +5564,19 @@ def _draw_nodes(
                         )
                         border_paths.append(annular_path(border_outer_path, border_inner_path))
                         border_colors.append(edgecolor)
+                        if int(style.border_count) >= 2:
+                            inner_path = inset_shape_path(
+                                shape_spec,
+                                border_width * _DOUBLE_BORDER_INSET_FACTOR,
+                            )
+                            inner_outer_path, inner_inner_path = _solid_border_ring_paths(
+                                shape_spec,
+                                inner_path,
+                                border_width,
+                                border_position,
+                            )
+                            border_paths.append(annular_path(inner_outer_path, inner_inner_path))
+                            border_colors.append(edgecolor)
                 else:
                     centerline_path = _node_border_centerline_path(
                         shape_spec,

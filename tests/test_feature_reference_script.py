@@ -40,7 +40,7 @@ def test_catalog_counts_match_requested_gallery() -> None:
 
     assert len(module.SHAPE_NAMES) == 20
     assert len(module.FEATURE_NAMES) == 7
-    assert len(module.THEME_REGISTRY) == 44
+    assert len(module.THEME_REGISTRY) == 319
 
 
 def test_build_gallery_writes_expected_structure(tmp_path: Path) -> None:

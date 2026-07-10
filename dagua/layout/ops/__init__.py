@@ -26,7 +26,11 @@ from dagua.layout.ops.base import (
     Pipeline,
     Repeat,
 )
-from dagua.layout.ops.cluster_driver import ClusterAwareDriver, ClusterPlacement
+from dagua.layout.ops.cluster_driver import (
+    ClusterAwareDriver,
+    ClusterPlacement,
+    NativeClusterLevelLayout,
+)
 from dagua.layout.ops.edge_route import (
     BezierControlPointOpt,
     BezierControlPointOptConfig,
@@ -172,6 +176,7 @@ __all__ = [
     # Composition patterns
     "ClusterAwareDriver",
     "ClusterPlacement",
+    "NativeClusterLevelLayout",
     "Pipeline",
     "Repeat",
     "Conditional",
@@ -249,6 +254,7 @@ _EXPECTED_OP_MODULES = (
     "loss_classic",
     "loss_engine",
     "maxent_stress",
+    "native_stress",
     "neulay",
     "optimize",
     "ordering",
@@ -260,6 +266,7 @@ _EXPECTED_OP_MODULES = (
     "sfdp",
     "sgd2_multi",
     "spatial_hash",
+    "scc",
     "stress",
     "stress_sgd",
     "sugiyama",

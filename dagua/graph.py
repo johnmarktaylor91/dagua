@@ -1891,7 +1891,7 @@ class DaguaGraph:
             if parent_id not in node_ids:
                 continue
 
-            for child_label in getattr(entry, "child_layers", None) or []:
+            for child_label in _torchlens_child_labels(entry):
                 if child_label not in node_ids:
                     continue
 
@@ -1956,12 +1956,43 @@ def _classify_torchlens_node_type(entry) -> str:
     return "default"
 
 
+def _torchlens_child_labels(entry: object) -> list[str]:
+    """Return child layer labels across supported TorchLens log schemas.
+
+    Parameters
+    ----------
+    entry : object
+        TorchLens layer entry from either the legacy ``ModelLog`` API or the
+        current ``Trace`` API.
+
+    Returns
+    -------
+    list[str]
+        Child layer labels that can be matched against Dagua node ids.
+    """
+    child_layers = getattr(entry, "child_layers", None)
+    if child_layers is None:
+        child_layers = getattr(entry, "children", None)
+    if child_layers is None:
+        return []
+
+    labels: list[str] = []
+    for child in child_layers:
+        label = getattr(child, "layer_label", child)
+        labels.append(str(label))
+    return labels
+
+
 def _classify_torchlens_edge_type(parent_entry, child_label: str) -> str:
     """Classify edge type from TorchLens conditional branch data."""
     then_children = getattr(parent_entry, "cond_branch_then_children", None) or []
+    if not then_children:
+        then_children = getattr(parent_entry, "conditional_then_children", None) or []
     if child_label in then_children:
         return "then"
     if_children = getattr(parent_entry, "cond_branch_start_children", None) or []
+    if not if_children:
+        if_children = getattr(parent_entry, "conditional_entry_children", None) or []
     if child_label in if_children:
         return "if"
     if getattr(parent_entry, "is_buffer_layer", False):

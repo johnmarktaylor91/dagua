@@ -75,7 +75,14 @@ def test_cytoscape_fcose_variant_params() -> None:
         This test asserts on the adapter's supported parameter names.
     """
     assert CytoscapeFcose.variant_param_names == frozenset(
-        {"quality", "nodeSeparation", "idealEdgeLength", "nodeRepulsion"}
+        {
+            "idealEdgeLength",
+            "nodeRepulsion",
+            "nodeSeparation",
+            "numIter",
+            "quality",
+            "randomize",
+        }
     )
 
 

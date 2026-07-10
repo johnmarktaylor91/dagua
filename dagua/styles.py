@@ -490,6 +490,7 @@ class EdgeStyle:
     label_offset: float = 8.0  # Perpendicular distance from edge centerline
     label_side: str = "auto"  # "auto", "left", or "right" relative to edge direction
     curvature: float = 0.4  # Control point offset factor (0=straight, 1=max curve)
+    avoid_nodes: bool = True  # Deflect bezier control points around non-endpoint node bboxes
     port_style: str = "distributed"  # "distributed" or "center"
     label_avoidance: bool = True  # Whether to avoid label collisions
     taper: bool = False  # Taper edge body from source width to target width

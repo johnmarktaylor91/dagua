@@ -8,6 +8,8 @@ import torch
 from dagua.layout.ops.ordering import (
     BarycenterSweep,
     BarycenterSweepConfig,
+    ClusterContiguousOrder,
+    ClusterContiguousOrderConfig,
     MedianSweep,
     MedianSweepConfig,
     SpectralOrder,
@@ -482,3 +484,59 @@ def test_spectral_order_handles_graphs_without_edges() -> None:
 
     assert result.ordering is not None
     assert result.ordering.tolist() == [0, 1, 0, 1]
+
+
+def test_cluster_contiguous_order_groups_same_layer_cluster_members() -> None:
+    """ClusterContiguousOrder should keep nested cluster members adjacent."""
+    problem = LayoutProblem(
+        edge_index=_edge_index([(0, 4), (1, 5), (2, 6), (3, 7)]),
+        num_nodes=8,
+        clusters={
+            "outer_a": [0, 2, 4, 6],
+            "outer_b": [1, 3, 5, 7],
+            "inner_a": [2, 6],
+            "singleton_a": [0],
+            "singleton_b": [1],
+        },
+        cluster_parents={
+            "outer_a": None,
+            "outer_b": None,
+            "inner_a": "outer_a",
+            "singleton_a": "outer_a",
+            "singleton_b": "outer_b",
+        },
+    )
+    state = SolveState(
+        layers=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.long),
+        ordering=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.long),
+    )
+
+    result = ClusterContiguousOrder(ClusterContiguousOrderConfig()).apply(
+        problem,
+        state,
+        RuntimeContext(),
+    )
+
+    assert result.ordering is not None
+    _assert_layerwise_permutation(state.layers, result.ordering)
+    layer_zero = sorted(range(4), key=lambda node: int(result.ordering[node].item()))
+    assert {0, 2} in ({layer_zero[0], layer_zero[1]}, {layer_zero[2], layer_zero[3]})
+
+
+def test_cluster_contiguous_order_skips_without_clusters() -> None:
+    """ClusterContiguousOrder should leave non-clustered graphs untouched."""
+    problem = LayoutProblem(edge_index=_edge_index([(0, 2), (1, 3)]), num_nodes=4)
+    ordering = torch.tensor([1, 0, 1, 0], dtype=torch.long)
+    state = SolveState(
+        layers=torch.tensor([0, 0, 1, 1], dtype=torch.long),
+        ordering=ordering.clone(),
+    )
+
+    result = ClusterContiguousOrder(ClusterContiguousOrderConfig()).apply(
+        problem,
+        state,
+        RuntimeContext(),
+    )
+
+    assert result.ordering is not None
+    assert torch.equal(result.ordering.cpu(), ordering)
