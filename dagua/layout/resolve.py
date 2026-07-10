@@ -23,6 +23,7 @@ from typing import Any, List, Literal, Optional
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.aesthetics import apply_loss_multipliers, resolve_aesthetic_profile
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.ops.base import LossOp
 from dagua.layout.ops.loss_engine import (
@@ -528,6 +529,17 @@ def prepare_pipeline_config(
     consumes.
     """
     effective_config = copy.copy(config)
+    # r80-S8 aesthetic-priority knob: resolve ONCE per problem instance so
+    # every downstream consumer (the loss-weight multipliers below AND the
+    # undirected-portfolio contest's candidate scorer, which reads the
+    # stashed profile back off this same prepared config) uses the
+    # identical profile object -- required for contest fairness. `None`
+    # (the default, unset path) is a true no-op: no config copy churn beyond
+    # the one already happening here, no wrapper call on the scoring path.
+    aesthetic_profile = resolve_aesthetic_profile(effective_config)
+    if aesthetic_profile is not None:
+        effective_config = apply_loss_multipliers(effective_config, aesthetic_profile)
+    setattr(effective_config, "_dagua_native_aesthetic_profile", aesthetic_profile)
     quality_budgets = resolve_quality_budgets(
         float(getattr(effective_config, "quality", 0.5)),
         num_nodes=num_nodes,
