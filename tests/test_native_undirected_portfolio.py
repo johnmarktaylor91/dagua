@@ -20,6 +20,26 @@ from dagua.layout.ops.pipelines.native_undirected import (
 from dagua.layout.ops.state import LayoutProblem
 
 
+def _centroid_spread_ratio(pos: torch.Tensor) -> float:
+    """Return max-to-median centroid distance for a layout.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Ratio of maximum centroid distance to median centroid distance.
+    """
+    distances = torch.linalg.vector_norm(pos - pos.mean(dim=0, keepdim=True), dim=1)
+    median = float(torch.median(distances).item())
+    if median == 0.0:
+        return 0.0
+    return float(distances.max().item()) / median
+
+
 def _ring_with_chords(num_nodes: int = 10) -> DaguaGraph:
     """Return a small cyclic undirected-declared graph."""
     edges = [(i, (i + 1) % num_nodes) for i in range(num_nodes)]
@@ -108,6 +128,22 @@ def test_healthy_spread_candidate_passes_guard() -> None:
     assert reason == ""
 
 
+def test_far_flung_candidate_is_rejected_by_centroid_spread() -> None:
+    """A challenger with one distant node trips the centroid-spread guard."""
+    num_nodes = 10
+    edges = [(i, (i + 1) % num_nodes) for i in range(num_nodes)]
+    edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    node_sizes = torch.full((num_nodes, 2), 2.0)
+    angles = torch.arange(num_nodes, dtype=torch.float32) * (2 * torch.pi / num_nodes)
+    pos = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * 100.0
+    pos[-1] = torch.tensor([2000.0, 0.0])
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is True
+    assert "centroid spread" in reason
+
+
 def test_collapsed_challenger_loses_to_sane_incumbent() -> None:
     """Contest semantics: a collapsed challenger is rejected BEFORE scoring.
 
@@ -176,6 +212,43 @@ def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
 
     assert pos.shape == (graph.num_nodes, 2)
     assert bool(torch.isfinite(pos).all())
+
+
+def test_random_bipartite_60_isolates_stay_near_core() -> None:
+    """Portfolio layout keeps random_bipartite_60 singleton nodes near the core."""
+    from dagua.eval.graphs import get_test_graphs
+    from dagua.layout import layout
+
+    graph = next(
+        test_graph.graph
+        for test_graph in get_test_graphs()
+        if test_graph.name == "random_bipartite_60"
+    )
+
+    pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+    assert _centroid_spread_ratio(pos) <= 3.0
+
+
+def test_synthetic_singletons_stay_near_connected_component() -> None:
+    """Portfolio layout packs degree-zero singleton nodes near a small path."""
+    from dagua.layout import layout
+
+    path_edges = [(node, node + 1) for node in range(7)]
+    graph = DaguaGraph.from_edge_list(
+        path_edges,
+        num_nodes=10,
+        is_semantically_directed=False,
+    )
+    graph.compute_node_sizes()
+
+    pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+    assert _centroid_spread_ratio(pos) <= 3.0
 
 
 def _dense_clique_problem() -> tuple[torch.Tensor, torch.Tensor, LayoutProblem]:

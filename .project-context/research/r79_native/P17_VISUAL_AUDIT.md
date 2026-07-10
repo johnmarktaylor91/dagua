@@ -172,3 +172,55 @@ L->T/W; the flip is not real to a human reader.
   real_karate, weighted_clusters), (c) edge-to-edge overlap compaction (regular_4_40),
   (d) long sweeping-curve lasso tangles from the router on dispersed layouts
   (heavy_tail, clustered_medium, sbm perimeter).
+
+## Evidence -- r80 singleton challenger fix
+
+* Root cause confirmed:
+  `dagua/layout/ops/pipelines/native_undirected.py:703-739` and `:751-786`
+  previously built the sfdp/neato challengers by solving the full problem in
+  one call. Degree-0 nodes are one-node weak components, so they had no local
+  edge constraints inside those solvers and could be flung far from the core
+  before the composite contest scored the candidate.
+* Fix approach:
+  chose full per-component challenger solving, not singleton-only extraction.
+  `_run_component_packed_challenger` now uses the existing
+  `dagua.layout.ops.coordinate._weak_components`, extracts relabeled child
+  problems with `_extract_component_problem`, solves each non-singleton child
+  with the same challenger algorithm, uses origin positions for singleton
+  children, and reassembles with the existing `_tile_component_positions`
+  tiler. This is lower-risk than inventing a new isolate packer and keeps
+  disconnected non-singleton components consistent with the incumbent tiling
+  lifecycle. The incumbent path was not changed.
+* Degeneracy guard:
+  added `DEGENERACY_MAX_CENTROID_SPREAD_RATIO = 6.0` at
+  `native_undirected.py:75`. `_candidate_is_degenerate` now rejects
+  challengers when max centroid distance is more than 6x the median centroid
+  distance, skipping the check when the median is zero so existing collapse
+  checks handle coincident layouts. This guards future far-flung-node
+  candidates without special-casing `random_bipartite_60`.
+* Unit tests:
+  `.venv/bin/pytest tests/test_native_undirected_portfolio.py -x --tb=short`
+  -> 23 passed, 6 warnings.
+  `.venv/bin/pytest tests/ -k "native_undirected or portfolio or dagua_native" -x --tb=short`
+  -> 44 passed, 3383 deselected, 38 warnings.
+  Project targeted gate
+  `.venv/bin/pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q`
+  -> failed on pre-existing environment CUDA initialization in
+  `test_streaming_coarsen_end_to_end_matches_cpu_layout` after 141 passed and
+  18 skipped; NVIDIA driver 12040 is too old for the installed torch CUDA.
+* Visual sanity:
+  rendered `/tmp/r80_bipartite_fixed.png` through `dagua.draw`.
+  Before audit pathology -> isolates at 3300/4044/4680 units from core,
+  core median radius 167, ratio about 28x.
+  After fix -> bbox=(-1767.026, 1766.800, -1955.352, 2198.621),
+  core_node_count=57, isolate_count=3, median_radius=2274.112,
+  max_radius=2697.651, ratio=1.186. Isolates are nodes [29, 30, 45]
+  with radii [2623.031, 2406.055, 2340.330].
+* Sweep:
+  `--fresh` was confirmed by `scripts/r79_baseline.py --help`. The default
+  output dir refused `--fresh` because 107 dagua rows remained resumable in the
+  staging store, so the sweep was launched against clean output dir
+  `eval_output/r80_singleton_sweep` with:
+  `setsid .venv/bin/python -u scripts/r79_baseline.py --dagua-only --fresh --output-dir eval_output/r80_singleton_sweep > /tmp/r80_singleton_sweep.log 2>&1 < /dev/null &`
+  PID 3398381, log `/tmp/r80_singleton_sweep.log`. Results pending --
+  architect to harvest.
