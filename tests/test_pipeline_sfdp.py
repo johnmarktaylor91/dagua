@@ -10,6 +10,7 @@ import torch
 from dagua.layout.classic.sfdp import layout_sfdp
 from dagua.layout.ops.pipelines.sfdp import (
     _decompose_graphviz_supervariables,
+    _finalize_graphviz_sfdp_component_positions,
     _graphviz_sfdp_coarsen,
     _pack_graphviz_sfdp_component_positions,
     build_sfdp_pipeline,
@@ -21,7 +22,9 @@ from dagua.layout.ops.sfdp import (
     GraphData,
     GraphvizRandom,
     SFDPHierarchyConfig,
+    _average_edge_length,
     _build_graph,
+    _principal_component_rotate,
 )
 from dagua.layout.ops.state import (
     ExecutionPlan,
@@ -449,6 +452,36 @@ class TestSFDPPipelineFidelity:
 
         assert torch.isfinite(packed).all()
         assert float(torch.abs(packed).max().item()) < 500.0
+
+    def test_graphviz_sfdp_component_finalize_matches_prism0_edge_scale(self) -> None:
+        """Disconnected finalization should port Graphviz's ``prism0`` scale."""
+        edge_index = _edge_index_from_edges([(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)])
+        graph = _build_graph(edge_index=edge_index, num_nodes=4, graphviz_order=True)
+        raw_positions = torch.tensor(
+            [[0.1, 0.8], [0.9, 0.2], [0.7, 0.95], [0.25, 0.15]],
+            dtype=torch.float64,
+        )
+        node_sizes = torch.tensor(
+            [[54.0, 36.0], [72.0, 36.0], [54.0, 54.0], [90.0, 36.0]],
+            dtype=torch.float32,
+        )
+        problem = LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=4,
+            node_sizes=node_sizes,
+        )
+        state = SolveState(pos=raw_positions, extras={_GRAPH_KEY: [graph]})
+
+        finalized = _finalize_graphviz_sfdp_component_positions(problem=problem, state=state)
+
+        rotated = _principal_component_rotate(raw_positions)
+        raw_average = _average_edge_length(graph=graph, positions=rotated)
+        mean_half_size_inches = (
+            float(((node_sizes[:, 0] + node_sizes[:, 1]) * 0.5).mean().item()) / 72.0
+        )
+        expected_scale = (4.0 * (mean_half_size_inches + 8.0 / 72.0)) / raw_average
+        expected = (rotated * expected_scale * 72.0).to(dtype=torch.float32)
+        assert torch.equal(finalized, expected)
 
     def test_build_sfdp_pipeline_matches_classic_on_complete_graph(self) -> None:
         """The raw pipeline object should match classic SFDP on a dense graph."""

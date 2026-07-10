@@ -43,7 +43,9 @@ from dagua.layout.ops.sfdp import (
     SFDPHierarchyConfig,
     SFDPProlongateAndRefineLevels,
     SFDPRefineCoarsestLevel,
+    _average_edge_length,
     _build_graph,
+    _principal_component_rotate,
     _prolongate_positions,
 )
 from dagua.layout.ops.state import (
@@ -59,6 +61,9 @@ _DEFAULT_P = -1.0
 _GRAPHVIZ_MAX_CLUSTER_SIZE = 4
 _GRAPHVIZ_FIDELITY_MODE = "graphviz"
 _GRAPHVIZ_MIN_DISTANCE = 1.0e-15
+_GRAPHVIZ_POINTS_PER_INCH = 72.0
+_GRAPHVIZ_PRISM_MARGIN_POINTS = 4.0
+_GRAPHVIZ_PRISM_INITIAL_SCALING = 4.0
 _GRAPHVIZ_SHARED_RNG_KEY = "sfdp_graphviz_shared_rng"
 SFDPFidelityMode = Optional[Union[bool, str]]
 
@@ -1043,16 +1048,21 @@ def _layout_graphviz_sfdp_components(
         )
         state = SolveState(extras={_GRAPHVIZ_SHARED_RNG_KEY: shared_generator})
         ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-        final_state = build_sfdp_pipeline(
+        component_pipeline = build_sfdp_pipeline(
             steps=steps,
             theta=theta,
             repulsive_exponent=repulsive_exponent,
             fidelity_mode=_GRAPHVIZ_FIDELITY_MODE,
             fidelity_dtype=fidelity_dtype,
-        ).apply(problem, state, ctx)
-        if final_state.pos is None:
+        )
+        for op in component_pipeline.ops[:-1]:
+            state = op.apply(problem, state, ctx)
+        if state.pos is None:
             raise RuntimeError("SFDP component pipeline did not produce final positions.")
-        local_pos = final_state.pos
+        local_pos = _finalize_graphviz_sfdp_component_positions(
+            problem=problem,
+            state=state,
+        )
         component_positions.append(local_pos)
         component_edges.append(local_edges)
 
@@ -1063,6 +1073,62 @@ def _layout_graphviz_sfdp_components(
         num_nodes=num_nodes,
         node_sizes=node_sizes,
     )
+
+
+def _finalize_graphviz_sfdp_component_positions(
+    problem: LayoutProblem,
+    state: SolveState,
+) -> torch.Tensor:
+    """Apply Graphviz's default ``prism0`` component scaling.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Component-local inputs. ``node_sizes`` uses point units when present.
+    state : SolveState
+        Component state after force refinement and before Dagua's generic
+        normalization. ``state.pos`` has shape ``[C, 2]`` in Graphviz inches.
+
+    Returns
+    -------
+    torch.Tensor
+        Principal-component-rotated coordinates with shape ``[C, 2]`` in
+        Graphviz points.
+
+    Raises
+    ------
+    ValueError
+        If component positions or the finest Graphviz graph are unavailable.
+
+    Notes
+    -----
+    Graphviz 7.0.5 defaults SFDP to ``overlap=prism0``. Zero prism iterations
+    still apply ``remove_overlap``'s initial scale: the average edge length
+    becomes four times the mean padded node half-size. Component packing then
+    translates these coordinates without rescaling them.
+    """
+    if state.pos is None:
+        raise ValueError("Graphviz SFDP component finalization requires state.pos.")
+    graphs = state.extras.get(_GRAPH_KEY)
+    if not isinstance(graphs, list) or not graphs:
+        raise ValueError("Graphviz SFDP component finalization requires the graph hierarchy.")
+
+    rotated = _principal_component_rotate(state.pos)
+    current_average_edge_length = _average_edge_length(graph=graphs[0], positions=rotated)
+    if problem.node_sizes is None or problem.node_sizes.numel() == 0:
+        mean_half_size_inches = sum(_GRAPHVIZ_DEFAULT_NODE_SIZE) * 0.5
+    else:
+        sizes_points = problem.node_sizes.to(dtype=torch.float64, device="cpu")
+        mean_half_size_inches = (
+            float(((sizes_points[:, 0] + sizes_points[:, 1]) * 0.5).mean().item())
+            / _GRAPHVIZ_POINTS_PER_INCH
+        )
+    padded_half_size_inches = mean_half_size_inches + (
+        2.0 * _GRAPHVIZ_PRISM_MARGIN_POINTS / _GRAPHVIZ_POINTS_PER_INCH
+    )
+    target_average_edge_length = _GRAPHVIZ_PRISM_INITIAL_SCALING * padded_half_size_inches
+    scale = target_average_edge_length / current_average_edge_length
+    return (rotated * scale * _GRAPHVIZ_POINTS_PER_INCH).to(dtype=torch.float32)
 
 
 def _pack_graphviz_sfdp_component_positions(
