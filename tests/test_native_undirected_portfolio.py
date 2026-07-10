@@ -12,10 +12,15 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline_baseline,
 )
 from dagua.layout.ops.pipelines.native_undirected import (
+    BALANCED_LARGE_REFINEMENT_STEPS,
     DEGENERACY_MAX_ISOLATED_SPREAD_RATIO,
+    FULL_REFINEMENT_STEPS,
+    MAX_CONTEST_NODES,
     NEATO_QUALITY_THRESHOLD,
     _candidate_is_degenerate,
+    _candidate_refinement_steps,
     _neato_in_contest,
+    _project_candidate_prism,
     _repair_flung_isolates,
     _score_undirected_candidate,
 )
@@ -336,12 +341,7 @@ def test_collapsed_challenger_loses_to_sane_incumbent() -> None:
 
 
 def test_neato_contest_quality_gate() -> None:
-    """Candidate C joins at quality >= high, or at balanced for small graphs.
-
-    The balanced-quality node cap is probe-derived: every balanced-quality
-    contest win for neato in P8_PORTFOLIO_PROBE.md sits at n <= 80 where its
-    SMACOF loop converges in seconds; above the cap it is slow and never won.
-    """
+    """Candidate C joins throughout the contest cap with scheduled work."""
     from dagua.layout.ops.pipelines.native_undirected import NEATO_BALANCED_NODE_CAP
 
     balanced = LayoutConfig(seed=42, quality="balanced")
@@ -351,7 +351,38 @@ def test_neato_contest_quality_gate() -> None:
     assert _neato_in_contest(balanced, NEATO_BALANCED_NODE_CAP) is True
     assert _neato_in_contest(high, NEATO_BALANCED_NODE_CAP + 1) is True
     assert NEATO_QUALITY_THRESHOLD == 0.75
-    assert NEATO_BALANCED_NODE_CAP == 80
+    assert NEATO_BALANCED_NODE_CAP == MAX_CONTEST_NODES
+
+
+def test_candidate_refinement_schedule_preserves_high_quality() -> None:
+    """Large balanced solves are bounded while high quality keeps 500 steps."""
+    balanced = LayoutConfig(seed=42, quality="balanced")
+    high = LayoutConfig(seed=42, quality="high")
+
+    assert _candidate_refinement_steps(balanced, 150) == FULL_REFINEMENT_STEPS
+    assert _candidate_refinement_steps(balanced, 500) == BALANCED_LARGE_REFINEMENT_STEPS
+    assert _candidate_refinement_steps(high, 500) == FULL_REFINEMENT_STEPS
+
+
+def test_prism_candidate_finishes_residual_overlaps_to_zero() -> None:
+    """PRISM plus its residual scale loop reaches literal zero overlaps."""
+    positions = torch.tensor(
+        [[0.0, 0.0], [9.0, 0.0], [18.0, 0.0], [27.0, 0.0]], dtype=torch.float32
+    )
+    node_sizes = torch.full((4, 2), 20.0)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    projected = _project_candidate_prism(positions, problem)
+
+    from dagua.metrics import count_overlaps
+
+    assert count_overlaps(projected.cpu(), node_sizes) == 0
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
