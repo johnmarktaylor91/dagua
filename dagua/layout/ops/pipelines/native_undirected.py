@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Callable, ClassVar, Dict, Optional, Tuple
+from typing import ClassVar, Dict, Optional, Tuple
 
 import torch
 
@@ -175,64 +175,99 @@ def _candidate_is_degenerate(
     # Isolated-node fling check. Judged for degree-0 nodes ONLY: a global
     # max/median test over all nodes also rejected legitimately-dispersed
     # candidates (multi-component tilings, ER periphery) in the r80 gate
-    # sweep. Skipped when every node is isolated (no connected core exists
-    # to be far from) or when the median distance is zero (true collapse is
-    # already covered by checks 1-2).
-    isolated_mask = torch.ones(n, dtype=torch.bool)
-    if edge_index.numel() > 0:
-        isolated_mask[edge_index.reshape(-1).to(dtype=torch.long)] = False
-    if bool(isolated_mask.any()) and not bool(isolated_mask.all()):
-        centroid = pos.mean(dim=0, keepdim=True)
-        centroid_distances = torch.linalg.vector_norm(pos - centroid, dim=1)
-        median_distance = float(torch.median(centroid_distances).item())
-        if median_distance > 0.0:
-            max_isolated_distance = float(centroid_distances[isolated_mask].max().item())
-            if max_isolated_distance > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO * median_distance:
-                return True, (
-                    f"isolated-node centroid spread {max_isolated_distance:.1f} > "
-                    f"{DEGENERACY_MAX_ISOLATED_SPREAD_RATIO} x median distance "
-                    f"{median_distance:.1f}"
-                )
+    # sweep. Not applicable (ratio 0.0) when there are no isolates, every
+    # node is isolated, or the median distance is zero (true collapse is
+    # already covered by checks 1-2). Normally pre-empted by the
+    # _repair_flung_isolates repair path; kept as a backstop should a
+    # repaired (or unrepairable single-component) candidate still fling.
+    spread_ratio = _max_isolated_spread_ratio(pos, edge_index)
+    if spread_ratio > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO:
+        return True, (
+            f"isolated-node centroid spread {spread_ratio:.1f}x median > "
+            f"{DEGENERACY_MAX_ISOLATED_SPREAD_RATIO}x"
+        )
     return False, ""
 
 
-ChallengerSolver = Callable[
-    [torch.Tensor, int, Optional[torch.Tensor], Optional[torch.Tensor]],
-    torch.Tensor,
-]
+def _max_isolated_spread_ratio(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
+    """Return the worst isolated-node centroid-distance / median-distance ratio.
 
-
-def _run_component_packed_challenger(
-    problem: LayoutProblem,
-    state: SolveState,
-    solver: ChallengerSolver,
-    node_sep: float,
-) -> torch.Tensor:
-    """Run one challenger per weak component and tile results in parent space.
+    The exact quantity the isolated-fling guard and the repair trigger
+    evaluate. Returns ``0.0`` when the check does not apply: no isolated
+    (degree-0) nodes, ALL nodes isolated (no connected core exists to be far
+    from), or zero median distance (true collapse is covered by the other
+    degeneracy checks).
 
     Parameters
     ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Max isolated-node centroid distance divided by the median centroid
+        distance over all nodes, or ``0.0`` when not applicable.
+    """
+    n = int(pos.shape[0])
+    if n <= 1:
+        return 0.0
+    isolated_mask = torch.ones(n, dtype=torch.bool)
+    if edge_index.numel() > 0:
+        isolated_mask[edge_index.reshape(-1).to(dtype=torch.long)] = False
+    if not bool(isolated_mask.any()) or bool(isolated_mask.all()):
+        return 0.0
+    centroid = pos.mean(dim=0, keepdim=True)
+    centroid_distances = torch.linalg.vector_norm(pos - centroid, dim=1)
+    median_distance = float(torch.median(centroid_distances).item())
+    if median_distance <= 0.0:
+        return 0.0
+    return float(centroid_distances[isolated_mask].max().item()) / median_distance
+
+
+def _repair_flung_isolates(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    node_sep: float,
+) -> torch.Tensor:
+    """Repair isolated-node fling by re-tiling components; no-op otherwise.
+
+    r80 round 4: packing is a REPAIR, not a default. Unconditional challenger
+    packing regressed er_500 (-4.9, honest win lost) and multi_component_80
+    (-11.0) whose isolates sat at a legitimate 2.8-4.8x median -- rewriting
+    healthy layouts let the composite mildly prefer the original moderate
+    spread. A candidate keeps its raw layout byte-identical UNLESS the
+    isolated-fling trigger fires (any degree-0 node beyond
+    ``DEGENERACY_MAX_ISOLATED_SPREAD_RATIO`` x median centroid distance), in
+    which case each weak component keeps its raw internal geometry and the
+    components are re-tiled adjacent with the shared
+    ``_tile_component_positions`` tiler. Repair-then-rescore: the contest
+    referee sees the repaired version.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Raw challenger positions with shape ``[N, 2]``.
     problem : LayoutProblem
-        Parent layout problem.
-    state : SolveState
-        Parent state used only to seed child component extraction when
-        positions exist.
-    solver : Callable[[torch.Tensor, int, torch.Tensor | None, torch.Tensor | None], torch.Tensor]
-        Challenger algorithm callable. It receives ``edge_index``,
-        ``num_nodes``, ``node_sizes``, and ``edge_weights`` for one component.
+        Parent layout problem (edge_index / num_nodes are read).
     node_sep : float
         Node separation passed through to the shared component tiler.
 
     Returns
     -------
     torch.Tensor
-        Full parent positions with shape ``[N, 2]``.
+        ``pos`` unchanged when the trigger does not fire, else the repaired
+        full-layout positions with shape ``[N, 2]``.
     """
+    if _max_isolated_spread_ratio(pos, problem.edge_index) <= (
+        DEGENERACY_MAX_ISOLATED_SPREAD_RATIO
+    ):
+        return pos
+
     from dagua.layout.ops.coordinate import _weak_components
-    from dagua.layout.ops.pipelines._native_shared import (
-        _extract_component_problem,
-        _tile_component_positions,
-    )
+    from dagua.layout.ops.pipelines._native_shared import _tile_component_positions
     from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
 
     components = _weak_components(
@@ -240,45 +275,15 @@ def _run_component_packed_challenger(
         int(problem.num_nodes),
     )
     if len(components) <= 1:
-        return solver(
-            problem.edge_index,
-            int(problem.num_nodes),
-            problem.node_sizes,
-            problem.edge_weights,
-        )
-
+        return pos
     component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
     for component_nodes_list in components:
         component_nodes = torch.tensor(
             component_nodes_list,
             dtype=torch.long,
-            device=problem.edge_index.device,
+            device=pos.device,
         )
-        child_problem, _child_state, parent_indices, _child_layers = _extract_component_problem(
-            problem,
-            state,
-            component_nodes,
-        )
-        if child_problem.num_nodes <= 1:
-            child_pos = torch.zeros(
-                (child_problem.num_nodes, 2),
-                dtype=torch.float32,
-                device=problem.edge_index.device,
-            )
-        else:
-            child_pos = solver(
-                child_problem.edge_index,
-                int(child_problem.num_nodes),
-                child_problem.node_sizes,
-                child_problem.edge_weights,
-            )
-        component_results.append((parent_indices, child_pos))
-
-    # The incumbent's decomposition predicate intentionally skips the
-    # dominant-component-plus-singletons case to preserve historical default
-    # geometry. Challenger packing is independent of that guarantee, so all
-    # weak components are tiled here to keep unconstrained isolates near the
-    # solved core.
+        component_results.append((component_nodes, pos[component_nodes]))
     tiled_positions = _tile_component_positions(component_results, node_sep=node_sep)
     fit_state = AspectRatioFit(AspectRatioFitConfig()).apply(
         problem,
@@ -286,7 +291,7 @@ def _run_component_packed_challenger(
         RuntimeContext(),
     )
     if fit_state.pos is None:
-        raise RuntimeError("challenger component tiling did not produce positions.")
+        raise RuntimeError("isolate-fling repair did not produce positions.")
     return fit_state.pos.detach()
 
 
@@ -698,6 +703,13 @@ def layout_native_undirected_portfolio(
     challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
     def _add_challenger(name: str, raw_pos: torch.Tensor) -> None:
+        # Repair, not default (r80 round 4): the candidate keeps its raw
+        # layout byte-identical unless the isolated-fling trigger fires, in
+        # which case the flung singletons are re-tiled adjacent to the core
+        # before projection and the referee scores the repaired version.
+        # Applied at this shared entry so every challenger family (sfdp,
+        # neato, cluster_sfdp, weighted_similarity) gets the same backstop.
+        raw_pos = _repair_flung_isolates(raw_pos, problem, challenger_node_sep)
         # Both cleanup variants enter the contest as separate candidates --
         # never replace one with the other (r80-S2b bisect: replacing the
         # legacy variant with the convergent one silently removed the
@@ -727,44 +739,17 @@ def layout_native_undirected_portfolio(
     try:
         from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
 
-        def _run_sfdp(
-            edge_index: torch.Tensor,
-            num_nodes: int,
-            node_sizes: Optional[torch.Tensor],
-            edge_weights: Optional[torch.Tensor],
-        ) -> torch.Tensor:
-            """Run the sfdp challenger on one weak component.
-
-            Parameters
-            ----------
-            edge_index : torch.Tensor
-                Component edge tensor with shape ``[2, E]``.
-            num_nodes : int
-                Component node count.
-            node_sizes : torch.Tensor, optional
-                Component node sizes with shape ``[N, 2]``.
-            edge_weights : torch.Tensor, optional
-                Component edge weights with shape ``[E]``.
-
-            Returns
-            -------
-            torch.Tensor
-                Component positions with shape ``[N, 2]``.
-            """
-            return layout_sfdp_pipeline(
-                edge_index=edge_index,
-                num_nodes=num_nodes,
-                node_sizes=node_sizes,
-                steps=max(int(getattr(config, "steps", 0) or 0), 0),
-                seed=seed,
-                edge_weights=edge_weights,
-            )
-
-        sfdp_pos = _run_component_packed_challenger(
-            problem,
-            state,
-            _run_sfdp,
-            node_sep=challenger_node_sep,
+        # Raw full-problem solve (round 4): per-component packed solving was
+        # tried and regressed healthy multi-component candidates; any
+        # isolate fling in this raw output is repaired conditionally inside
+        # _add_challenger.
+        sfdp_pos = layout_sfdp_pipeline(
+            edge_index=problem.edge_index,
+            num_nodes=n,
+            node_sizes=problem.node_sizes,
+            steps=max(int(getattr(config, "steps", 0) or 0), 0),
+            seed=seed,
+            edge_weights=problem.edge_weights,
         )
         _add_challenger("sfdp", sfdp_pos)
     except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
@@ -775,43 +760,14 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.neato import layout_neato_pipeline
 
-            def _run_neato(
-                edge_index: torch.Tensor,
-                num_nodes: int,
-                node_sizes: Optional[torch.Tensor],
-                edge_weights: Optional[torch.Tensor],
-            ) -> torch.Tensor:
-                """Run the neato challenger on one weak component.
-
-                Parameters
-                ----------
-                edge_index : torch.Tensor
-                    Component edge tensor with shape ``[2, E]``.
-                num_nodes : int
-                    Component node count.
-                node_sizes : torch.Tensor, optional
-                    Component node sizes with shape ``[N, 2]``.
-                edge_weights : torch.Tensor, optional
-                    Component edge weights with shape ``[E]``.
-
-                Returns
-                -------
-                torch.Tensor
-                    Component positions with shape ``[N, 2]``.
-                """
-                return layout_neato_pipeline(
-                    edge_index=edge_index,
-                    num_nodes=num_nodes,
-                    node_sizes=node_sizes,
-                    seed=seed,
-                    edge_weights=edge_weights,
-                )
-
-            neato_pos = _run_component_packed_challenger(
-                problem,
-                state,
-                _run_neato,
-                node_sep=challenger_node_sep,
+            # Raw full-problem solve (round 4); isolate fling repaired
+            # conditionally inside _add_challenger.
+            neato_pos = layout_neato_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                seed=seed,
+                edge_weights=problem.edge_weights,
             )
             _add_challenger("neato", neato_pos)
         except Exception:  # noqa: BLE001

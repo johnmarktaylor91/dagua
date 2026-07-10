@@ -12,9 +12,11 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline_baseline,
 )
 from dagua.layout.ops.pipelines.native_undirected import (
+    DEGENERACY_MAX_ISOLATED_SPREAD_RATIO,
     NEATO_QUALITY_THRESHOLD,
     _candidate_is_degenerate,
     _neato_in_contest,
+    _repair_flung_isolates,
     _score_undirected_candidate,
 )
 from dagua.layout.ops.state import LayoutProblem
@@ -241,6 +243,54 @@ def test_dispersed_multi_component_passes_spread_guard() -> None:
 
     degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
 
+    assert degenerate is False
+    assert reason == ""
+
+
+def test_repair_leaves_below_threshold_layout_byte_unchanged() -> None:
+    """The repair path is a NO-OP for layouts below the fling threshold.
+
+    r80 round 4: unconditional packing regressed er_500 and
+    multi_component_80 whose isolates sat at a legitimate 2.8-4.8x median.
+    Repair must fire ONLY above ``DEGENERACY_MAX_ISOLATED_SPREAD_RATIO``;
+    below it the candidate's raw layout is returned byte-identical.
+    """
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=510.0)
+    assert 4.0 < ratio < DEGENERACY_MAX_ISOLATED_SPREAD_RATIO  # legitimate band
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=pos.shape[0],
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    repaired = _repair_flung_isolates(pos, problem, node_sep=25.0)
+
+    assert repaired is pos  # byte-identical: the very same tensor, untouched
+    assert torch.equal(repaired, pos)
+
+
+def test_repair_packs_flung_isolate_next_to_core() -> None:
+    """Above the threshold, repair re-tiles the flung isolate near the core."""
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=1600.0)
+    assert ratio > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO  # pathological band
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=pos.shape[0],
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    repaired = _repair_flung_isolates(pos, problem, node_sep=25.0)
+
+    assert repaired.shape == pos.shape
+    assert not torch.equal(repaired, pos)
+    from dagua.layout.ops.pipelines.native_undirected import _max_isolated_spread_ratio
+
+    assert _max_isolated_spread_ratio(repaired, edge_index) <= (
+        DEGENERACY_MAX_ISOLATED_SPREAD_RATIO
+    )
+    degenerate, reason = _candidate_is_degenerate(repaired, node_sizes, edge_index)
     assert degenerate is False
     assert reason == ""
 
