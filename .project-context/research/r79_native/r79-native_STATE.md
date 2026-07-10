@@ -255,3 +255,17 @@ P5 clusters still running (~6.5h, in sweep/test gates).
   loss multipliers; default-identity gate; API shape presented for JMT sign-off BEFORE merge.
 - Remaining after: visual audit (Opus, after S8/renders), docs rebuild, merge decision (coordinate with
   fidelity tab -- no unilateral develop merge).
+
+## 2026-07-10 ~05:20: visual audit verdicts; holdout recovery; singleton blocker fix dispatched
+- Opus visual audit (P17): 1 metric-gamed flip FOUND -- random_bipartite_60 "win" flings 3 degree-0 nodes 28x
+  core radius (composite blind to edgeless nodes). SHIPPING BLOCKER -> fix dispatched (r80/singleton-fix:
+  component packing for singletons + spread guard in portfolio degeneracy check; fake win MAY honestly revert).
+  Also: hexagonal_lattice_42 CLEAN WIN (flagship visual); honest losses confirmed; 4 failure modes -> r81.
+- Holdout data incident: dagua gap-fill's publish SWAPPED away the externals' 2200 rows (staging-replace bug
+  the OOM-fix agent flagged). Recovery: --resume carry VERIFIED on suitesparse (135 rows, dagua carried);
+  rome+north recovery chain running. Spawn fix for dagua children committed 9b329ed (fork-after-torch deadlock;
+  3/3 previously-timed-out graphs now OK).
+- S8 COMPLETE (all gates; efficacy proven; load-nondeterminism bisect bonus). Awaiting JMT API-shape pick
+  (recommended c: preset + dict override).
+- REMAINING: holdout verdict (recovery ~1.5h) -> P14; singleton sweep gate; docs rebuild; final summary + memory
+  + branch sweep + merge proposal.
