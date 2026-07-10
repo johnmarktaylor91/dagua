@@ -42,6 +42,7 @@ sfdp/neato pipelines are the fidelity-campaign reimplementations
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
 
@@ -65,11 +66,24 @@ MAX_CONTEST_NODES = 1500
 # Candidate C (neato) participates when the public quality knob resolves to
 # at least this value ("high" alias = 0.75)...
 NEATO_QUALITY_THRESHOLD = 0.75
-# ...OR, at balanced quality, when the problem is small enough that neato's
-# SMACOF converges within seconds. Probe-derived (see _neato_in_contest and
-# P8_PORTFOLIO_PROBE.md): all balanced-quality neato contest wins are at
-# n <= 80 (max 8s); at n > 80 it costs 40-150s and never won a probe row.
-NEATO_BALANCED_NODE_CAP = 80
+# ...OR at balanced quality throughout the measured contest range. The
+# iteration schedule below bounds larger SMACOF solves instead of excluding
+# the graph families where neato is the reference winner.
+NEATO_BALANCED_NODE_CAP = MAX_CONTEST_NODES
+
+# Candidate refinement schedule. The faithful 500-step SFDP solve costs
+# 9-20s through 150 nodes on the r81 CPU probe. Above that knee, 150 steps
+# keeps the measured 500-node solve near the 60s default envelope; explicit
+# high quality retains the full reference-fidelity budget.
+FULL_REFINEMENT_NODE_CAP = 150
+FULL_REFINEMENT_STEPS = 500
+BALANCED_LARGE_REFINEMENT_STEPS = 150
+NEATO_FULL_ITERATIONS = 200
+NEATO_MEDIUM_NODE_CAP = 250
+NEATO_BALANCED_MEDIUM_ITERATIONS = 40
+NEATO_BALANCED_LARGE_ITERATIONS = 4
+
+_LOGGER = logging.getLogger(__name__)
 
 # Degeneracy guard thresholds (see _candidate_is_degenerate).
 DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO = 0.5
@@ -295,7 +309,29 @@ def _repair_flung_isolates(
     )
     if fit_state.pos is None:
         raise RuntimeError("isolate-fling repair did not produce positions.")
-    return fit_state.pos.detach()
+    repaired = fit_state.pos.detach()
+    # The guard judges isolate radius against the all-node median radius, so
+    # make the repair target that exact geometry after component tiling.
+    # Recompute because moving isolates also shifts the all-node centroid.
+    isolated_mask = torch.ones(int(problem.num_nodes), dtype=torch.bool, device=repaired.device)
+    if problem.edge_index.numel() > 0:
+        isolated_mask[
+            problem.edge_index.reshape(-1).to(device=repaired.device, dtype=torch.long)
+        ] = False
+    target_ratio = DEGENERACY_MAX_ISOLATED_SPREAD_RATIO * 0.95
+    for _iteration in range(4):
+        centroid = repaired.mean(dim=0, keepdim=True)
+        distances = torch.linalg.vector_norm(repaired - centroid, dim=1)
+        median_distance = float(torch.median(distances).item())
+        if median_distance <= 0.0:
+            break
+        limit = target_ratio * median_distance
+        far_mask = isolated_mask & (distances > limit)
+        if not bool(far_mask.any()):
+            break
+        vectors = repaired[far_mask] - centroid
+        repaired[far_mask] = centroid + vectors * (limit / distances[far_mask]).unsqueeze(1)
+    return repaired
 
 
 def _build_cluster_ids(problem: LayoutProblem) -> Optional[torch.Tensor]:
@@ -422,6 +458,145 @@ def _score_undirected_candidate(
 # so this ceiling is only consumed on hard overlap fields; the contest cap
 # (MAX_CONTEST_NODES) bounds the per-pass O(N^2) cost.
 CHALLENGER_PROJECTION_ITERATIONS = 200
+PRISM_ZERO_MAX_ITERATIONS = 4
+PRISM_SCALE_MARGIN = 1.001
+
+
+def _candidate_refinement_steps(config: Optional[LayoutConfig], num_nodes: int) -> int:
+    """Return the quality-scaled force refinement budget.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared public layout configuration.
+    num_nodes : int
+        Number of nodes in the contest problem.
+
+    Returns
+    -------
+    int
+        SFDP refinement steps for the candidate solve.
+    """
+    if (
+        num_nodes <= FULL_REFINEMENT_NODE_CAP
+        or _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD
+    ):
+        return FULL_REFINEMENT_STEPS
+    return BALANCED_LARGE_REFINEMENT_STEPS
+
+
+def _neato_iterations(config: Optional[LayoutConfig], num_nodes: int) -> int:
+    """Return the quality-scaled neato SMACOF iteration budget.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared public layout configuration.
+    num_nodes : int
+        Number of nodes in the contest problem.
+
+    Returns
+    -------
+    int
+        Maximum SMACOF iterations for the candidate solve.
+    """
+    if _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD:
+        return NEATO_FULL_ITERATIONS
+    if num_nodes <= FULL_REFINEMENT_NODE_CAP:
+        return NEATO_FULL_ITERATIONS
+    if num_nodes <= NEATO_MEDIUM_NODE_CAP:
+        return NEATO_BALANCED_MEDIUM_ITERATIONS
+    return NEATO_BALANCED_LARGE_ITERATIONS
+
+
+def _overlap_pairs(pos: torch.Tensor, node_sizes: torch.Tensor) -> torch.Tensor:
+    """Return upper-triangle pairs whose axis-aligned node boxes overlap.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Overlapping node-index pairs with shape ``[K, 2]``.
+    """
+    deltas = torch.abs(pos.unsqueeze(1) - pos.unsqueeze(0))
+    required = (node_sizes.unsqueeze(1) + node_sizes.unsqueeze(0)) * 0.5
+    overlaps = (deltas[..., 0] < required[..., 0]) & (deltas[..., 1] < required[..., 1])
+    return torch.nonzero(torch.triu(overlaps, diagonal=1), as_tuple=False)
+
+
+def _scale_past_residual_overlaps(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    overlap_pairs: torch.Tensor,
+) -> torch.Tensor:
+    """Uniformly scale a layout just past its remaining overlap pairs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    overlap_pairs : torch.Tensor
+        Residual overlapping pairs with shape ``[K, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Topology-preserving uniformly scaled positions.
+    """
+    source = overlap_pairs[:, 0]
+    target = overlap_pairs[:, 1]
+    deltas = torch.abs(pos[target] - pos[source])
+    required = (node_sizes[target] + node_sizes[source]) * 0.5
+    ratios = required / torch.clamp(deltas, min=torch.finfo(pos.dtype).eps)
+    # A pair stops overlapping as soon as either axis clears. Only residual
+    # pairs determine the smallest global scale bump, preserving all angles.
+    pair_scales = torch.min(ratios, dim=1).values
+    scale = float(torch.max(pair_scales).item()) * PRISM_SCALE_MARGIN
+    centered = pos - pos.mean(dim=0, keepdim=True)
+    return centered * scale + pos.mean(dim=0, keepdim=True)
+
+
+def _project_candidate_prism(pos: torch.Tensor, problem: LayoutProblem) -> torch.Tensor:
+    """Apply native PRISM cleanup and iterate residual overlaps to zero.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions in points with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Problem carrying topology and node sizes.
+
+    Returns
+    -------
+    torch.Tensor
+        PRISM-cleaned positions in points with shape ``[N, 2]``.
+    """
+    if problem.node_sizes is None or problem.node_sizes.numel() == 0:
+        return pos
+    from dagua.layout.ops.pipelines.fmmm import _graphviz_fdp_prism_overlap
+
+    points_per_inch = 72.0
+    projected = _graphviz_fdp_prism_overlap(
+        positions=pos.detach().to(dtype=torch.float64) / points_per_inch,
+        edge_index=problem.edge_index.detach().to(device="cpu", dtype=torch.long),
+        node_sizes=problem.node_sizes.detach().to(device="cpu", dtype=torch.float64),
+    )
+    projected = (projected * points_per_inch).to(device=pos.device, dtype=torch.float32)
+    sizes = problem.node_sizes.to(device=projected.device, dtype=projected.dtype)
+    for _iteration in range(PRISM_ZERO_MAX_ITERATIONS):
+        pairs = _overlap_pairs(projected, sizes)
+        if pairs.numel() == 0:
+            break
+        projected = _scale_past_residual_overlaps(projected, sizes, pairs)
+    return projected
 
 
 def _project_candidate(
@@ -750,26 +925,35 @@ def layout_native_undirected_portfolio(
         # each variant independently.
         for suffix, convergent in (("", False), ("_convergent", True)):
             projected = _project_candidate(raw_pos, problem, convergent=convergent)
-            degenerate, _reason = _candidate_is_degenerate(
+            degenerate, reason = _candidate_is_degenerate(
                 projected,
                 problem.node_sizes,
                 problem.edge_index,
             )
             if degenerate:
+                _LOGGER.info("Rejected undirected candidate %s%s: %s", name, suffix, reason)
                 continue
             positions[name + suffix] = projected
             scores[name + suffix] = _score_undirected_candidate(
                 projected, problem, cluster_ids, aesthetic_profile
             )
+        prism_projected = _project_candidate_prism(raw_pos, problem)
+        degenerate, reason = _candidate_is_degenerate(
+            prism_projected,
+            problem.node_sizes,
+            problem.edge_index,
+        )
+        if degenerate:
+            _LOGGER.info("Rejected undirected candidate %s_prism: %s", name, reason)
+        else:
+            positions[name + "_prism"] = prism_projected
+            scores[name + "_prism"] = _score_undirected_candidate(
+                prism_projected, problem, cluster_ids, aesthetic_profile
+            )
 
-    # Candidate B: our sfdp reimplementation + projection. Weighted graphs
-    # pass edge weights through unchanged (the pipeline handles them).
-    # steps mirrors the engine's pipeline dispatch (config.steps, default 0):
-    # the Stage-1 probe ran sfdp through the public engine path, which
-    # forwards config.steps -- 0 skips the per-level sequential refinement
-    # and keeps only the multilevel spring-electrical solve. The probe's
-    # headroom numbers correspond to THAT candidate (and it is ~100x
-    # cheaper than the standalone default of 500 refinement steps).
+    # Candidate B: our graphviz-fidelity sfdp reimplementation. The contest
+    # owns a quality-scaled nonzero budget because LayoutConfig.steps=0 means
+    # automatic at the public API, not zero refinement for this challenger.
     try:
         from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
 
@@ -781,13 +965,25 @@ def layout_native_undirected_portfolio(
             edge_index=problem.edge_index,
             num_nodes=n,
             node_sizes=problem.node_sizes,
-            steps=max(int(getattr(config, "steps", 0) or 0), 0),
+            steps=_candidate_refinement_steps(config, n),
             seed=seed,
             edge_weights=problem.edge_weights,
+            fidelity_mode="graphviz",
         )
         _add_challenger("sfdp", sfdp_pos)
+        if problem.edge_weights is not None:
+            sfdp_unweighted_pos = layout_sfdp_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                steps=_candidate_refinement_steps(config, n),
+                seed=seed,
+                edge_weights=None,
+                fidelity_mode="graphviz",
+            )
+            _add_challenger("sfdp_unweighted", sfdp_unweighted_pos)
     except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
-        pass
+        _LOGGER.warning("SFDP undirected challenger failed", exc_info=True)
 
     # Candidate C: our neato reimplementation + projection, quality-gated.
     if _neato_in_contest(config, n):
@@ -802,10 +998,25 @@ def layout_native_undirected_portfolio(
                 node_sizes=problem.node_sizes,
                 seed=seed,
                 edge_weights=problem.edge_weights,
+                maxiter=_neato_iterations(config, n),
+                fidelity_mode="graphviz",
+                overlap_removal=False,
             )
             _add_challenger("neato", neato_pos)
+            if problem.edge_weights is not None:
+                neato_unweighted_pos = layout_neato_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    seed=seed,
+                    edge_weights=None,
+                    maxiter=_neato_iterations(config, n),
+                    fidelity_mode="graphviz",
+                    overlap_removal=False,
+                )
+                _add_challenger("neato_unweighted", neato_unweighted_pos)
         except Exception:  # noqa: BLE001
-            pass
+            _LOGGER.warning("neato undirected challenger failed", exc_info=True)
 
     # Candidate D (r80-S9 Deliverable 1): cluster-aware sfdp driver, only
     # for problems that actually carry cluster metadata. Adds a candidate
@@ -817,6 +1028,7 @@ def layout_native_undirected_portfolio(
         try:
             cluster_sfdp_pos = _cluster_aware_sfdp_candidate(problem, config, ctx)
         except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("cluster-SFDP undirected challenger failed", exc_info=True)
             cluster_sfdp_pos = None
         if cluster_sfdp_pos is not None:
             _add_challenger("cluster_sfdp", cluster_sfdp_pos)
@@ -830,6 +1042,7 @@ def layout_native_undirected_portfolio(
         try:
             weighted_pos = _weighted_similarity_candidate(problem, seed)
         except Exception:  # noqa: BLE001
+            _LOGGER.warning("weighted-similarity undirected challenger failed", exc_info=True)
             weighted_pos = None
         if weighted_pos is not None:
             _add_challenger("weighted_similarity", weighted_pos)
@@ -839,6 +1052,11 @@ def layout_native_undirected_portfolio(
     for name, score in scores.items():
         if name != "incumbent" and score > scores[best_name]:
             best_name = name
+    _LOGGER.info(
+        "Undirected contest candidates=%s winner=%s",
+        ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
+        best_name,
+    )
     return positions[best_name]
 
 
