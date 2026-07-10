@@ -277,3 +277,9 @@ P5 clusters still running (~6.5h, in sweep/test gates).
 - Singleton-fix gate sweep relaunched (default store dir; custom dir lacked frozen externals). Pending.
 - Remaining: singleton gate + merge + trunk re-anchor; docs rebuild; final summary/memory/branch-sweep/merge
   proposal. S8 awaits JMT API pick.
+
+## 2026-07-10 ~12:00: SPRINT COMPLETE -- final gate passed, singleton fix merged (8d4787b)
+- er_500 bisect: raw challenger fling 18.9x/42.8x (masked post-projection) -> BOTH reversions honest.
+- Final store: 52/12/29 + 6/3/6 = 73/108 honest. Holdout 73.8%. Counterfactual +10 net, zero regressions.
+- SUMMARY rewritten as final; memory updated; r80/singleton-fix merged+deleted; trunk on r79/native.
+- PENDING JMT: S8 API pick; merge-to-develop decision.
