@@ -128,20 +128,71 @@ def test_healthy_spread_candidate_passes_guard() -> None:
     assert reason == ""
 
 
-def test_far_flung_candidate_is_rejected_by_centroid_spread() -> None:
-    """A challenger with one distant node trips the centroid-spread guard."""
+def test_far_flung_isolated_node_is_rejected_by_spread_guard() -> None:
+    """A challenger flinging a degree-0 node trips the isolated-spread guard."""
+    ring_nodes = 10
+    num_nodes = ring_nodes + 1  # node 10 has no edges (degree-0 isolate)
+    edges = [(i, (i + 1) % ring_nodes) for i in range(ring_nodes)]
+    edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    node_sizes = torch.full((num_nodes, 2), 2.0)
+    angles = torch.arange(ring_nodes, dtype=torch.float32) * (2 * torch.pi / ring_nodes)
+    ring_pos = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * 100.0
+    pos = torch.cat([ring_pos, torch.tensor([[2000.0, 0.0]])], dim=0)
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is True
+    assert "isolated-node centroid spread" in reason
+
+
+def test_far_flung_connected_node_passes_spread_guard() -> None:
+    """Non-isolated spread is legitimate structure and is NOT judged.
+
+    r80 gate verdict: the first (global max/median) form of the spread guard
+    also rejected legitimately-dispersed candidates -- multi_component_80
+    (-11.0), er_500 (real win flipped to loss, -4.9), scale_free_ba_120
+    (-1.9). A far-out CONNECTED node (ER periphery, long chain end) must
+    pass; only degree-0 isolates are the metric-blind pathology.
+    """
     num_nodes = 10
     edges = [(i, (i + 1) % num_nodes) for i in range(num_nodes)]
     edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
     node_sizes = torch.full((num_nodes, 2), 2.0)
     angles = torch.arange(num_nodes, dtype=torch.float32) * (2 * torch.pi / num_nodes)
     pos = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * 100.0
-    pos[-1] = torch.tensor([2000.0, 0.0])
+    pos[-1] = torch.tensor([2000.0, 0.0])  # node 9 is connected (ring member)
 
     degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
 
-    assert degenerate is True
-    assert "centroid spread" in reason
+    assert degenerate is False
+    assert reason == ""
+
+
+def test_dispersed_multi_component_passes_spread_guard() -> None:
+    """A multi-component tiling with high global spread but no isolates passes.
+
+    multi_component_80-style case: several connected components tiled far
+    apart produce a large max/median centroid-distance ratio with ZERO
+    degree-0 nodes. The narrowed guard must not judge it (the global form
+    regressed multi_component_80 92.52 -> 81.55 in the r80 gate sweep).
+    """
+    # A 14-node path near the origin plus a 2-node component tiled far away;
+    # no isolated nodes anywhere. The far pair drags max/median centroid
+    # distance to ~7x while every node keeps degree >= 1.
+    edges = [(i, i + 1) for i in range(13)] + [(14, 15)]
+    positions = [[10.0 * i, 0.0] for i in range(14)]
+    positions += [[100000.0, 0.0], [100010.0, 0.0]]
+    edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    pos = torch.tensor(positions, dtype=torch.float32)
+    node_sizes = torch.full((pos.shape[0], 2), 2.0)
+
+    # Sanity: this layout WOULD trip a global 6x max/median test.
+    assert _centroid_spread_ratio(pos) > 6.0
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is False
+    assert reason == ""
 
 
 def test_collapsed_challenger_loses_to_sane_incumbent() -> None:

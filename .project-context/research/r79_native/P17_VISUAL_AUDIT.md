@@ -224,3 +224,30 @@ L->T/W; the flip is not real to a human reader.
   `setsid .venv/bin/python -u scripts/r79_baseline.py --dagua-only --fresh --output-dir eval_output/r80_singleton_sweep > /tmp/r80_singleton_sweep.log 2>&1 < /dev/null &`
   PID 3398381, log `/tmp/r80_singleton_sweep.log`. Results pending --
   architect to harvest.
+
+## Evidence -- r80 singleton guard NARROWED (follow-up, gate verdict)
+
+* Gate sweep verdict on the first guard form: PARTIAL FAIL. The packing fix and
+  the random_bipartite_60 honest reversion (79.09 -> 65.24) were accepted, but
+  the GLOBAL max/median centroid-spread test was over-broad: it also rejected
+  legitimately-dispersed candidates and regressed multi_component_80
+  (92.52 -> 81.55, -11.0), er_500 (51.72 -> 46.82, -4.9, a real win flipped to
+  loss), and scale_free_ba_120 (-1.9). Multi-component tilings and ER-periphery
+  structure legitimately exceed a global radius ratio.
+* Narrowing: the guard now judges ISOLATED (degree-0) nodes only -- the actual
+  metric-blind pathology. `DEGENERACY_MAX_CENTROID_SPREAD_RATIO = 6.0` replaced
+  by `DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 3.0`
+  (native_undirected.py, constants block). A candidate is rejected iff any
+  degree-0 node sits further than 3.0x the median centroid distance from the
+  layout centroid. Skipped when there are no isolates, when ALL nodes are
+  isolated (no connected core exists), or when the median distance is zero
+  (true collapse is covered by the existing checks 1-2). Connected-node spread
+  is never judged.
+* Tests updated: the flung-CONNECTED-node case now asserts PASS (was the
+  global-guard rejection test); new flung-ISOLATED-node rejection test; new
+  multi_component_80-style test (14-node path + far 2-node component, global
+  ratio ~7x, zero isolates) asserts PASS. Full file: 25 passed. ruff clean.
+* Gate sweep relaunched: default output dir, --dagua-only --fresh, log
+  /tmp/r80_singleton_sweep4.log. Acceptance: only random_bipartite_60 moves vs
+  the 74/108 store (its honest reversion); zero other movers. Results pending
+  -- architect to harvest.
