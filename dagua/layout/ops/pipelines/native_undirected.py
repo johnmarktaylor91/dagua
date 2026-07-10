@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, Optional, Tuple
+from typing import Callable, ClassVar, Dict, Optional, Tuple
 
 import torch
 
@@ -71,6 +71,8 @@ NEATO_BALANCED_NODE_CAP = 80
 # Degeneracy guard thresholds (see _candidate_is_degenerate).
 DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO = 0.5
 DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO = 0.5
+# Reject challenger layouts whose bounding scale is dominated by a few far-flung nodes.
+DEGENERACY_MAX_CENTROID_SPREAD_RATIO = 6.0
 
 
 @dataclass(frozen=True)
@@ -94,9 +96,9 @@ def _candidate_is_degenerate(
 ) -> Tuple[bool, str]:
     """Return whether a challenger layout is geometrically collapsed.
 
-    Two symptoms are checked, either one rejects the candidate BEFORE the
+    Three symptoms are checked, any one rejects the candidate BEFORE the
     composite contest (composite terms like edge-length uniformity can score
-    a fully-collapsed layout deceptively well):
+    a geometrically broken layout deceptively well):
 
     1. Mean edge length below ``DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO`` times
        the mean node bounding-box diagonal -- edges shorter than half a node
@@ -105,6 +107,10 @@ def _candidate_is_degenerate(
        ``DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO`` times the summed node-box
        area -- the canvas is smaller than the nodes it must contain, so
        overlap is unavoidable.
+    3. Maximum node distance from the layout centroid exceeds
+       ``DEGENERACY_MAX_CENTROID_SPREAD_RATIO`` times the median centroid
+       distance -- a few far-flung nodes can make edge-based metrics call an
+       illegible corner blob a win.
 
     Parameters
     ----------
@@ -151,7 +157,113 @@ def _candidate_is_degenerate(
             f"bbox area {bbox_area:.1f} < {DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO} x "
             f"total node-box area {total_node_area:.1f}"
         )
+
+    centroid = pos.mean(dim=0, keepdim=True)
+    centroid_distances = torch.linalg.vector_norm(pos - centroid, dim=1)
+    median_distance = float(torch.median(centroid_distances).item())
+    if median_distance > 0.0:
+        max_distance = float(centroid_distances.max().item())
+        if max_distance > DEGENERACY_MAX_CENTROID_SPREAD_RATIO * median_distance:
+            return True, (
+                f"centroid spread max distance {max_distance:.1f} > "
+                f"{DEGENERACY_MAX_CENTROID_SPREAD_RATIO} x median distance "
+                f"{median_distance:.1f}"
+            )
     return False, ""
+
+
+ChallengerSolver = Callable[
+    [torch.Tensor, int, Optional[torch.Tensor], Optional[torch.Tensor]],
+    torch.Tensor,
+]
+
+
+def _run_component_packed_challenger(
+    problem: LayoutProblem,
+    state: SolveState,
+    solver: ChallengerSolver,
+    node_sep: float,
+) -> torch.Tensor:
+    """Run one challenger per weak component and tile results in parent space.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Parent layout problem.
+    state : SolveState
+        Parent state used only to seed child component extraction when
+        positions exist.
+    solver : Callable[[torch.Tensor, int, torch.Tensor | None, torch.Tensor | None], torch.Tensor]
+        Challenger algorithm callable. It receives ``edge_index``,
+        ``num_nodes``, ``node_sizes``, and ``edge_weights`` for one component.
+    node_sep : float
+        Node separation passed through to the shared component tiler.
+
+    Returns
+    -------
+    torch.Tensor
+        Full parent positions with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.coordinate import _weak_components
+    from dagua.layout.ops.pipelines._native_shared import (
+        _extract_component_problem,
+        _tile_component_positions,
+    )
+    from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
+
+    components = _weak_components(
+        problem.edge_index.detach().to(device="cpu", dtype=torch.long),
+        int(problem.num_nodes),
+    )
+    if len(components) <= 1:
+        return solver(
+            problem.edge_index,
+            int(problem.num_nodes),
+            problem.node_sizes,
+            problem.edge_weights,
+        )
+
+    component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for component_nodes_list in components:
+        component_nodes = torch.tensor(
+            component_nodes_list,
+            dtype=torch.long,
+            device=problem.edge_index.device,
+        )
+        child_problem, _child_state, parent_indices, _child_layers = _extract_component_problem(
+            problem,
+            state,
+            component_nodes,
+        )
+        if child_problem.num_nodes <= 1:
+            child_pos = torch.zeros(
+                (child_problem.num_nodes, 2),
+                dtype=torch.float32,
+                device=problem.edge_index.device,
+            )
+        else:
+            child_pos = solver(
+                child_problem.edge_index,
+                int(child_problem.num_nodes),
+                child_problem.node_sizes,
+                child_problem.edge_weights,
+            )
+        component_results.append((parent_indices, child_pos))
+
+    # The incumbent's decomposition predicate intentionally skips the
+    # dominant-component-plus-singletons case to preserve historical default
+    # geometry. Challenger packing is independent of that guarantee, so all
+    # weak components are tiled here to keep unconstrained isolates near the
+    # solved core.
+    tiled_positions = _tile_component_positions(component_results, node_sep=node_sep)
+    fit_state = AspectRatioFit(AspectRatioFitConfig()).apply(
+        problem,
+        SolveState(pos=tiled_positions),
+        RuntimeContext(),
+    )
+    if fit_state.pos is None:
+        raise RuntimeError("challenger component tiling did not produce positions.")
+    return fit_state.pos.detach()
 
 
 def _build_cluster_ids(problem: LayoutProblem) -> Optional[torch.Tensor]:
@@ -559,6 +671,7 @@ def layout_native_undirected_portfolio(
     scores["incumbent"] = _score_undirected_candidate(incumbent_pos, problem, cluster_ids)
 
     seed = int(problem.seed) if problem.seed is not None else 42
+    challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
     def _add_challenger(name: str, raw_pos: torch.Tensor) -> None:
         # Both cleanup variants enter the contest as separate candidates --
@@ -590,13 +703,44 @@ def layout_native_undirected_portfolio(
     try:
         from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
 
-        sfdp_pos = layout_sfdp_pipeline(
-            edge_index=problem.edge_index,
-            num_nodes=n,
-            node_sizes=problem.node_sizes,
-            steps=max(int(getattr(config, "steps", 0) or 0), 0),
-            seed=seed,
-            edge_weights=problem.edge_weights,
+        def _run_sfdp(
+            edge_index: torch.Tensor,
+            num_nodes: int,
+            node_sizes: Optional[torch.Tensor],
+            edge_weights: Optional[torch.Tensor],
+        ) -> torch.Tensor:
+            """Run the sfdp challenger on one weak component.
+
+            Parameters
+            ----------
+            edge_index : torch.Tensor
+                Component edge tensor with shape ``[2, E]``.
+            num_nodes : int
+                Component node count.
+            node_sizes : torch.Tensor, optional
+                Component node sizes with shape ``[N, 2]``.
+            edge_weights : torch.Tensor, optional
+                Component edge weights with shape ``[E]``.
+
+            Returns
+            -------
+            torch.Tensor
+                Component positions with shape ``[N, 2]``.
+            """
+            return layout_sfdp_pipeline(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                node_sizes=node_sizes,
+                steps=max(int(getattr(config, "steps", 0) or 0), 0),
+                seed=seed,
+                edge_weights=edge_weights,
+            )
+
+        sfdp_pos = _run_component_packed_challenger(
+            problem,
+            state,
+            _run_sfdp,
+            node_sep=challenger_node_sep,
         )
         _add_challenger("sfdp", sfdp_pos)
     except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
@@ -607,12 +751,43 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.neato import layout_neato_pipeline
 
-            neato_pos = layout_neato_pipeline(
-                edge_index=problem.edge_index,
-                num_nodes=n,
-                node_sizes=problem.node_sizes,
-                seed=seed,
-                edge_weights=problem.edge_weights,
+            def _run_neato(
+                edge_index: torch.Tensor,
+                num_nodes: int,
+                node_sizes: Optional[torch.Tensor],
+                edge_weights: Optional[torch.Tensor],
+            ) -> torch.Tensor:
+                """Run the neato challenger on one weak component.
+
+                Parameters
+                ----------
+                edge_index : torch.Tensor
+                    Component edge tensor with shape ``[2, E]``.
+                num_nodes : int
+                    Component node count.
+                node_sizes : torch.Tensor, optional
+                    Component node sizes with shape ``[N, 2]``.
+                edge_weights : torch.Tensor, optional
+                    Component edge weights with shape ``[E]``.
+
+                Returns
+                -------
+                torch.Tensor
+                    Component positions with shape ``[N, 2]``.
+                """
+                return layout_neato_pipeline(
+                    edge_index=edge_index,
+                    num_nodes=num_nodes,
+                    node_sizes=node_sizes,
+                    seed=seed,
+                    edge_weights=edge_weights,
+                )
+
+            neato_pos = _run_component_packed_challenger(
+                problem,
+                state,
+                _run_neato,
+                node_sep=challenger_node_sep,
             )
             _add_challenger("neato", neato_pos)
         except Exception:  # noqa: BLE001
