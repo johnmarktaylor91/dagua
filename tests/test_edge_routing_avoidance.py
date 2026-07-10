@@ -366,3 +366,25 @@ class TestDensityScaledSpread:
         sparse = hub_min_angle(0)
         dense = hub_min_angle(20)
         assert dense < sparse
+
+
+def test_route_edges_survives_non_finite_positions():
+    """Divergent layouts (NaN/inf positions) must render as-is, not crash.
+
+    r80 adversarial review MEDIUM-1: the S7 spatial grid and deflection
+    machinery floor()ed non-finite coordinates. Non-finite inputs now skip
+    avoidance/spread and fall back to pre-r80 behavior.
+    """
+    import torch
+
+    from dagua.edges import route_edges
+
+    n = 12
+    edges = torch.tensor([[i, (i + 1) % n] for i in range(n)], dtype=torch.long).t()
+    sizes = torch.full((n, 2), 40.0)
+    for value in (float("nan"), float("inf"), float("-inf")):
+        pos = torch.full((n, 2), value)
+        assert len(route_edges(pos, edges, sizes)) == n
+    mixed = torch.rand(n, 2) * 500
+    mixed[3, 0] = float("nan")
+    assert len(route_edges(mixed, edges, sizes)) == n
