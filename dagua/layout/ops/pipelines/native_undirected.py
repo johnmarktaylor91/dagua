@@ -71,8 +71,12 @@ NEATO_BALANCED_NODE_CAP = 80
 # Degeneracy guard thresholds (see _candidate_is_degenerate).
 DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO = 0.5
 DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO = 0.5
-# Reject challenger layouts whose bounding scale is dominated by a few far-flung nodes.
-DEGENERACY_MAX_CENTROID_SPREAD_RATIO = 6.0
+# Reject challenger layouts that fling ISOLATED (degree-0) nodes far from the
+# layout centroid. Scoped to isolated nodes only: the r80 gate sweep proved a
+# global max/median radius test also rejects legitimately-dispersed structure
+# (multi_component_80 -11.0, er_500 real win -> loss -4.9, scale_free_ba_120
+# -1.9). Non-isolated spread is legitimate layout structure and is not judged.
+DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 3.0
 
 
 @dataclass(frozen=True)
@@ -107,10 +111,14 @@ def _candidate_is_degenerate(
        ``DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO`` times the summed node-box
        area -- the canvas is smaller than the nodes it must contain, so
        overlap is unavoidable.
-    3. Maximum node distance from the layout centroid exceeds
-       ``DEGENERACY_MAX_CENTROID_SPREAD_RATIO`` times the median centroid
-       distance -- a few far-flung nodes can make edge-based metrics call an
-       illegible corner blob a win.
+    3. Any ISOLATED (degree-0) node sits further than
+       ``DEGENERACY_MAX_ISOLATED_SPREAD_RATIO`` times the median centroid
+       distance from the layout centroid -- edge-based composite terms are
+       blind to edgeless nodes, so a flung isolate can make the metrics call
+       an illegible corner blob a win (random_bipartite_60 pathology).
+       Connected-node spread is NOT judged: multi-component tilings and
+       ER-periphery layouts legitimately exceed a global max/median radius
+       test (r80 gate sweep regressions).
 
     Parameters
     ----------
@@ -158,17 +166,27 @@ def _candidate_is_degenerate(
             f"total node-box area {total_node_area:.1f}"
         )
 
-    centroid = pos.mean(dim=0, keepdim=True)
-    centroid_distances = torch.linalg.vector_norm(pos - centroid, dim=1)
-    median_distance = float(torch.median(centroid_distances).item())
-    if median_distance > 0.0:
-        max_distance = float(centroid_distances.max().item())
-        if max_distance > DEGENERACY_MAX_CENTROID_SPREAD_RATIO * median_distance:
-            return True, (
-                f"centroid spread max distance {max_distance:.1f} > "
-                f"{DEGENERACY_MAX_CENTROID_SPREAD_RATIO} x median distance "
-                f"{median_distance:.1f}"
-            )
+    # Isolated-node fling check. Judged for degree-0 nodes ONLY: a global
+    # max/median test over all nodes also rejected legitimately-dispersed
+    # candidates (multi-component tilings, ER periphery) in the r80 gate
+    # sweep. Skipped when every node is isolated (no connected core exists
+    # to be far from) or when the median distance is zero (true collapse is
+    # already covered by checks 1-2).
+    isolated_mask = torch.ones(n, dtype=torch.bool)
+    if edge_index.numel() > 0:
+        isolated_mask[edge_index.reshape(-1).to(dtype=torch.long)] = False
+    if bool(isolated_mask.any()) and not bool(isolated_mask.all()):
+        centroid = pos.mean(dim=0, keepdim=True)
+        centroid_distances = torch.linalg.vector_norm(pos - centroid, dim=1)
+        median_distance = float(torch.median(centroid_distances).item())
+        if median_distance > 0.0:
+            max_isolated_distance = float(centroid_distances[isolated_mask].max().item())
+            if max_isolated_distance > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO * median_distance:
+                return True, (
+                    f"isolated-node centroid spread {max_isolated_distance:.1f} > "
+                    f"{DEGENERACY_MAX_ISOLATED_SPREAD_RATIO} x median distance "
+                    f"{median_distance:.1f}"
+                )
     return False, ""
 
 
