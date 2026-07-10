@@ -99,3 +99,8 @@ positions (.pt mtimes 14:05-18:36, ~10min spacing = real ~700s runs, matches 706
 Purge + retry triggered recover_results_from_positions -> 35 ok records reconstructed from
 genuine position files (runtime_seconds=None is the recovery signature). VERIFIED legitimate.
 fam2_fast final state: 3,609 ok + 785 DH-capacity skips + adjudicated stress_sgd/DH rows (no data).
+
+## 2026-07-10 13:15: BENCH FLEET COMPLETE (decision: drop grid_50x50 maxent straggler)
+nodrl final: 5,530 ok + 105 capacity skips. Sole gap: grid_50x50::classic_maxent_stress_steps50
+x35 seeds (~2,040s/seed serial on one worker = ~17h) -- combo NOT in the 707 contested set;
+its r77 disposition stands. Killed retry. Every combo in the rescore list now has fresh data.
