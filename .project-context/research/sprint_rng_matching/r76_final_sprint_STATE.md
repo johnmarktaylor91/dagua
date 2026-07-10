@@ -1008,3 +1008,24 @@ REMEDIATION IN FLIGHT:
   (graphviz sugiyama rank-collapse 20, MDS eigenspace 12 confirmed floor, SFDP label-box 8,
   drl float32 3, sgd2 era 2 to re-score). Final rescore must include: 291 targeted + 145
   sugiyama + 59 neato/fdp combos + stale mds/fmmm lists + small-tier families.
+
+## 2026-07-10: rescore DONE (707/707); preview ledger; endgame forensics
+- Definitive rescore complete over 48-dir chain: 707/707 scored, merged onto r77 base
+  (per_combo_r78_merged.jsonl, 3,955 rows). Causes sidecar rebuilt: 135 of 249 r77 named
+  causes RETIRED by fresh evidence (d_R<1e-3 / dist_equivalent), 114 kept (causes_r78.json).
+- PREVIEW LEDGER (r78_preview): BIT_EXACT 314 (+128 vs r77), POSITIONAL_IDENTICAL 1,591,
+  DISTRIBUTIONAL 1,349, MODE_B ident/close 45/79, quality-only 47, SUPERIOR 11, NAMED 102,
+  UNEXPLAINED 22, INSUFFICIENT 93, NO_CANONICAL 302 (-103: new refs gave verdicts).
+- ADJUDICATED BY ME (evidence inline):
+  * sfdp disconnected rows: per-component Procrustes = 0.00 (parallel_cycles) / 1.4e-3
+    (multi_component_80) with global 0.73/0.68 -> pure inter-component packing ->
+    SFDP label-box family cause extended to the 8 sfdp unexplained rows (pending final list).
+  * org_chart_1_5_4_8 + wide_3_50_3 classical_mds_default: deterministic, era-stable to 12
+    digits (0.8058503862124403), audit F3 sibling evidence -> MDS eigenspace family.
+  * wide_single_layer_1_50_1::classical_mds_igraph_fidelity: NOT eigenspace -- dagua layout
+    is ALL ZEROS at HEAD (rank 0) vs igraph rank-2 -> GENUINE BUG caught; root-cause agent out.
+- FORENSIC AGENTS OUT: (1) 54 neato + 18 sugiyama kept rows = overlay/mode/coverage issue
+  (live probes say closed; stored rows disagree); (2) 58 sgd2 + 8 umap insufficiency trace +
+  6 fmmm param-match check + 2 drl + 4 fam2-neato unexplained; (3) MDS zero-collapse.
+- Remaining to final ledger: apply 3 agents' repairs (micro-benches/rescore flags), final
+  build (exit zero), gates rerun, close-out summary (text+vault+chat per JMT directive).
