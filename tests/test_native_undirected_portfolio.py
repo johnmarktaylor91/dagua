@@ -12,12 +12,34 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline_baseline,
 )
 from dagua.layout.ops.pipelines.native_undirected import (
+    DEGENERACY_MAX_ISOLATED_SPREAD_RATIO,
     NEATO_QUALITY_THRESHOLD,
     _candidate_is_degenerate,
     _neato_in_contest,
+    _repair_flung_isolates,
     _score_undirected_candidate,
 )
 from dagua.layout.ops.state import LayoutProblem
+
+
+def _centroid_spread_ratio(pos: torch.Tensor) -> float:
+    """Return max-to-median centroid distance for a layout.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Ratio of maximum centroid distance to median centroid distance.
+    """
+    distances = torch.linalg.vector_norm(pos - pos.mean(dim=0, keepdim=True), dim=1)
+    median = float(torch.median(distances).item())
+    if median == 0.0:
+        return 0.0
+    return float(distances.max().item()) / median
 
 
 def _ring_with_chords(num_nodes: int = 10) -> DaguaGraph:
@@ -108,6 +130,171 @@ def test_healthy_spread_candidate_passes_guard() -> None:
     assert reason == ""
 
 
+def _ring_plus_isolate(
+    isolate_distance: float,
+    ring_nodes: int = 50,
+    ring_radius: float = 100.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    """Build a ring layout plus one degree-0 isolate at a chosen distance.
+
+    Parameters
+    ----------
+    isolate_distance : float
+        Distance of the isolated node from the ring center (origin).
+    ring_nodes : int, default=50
+        Connected ring size. Large enough that the isolate barely shifts
+        the centroid, keeping the measured ratio close to the nominal one.
+    ring_radius : float, default=100.0
+        Ring radius.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]
+        Positions ``[N, 2]``, node sizes ``[N, 2]``, edge index ``[2, E]``,
+        and the isolate's measured centroid-distance / median-distance ratio
+        (the exact quantity the guard evaluates).
+    """
+    edges = [(i, (i + 1) % ring_nodes) for i in range(ring_nodes)]
+    edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    angles = torch.arange(ring_nodes, dtype=torch.float32) * (2 * torch.pi / ring_nodes)
+    ring_pos = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * ring_radius
+    pos = torch.cat([ring_pos, torch.tensor([[isolate_distance, 0.0]])], dim=0)
+    node_sizes = torch.full((ring_nodes + 1, 2), 2.0)
+    distances = torch.linalg.vector_norm(pos - pos.mean(dim=0, keepdim=True), dim=1)
+    ratio = float(distances[-1].item()) / float(torch.median(distances).item())
+    return pos, node_sizes, edge_index, ratio
+
+
+def test_isolated_node_at_5x_median_passes_spread_guard() -> None:
+    """A degree-0 node at ~5x median distance is peripheral, NOT pathological.
+
+    r80 round-3 calibration (measured on the old store): legitimate isolate
+    placements reach 5.4x median (er_500 periphery 0.5-4.8x,
+    multi_component_80 tiles 2.8-2.9x); the pathology class starts at 15.1x.
+    The 8x threshold must PASS peripheral placement.
+    """
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=510.0)
+    assert 4.0 < ratio < 6.0  # sanity: this case sits in the legitimate band
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is False
+    assert reason == ""
+
+
+def test_isolated_node_at_15x_median_is_rejected_by_spread_guard() -> None:
+    """A degree-0 node at ~15x median distance is the fling pathology.
+
+    Matches the measured random_bipartite_60 pathology floor (15.1x, range
+    15-21x on the old store). The 8x threshold must REJECT it.
+    """
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=1600.0)
+    assert 12.0 < ratio < 18.0  # sanity: this case sits in the pathological band
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is True
+    assert "isolated-node centroid spread" in reason
+
+
+def test_far_flung_connected_node_passes_spread_guard() -> None:
+    """Non-isolated spread is legitimate structure and is NOT judged.
+
+    r80 gate verdict: the first (global max/median) form of the spread guard
+    also rejected legitimately-dispersed candidates -- multi_component_80
+    (-11.0), er_500 (real win flipped to loss, -4.9), scale_free_ba_120
+    (-1.9). A far-out CONNECTED node (ER periphery, long chain end) must
+    pass; only degree-0 isolates are the metric-blind pathology.
+    """
+    num_nodes = 10
+    edges = [(i, (i + 1) % num_nodes) for i in range(num_nodes)]
+    edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    node_sizes = torch.full((num_nodes, 2), 2.0)
+    angles = torch.arange(num_nodes, dtype=torch.float32) * (2 * torch.pi / num_nodes)
+    pos = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * 100.0
+    pos[-1] = torch.tensor([2000.0, 0.0])  # node 9 is connected (ring member)
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is False
+    assert reason == ""
+
+
+def test_dispersed_multi_component_passes_spread_guard() -> None:
+    """A multi-component tiling with high global spread but no isolates passes.
+
+    multi_component_80-style case: several connected components tiled far
+    apart produce a large max/median centroid-distance ratio with ZERO
+    degree-0 nodes. The narrowed guard must not judge it (the global form
+    regressed multi_component_80 92.52 -> 81.55 in the r80 gate sweep).
+    """
+    # A 14-node path near the origin plus a 2-node component tiled far away;
+    # no isolated nodes anywhere. The far pair drags max/median centroid
+    # distance to ~7x while every node keeps degree >= 1.
+    edges = [(i, i + 1) for i in range(13)] + [(14, 15)]
+    positions = [[10.0 * i, 0.0] for i in range(14)]
+    positions += [[100000.0, 0.0], [100010.0, 0.0]]
+    edge_index = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    pos = torch.tensor(positions, dtype=torch.float32)
+    node_sizes = torch.full((pos.shape[0], 2), 2.0)
+
+    # Sanity: this layout WOULD trip a global 6x max/median test.
+    assert _centroid_spread_ratio(pos) > 6.0
+
+    degenerate, reason = _candidate_is_degenerate(pos, node_sizes, edge_index)
+
+    assert degenerate is False
+    assert reason == ""
+
+
+def test_repair_leaves_below_threshold_layout_byte_unchanged() -> None:
+    """The repair path is a NO-OP for layouts below the fling threshold.
+
+    r80 round 4: unconditional packing regressed er_500 and
+    multi_component_80 whose isolates sat at a legitimate 2.8-4.8x median.
+    Repair must fire ONLY above ``DEGENERACY_MAX_ISOLATED_SPREAD_RATIO``;
+    below it the candidate's raw layout is returned byte-identical.
+    """
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=510.0)
+    assert 4.0 < ratio < DEGENERACY_MAX_ISOLATED_SPREAD_RATIO  # legitimate band
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=pos.shape[0],
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    repaired = _repair_flung_isolates(pos, problem, node_sep=25.0)
+
+    assert repaired is pos  # byte-identical: the very same tensor, untouched
+    assert torch.equal(repaired, pos)
+
+
+def test_repair_packs_flung_isolate_next_to_core() -> None:
+    """Above the threshold, repair re-tiles the flung isolate near the core."""
+    pos, node_sizes, edge_index, ratio = _ring_plus_isolate(isolate_distance=1600.0)
+    assert ratio > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO  # pathological band
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=pos.shape[0],
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    repaired = _repair_flung_isolates(pos, problem, node_sep=25.0)
+
+    assert repaired.shape == pos.shape
+    assert not torch.equal(repaired, pos)
+    from dagua.layout.ops.pipelines.native_undirected import _max_isolated_spread_ratio
+
+    assert _max_isolated_spread_ratio(repaired, edge_index) <= (
+        DEGENERACY_MAX_ISOLATED_SPREAD_RATIO
+    )
+    degenerate, reason = _candidate_is_degenerate(repaired, node_sizes, edge_index)
+    assert degenerate is False
+    assert reason == ""
+
+
 def test_collapsed_challenger_loses_to_sane_incumbent() -> None:
     """Contest semantics: a collapsed challenger is rejected BEFORE scoring.
 
@@ -176,6 +363,43 @@ def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
 
     assert pos.shape == (graph.num_nodes, 2)
     assert bool(torch.isfinite(pos).all())
+
+
+def test_random_bipartite_60_isolates_stay_near_core() -> None:
+    """Portfolio layout keeps random_bipartite_60 singleton nodes near the core."""
+    from dagua.eval.graphs import get_test_graphs
+    from dagua.layout import layout
+
+    graph = next(
+        test_graph.graph
+        for test_graph in get_test_graphs()
+        if test_graph.name == "random_bipartite_60"
+    )
+
+    pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+    assert _centroid_spread_ratio(pos) <= 3.0
+
+
+def test_synthetic_singletons_stay_near_connected_component() -> None:
+    """Portfolio layout packs degree-zero singleton nodes near a small path."""
+    from dagua.layout import layout
+
+    path_edges = [(node, node + 1) for node in range(7)]
+    graph = DaguaGraph.from_edge_list(
+        path_edges,
+        num_nodes=10,
+        is_semantically_directed=False,
+    )
+    graph.compute_node_sizes()
+
+    pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all())
+    assert _centroid_spread_ratio(pos) <= 3.0
 
 
 def _dense_clique_problem() -> tuple[torch.Tensor, torch.Tensor, LayoutProblem]:
