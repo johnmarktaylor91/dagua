@@ -380,6 +380,21 @@ class LayoutConfig:
     algorithm: Optional[str] = None
     algorithm_params: dict[str, Any] = field(default_factory=dict)
 
+    # r80-S8 aesthetic-priority knob (PROVISIONAL API -- pending JMT sign-off,
+    # see .project-context/research/r79_native/P15_AESTHETIC_KNOB.md). Steers
+    # BOTH the native undirected-portfolio candidate-selection composite and
+    # the differentiable loss weights toward a user's aesthetic priorities.
+    # Default None/None is the true identity path: unset means dagua's
+    # candidate contest and loss weights behave exactly as before this knob
+    # existed (see dagua.layout.aesthetics.resolve_aesthetic_profile).
+    # ``prioritize`` selects a named preset ("crossings", "uniform_edges",
+    # "compactness", "readability"); ``aesthetic_weights`` is an explicit
+    # {term: multiplier} dict that overrides the preset per-key when both
+    # are set. Validated lazily at layout time (not at construction) by
+    # dagua.layout.aesthetics.resolve_aesthetic_profile.
+    prioritize: Optional[str] = None
+    aesthetic_weights: Optional[Dict[str, float]] = None
+
     def __post_init__(self) -> None:
         """Normalize public quality/time fields after dataclass construction.
 
