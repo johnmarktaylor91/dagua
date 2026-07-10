@@ -71,6 +71,18 @@ NEATO_BALANCED_NODE_CAP = 80
 # Degeneracy guard thresholds (see _candidate_is_degenerate).
 DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO = 0.5
 DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO = 0.5
+# Reject challenger layouts that fling ISOLATED (degree-0) nodes far from the
+# layout centroid. Scoped to isolated nodes only: the r80 gate sweep proved a
+# global max/median radius test also rejects legitimately-dispersed structure
+# (multi_component_80 -11.0, er_500 real win -> loss -4.9, scale_free_ba_120
+# -1.9). Non-isolated spread is legitimate layout structure and is not judged.
+# Threshold 8.0: the pathology class is ORDER-OF-MAGNITUDE fling, not
+# peripheral placement. Measured on the r80 store: legitimate isolate
+# placements reach 5.4x median at most (er_500 periphery 0.5-4.8x,
+# multi_component_80 tiles 2.8-2.9x), while the pathological
+# random_bipartite_60 fling starts at 15.1x (measured 15-21x). 8x sits in
+# the measured separation gap with margin on both sides.
+DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 8.0
 
 
 @dataclass(frozen=True)
@@ -94,9 +106,9 @@ def _candidate_is_degenerate(
 ) -> Tuple[bool, str]:
     """Return whether a challenger layout is geometrically collapsed.
 
-    Two symptoms are checked, either one rejects the candidate BEFORE the
+    Three symptoms are checked, any one rejects the candidate BEFORE the
     composite contest (composite terms like edge-length uniformity can score
-    a fully-collapsed layout deceptively well):
+    a geometrically broken layout deceptively well):
 
     1. Mean edge length below ``DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO`` times
        the mean node bounding-box diagonal -- edges shorter than half a node
@@ -105,6 +117,14 @@ def _candidate_is_degenerate(
        ``DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO`` times the summed node-box
        area -- the canvas is smaller than the nodes it must contain, so
        overlap is unavoidable.
+    3. Any ISOLATED (degree-0) node sits further than
+       ``DEGENERACY_MAX_ISOLATED_SPREAD_RATIO`` times the median centroid
+       distance from the layout centroid -- edge-based composite terms are
+       blind to edgeless nodes, so a flung isolate can make the metrics call
+       an illegible corner blob a win (random_bipartite_60 pathology).
+       Connected-node spread is NOT judged: multi-component tilings and
+       ER-periphery layouts legitimately exceed a global max/median radius
+       test (r80 gate sweep regressions).
 
     Parameters
     ----------
@@ -151,7 +171,128 @@ def _candidate_is_degenerate(
             f"bbox area {bbox_area:.1f} < {DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO} x "
             f"total node-box area {total_node_area:.1f}"
         )
+
+    # Isolated-node fling check. Judged for degree-0 nodes ONLY: a global
+    # max/median test over all nodes also rejected legitimately-dispersed
+    # candidates (multi-component tilings, ER periphery) in the r80 gate
+    # sweep. Not applicable (ratio 0.0) when there are no isolates, every
+    # node is isolated, or the median distance is zero (true collapse is
+    # already covered by checks 1-2). Normally pre-empted by the
+    # _repair_flung_isolates repair path; kept as a backstop should a
+    # repaired (or unrepairable single-component) candidate still fling.
+    spread_ratio = _max_isolated_spread_ratio(pos, edge_index)
+    if spread_ratio > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO:
+        return True, (
+            f"isolated-node centroid spread {spread_ratio:.1f}x median > "
+            f"{DEGENERACY_MAX_ISOLATED_SPREAD_RATIO}x"
+        )
     return False, ""
+
+
+def _max_isolated_spread_ratio(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
+    """Return the worst isolated-node centroid-distance / median-distance ratio.
+
+    The exact quantity the isolated-fling guard and the repair trigger
+    evaluate. Returns ``0.0`` when the check does not apply: no isolated
+    (degree-0) nodes, ALL nodes isolated (no connected core exists to be far
+    from), or zero median distance (true collapse is covered by the other
+    degeneracy checks).
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Max isolated-node centroid distance divided by the median centroid
+        distance over all nodes, or ``0.0`` when not applicable.
+    """
+    n = int(pos.shape[0])
+    if n <= 1:
+        return 0.0
+    isolated_mask = torch.ones(n, dtype=torch.bool)
+    if edge_index.numel() > 0:
+        isolated_mask[edge_index.reshape(-1).to(dtype=torch.long)] = False
+    if not bool(isolated_mask.any()) or bool(isolated_mask.all()):
+        return 0.0
+    centroid = pos.mean(dim=0, keepdim=True)
+    centroid_distances = torch.linalg.vector_norm(pos - centroid, dim=1)
+    median_distance = float(torch.median(centroid_distances).item())
+    if median_distance <= 0.0:
+        return 0.0
+    return float(centroid_distances[isolated_mask].max().item()) / median_distance
+
+
+def _repair_flung_isolates(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    node_sep: float,
+) -> torch.Tensor:
+    """Repair isolated-node fling by re-tiling components; no-op otherwise.
+
+    r80 round 4: packing is a REPAIR, not a default. Unconditional challenger
+    packing regressed er_500 (-4.9, honest win lost) and multi_component_80
+    (-11.0) whose isolates sat at a legitimate 2.8-4.8x median -- rewriting
+    healthy layouts let the composite mildly prefer the original moderate
+    spread. A candidate keeps its raw layout byte-identical UNLESS the
+    isolated-fling trigger fires (any degree-0 node beyond
+    ``DEGENERACY_MAX_ISOLATED_SPREAD_RATIO`` x median centroid distance), in
+    which case each weak component keeps its raw internal geometry and the
+    components are re-tiled adjacent with the shared
+    ``_tile_component_positions`` tiler. Repair-then-rescore: the contest
+    referee sees the repaired version.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Raw challenger positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Parent layout problem (edge_index / num_nodes are read).
+    node_sep : float
+        Node separation passed through to the shared component tiler.
+
+    Returns
+    -------
+    torch.Tensor
+        ``pos`` unchanged when the trigger does not fire, else the repaired
+        full-layout positions with shape ``[N, 2]``.
+    """
+    if _max_isolated_spread_ratio(pos, problem.edge_index) <= (
+        DEGENERACY_MAX_ISOLATED_SPREAD_RATIO
+    ):
+        return pos
+
+    from dagua.layout.ops.coordinate import _weak_components
+    from dagua.layout.ops.pipelines._native_shared import _tile_component_positions
+    from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
+
+    components = _weak_components(
+        problem.edge_index.detach().to(device="cpu", dtype=torch.long),
+        int(problem.num_nodes),
+    )
+    if len(components) <= 1:
+        return pos
+    component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for component_nodes_list in components:
+        component_nodes = torch.tensor(
+            component_nodes_list,
+            dtype=torch.long,
+            device=pos.device,
+        )
+        component_results.append((component_nodes, pos[component_nodes]))
+    tiled_positions = _tile_component_positions(component_results, node_sep=node_sep)
+    fit_state = AspectRatioFit(AspectRatioFitConfig()).apply(
+        problem,
+        SolveState(pos=tiled_positions),
+        RuntimeContext(),
+    )
+    if fit_state.pos is None:
+        raise RuntimeError("isolate-fling repair did not produce positions.")
+    return fit_state.pos.detach()
 
 
 def _build_cluster_ids(problem: LayoutProblem) -> Optional[torch.Tensor]:
@@ -559,8 +700,16 @@ def layout_native_undirected_portfolio(
     scores["incumbent"] = _score_undirected_candidate(incumbent_pos, problem, cluster_ids)
 
     seed = int(problem.seed) if problem.seed is not None else 42
+    challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
     def _add_challenger(name: str, raw_pos: torch.Tensor) -> None:
+        # Repair, not default (r80 round 4): the candidate keeps its raw
+        # layout byte-identical unless the isolated-fling trigger fires, in
+        # which case the flung singletons are re-tiled adjacent to the core
+        # before projection and the referee scores the repaired version.
+        # Applied at this shared entry so every challenger family (sfdp,
+        # neato, cluster_sfdp, weighted_similarity) gets the same backstop.
+        raw_pos = _repair_flung_isolates(raw_pos, problem, challenger_node_sep)
         # Both cleanup variants enter the contest as separate candidates --
         # never replace one with the other (r80-S2b bisect: replacing the
         # legacy variant with the convergent one silently removed the
@@ -590,6 +739,10 @@ def layout_native_undirected_portfolio(
     try:
         from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
 
+        # Raw full-problem solve (round 4): per-component packed solving was
+        # tried and regressed healthy multi-component candidates; any
+        # isolate fling in this raw output is repaired conditionally inside
+        # _add_challenger.
         sfdp_pos = layout_sfdp_pipeline(
             edge_index=problem.edge_index,
             num_nodes=n,
@@ -607,6 +760,8 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.neato import layout_neato_pipeline
 
+            # Raw full-problem solve (round 4); isolate fling repaired
+            # conditionally inside _add_challenger.
             neato_pos = layout_neato_pipeline(
                 edge_index=problem.edge_index,
                 num_nodes=n,
