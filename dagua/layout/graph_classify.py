@@ -561,8 +561,8 @@ def _adjacent_layer_edge_fraction(
     """
     if layer_assignments is None or edge_index.numel() == 0:
         return 0.0
-    sources = edge_index[0]
-    targets = edge_index[1]
+    sources = edge_index[0].to(layer_assignments.device)
+    targets = edge_index[1].to(layer_assignments.device)
     layer_span = layer_assignments[targets] - layer_assignments[sources]
     return float((layer_span == 1).to(dtype=torch.float32).mean().item())
 
