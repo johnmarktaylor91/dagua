@@ -172,3 +172,140 @@ L->T/W; the flip is not real to a human reader.
   real_karate, weighted_clusters), (c) edge-to-edge overlap compaction (regular_4_40),
   (d) long sweeping-curve lasso tangles from the router on dispersed layouts
   (heavy_tail, clustered_medium, sbm perimeter).
+
+## Evidence -- r80 singleton challenger fix
+
+* Root cause confirmed:
+  `dagua/layout/ops/pipelines/native_undirected.py:703-739` and `:751-786`
+  previously built the sfdp/neato challengers by solving the full problem in
+  one call. Degree-0 nodes are one-node weak components, so they had no local
+  edge constraints inside those solvers and could be flung far from the core
+  before the composite contest scored the candidate.
+* Fix approach:
+  chose full per-component challenger solving, not singleton-only extraction.
+  `_run_component_packed_challenger` now uses the existing
+  `dagua.layout.ops.coordinate._weak_components`, extracts relabeled child
+  problems with `_extract_component_problem`, solves each non-singleton child
+  with the same challenger algorithm, uses origin positions for singleton
+  children, and reassembles with the existing `_tile_component_positions`
+  tiler. This is lower-risk than inventing a new isolate packer and keeps
+  disconnected non-singleton components consistent with the incumbent tiling
+  lifecycle. The incumbent path was not changed.
+* Degeneracy guard:
+  added `DEGENERACY_MAX_CENTROID_SPREAD_RATIO = 6.0` at
+  `native_undirected.py:75`. `_candidate_is_degenerate` now rejects
+  challengers when max centroid distance is more than 6x the median centroid
+  distance, skipping the check when the median is zero so existing collapse
+  checks handle coincident layouts. This guards future far-flung-node
+  candidates without special-casing `random_bipartite_60`.
+* Unit tests:
+  `.venv/bin/pytest tests/test_native_undirected_portfolio.py -x --tb=short`
+  -> 23 passed, 6 warnings.
+  `.venv/bin/pytest tests/ -k "native_undirected or portfolio or dagua_native" -x --tb=short`
+  -> 44 passed, 3383 deselected, 38 warnings.
+  Project targeted gate
+  `.venv/bin/pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q`
+  -> failed on pre-existing environment CUDA initialization in
+  `test_streaming_coarsen_end_to_end_matches_cpu_layout` after 141 passed and
+  18 skipped; NVIDIA driver 12040 is too old for the installed torch CUDA.
+* Visual sanity:
+  rendered `/tmp/r80_bipartite_fixed.png` through `dagua.draw`.
+  Before audit pathology -> isolates at 3300/4044/4680 units from core,
+  core median radius 167, ratio about 28x.
+  After fix -> bbox=(-1767.026, 1766.800, -1955.352, 2198.621),
+  core_node_count=57, isolate_count=3, median_radius=2274.112,
+  max_radius=2697.651, ratio=1.186. Isolates are nodes [29, 30, 45]
+  with radii [2623.031, 2406.055, 2340.330].
+* Sweep:
+  `--fresh` was confirmed by `scripts/r79_baseline.py --help`. The default
+  output dir refused `--fresh` because 107 dagua rows remained resumable in the
+  staging store, so the sweep was launched against clean output dir
+  `eval_output/r80_singleton_sweep` with:
+  `setsid .venv/bin/python -u scripts/r79_baseline.py --dagua-only --fresh --output-dir eval_output/r80_singleton_sweep > /tmp/r80_singleton_sweep.log 2>&1 < /dev/null &`
+  PID 3398381, log `/tmp/r80_singleton_sweep.log`. Results pending --
+  architect to harvest.
+
+## Evidence -- r80 singleton guard NARROWED (follow-up, gate verdict)
+
+* Gate sweep verdict on the first guard form: PARTIAL FAIL. The packing fix and
+  the random_bipartite_60 honest reversion (79.09 -> 65.24) were accepted, but
+  the GLOBAL max/median centroid-spread test was over-broad: it also rejected
+  legitimately-dispersed candidates and regressed multi_component_80
+  (92.52 -> 81.55, -11.0), er_500 (51.72 -> 46.82, -4.9, a real win flipped to
+  loss), and scale_free_ba_120 (-1.9). Multi-component tilings and ER-periphery
+  structure legitimately exceed a global radius ratio.
+* Narrowing: the guard now judges ISOLATED (degree-0) nodes only -- the actual
+  metric-blind pathology. `DEGENERACY_MAX_CENTROID_SPREAD_RATIO = 6.0` replaced
+  by `DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 3.0`
+  (native_undirected.py, constants block). A candidate is rejected iff any
+  degree-0 node sits further than 3.0x the median centroid distance from the
+  layout centroid. Skipped when there are no isolates, when ALL nodes are
+  isolated (no connected core exists), or when the median distance is zero
+  (true collapse is covered by the existing checks 1-2). Connected-node spread
+  is never judged.
+* Tests updated: the flung-CONNECTED-node case now asserts PASS (was the
+  global-guard rejection test); new flung-ISOLATED-node rejection test; new
+  multi_component_80-style test (14-node path + far 2-node component, global
+  ratio ~7x, zero isolates) asserts PASS. Full file: 25 passed. ruff clean.
+* Gate sweep relaunched: default output dir, --dagua-only --fresh, log
+  /tmp/r80_singleton_sweep4.log. Acceptance: only random_bipartite_60 moves vs
+  the 74/108 store (its honest reversion); zero other movers. Results pending
+  -- architect to harvest.
+
+## Evidence -- r80 singleton guard threshold RECALIBRATED to 8x (round 3)
+
+* Round-2 verdict (architect, fling measurements on the OLD store positions):
+  the 3x isolated-node threshold conflated peripheral placement with
+  catastrophic fling. Measured isolate distances as multiples of median
+  centroid distance: random_bipartite_60 pathology 15-21x; multi_component_80
+  isolates a sane 2.8-2.9x; er_500 isolates 0.5-4.8x (peripheral, visually
+  fine). Max legitimate observed 5.4x vs min pathological 15.1x.
+* Change: DEGENERACY_MAX_ISOLATED_SPREAD_RATIO 3.0 -> 8.0
+  (native_undirected.py constants block). 8x sits in the measured separation
+  gap with margin both ways; the pathology class is order-of-magnitude fling,
+  not peripheral placement. Rationale documented at the constant.
+* Tests: new parametric helper builds a 50-node ring + one degree-0 isolate at
+  a chosen centroid-distance ratio. A ~5x isolate PASSES the guard (peripheral
+  band); a ~15x isolate is REJECTED (pathology band). Each test asserts its
+  measured ratio sits in the intended band before checking the verdict.
+  Full file: 26 passed. ruff clean.
+* Gate sweep relaunched: default output dir, --dagua-only --fresh, log
+  /tmp/r80_singleton_sweep5.log. Acceptance: EXACTLY ONE mover vs the
+  committed 74/108 store -- random_bipartite_60's honest reversion. Results
+  pending -- architect to harvest.
+
+## Evidence -- r80 singleton fix FINAL design: repair, not default (round 4)
+
+* Round-3 analysis (architect): the 8x threshold is right, but UNCONDITIONAL
+  challenger packing was what still moved er_500 (-4.9, honest S2b win lost)
+  and multi_component_80 (-11.0). Their isolates sat at a legitimate
+  2.8-4.8x median, yet packing rewrote their layouts and the composite mildly
+  preferred the original moderate spread.
+* Final design: packing is a REPAIR, not a default.
+  - sfdp/neato challengers revert to raw full-problem solves (the pre-fix
+    call shape), so below-threshold graphs produce byte-identical candidates
+    to the committed 74/108 store.
+  - _repair_flung_isolates (native_undirected.py): fires ONLY when
+    _max_isolated_spread_ratio > DEGENERACY_MAX_ISOLATED_SPREAD_RATIO (8.0).
+    On fire, each weak component keeps its raw internal geometry and
+    components are re-tiled adjacent via the existing shared
+    _tile_component_positions tiler + AspectRatioFit. Repair-then-rescore:
+    the contest referee scores the repaired version.
+  - Applied at the shared _add_challenger entry, so ALL challenger families
+    (sfdp, neato, cluster_sfdp, weighted_similarity) get the same backstop.
+  - Guard check 3 (8x isolated-fling rejection) kept as a backstop behind
+    the repair; formula deduped into _max_isolated_spread_ratio.
+  - The unconditional per-component packed-challenger runner from round 1
+    was removed (dead code under the final design).
+* Tests: round-3 5x-pass / 15x-reject guard tests kept. New:
+  below-threshold layout is BYTE-IDENTICAL through the repair path (same
+  tensor object, torch.equal); above-threshold repair re-tiles the isolate
+  under 8x and passes the full degeneracy guard. End-to-end
+  random_bipartite_60 and synthetic-singleton 3x-median assertions still
+  pass. Full file: 28 passed. ruff clean.
+* Gate sweep: default output dir, --dagua-only --fresh, log
+  /tmp/r80_singleton_sweep6.log. Acceptance: EXACTLY ONE mover vs the
+  committed 74/108 store -- random_bipartite_60's honest reversion
+  (er_500 and multi_component_80 byte-identical: no trigger, no packing).
+  FINAL ROUND per architect: any other mover -> stop and report, do not
+  iterate. Results pending -- architect to harvest.
