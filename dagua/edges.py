@@ -773,6 +773,9 @@ def route_edges(
     positions_finite = all(
         math.isfinite(x) and math.isfinite(y) for x, y in zip(x_coords, y_coords)
     )
+    if not positions_finite:
+        # Neutral per-node spread scales so downstream indexing stays valid.
+        spread_scales = [1.0] * num_nodes
     if num_nodes > 0 and positions_finite:
         mean_diag = sum(math.hypot(w, h) for w, h in zip(widths, heights)) / num_nodes
         if mean_diag > 1e-6:
@@ -936,7 +939,7 @@ def route_edges(
         # non-endpoint node the curve passes through. Bezier-only (r80-S7#1);
         # ON by default, per-edge opt-out via EdgeStyle.avoid_nodes.
         avoid_nodes = edge_style.avoid_nodes if edge_style is not None else True
-        if avoid_nodes and routing == "bezier" and num_nodes > 2:
+        if avoid_nodes and positions_finite and routing == "bezier" and num_nodes > 2:
             curve = _deflect_around_nodes(
                 curve,
                 s,
