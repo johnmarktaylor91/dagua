@@ -138,6 +138,7 @@ def build_sugiyama_pipeline(
             center_coordinates=center_coordinates,
             use_graphviz_xcoord=use_graphviz_xcoord,
             use_igraph_conflicts=use_igraph_fidelity,
+            use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
         ),
     ]
     if return_edge_routes:
@@ -165,6 +166,7 @@ def layout_sugiyama_pipeline(
     graphviz_edge_label_sizes: Optional[torch.Tensor] = None,
     clusters: Optional[Dict[str, Any]] = None,
     cluster_parents: Optional[Dict[str, Optional[str]]] = None,
+    graphviz_cluster_label_widths: Optional[Dict[str, float]] = None,
     graphviz_apply_cluster_constraints: bool = False,
     graphviz_enable_cluster_skeleton: bool = False,
     config: Optional["LayoutConfig"] = None,
@@ -229,6 +231,8 @@ def layout_sugiyama_pipeline(
         x-boundary machinery.
     cluster_parents : dict[str, str | None], optional
         Cluster hierarchy metadata from ``DaguaGraph.cluster_parents``.
+    graphviz_cluster_label_widths : dict[str, float], optional
+        Padded Graphviz cluster-label widths in point units.
     graphviz_apply_cluster_constraints : bool, default=False
         Whether Graphviz-dot cluster x-boundary machinery is allowed to consume
         ``clusters``. The benchmark wrapper enables this only for cluster-only
@@ -328,6 +332,10 @@ def layout_sugiyama_pipeline(
             device="cpu",
             dtype=torch.float32,
         )
+    if graphviz_cluster_label_widths is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_cluster_label_widths"] = {
+            str(name): float(width) for name, width in graphviz_cluster_label_widths.items()
+        }
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
 
     pipeline = build_sugiyama_pipeline(

@@ -465,6 +465,8 @@ def test_classic_sugiyama_graphviz_fidelity_forwards_label_only_metadata(
     assert result.pos is not None
     kwargs = seen["kwargs"]
     assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert graph.node_sizes is not None
+    assert torch.equal(kwargs["graphviz_node_sizes"], graph.node_sizes)
     assert isinstance(kwargs["graphviz_edge_label_sizes"], torch.Tensor)
     assert kwargs["graphviz_edge_label_sizes"].shape == (1, 2)
     assert "clusters" not in kwargs
