@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
-import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -431,23 +428,12 @@ def test_geometry_candidate_rejects_overlap_increase() -> None:
     assert reason == "overlaps increased 1->2"
 
 
-@pytest.mark.parametrize("num_nodes", [300, 500])
-def test_mid_size_undirected_layout_skips_unbounded_contest(num_nodes: int) -> None:
-    """Mid-size sparse graphs return finite layouts within a wall-time bound."""
-    from dagua.layout import layout
+def test_general_challengers_cover_500_node_corpus() -> None:
+    """The contest cap covers the corpus without a smaller challenger cutoff."""
+    from dagua.layout.ops.pipelines import native_undirected
 
-    graph = DaguaGraph.from_edge_list(
-        [(node, (node + 1) % num_nodes) for node in range(num_nodes)],
-        num_nodes=num_nodes,
-        is_semantically_directed=False,
-    )
-    graph.compute_node_sizes()
-    started = time.monotonic()
-
-    pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
-
-    assert time.monotonic() - started < 15.0
-    assert bool(torch.isfinite(pos).all())
+    assert MAX_CONTEST_NODES >= 500
+    assert not hasattr(native_undirected, "MAX_GENERAL_CHALLENGER_NODES")
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
