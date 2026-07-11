@@ -1633,7 +1633,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         "SFDP (p=-2.0)",
         {"steps": 500, "theta": 0.6, "repulsive_exponent": -2.0, "fidelity_mode": "graphviz"},
         "graphviz_sfdp",
-        {"maxiter": 500, "theta": 0.6, "repulsiveforce": -2.0},
+        {"maxiter": 500, "theta": 0.6, "repulsiveforce": 2.0},
         False,
         True,
         False,

@@ -325,6 +325,15 @@ def test_classic_embedding_variant_registry_matches_reference_defaults() -> None
     assert "gcn_steps" not in neulay_no_gcn.original_params
 
 
+def test_classic_sfdp_p_neg2_uses_positive_graphviz_repulsiveforce() -> None:
+    """The Graphviz p=-2 reference should request internal exponent ``p=-2``."""
+    sfdp_p_neg2 = get_variant("classic_sfdp_p_neg2")
+
+    assert sfdp_p_neg2 is not None
+    assert sfdp_p_neg2.reimpl_params["repulsive_exponent"] == -2.0
+    assert sfdp_p_neg2.original_params["repulsiveforce"] == 2.0
+
+
 def test_stochastic_flag_consistency() -> None:
     """Variant stochastic flags should match runner classification."""
     for variant in VARIANT_REGISTRY:
