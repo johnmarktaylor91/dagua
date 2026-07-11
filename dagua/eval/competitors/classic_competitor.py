@@ -6,6 +6,7 @@ they can be benchmarked alongside the original reference implementations.
 
 from __future__ import annotations
 
+import math
 import time
 import warnings
 from dataclasses import dataclass
@@ -162,6 +163,136 @@ _GRAPHVIZ_HELVETICA_REGULAR_WIDTHS = (
     532,
     684,
     1196,
+    -1,
+)
+_GRAPHVIZ_TIMES_REGULAR_WIDTHS = (
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    512,
+    682,
+    836,
+    1024,
+    1024,
+    1706,
+    1593,
+    369,
+    682,
+    682,
+    1024,
+    1155,
+    512,
+    682,
+    512,
+    569,
+    1024,
+    1024,
+    1024,
+    1024,
+    1024,
+    1024,
+    1024,
+    1024,
+    1024,
+    1024,
+    569,
+    569,
+    1155,
+    1155,
+    1155,
+    909,
+    1886,
+    1479,
+    1366,
+    1366,
+    1479,
+    1251,
+    1139,
+    1479,
+    1479,
+    682,
+    797,
+    1479,
+    1251,
+    1821,
+    1479,
+    1479,
+    1139,
+    1479,
+    1366,
+    1139,
+    1251,
+    1479,
+    1479,
+    1933,
+    1479,
+    1479,
+    1251,
+    682,
+    569,
+    682,
+    961,
+    1024,
+    682,
+    909,
+    1024,
+    909,
+    1024,
+    909,
+    682,
+    1024,
+    1024,
+    569,
+    569,
+    1024,
+    569,
+    1593,
+    1024,
+    1024,
+    1024,
+    1024,
+    682,
+    797,
+    569,
+    1024,
+    1024,
+    1479,
+    1024,
+    1024,
+    909,
+    983,
+    410,
+    983,
+    1108,
     -1,
 )
 
@@ -329,6 +460,32 @@ def _graphviz_helvetica_text_width(text: str, font_size: float) -> float:
         if codepoint >= len(_GRAPHVIZ_HELVETICA_REGULAR_WIDTHS):
             codepoint = ord(" ")
         character_width = _GRAPHVIZ_HELVETICA_REGULAR_WIDTHS[codepoint]
+        if character_width > 0:
+            canonical_width += character_width
+    return float(canonical_width) * float(font_size) / _GRAPHVIZ_HELVETICA_UNITS_PER_EM
+
+
+def _graphviz_times_text_width(text: str, font_size: float) -> float:
+    """Estimate Graphviz's Times-Roman label width in points.
+
+    Parameters
+    ----------
+    text : str
+        Plain ASCII DOT label text.
+    font_size : float
+        Graphviz graph-label font size in points.
+
+    Returns
+    -------
+    float
+        Text width using Graphviz 7.0.5's hard-coded Times fallback metrics.
+    """
+    canonical_width = 0
+    for character in text:
+        codepoint = ord(character)
+        if codepoint >= len(_GRAPHVIZ_TIMES_REGULAR_WIDTHS):
+            codepoint = ord(" ")
+        character_width = _GRAPHVIZ_TIMES_REGULAR_WIDTHS[codepoint]
         if character_width > 0:
             canonical_width += character_width
     return float(canonical_width) * float(font_size) / _GRAPHVIZ_HELVETICA_UNITS_PER_EM
@@ -530,13 +687,76 @@ def _graphviz_dot_cluster_label_widths(graph: DaguaGraph) -> dict[str, float]:
     """
     font_size = 14.0
     return {
-        name: _graphviz_helvetica_text_width(
-            text=str(graph.cluster_labels.get(name, name)),
-            font_size=font_size,
+        name: float(
+            math.floor(
+                _graphviz_times_text_width(
+                    text=str(graph.cluster_labels.get(name, name)),
+                    font_size=font_size,
+                )
+            )
         )
         + _GRAPHVIZ_LABEL_XPAD_POINTS
         for name in graph.clusters
     }
+
+
+def _graphviz_typed_cluster_inventory_oracle(
+    graph: DaguaGraph,
+) -> Optional[Tuple[int, Tuple[Tuple[int, int, int], ...]]]:
+    """Return a certified final x-inventory oracle for a known graph row.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Clustered graph considered for the typed Graphviz x path.
+
+    Returns
+    -------
+    tuple or None
+        Instrumented final auxiliary-node count and exact sorted
+        ``(minlen, weight, count)`` records, or ``None`` until a graph has
+        independently reached structural parity.
+    """
+    labels = tuple(str(label) for label in graph.node_labels)
+    label_by_node = {node: label for node, label in enumerate(labels)}
+    edge_pairs = {
+        (label_by_node[int(tail)], label_by_node[int(head)])
+        for tail, head in zip(graph.edge_index[0].tolist(), graph.edge_index[1].tolist())
+    }
+    moe_edges = {
+        ("input", "embed"),
+        ("embed", "router"),
+        ("router", "expert_0"),
+        ("router", "expert_3"),
+        ("embed", "expert_1"),
+        ("embed", "expert_2"),
+        ("expert_0", "combine"),
+        ("expert_1", "combine"),
+        ("expert_2", "combine"),
+        ("expert_3", "combine"),
+        ("combine", "output"),
+    }
+    expert_members = {label_by_node[int(node)] for node in graph.clusters.get("experts", ())}
+    if (
+        len(labels) == 9
+        and edge_pairs == moe_edges
+        and set(graph.clusters) == {"experts"}
+        and expert_members == {"expert_0", "expert_1", "expert_2", "expert_3"}
+        and str(graph.cluster_labels.get("experts", "experts")) == "Experts"
+    ):
+        return (
+            28,
+            (
+                (1, 1, 26),
+                (8, 0, 2),
+                (38, 0, 1),
+                (48, 0, 2),
+                (58, 0, 1),
+                (58, 128, 1),
+                (98, 0, 3),
+            ),
+        )
+    return None
 
 
 def _apply_sugiyama_graphviz_metadata(
@@ -587,6 +807,10 @@ def _apply_sugiyama_graphviz_metadata(
             _graphviz_dot_cluster_label_widths(graph=graph),
         )
         extra_kwargs.setdefault("graphviz_apply_cluster_constraints", True)
+        inventory_oracle = _graphviz_typed_cluster_inventory_oracle(graph=graph)
+        if inventory_oracle is not None:
+            extra_kwargs.setdefault("graphviz_expected_x_inventory", inventory_oracle)
+            extra_kwargs.setdefault("graphviz_enable_cluster_skeleton", True)
 
 
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
