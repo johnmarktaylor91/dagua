@@ -17,9 +17,15 @@ from dagua.layout.ops.pipelines.fmmm import (
     _graphviz_fdp_collapse_parallel_edges,
     _graphviz_tile_pack_offsets,
     _layout_ogdf_fmmm_small_fidelity,
+    _ogdf_fmmm_build_hierarchy,
     _ogdf_fmmm_max_mult_iter,
+    _ogdf_fmmm_nmm_repulsive_forces,
+    _ogdf_fmmm_random_placement,
+    _ogdf_fmmm_repulsive_forces,
+    _ogdf_fmmm_update_box,
     _ogdf_maar_pack_component_transforms,
     _ogdf_maar_pack_offsets,
+    _OgdfMt19937,
     layout_fmmm_pipeline,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -209,6 +215,74 @@ def test_fmmm_fidelity_mode_uses_multilevel_driver_above_coarse_target() -> None
     assert positions.shape == (60, 2)
     assert torch.isfinite(positions).all()
     assert not torch.allclose(positions, legacy_positions)
+
+
+def test_fmmm_ogdf_hierarchy_uses_reseeded_mt19937_galaxy_stream() -> None:
+    """Pin OGDF solar-system selection and coarse edge insertion order.
+
+    Returns
+    -------
+    None
+        The assertions pin the private per-level MT19937 stream and the
+        first-surviving-edge behavior of ``makeSimpleUndirected``.
+    """
+    edge_index = torch.tensor(
+        [[node for node in range(59)], [node + 1 for node in range(59)]],
+        dtype=torch.long,
+    )
+
+    levels, steps = _ogdf_fmmm_build_hierarchy(edge_index, 60, seed=3)
+
+    assert [level.num_nodes for level in levels] == [60, 17]
+    assert steps[0].mapping[:20] == [
+        0,
+        0,
+        0,
+        13,
+        13,
+        13,
+        3,
+        3,
+        3,
+        3,
+        7,
+        7,
+        7,
+        7,
+        2,
+        2,
+        2,
+        11,
+        11,
+        11,
+    ]
+    assert levels[1].edges[:3] == [(0, 13), (13, 3), (3, 7)]
+
+
+def test_fmmm_nmm_force_approximates_exact_force_at_dispatch_boundary() -> None:
+    """Validate the ported NMM force at OGDF's 175-node boundary.
+
+    Returns
+    -------
+    None
+        The relative force error stays below the order-four expansion budget.
+    """
+    positions = _ogdf_fmmm_random_placement(175, seed=9)
+    boxlength, down_left = _ogdf_fmmm_update_box(positions)
+
+    approximate = torch.tensor(
+        _ogdf_fmmm_nmm_repulsive_forces(
+            positions,
+            boxlength,
+            down_left,
+            _OgdfMt19937(9),
+        ),
+        dtype=torch.float64,
+    )
+    exact = torch.tensor(_ogdf_fmmm_repulsive_forces(positions), dtype=torch.float64)
+    relative_error = torch.linalg.norm(approximate - exact) / torch.linalg.norm(exact)
+
+    assert float(relative_error.item()) < 1.0e-3
 
 
 def test_fmmm_fidelity_mode_decomposes_disconnected_large_graphs() -> None:
