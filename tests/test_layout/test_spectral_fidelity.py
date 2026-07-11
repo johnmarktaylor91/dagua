@@ -59,6 +59,35 @@ def _path_edge_index(num_nodes: int) -> torch.Tensor:
     )
 
 
+def _multi_component_path_laplacian(component_size: int, component_count: int) -> sparse.csr_matrix:
+    """Build an unnormalized Laplacian for equal-size path components.
+
+    Parameters
+    ----------
+    component_size : int
+        Number of nodes in each path component.
+    component_count : int
+        Number of disconnected path components.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Unnormalized Laplacian with shape ``[N, N]``.
+    """
+    adjacency_blocks = []
+    for _ in range(component_count):
+        adjacency = sparse.diags(
+            [np.ones(component_size - 1), np.ones(component_size - 1)],
+            offsets=[-1, 1],
+            shape=(component_size, component_size),
+            format="csr",
+        )
+        adjacency_blocks.append(adjacency)
+    adjacency = sparse.block_diag(adjacency_blocks, format="csr")
+    degrees = np.asarray(adjacency.sum(axis=1)).reshape(-1)
+    return (sparse.diags(degrees, offsets=0, format="csr") - adjacency).tocsr()
+
+
 def _weighted_duplicate_graph() -> DaguaGraph:
     """Build a graph with duplicate weighted edges.
 
@@ -338,6 +367,7 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
         k: int,
         which: str,
         ncv: int,
+        v0: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Capture sparse eigensolver sizing.
 
@@ -351,13 +381,15 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
             ARPACK eigenvalue selector.
         ncv : int
             Requested Lanczos vector count.
+        v0 : numpy.ndarray
+            Deterministic ARPACK start vector with shape ``[N]``.
 
         Returns
         -------
         tuple[numpy.ndarray, numpy.ndarray]
             Eigenvalues and eigenvectors.
         """
-        captured.update({"k": k, "which": which, "ncv": ncv})
+        captured.update({"k": k, "which": which, "ncv": ncv, "v0_size": int(v0.shape[0])})
         return np.array([0.0, 1.0, 2.0]), np.eye(laplacian.shape[0], k)
 
     monkeypatch.setattr(embed_ops.sparse_linalg, "eigsh", _eigsh)
@@ -369,4 +401,101 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
         networkx_fidelity=True,
     )
 
-    assert captured == {"k": 3, "which": "SM", "ncv": 22}
+    assert captured == {"k": 3, "which": "SM", "ncv": 22, "v0_size": 500}
+
+
+def test_networkx_fidelity_disconnected_sparse_fallback_returns_zero_space() -> None:
+    """Disconnected sparse unnormalized Laplacians should not truncate zero modes."""
+    laplacian = _multi_component_path_laplacian(component_size=125, component_count=4)
+
+    coordinates = _sparse_spectral_embedding(
+        laplacian=laplacian,
+        dim=2,
+        symmetric=True,
+        networkx_fidelity=True,
+    )
+    residual = np.linalg.norm(laplacian @ coordinates) / np.linalg.norm(coordinates)
+
+    assert residual <= 1.0e-8
+
+
+def test_networkx_fidelity_random_walk_sparse_uses_symmetric_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sparse random-walk fidelity should avoid nondeterministic nonsymmetric ARPACK."""
+    laplacian = sparse.identity(500, format="csr", dtype=np.float64)
+    called: dict[str, bool] = {"eigsh": False}
+
+    def _eigsh(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+        v0: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return deterministic eigenpairs from the symmetric substitute.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.csr_matrix
+            Symmetric sparse matrix with shape ``[N, N]``.
+        k : int
+            Requested eigenpair count.
+        which : str
+            ARPACK eigenvalue selector.
+        ncv : int
+            Requested Lanczos vector count.
+        v0 : numpy.ndarray
+            Deterministic ARPACK start vector with shape ``[N]``.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            Eigenvalues and eigenvectors.
+        """
+        _ = matrix, which, ncv, v0
+        called["eigsh"] = True
+        return np.arange(k, dtype=np.float64), np.eye(500, k, dtype=np.float64)
+
+    def _eigs(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+        v0: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Fail if the nonsymmetric eigensolver path is used.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.csr_matrix
+            Sparse matrix with shape ``[N, N]``.
+        k : int
+            Requested eigenpair count.
+        which : str
+            ARPACK eigenvalue selector.
+        ncv : int
+            Requested Lanczos vector count.
+        v0 : numpy.ndarray
+            Deterministic ARPACK start vector with shape ``[N]``.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            This fake never returns because the test expects it not to run.
+        """
+        _ = matrix, k, which, ncv, v0
+        raise AssertionError("random-walk spectral fidelity should not call eigs")
+
+    monkeypatch.setattr(embed_ops.sparse_linalg, "eigsh", _eigsh)
+    monkeypatch.setattr(embed_ops.sparse_linalg, "eigs", _eigs)
+
+    coordinates = _sparse_spectral_embedding(
+        laplacian=laplacian,
+        dim=2,
+        symmetric=False,
+        networkx_fidelity=True,
+    )
+
+    assert called["eigsh"] is True
+    assert coordinates.shape == (500, 2)

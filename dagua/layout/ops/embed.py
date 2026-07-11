@@ -44,6 +44,7 @@ _EMBEDDING_OUTPUT_DIM = 2
 _SPECTRAL_EXTRA_EIGENPAIRS = 4
 _SPECTRAL_LANCZOS_MULTIPLIER = 2
 _SPECTRAL_LANCZOS_PADDING = 2
+_SPECTRAL_DENSE_DEGENERATE_NODE_LIMIT = 2_500
 _GCN_REQUIRED_HIDDEN_LAYER_COUNT = 2
 _TSNE_JOINT_PROBABILITY_DIVISOR = 2.0
 _CURVE_FIT_INITIAL_GUESS = (_DEFAULT_CURVE_A, _DEFAULT_CURVE_B)
@@ -1199,6 +1200,238 @@ def _select_embedding_columns(
     return coordinates
 
 
+def _deterministic_arpack_start(num_nodes: int) -> np.ndarray:
+    """Build a process-stable ARPACK start vector.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of rows in the eigensolver input matrix.
+
+    Returns
+    -------
+    numpy.ndarray
+        Unit-norm start vector with shape ``[N]``.
+    """
+    if num_nodes <= 0:
+        return np.empty((0,), dtype=np.float64)
+    start = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+    start -= float(start.mean())
+    norm = float(np.linalg.norm(start))
+    if norm <= _EPSILON:
+        start = np.ones(num_nodes, dtype=np.float64)
+        norm = float(np.linalg.norm(start))
+    return start / norm
+
+
+def _offdiagonal_connectivity(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
+    """Return the undirected nonzero off-diagonal structure of a matrix.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.csr_matrix
+        Square matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Binary symmetric off-diagonal connectivity matrix with shape ``[N, N]``.
+    """
+    connectivity = matrix.copy().tocsr()
+    connectivity.setdiag(0.0)
+    connectivity.eliminate_zeros()
+    connectivity = ((connectivity != 0) + (connectivity.transpose() != 0)).astype(np.float64)
+    connectivity.setdiag(0.0)
+    connectivity.eliminate_zeros()
+    return connectivity.tocsr()
+
+
+def _requires_disconnected_dense_fallback(laplacian: sparse.csr_matrix) -> bool:
+    """Detect sparse unnormalized Laplacians whose zero eigenspace is truncated.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Symmetric Laplacian matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when a small disconnected unnormalized Laplacian should use
+        the dense NetworkX-compatible path instead of ARPACK's incomplete
+        smallest-magnitude slice.
+    """
+    num_nodes = int(laplacian.shape[0])
+    if num_nodes > _SPECTRAL_DENSE_DEGENERATE_NODE_LIMIT:
+        return False
+    row_sums = np.asarray(laplacian.sum(axis=1)).reshape(-1)
+    if row_sums.size == 0 or float(np.max(np.abs(row_sums))) > _SPECTRAL_EIGENVALUE_TOLERANCE:
+        return False
+    connectivity = _offdiagonal_connectivity(laplacian)
+    component_count, _ = sparse.csgraph.connected_components(
+        connectivity,
+        directed=False,
+        return_labels=True,
+    )
+    return int(component_count) > 1
+
+
+def _disconnected_kernel_spectral_embedding(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    skip_first: bool,
+) -> Optional[np.ndarray]:
+    """Build deterministic coordinates from a disconnected Laplacian kernel.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Unnormalized disconnected Laplacian with shape ``[N, N]``.
+    dim : int
+        Requested output dimension.
+    skip_first : bool
+        Whether to drop the first component-indicator vector before selecting
+        layout coordinates.
+
+    Returns
+    -------
+    numpy.ndarray | None
+        Kernel coordinates with shape ``[N, dim]`` when the component nullity
+        can satisfy the requested dimensions, otherwise ``None``.
+    """
+    num_nodes = int(laplacian.shape[0])
+    connectivity = _offdiagonal_connectivity(laplacian)
+    component_count, labels = sparse.csgraph.connected_components(
+        connectivity,
+        directed=False,
+        return_labels=True,
+    )
+    if int(component_count) <= 1:
+        return None
+
+    basis = np.zeros((num_nodes, int(component_count)), dtype=np.float64)
+    for component in range(int(component_count)):
+        mask = labels == component
+        size = int(np.count_nonzero(mask))
+        if size > 0:
+            basis[mask, component] = 1.0 / np.sqrt(float(size))
+
+    start_column = 1 if skip_first else 0
+    selected = basis[:, start_column : start_column + dim]
+    if selected.shape[1] < dim:
+        return None
+    coordinates = np.zeros((num_nodes, dim), dtype=np.float64)
+    coordinates[:, : selected.shape[1]] = selected
+    return coordinates
+
+
+def _random_walk_similarity_data(
+    laplacian: sparse.csr_matrix,
+) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """Convert ``I - D^-1 A`` to its symmetric similar problem.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Random-walk Laplacian with shape ``[N, N]``.
+
+    Returns
+    -------
+    tuple[scipy.sparse.csr_matrix, numpy.ndarray]
+        Symmetric normalized Laplacian and relative ``D^-1/2`` row scales used
+        to map symmetric eigenvectors back to right eigenvectors of the
+        random-walk operator.
+    """
+    num_nodes = int(laplacian.shape[0])
+    transition = (sparse.identity(num_nodes, format="csr", dtype=np.float64) - laplacian).tocsr()
+    transition.setdiag(0.0)
+    transition.eliminate_zeros()
+
+    symmetric_weights = transition.multiply(transition.transpose()).tocsr()
+    if symmetric_weights.nnz > 0:
+        symmetric_weights.data = np.sqrt(np.maximum(symmetric_weights.data, 0.0))
+    symmetric_laplacian = (
+        sparse.identity(num_nodes, format="csr", dtype=np.float64) - symmetric_weights
+    ).tocsr()
+
+    row_scales = np.ones(num_nodes, dtype=np.float64)
+    connectivity = _offdiagonal_connectivity(transition)
+    _, labels = sparse.csgraph.connected_components(
+        connectivity,
+        directed=False,
+        return_labels=True,
+    )
+    csr = transition.tocsr()
+    csc = transition.tocsc()
+    for component in np.unique(labels):
+        nodes = np.flatnonzero(labels == component)
+        if nodes.size <= 1:
+            continue
+        degree_like = {int(nodes[0]): 1.0}
+        queue = [int(nodes[0])]
+        while queue:
+            source = queue.pop(0)
+            start = int(csr.indptr[source])
+            end = int(csr.indptr[source + 1])
+            for offset in range(start, end):
+                target = int(csr.indices[offset])
+                if target in degree_like:
+                    continue
+                forward = float(csr.data[offset])
+                reverse = float(csc[target, source])
+                if forward <= 0.0 or reverse <= 0.0:
+                    continue
+                degree_like[target] = degree_like[source] * forward / reverse
+                queue.append(target)
+        for node, value in degree_like.items():
+            row_scales[node] = 1.0 / np.sqrt(max(value, _EPSILON))
+    return symmetric_laplacian, row_scales
+
+
+def _sparse_random_walk_spectral_embedding(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    eigen_count: int,
+    ncv: int,
+    skip_first: bool,
+) -> np.ndarray:
+    """Compute sparse random-walk spectral coordinates deterministically.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Random-walk Laplacian with shape ``[N, N]``.
+    dim : int
+        Requested output dimension.
+    eigen_count : int
+        Number of low-frequency eigenpairs to request.
+    ncv : int
+        Number of Lanczos vectors to request from ARPACK.
+    skip_first : bool
+        Whether to drop exactly the first sorted eigenvector.
+
+    Returns
+    -------
+    numpy.ndarray
+        Spectral coordinates with shape ``[N, dim]``.
+    """
+    symmetric_laplacian, row_scales = _random_walk_similarity_data(laplacian)
+    eigenvalues, eigenvectors = sparse_linalg.eigsh(
+        symmetric_laplacian,
+        k=eigen_count,
+        which="SM",
+        ncv=ncv,
+        v0=_deterministic_arpack_start(int(laplacian.shape[0])),
+    )
+    eigenvectors = eigenvectors * row_scales[:, np.newaxis]
+    return _select_embedding_columns(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        dim=dim,
+        skip_first=skip_first,
+    )
+
+
 def _dense_spectral_embedding(
     laplacian: sparse.csr_matrix,
     dim: int,
@@ -1298,12 +1531,42 @@ def _sparse_spectral_embedding(
             max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING),
             num_nodes,
         )
+    if (
+        symmetric
+        and networkx_fidelity
+        and _requires_disconnected_dense_fallback(
+            laplacian=laplacian,
+        )
+    ):
+        kernel_coordinates = _disconnected_kernel_spectral_embedding(
+            laplacian=laplacian,
+            dim=dim,
+            skip_first=networkx_fidelity or igraph_fidelity,
+        )
+        if kernel_coordinates is not None:
+            return kernel_coordinates
+        return _dense_spectral_embedding(
+            laplacian=laplacian,
+            dim=dim,
+            symmetric=symmetric,
+            networkx_fidelity=networkx_fidelity,
+            igraph_fidelity=igraph_fidelity,
+        )
+    if networkx_fidelity and not symmetric:
+        return _sparse_random_walk_spectral_embedding(
+            laplacian=laplacian,
+            dim=dim,
+            eigen_count=eigen_count,
+            ncv=ncv,
+            skip_first=networkx_fidelity or igraph_fidelity,
+        )
     if symmetric:
         eigenvalues, eigenvectors = sparse_linalg.eigsh(
             laplacian,
             k=eigen_count,
             which="SM",
             ncv=ncv,
+            v0=_deterministic_arpack_start(num_nodes),
         )
     else:
         eigenvalues, eigenvectors = sparse_linalg.eigs(
@@ -1311,6 +1574,7 @@ def _sparse_spectral_embedding(
             k=eigen_count,
             which="SR",
             ncv=ncv,
+            v0=_deterministic_arpack_start(num_nodes),
         )
     return _select_embedding_columns(
         eigenvalues=eigenvalues,
