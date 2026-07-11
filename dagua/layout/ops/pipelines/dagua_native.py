@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -4410,7 +4411,13 @@ def _collinear_dodge(
     torch.Tensor or None
         Dodged positions, or ``None`` when no blocked edge is detected.
     """
-    if edge_index.numel() == 0 or pos.shape[0] < 3:
+    from dagua.layout.ops.pipelines.native_undirected import MAX_COLLINEAR_WORK
+
+    if (
+        edge_index.numel() == 0
+        or pos.shape[0] < 3
+        or int(pos.shape[0]) * int(edge_index.shape[1]) > MAX_COLLINEAR_WORK
+    ):
         return None
     vectors = pos[edge_index[1]] - pos[edge_index[0]]
     lengths = torch.linalg.vector_norm(vectors, dim=1)
@@ -4531,8 +4538,8 @@ def _best_of_polish(
     layered_dag and tree pipelines, so a direct constraint projection
     can escape the local minimum. Edge-equalize variants are tried first;
     projection primitives are then scored as named candidates.
-    The un-polished baseline is preserved unless a candidate beats it by at
-    least ``margin`` composite points.
+    The un-polished baseline is preserved unless a finite, non-degenerate,
+    overlap-monotone candidate beats it by at least ``margin`` composite points.
 
     Margin lowered from 0.5 to 0.1. made
     composite() deterministic for fixed positions, so the larger gate
@@ -4594,6 +4601,11 @@ def _best_of_polish(
         except Exception:
             return None
 
+    from dagua.layout.ops.pipelines.native_undirected import (
+        DEFAULT_CANDIDATE_BUDGET_S,
+        _candidate_is_eligible,
+    )
+
     best_pos = base_pos
     best_score = score(base_pos)
 
@@ -4616,7 +4628,10 @@ def _best_of_polish(
     best_edge_score = best_score
     edge_seed_positions: list[tuple[str, torch.Tensor]] = []
     for edge_name, make_candidate in edge_equalize_candidates:
+        started = time.monotonic()
         cand = make_candidate(base_pos, edge_index, node_sizes)
+        if time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+            continue
         cand_score = safe_score(cand)
         if cand_score is None:
             continue
@@ -4794,9 +4809,18 @@ def _best_of_polish(
                 ),
             ]
         )
-    for _, make_polish_candidate in polish_candidates:
+    for candidate_name, make_polish_candidate in polish_candidates:
+        started = time.monotonic()
         cand = make_polish_candidate(best_pos, edge_index, node_sizes)
-        if cand is None:
+        if cand is None or time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+            continue
+        candidate_input = (
+            base_pos
+            if candidate_name.startswith("collinear_dodge") or candidate_name == "unshear"
+            else best_pos
+        )
+        eligible, _reason = _candidate_is_eligible(cand, candidate_input, node_sizes, edge_index)
+        if not eligible:
             continue
         cand_score = safe_score(cand)
         if cand_score is None:
