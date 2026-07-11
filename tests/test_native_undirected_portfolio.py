@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -19,6 +22,7 @@ from dagua.layout.ops.pipelines.native_undirected import (
     MAX_CONTEST_NODES,
     NEATO_QUALITY_THRESHOLD,
     _candidate_is_degenerate,
+    _candidate_is_eligible,
     _candidate_refinement_steps,
     _neato_in_contest,
     _project_candidate_prism,
@@ -384,6 +388,66 @@ def test_prism_candidate_finishes_residual_overlaps_to_zero() -> None:
     from dagua.metrics import count_overlaps
 
     assert count_overlaps(projected.cpu(), node_sizes) == 0
+
+
+def test_prism_duplicate_positions_fail_closed() -> None:
+    """PRISM rejects duplicate positions instead of returning extreme coordinates."""
+    positions = torch.tensor([[0.0, 0.0], [0.0, 0.0], [100.0, 100.0]])
+    node_sizes = torch.full((3, 2), 10.0)
+    edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=3,
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    assert _project_candidate_prism(positions, problem) is None
+
+
+def test_geometry_candidate_rejects_overlap_increase() -> None:
+    """The adversarial collinear dodge that adds an overlap is ineligible."""
+    from dagua.layout.ops.pipelines.dagua_native import _collinear_dodge
+
+    edge_index = torch.tensor([[0, 0, 1, 1, 2, 3, 4], [2, 1, 5, 7, 3, 5, 5]], dtype=torch.long)
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.0, 10.0],
+            [0.0, 20.0],
+            [15.4435, -2.0417],
+            [3.3375, 13.7076],
+            [-20.0198, -22.4181],
+            [50.0, 50.0],
+            [50.0, 50.0],
+        ]
+    )
+    node_sizes = torch.full((8, 2), 2.0)
+    candidate = _collinear_dodge(positions, edge_index, delta=0.15)
+
+    assert candidate is not None
+    eligible, reason = _candidate_is_eligible(candidate, positions, node_sizes, edge_index)
+    assert eligible is False
+    assert reason == "overlaps increased 1->2"
+
+
+@pytest.mark.parametrize("num_nodes", [300, 500])
+def test_mid_size_undirected_layout_skips_unbounded_contest(num_nodes: int) -> None:
+    """Mid-size sparse graphs return finite layouts within a wall-time bound."""
+    from dagua.layout import layout
+
+    graph = DaguaGraph.from_edge_list(
+        [(node, (node + 1) % num_nodes) for node in range(num_nodes)],
+        num_nodes=num_nodes,
+        is_semantically_directed=False,
+    )
+    graph.compute_node_sizes()
+    started = time.monotonic()
+
+    pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+
+    assert time.monotonic() - started < 15.0
+    assert bool(torch.isfinite(pos).all())
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
