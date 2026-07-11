@@ -20,12 +20,6 @@ from dagua.eval.competitors.base import (
     CompetitorResult,
     register,
 )
-from dagua.layout.ops.embed import (
-    _deterministic_arpack_start,
-    _disconnected_kernel_spectral_embedding,
-    _requires_disconnected_dense_fallback,
-    _sparse_random_walk_spectral_embedding,
-)
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -251,40 +245,10 @@ def _networkx_laplacian_spectral_array(A: Any, dim: int, normalization: str) -> 
     else:
         k = dim + 1
         ncv = max((2 * k) + 1, int(np.sqrt(num_nodes)))
-        if symmetric and _requires_disconnected_dense_fallback(laplacian=laplacian):
-            kernel_coordinates = _disconnected_kernel_spectral_embedding(
-                laplacian=laplacian,
-                dim=dim,
-                skip_first=True,
-            )
-            if kernel_coordinates is not None:
-                return kernel_coordinates
-            dense_laplacian = laplacian.toarray()
-            eigenvalues, eigenvectors = np.linalg.eig(dense_laplacian)
-        elif symmetric:
-            eigenvalues, eigenvectors = sp.sparse.linalg.eigsh(
-                laplacian,
-                k,
-                which="SM",
-                ncv=ncv,
-                v0=_deterministic_arpack_start(num_nodes),
-            )
-        elif normalization == "random_walk":
-            return _sparse_random_walk_spectral_embedding(
-                laplacian=laplacian,
-                dim=dim,
-                eigen_count=k,
-                ncv=ncv,
-                skip_first=True,
-            )
+        if symmetric:
+            eigenvalues, eigenvectors = sp.sparse.linalg.eigsh(laplacian, k, which="SM", ncv=ncv)
         else:
-            eigenvalues, eigenvectors = sp.sparse.linalg.eigs(
-                laplacian,
-                k,
-                which="SR",
-                ncv=ncv,
-                v0=_deterministic_arpack_start(num_nodes),
-            )
+            eigenvalues, eigenvectors = sp.sparse.linalg.eigs(laplacian, k, which="SR", ncv=ncv)
     index = np.argsort(np.real(eigenvalues))[1 : dim + 1]
     return np.real(eigenvectors[:, index])
 
@@ -418,81 +382,6 @@ class NetworkXSpectral(_NetworkXBase):
     variant_param_names = frozenset({"dim", "scale"})
     output_scale = 1.0
     duplicate_policy = "last"
-
-    def layout_with_variant(
-        self,
-        graph: DaguaGraph,
-        timeout: float = 300.0,
-        seed: Optional[int] = None,
-        variant_params: Optional[Mapping[str, Any]] = None,
-    ) -> CompetitorResult:
-        """Run deterministic NetworkX-style unnormalized spectral layout.
-
-        Parameters
-        ----------
-        graph : DaguaGraph
-            Graph to lay out.
-        timeout : float, default=300.0
-            Unused compatibility timeout parameter.
-        seed : int | None, default=None
-            Unused deterministic-layout seed.
-        variant_params : Mapping[str, Any] | None, default=None
-            Optional parameters forwarded from ``AlgorithmVariant.original_params``.
-
-        Returns
-        -------
-        CompetitorResult
-            Layout result and runtime information.
-        """
-        del timeout, seed
-
-        import networkx as nx
-
-        G = _graph_to_nx(graph, duplicate_policy=self.duplicate_policy)
-
-        start = time.perf_counter()
-        try:
-            layout_kwargs = dict(self.layout_kwargs)
-            if variant_params is not None:
-                layout_kwargs.update(dict(variant_params))
-            output_scale = float(layout_kwargs.pop("output_scale", self.output_scale))
-            output_dtype = _normalize_output_dtype(
-                layout_kwargs.pop("output_dtype", self.output_dtype)
-            )
-            dim = int(layout_kwargs.pop("dim", 2))
-            scale = float(layout_kwargs.pop("scale", 1.0))
-            edge_case_pos = _networkx_spectral_edge_case_positions(G, dim=dim)
-            if edge_case_pos is None:
-                adjacency = nx.to_scipy_sparse_array(G, weight="weight", dtype="d")
-                if G.is_directed():
-                    adjacency = adjacency + adjacency.T
-                laplacian, _ = _spectral_laplacian_matrix(
-                    adjacency,
-                    normalization="unnormalized",
-                )
-                if _requires_disconnected_dense_fallback(laplacian=laplacian):
-                    pos_array = _networkx_laplacian_spectral_array(
-                        adjacency,
-                        dim=dim,
-                        normalization="unnormalized",
-                    )
-                    pos_array = nx.drawing.layout.rescale_layout(pos_array, scale=scale)
-                    nx_pos = dict(zip(G, pos_array))
-                else:
-                    nx_pos = nx.spectral_layout(G, dim=dim, scale=scale, weight="weight")
-            else:
-                nx_pos = edge_case_pos
-            elapsed = time.perf_counter() - start
-            pos = _nx_pos_to_tensor(
-                nx_pos,
-                graph.num_nodes,
-                output_scale=output_scale,
-                output_dtype=output_dtype,
-            )
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
-        except Exception as e:
-            elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
 
 
 @register

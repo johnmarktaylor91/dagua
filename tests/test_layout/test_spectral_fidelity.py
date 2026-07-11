@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import numpy as np
 import pytest
@@ -303,6 +304,64 @@ def test_networkx_spectral_adapter_uses_raw_algorithm_scale() -> None:
 
     assert NetworkXSpectral.output_scale == 1.0
     assert torch.equal(tensor, torch.tensor([[1.0, -2.0]]))
+
+
+def test_networkx_spectral_reference_delegates_to_networkx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The NetworkX oracle must call the real NetworkX spectral implementation."""
+    import networkx as nx
+
+    graph = DaguaGraph()
+    graph.add_edge(0, 1)
+    graph.add_node(2)
+    graph.compute_node_sizes()
+    called = {"spectral_layout": False}
+
+    def _spectral_layout(graph_nx: nx.Graph, **kwargs: object) -> dict[int, np.ndarray]:
+        """Record the oracle call and return fixed reference coordinates.
+
+        Parameters
+        ----------
+        graph_nx : networkx.Graph
+            Disconnected NetworkX graph supplied by the adapter.
+        **kwargs : object
+            Spectral layout parameters supplied by the adapter.
+
+        Returns
+        -------
+        dict[int, numpy.ndarray]
+            Fixed two-dimensional positions keyed by node ID.
+        """
+        called["spectral_layout"] = True
+        assert nx.number_weakly_connected_components(graph_nx) == 2
+        assert kwargs == {"dim": 2}
+        return {
+            0: np.array([0.0, 1.0]),
+            1: np.array([1.0, 0.0]),
+            2: np.array([-1.0, -1.0]),
+        }
+
+    monkeypatch.setattr(nx, "spectral_layout", _spectral_layout)
+
+    result = NetworkXSpectral().layout(graph)
+
+    assert result.error is None
+    assert called["spectral_layout"] is True
+    assert torch.equal(
+        result.pos,
+        torch.tensor([[0.0, 1.0], [1.0, 0.0], [-1.0, -1.0]]),
+    )
+
+
+def test_networkx_reference_has_no_dagua_layout_runtime_import() -> None:
+    """The independent reference adapter must not import Dagua layout code."""
+    import dagua.eval.competitors.networkx_competitor as networkx_competitor
+
+    source = inspect.getsource(networkx_competitor)
+
+    assert "from dagua.layout" not in source
+    assert "import dagua.layout" not in source
 
 
 def test_networkx_fidelity_dense_branch_uses_generic_eig(
