@@ -10,6 +10,7 @@ from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline,
     _choose_native_pipeline_baseline,
+    _unshear_bimodal_edges,
 )
 from dagua.layout.ops.pipelines.native_undirected import (
     BALANCED_LARGE_REFINEMENT_STEPS,
@@ -821,3 +822,20 @@ def test_new_candidates_share_the_degeneracy_guard() -> None:
 
     assert degenerate is True
     assert reason != ""
+
+
+def test_unshear_orthogonalizes_sheared_grid_edge_families() -> None:
+    """The grid challenger maps two sheared direction families to right angles."""
+    pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.5, 1.0], [1.5, 1.0], [1.0, 2.0], [2.0, 2.0]])
+    edge_index = torch.tensor([[0, 2, 4, 0, 1, 2], [1, 3, 5, 2, 3, 4]], dtype=torch.long)
+
+    unsheared = _unshear_bimodal_edges(pos, edge_index)
+
+    assert unsheared is not None
+    vectors = unsheared[edge_index[1]] - unsheared[edge_index[0]]
+    horizontal = vectors[:3].mean(dim=0)
+    diagonal = vectors[3:].mean(dim=0)
+    cosine = torch.dot(horizontal, diagonal) / (
+        torch.linalg.vector_norm(horizontal) * torch.linalg.vector_norm(diagonal)
+    )
+    assert float(torch.abs(cosine).item()) < 1e-5
