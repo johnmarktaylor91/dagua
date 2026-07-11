@@ -5,7 +5,11 @@ import importlib
 import pytest
 import torch
 
-from dagua.eval.graphs import _make_hexagonal_lattice_graph, make_real_karate_graph
+from dagua.eval.graphs import (
+    _make_hexagonal_lattice_graph,
+    make_clustered_medium,
+    make_real_karate_graph,
+)
 from dagua.graph import DaguaGraph
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
@@ -13,7 +17,10 @@ from dagua.layout.ops.sugiyama import (
     _build_graphviz_x_inventory,
     _edge_processing_order,
     _expand_long_edges_with_dummy_nodes,
+    _graphviz_cluster_rank_assignments,
     _graphviz_layer_assignments,
+    _graphviz_skeleton_cluster_ordering,
+    _graphviz_x_coordinate_assignment,
     _GraphvizXEdgeKind,
     _GraphvizXNodeClass,
     _igraph_eades_layer_assignments,
@@ -568,6 +575,62 @@ def test_sugiyama_graphviz_class2_scans_backedge_at_original_tail() -> None:
     assert edge_order == [1, 0]
 
 
+def test_sugiyama_graphviz_class2_installs_virtual_leaders_before_cluster() -> None:
+    """Match dot's recursive class-2 order on the certified MoE row."""
+    ranks = [[0], [1], [2, 9, 10], [3, 4, 5, 6], [7], [8]]
+    edges = [
+        (0, 1),
+        (1, 2),
+        (1, 9),
+        (9, 5),
+        (1, 10),
+        (10, 6),
+        (2, 3),
+        (2, 4),
+        (3, 7),
+        (4, 7),
+        (5, 7),
+        (6, 7),
+        (7, 8),
+    ]
+
+    ordered = _graphviz_skeleton_cluster_ordering(
+        ranks=ranks,
+        edges=edges,
+        edge_penalties=[1] * len(edges),
+        node_order=[0, 1, 2, 3, 7, 8, 4, 5, 9, 6, 10],
+        graphviz_cluster_members={"experts": (3, 4, 5, 6)},
+        graphviz_cluster_parents={"experts": None},
+        num_original_nodes=9,
+        iterations=24,
+    )
+
+    assert ordered[2] == [9, 10, 2]
+    assert ordered[3] == [5, 6, 4, 3]
+
+
+def test_sugiyama_graphviz_recursive_cluster_rank_uses_class1_slack() -> None:
+    """Keep clustered-medium collapse acyclic with dot-exact rank bounds."""
+    graph = make_clustered_medium(5, 20, inter_density=0.05, seed=42)
+
+    layers, _, rank_bounds = _graphviz_cluster_rank_assignments(
+        edge_index=graph.edge_index,
+        edge_weights=None,
+        num_nodes=graph.num_nodes,
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+    )
+
+    assert int(layers.max().item()) == 61
+    assert rank_bounds == {
+        "cluster_0": (0, 19),
+        "cluster_1": (12, 31),
+        "cluster_2": (22, 41),
+        "cluster_3": (33, 52),
+        "cluster_4": (42, 61),
+    }
+
+
 def test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths() -> None:
     """Graphviz x constraints should use label-node ND_lw/ND_rw separately."""
     edge_index = torch.tensor([[0], [1]], dtype=torch.long)
@@ -625,11 +688,67 @@ def test_sugiyama_graphviz_typed_x_inventory_tracks_cluster_borders() -> None:
         _GraphvizXNodeClass.SLACK,
         _GraphvizXNodeClass.BORDER,
         _GraphvizXNodeClass.BORDER,
+        _GraphvizXNodeClass.BORDER,
+        _GraphvizXNodeClass.BORDER,
     ]
     pair_edges = [edge for edge in inventory.edges if edge.kind == _GraphvizXEdgeKind.EDGE_PAIR]
     contain_edges = [edge for edge in inventory.edges if edge.kind == _GraphvizXEdgeKind.CONTAIN]
     assert {edge.original_edge_id for edge in pair_edges} == {7}
     assert (80, 128) in {(edge.minlen, edge.weight) for edge in contain_edges}
+    assert sum((edge.minlen, edge.weight) == (8, 0) for edge in contain_edges) == 2
+
+
+def test_sugiyama_graphviz_typed_clusters_use_dot_nodesep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use dot's 18-point nodesep in the typed cluster x inventory."""
+    sugiyama_ops = importlib.import_module("dagua.layout.ops.sugiyama")
+    original_builder = sugiyama_ops._build_graphviz_x_inventory
+    seen: dict[str, float] = {}
+
+    def capture_inventory(*args: object, **kwargs: object) -> object:
+        """Capture the resolved nodesep and delegate to the real builder."""
+        seen["node_sep"] = float(kwargs["node_sep"])
+        return original_builder(*args, **kwargs)
+
+    monkeypatch.setattr(sugiyama_ops, "_build_graphviz_x_inventory", capture_inventory)
+    _graphviz_x_coordinate_assignment(
+        layers=[[0, 1]],
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_weights=None,
+        node_sizes=torch.full((2, 2), 44.0, dtype=torch.float32),
+        num_nodes=2,
+        num_original_nodes=2,
+        rank_sep=1.0,
+        node_sep=1.0,
+        output_device=torch.device("cpu"),
+        graphviz_left_widths=[22.0, 22.0],
+        graphviz_right_widths=[22.0, 22.0],
+        graphviz_cluster_members={"group": (0, 1)},
+        graphviz_cluster_parents={"group": None},
+        graphviz_cluster_label_widths={"group": 50.0},
+    )
+
+    assert seen["node_sep"] == 18.0
+
+
+def test_sugiyama_graphviz_typed_inventory_rejects_oracle_mismatch() -> None:
+    """Refuse a typed cluster solve whose final inventory is not exact."""
+    with pytest.raises(ValueError, match="failed structural parity"):
+        _graphviz_x_coordinate_assignment(
+            layers=[[0, 1]],
+            edge_index=torch.empty((2, 0), dtype=torch.long),
+            edge_weights=None,
+            node_sizes=torch.full((2, 2), 44.0, dtype=torch.float32),
+            num_nodes=2,
+            num_original_nodes=2,
+            rank_sep=1.0,
+            node_sep=1.0,
+            output_device=torch.device("cpu"),
+            graphviz_cluster_members={"group": (0, 1)},
+            graphviz_cluster_parents={"group": None},
+            expected_typed_inventory=(0, ()),
+        )
 
 
 def test_sugiyama_graphviz_clusters_affect_only_graphviz_mode() -> None:
