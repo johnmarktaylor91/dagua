@@ -784,6 +784,32 @@ def route_edges(
         # r80-S7b#3: per-node density scale for the port-spread budget.
         spread_scales = _local_density_spread_scales(node_grid, grid_cell_size, x_coords, y_coords)
 
+    # r82: chord-first routing for declared-undirected graphs. Straight chords
+    # (the neato/sfdp convention) avoid the uniform-curvature penalty the r80
+    # spline pipeline pays on compact force layouts, then only edges that
+    # actually pierce foreign node boxes are detoured. Gated on the SAME
+    # semantic-direction declaration the eval corpus/oracle use; directed
+    # graphs fall through to the existing spline pipeline unchanged.
+    if (
+        graph is not None
+        and getattr(graph, "is_semantically_directed", None) is False
+        and positions_finite
+        and num_nodes > 2
+    ):
+        return _route_chord_first(
+            src_indices,
+            tgt_indices,
+            x_coords,
+            y_coords,
+            widths,
+            heights,
+            node_grid,
+            grid_cell_size,
+            node_shapes,
+            edge_styles,
+            direction,
+        )
+
     # r80-S7b#2: store of already-accepted routes for the crossing-aware
     # acceptance referee (greedy monotone: each edge's S7 modifications are
     # kept only if they do not create net new crossings against edges
@@ -1995,6 +2021,564 @@ def _count_route_crossings(
                     if stop_above is not None and count > stop_above:
                         return count
     return count
+
+
+# ---------------------------------------------------------------------------
+# r82: chord-first routing for semantically-undirected graphs
+# ---------------------------------------------------------------------------
+#
+# Evidence (r82 drawing diagnosis, /tmp gap+attribution instruments on the
+# 10-graph probe corpus): on declared-undirected graphs the r80 bezier
+# pipeline (S-curves, back-edge arcs, port fans) LOSES 5-12 composite_drawing
+# points versus plain straight chords on the SAME positions, while graphviz
+# dot's native spline router GAINS points on its own positions by routing
+# around node boxes. The dominant gap term versus dot is edge-node crossings
+# (66% of the mean 8.6pt gap), concentrated on undirected community graphs
+# whose compact placements put node boxes in edge corridors. Straight chords
+# are also the established convention for undirected force layouts
+# (neato/sfdp/fdp all emit straight segments).
+#
+# Chord-first routing therefore: (1) draws every default edge as its straight
+# chord anchored at node-boundary ports; (2) detours edges that pass through
+# foreign node boxes around the blocking boxes with short waypoint polylines
+# (greedy corner search, bounded recursion, deterministic); (3) referees the
+# detoured drawing against the pure-chord drawing with the composite's own
+# term weights (box-hit samples vs added edge-edge crossings vs the
+# curvature-uniformity and bend terms), keeping whichever drawing scores
+# higher. Directed graphs keep the existing spline pipeline untouched.
+
+_CHORD_DETOUR_MARGIN = 5.0
+_CHORD_DETOUR_DEPTH = 4
+_CHORD_MAX_BLOCKERS = 12
+
+
+def _chord_cubic(p0: Tuple[float, float], p1: Tuple[float, float]) -> BezierCurve:
+    """Return a straight chord as a well-formed cubic bezier.
+
+    Control points sit at the 1/3 and 2/3 chord points so endpoint tangents
+    are well-defined (a degenerate ``p0, p0, p1, p1`` bezier has zero
+    derivative at both ends, which corrupts tangent-based consumers such as
+    the port angular-resolution metric and arrowhead orientation).
+
+    Parameters
+    ----------
+    p0, p1 : tuple[float, float]
+        Chord endpoints.
+
+    Returns
+    -------
+    BezierCurve
+        Straight cubic with collinear control points.
+    """
+    cp1 = (p0[0] + (p1[0] - p0[0]) / 3.0, p0[1] + (p1[1] - p0[1]) / 3.0)
+    cp2 = (p0[0] + 2.0 * (p1[0] - p0[0]) / 3.0, p0[1] + 2.0 * (p1[1] - p0[1]) / 3.0)
+    return BezierCurve(p0, cp1, cp2, p1, routing="bezier")
+
+
+def _chord_boundary_port(
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    shape: Optional[str],
+    toward_x: float,
+    toward_y: float,
+    is_source: bool,
+) -> Tuple[float, float]:
+    """Radial boundary port: where the center->target ray exits the node.
+
+    Undirected chords anchor at the boundary point facing the neighbor
+    (the neato/fdp convention) instead of the layered top/bottom-face
+    ports, so edges leave at their natural chord angle.
+
+    Parameters
+    ----------
+    cx, cy : float
+        Node center.
+    w, h : float
+        Node width and height.
+    shape : str | None
+        Node shape for boundary projection (rect family needs none).
+    toward_x, toward_y : float
+        The other endpoint's center.
+    is_source : bool
+        Passed through to shape projection for degenerate fallbacks.
+
+    Returns
+    -------
+    tuple[float, float]
+        Port position on the node boundary (node center when degenerate).
+    """
+    if w <= 0.0 and h <= 0.0:
+        return cx, cy
+    rect = (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+    hit = _segment_rect_intersection((cx, cy), (toward_x, toward_y), rect)
+    if hit is None:
+        return cx, cy
+    px, py = hit[1]
+    if shape is not None and shape not in ("rect", "roundrect"):
+        px, py = _adjust_port_for_shape(shape, cx, cy, w, h, px, py, is_source=is_source)
+    return px, py
+
+
+def _segment_hits_rect(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    rect: Rect,
+) -> bool:
+    """Return whether a segment touches a rectangle (interior included)."""
+    if _point_in_rect(p0, rect) or _point_in_rect(p1, rect):
+        return True
+    return _segment_rect_intersection(p0, p1, rect) is not None
+
+
+def _chord_blockers(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    node_grid: Dict[Tuple[int, int], List[int]],
+    grid_cell_size: float,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    widths: Sequence[float],
+    heights: Sequence[float],
+    exclude: Set[int],
+    margin: float,
+) -> List[Tuple[float, int, Rect]]:
+    """Find foreign node boxes blocking a segment, ordered along it.
+
+    Parameters
+    ----------
+    p0, p1 : tuple[float, float]
+        Segment endpoints.
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over node centers (see :func:`_build_node_grid`).
+    grid_cell_size : float
+        Grid cell size used to build ``node_grid``.
+    x_coords, y_coords, widths, heights : sequence[float]
+        Per-node geometry, indexed by node id.
+    exclude : set[int]
+        Node indices never treated as blockers (the edge's endpoints).
+    margin : float
+        Inflation added around each node bbox before the hit test.
+
+    Returns
+    -------
+    list[tuple[float, int, Rect]]
+        ``(first_hit_t, node_index, inflated_rect)`` sorted by ``t``.
+    """
+    pad = grid_cell_size + margin
+    query = (
+        min(p0[0], p1[0]) - pad,
+        min(p0[1], p1[1]) - pad,
+        max(p0[0], p1[0]) + pad,
+        max(p0[1], p1[1]) + pad,
+    )
+    out: List[Tuple[float, int, Rect]] = []
+    for node_idx in _grid_candidates(query, node_grid, grid_cell_size):
+        if node_idx in exclude:
+            continue
+        w, h = widths[node_idx], heights[node_idx]
+        if w <= 0.0 and h <= 0.0:
+            continue
+        cx, cy = x_coords[node_idx], y_coords[node_idx]
+        rect = (
+            cx - w / 2.0 - margin,
+            cy - h / 2.0 - margin,
+            cx + w / 2.0 + margin,
+            cy + h / 2.0 + margin,
+        )
+        if _point_in_rect(p0, rect):
+            out.append((0.0, node_idx, rect))
+            continue
+        hit = _segment_rect_intersection(p0, p1, rect)
+        if hit is not None:
+            out.append((hit[0], node_idx, rect))
+    out.sort(key=lambda item: (item[0], item[1]))
+    return out
+
+
+def _detour_polyline(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    node_grid: Dict[Tuple[int, int], List[int]],
+    grid_cell_size: float,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    widths: Sequence[float],
+    heights: Sequence[float],
+    exclude: Set[int],
+    margin: float,
+    depth: int,
+) -> Optional[List[Tuple[float, float]]]:
+    """Route a segment around blocking node boxes via inflated corners.
+
+    Greedy first-blocker detour: pick the first box the segment hits, try
+    its four corners (inflated slightly beyond the blocker margin, nearest
+    detour first), and recurse on both halves against the remaining boxes.
+    Deterministic; bounded by ``depth``; returns ``None`` when no bounded
+    corner path clears the field (caller keeps the chord).
+
+    Parameters
+    ----------
+    p0, p1 : tuple[float, float]
+        Segment endpoints.
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over node centers.
+    grid_cell_size : float
+        Grid cell size used to build ``node_grid``.
+    x_coords, y_coords, widths, heights : sequence[float]
+        Per-node geometry, indexed by node id.
+    exclude : set[int]
+        Node indices never treated as blockers.
+    margin : float
+        Blocker bbox inflation; corners are placed at ``margin + 2``.
+    depth : int
+        Remaining recursion budget.
+
+    Returns
+    -------
+    list[tuple[float, float]] | None
+        Waypoint polyline from ``p0`` to ``p1`` clearing all reachable
+        blockers, or ``None``.
+    """
+    blockers = _chord_blockers(
+        p0, p1, node_grid, grid_cell_size, x_coords, y_coords, widths, heights, exclude, margin
+    )
+    if not blockers:
+        return [p0, p1]
+    if depth <= 0 or len(blockers) > _CHORD_MAX_BLOCKERS:
+        return None
+
+    _, node_idx, _ = blockers[0]
+    corner_margin = margin + 2.0
+    w, h = widths[node_idx], heights[node_idx]
+    cx, cy = x_coords[node_idx], y_coords[node_idx]
+    cr = (
+        cx - w / 2.0 - corner_margin,
+        cy - h / 2.0 - corner_margin,
+        cx + w / 2.0 + corner_margin,
+        cy + h / 2.0 + corner_margin,
+    )
+    inner = (
+        cx - w / 2.0 - margin,
+        cy - h / 2.0 - margin,
+        cx + w / 2.0 + margin,
+        cy + h / 2.0 + margin,
+    )
+    corners = [(cr[0], cr[1]), (cr[2], cr[1]), (cr[2], cr[3]), (cr[0], cr[3])]
+    corners.sort(
+        key=lambda c: math.hypot(c[0] - p0[0], c[1] - p0[1])
+        + math.hypot(p1[0] - c[0], p1[1] - c[1])
+    )
+    for corner in corners:
+        if _segment_hits_rect(p0, corner, inner) or _segment_hits_rect(corner, p1, inner):
+            continue
+        left = _detour_polyline(
+            p0,
+            corner,
+            node_grid,
+            grid_cell_size,
+            x_coords,
+            y_coords,
+            widths,
+            heights,
+            exclude,
+            margin,
+            depth - 1,
+        )
+        if left is None:
+            continue
+        right = _detour_polyline(
+            corner,
+            p1,
+            node_grid,
+            grid_cell_size,
+            x_coords,
+            y_coords,
+            widths,
+            heights,
+            exclude,
+            margin,
+            depth - 1,
+        )
+        if right is None:
+            continue
+        return left[:-1] + right
+    return None
+
+
+def _enx_samples_for_curve(
+    curve: BezierCurve,
+    node_grid: Dict[Tuple[int, int], List[int]],
+    grid_cell_size: float,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    widths: Sequence[float],
+    heights: Sequence[float],
+    exclude: Set[int],
+) -> int:
+    """Count interior curve samples that land inside foreign node boxes.
+
+    Mirrors :func:`dagua.metrics.edge_node_crossing_count` sampling
+    (9 interior points at ``t = 0.1 .. 0.9``, at most one hit per sample)
+    but restricts the box search to the spatial grid neighborhood of each
+    sample, so the referee stays cheap inside the router.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Routed curve to test.
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over node centers.
+    grid_cell_size : float
+        Grid cell size used to build ``node_grid``.
+    x_coords, y_coords, widths, heights : sequence[float]
+        Per-node geometry, indexed by node id.
+    exclude : set[int]
+        Node indices whose boxes never count (the edge's endpoints).
+
+    Returns
+    -------
+    int
+        Number of interior samples (0-9) inside some foreign node box.
+    """
+    hits = 0
+    for t_step in range(1, 10):
+        px, py = evaluate_bezier(curve, t_step / 10.0)
+        query = (
+            px - grid_cell_size,
+            py - grid_cell_size,
+            px + grid_cell_size,
+            py + grid_cell_size,
+        )
+        for node_idx in _grid_candidates(query, node_grid, grid_cell_size):
+            if node_idx in exclude:
+                continue
+            w, h = widths[node_idx], heights[node_idx]
+            if w <= 0.0 and h <= 0.0:
+                continue
+            if abs(px - x_coords[node_idx]) < w / 2.0 and abs(py - y_coords[node_idx]) < h / 2.0:
+                hits += 1
+                break
+    return hits
+
+
+def _route_chord_first(
+    src_indices: Sequence[int],
+    tgt_indices: Sequence[int],
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    widths: Sequence[float],
+    heights: Sequence[float],
+    node_grid: Dict[Tuple[int, int], List[int]],
+    grid_cell_size: float,
+    node_shapes: Optional[Sequence[str]],
+    edge_styles: Optional[Sequence[Any]],
+    direction: str,
+) -> List[BezierCurve]:
+    """Route a semantically-undirected graph chord-first (r82 prototype).
+
+    Phase 1 draws every default edge as its straight chord between radial
+    boundary ports. Phase 2 counts chord box-hit samples (the edge-node
+    crossing metric's own sampling). Phase 3 detours hit edges around
+    blocking boxes and accepts each detour only when its composite-weighted
+    local delta is positive (box samples saved at 20/(0.9E) pts each versus
+    added edge-edge crossings and bends). Phase 4 referees the finished
+    detoured drawing against the pure-chord drawing on the exact curvature-
+    consistency and bend terms plus the sampled box/crossing deltas, and
+    returns whichever drawing scores higher -- so a graph whose chords are
+    already clean keeps the uniform straight style (and its curvature-term
+    credit), while a congested graph pays the uniformity cost to route
+    around node boxes the way dot's spline router does.
+
+    Parameters
+    ----------
+    src_indices, tgt_indices : sequence[int]
+        Edge endpoints, aligned to edge order.
+    x_coords, y_coords, widths, heights : sequence[float]
+        Per-node geometry, indexed by node id.
+    node_grid : dict[tuple[int, int], list[int]]
+        Spatial grid over node centers.
+    grid_cell_size : float
+        Grid cell size used to build ``node_grid``.
+    node_shapes : sequence[str] | None
+        Per-node shapes for boundary port projection.
+    edge_styles : sequence[Any] | None
+        Resolved per-edge styles (routing/avoid_nodes honored).
+    direction : str
+        Layout direction (self-loop side selection only).
+
+    Returns
+    -------
+    list[BezierCurve]
+        One routed curve per edge.
+    """
+    num_edges = len(src_indices)
+    curves: List[BezierCurve] = []
+    detourable: List[bool] = []
+
+    for e_idx in range(num_edges):
+        s, t = src_indices[e_idx], tgt_indices[e_idx]
+        style = edge_styles[e_idx] if edge_styles is not None else None
+        routing = style.routing if style is not None else "bezier"
+        avoid = style.avoid_nodes if style is not None else True
+        if s == t:
+            curves.append(
+                _compute_self_loop_curve(x_coords[s], y_coords[s], widths[s], heights[s], direction)
+            )
+            detourable.append(False)
+            continue
+        shape_s = node_shapes[s] if node_shapes is not None else None
+        shape_t = node_shapes[t] if node_shapes is not None else None
+        sp = _chord_boundary_port(
+            x_coords[s],
+            y_coords[s],
+            widths[s],
+            heights[s],
+            shape_s,
+            x_coords[t],
+            y_coords[t],
+            True,
+        )
+        tp = _chord_boundary_port(
+            x_coords[t],
+            y_coords[t],
+            widths[t],
+            heights[t],
+            shape_t,
+            x_coords[s],
+            y_coords[s],
+            False,
+        )
+        if routing != "bezier":
+            curvature = style.curvature if style is not None else 0.4
+            curves.append(_compute_curve(sp[0], sp[1], tp[0], tp[1], direction, routing, curvature))
+            detourable.append(False)
+            continue
+        curves.append(_chord_cubic(sp, tp))
+        detourable.append(bool(avoid))
+
+    # Phase 2: box-hit samples per edge on the chord drawing.
+    excludes: List[Set[int]] = [
+        {int(src_indices[e]), int(tgt_indices[e])} for e in range(num_edges)
+    ]
+    hits = [
+        _enx_samples_for_curve(
+            curves[e],
+            node_grid,
+            grid_cell_size,
+            x_coords,
+            y_coords,
+            widths,
+            heights,
+            excludes[e],
+        )
+        for e in range(num_edges)
+    ]
+    s_total = sum(hits)
+    if s_total == 0:
+        return curves
+
+    # Phase 3: candidate detours with a composite-weighted local referee.
+    E = float(max(1, num_edges))
+    pts_box = 20.0 * 10.0 / (9.0 * E)
+    pairs = max(1.0, E * (E - 1.0) / 2.0)
+    pts_cross = 30.0 * 10.0 / pairs
+    pts_bend = 5.0 / (4.0 * E)
+
+    polys: List[List[Tuple[float, float]]] = [
+        _curve_polyline_samples(curves[e], sample_count=12) for e in range(num_edges)
+    ]
+    bboxes: List[Rect] = [_poly_bbox(p) for p in polys]
+
+    detours: Dict[int, List[Tuple[float, float]]] = {}
+    saved_total = 0
+    added_cross_total = 0
+    for e_idx in range(num_edges):
+        if hits[e_idx] == 0 or not detourable[e_idx]:
+            continue
+        wp = _detour_polyline(
+            curves[e_idx].p0,
+            curves[e_idx].p1,
+            node_grid,
+            grid_cell_size,
+            x_coords,
+            y_coords,
+            widths,
+            heights,
+            excludes[e_idx],
+            _CHORD_DETOUR_MARGIN,
+            _CHORD_DETOUR_DEPTH,
+        )
+        if wp is None or len(wp) < 3:
+            continue
+        cand_curve = _polyline_curve(wp, routing="bezier", direction=direction)
+        new_hits = _enx_samples_for_curve(
+            cand_curve,
+            node_grid,
+            grid_cell_size,
+            x_coords,
+            y_coords,
+            widths,
+            heights,
+            excludes[e_idx],
+        )
+        saved = hits[e_idx] - new_hits
+        if saved <= 0:
+            continue
+        cand_poly = [(float(x), float(y)) for x, y in (cand_curve.waypoints or wp)]
+        cand_bbox = _poly_bbox(cand_poly)
+        # Crossing deltas against the current drawing, excluding this edge
+        # (empty placeholder contributes zero segments).
+        own_poly, own_bbox = polys[e_idx], bboxes[e_idx]
+        polys[e_idx] = []
+        bboxes[e_idx] = (0.0, 0.0, 0.0, 0.0)
+        base_cross = _count_route_crossings(own_poly, own_bbox, polys, bboxes)
+        cand_cross = _count_route_crossings(cand_poly, cand_bbox, polys, bboxes)
+        added = max(0, cand_cross - base_cross)
+        bends = max(0, len(cand_poly) - 2)
+        if saved * pts_box > added * pts_cross + bends * pts_bend:
+            detours[e_idx] = cand_poly
+            polys[e_idx] = cand_poly
+            bboxes[e_idx] = cand_bbox
+            saved_total += saved
+            added_cross_total += added
+        else:
+            polys[e_idx] = own_poly
+            bboxes[e_idx] = own_bbox
+
+    if not detours:
+        return curves
+
+    detour_curves = [
+        _polyline_curve(detours[e], routing="bezier", direction=direction)
+        if e in detours
+        else curves[e]
+        for e in range(num_edges)
+    ]
+
+    # Phase 4: uniform-style referee -- exact curvature/bend terms for both
+    # candidate drawings plus the sampled box/crossing deltas. Lazy import:
+    # dagua.metrics imports symbols from this module inside functions, so a
+    # call-time import here cannot create an import cycle.
+    from dagua.metrics import bend_count, edge_curvature_consistency
+
+    def _style_terms(candidate: List[BezierCurve]) -> Tuple[float, float]:
+        curv = edge_curvature_consistency(candidate)
+        bend = bend_count(candidate)
+        term_curv = max(0.0, 1.0 - min(1.0, float(curv["edge_curvature_cv"])))
+        term_bend = max(0.0, 1.0 - float(bend["bend_mean_per_edge"]) / 4.0)
+        return term_curv, term_bend
+
+    chord_curv, chord_bend = _style_terms(curves)
+    detour_curv, detour_bend = _style_terms(detour_curves)
+    rate_before = min(1.0, 10.0 * s_total / (9.0 * E))
+    rate_after = min(1.0, 10.0 * (s_total - saved_total) / (9.0 * E))
+    benefit = 20.0 * (rate_before - rate_after)
+    benefit += 8.0 * (detour_curv - chord_curv)
+    benefit += 5.0 * (detour_bend - chord_bend)
+    benefit -= 30.0 * 10.0 * added_cross_total / pairs
+    return detour_curves if benefit > 0.0 else curves
 
 
 def _curve_polyline_samples(
