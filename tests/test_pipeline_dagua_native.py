@@ -7,6 +7,7 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.dagua_native import (
     _apply_dot_cluster_fidelity_layout,
+    _best_of_polish,
     _build_dot_cluster_skeletons,
     _collinear_dodge,
     _dot_rank_assignment,
@@ -26,6 +27,32 @@ def test_collinear_dodge_moves_blocker_off_skip_edge() -> None:
     assert torch.equal(dodged[[0, 2]], pos[[0, 2]])
     assert float(torch.abs(dodged[1, 0]).item()) > 0.0
     assert float(dodged[1, 1].item()) == float(pos[1, 1].item())
+
+
+def test_directed_polish_rejects_degenerate_geometry_candidate(monkeypatch) -> None:
+    """Shared directed polish routes geometry through the degeneracy guard."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+
+    pos = torch.tensor([[0.0, 0.0], [0.0, 100.0], [0.0, 200.0]])
+    edge_index = torch.tensor([[0, 0], [1, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 10.0)
+
+    monkeypatch.setattr(native, "_POLISH_SETTINGS", ())
+    monkeypatch.setattr(native, "_collinear_dodge", lambda *args, **kwargs: torch.zeros_like(pos))
+    polished = _best_of_polish(pos, edge_index, node_sizes)
+
+    assert torch.equal(polished, pos)
+
+
+def test_dense_collinear_dodge_is_skipped_before_blocker_scan() -> None:
+    """Dense O(E*N) blocker detection is capped on a 300-node graph."""
+    n = 300
+    pos = torch.stack((torch.arange(n, dtype=torch.float32), torch.zeros(n)), dim=1)
+    edge_index = torch.triu_indices(n, n, offset=1)
+
+    assert _collinear_dodge(pos, edge_index) is None
 
 
 def test_dot_cluster_skeleton_counts_match_cluster_c_build_skeleton() -> None:
