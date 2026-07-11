@@ -1063,10 +1063,12 @@ def cluster_separation(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Dict[str
     # Sample cluster pairs if too many
     cluster_list = list(centroids.keys())
     if n_clusters > 200:
-        # Random sample of pairs
+        # A local generator keeps referee sampling deterministic without
+        # perturbing NumPy's process-global RNG state.
         n_pairs = min(20000, n_clusters * (n_clusters - 1) // 2)
-        i_idx = np.random.randint(0, n_clusters, n_pairs)
-        j_idx = np.random.randint(0, n_clusters, n_pairs)
+        rng = np.random.default_rng(42)
+        i_idx = rng.integers(0, n_clusters, n_pairs)
+        j_idx = rng.integers(0, n_clusters, n_pairs)
         pairs = [(cluster_list[i], cluster_list[j]) for i, j in zip(i_idx, j_idx) if i < j]
     else:
         pairs = [
