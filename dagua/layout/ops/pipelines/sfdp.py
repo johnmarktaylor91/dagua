@@ -83,8 +83,8 @@ def _decompose_graphviz_supervariables(graph: GraphData) -> list[list[int]]:
 
     super_ids = [0 for _ in range(num_nodes)]
     super_sizes = [0 for _ in range(num_nodes + 1)]
-    mask = [-1 for _ in range(num_nodes)]
-    newmap = [0 for _ in range(num_nodes)]
+    mask = [-1 for _ in range(num_nodes + 1)]
+    newmap = [0 for _ in range(num_nodes + 1)]
     super_sizes[0] = num_nodes
     next_super_id = 1
 
@@ -103,6 +103,14 @@ def _decompose_graphviz_supervariables(graph: GraphData) -> list[list[int]]:
                 else:
                     new_super = next_super_id
                     next_super_id += 1
+                    # Refinement IDs follow creation order and are never
+                    # recycled, so their high-water mark can exceed the node
+                    # count even though at most ``num_nodes`` groups are live.
+                    # All three ID-indexed workspaces must grow together.
+                    if new_super >= len(super_sizes):
+                        super_sizes.append(0)
+                        mask.append(-1)
+                        newmap.append(0)
                     newmap[old_super] = new_super
                     super_sizes[new_super] = 1
                     super_ids[neighbor] = new_super

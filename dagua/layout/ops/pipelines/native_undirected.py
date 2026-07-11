@@ -24,6 +24,8 @@ candidate CONTEST instead of betting on one pipeline:
   (``weight_transform="inverse"``) instead of the default distance
   semantics, for community/social weighted families where a heavy edge
   means "close" (see ``_weighted_similarity_candidate``).
+- Candidate F (r81-P1.5): the native-stress core with target distances scaled
+  into the point units used by node boxes (see ``_stress_points_candidate``).
 
 All candidates are scored with the SAME honest composite the benchmark
 harness uses for undirected rows (``metrics.full`` + ``composite_auto``
@@ -838,6 +840,36 @@ def _weighted_similarity_candidate(
     )
 
 
+def _stress_points_candidate(problem: LayoutProblem, seed: int) -> torch.Tensor:
+    """Run native stress with target distances expressed in points.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    seed : int
+        Deterministic seed shared with the rest of the contest.
+
+    Returns
+    -------
+    torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.native_stress import (
+        NativeStressConfig,
+        layout_native_stress_pipeline,
+    )
+
+    return layout_native_stress_pipeline(
+        edge_index=problem.edge_index,
+        num_nodes=int(problem.num_nodes),
+        node_sizes=problem.node_sizes,
+        edge_weights=problem.edge_weights,
+        seed=seed,
+        config=NativeStressConfig(target_unit="points", seed=seed),
+    )
+
+
 def layout_native_undirected_portfolio(
     problem: LayoutProblem,
     state: SolveState,
@@ -1046,6 +1078,16 @@ def layout_native_undirected_portfolio(
             weighted_pos = None
         if weighted_pos is not None:
             _add_challenger("weighted_similarity", weighted_pos)
+
+    # Candidate F (r81-P1.5): point-unit native stress uses the existing
+    # quality-scaled stress schedule. It is additive and contest-scored, so
+    # graphs where hop-unit or force candidates are stronger remain unchanged.
+    try:
+        stress_points_pos = _stress_points_candidate(problem, seed)
+    except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+        _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
+    else:
+        _add_challenger("stress_points", stress_points_pos)
 
     # Argmax selection; strict inequality means ties go to the incumbent.
     best_name = "incumbent"
