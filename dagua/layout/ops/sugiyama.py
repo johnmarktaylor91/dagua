@@ -60,6 +60,7 @@ _SUGIYAMA_NODE_SEP_KEY = "sugiyama_node_sep"
 _SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY = "sugiyama_graphviz_virtual_edges"
 _SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY = "sugiyama_graphviz_edge_order"
 _SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY = "sugiyama_graphviz_node_sizes"
+_SUGIYAMA_GRAPHVIZ_TYPED_NODE_SIZES_KEY = "sugiyama_graphviz_typed_node_sizes"
 _SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY = "sugiyama_graphviz_edge_label_sizes"
 _SUGIYAMA_GRAPHVIZ_CLUSTER_RANKS_KEY = "sugiyama_graphviz_cluster_ranks"
 _SUGIYAMA_GRAPHVIZ_CLUSTER_LABEL_WIDTHS_KEY = "sugiyama_graphviz_cluster_label_widths"
@@ -102,6 +103,7 @@ class _ExpandedLayeredGraph:
     graphviz_cluster_parents: Optional[Dict[str, Optional[str]]] = None
     graphviz_cluster_label_widths: Optional[Dict[str, float]] = None
     expanded_edge_origins: Optional[Tuple[int, ...]] = None
+    graphviz_weight_classes: Optional[Tuple[int, ...]] = None
 
 
 class _GraphvizXNodeClass(str, Enum):
@@ -1895,8 +1897,6 @@ def _expand_long_edges_with_dummy_nodes(
         for node in range(num_original_nodes):
             stored_width = float(node_sizes[node, 0].item())
             half_width = stored_width / 2.0
-            if stored_width >= 60.0:
-                half_width += _GRAPHVIZ_LABEL_BOX_HALF_WIDTH_SEED_POINTS
             graphviz_left_widths[node] = half_width
             graphviz_right_widths[node] = half_width
     expanded_sources: list[int] = []
@@ -2038,8 +2038,27 @@ def _expand_long_edges_with_dummy_nodes(
         dtype=torch.long,
     )
     expanded_edge_weights: Optional[torch.Tensor] = None
-    if edge_weights is not None:
+    if edge_weights is not None or clusters:
         expanded_edge_weights = torch.tensor(expanded_weight_values, dtype=torch.float32)
+    expanded_cluster_members = _graphviz_expanded_cluster_members(
+        clusters=clusters,
+        edge_paths=edge_paths,
+        edge_index=edge_index,
+        num_original_nodes=num_original_nodes,
+    )
+    if expanded_cluster_members is not None and graphviz_virtual_node_sep is not None:
+        cluster_virtual_nodes = {
+            node
+            for members in expanded_cluster_members.values()
+            for node in members
+            if node >= num_original_nodes
+        }
+        for node in cluster_virtual_nodes:
+            # ``clone_vn`` copies unexpanded skeleton rankleaders, which retain
+            # ``virtual_node``'s one-point half-width rather than ``plain_vnode`` width.
+            graphviz_left_widths[node] = _GRAPHVIZ_VIRTUAL_NODE_HALF_WIDTH_SEED_POINTS
+            graphviz_right_widths[node] = _GRAPHVIZ_VIRTUAL_NODE_HALF_WIDTH_SEED_POINTS
+
     return _ExpandedLayeredGraph(
         edge_index=expanded_edge_index,
         layers=expanded_layers,
@@ -2062,12 +2081,7 @@ def _expand_long_edges_with_dummy_nodes(
         graphviz_right_widths=(
             graphviz_right_widths if graphviz_virtual_node_sep is not None else None
         ),
-        graphviz_cluster_members=_graphviz_expanded_cluster_members(
-            clusters=clusters,
-            edge_paths=edge_paths,
-            edge_index=edge_index,
-            num_original_nodes=num_original_nodes,
-        ),
+        graphviz_cluster_members=expanded_cluster_members,
         graphviz_cluster_parents=(
             _normalize_graphviz_cluster_parents(
                 cluster_names=tuple(
@@ -2087,6 +2101,15 @@ def _expand_long_edges_with_dummy_nodes(
             else None
         ),
         expanded_edge_origins=tuple(expanded_edge_origins),
+        graphviz_weight_classes=tuple(
+            _graphviz_weight_classes(
+                edge_index=edge_index,
+                num_nodes=num_original_nodes,
+                num_original_nodes=num_original_nodes,
+            )
+        )
+        if use_graphviz_edge_order
+        else None,
     ), expanded_edge_weights
 
 
@@ -4140,6 +4163,7 @@ def _graphviz_x_coordinate_assignment(
     graphviz_cluster_label_widths: Optional[Mapping[str, float]] = None,
     graphviz_node_order: Optional[Sequence[int]] = None,
     expanded_edge_origins: Optional[Sequence[int]] = None,
+    graphviz_weight_classes: Optional[Sequence[int]] = None,
     expected_typed_inventory: Optional[Tuple[int, Tuple[Tuple[int, int, int], ...]]] = None,
     use_typed_inventory: bool = True,
 ) -> torch.Tensor:
@@ -4235,6 +4259,7 @@ def _graphviz_x_coordinate_assignment(
             graphviz_cluster_parents=graphviz_cluster_parents,
             graphviz_cluster_label_widths=graphviz_cluster_label_widths,
             graphviz_node_order=graphviz_node_order,
+            graphviz_weight_classes=graphviz_weight_classes,
         )
         if expected_typed_inventory is not None:
             _validate_graphviz_x_inventory_parity(
@@ -4340,6 +4365,7 @@ def _build_graphviz_x_aux_edges(
     graphviz_cluster_label_widths: Optional[Mapping[str, float]] = None,
     graphviz_node_order: Optional[Sequence[int]] = None,
     expanded_edge_origins: Optional[Sequence[int]] = None,
+    graphviz_weight_classes: Optional[Sequence[int]] = None,
 ) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, int]]:
     """Build Stage A Graphviz dot auxiliary x-coordinate constraints.
 
@@ -4372,6 +4398,8 @@ def _build_graphviz_x_aux_edges(
         Padded cluster label widths in Graphviz point units.
     graphviz_node_order : sequence of int, optional
         Expanded ``GD_nlist`` order for scanning saved outgoing fast edges.
+    graphviz_weight_classes : sequence of int, optional
+        Original class-2 ``ND_weight_class`` counters for normal nodes.
 
     Returns
     -------
@@ -4413,10 +4441,14 @@ def _build_graphviz_x_aux_edges(
             if edge_weights is None
             else edge_weights.detach().to(device="cpu", dtype=torch.float32)
         )
-        weight_classes = _graphviz_weight_classes(
-            edge_index=edge_index,
-            num_nodes=num_nodes,
-            num_original_nodes=num_original_nodes,
+        weight_classes = (
+            list(graphviz_weight_classes)
+            if graphviz_weight_classes is not None
+            else _graphviz_weight_classes(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                num_original_nodes=num_original_nodes,
+            )
         )
         edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
         tails = [int(value) for value in edge_cpu[0].tolist()]
@@ -4485,6 +4517,7 @@ def _build_graphviz_x_inventory(
     graphviz_cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
     graphviz_cluster_label_widths: Optional[Mapping[str, float]] = None,
     graphviz_node_order: Optional[Sequence[int]] = None,
+    graphviz_weight_classes: Optional[Sequence[int]] = None,
 ) -> _GraphvizXInventory:
     """Build the typed Graphviz x inventory before network simplex.
 
@@ -4518,6 +4551,8 @@ def _build_graphviz_x_inventory(
         Padded cluster label widths in points.
     graphviz_node_order : sequence of int, optional
         Expanded ``GD_nlist`` order.
+    graphviz_weight_classes : sequence of int, optional
+        Original class-2 ``ND_weight_class`` counters for normal nodes.
 
     Returns
     -------
@@ -4539,6 +4574,7 @@ def _build_graphviz_x_inventory(
         graphviz_cluster_label_widths=graphviz_cluster_label_widths,
         graphviz_node_order=graphviz_node_order,
         expanded_edge_origins=expanded_edge_origins,
+        graphviz_weight_classes=graphviz_weight_classes,
     )
     edge_count = int(edge_index.shape[1])
     left_right_count = sum(max(len(rank) - 1, 0) for rank in layers)
@@ -7483,7 +7519,12 @@ class _ExpandDummyNodes(Op):
         use_igraph_edge_order = self.use_igraph_edge_order and use_igraph_source_order
         node_sizes = state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY]
         if use_graphviz_edge_order:
-            node_sizes = state.extras.get(_SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY, node_sizes)
+            node_size_key = (
+                _SUGIYAMA_GRAPHVIZ_TYPED_NODE_SIZES_KEY
+                if self.use_graphviz_cluster_skeleton
+                else _SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY
+            )
+            node_sizes = state.extras.get(node_size_key, node_sizes)
         graphviz_virtual_node_sep = None
         if use_graphviz_edge_order:
             graphviz_virtual_node_sep = (
@@ -7912,6 +7953,7 @@ class _CoordinateAssignment(Op):
                     expanded_graph.graphviz_node_order if use_typed_inventory else None
                 ),
                 expanded_edge_origins=expanded_graph.expanded_edge_origins,
+                graphviz_weight_classes=expanded_graph.graphviz_weight_classes,
                 expected_typed_inventory=state.extras.get(
                     _SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY
                 ),
