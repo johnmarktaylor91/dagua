@@ -30,7 +30,9 @@ _GRAPHVIZ_DEFAULT_NODE_HEIGHT_POINTS = 36.0
 _GRAPHVIZ_LABEL_XPAD_POINTS = 16.0
 _GRAPHVIZ_LABEL_YPAD_POINTS = 8.0
 _GRAPHVIZ_HELVETICA_UNITS_PER_EM = 2048.0
+# Graphviz 7.0.5 ``textspan.c`` fallback uses ``LINESPACING`` for logical height.
 _GRAPHVIZ_TEXT_HEIGHT_FACTOR = 1.128
+_GRAPHVIZ_TYPED_TEXT_HEIGHT_FACTOR = 1.2
 _SFDP_LABEL_BOX_MIN_NODE_COUNT = 10
 _SFDP_LABEL_BOX_WIDE_LABEL_POINTS = 100.0
 _SUGIYAMA_TYPED_X_MAX_NODES = 50
@@ -491,7 +493,12 @@ def _graphviz_times_text_width(text: str, font_size: float) -> float:
     return float(canonical_width) * float(font_size) / _GRAPHVIZ_HELVETICA_UNITS_PER_EM
 
 
-def _graphviz_dot_node_box(label: str, font_size: float, shape: str) -> tuple[float, float]:
+def _graphviz_dot_node_box(
+    label: str,
+    font_size: float,
+    shape: str,
+    text_height_factor: float = _GRAPHVIZ_TEXT_HEIGHT_FACTOR,
+) -> tuple[float, float]:
     """Return the DOT node box that ``_graph_to_dot`` asks Graphviz to compute.
 
     Parameters
@@ -502,6 +509,9 @@ def _graphviz_dot_node_box(label: str, font_size: float, shape: str) -> tuple[fl
         Node ``fontsize`` emitted by the Graphviz competitor adapter.
     shape : str
         Dagua node shape used by ``_graph_to_dot`` to select the DOT shape.
+    text_height_factor : float, default=_GRAPHVIZ_TEXT_HEIGHT_FACTOR
+        Logical label-height multiplier. The typed cluster candidate uses
+        Graphviz 7.0.5's exact fallback ``LINESPACING`` value.
 
     Returns
     -------
@@ -509,7 +519,7 @@ def _graphviz_dot_node_box(label: str, font_size: float, shape: str) -> tuple[fl
         Graphviz node box ``(width, height)`` in points.
     """
     text_width = _graphviz_helvetica_text_width(text=label, font_size=font_size)
-    text_height = float(font_size) * _GRAPHVIZ_TEXT_HEIGHT_FACTOR if label else 0.0
+    text_height = float(font_size) * float(text_height_factor) if label else 0.0
     padded_width = text_width + _GRAPHVIZ_LABEL_XPAD_POINTS if label else 0.0
     padded_height = text_height + _GRAPHVIZ_LABEL_YPAD_POINTS if label else 0.0
 
@@ -531,13 +541,18 @@ def _graphviz_dot_node_box(label: str, font_size: float, shape: str) -> tuple[fl
     return width, height
 
 
-def _graphviz_dot_node_sizes(graph: DaguaGraph) -> torch.Tensor:
+def _graphviz_dot_node_sizes(
+    graph: DaguaGraph,
+    text_height_factor: float = _GRAPHVIZ_TEXT_HEIGHT_FACTOR,
+) -> torch.Tensor:
     """Compute Graphviz auto-sized DOT node boxes from labels and styles.
 
     Parameters
     ----------
     graph : DaguaGraph
         Source graph passed to both classic and Graphviz competitors.
+    text_height_factor : float, default=_GRAPHVIZ_TEXT_HEIGHT_FACTOR
+        Logical label-height multiplier forwarded to the shape fitter.
 
     Returns
     -------
@@ -553,6 +568,7 @@ def _graphviz_dot_node_sizes(graph: DaguaGraph) -> torch.Tensor:
                 label=label,
                 font_size=float(style.font_size),
                 shape=str(style.shape),
+                text_height_factor=text_height_factor,
             )
         )
     return torch.tensor(boxes, dtype=graph.size_dtype)
@@ -800,6 +816,13 @@ def _apply_sugiyama_graphviz_metadata(
     if has_edge_labels and not has_clusters:
         extra_kwargs.setdefault("graphviz_edge_label_sizes", _graphviz_dot_edge_label_sizes(graph))
     elif has_clusters and not has_edge_labels:
+        extra_kwargs.setdefault(
+            "graphviz_typed_node_sizes",
+            _graphviz_dot_node_sizes(
+                graph=graph,
+                text_height_factor=_GRAPHVIZ_TYPED_TEXT_HEIGHT_FACTOR,
+            ),
+        )
         extra_kwargs.setdefault("clusters", graph.clusters)
         extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
         extra_kwargs.setdefault(
