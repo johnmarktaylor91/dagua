@@ -35,10 +35,8 @@ def build_drl_pipeline(
     Fidelity mode: ``layout_drl_pipeline(..., fidelity_mode=True)`` uses the
         benchmark adapter's seed-matrix and RNG conventions while remaining in
         the pure Python DrL port.
-    Verified at: round_62 implementation smoke against the adapter path.
-    Known divergences:
-        - Full-suite parity depends on C++ float rounding and density-grid
-          boundary behavior; the port rounds state updates through float32.
+    Verified at: round_79 seeded real-graph parity against igraph 1.0.0.
+    Known divergences: none in the seeded DrL fidelity rows verified at round 79.
 
     Parameters
     ----------
@@ -48,9 +46,9 @@ def build_drl_pipeline(
     fidelity_mode : bool, default=False
         Preserved for direct native-pipeline compatibility.
     fidelity_dtype : torch.dtype, default=torch.float32
-        Fidelity-mode internal dtype requested by public wrappers. The native
-        DrL op path is already double precision, so this is accepted for
-        signature consistency.
+        Fidelity-mode dtype requested by public wrappers. DrL explicitly
+        emulates the reference's C++ ``float`` state, so this is accepted for
+        signature consistency rather than changing its internal arithmetic.
 
     Returns
     -------
