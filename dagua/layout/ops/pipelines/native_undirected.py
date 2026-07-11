@@ -45,8 +45,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import math
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
 
@@ -66,12 +64,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # nodes (see .project-context/research/r79_native/P8_PORTFOLIO_PROBE.md);
 # probe data for larger graphs would be needed before raising this.
 MAX_CONTEST_NODES = 1500
+# Shared by the legacy native polish battery; portfolio challenger acceptance
+# below is intentionally governed only by deterministic size schedules.
 DEFAULT_CANDIDATE_BUDGET_S = 25.0
 MAX_COLLINEAR_WORK = 100_000
 MAX_DENSE_STRESS_NODES = 200
 MAX_DENSE_STRESS_EDGES = 20_000
-MAX_GENERAL_CHALLENGER_NODES = 200
-MAX_RING_FALLBACK_NODES = 500
 
 # Candidate C (neato) participates when the public quality knob resolves to
 # at least this value ("high" alias = 0.75)...
@@ -932,40 +930,6 @@ def _stress_points_candidate(problem: LayoutProblem, seed: int) -> torch.Tensor:
     )
 
 
-def _large_sparse_ring_candidate(problem: LayoutProblem) -> Optional[torch.Tensor]:
-    """Return a cheap circular candidate for graphs dominated by ring-local edges.
-
-    Parameters
-    ----------
-    problem : LayoutProblem
-        Prepared undirected problem with stable node ordering.
-
-    Returns
-    -------
-    torch.Tensor or None
-        Circular positions with shape ``[N, 2]``, or ``None`` when topology
-        is not predominantly local in cyclic node order.
-    """
-    n = int(problem.num_nodes)
-    edge_count = int(problem.edge_index.shape[1])
-    if n <= MAX_GENERAL_CHALLENGER_NODES or n > MAX_RING_FALLBACK_NODES or edge_count > 4 * n:
-        return None
-    source, target = problem.edge_index
-    cyclic_delta = torch.abs(source - target)
-    cyclic_delta = torch.minimum(cyclic_delta, n - cyclic_delta)
-    locality_limit = max(4, int(round(0.02 * n)))
-    local_fraction = float((cyclic_delta <= locality_limit).to(torch.float32).mean().item())
-    if local_fraction < 0.8:
-        return None
-    if problem.node_sizes is None or problem.node_sizes.numel() == 0:
-        max_diagonal = 1.0
-    else:
-        max_diagonal = float(torch.linalg.vector_norm(problem.node_sizes, dim=1).max().item())
-    radius = 1.1 * max_diagonal / max(2.0 * math.sin(math.pi / n), 1.0e-9)
-    angles = torch.arange(n, device=source.device, dtype=torch.float32) * (2.0 * math.pi / n)
-    return torch.stack((torch.cos(angles), torch.sin(angles)), dim=1) * radius
-
-
 def layout_native_undirected_portfolio(
     problem: LayoutProblem,
     state: SolveState,
@@ -1007,24 +971,12 @@ def layout_native_undirected_portfolio(
 
     incumbent_pos = _run_incumbent()
 
-    # Contest predicate: documented caps. Above MAX_CONTEST_NODES the probe
-    # has no candidate data; with an explicit wall-clock budget the extra
-    # candidate solves would silently blow it.
+    # Contest predicate: the corpus-backed node cap and an explicit caller
+    # deadline are deterministic inputs. Within the cap, fixed size-scaled
+    # iteration schedules govern challenger work; machine load never changes
+    # candidate eligibility.
     n = int(problem.num_nodes)
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
-        return incumbent_pos
-    if n > MAX_GENERAL_CHALLENGER_NODES:
-        ring_pos = _large_sparse_ring_candidate(problem)
-        if ring_pos is not None:
-            eligible, _reason = _candidate_is_eligible(
-                ring_pos, incumbent_pos, problem.node_sizes, problem.edge_index
-            )
-            if eligible:
-                cluster_ids = _build_cluster_ids(problem)
-                incumbent_score = _score_undirected_candidate(incumbent_pos, problem, cluster_ids)
-                ring_score = _score_undirected_candidate(ring_pos, problem, cluster_ids)
-                if ring_score > incumbent_score + 0.1:
-                    return ring_pos
         return incumbent_pos
     # r80-S8: the aesthetic profile was resolved ONCE in
     # prepare_pipeline_config and stashed on this (already-prepared) config.
@@ -1064,9 +1016,8 @@ def layout_native_undirected_portfolio(
             and n * int(problem.edge_index.shape[1]) > MAX_COLLINEAR_WORK
         ):
             continue
-        started = time.monotonic()
         candidate = factory()
-        if candidate is None or time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+        if candidate is None:
             continue
         eligible, reason = _candidate_is_eligible(
             candidate, incumbent_pos, problem.node_sizes, problem.edge_index
@@ -1139,7 +1090,6 @@ def layout_native_undirected_portfolio(
         # tried and regressed healthy multi-component candidates; any
         # isolate fling in this raw output is repaired conditionally inside
         # _add_challenger.
-        started = time.monotonic()
         sfdp_pos = layout_sfdp_pipeline(
             edge_index=problem.edge_index,
             num_nodes=n,
@@ -1149,10 +1099,8 @@ def layout_native_undirected_portfolio(
             edge_weights=problem.edge_weights,
             fidelity_mode="graphviz",
         )
-        if time.monotonic() - started <= DEFAULT_CANDIDATE_BUDGET_S:
-            _add_challenger("sfdp", sfdp_pos)
+        _add_challenger("sfdp", sfdp_pos)
         if problem.edge_weights is not None:
-            started = time.monotonic()
             sfdp_unweighted_pos = layout_sfdp_pipeline(
                 edge_index=problem.edge_index,
                 num_nodes=n,
@@ -1162,8 +1110,7 @@ def layout_native_undirected_portfolio(
                 edge_weights=None,
                 fidelity_mode="graphviz",
             )
-            if time.monotonic() - started <= DEFAULT_CANDIDATE_BUDGET_S:
-                _add_challenger("sfdp_unweighted", sfdp_unweighted_pos)
+            _add_challenger("sfdp_unweighted", sfdp_unweighted_pos)
     except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
         _LOGGER.warning("SFDP undirected challenger failed", exc_info=True)
 
@@ -1174,7 +1121,6 @@ def layout_native_undirected_portfolio(
 
             # Raw full-problem solve (round 4); isolate fling repaired
             # conditionally inside _add_challenger.
-            started = time.monotonic()
             neato_pos = layout_neato_pipeline(
                 edge_index=problem.edge_index,
                 num_nodes=n,
@@ -1185,10 +1131,8 @@ def layout_native_undirected_portfolio(
                 fidelity_mode="graphviz",
                 overlap_removal=False,
             )
-            if time.monotonic() - started <= DEFAULT_CANDIDATE_BUDGET_S:
-                _add_challenger("neato", neato_pos)
+            _add_challenger("neato", neato_pos)
             if problem.edge_weights is not None:
-                started = time.monotonic()
                 neato_unweighted_pos = layout_neato_pipeline(
                     edge_index=problem.edge_index,
                     num_nodes=n,
@@ -1199,8 +1143,7 @@ def layout_native_undirected_portfolio(
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
-                if time.monotonic() - started <= DEFAULT_CANDIDATE_BUDGET_S:
-                    _add_challenger("neato_unweighted", neato_unweighted_pos)
+                _add_challenger("neato_unweighted", neato_unweighted_pos)
         except Exception:  # noqa: BLE001
             _LOGGER.warning("neato undirected challenger failed", exc_info=True)
 
@@ -1212,15 +1155,11 @@ def layout_native_undirected_portfolio(
     # flat sfdp/neato challengers above.
     if problem.clusters:
         try:
-            started = time.monotonic()
             cluster_sfdp_pos = _cluster_aware_sfdp_candidate(problem, config, ctx)
         except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _LOGGER.warning("cluster-SFDP undirected challenger failed", exc_info=True)
             cluster_sfdp_pos = None
-        if (
-            cluster_sfdp_pos is not None
-            and time.monotonic() - started <= DEFAULT_CANDIDATE_BUDGET_S
-        ):
+        if cluster_sfdp_pos is not None:
             _add_challenger("cluster_sfdp", cluster_sfdp_pos)
 
     # Candidate E (r80-S9 Deliverable 2): weighted-similarity native-stress
@@ -1230,12 +1169,11 @@ def layout_native_undirected_portfolio(
     # handling anywhere else.
     if problem.edge_weights is not None:
         try:
-            started = time.monotonic()
             weighted_pos = _weighted_similarity_candidate(problem, seed)
         except Exception:  # noqa: BLE001
             _LOGGER.warning("weighted-similarity undirected challenger failed", exc_info=True)
             weighted_pos = None
-        if weighted_pos is not None and time.monotonic() - started <= DEFAULT_CANDIDATE_BUDGET_S:
+        if weighted_pos is not None:
             _add_challenger("weighted_similarity", weighted_pos)
 
     # Candidate F (r81-P1.5): point-unit native stress uses the existing
@@ -1246,10 +1184,8 @@ def layout_native_undirected_portfolio(
         edge_count = int(problem.edge_index.shape[1])
         if n > MAX_DENSE_STRESS_NODES or edge_count > MAX_DENSE_STRESS_EDGES:
             raise RuntimeError("point-unit stress exceeds dense-work cap")
-        started = time.monotonic()
         candidate = _stress_points_candidate(problem, seed)
-        if time.monotonic() - started <= DEFAULT_CANDIDATE_BUDGET_S:
-            stress_points_pos = candidate
+        stress_points_pos = candidate
     except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
         _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
     if stress_points_pos is not None:
