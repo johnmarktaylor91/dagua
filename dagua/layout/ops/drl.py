@@ -508,8 +508,12 @@ class _DensityGrid:
         tuple[int, int]
             Unclamped integer cell coordinates.
         """
-        cell_x = int((x_value + self.half_view + 0.5) * self.view_to_grid)
-        cell_y = int((y_value + self.half_view + 0.5) * self.view_to_grid)
+        # HALF_VIEW is an integer macro in igraph, so C++ evaluates the first
+        # addition in float before the double literals promote the expression.
+        shifted_x = _as_float32(x_value + self.half_view)
+        shifted_y = _as_float32(y_value + self.half_view)
+        cell_x = int((shifted_x + 0.5) * self.view_to_grid)
+        cell_y = int((shifted_y + 0.5) * self.view_to_grid)
         return cell_x, cell_y
 
     def _apply_kernel(self, cell_x: int, cell_y: int, sign: float) -> None:
