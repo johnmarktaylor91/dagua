@@ -169,6 +169,7 @@ def layout_sugiyama_pipeline(
     graphviz_cluster_label_widths: Optional[Dict[str, float]] = None,
     graphviz_apply_cluster_constraints: bool = False,
     graphviz_enable_cluster_skeleton: bool = False,
+    graphviz_expected_x_inventory: Optional[Tuple[int, Tuple[Tuple[int, int, int], ...]]] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -241,6 +242,9 @@ def layout_sugiyama_pipeline(
     graphviz_enable_cluster_skeleton : bool, default=False
         Enable the inactive A12 cluster rank/mincross prototype. It remains
         opt-in because the x-stage integration is not benchmark-safe yet.
+    graphviz_expected_x_inventory : tuple, optional
+        Instrumented Graphviz node count and exact ``(minlen, weight)``
+        multiset required before the typed cluster solve can run.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -336,6 +340,8 @@ def layout_sugiyama_pipeline(
         state.extras["sugiyama_graphviz_cluster_label_widths"] = {
             str(name): float(width) for name, width in graphviz_cluster_label_widths.items()
         }
+    if graphviz_expected_x_inventory is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_expected_x_inventory"] = graphviz_expected_x_inventory
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
 
     pipeline = build_sugiyama_pipeline(
