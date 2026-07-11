@@ -632,6 +632,21 @@
       "width_skew_late_merge"
     ]
   },
+  "classic_fcose_default": {
+    "ref": "cytoscape_fcose__for__classic_fcose_default",
+    "graphs": [
+      "ba_500",
+      "random_dag_200",
+      "random_dag_50"
+    ]
+  },
+  "classic_fcose_proof": {
+    "ref": "cytoscape_fcose__for__classic_fcose_proof",
+    "graphs": [
+      "random_dag_200",
+      "random_dag_50"
+    ]
+  },
   "classic_fmmm_graphviz_fdp_fidelity": {
     "ref": "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity",
     "graphs": [
