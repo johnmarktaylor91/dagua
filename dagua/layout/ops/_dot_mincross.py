@@ -93,6 +93,32 @@ def graphviz_mincross(
     if not adjacent_edges:
         return base_ranks
 
+    components = _mincross_components(node_order=build_order, edges=adjacent_edges)
+    if len(components) > 1:
+        merged_ranks: List[List[int]] = [[] for _ in base_ranks]
+        for component in components:
+            component_nodes = set(component)
+            component_ranks = [
+                [node for node in rank if node in component_nodes] for rank in base_ranks
+            ]
+            component_edges = [
+                edge
+                for edge in adjacent_edges
+                if edge.tail in component_nodes and edge.head in component_nodes
+            ]
+            ordered_component = graphviz_mincross(
+                ranks=component_ranks,
+                edges=[(edge.tail, edge.head) for edge in component_edges],
+                iterations=iterations,
+                edge_penalties=[edge.penalty for edge in component_edges],
+                node_order=component,
+                start_pass=start_pass,
+                end_pass=end_pass,
+            )
+            for rank_index, rank in enumerate(ordered_component):
+                merged_ranks[rank_index].extend(rank)
+        return merged_ranks
+
     max_iter = max(int(iterations), 0)
     start_pass = max(0, int(start_pass))
     end_pass = min(_MAX_INITIAL_PASSES, int(end_pass))
@@ -184,6 +210,49 @@ def graphviz_mincross(
         _transpose(ranks=ordered_ranks, incoming=incoming, outgoing=outgoing, reverse=False)
 
     return ordered_ranks
+
+
+def _mincross_components(
+    node_order: Sequence[int],
+    edges: Sequence[_MincrossEdge],
+) -> List[List[int]]:
+    """Return weak components in Graphviz ``decompose`` node-list order.
+
+    Parameters
+    ----------
+    node_order : sequence[int]
+        Expanded nodes in the order produced by Graphviz-style decomposition.
+    edges : sequence[_MincrossEdge]
+        Adjacent-rank edges in fast-edge order.
+
+    Returns
+    -------
+    list[list[int]]
+        Component node lists preserving their subsequence of ``node_order``.
+    """
+    adjacency: Dict[int, List[int]] = {int(node): [] for node in node_order}
+    for edge in edges:
+        adjacency.setdefault(edge.tail, []).append(edge.head)
+        adjacency.setdefault(edge.head, []).append(edge.tail)
+
+    component_by_node: Dict[int, int] = {}
+    components: List[List[int]] = []
+    for start in node_order:
+        if start in component_by_node:
+            continue
+        component_index = len(components)
+        component_by_node[start] = component_index
+        stack = [int(start)]
+        while stack:
+            node = stack.pop()
+            for neighbor in adjacency.get(node, []):
+                if neighbor not in component_by_node:
+                    component_by_node[neighbor] = component_index
+                    stack.append(neighbor)
+        components.append([])
+    for node in node_order:
+        components[component_by_node[node]].append(int(node))
+    return components
 
 
 def _normalize_adjacent_edges(
@@ -605,9 +674,13 @@ def _transpose(
         ``ranks`` is updated in place.
     """
     order_by_rank = _rank_order_maps(ranks)
+    candidates = [True] * len(ranks)
     while True:
         delta = 0
         for rank_index, rank_nodes in enumerate(ranks):
+            if not candidates[rank_index]:
+                continue
+            candidates[rank_index] = False
             for order in range(len(rank_nodes) - 1):
                 left = rank_nodes[order]
                 right = rank_nodes[order + 1]
@@ -626,6 +699,11 @@ def _transpose(
                     order_by_rank[rank_index][left] = order + 1
                     order_by_rank[rank_index][right] = order
                     delta += before - after
+                    candidates[rank_index] = True
+                    if rank_index > 0:
+                        candidates[rank_index - 1] = True
+                    if rank_index < len(ranks) - 1:
+                        candidates[rank_index + 1] = True
         if delta < 1:
             break
 

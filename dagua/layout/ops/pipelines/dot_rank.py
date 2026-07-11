@@ -100,6 +100,7 @@ class _SimplexGraph:
     tree_edges: List[int] = field(default_factory=list)
     search_index: int = 0
     search_size: int = _GRAPHVIZ_SEARCH_SIZE
+    legacy_tree_order: bool = False
 
 
 def graphviz_rank_assignment(
@@ -111,6 +112,7 @@ def graphviz_rank_assignment(
     maxiter: Optional[int] = None,
     search_size: int = _GRAPHVIZ_SEARCH_SIZE,
     balance: bool = True,
+    legacy_tree_order: bool = False,
 ) -> Tuple[Dict[NodeId, int], List[GraphvizVirtualEdge]]:
     """Assign dot ranks and describe virtual-node chains for long edges.
 
@@ -138,6 +140,9 @@ def graphviz_rank_assignment(
         Graphviz ``searchsize`` equivalent for selecting leaving tree edges.
     balance : bool, default=True
         Whether to apply dot's top-bottom balancing pass after optimization.
+    legacy_tree_order : bool, default=False
+        Preserve the pre-r79 iterative traversal when ``True``. The default
+        follows Graphviz's recursive traversal and feasible-subtree heap.
 
     Returns
     -------
@@ -179,6 +184,7 @@ def graphviz_rank_assignment(
             maxiter=maxiter,
             search_size=search_size,
             balance_mode="tb" if balance else "none",
+            legacy_tree_order=legacy_tree_order,
         )
         ranks.update(local_ranks)
 
@@ -199,6 +205,7 @@ def graphviz_network_simplex_assignment(
     maxiter: Optional[int] = None,
     search_size: int = _GRAPHVIZ_SEARCH_SIZE,
     balance_mode: BalanceMode = "tb",
+    legacy_tree_order: bool = True,
 ) -> Dict[NodeId, int]:
     """Assign node ranks for arbitrary Graphviz network-simplex constraints.
 
@@ -227,6 +234,9 @@ def graphviz_network_simplex_assignment(
     balance_mode : {"none", "tb", "lr"}, default="tb"
         Post-optimal balancing pass. ``"lr"`` matches dot ``rank(g, 2, ...)``
         for horizontal coordinate assignment.
+    legacy_tree_order : bool, default=True
+        Preserve the established horizontal tie path. Rank assignment uses
+        the corrected Graphviz traversal through :func:`graphviz_rank_assignment`.
 
     Returns
     -------
@@ -269,6 +279,7 @@ def graphviz_network_simplex_assignment(
             search_size=search_size,
             balance_mode=balance_mode,
             initial_ranks=initial_ranks,
+            legacy_tree_order=legacy_tree_order,
         )
         ranks.update(local_ranks)
     return ranks
@@ -425,7 +436,10 @@ def _validate_integer_node(node: int, num_nodes: Optional[int]) -> None:
         raise ValueError("edge endpoint is outside num_nodes")
 
 
-def _ordered_nodes(records: Sequence[_EdgeRecord], num_nodes: Optional[int]) -> List[NodeId]:
+def _ordered_nodes(
+    records: Sequence[_EdgeRecord],
+    num_nodes: Optional[int],
+) -> List[NodeId]:
     """Return nodes in deterministic Graphviz input order.
 
     Parameters
@@ -503,6 +517,7 @@ def _rank_component(
     search_size: int,
     balance_mode: BalanceMode,
     initial_ranks: Optional[Dict[NodeId, int]] = None,
+    legacy_tree_order: bool = False,
 ) -> Dict[NodeId, int]:
     """Run network simplex on one weak component.
 
@@ -520,6 +535,8 @@ def _rank_component(
         Post-optimal balancing pass.
     initial_ranks : dict, optional
         Optional starting ranks keyed by original node id.
+    legacy_tree_order : bool, default=False
+        Preserve the pre-r79 tree traversal used by the horizontal x solver.
 
     Returns
     -------
@@ -532,6 +549,7 @@ def _rank_component(
         node_to_local=node_to_local,
         search_size=search_size,
     )
+    graph.legacy_tree_order = legacy_tree_order
     if initial_ranks is not None:
         for node, local_id in node_to_local.items():
             graph.nodes[local_id].rank = int(initial_ranks.get(node, 0))
@@ -711,11 +729,34 @@ def _feasible_tree(graph: _SimplexGraph) -> None:
     subtrees = _find_tight_subtrees(graph=graph)
     if not subtrees:
         return
-    active = {index for index in range(len(subtrees))}
-    while len(active) > 1:
-        extracted = min(active, key=lambda idx: (subtrees[idx].size, idx))
-        active.remove(extracted)
-        subtrees[extracted].heap_index = -1
+    if graph.legacy_tree_order:
+        active = {index for index in range(len(subtrees))}
+        while len(active) > 1:
+            extracted = min(active, key=lambda idx: (subtrees[idx].size, idx))
+            active.remove(extracted)
+            subtrees[extracted].heap_index = -1
+            entering = _inter_tree_edge(graph=graph, subtrees=subtrees, subtree_id=extracted)
+            if entering is None:
+                raise ValueError("graphviz rank assignment could not connect tight subtrees")
+            merged = _merge_trees_legacy(
+                graph=graph,
+                subtrees=subtrees,
+                edge_id=entering,
+                active=active,
+            )
+            active.add(merged)
+            subtrees[merged].heap_index = len(active) - 1
+        _dfs_range_init(graph=graph)
+        _dfs_cutval(graph=graph)
+        return
+    heap = list(range(len(subtrees)))
+    for index, subtree_id in enumerate(heap):
+        subtrees[subtree_id].heap_index = index
+    for index in range(len(heap) // 2, -1, -1):
+        _subtree_heapify(heap=heap, subtrees=subtrees, index=index)
+
+    while len(heap) > 1:
+        extracted = _subtree_heap_extract_min(heap=heap, subtrees=subtrees)
         entering = _inter_tree_edge(graph=graph, subtrees=subtrees, subtree_id=extracted)
         if entering is None:
             raise ValueError("graphviz rank assignment could not connect tight subtrees")
@@ -723,12 +764,79 @@ def _feasible_tree(graph: _SimplexGraph) -> None:
             graph=graph,
             subtrees=subtrees,
             edge_id=entering,
-            active=active,
         )
-        active.add(merged)
-        subtrees[merged].heap_index = len(active) - 1
+        _subtree_heapify(
+            heap=heap,
+            subtrees=subtrees,
+            index=subtrees[merged].heap_index,
+        )
     _dfs_range_init(graph=graph)
     _dfs_cutval(graph=graph)
+
+
+def _subtree_heapify(heap: List[int], subtrees: List[_Subtree], index: int) -> None:
+    """Restore Graphviz's feasible-tree subtree heap below one index.
+
+    Parameters
+    ----------
+    heap : list of int
+        Active subtree ids in Graphviz heap order.
+    subtrees : list of _Subtree
+        Mutable subtree records carrying sizes and heap indices.
+    index : int
+        Heap index whose descendants may violate the size ordering.
+
+    Returns
+    -------
+    None
+        ``heap`` and the subtree heap indices are updated in place.
+
+    Notes
+    -----
+    Preserving a selected left child when the right child is not smaller is
+    essential: resetting to the parent changes the tight spanning tree for
+    equal-objective rank solutions.
+    """
+    while 0 <= index < len(heap):
+        left = 2 * (index + 1) - 1
+        right = 2 * (index + 1)
+        if left < len(heap) and subtrees[heap[left]].size < subtrees[heap[index]].size:
+            smallest = left
+        else:
+            smallest = index
+        if right < len(heap) and subtrees[heap[right]].size < subtrees[heap[smallest]].size:
+            smallest = right
+        if smallest == index:
+            break
+        heap[index], heap[smallest] = heap[smallest], heap[index]
+        subtrees[heap[index]].heap_index = index
+        subtrees[heap[smallest]].heap_index = smallest
+        index = smallest
+
+
+def _subtree_heap_extract_min(heap: List[int], subtrees: List[_Subtree]) -> int:
+    """Extract Graphviz's next feasible-tree subtree.
+
+    Parameters
+    ----------
+    heap : list of int
+        Active subtree ids in Graphviz heap order.
+    subtrees : list of _Subtree
+        Mutable subtree records carrying heap indices.
+
+    Returns
+    -------
+    int
+        Extracted subtree id.
+    """
+    extracted = heap[0]
+    subtrees[extracted].heap_index = -1
+    replacement = heap.pop()
+    if heap:
+        heap[0] = replacement
+        subtrees[replacement].heap_index = 0
+        _subtree_heapify(heap=heap, subtrees=subtrees, index=0)
+    return extracted
 
 
 def _find_tight_subtrees(graph: _SimplexGraph) -> List[_Subtree]:
@@ -771,6 +879,59 @@ def _tight_subtree_search(graph: _SimplexGraph, start: int, subtree_id: int) -> 
     -------
     int
         Number of nodes in the tight subtree.
+    """
+    if graph.legacy_tree_order:
+        return _tight_subtree_search_legacy(graph=graph, start=start, subtree_id=subtree_id)
+
+    size = 1
+    stack: List[Tuple[int, int, int]] = [(start, 0, 0)]
+    while stack:
+        node_id, phase, edge_offset = stack[-1]
+        node = graph.nodes[node_id]
+        edges = node.in_edges if phase == 0 else node.out_edges
+        if edge_offset >= len(edges):
+            if phase == 0:
+                stack[-1] = (node_id, 1, 0)
+                continue
+            stack.pop()
+            continue
+
+        edge_id = edges[edge_offset]
+        stack[-1] = (node_id, phase, edge_offset + 1)
+        edge = graph.edges[edge_id]
+        if phase == 0:
+            if _is_tree_edge(graph=graph, edge_id=edge_id):
+                continue
+            if graph.nodes[edge.tail].subtree == -1 and _slack(graph=graph, edge_id=edge_id) == 0:
+                _add_tree_edge(graph=graph, edge_id=edge_id)
+                graph.nodes[edge.tail].subtree = subtree_id
+                size += 1
+                stack.append((edge.tail, 0, 0))
+        elif not _is_tree_edge(graph=graph, edge_id=edge_id):
+            if graph.nodes[edge.head].subtree == -1 and _slack(graph=graph, edge_id=edge_id) == 0:
+                _add_tree_edge(graph=graph, edge_id=edge_id)
+                graph.nodes[edge.head].subtree = subtree_id
+                size += 1
+                stack.append((edge.head, 0, 0))
+    return size
+
+
+def _tight_subtree_search_legacy(graph: _SimplexGraph, start: int, subtree_id: int) -> int:
+    """Preserve the pre-r79 iterative tight-subtree traversal for x layout.
+
+    Parameters
+    ----------
+    graph : _SimplexGraph
+        Mutable x-stage simplex graph.
+    start : int
+        Initial local node id.
+    subtree_id : int
+        Subtree label to install.
+
+    Returns
+    -------
+    int
+        Number of nodes discovered.
     """
     size = 0
     stack = [start]
@@ -819,33 +980,70 @@ def _inter_tree_edge(
         Best non-tree edge id.
     """
     root = _find_subtree(subtrees=subtrees, subtree_id=subtree_id)
+    if graph.legacy_tree_order:
+        best: Optional[int] = None
+        seen: set[int] = set()
+        stack = [subtrees[root].rep]
+        while stack:
+            node_id = stack.pop()
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            node = graph.nodes[node_id]
+            for edge_id in node.out_edges:
+                edge = graph.edges[edge_id]
+                if _is_tree_edge(graph=graph, edge_id=edge_id):
+                    stack.append(edge.head)
+                elif _find_subtree(
+                    subtrees=subtrees,
+                    subtree_id=graph.nodes[edge.head].subtree,
+                ) != root and _is_better_entering_edge(
+                    graph=graph,
+                    edge_id=edge_id,
+                    best=best,
+                ):
+                    best = edge_id
+            for edge_id in node.in_edges:
+                edge = graph.edges[edge_id]
+                if _is_tree_edge(graph=graph, edge_id=edge_id):
+                    stack.append(edge.tail)
+                elif _find_subtree(
+                    subtrees=subtrees,
+                    subtree_id=graph.nodes[edge.tail].subtree,
+                ) != root and _is_better_entering_edge(
+                    graph=graph,
+                    edge_id=edge_id,
+                    best=best,
+                ):
+                    best = edge_id
+        return best
     best: Optional[int] = None
-    seen: set[int] = set()
-    stack = [subtrees[root].rep]
+    stack: List[Tuple[int, Optional[int], int, int]] = [(subtrees[root].rep, None, 0, 0)]
     while stack:
-        node_id = stack.pop()
-        if node_id in seen:
-            continue
-        seen.add(node_id)
+        node_id, from_node, phase, edge_offset = stack[-1]
+        if best is not None and _slack(graph=graph, edge_id=best) == 0:
+            break
         node = graph.nodes[node_id]
-        for edge_id in node.out_edges:
-            edge = graph.edges[edge_id]
-            if _is_tree_edge(graph=graph, edge_id=edge_id):
-                stack.append(edge.head)
-            elif (
-                _find_subtree(subtrees=subtrees, subtree_id=graph.nodes[edge.head].subtree) != root
-            ):
-                if _is_better_entering_edge(graph=graph, edge_id=edge_id, best=best):
-                    best = edge_id
-        for edge_id in node.in_edges:
-            edge = graph.edges[edge_id]
-            if _is_tree_edge(graph=graph, edge_id=edge_id):
-                stack.append(edge.tail)
-            elif (
-                _find_subtree(subtrees=subtrees, subtree_id=graph.nodes[edge.tail].subtree) != root
-            ):
-                if _is_better_entering_edge(graph=graph, edge_id=edge_id, best=best):
-                    best = edge_id
+        edges = node.out_edges if phase == 0 else node.in_edges
+        if edge_offset >= len(edges):
+            if phase == 0:
+                stack[-1] = (node_id, from_node, 1, 0)
+                continue
+            stack.pop()
+            continue
+
+        edge_id = edges[edge_offset]
+        stack[-1] = (node_id, from_node, phase, edge_offset + 1)
+        edge = graph.edges[edge_id]
+        other = edge.head if phase == 0 else edge.tail
+        if _is_tree_edge(graph=graph, edge_id=edge_id):
+            if other != from_node:
+                stack.append((other, node_id, 0, 0))
+        elif _find_subtree(
+            subtrees=subtrees,
+            subtree_id=graph.nodes[other].subtree,
+        ) != root and _is_better_entering_edge(graph=graph, edge_id=edge_id, best=best):
+            best = edge_id
     return best
 
 
@@ -853,7 +1051,6 @@ def _merge_trees(
     graph: _SimplexGraph,
     subtrees: List[_Subtree],
     edge_id: int,
-    active: set[int],
 ) -> int:
     """Merge two tight subtrees through an entering edge.
 
@@ -865,9 +1062,6 @@ def _merge_trees(
         Union-find subtree records.
     edge_id : int
         Non-tree edge used for the merge.
-    active : set of int
-        Subtree ids still participating in the heap.
-
     Returns
     -------
     int
@@ -877,7 +1071,7 @@ def _merge_trees(
     tail_tree = _find_subtree(subtrees=subtrees, subtree_id=graph.nodes[edge.tail].subtree)
     head_tree = _find_subtree(subtrees=subtrees, subtree_id=graph.nodes[edge.head].subtree)
     slack = _slack(graph=graph, edge_id=edge_id)
-    if tail_tree not in active:
+    if subtrees[tail_tree].heap_index == -1:
         if slack:
             _tree_adjust(graph=graph, node_id=subtrees[tail_tree].rep, from_node=None, delta=slack)
         root = head_tree
@@ -887,6 +1081,49 @@ def _merge_trees(
             _tree_adjust(graph=graph, node_id=subtrees[head_tree].rep, from_node=None, delta=-slack)
         root = tail_tree
         child = head_tree
+    _add_tree_edge(graph=graph, edge_id=edge_id)
+    subtrees[child].parent = root
+    subtrees[root].parent = root
+    subtrees[root].size += subtrees[child].size
+    return root
+
+
+def _merge_trees_legacy(
+    graph: _SimplexGraph,
+    subtrees: List[_Subtree],
+    edge_id: int,
+    active: set[int],
+) -> int:
+    """Merge feasible subtrees using the pre-r79 active-set convention.
+
+    Parameters
+    ----------
+    graph : _SimplexGraph
+        Mutable x-stage simplex graph.
+    subtrees : list of _Subtree
+        Union-find subtree records.
+    edge_id : int
+        Entering edge joining two subtrees.
+    active : set of int
+        Subtree ids still active in the legacy priority set.
+
+    Returns
+    -------
+    int
+        Active root after merging.
+    """
+    edge = graph.edges[edge_id]
+    tail_tree = _find_subtree(subtrees=subtrees, subtree_id=graph.nodes[edge.tail].subtree)
+    head_tree = _find_subtree(subtrees=subtrees, subtree_id=graph.nodes[edge.head].subtree)
+    slack = _slack(graph=graph, edge_id=edge_id)
+    if tail_tree not in active:
+        if slack:
+            _tree_adjust(graph=graph, node_id=subtrees[tail_tree].rep, from_node=None, delta=slack)
+        root, child = head_tree, tail_tree
+    else:
+        if slack:
+            _tree_adjust(graph=graph, node_id=subtrees[head_tree].rep, from_node=None, delta=-slack)
+        root, child = tail_tree, head_tree
     _add_tree_edge(graph=graph, edge_id=edge_id)
     subtrees[child].parent = root
     subtrees[root].parent = root
@@ -1344,24 +1581,56 @@ def _dfs_enter_outedge(
     int or None
         Entering edge id.
     """
-    best: Optional[int] = None
-    stack = [node_id]
+    if graph.legacy_tree_order:
+        best: Optional[int] = None
+        stack = [node_id]
+        while stack:
+            current = stack.pop()
+            for edge_id in graph.nodes[current].out_edges:
+                edge = graph.edges[edge_id]
+                if not _is_tree_edge(graph=graph, edge_id=edge_id):
+                    if not _seq(low, graph.nodes[edge.head].lim, lim):
+                        if _is_better_entering_edge(graph=graph, edge_id=edge_id, best=best):
+                            best = edge_id
+                elif graph.nodes[edge.head].lim < graph.nodes[current].lim:
+                    stack.append(edge.head)
+            if best is not None and _slack(graph=graph, edge_id=best) == 0:
+                continue
+            for edge_id in graph.nodes[current].tree_in:
+                edge = graph.edges[edge_id]
+                if graph.nodes[edge.tail].lim < graph.nodes[current].lim:
+                    stack.append(edge.tail)
+        return best
+
+    best = None
+    stack: List[Tuple[int, int, int]] = [(node_id, 0, 0)]
     while stack:
-        current = stack.pop()
-        for edge_id in graph.nodes[current].out_edges:
-            edge = graph.edges[edge_id]
-            if not _is_tree_edge(graph=graph, edge_id=edge_id):
-                if not _seq(low, graph.nodes[edge.head].lim, lim):
-                    if _is_better_entering_edge(graph=graph, edge_id=edge_id, best=best):
-                        best = edge_id
-            elif graph.nodes[edge.head].lim < graph.nodes[current].lim:
-                stack.append(edge.head)
-        if best is not None and _slack(graph=graph, edge_id=best) == 0:
+        current, phase, edge_offset = stack[-1]
+        edges = graph.nodes[current].out_edges if phase == 0 else graph.nodes[current].tree_in
+        if edge_offset >= len(edges) or (
+            phase == 1 and best is not None and _slack(graph=graph, edge_id=best) == 0
+        ):
+            if phase == 0:
+                stack[-1] = (current, 1, 0)
+                continue
+            stack.pop()
             continue
-        for edge_id in graph.nodes[current].tree_in:
-            edge = graph.edges[edge_id]
-            if graph.nodes[edge.tail].lim < graph.nodes[current].lim:
-                stack.append(edge.tail)
+
+        edge_id = edges[edge_offset]
+        stack[-1] = (current, phase, edge_offset + 1)
+        edge = graph.edges[edge_id]
+        if phase == 0:
+            if not _is_tree_edge(graph=graph, edge_id=edge_id):
+                if not _seq(low, graph.nodes[edge.head].lim, lim) and _is_better_entering_edge(
+                    graph=graph,
+                    edge_id=edge_id,
+                    best=best,
+                ):
+                    best = edge_id
+            elif graph.nodes[edge.head].lim < graph.nodes[current].lim:
+                stack.append((edge.head, 0, 0))
+        elif graph.nodes[edge.tail].lim < graph.nodes[current].lim:
+            stack.append((edge.tail, 0, 0))
     return best
 
 
@@ -1389,24 +1658,56 @@ def _dfs_enter_inedge(
     int or None
         Entering edge id.
     """
-    best: Optional[int] = None
-    stack = [node_id]
+    if graph.legacy_tree_order:
+        best: Optional[int] = None
+        stack = [node_id]
+        while stack:
+            current = stack.pop()
+            for edge_id in graph.nodes[current].in_edges:
+                edge = graph.edges[edge_id]
+                if not _is_tree_edge(graph=graph, edge_id=edge_id):
+                    if not _seq(low, graph.nodes[edge.tail].lim, lim):
+                        if _is_better_entering_edge(graph=graph, edge_id=edge_id, best=best):
+                            best = edge_id
+                elif graph.nodes[edge.tail].lim < graph.nodes[current].lim:
+                    stack.append(edge.tail)
+            if best is not None and _slack(graph=graph, edge_id=best) == 0:
+                continue
+            for edge_id in graph.nodes[current].tree_out:
+                edge = graph.edges[edge_id]
+                if graph.nodes[edge.head].lim < graph.nodes[current].lim:
+                    stack.append(edge.head)
+        return best
+
+    best = None
+    stack: List[Tuple[int, int, int]] = [(node_id, 0, 0)]
     while stack:
-        current = stack.pop()
-        for edge_id in graph.nodes[current].in_edges:
-            edge = graph.edges[edge_id]
-            if not _is_tree_edge(graph=graph, edge_id=edge_id):
-                if not _seq(low, graph.nodes[edge.tail].lim, lim):
-                    if _is_better_entering_edge(graph=graph, edge_id=edge_id, best=best):
-                        best = edge_id
-            elif graph.nodes[edge.tail].lim < graph.nodes[current].lim:
-                stack.append(edge.tail)
-        if best is not None and _slack(graph=graph, edge_id=best) == 0:
+        current, phase, edge_offset = stack[-1]
+        edges = graph.nodes[current].in_edges if phase == 0 else graph.nodes[current].tree_out
+        if edge_offset >= len(edges) or (
+            phase == 1 and best is not None and _slack(graph=graph, edge_id=best) == 0
+        ):
+            if phase == 0:
+                stack[-1] = (current, 1, 0)
+                continue
+            stack.pop()
             continue
-        for edge_id in graph.nodes[current].tree_out:
-            edge = graph.edges[edge_id]
-            if graph.nodes[edge.head].lim < graph.nodes[current].lim:
-                stack.append(edge.head)
+
+        edge_id = edges[edge_offset]
+        stack[-1] = (current, phase, edge_offset + 1)
+        edge = graph.edges[edge_id]
+        if phase == 0:
+            if not _is_tree_edge(graph=graph, edge_id=edge_id):
+                if not _seq(low, graph.nodes[edge.tail].lim, lim) and _is_better_entering_edge(
+                    graph=graph,
+                    edge_id=edge_id,
+                    best=best,
+                ):
+                    best = edge_id
+            elif graph.nodes[edge.tail].lim < graph.nodes[current].lim:
+                stack.append((edge.tail, 0, 0))
+        elif graph.nodes[edge.head].lim < graph.nodes[current].lim:
+            stack.append((edge.head, 0, 0))
     return best
 
 

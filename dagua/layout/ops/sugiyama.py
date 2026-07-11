@@ -2140,10 +2140,17 @@ def _edge_processing_order(
 
     outgoing: List[List[int]] = [[] for _ in range(num_nodes)]
     sources = edge_index[0].tolist()
+    targets = edge_index[1].tolist()
     for edge_idx, source in enumerate(sources):
         source_id = int(source)
         if 0 <= source_id < num_nodes:
             outgoing[source_id].append(edge_idx)
+    for source_edges in outgoing:
+        # cgraph's agfstout/agnxtout scan is ordered by head-node sequence,
+        # then by parallel-edge sequence. Class2 creates virtual chains in
+        # that order, so preserving tensor insertion order changes which
+        # chain occupies each virtual-node slot and alters mincross counts.
+        source_edges.sort(key=lambda edge_idx: (int(targets[edge_idx]), edge_idx))
 
     edge_order: list[int] = []
     for node_id, source_edges in enumerate(outgoing):
