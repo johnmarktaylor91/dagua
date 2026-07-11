@@ -148,6 +148,36 @@ def _networkx_center(dim: int) -> Any:
     return np.zeros(dim, dtype=float)
 
 
+def _networkx_random_walk_arpack_start(num_nodes: int) -> Any:
+    """Build a process-stable start vector for the random-walk oracle.
+
+    NetworkX does not expose a random-walk spectral-layout variant.  The
+    independent adapter therefore fixes the otherwise implicit SciPy ARPACK
+    start vector so repeated eigenspaces have reproducible reference bases.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of rows in the random-walk Laplacian.
+
+    Returns
+    -------
+    Any
+        NumPy unit vector with shape ``[N]``.
+    """
+    import numpy as np
+
+    if num_nodes <= 0:
+        return np.empty((0,), dtype=np.float64)
+    start = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+    start -= float(start.mean())
+    norm = float(np.linalg.norm(start))
+    if norm <= np.finfo(np.float64).eps:
+        start = np.ones(num_nodes, dtype=np.float64)
+        norm = float(np.linalg.norm(start))
+    return start / norm
+
+
 def _networkx_spectral_edge_case_positions(G: Any, dim: int) -> Optional[dict[int, Any]]:
     """Return NetworkX spectral special-case positions when applicable.
 
@@ -248,7 +278,13 @@ def _networkx_laplacian_spectral_array(A: Any, dim: int, normalization: str) -> 
         if symmetric:
             eigenvalues, eigenvectors = sp.sparse.linalg.eigsh(laplacian, k, which="SM", ncv=ncv)
         else:
-            eigenvalues, eigenvectors = sp.sparse.linalg.eigs(laplacian, k, which="SR", ncv=ncv)
+            eigenvalues, eigenvectors = sp.sparse.linalg.eigs(
+                laplacian,
+                k,
+                which="SR",
+                ncv=ncv,
+                v0=_networkx_random_walk_arpack_start(num_nodes),
+            )
     index = np.argsort(np.real(eigenvalues))[1 : dim + 1]
     return np.real(eigenvectors[:, index])
 
