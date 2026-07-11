@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.base import Op, Pipeline
@@ -4120,6 +4121,7 @@ _GRAPHVIZ_FDP_PRISM_STRESS_TOL = 0.001
 _GRAPHVIZ_FDP_PRISM_MACHINE_ACC = 1.0e-12
 _GRAPHVIZ_FDP_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS = 4.0
+_GRAPHVIZ_FDP_DEFAULT_XLAYOUT_MARGIN_INCHES = 0.0555555559694767
 _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES = 0.75
 _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES = 0.5
 _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS = 8.0
@@ -4650,7 +4652,33 @@ def _graphviz_fdp_node_size_points(
     if node_sizes is None:
         return floor
     size = node_sizes[int(node_index)].detach().to(dtype=torch.float64, device="cpu")
-    return torch.maximum(size, floor)
+    return torch.tensor(
+        [
+            float(floor[axis].item())
+            if float(value.item()) <= 0.0
+            else _graphviz_fdp_explicit_size_points(float(value.item()))
+            for axis, value in enumerate(size)
+        ],
+        dtype=torch.float64,
+    )
+
+
+def _graphviz_fdp_explicit_size_points(value: float) -> float:
+    """Quantize an explicit size through Graphviz's DOT fixed-size path.
+
+    Parameters
+    ----------
+    value : float
+        Measured node extent in points.
+
+    Returns
+    -------
+    float
+        Integer-point extent after four-decimal inch serialization.
+    """
+    serialized_inches = float(f"{value / _GRAPHVIZ_FDP_POINTS_PER_INCH:.4f}")
+    points = serialized_inches * _GRAPHVIZ_FDP_POINTS_PER_INCH
+    return float(math.floor(points + 0.5))
 
 
 def _fdp_recursion_component_sizes(
@@ -5882,6 +5910,8 @@ def _graphviz_fdp_edge_lists(
         factor = 1.0 if weights_cpu is None else float(weights_cpu[edge_id].item())
         edges.append((source_index, target_index, factor, _GRAPHVIZ_FDP_DEFAULT_K))
         outgoing[source_index].append(len(edges) - 1)
+    for edge_ids in outgoing:
+        edge_ids.sort(key=lambda edge_id: edges[edge_id][1])
     return outgoing, edges
 
 
@@ -5952,6 +5982,28 @@ def _graphviz_fdp_collapse_parallel_edges(
         device=edge_weights.device,
     )
     return collapsed_edges, collapsed_weights
+
+
+def _graphviz_fdp_xlayout_edges(edge_index: torch.Tensor) -> torch.Tensor:
+    """Orient derived FDP edges in Graphviz node-sequence order.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Collapsed local edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Edges oriented from the lower to the higher local node index while
+        preserving insertion order.
+    """
+    return torch.stack(
+        (
+            torch.minimum(edge_index[0], edge_index[1]),
+            torch.maximum(edge_index[0], edge_index[1]),
+        )
+    )
 
 
 def _graphviz_fdp_initial_positions(num_nodes: int, seed: int) -> torch.Tensor:
@@ -6719,18 +6771,16 @@ def _graphviz_fdp_node_sizes_in_inches(
         Node sizes plus Graphviz fdp's default additive ``xLayout``
         separation in inches with shape ``[N, 2]``.
     """
-    if node_sizes is None:
-        sizes = torch.zeros((num_nodes, 2), dtype=torch.float64)
-    else:
-        sizes = node_sizes.detach().to(device="cpu", dtype=torch.float64) / (
-            _GRAPHVIZ_FDP_POINTS_PER_INCH
-        )
-    floors = torch.tensor(
-        [_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES, _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES],
+    if node_sizes is not None:
+        widths, heights = _graphviz_fdp_node_size_lists_in_inches(node_sizes, num_nodes)
+        return torch.tensor(list(zip(widths, heights)), dtype=torch.float64)
+    sizes = torch.tensor(
+        [[_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES, _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES]] * num_nodes,
         dtype=torch.float64,
     )
-    sep = 2.0 * _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS / _GRAPHVIZ_FDP_POINTS_PER_INCH
-    return torch.maximum(sizes, floors) + sep
+    # Graphviz stores the four-point sepFactor margin through a float pointf
+    # before widening it back to double inside xLayout.
+    return 2.0 * (sizes / 2.0 + _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_MARGIN_INCHES)
 
 
 def _graphviz_fdp_node_size_lists_in_inches(
@@ -6752,21 +6802,48 @@ def _graphviz_fdp_node_size_lists_in_inches(
         Widths and heights including Graphviz's default additive separation,
         in internal inches.
     """
-    sep = 2.0 * _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS / _GRAPHVIZ_FDP_POINTS_PER_INCH
     widths: List[float] = []
     heights: List[float] = []
     if node_sizes is None:
         for _node_index in range(num_nodes):
-            widths.append(_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES + sep)
-            heights.append(_GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES + sep)
+            widths.append(
+                2.0
+                * (
+                    _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES / 2.0
+                    + _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_MARGIN_INCHES
+                )
+            )
+            heights.append(
+                2.0
+                * (
+                    _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES / 2.0
+                    + _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_MARGIN_INCHES
+                )
+            )
         return widths, heights
 
     sizes_cpu = node_sizes.detach().to(device="cpu", dtype=torch.float64)
     for node_index in range(num_nodes):
-        width = float(sizes_cpu[node_index, 0].item()) / _GRAPHVIZ_FDP_POINTS_PER_INCH
-        height = float(sizes_cpu[node_index, 1].item()) / _GRAPHVIZ_FDP_POINTS_PER_INCH
-        widths.append(max(width, _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES) + sep)
-        heights.append(max(height, _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES) + sep)
+        width = _graphviz_fdp_explicit_size_points(float(sizes_cpu[node_index, 0].item()))
+        height = _graphviz_fdp_explicit_size_points(float(sizes_cpu[node_index, 1].item()))
+        if float(sizes_cpu[node_index, 0].item()) <= 0.0:
+            width = _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH
+        if float(sizes_cpu[node_index, 1].item()) <= 0.0:
+            height = _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH
+        widths.append(
+            2.0
+            * (
+                width / _GRAPHVIZ_FDP_POINTS_PER_INCH / 2.0
+                + _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_MARGIN_INCHES
+            )
+        )
+        heights.append(
+            2.0
+            * (
+                height / _GRAPHVIZ_FDP_POINTS_PER_INCH / 2.0
+                + _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_MARGIN_INCHES
+            )
+        )
     return widths, heights
 
 
@@ -6789,8 +6866,25 @@ def _graphviz_fdp_prism_half_size_lists_in_inches(
         Half-widths and half-heights including Graphviz's default FDP
         additive separation, in internal inches.
     """
-    widths, heights = _graphviz_fdp_node_size_lists_in_inches(node_sizes, num_nodes)
-    return [width / 2.0 for width in widths], [height / 2.0 for height in heights]
+    margin = _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS / _GRAPHVIZ_FDP_POINTS_PER_INCH
+    if node_sizes is None:
+        return (
+            [_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES / 2.0 + margin] * num_nodes,
+            [_GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES / 2.0 + margin] * num_nodes,
+        )
+    sizes_cpu = node_sizes.detach().to(device="cpu", dtype=torch.float64)
+    half_widths: List[float] = []
+    half_heights: List[float] = []
+    for node_index in range(num_nodes):
+        width = _graphviz_fdp_explicit_size_points(float(sizes_cpu[node_index, 0].item()))
+        height = _graphviz_fdp_explicit_size_points(float(sizes_cpu[node_index, 1].item()))
+        if float(sizes_cpu[node_index, 0].item()) <= 0.0:
+            width = _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH
+        if float(sizes_cpu[node_index, 1].item()) <= 0.0:
+            height = _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH
+        half_widths.append(width / _GRAPHVIZ_FDP_POINTS_PER_INCH / 2.0 + margin)
+        half_heights.append(height / _GRAPHVIZ_FDP_POINTS_PER_INCH / 2.0 + margin)
+    return half_widths, half_heights
 
 
 def _graphviz_fdp_prism_overlap_edges(
@@ -7036,13 +7130,21 @@ def _graphviz_fdp_prism_average_edge_length(
         edges.add((source, target))
     if not edges:
         return 0.0
-    total = 0.0
+    adjacency: List[List[int]] = [[] for _ in range(len(x_positions))]
     for source, target in edges:
-        total += math.hypot(
-            x_positions[source] - x_positions[target],
-            y_positions[source] - y_positions[target],
-        )
-    return total / len(edges)
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+    total = 0.0
+    edge_entries = 0
+    for source, targets in enumerate(adjacency):
+        for target in sorted(targets):
+            x_delta = x_positions[source] - x_positions[target]
+            # Graphviz 7.0.5's average_edge_length indexes the target as
+            # coord[dim * target] for both axes. Preserve that historical bug.
+            y_delta = y_positions[source] - x_positions[target]
+            total += math.sqrt(x_delta * x_delta + y_delta * y_delta)
+            edge_entries += 1
+    return total / edge_entries
 
 
 def _graphviz_fdp_prism_apply_initial_scaling(
@@ -7813,11 +7915,17 @@ def _graphviz_fdp_apply_xlayout_attraction_lists(
         return
     x_delta = x_positions[target] - x_positions[source]
     y_delta = y_positions[target] - y_positions[source]
-    dist = math.hypot(x_delta, y_delta)
+    dist = _graphviz_fdp_xlayout_hypot(x_delta, y_delta)
     if dist == 0.0:
         return
-    source_radius = math.hypot(widths_in_inches[source] / 2.0, heights_in_inches[source] / 2.0)
-    target_radius = math.hypot(widths_in_inches[target] / 2.0, heights_in_inches[target] / 2.0)
+    source_radius = _graphviz_fdp_xlayout_hypot(
+        widths_in_inches[source] / 2.0,
+        heights_in_inches[source] / 2.0,
+    )
+    target_radius = _graphviz_fdp_xlayout_hypot(
+        widths_in_inches[target] / 2.0,
+        heights_in_inches[target] / 2.0,
+    )
     din = source_radius + target_radius
     dout = dist - din
     force = dout * dout / ((x_k + din) * dist)
@@ -7825,6 +7933,30 @@ def _graphviz_fdp_apply_xlayout_attraction_lists(
     y_displacements[target] -= y_delta * force
     x_displacements[source] += x_delta * force
     y_displacements[source] += y_delta * force
+
+
+def _graphviz_fdp_xlayout_hypot(x_value: float, y_value: float) -> float:
+    """Match the libm ``hypot`` rounding used by Graphviz 7 xLayout.
+
+    Parameters
+    ----------
+    x_value : float
+        Horizontal operand in Graphviz internal inches.
+    y_value : float
+        Vertical operand in Graphviz internal inches.
+
+    Returns
+    -------
+    float
+        Euclidean magnitude with Graphviz's bounded-coordinate arithmetic.
+
+    Notes
+    -----
+    NumPy's scalar ``hypot`` follows the platform libm rounding used by
+    Graphviz 7.0.5. Python's compensated ``math.hypot`` can differ by one ULP,
+    which changes later overlap branches.
+    """
+    return float(np.hypot(x_value, y_value))
 
 
 def _graphviz_fdp_update_xlayout_position_lists(
@@ -8104,16 +8236,21 @@ def _graphviz_fdp_component_layout(
     )
     positions = _graphviz_fdp_xlayout(
         positions=positions,
-        edge_index=edge_index,
+        edge_index=_graphviz_fdp_xlayout_edges(edge_index),
         node_sizes=node_sizes,
         edge_weights=edge_weights,
         xpms=xpms,
     )
-    positions = _graphviz_fdp_prism_overlap(
-        positions=positions,
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-    )
+    xlayout_sizes = _graphviz_fdp_node_sizes_in_inches(node_sizes, num_nodes)
+    # fdp_xLayout returns immediately when its native expansion eliminates
+    # every overlap; removeOverlapAs(PRISM) is only the fallback for a
+    # non-zero residual after the configured x-layout tries.
+    if _graphviz_fdp_count_overlaps(positions, xlayout_sizes) > 0:
+        positions = _graphviz_fdp_prism_overlap(
+            positions=positions,
+            edge_index=edge_index,
+            node_sizes=node_sizes,
+        )
     result = positions * _GRAPHVIZ_FDP_POINTS_PER_INCH
     if flip_y:
         result[:, 1] *= -1.0
@@ -8781,6 +8918,8 @@ def _layout_fmmm_fidelity_components(
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     component_positions: list[torch.Tensor] = []
     boxes: list[tuple[float, float, float, float]] = []
+    component_node_geometries: list[list[tuple[float, float, float, float]]] = []
+    packing_sizes = torch.empty((num_nodes, 2), dtype=torch.float64, device=device)
     for component in components:
         local_edges, local_weights = _slice_component_edges(edge_index, edge_weights, component)
         local_sizes = node_sizes[component] if node_sizes is not None else None
@@ -8793,16 +8932,37 @@ def _layout_fmmm_fidelity_components(
             max_iters=steps,
             flip_y=False,
         )
+        local_packing_sizes = torch.stack(
+            [
+                _graphviz_fdp_node_size_points(local_sizes, local_index)
+                for local_index in range(len(component))
+            ]
+        )
+        component_indices = torch.tensor(component, dtype=torch.long, device=device)
+        packing_sizes[component_indices] = local_packing_sizes.to(device=device)
         component_positions.append(local_pos)
-        boxes.append(_component_box(local_pos, local_sizes))
+        boxes.append(_component_box(local_pos, local_packing_sizes))
+        component_node_geometries.append(
+            [
+                (
+                    float(local_pos[local_index, 0].item()),
+                    float(local_pos[local_index, 1].item()),
+                    float(local_packing_sizes[local_index, 0].item()),
+                    float(local_packing_sizes[local_index, 1].item()),
+                )
+                for local_index in range(len(component))
+            ]
+        )
 
-    offsets = _graphviz_tile_pack_offsets(boxes)
+    offsets = _graphviz_node_poly_pack_offsets(boxes, component_node_geometries)
     dtype = component_positions[0].dtype
     packed = torch.zeros((num_nodes, 2), dtype=dtype, device=device)
     for component, local_pos, offset in zip(components, component_positions, offsets):
         offset_tensor = torch.tensor(offset, dtype=dtype, device=local_pos.device)
         packed[component] = (local_pos + offset_tensor).to(device=device, dtype=dtype)
-    translated = _translate_packed_components_to_origin(packed, node_sizes).to(dtype=torch.float32)
+    translated = _translate_packed_components_to_origin(packed, packing_sizes).to(
+        dtype=torch.float32
+    )
     translated[:, 1] *= -1.0
     return _graphviz_quantize_output_points(translated)
 
