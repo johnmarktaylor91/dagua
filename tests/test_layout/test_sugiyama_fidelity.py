@@ -18,6 +18,7 @@ from dagua.layout.ops.sugiyama import (
     _edge_processing_order,
     _expand_long_edges_with_dummy_nodes,
     _graphviz_cluster_rank_assignments,
+    _graphviz_contain_cluster_ordering,
     _graphviz_layer_assignments,
     _graphviz_skeleton_cluster_ordering,
     _graphviz_x_coordinate_assignment,
@@ -630,6 +631,61 @@ def test_sugiyama_graphviz_recursive_cluster_rank_uses_class1_slack() -> None:
         "cluster_3": (33, 52),
         "cluster_4": (42, 61),
     }
+
+
+def test_sugiyama_graphviz_nested_top_clusters_keep_root_skeleton_order() -> None:
+    """Order nested top-level blocks by dot's root rank-leader span rules."""
+    ordered = _graphviz_contain_cluster_ordering(
+        ranks=[[12, 16], [13, 17], [0, 14], [7, 10], [8, 11], [9]],
+        graphviz_cluster_members={
+            "online": (0, 7, 8, 9),
+            "services": (0,),
+            "observability": (10, 11),
+            "offline": (12, 13, 14),
+            "audit": (16, 17),
+        },
+        graphviz_cluster_parents={"services": "online"},
+    )
+
+    assert ordered[0] == [16, 12]
+    assert ordered[1] == [17, 13]
+    assert ordered[3] == [7, 10]
+    assert ordered[4] == [8, 11]
+
+
+def test_sugiyama_graphviz_self_loop_reserves_right_cluster_space() -> None:
+    """Carry dot's self-loop ``nodesep`` into typed right half-widths."""
+    expanded, _ = _expand_long_edges_with_dummy_nodes(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        layer_assignments=torch.tensor([0, 1], dtype=torch.long),
+        node_sizes=torch.full((2, 2), 54.0, dtype=torch.float32),
+        num_original_nodes=2,
+        use_graphviz_edge_order=True,
+        graphviz_virtual_node_sep=18.0,
+        clusters={"group": (0, 1)},
+        graphviz_self_loop_nodes={0},
+    )
+
+    assert expanded.graphviz_left_widths == [27.0, 27.0]
+    assert expanded.graphviz_right_widths == [45.0, 27.0]
+
+
+def test_sugiyama_graphviz_isolated_cluster_chain_keeps_base_weight() -> None:
+    """Do not reapply class-2 omega after isolated-cluster expansion."""
+    aux_edges, _ = _build_graphviz_x_aux_edges(
+        layers=[[0], [1]],
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        edge_weights=torch.ones(1, dtype=torch.float32),
+        node_sizes=torch.full((2, 2), 54.0, dtype=torch.float32),
+        num_nodes=2,
+        num_original_nodes=2,
+        node_sep=18.0,
+        graphviz_cluster_members={"group": (0, 1)},
+        graphviz_cluster_parents={"group": None},
+        graphviz_weight_classes=(1, 1),
+    )
+
+    assert aux_edges[:2] == [(2, 0, 1, 1), (2, 1, 1, 1)]
 
 
 def test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths() -> None:
