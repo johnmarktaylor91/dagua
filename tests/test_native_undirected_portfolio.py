@@ -363,6 +363,7 @@ def test_candidate_refinement_schedule_preserves_high_quality() -> None:
 
     assert _candidate_refinement_steps(balanced, 150) == FULL_REFINEMENT_STEPS
     assert _candidate_refinement_steps(balanced, 500) == BALANCED_LARGE_REFINEMENT_STEPS
+    assert BALANCED_LARGE_REFINEMENT_STEPS == 30
     assert _candidate_refinement_steps(high, 500) == FULL_REFINEMENT_STEPS
 
 
