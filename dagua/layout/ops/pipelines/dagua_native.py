@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -4389,6 +4390,139 @@ def _multi_component_row_major_repack(
     return out
 
 
+def _collinear_dodge(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    delta: float = 0.10,
+) -> Optional[torch.Tensor]:
+    """Shift nodes that block non-incident straight edge segments.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    delta : float, default=0.10
+        Perpendicular displacement as a fraction of median edge length.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Dodged positions, or ``None`` when no blocked edge is detected.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import MAX_COLLINEAR_WORK
+
+    if (
+        edge_index.numel() == 0
+        or pos.shape[0] < 3
+        or int(pos.shape[0]) * int(edge_index.shape[1]) > MAX_COLLINEAR_WORK
+    ):
+        return None
+    vectors = pos[edge_index[1]] - pos[edge_index[0]]
+    lengths = torch.linalg.vector_norm(vectors, dim=1)
+    median_length = float(lengths.median().item())
+    if median_length < 1e-9:
+        return None
+
+    tolerance = 0.05 * median_length
+    source = edge_index[0]
+    target = edge_index[1]
+    candidate = pos.detach().clone()
+    moved: set[int] = set()
+    for edge_id in range(int(edge_index.shape[1])):
+        u = int(source[edge_id].item())
+        w = int(target[edge_id].item())
+        segment = pos[w] - pos[u]
+        squared_length = float(torch.dot(segment, segment).item())
+        if squared_length < 1e-12:
+            continue
+        projection = ((pos - pos[u]) @ segment) / squared_length
+        closest = pos[u] + projection.unsqueeze(1) * segment
+        distances = torch.linalg.vector_norm(pos - closest, dim=1)
+        blockers = (projection > 1e-6) & (projection < 1.0 - 1e-6) & (distances < tolerance)
+        blockers[u] = False
+        blockers[w] = False
+        if not bool(blockers.any().item()):
+            continue
+        perpendicular = torch.stack((-segment[1], segment[0])) / torch.sqrt(
+            torch.dot(segment, segment)
+        )
+        shift = perpendicular * (delta * median_length)
+        for blocker in torch.nonzero(blockers, as_tuple=False).flatten().tolist():
+            if blocker not in moved:
+                candidate[blocker] = candidate[blocker] + shift
+                moved.add(blocker)
+    return candidate if moved else None
+
+
+def _unshear_bimodal_edges(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    """Orthogonalize two edge-direction families in a sheared grid layout.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Orthogonalized positions, or ``None`` without two usable families.
+    """
+    if edge_index.shape[1] < 4:
+        return None
+    vectors = pos[edge_index[1]] - pos[edge_index[0]]
+    nonzero = torch.linalg.vector_norm(vectors, dim=1) > 1e-9
+    vectors = vectors[nonzero]
+    if vectors.shape[0] < 4:
+        return None
+    angles = torch.remainder(torch.atan2(vectors[:, 1], vectors[:, 0]), torch.pi)
+    median_angle = torch.quantile(angles, 0.5)
+    first_mask = angles < median_angle
+    if int(first_mask.sum().item()) < 2 or int((~first_mask).sum().item()) < 2:
+        return None
+    family_angles = (angles[first_mask], angles[~first_mask])
+    family_means: list[torch.Tensor] = []
+    for members in family_angles:
+        mean_angle = (
+            torch.atan2(
+                torch.sin(2.0 * members).mean(),
+                torch.cos(2.0 * members).mean(),
+            )
+            / 2.0
+        )
+        mean_angle = torch.remainder(mean_angle, torch.pi)
+        deviations = torch.abs(
+            torch.remainder(members - mean_angle + torch.pi / 2.0, torch.pi) - torch.pi / 2.0
+        )
+        # A grid family is a narrow directional mode; broad force-layout
+        # histograms are not evidence of shear even if a median splits them.
+        if float(deviations.mean().item()) > float(torch.deg2rad(torch.tensor(10.0)).item()):
+            return None
+        family_means.append(mean_angle)
+    separation = torch.abs(family_means[0] - family_means[1])
+    separation = torch.minimum(separation, torch.pi - separation)
+    separation_degrees = float(torch.rad2deg(separation).item())
+    if separation_degrees < 20.0 or separation_degrees > 75.0:
+        return None
+    first = vectors[first_mask].mean(dim=0)
+    second = vectors[~first_mask].mean(dim=0)
+    basis = torch.stack((first, second), dim=1)
+    determinant = torch.linalg.det(basis)
+    if float(torch.abs(determinant).item()) < 1e-9:
+        return None
+    target = torch.diag(
+        torch.stack((torch.linalg.vector_norm(first), torch.linalg.vector_norm(second)))
+    )
+    transform = target @ torch.linalg.inv(basis)
+    return pos @ transform.T
+
+
 def _best_of_polish(
     base_pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -4404,8 +4538,8 @@ def _best_of_polish(
     layered_dag and tree pipelines, so a direct constraint projection
     can escape the local minimum. Edge-equalize variants are tried first;
     projection primitives are then scored as named candidates.
-    The un-polished baseline is preserved unless a candidate beats it by at
-    least ``margin`` composite points.
+    The un-polished baseline is preserved unless a finite, non-degenerate,
+    overlap-monotone candidate beats it by at least ``margin`` composite points.
 
     Margin lowered from 0.5 to 0.1. made
     composite() deterministic for fixed positions, so the larger gate
@@ -4467,6 +4601,11 @@ def _best_of_polish(
         except Exception:
             return None
 
+    from dagua.layout.ops.pipelines.native_undirected import (
+        DEFAULT_CANDIDATE_BUDGET_S,
+        _candidate_is_eligible,
+    )
+
     best_pos = base_pos
     best_score = score(base_pos)
 
@@ -4489,7 +4628,10 @@ def _best_of_polish(
     best_edge_score = best_score
     edge_seed_positions: list[tuple[str, torch.Tensor]] = []
     for edge_name, make_candidate in edge_equalize_candidates:
+        started = time.monotonic()
         cand = make_candidate(base_pos, edge_index, node_sizes)
+        if time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+            continue
         cand_score = safe_score(cand)
         if cand_score is None:
             continue
@@ -4502,8 +4644,22 @@ def _best_of_polish(
             best_pos = cand
 
     polish_candidates: list[
-        tuple[str, Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]]
+        tuple[
+            str,
+            Callable[
+                [torch.Tensor, torch.Tensor, torch.Tensor],
+                Optional[torch.Tensor],
+            ],
+        ]
     ] = [
+        (
+            "collinear_dodge_0.10",
+            lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.10),
+        ),
+        (
+            "collinear_dodge_0.15",
+            lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.15),
+        ),
         (
             "y_layer_snap",
             lambda pos, edges, sizes: _y_layer_snap(best_edge_pos, edges, sizes),
@@ -4653,8 +4809,19 @@ def _best_of_polish(
                 ),
             ]
         )
-    for _, make_candidate in polish_candidates:
-        cand = make_candidate(best_pos, edge_index, node_sizes)
+    for candidate_name, make_polish_candidate in polish_candidates:
+        started = time.monotonic()
+        cand = make_polish_candidate(best_pos, edge_index, node_sizes)
+        if cand is None or time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+            continue
+        candidate_input = (
+            base_pos
+            if candidate_name.startswith("collinear_dodge") or candidate_name == "unshear"
+            else best_pos
+        )
+        eligible, _reason = _candidate_is_eligible(cand, candidate_input, node_sizes, edge_index)
+        if not eligible:
+            continue
         cand_score = safe_score(cand)
         if cand_score is None:
             continue
@@ -4814,6 +4981,11 @@ def layout_dagua_native_pipeline(
     # closing the -8.51 gap to igraph_sugiyama).
     if (
         _selected_force_pipeline(effective_config) is None
+        and not (
+            graph_structure is not None
+            and getattr(graph_structure, "is_semantically_directed", True) is False
+            and bool(getattr(graph_structure, "direction_is_declared", False))
+        )
         and not _is_graphviz_dot_flat_fidelity_mode(
             getattr(effective_config, "fidelity_mode", None)
         )
