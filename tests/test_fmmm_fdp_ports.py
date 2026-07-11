@@ -15,10 +15,17 @@ from dagua.layout.ops.pipelines.fmmm import (
     _fdp_node_boxes,
     _fdp_obstacle_vertices,
     _FdpCompoundEdgeAttachmentOp,
+    _graphviz_fdp_component_layout,
+    _graphviz_fdp_edge_lists,
+    _graphviz_fdp_explicit_size_points,
+    _graphviz_fdp_prism_average_edge_length,
     _graphviz_fdp_prism_delaunay_edges,
+    _graphviz_fdp_prism_half_size_lists_in_inches,
     _graphviz_fdp_prism_overlap,
     _graphviz_fdp_prism_overlap_edges,
+    _graphviz_fdp_xlayout_edges,
     build_fmmm_pipeline,
+    layout_fmmm_pipeline,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
@@ -288,3 +295,165 @@ def test_fdp_prism_overlap_stage_reduces_compact_component_overlaps() -> None:
 
     assert before == 6
     assert after < before
+
+
+def test_fdp_prism_preserves_graphviz_705_scaling_arithmetic() -> None:
+    """Pin PRISM padding and Graphviz 7.0.5's edge-length indexing bug.
+
+    Returns
+    -------
+    None
+        Half-sizes and the symmetric sparse-edge average match Graphviz.
+    """
+    half_widths, half_heights = _graphviz_fdp_prism_half_size_lists_in_inches(
+        torch.tensor([[44.0, 34.0], [44.0, 34.0]], dtype=torch.float64),
+        2,
+    )
+    average = _graphviz_fdp_prism_average_edge_length(
+        [0.0, 3.0],
+        [10.0, 4.0],
+        torch.tensor([[0], [1]], dtype=torch.long),
+    )
+
+    assert half_widths == [44.0 / 72.0 / 2.0 + 4.0 / 72.0] * 2
+    assert half_heights == [34.0 / 72.0 / 2.0 + 4.0 / 72.0] * 2
+    assert average == pytest.approx((58.0**0.5 + 5.0) / 2.0)
+
+
+def test_fdp_component_skips_prism_after_xlayout_resolves_overlaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Match Graphviz's early return after successful native x-layout.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Fixture used to reject an unexpected PRISM fallback call.
+
+    Returns
+    -------
+    None
+        The five-cycle fixture reaches zero overlaps in native x-layout.
+    """
+
+    def reject_prism(**_kwargs: object) -> torch.Tensor:
+        """Fail if the PRISM fallback runs.
+
+        Parameters
+        ----------
+        **_kwargs : object
+            Ignored PRISM call arguments.
+
+        Returns
+        -------
+        torch.Tensor
+            This function never returns.
+
+        Raises
+        ------
+        AssertionError
+            Always, because Graphviz skips PRISM for this fixture.
+        """
+        raise AssertionError("PRISM must not run after x-layout reaches zero overlaps.")
+
+    monkeypatch.setitem(
+        _graphviz_fdp_component_layout.__globals__,
+        "_graphviz_fdp_prism_overlap",
+        reject_prism,
+    )
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 4], [1, 2, 3, 4, 0]],
+        dtype=torch.long,
+    )
+    node_sizes = torch.tensor([[79.5363, 34.0]] * 5, dtype=torch.float64)
+
+    positions = _graphviz_fdp_component_layout(
+        edge_index=edge_index,
+        num_nodes=5,
+        node_sizes=node_sizes,
+        seed=42,
+        flip_y=False,
+    )
+
+    assert positions.shape == (5, 2)
+
+
+def test_fdp_explicit_sizes_preserve_subdefault_fixed_height() -> None:
+    """Match Graphviz's fixed-size point quantization without default floors.
+
+    Returns
+    -------
+    None
+        The measured cycle label box becomes Graphviz's emitted 80x34 points.
+    """
+    assert _graphviz_fdp_explicit_size_points(79.5363) == 80.0
+    assert _graphviz_fdp_explicit_size_points(34.0) == 34.0
+    assert _graphviz_fdp_explicit_size_points(78.2906) == 78.0
+
+
+def test_fdp_xlayout_orients_derived_edges_by_node_sequence() -> None:
+    """Match Graphviz's canonical orientation without reordering edges.
+
+    Returns
+    -------
+    None
+        Reversed input edges point from lower to higher local node indices.
+    """
+    edges = torch.tensor([[3, 0, 4], [1, 2, 2]], dtype=torch.long)
+
+    oriented = _graphviz_fdp_xlayout_edges(edges)
+
+    assert torch.equal(oriented, torch.tensor([[1, 0, 2], [3, 2, 4]], dtype=torch.long))
+
+
+def test_fdp_outgoing_edges_follow_graphviz_target_order() -> None:
+    """Match cgraph's target-node ordering within each outgoing edge list.
+
+    Returns
+    -------
+    None
+        Input insertion order does not override Graphviz's node sequence.
+    """
+    edges = torch.tensor([[0, 0, 0], [4, 1, 3]], dtype=torch.long)
+
+    outgoing, records = _graphviz_fdp_edge_lists(edges, 5, None)
+
+    assert [records[edge_id][1] for edge_id in outgoing[0]] == [1, 3, 4]
+
+
+def test_fdp_disconnected_cycles_use_node_polyomino_pack_offsets() -> None:
+    """Pin Graphviz's flat FDP node-polyomino component translations.
+
+    Returns
+    -------
+    None
+        Four identical cycles retain the captured relative pack offsets.
+    """
+    sources: list[int] = []
+    targets: list[int] = []
+    for component_start in range(0, 20, 5):
+        for offset in range(5):
+            sources.append(component_start + offset)
+            targets.append(component_start + ((offset + 1) % 5))
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    node_sizes = torch.tensor([[79.5363, 34.0]] * 20, dtype=torch.float64)
+
+    positions = layout_fmmm_pipeline(
+        edge_index=edge_index,
+        num_nodes=20,
+        node_sizes=node_sizes,
+        steps=200,
+        seed=42,
+        fidelity_mode="graphviz_fdp",
+    ).to(dtype=torch.float64)
+    relative_offsets = positions[[5, 10, 15]] - positions[0]
+
+    assert torch.allclose(
+        relative_offsets,
+        torch.tensor(
+            [[190.0, -95.0], [228.0, 76.0], [76.0, -228.0]],
+            dtype=torch.float64,
+        ),
+        atol=0.01,
+        rtol=0.0,
+    )
