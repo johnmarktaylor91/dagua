@@ -14,6 +14,8 @@ from dagua.eval.competitors.classic_competitor import ClassicSpectral
 from dagua.eval.competitors.networkx_competitor import (
     NetworkXSpectral,
     _graph_to_nx,
+    _networkx_laplacian_spectral_array,
+    _networkx_random_walk_arpack_start,
     _nx_pos_to_tensor,
 )
 from dagua.eval.variants import get_variant
@@ -364,6 +366,74 @@ def test_networkx_reference_has_no_dagua_layout_runtime_import() -> None:
     assert "import dagua.layout" not in source
 
 
+def test_random_walk_arpack_start_matches_independent_reference() -> None:
+    """Dagua and the independent oracle should stabilize repeated eigenspaces equally."""
+    np.testing.assert_array_equal(
+        embed_ops._deterministic_arpack_start(500),
+        _networkx_random_walk_arpack_start(500),
+    )
+
+
+def test_random_walk_reference_passes_stable_arpack_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The independent sparse reference should explicitly stabilize ARPACK's basis."""
+    captured: dict[str, object] = {}
+
+    def _eigs(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+        v0: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Capture the reference adapter's sparse eigensolver call.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.csr_matrix
+            Random-walk Laplacian with shape ``[N, N]``.
+        k : int
+            Requested eigenpair count.
+        which : str
+            ARPACK eigenvalue selector.
+        ncv : int
+            Requested Arnoldi vector count.
+        v0 : numpy.ndarray
+            Explicit process-stable start vector with shape ``[N]``.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            Synthetic eigenpairs for the adapter selection step.
+        """
+        captured.update(
+            {
+                "shape": matrix.shape,
+                "k": k,
+                "which": which,
+                "ncv": ncv,
+                "v0": v0,
+            }
+        )
+        return np.arange(k, dtype=np.float64), np.eye(matrix.shape[0], k, dtype=np.float64)
+
+    monkeypatch.setattr(sparse.linalg, "eigs", _eigs)
+
+    coordinates = _networkx_laplacian_spectral_array(
+        sparse.identity(500, format="csr", dtype=np.float64),
+        dim=2,
+        normalization="random_walk",
+    )
+
+    assert captured["shape"] == (500, 500)
+    assert captured["k"] == 3
+    assert captured["which"] == "SR"
+    assert captured["ncv"] == 22
+    np.testing.assert_array_equal(captured["v0"], _networkx_random_walk_arpack_start(500))
+    np.testing.assert_array_equal(coordinates, np.eye(500, 3)[:, 1:3])
+
+
 def test_networkx_fidelity_dense_branch_uses_generic_eig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -506,43 +576,12 @@ def test_networkx_fidelity_disconnected_sparse_uses_reference_arpack_call(
     np.testing.assert_array_equal(coordinates, np.eye(500, 3)[:, 1:3])
 
 
-def test_networkx_fidelity_random_walk_sparse_uses_symmetric_path(
+def test_networkx_fidelity_random_walk_sparse_matches_reference_eigs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sparse random-walk fidelity should avoid nondeterministic nonsymmetric ARPACK."""
+    """Sparse random-walk fidelity should match the reference's right eigenvectors."""
     laplacian = sparse.identity(500, format="csr", dtype=np.float64)
-    called: dict[str, bool] = {"eigsh": False}
-
-    def _eigsh(
-        matrix: sparse.csr_matrix,
-        k: int,
-        which: str,
-        ncv: int,
-        v0: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return deterministic eigenpairs from the symmetric substitute.
-
-        Parameters
-        ----------
-        matrix : scipy.sparse.csr_matrix
-            Symmetric sparse matrix with shape ``[N, N]``.
-        k : int
-            Requested eigenpair count.
-        which : str
-            ARPACK eigenvalue selector.
-        ncv : int
-            Requested Lanczos vector count.
-        v0 : numpy.ndarray
-            Deterministic ARPACK start vector with shape ``[N]``.
-
-        Returns
-        -------
-        tuple[numpy.ndarray, numpy.ndarray]
-            Eigenvalues and eigenvectors.
-        """
-        _ = matrix, which, ncv, v0
-        called["eigsh"] = True
-        return np.arange(k, dtype=np.float64), np.eye(500, k, dtype=np.float64)
+    captured: dict[str, object] = {}
 
     def _eigs(
         matrix: sparse.csr_matrix,
@@ -551,7 +590,7 @@ def test_networkx_fidelity_random_walk_sparse_uses_symmetric_path(
         ncv: int,
         v0: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Fail if the nonsymmetric eigensolver path is used.
+        """Capture the nonsymmetric reference eigensolver call.
 
         Parameters
         ----------
@@ -569,12 +608,19 @@ def test_networkx_fidelity_random_walk_sparse_uses_symmetric_path(
         Returns
         -------
         tuple[numpy.ndarray, numpy.ndarray]
-            This fake never returns because the test expects it not to run.
+            Synthetic right eigenvectors.
         """
-        _ = matrix, k, which, ncv, v0
-        raise AssertionError("random-walk spectral fidelity should not call eigs")
+        captured.update(
+            {
+                "shape": matrix.shape,
+                "k": k,
+                "which": which,
+                "ncv": ncv,
+                "v0": v0,
+            }
+        )
+        return np.arange(k, dtype=np.float64), np.eye(500, k, dtype=np.float64)
 
-    monkeypatch.setattr(embed_ops.sparse_linalg, "eigsh", _eigsh)
     monkeypatch.setattr(embed_ops.sparse_linalg, "eigs", _eigs)
 
     coordinates = _sparse_spectral_embedding(
@@ -584,5 +630,9 @@ def test_networkx_fidelity_random_walk_sparse_uses_symmetric_path(
         networkx_fidelity=True,
     )
 
-    assert called["eigsh"] is True
-    assert coordinates.shape == (500, 2)
+    assert captured["shape"] == (500, 500)
+    assert captured["k"] == 3
+    assert captured["which"] == "SR"
+    assert captured["ncv"] == 22
+    np.testing.assert_array_equal(captured["v0"], embed_ops._deterministic_arpack_start(500))
+    np.testing.assert_array_equal(coordinates, np.eye(500, 3)[:, 1:3])
