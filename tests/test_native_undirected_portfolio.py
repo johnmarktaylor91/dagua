@@ -772,6 +772,34 @@ def test_weighted_undirected_contest_reaches_weighted_similarity_candidate() -> 
     assert all(calls)
 
 
+def test_stress_points_candidate_uses_point_targets() -> None:
+    """The additive stress challenger should match an explicit point-unit solve."""
+    from dagua.layout.ops.pipelines.native_stress import (
+        NativeStressConfig,
+        layout_native_stress_pipeline,
+    )
+    from dagua.layout.ops.pipelines.native_undirected import _stress_points_candidate
+
+    graph = _ring_with_chords()
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+    )
+
+    candidate_pos = _stress_points_candidate(problem, seed=42)
+    direct_pos = layout_native_stress_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+        config=NativeStressConfig(target_unit="points", seed=42),
+    )
+
+    torch.testing.assert_close(candidate_pos, direct_pos, rtol=0.0, atol=0.0)
+
+
 def test_new_candidates_share_the_degeneracy_guard() -> None:
     """New candidates D and E are added via the shared ``_add_challenger`` path.
 

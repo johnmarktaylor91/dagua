@@ -273,6 +273,31 @@ class TestSFDPPipelineFidelity:
 
         assert groups == [[0, 1], [2, 3], [4, 5], [6, 7]]
 
+    def test_graphviz_supervariable_workspace_grows_for_sbm_trigger(self) -> None:
+        """Supervariable refinement should survive creation IDs above node count."""
+        from dagua.eval.graphs import _make_r79_undirected_sbm
+
+        test_graph = _make_r79_undirected_sbm(
+            "r79_undirected_sbm_high_mix_3x30",
+            [30, 30, 30],
+            0.18,
+            0.08,
+            81,
+        )
+        graph = test_graph.graph
+        edge_index = torch.tensor(
+            [
+                [edge.source.index for edge in graph.edges],
+                [edge.target.index for edge in graph.edges],
+            ],
+            dtype=torch.long,
+        )
+        sfdp_graph = _build_graph(edge_index, 90)
+
+        groups = _decompose_graphviz_supervariables(sfdp_graph)
+
+        assert sorted(node for group in groups for node in group) == list(range(90))
+
     def test_graphviz_matrix_coarsening_matches_reference_complete_multipartite(
         self,
     ) -> None:
