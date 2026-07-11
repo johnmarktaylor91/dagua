@@ -386,7 +386,7 @@ def _ogdf_nmm_form_multipoles(
     random_y = float(rng.randint(1, _OGDF_FMMM_BILLION) + 1) / float(_OGDF_FMMM_BILLION + 2)
     cell.center = complex(
         cell.down_left[0] + cell.boxlength * 0.5,
-        cell.down_left[1] + cell.boxlength * (0.5 + 0.001 * random_y),
+        cell.down_left[1] + cell.boxlength * 0.5 + 0.001 * cell.boxlength * random_y,
     )
     if cell.is_leaf():
         leaves.append(cell)
@@ -534,7 +534,7 @@ def _ogdf_nmm_bordering(first: _OgdfNmmCell, second: _OgdfNmmCell) -> bool:
     elif moving[3] > fixed[3]:
         moving[2] -= length
         moving[3] -= length
-    return contained(first_box, second_box)
+    return contained(moving, fixed)
 
 
 def _ogdf_nmm_complex_log(value: complex) -> complex:
@@ -732,6 +732,7 @@ def _ogdf_nmm_pair_force(
     positions: Sequence[Sequence[float]],
     source: int,
     target: int,
+    rng: _OgdfMt19937,
 ) -> Tuple[float, float]:
     """Return the exact repulsive force of ``source`` on ``target``.
 
@@ -743,18 +744,36 @@ def _ogdf_nmm_pair_force(
         Source particle index.
     target : int
         Target particle index.
+    rng : _OgdfMt19937
+        Shared OGDF random stream used to separate coincident particles.
 
     Returns
     -------
     tuple[float, float]
         Repulsive force vector.
     """
-    dx = positions[target][0] - positions[source][0]
-    dy = positions[target][1] - positions[source][1]
+    source_x = positions[source][0]
+    source_y = positions[source][1]
+    target_x = positions[target][0]
+    target_y = positions[target][1]
+    if abs(source_x - target_x) <= 1.0e-8 and abs(source_y - target_y) <= 1.0e-8:
+        # numexcept::choose_distinct_random_point_in_radius_epsilon samples a
+        # square and rejects points outside the radius-0.01 disc.
+        while True:
+            offset_x = (0.1 * (2.0 * (rng.random() - 0.5))) * 0.1
+            offset_y = (0.1 * (2.0 * (rng.random() - 0.5))) * 0.1
+            if (abs(offset_x) > 1.0e-8 or abs(offset_y) > 1.0e-8) and math.hypot(
+                offset_x, offset_y
+            ) < 0.01:
+                source_x += offset_x
+                source_y += offset_y
+                break
+    dx = target_x - source_x
+    dy = target_y - source_y
     distance = math.sqrt(dx * dx + dy * dy)
     if distance == 0.0:
         return 0.0, 0.0
-    scalar = 1.0 / (distance * distance)
+    scalar = (1.0 / distance) / distance
     return scalar * dx, scalar * dy
 
 
@@ -811,7 +830,7 @@ def _ogdf_fmmm_nmm_repulsive_forces(
                 multipole_force[node][1] -= value.imag
         for source_pos, source in enumerate(leaf.nodes[:-1]):
             for target in leaf.nodes[source_pos + 1 :]:
-                fx, fy = _ogdf_nmm_pair_force(positions, source, target)
+                fx, fy = _ogdf_nmm_pair_force(positions, source, target, rng)
                 direct[target][0] += fx
                 direct[target][1] += fy
                 direct[source][0] -= fx
@@ -822,7 +841,7 @@ def _ogdf_fmmm_nmm_repulsive_forces(
             ):
                 for target in leaf.nodes:
                     for source in neighbor.nodes:
-                        fx, fy = _ogdf_nmm_pair_force(positions, source, target)
+                        fx, fy = _ogdf_nmm_pair_force(positions, source, target, rng)
                         direct[target][0] += fx
                         direct[target][1] += fy
                         direct[source][0] -= fx
@@ -830,7 +849,7 @@ def _ogdf_fmmm_nmm_repulsive_forces(
         for source_cell in leaf.direct_two:
             for target in leaf.nodes:
                 for source in source_cell.nodes:
-                    fx, fy = _ogdf_nmm_pair_force(positions, source, target)
+                    fx, fy = _ogdf_nmm_pair_force(positions, source, target, rng)
                     direct[target][0] += fx
                     direct[target][1] += fy
     return [
@@ -1146,6 +1165,10 @@ def _ogdf_fmmm_combined_forces(
     tuple[list[list[float]], float]
         Combined movement vectors and updated cool factor.
     """
+    # OGDF's default coolTemperature(false) resets the shared factor before
+    # every phase adjustment; the cooldown division therefore does not
+    # accumulate across its ten iterations.
+    cool_factor = 1.0
     if fine_tuning_step == 1:
         cool_factor /= 10.0
     elif fine_tuning_step == 2:
@@ -1386,6 +1409,9 @@ def _ogdf_fmmm_tensor_combined_forces(
         Combined movement vectors with shape ``[N, 2]`` and updated cool
         factor.
     """
+    # Keep the vectorized small-graph path identical to OGDF's default
+    # coolTemperature(false) state transition.
+    cool_factor = 1.0
     if fine_tuning_step == 1:
         cool_factor /= 10.0
     elif fine_tuning_step == 2:
