@@ -308,6 +308,33 @@ def compute_stale_flags(
     return out
 
 
+def compute_stale_coverage(
+    combos: list[str],
+    engines: dict,
+    stale_map: dict | None,
+    winners: dict | None,
+) -> dict:
+    """Report guard COVERAGE per stale-map substring so a scope gap cannot hide.
+
+    For each engine-family substring: how many combos matched it, how many were
+    EVALUATED (had a winners-map entry, so the guard could resolve a date), and how
+    many were SKIPPED for lacking a winners entry (`compute_stale_flags` silently
+    `continue`s past those -- the exact blind spot that hid 60 sugiyama rows).
+    """
+    cov: dict = {}
+    if not stale_map or not winners:
+        return cov
+    for sub in stale_map:
+        matched = [c for c in combos if sub in engines.get(c, "")]
+        skipped = [c for c in matched if winners.get(c) is None]
+        cov[sub] = {
+            "matched": len(matched),
+            "evaluated": len(matched) - len(skipped),
+            "skipped_no_winner": len(skipped),
+        }
+    return cov
+
+
 # ---------------------------------------------------------------------------
 # Tier assignment (the heart of the ledger)
 # ---------------------------------------------------------------------------
@@ -616,9 +643,10 @@ GLOSSARY = [
     ),
     (
         TIER_POSITIONAL_IDENTICAL,
-        "Stochastic engine, per-seed PROOF: >= 30 matched seeds, mean per-seed "
-        "matched-Procrustes distance mean_diag_B < 1e-3. Every matched seed produces "
-        "the same layout as the reference (up to similarity). Strongest stochastic claim.",
+        "Stochastic engine, per-seed PROOF: >= 30 matched seeds, MEAN per-seed "
+        "matched-Procrustes distance mean_diag_B < 1e-3 -- a mean-over-matched-seeds "
+        "gate, not a per-seed maximum. On average each matched seed reproduces the "
+        "reference layout up to similarity at sub-1e-3 distance. Strongest stochastic claim.",
     ),
     (
         TIER_DISTRIBUTIONAL_EQUIVALENT,
@@ -703,6 +731,37 @@ def render_ledger_md(ledger_rows: list[dict], summary: dict, priors: dict) -> st
     add(f"- No verdict (insufficient / stale-reference / no-canonical): {n_nonverdict}")
     add("")
 
+    # Both denominators published (round-2 cert requirement): the numerator is
+    # same-layout-or-superior and EXCLUDES quality-equivalent-only rows.
+    scoreable = total - n_nonverdict
+    equiv_or_better = (
+        h["positional_or_better"]
+        + h["distributional_equivalent"]
+        + counts.get(TIER_SUPERIOR_DISTINCT, 0)
+    )
+    pct_scoreable = (100.0 * equiv_or_better / scoreable) if scoreable else 0.0
+    pct_all = (100.0 * equiv_or_better / total) if total else 0.0
+    add("## Headline percentages (both denominators)")
+    add("")
+    add(
+        f"- Numerator = same-layout-or-superior = positional-or-better "
+        f"({h['positional_or_better']}) + distributionally-equivalent "
+        f"({h['distributional_equivalent']}) + superior-distinct "
+        f"({counts.get(TIER_SUPERIOR_DISTINCT, 0)}) = **{equiv_or_better}**. Excludes the "
+        f"{h['quality_equivalent_only']} quality-equivalent-only rows (equivalent quality, "
+        "no positional/distributional claim)."
+    )
+    add(
+        f"- Scoreable denominator = total - no-verdict = {total} - {n_nonverdict} = "
+        f"**{scoreable}** (drops NO_CANONICAL_REFERENCE + INSUFFICIENT_DATA + aggregate carries)."
+    )
+    add(
+        f"- **Of scoreable rows: {equiv_or_better}/{scoreable} = {pct_scoreable:.2f}% "
+        "same-layout-or-superior.**"
+    )
+    add(f"- **Of ALL rows: {equiv_or_better}/{total} = {pct_all:.2f}% same-layout-or-superior.**")
+    add("")
+
     add("## Tier counts (new taxonomy)")
     add("")
     add("| Tier | Rows |")
@@ -778,6 +837,23 @@ def render_ledger_md(ledger_rows: list[dict], summary: dict, priors: dict) -> st
     stale_rows = [r for r in ledger_rows if r["stale_code"]]
     add("## Stale-code provenance guard")
     add("")
+    coverage = summary.get("stale_guard_coverage") or {}
+    if coverage:
+        total_matched = sum(c["matched"] for c in coverage.values())
+        total_eval = sum(c["evaluated"] for c in coverage.values())
+        total_skipped = sum(c["skipped_no_winner"] for c in coverage.values())
+        add(
+            f"Guard coverage: **{total_eval}/{total_matched}** rows matching a stale-map "
+            f"engine family were EVALUATED against their winning-dir date; "
+            f"**{total_skipped}** matched but had no winners-map entry (NOT evaluated)."
+        )
+        add("")
+        add("| Engine family (stale-map) | Matched | Evaluated | Skipped (no winner) |")
+        add("| --- | ---: | ---: | ---: |")
+        for sub in sorted(coverage):
+            c = coverage[sub]
+            add(f"| `{sub}` | {c['matched']} | {c['evaluated']} | {c['skipped_no_winner']} |")
+        add("")
     if stale_rows:
         n_benign = summary["stale_code_benign_rows"]
         add(f"{len(stale_rows)} rows won from result dirs that predate the engine's most")
@@ -788,8 +864,14 @@ def render_ledger_md(ledger_rows: list[dict], summary: dict, priors: dict) -> st
         add("| --- | --- | --- |")
         for r in stale_rows:
             add(f"| `{r['combo_id']}` | `{r['tier']}` | {r['stale_reason']} |")
+    elif coverage:
+        add(
+            "0 stale-code rows: every EVALUATED row's winning dir is at or after its "
+            "engine's most-recent fix date. Any 'skipped (no winner)' rows above were "
+            "NOT checked -- widen the winners map to close that gap."
+        )
     else:
-        add("No stale-code rows flagged (no --stale-map/--winners provided, or none matched).")
+        add("Stale-code guard not run (no --stale-map/--winners provided).")
     add("")
 
     unexpl = [r for r in ledger_rows if r["tier"] == TIER_DIVERGENT_UNEXPLAINED]
@@ -887,6 +969,7 @@ def run(argv=None) -> int:
     combos = [combo_id(r) for r in rows]
     engines = {combo_id(r): (r.get("engine") or "") for r in rows}
     stale_flags = compute_stale_flags(combos, engines, stale_map, winners, args.eval_root)
+    stale_coverage = compute_stale_coverage(combos, engines, stale_map, winners)
 
     ledger_rows = build_ledger_rows(rows, priors, causes, stale_flags)
 
@@ -910,6 +993,7 @@ def run(argv=None) -> int:
         "allow_unexplained": args.allow_unexplained,
     }
     summary = build_summary(ledger_rows, input_hashes, args_echo)
+    summary["stale_guard_coverage"] = stale_coverage
 
     os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "ledger.jsonl"), "w", encoding="utf-8") as f:
