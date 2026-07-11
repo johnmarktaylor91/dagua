@@ -65,6 +65,7 @@ _SUGIYAMA_GRAPHVIZ_CLUSTER_RANKS_KEY = "sugiyama_graphviz_cluster_ranks"
 _SUGIYAMA_GRAPHVIZ_CLUSTER_LABEL_WIDTHS_KEY = "sugiyama_graphviz_cluster_label_widths"
 _GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS = 18.0
+_GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES = 50
 _GRAPHVIZ_VIRTUAL_NODE_CLASS = 2
 _GRAPHVIZ_SINGLETON_NODE_CLASS = 1
 _GRAPHVIZ_ORDINARY_NODE_CLASS = 0
@@ -4043,32 +4044,51 @@ def _graphviz_x_coordinate_assignment(
 
     graphviz_node_sep = (
         float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
-        if graphviz_left_widths is not None and graphviz_cluster_members is None
+        if graphviz_left_widths is not None
+        or num_original_nodes > _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
         else _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS
     )
-    inventory = _build_graphviz_x_inventory(
-        layers=layers,
-        edge_index=edge_index,
-        edge_weights=edge_weights,
-        node_sizes=node_sizes,
-        num_nodes=num_nodes,
-        num_original_nodes=num_original_nodes,
-        node_sep=graphviz_node_sep,
-        graphviz_left_widths=graphviz_left_widths,
-        graphviz_right_widths=graphviz_right_widths,
-        graphviz_cluster_members=graphviz_cluster_members,
-        graphviz_cluster_parents=graphviz_cluster_parents,
-        graphviz_cluster_label_widths=graphviz_cluster_label_widths,
-        graphviz_node_order=graphviz_node_order,
-        expanded_edge_origins=expanded_edge_origins,
+    use_typed_inventory = (
+        num_original_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+        or graphviz_cluster_members is not None
     )
-    aux_edges = [(edge.tail, edge.head, edge.minlen, edge.weight) for edge in inventory.edges]
-    initial_ranks = inventory.initial_ranks
-    aux_node_count = max(
-        num_nodes + int(edge_index.shape[1]),
-        max(initial_ranks, default=-1) + 1,
-        max((max(edge[0], edge[1]) for edge in aux_edges), default=-1) + 1,
-    )
+    if use_typed_inventory:
+        inventory = _build_graphviz_x_inventory(
+            layers=layers,
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            node_sizes=node_sizes,
+            num_nodes=num_nodes,
+            num_original_nodes=num_original_nodes,
+            node_sep=graphviz_node_sep,
+            expanded_edge_origins=expanded_edge_origins,
+            graphviz_left_widths=graphviz_left_widths,
+            graphviz_right_widths=graphviz_right_widths,
+            graphviz_cluster_members=graphviz_cluster_members,
+            graphviz_cluster_parents=graphviz_cluster_parents,
+            graphviz_cluster_label_widths=graphviz_cluster_label_widths,
+            graphviz_node_order=graphviz_node_order,
+        )
+        aux_edges = [(edge.tail, edge.head, edge.minlen, edge.weight) for edge in inventory.edges]
+        initial_ranks = inventory.initial_ranks
+        aux_node_count = max(
+            num_nodes + int(edge_index.shape[1]),
+            max(initial_ranks, default=-1) + 1,
+            max((max(edge[0], edge[1]) for edge in aux_edges), default=-1) + 1,
+        )
+    else:
+        aux_edges, initial_ranks = _build_graphviz_x_aux_edges(
+            layers=layers,
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            node_sizes=node_sizes,
+            num_nodes=num_nodes,
+            num_original_nodes=num_original_nodes,
+            node_sep=graphviz_node_sep,
+            graphviz_left_widths=graphviz_left_widths,
+            graphviz_right_widths=graphviz_right_widths,
+        )
+        aux_node_count = num_nodes + int(edge_index.shape[1])
     x_ranks = graphviz_network_simplex_assignment(
         edges=aux_edges,
         num_nodes=aux_node_count,
@@ -4192,12 +4212,11 @@ def _build_graphviz_x_aux_edges(
         outgoing_edge_ids: List[List[int]] = [[] for _ in range(num_nodes)]
         for edge_id, tail in enumerate(tails):
             outgoing_edge_ids[tail].append(edge_id)
-        node_scan = (
-            list(range(num_nodes))
-            if graphviz_node_order is None
-            else [int(node) for node in graphviz_node_order]
-        )
-        edge_scan = [edge_id for node in node_scan for edge_id in outgoing_edge_ids[node]]
+        if graphviz_node_order is None:
+            edge_scan = list(range(int(edge_index.shape[1])))
+        else:
+            node_scan = [int(node) for node in graphviz_node_order]
+            edge_scan = [edge_id for node in node_scan for edge_id in outgoing_edge_ids[node]]
         for slack_offset, edge_id in enumerate(edge_scan):
             tail = tails[edge_id]
             head = heads[edge_id]
@@ -4363,12 +4382,11 @@ def _build_graphviz_x_inventory(
     outgoing_edge_ids: List[List[int]] = [[] for _ in range(num_nodes)]
     for expanded_edge_id, tail in enumerate(edge_cpu[0].tolist()):
         outgoing_edge_ids[int(tail)].append(expanded_edge_id)
-    node_scan = (
-        list(range(num_nodes))
-        if graphviz_node_order is None
-        else [int(node) for node in graphviz_node_order]
-    )
-    edge_scan = [edge_id for node in node_scan for edge_id in outgoing_edge_ids[node]]
+    if graphviz_node_order is None:
+        edge_scan = list(range(int(edge_index.shape[1])))
+    else:
+        node_scan = [int(node) for node in graphviz_node_order]
+        edge_scan = [edge_id for node in node_scan for edge_id in outgoing_edge_ids[node]]
     typed_edges: List[_GraphvizXEdge] = []
     for edge_offset, (tail, head, minlen, weight) in enumerate(edge_records):
         if edge_offset < left_right_count:
@@ -7196,18 +7214,22 @@ class _ExpandDummyNodes(Op):
         use_igraph_source_order = bool(state.extras.get(_SUGIYAMA_IGRAPH_SOURCE_ORDER_KEY, False))
         use_igraph_edge_order = self.use_igraph_edge_order and use_igraph_source_order
         node_sizes = state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY]
-        if use_graphviz_edge_order and (not problem.clusters or self.use_graphviz_cluster_skeleton):
+        if use_graphviz_edge_order:
             node_sizes = state.extras.get(_SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY, node_sizes)
         graphviz_virtual_node_sep = None
         if use_graphviz_edge_order:
             graphviz_virtual_node_sep = (
                 float(state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)) * _GRAPHVIZ_POINTS_PER_INCH
-                if problem.clusters and not self.use_graphviz_cluster_skeleton
+                if (problem.clusters and not self.use_graphviz_cluster_skeleton)
+                or problem.num_nodes > _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
                 else _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS
             )
         graphviz_edge_order_sources: Optional[torch.Tensor] = None
         graphviz_edge_order_targets: Optional[torch.Tensor] = None
-        if use_graphviz_edge_order:
+        if use_graphviz_edge_order and (
+            (not problem.clusters and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES)
+            or self.use_graphviz_cluster_skeleton
+        ):
             oriented_edges = state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY]
             reversed_mask = state.extras[_SUGIYAMA_REVERSED_MASK_KEY].to(
                 device="cpu",
@@ -7596,7 +7618,11 @@ class _CoordinateAssignment(Op):
                     if self.use_graphviz_cluster_skeleton
                     else None
                 ),
-                graphviz_node_order=expanded_graph.graphviz_node_order,
+                graphviz_node_order=(
+                    expanded_graph.graphviz_node_order
+                    if problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+                    else None
+                ),
                 expanded_edge_origins=expanded_graph.expanded_edge_origins,
             )
         else:

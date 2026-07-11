@@ -32,6 +32,7 @@ _GRAPHVIZ_HELVETICA_UNITS_PER_EM = 2048.0
 _GRAPHVIZ_TEXT_HEIGHT_FACTOR = 1.128
 _SFDP_LABEL_BOX_MIN_NODE_COUNT = 10
 _SFDP_LABEL_BOX_WIDE_LABEL_POINTS = 100.0
+_SUGIYAMA_TYPED_X_MAX_NODES = 50
 _SUGIYAMA_DETERMINISTIC_CACHE: dict[Tuple[Any, ...], Tuple[torch.Tensor, float]] = {}
 _GRAPHVIZ_HELVETICA_REGULAR_WIDTHS = (
     -1,
@@ -557,7 +558,12 @@ def _apply_sugiyama_graphviz_metadata(
         ``extra_kwargs`` is updated in place.
     """
     graphviz_node_sizes = _graphviz_dot_node_sizes(graph=graph)
-    if graph.node_sizes is not None and size_aware_externals() and not graph.clusters:
+    if (
+        graph.node_sizes is not None
+        and size_aware_externals()
+        and not graph.clusters
+        and graph.num_nodes <= _SUGIYAMA_TYPED_X_MAX_NODES
+    ):
         # The reference adapter emits the measured boxes as fixed DOT
         # width/height attributes for size-aware benchmark runs.
         graphviz_node_sizes = (
