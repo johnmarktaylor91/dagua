@@ -502,6 +502,49 @@ def test_classic_sugiyama_graphviz_fidelity_forwards_cluster_only_metadata(
     assert "graphviz_edge_label_sizes" not in kwargs
 
 
+def test_classic_sugiyama_uses_times_metrics_for_dot_cluster_labels() -> None:
+    """Match DOT's default Times-Roman widths for cluster labels."""
+    graph = DaguaGraph.from_edge_list([("source", "target")])
+    graph.add_cluster("encoder", ["source", "target"], label="Encoder")
+    graph.add_cluster("cross", ["source"], label="Cross Attention", parent="encoder")
+
+    widths = classic_competitor._graphviz_dot_cluster_label_widths(graph)
+
+    assert widths["encoder"] == 62
+    assert round(widths["cross"]) == 104
+
+
+def test_classic_sugiyama_enables_only_certified_cluster_inventory() -> None:
+    """Enable the typed cluster path only for an instrumented exact oracle."""
+    edges = [
+        ("input", "embed"),
+        ("embed", "router"),
+        ("router", "expert_0"),
+        ("router", "expert_3"),
+        ("embed", "expert_1"),
+        ("embed", "expert_2"),
+        ("expert_0", "combine"),
+        ("expert_1", "combine"),
+        ("expert_2", "combine"),
+        ("expert_3", "combine"),
+        ("combine", "output"),
+    ]
+    graph = DaguaGraph.from_edge_list(edges)
+    node_by_label = {label: index for index, label in enumerate(graph.node_labels)}
+    graph.add_cluster(
+        "experts",
+        [node_by_label[f"expert_{index}"] for index in range(4)],
+        label="Experts",
+    )
+    kwargs: dict[str, Any] = {}
+
+    classic_competitor._apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=kwargs)
+
+    assert kwargs["graphviz_enable_cluster_skeleton"] is True
+    assert kwargs["graphviz_expected_x_inventory"][0] == 28
+    assert sum(record[2] for record in kwargs["graphviz_expected_x_inventory"][1]) == 36
+
+
 def test_classic_sugiyama_graphviz_fidelity_guards_mixed_label_cluster_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

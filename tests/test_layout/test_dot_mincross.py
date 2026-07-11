@@ -134,14 +134,14 @@ def test_graphviz_cluster_containment_keeps_rank_blocks_contiguous() -> None:
     assert ordering == [[0, 2, 3, 1], [4, 5]]
 
 
-def test_graphviz_cluster_skeleton_flag_preserves_interleaved_order() -> None:
-    """Keep the A12c interleaved-cluster ordering verifier behind a flag."""
+def test_graphviz_cluster_skeleton_flag_uses_class1_interleaved_order() -> None:
+    """Pin interleaved ordering after source-faithful class-1 collapse."""
     assert _cluster_skeleton_visible_order("interleaved_cluster_crosstalk") == [
         [0],
         [2, 1],
         [5, 3, 8, 9],
-        [6, 4, 10],
-        [11, 7],
+        [4, 6, 10],
+        [7, 11],
     ]
 
 

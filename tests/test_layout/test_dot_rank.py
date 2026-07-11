@@ -463,9 +463,10 @@ def test_graphviz_cluster_x_aux_edges_use_boundary_nodes() -> None:
         graphviz_cluster_parents={"left": None, "right": None},
     )
 
-    assert initial_ranks[4] < initial_ranks[0]
-    assert initial_ranks[5] > initial_ranks[2]
-    assert (4, 0, 35, 0) in aux_edges
-    assert (2, 5, 35, 0) in aux_edges
-    assert (5, 6, 8, 0) in aux_edges
-    assert (4, 5, 1, 128) in aux_edges
+    assert initial_ranks[6] < initial_ranks[0]
+    assert initial_ranks[7] > initial_ranks[2]
+    assert (4, 6, 8, 0) in aux_edges
+    assert (6, 0, 35, 0) in aux_edges
+    assert (2, 7, 35, 0) in aux_edges
+    assert (7, 8, 8, 0) in aux_edges
+    assert (6, 7, 1, 128) in aux_edges
