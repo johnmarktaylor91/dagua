@@ -496,10 +496,24 @@ def test_classic_sugiyama_graphviz_fidelity_forwards_cluster_only_metadata(
     assert result.pos is not None
     kwargs = seen["kwargs"]
     assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert isinstance(kwargs["graphviz_typed_node_sizes"], torch.Tensor)
     assert kwargs["clusters"] is graph.clusters
     assert kwargs["cluster_parents"] is graph.cluster_parents
     assert kwargs["graphviz_apply_cluster_constraints"] is True
     assert "graphviz_edge_label_sizes" not in kwargs
+
+
+def test_classic_sugiyama_typed_boxes_use_dot_fallback_linespacing() -> None:
+    """Match Graphviz fallback label height when fitting typed ellipse boxes."""
+    width, height = classic_competitor._graphviz_dot_node_box(
+        label="encoder.stage_1_attention_projection",
+        font_size=12.0,
+        shape="ellipse",
+        text_height_factor=1.2,
+    )
+
+    assert width / 2.0 == pytest.approx(138.48179404552744)
+    assert height == 36.0
 
 
 def test_classic_sugiyama_uses_times_metrics_for_dot_cluster_labels() -> None:
