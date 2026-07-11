@@ -18,14 +18,19 @@ from dagua.layout.ops.pipelines.fmmm import (
     _graphviz_tile_pack_offsets,
     _layout_ogdf_fmmm_small_fidelity,
     _ogdf_fmmm_build_hierarchy,
+    _ogdf_fmmm_combined_forces,
     _ogdf_fmmm_max_mult_iter,
     _ogdf_fmmm_nmm_repulsive_forces,
     _ogdf_fmmm_random_placement,
     _ogdf_fmmm_repulsive_forces,
+    _ogdf_fmmm_tensor_combined_forces,
     _ogdf_fmmm_update_box,
     _ogdf_maar_pack_component_transforms,
     _ogdf_maar_pack_offsets,
+    _ogdf_nmm_bordering,
+    _ogdf_nmm_pair_force,
     _OgdfMt19937,
+    _OgdfNmmCell,
     layout_fmmm_pipeline,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -183,6 +188,60 @@ def test_fmmm_ogdf_max_mult_iter_matches_linearly_decreasing_reference() -> None
     assert _ogdf_fmmm_max_mult_iter(0, 2, 500, 20) == 100
 
 
+def test_fmmm_ogdf_cooldown_resets_default_temperature_each_iteration() -> None:
+    """Verify OGDF's disabled cooling does not accumulate cooldown scaling.
+
+    Returns
+    -------
+    None
+        Scalar and tensor force paths both retain the same movement on two
+        consecutive postprocessing cooldown iterations.
+    """
+    attractive = [[1.0, 0.0]]
+    repulsive = [[0.0, 0.0]]
+    first, first_cool = _ogdf_fmmm_combined_forces(
+        attractive,
+        repulsive,
+        boxlength=1_000.0,
+        iter_index=1,
+        fine_tuning_step=1,
+        cool_factor=1.0,
+        average_ideal_edge_length=1.0,
+    )
+    second, second_cool = _ogdf_fmmm_combined_forces(
+        attractive,
+        repulsive,
+        boxlength=1_000.0,
+        iter_index=2,
+        fine_tuning_step=1,
+        cool_factor=first_cool,
+        average_ideal_edge_length=1.0,
+    )
+    tensor_first, tensor_first_cool = _ogdf_fmmm_tensor_combined_forces(
+        torch.tensor(attractive, dtype=torch.float64),
+        torch.tensor(repulsive, dtype=torch.float64),
+        boxlength=1_000.0,
+        iter_index=1,
+        fine_tuning_step=1,
+        cool_factor=1.0,
+        average_ideal_edge_length=1.0,
+    )
+    tensor_second, tensor_second_cool = _ogdf_fmmm_tensor_combined_forces(
+        torch.tensor(attractive, dtype=torch.float64),
+        torch.tensor(repulsive, dtype=torch.float64),
+        boxlength=1_000.0,
+        iter_index=2,
+        fine_tuning_step=1,
+        cool_factor=tensor_first_cool,
+        average_ideal_edge_length=1.0,
+    )
+
+    assert first == second == [[0.005000000000000001, 0.0]]
+    assert first_cool == second_cool == 0.1
+    assert torch.equal(tensor_first, tensor_second)
+    assert tensor_first_cool == tensor_second_cool == 0.1
+
+
 def test_fmmm_fidelity_mode_uses_multilevel_driver_above_coarse_target() -> None:
     """Verify fidelity dispatch no longer uses the single-level path for large graphs.
 
@@ -283,6 +342,35 @@ def test_fmmm_nmm_force_approximates_exact_force_at_dispatch_boundary() -> None:
     relative_error = torch.linalg.norm(approximate - exact) / torch.linalg.norm(exact)
 
     assert float(relative_error.item()) < 1.0e-3
+
+
+def test_fmmm_nmm_bordering_compares_shifted_neighbor_boxes() -> None:
+    """Verify WSPRLS recognizes adjacent reduced quadtree cells.
+
+    Returns
+    -------
+    None
+        The assertion guards OGDF's shift-then-containment bordering test.
+    """
+    left = _OgdfNmmCell(level=1, down_left=(0.0, 0.0), boxlength=1.0, nodes=[0])
+    right = _OgdfNmmCell(level=1, down_left=(1.0, 0.0), boxlength=1.0, nodes=[1])
+
+    assert _ogdf_nmm_bordering(left, right)
+
+
+def test_fmmm_nmm_coincident_pair_uses_shared_ogdf_rng() -> None:
+    """Verify coincident direct forces follow OGDF's random separation path.
+
+    Returns
+    -------
+    None
+        The assertion pins deterministic non-zero repulsion and RNG use.
+    """
+    positions = [[3.0, -2.0], [3.0, -2.0]]
+
+    force = _ogdf_nmm_pair_force(positions, source=0, target=1, rng=_OgdfMt19937(42))
+
+    assert force == (36.02438917778261, -130.8127485389862)
 
 
 def test_fmmm_fidelity_mode_decomposes_disconnected_large_graphs() -> None:
