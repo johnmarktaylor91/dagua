@@ -938,6 +938,33 @@ def layout_native_undirected_portfolio(
         incumbent_pos, problem, cluster_ids, aesthetic_profile
     )
 
+    # P3 geometry challengers derive from the exact incumbent and bypass
+    # projection so their measured transforms reach the honest referee intact.
+    from dagua.layout.ops.pipelines.dagua_native import (
+        _collinear_dodge,
+        _unshear_bimodal_edges,
+    )
+
+    for name, candidate in (
+        (
+            "collinear_dodge_0.10",
+            _collinear_dodge(incumbent_pos, problem.edge_index, delta=0.10),
+        ),
+        (
+            "collinear_dodge_0.15",
+            _collinear_dodge(incumbent_pos, problem.edge_index, delta=0.15),
+        ),
+        ("unshear", _unshear_bimodal_edges(incumbent_pos, problem.edge_index)),
+    ):
+        if candidate is None or not bool(torch.isfinite(candidate).all().item()):
+            continue
+        candidate_score = _score_undirected_candidate(
+            candidate, problem, cluster_ids, aesthetic_profile
+        )
+        if candidate_score > scores["incumbent"] + 0.1:
+            positions[name] = candidate
+            scores[name] = candidate_score
+
     seed = int(problem.seed) if problem.seed is not None else 42
     challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
