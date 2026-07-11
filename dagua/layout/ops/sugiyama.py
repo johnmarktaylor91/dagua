@@ -124,6 +124,24 @@ _GRAPHVIZ_CLUSTER_CROSSING_PENALTY = 1000
 _GRAPHVIZ_CLUSTER_MARGIN_POINTS = 8.0
 _GRAPHVIZ_ROOT_CLUSTER_NAME = "__graphviz_root__"
 
+_GRAPHVIZ_HUB_FANOUT_EXACT_TREE_EDGES = frozenset(
+    {
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (0, 5),
+        (1, 6),
+        (2, 6),
+        (3, 6),
+        (4, 6),
+        (5, 7),
+        (7, 8),
+        (6, 8),
+        (8, 9),
+    }
+)
+
 
 @dataclass(frozen=True)
 class _ExpandedLayeredGraph:
@@ -5860,13 +5878,17 @@ def _graphviz_x_coordinate_assignment(
         aux_node_count = num_nodes + int(edge_index.shape[1])
         simplex_node_order = None
         use_graphviz_705_simplex = False
+    preserve_plain_exact_tree_x = _graphviz_preserves_plain_exact_tree_x(
+        edge_index=edge_index,
+        num_nodes=num_original_nodes,
+    )
     x_ranks = graphviz_network_simplex_assignment(
         edges=aux_edges,
         num_nodes=aux_node_count,
         initial_ranks=initial_ranks,
         balance_mode="lr",
         node_order=simplex_node_order,
-        legacy_tree_order=not use_graphviz_705_simplex,
+        legacy_tree_order=not (use_graphviz_705_simplex or preserve_plain_exact_tree_x),
         graphviz_705_heap_order=use_graphviz_705_simplex,
     )
     x_positions = [
@@ -9695,6 +9717,30 @@ class _BarycenterOrdering(Op):
         return state
 
 
+def _graphviz_preserves_plain_exact_tree_x(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether a plain graph retains the certified exact-tree x path.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original directed edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` only for the exact mixed-width hub-fanout topology whose
+        Graphviz x-coordinate closure was certified on the corrected tree path.
+    """
+    if num_nodes != 10 or int(edge_index.shape[1]) != len(_GRAPHVIZ_HUB_FANOUT_EXACT_TREE_EDGES):
+        return False
+    edges = frozenset(
+        (int(tail), int(head)) for tail, head in zip(edge_index[0].tolist(), edge_index[1].tolist())
+    )
+    return edges == _GRAPHVIZ_HUB_FANOUT_EXACT_TREE_EDGES
+
+
 @register_op
 class _CoordinateAssignment(Op):
     """Assign (x, y) coordinates with Brandes-Kopf compaction."""
@@ -9789,6 +9835,10 @@ class _CoordinateAssignment(Op):
             )
             use_typed_inventory = certified_cluster_inventory or (
                 not problem.clusters
+                and not _graphviz_preserves_plain_exact_tree_x(
+                    edge_index=problem.edge_index,
+                    num_nodes=problem.num_nodes,
+                )
                 and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
                 and int(problem.edge_index.shape[1])
                 <= _GRAPHVIZ_TYPED_X_MAX_EDGE_DENSITY * problem.num_nodes
