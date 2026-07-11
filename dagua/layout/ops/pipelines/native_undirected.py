@@ -168,7 +168,12 @@ def _candidate_is_degenerate(
     n = int(pos.shape[0])
     if n <= 1 or node_sizes is None or node_sizes.numel() == 0:
         return False, ""
-    sizes = node_sizes.to(dtype=pos.dtype)
+    # Align helper tensors to the candidate's device: pos may be on CUDA while
+    # edge_index / node_sizes came from a CPU graph, in which case indexing
+    # pos[edge_index] would raise a device-mismatch error.
+    if edge_index is not None and edge_index.numel() > 0:
+        edge_index = edge_index.to(pos.device)
+    sizes = node_sizes.to(device=pos.device, dtype=pos.dtype)
     if sizes.ndim == 1:
         sizes = sizes.unsqueeze(1).expand(-1, 2)
 
