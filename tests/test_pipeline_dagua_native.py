@@ -8,10 +8,24 @@ from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.dagua_native import (
     _apply_dot_cluster_fidelity_layout,
     _build_dot_cluster_skeletons,
+    _collinear_dodge,
     _dot_rank_assignment,
     _is_graphviz_dot_cluster_fidelity_mode,
     layout_dagua_native_pipeline,
 )
+
+
+def test_collinear_dodge_moves_blocker_off_skip_edge() -> None:
+    """A node centered on a non-incident skip edge is shifted perpendicular."""
+    pos = torch.tensor([[0.0, 0.0], [0.0, 10.0], [0.0, 20.0]])
+    edge_index = torch.tensor([[0, 0], [1, 2]], dtype=torch.long)
+
+    dodged = _collinear_dodge(pos, edge_index)
+
+    assert dodged is not None
+    assert torch.equal(dodged[[0, 2]], pos[[0, 2]])
+    assert float(torch.abs(dodged[1, 0]).item()) > 0.0
+    assert float(dodged[1, 1].item()) == float(pos[1, 1].item())
 
 
 def test_dot_cluster_skeleton_counts_match_cluster_c_build_skeleton() -> None:
