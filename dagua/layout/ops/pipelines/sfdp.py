@@ -450,12 +450,14 @@ def _graphviz_repulsive_exponent(repulsive_exponent: float) -> float:
 
     Notes
     -----
-    Graphviz parses ``repulsiveforce`` with a minimum of zero before negating
-    it into ``p``. The benchmark variant named ``p_neg2`` passes the clamped
-    negative graph attribute through as ``p=-2`` on the Dagua side, so the
-    fidelity path must collapse that request to Graphviz's fallback ``p=-1``.
+    Graphviz parses ``repulsiveforce`` with a minimum of zero, negates it into
+    ``p``, then resets only NONNEGATIVE ``p`` back to ``-1``
+    (``spring_electrical.c``). Genuinely negative exponents are honored as-is:
+    ``repulsiveforce=2`` -> internal ``p=-2`` (force denominator ``dist**3``).
+    The ``p_neg2`` variant therefore runs a real ``p=-2`` law, matching the
+    corrected ``repulsiveforce=2`` reference oracle (r79 fix).
     """
-    if repulsive_exponent < _DEFAULT_P:
+    if repulsive_exponent >= 0.0:
         return _DEFAULT_P
     return repulsive_exponent
 
