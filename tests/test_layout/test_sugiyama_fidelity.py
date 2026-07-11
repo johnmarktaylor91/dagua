@@ -10,9 +10,12 @@ from dagua.graph import DaguaGraph
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
     _build_graphviz_x_aux_edges,
+    _build_graphviz_x_inventory,
     _edge_processing_order,
     _expand_long_edges_with_dummy_nodes,
     _graphviz_layer_assignments,
+    _GraphvizXEdgeKind,
+    _GraphvizXNodeClass,
     _igraph_eades_layer_assignments,
     _igraph_glpk_layer_assignments,
     _igraph_glpk_objective_coefficients,
@@ -392,6 +395,9 @@ def test_sugiyama_igraph_dummy_order_uses_original_tail_for_flipped_edges() -> N
         edge_index=oriented_edges,
         num_nodes=4,
         use_graphviz_edge_order=False,
+        graphviz_edge_order_sources=None,
+        graphviz_edge_order_targets=None,
+        graphviz_sort_outgoing=True,
         use_igraph_edge_order=True,
         igraph_edge_order_sources=original_tail_sources,
         igraph_edge_order_targets=original_head_targets,
@@ -462,11 +468,11 @@ def test_sugiyama_graphviz_fidelity_uses_dot_x_assignment() -> None:
 
     expected = torch.tensor(
         [
-            [-0.2044, 0.0],
-            [-0.6022, 1.0],
-            [0.1934, 1.0],
-            [-0.6022, 2.0],
-            [-0.0055, 3.0],
+            [-0.2174, 0.0],
+            [-0.6087, 1.0],
+            [0.1739, 1.0],
+            [-0.6087, 2.0],
+            [0.0, 3.0],
         ]
     )
     assert torch.allclose(positions, expected, atol=1e-4)
@@ -522,6 +528,9 @@ def test_sugiyama_graphviz_class2_sorts_outgoing_edges_by_head() -> None:
         edge_index=edge_index,
         num_nodes=4,
         use_graphviz_edge_order=True,
+        graphviz_edge_order_sources=None,
+        graphviz_edge_order_targets=None,
+        graphviz_sort_outgoing=True,
         use_igraph_edge_order=False,
         igraph_edge_order_sources=None,
         igraph_edge_order_targets=None,
@@ -531,6 +540,32 @@ def test_sugiyama_graphviz_class2_sorts_outgoing_edges_by_head() -> None:
 
     assert edge_order == [1, 2, 0, 3]
     assert created_node_order == [0, 1, 2, 3]
+
+
+def test_sugiyama_graphviz_class2_scans_backedge_at_original_tail() -> None:
+    """Preserve ``ED_to_orig`` scan lineage after orienting a backward edge."""
+    oriented_edges = torch.tensor(
+        [[7, 9], [10, 10]],
+        dtype=torch.long,
+    )
+    original_sources = torch.tensor([10, 9], dtype=torch.long)
+    original_targets = torch.tensor([7, 10], dtype=torch.long)
+
+    edge_order = _edge_processing_order(
+        edge_index=oriented_edges,
+        num_nodes=11,
+        use_graphviz_edge_order=True,
+        graphviz_edge_order_sources=original_sources,
+        graphviz_edge_order_targets=original_targets,
+        graphviz_sort_outgoing=True,
+        use_igraph_edge_order=False,
+        igraph_edge_order_sources=None,
+        igraph_edge_order_targets=None,
+        igraph_edge_order_ids=None,
+        created_node_order=[],
+    )
+
+    assert edge_order == [1, 0]
 
 
 def test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths() -> None:
@@ -563,6 +598,38 @@ def test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths() -> None:
     )
 
     assert aux_edges[0] == (2, 3, 179, 0)
+
+
+def test_sugiyama_graphviz_typed_x_inventory_tracks_cluster_borders() -> None:
+    """Represent normal, slack, and border nodes before the x simplex solve."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    node_sizes = torch.full((2, 2), 44.0, dtype=torch.float32)
+
+    inventory = _build_graphviz_x_inventory(
+        layers=[[0, 1]],
+        edge_index=edge_index,
+        edge_weights=None,
+        node_sizes=node_sizes,
+        num_nodes=2,
+        num_original_nodes=2,
+        node_sep=18.0,
+        expanded_edge_origins=[7],
+        graphviz_cluster_members={"group": (0, 1)},
+        graphviz_cluster_parents={"group": None},
+        graphviz_cluster_label_widths={"group": 80.0},
+    )
+
+    assert [node.node_class for node in inventory.nodes] == [
+        _GraphvizXNodeClass.NORMAL,
+        _GraphvizXNodeClass.NORMAL,
+        _GraphvizXNodeClass.SLACK,
+        _GraphvizXNodeClass.BORDER,
+        _GraphvizXNodeClass.BORDER,
+    ]
+    pair_edges = [edge for edge in inventory.edges if edge.kind == _GraphvizXEdgeKind.EDGE_PAIR]
+    contain_edges = [edge for edge in inventory.edges if edge.kind == _GraphvizXEdgeKind.CONTAIN]
+    assert {edge.original_edge_id for edge in pair_edges} == {7}
+    assert (80, 128) in {(edge.minlen, edge.weight) for edge in contain_edges}
 
 
 def test_sugiyama_graphviz_clusters_affect_only_graphviz_mode() -> None:

@@ -18,6 +18,7 @@ from dagua.eval.competitors.base import (
     CompetitorResult,
     register,
 )
+from dagua.eval.size_policy import size_aware_externals
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -373,7 +374,7 @@ def _graphviz_dot_node_box(label: str, font_size: float, shape: str) -> tuple[fl
 
 
 def _graphviz_dot_node_sizes(graph: DaguaGraph) -> torch.Tensor:
-    """Compute Graphviz DOT node boxes for the benchmark adapter's DOT text.
+    """Compute Graphviz auto-sized DOT node boxes from labels and styles.
 
     Parameters
     ----------
@@ -512,6 +513,31 @@ def _has_graphviz_dot_edge_labels(graph: DaguaGraph) -> bool:
     return any(bool(label) for label in graph.edge_labels)
 
 
+def _graphviz_dot_cluster_label_widths(graph: DaguaGraph) -> dict[str, float]:
+    """Return padded Graphviz cluster-label widths in point units.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph whose cluster labels are serialized to DOT.
+
+    Returns
+    -------
+    dict[str, float]
+        Padded label width keyed by cluster name, matching ``PAD(dimen)`` in
+        Graphviz ``do_graph_label()`` for the default 14-point Helvetica font.
+    """
+    font_size = 14.0
+    return {
+        name: _graphviz_helvetica_text_width(
+            text=str(graph.cluster_labels.get(name, name)),
+            font_size=font_size,
+        )
+        + _GRAPHVIZ_LABEL_XPAD_POINTS
+        for name in graph.clusters
+    }
+
+
 def _apply_sugiyama_graphviz_metadata(
     graph: DaguaGraph,
     extra_kwargs: dict[str, Any],
@@ -530,7 +556,19 @@ def _apply_sugiyama_graphviz_metadata(
     None
         ``extra_kwargs`` is updated in place.
     """
-    extra_kwargs.setdefault("graphviz_node_sizes", _graphviz_dot_node_sizes(graph=graph))
+    graphviz_node_sizes = _graphviz_dot_node_sizes(graph=graph)
+    if graph.node_sizes is not None and size_aware_externals() and not graph.clusters:
+        # The reference adapter emits the measured boxes as fixed DOT
+        # width/height attributes for size-aware benchmark runs.
+        graphviz_node_sizes = (
+            graph.node_sizes.detach()
+            .to(
+                device="cpu",
+                dtype=graph.size_dtype,
+            )
+            .clone()
+        )
+    extra_kwargs.setdefault("graphviz_node_sizes", graphviz_node_sizes)
     has_edge_labels = _has_graphviz_dot_edge_labels(graph=graph)
     has_clusters = bool(graph.clusters)
     if has_edge_labels and not has_clusters:
@@ -538,6 +576,10 @@ def _apply_sugiyama_graphviz_metadata(
     elif has_clusters and not has_edge_labels:
         extra_kwargs.setdefault("clusters", graph.clusters)
         extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
+        extra_kwargs.setdefault(
+            "graphviz_cluster_label_widths",
+            _graphviz_dot_cluster_label_widths(graph=graph),
+        )
         extra_kwargs.setdefault("graphviz_apply_cluster_constraints", True)
 
 
