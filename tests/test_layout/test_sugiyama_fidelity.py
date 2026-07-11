@@ -27,6 +27,7 @@ from dagua.layout.ops.sugiyama import (
     _igraph_glpk_layer_assignments,
     _igraph_glpk_objective_coefficients,
     _igraph_undirected_layer_assignments,
+    _validate_graphviz_x_inventory_parity,
 )
 
 
@@ -696,6 +697,10 @@ def test_sugiyama_graphviz_typed_x_inventory_tracks_cluster_borders() -> None:
     assert {edge.original_edge_id for edge in pair_edges} == {7}
     assert (80, 128) in {(edge.minlen, edge.weight) for edge in contain_edges}
     assert sum((edge.minlen, edge.weight) == (8, 0) for edge in contain_edges) == 2
+    border_ids = [
+        node.node_id for node in inventory.nodes if node.node_class == _GraphvizXNodeClass.BORDER
+    ]
+    assert {inventory.initial_ranks[node_id] for node_id in border_ids} == {0}
 
 
 def test_sugiyama_graphviz_typed_clusters_use_dot_nodesep(
@@ -748,6 +753,36 @@ def test_sugiyama_graphviz_typed_inventory_rejects_oracle_mismatch() -> None:
             graphviz_cluster_members={"group": (0, 1)},
             graphviz_cluster_parents={"group": None},
             expected_typed_inventory=(0, ()),
+        )
+
+
+def test_sugiyama_graphviz_typed_inventory_rejects_endpoint_digest_mismatch() -> None:
+    """Reject endpoint-order changes even when the aggregate multiset matches."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    node_sizes = torch.full((2, 2), 44.0, dtype=torch.float32)
+    inventory = _build_graphviz_x_inventory(
+        layers=[[0, 1]],
+        edge_index=edge_index,
+        edge_weights=None,
+        node_sizes=node_sizes,
+        num_nodes=2,
+        num_original_nodes=2,
+        node_sep=18.0,
+        expanded_edge_origins=[0],
+        graphviz_cluster_members={"group": (0, 1)},
+        graphviz_cluster_parents={"group": None},
+        graphviz_cluster_label_widths={"group": 80.0},
+    )
+    counts: dict[tuple[int, int], int] = {}
+    for edge in inventory.edges:
+        key = (edge.minlen, edge.weight)
+        counts[key] = counts.get(key, 0) + 1
+    multiset = tuple((minlen, weight, count) for (minlen, weight), count in sorted(counts.items()))
+
+    with pytest.raises(ValueError, match="failed endpoint parity"):
+        _validate_graphviz_x_inventory_parity(
+            inventory=inventory,
+            expected=(len(inventory.nodes), multiset, "0" * 64),
         )
 
 

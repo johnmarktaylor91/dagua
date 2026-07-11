@@ -6,7 +6,11 @@ import random
 
 import torch
 
-from dagua.layout.ops.pipelines.dot_rank import graphviz_rank_assignment
+from dagua.layout.ops.pipelines.dot_rank import (
+    _Subtree,
+    _subtree_heapify,
+    graphviz_rank_assignment,
+)
 from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 from dagua.layout.ops.sugiyama import (
     _build_graphviz_x_aux_edges,
@@ -35,6 +39,33 @@ def _virtual_factory(tail: object, head: object, rank: int, edge_index: int) -> 
         Stable virtual node id.
     """
     return f"v_{tail}_{head}_{rank}_{edge_index}"
+
+
+def test_graphviz_705_x_heap_preserves_right_child_reset_quirk() -> None:
+    """Pin Graphviz 7.0.5's tied feasible-subtree heap behavior."""
+    subtrees = [
+        _Subtree(rep=0, size=3, parent=0, heap_index=0),
+        _Subtree(rep=1, size=2, parent=1, heap_index=1),
+        _Subtree(rep=2, size=4, parent=2, heap_index=2),
+    ]
+    historical_heap = [0, 1, 2]
+    corrected_heap = [0, 1, 2]
+
+    _subtree_heapify(
+        heap=historical_heap,
+        subtrees=subtrees,
+        index=0,
+        graphviz_705_heap_order=True,
+    )
+    _subtree_heapify(
+        heap=corrected_heap,
+        subtrees=subtrees,
+        index=0,
+        graphviz_705_heap_order=False,
+    )
+
+    assert historical_heap == [0, 1, 2]
+    assert corrected_heap == [1, 0, 2]
 
 
 def test_graphviz_rank_assignment_matches_dot_phase1_diamond() -> None:
@@ -463,8 +494,7 @@ def test_graphviz_cluster_x_aux_edges_use_boundary_nodes() -> None:
         graphviz_cluster_parents={"left": None, "right": None},
     )
 
-    assert initial_ranks[6] < initial_ranks[0]
-    assert initial_ranks[7] > initial_ranks[2]
+    assert {initial_ranks[node] for node in range(4, 10)} == {0}
     assert (4, 6, 8, 0) in aux_edges
     assert (6, 0, 35, 0) in aux_edges
     assert (2, 7, 35, 0) in aux_edges
