@@ -23,6 +23,36 @@ def test_fcose_pipeline_produces_finite_layout() -> None:
     assert float(pos.std().item()) > 0.0
 
 
+def test_fcose_randomized_initial_placement_honors_seed() -> None:
+    """Randomized spectral placement should be repeatable per seed and vary across seeds."""
+    edge_index = torch.tensor(
+        [[0, 0, 1, 2, 2, 3, 4, 5], [1, 2, 3, 3, 4, 5, 6, 7]],
+        dtype=torch.long,
+    )
+
+    first = layout_fcose_pipeline(
+        edge_index=edge_index,
+        num_nodes=8,
+        quality="draft",
+        seed=100,
+    )
+    repeated = layout_fcose_pipeline(
+        edge_index=edge_index,
+        num_nodes=8,
+        quality="draft",
+        seed=100,
+    )
+    second = layout_fcose_pipeline(
+        edge_index=edge_index,
+        num_nodes=8,
+        quality="draft",
+        seed=101,
+    )
+
+    assert torch.equal(first, repeated)
+    assert not torch.equal(first, second)
+
+
 def test_fcose_pipeline_registry_entry() -> None:
     """The dynamic pipeline registry should resolve ``fcose``."""
     pipeline_function = get_pipeline_function("fcose")
