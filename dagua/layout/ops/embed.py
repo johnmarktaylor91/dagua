@@ -44,7 +44,6 @@ _EMBEDDING_OUTPUT_DIM = 2
 _SPECTRAL_EXTRA_EIGENPAIRS = 4
 _SPECTRAL_LANCZOS_MULTIPLIER = 2
 _SPECTRAL_LANCZOS_PADDING = 2
-_SPECTRAL_DENSE_DEGENERATE_NODE_LIMIT = 2_500
 _GCN_REQUIRED_HIDDEN_LAYER_COUNT = 2
 _TSNE_JOINT_PROBABILITY_DIVISOR = 2.0
 _CURVE_FIT_INITIAL_GUESS = (_DEFAULT_CURVE_A, _DEFAULT_CURVE_B)
@@ -1246,85 +1245,6 @@ def _offdiagonal_connectivity(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
     return connectivity.tocsr()
 
 
-def _requires_disconnected_dense_fallback(laplacian: sparse.csr_matrix) -> bool:
-    """Detect sparse unnormalized Laplacians whose zero eigenspace is truncated.
-
-    Parameters
-    ----------
-    laplacian : scipy.sparse.csr_matrix
-        Symmetric Laplacian matrix with shape ``[N, N]``.
-
-    Returns
-    -------
-    bool
-        ``True`` when a small disconnected unnormalized Laplacian should use
-        the dense NetworkX-compatible path instead of ARPACK's incomplete
-        smallest-magnitude slice.
-    """
-    num_nodes = int(laplacian.shape[0])
-    if num_nodes > _SPECTRAL_DENSE_DEGENERATE_NODE_LIMIT:
-        return False
-    row_sums = np.asarray(laplacian.sum(axis=1)).reshape(-1)
-    if row_sums.size == 0 or float(np.max(np.abs(row_sums))) > _SPECTRAL_EIGENVALUE_TOLERANCE:
-        return False
-    connectivity = _offdiagonal_connectivity(laplacian)
-    component_count, _ = sparse.csgraph.connected_components(
-        connectivity,
-        directed=False,
-        return_labels=True,
-    )
-    return int(component_count) > 1
-
-
-def _disconnected_kernel_spectral_embedding(
-    laplacian: sparse.csr_matrix,
-    dim: int,
-    skip_first: bool,
-) -> Optional[np.ndarray]:
-    """Build deterministic coordinates from a disconnected Laplacian kernel.
-
-    Parameters
-    ----------
-    laplacian : scipy.sparse.csr_matrix
-        Unnormalized disconnected Laplacian with shape ``[N, N]``.
-    dim : int
-        Requested output dimension.
-    skip_first : bool
-        Whether to drop the first component-indicator vector before selecting
-        layout coordinates.
-
-    Returns
-    -------
-    numpy.ndarray | None
-        Kernel coordinates with shape ``[N, dim]`` when the component nullity
-        can satisfy the requested dimensions, otherwise ``None``.
-    """
-    num_nodes = int(laplacian.shape[0])
-    connectivity = _offdiagonal_connectivity(laplacian)
-    component_count, labels = sparse.csgraph.connected_components(
-        connectivity,
-        directed=False,
-        return_labels=True,
-    )
-    if int(component_count) <= 1:
-        return None
-
-    basis = np.zeros((num_nodes, int(component_count)), dtype=np.float64)
-    for component in range(int(component_count)):
-        mask = labels == component
-        size = int(np.count_nonzero(mask))
-        if size > 0:
-            basis[mask, component] = 1.0 / np.sqrt(float(size))
-
-    start_column = 1 if skip_first else 0
-    selected = basis[:, start_column : start_column + dim]
-    if selected.shape[1] < dim:
-        return None
-    coordinates = np.zeros((num_nodes, dim), dtype=np.float64)
-    coordinates[:, : selected.shape[1]] = selected
-    return coordinates
-
-
 def _random_walk_similarity_data(
     laplacian: sparse.csr_matrix,
 ) -> tuple[sparse.csr_matrix, np.ndarray]:
@@ -1531,27 +1451,6 @@ def _sparse_spectral_embedding(
             max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING),
             num_nodes,
         )
-    if (
-        symmetric
-        and networkx_fidelity
-        and _requires_disconnected_dense_fallback(
-            laplacian=laplacian,
-        )
-    ):
-        kernel_coordinates = _disconnected_kernel_spectral_embedding(
-            laplacian=laplacian,
-            dim=dim,
-            skip_first=networkx_fidelity or igraph_fidelity,
-        )
-        if kernel_coordinates is not None:
-            return kernel_coordinates
-        return _dense_spectral_embedding(
-            laplacian=laplacian,
-            dim=dim,
-            symmetric=symmetric,
-            networkx_fidelity=networkx_fidelity,
-            igraph_fidelity=igraph_fidelity,
-        )
     if networkx_fidelity and not symmetric:
         return _sparse_random_walk_spectral_embedding(
             laplacian=laplacian,
@@ -1560,7 +1459,19 @@ def _sparse_spectral_embedding(
             ncv=ncv,
             skip_first=networkx_fidelity or igraph_fidelity,
         )
-    if symmetric:
+    if symmetric and networkx_fidelity:
+        # NetworkX leaves ``v0``, ``sigma``, and the SciPy RNG unspecified.
+        # This matters on disconnected graphs: ARPACK then returns an arbitrary
+        # basis from the repeated zero eigenspace. Supplying Dagua's stable
+        # start vector or replacing the result with component indicators would
+        # implement a different algorithm and can collapse whole components.
+        eigenvalues, eigenvectors = sparse_linalg.eigsh(
+            laplacian,
+            k=eigen_count,
+            which="SM",
+            ncv=ncv,
+        )
+    elif symmetric:
         eigenvalues, eigenvectors = sparse_linalg.eigsh(
             laplacian,
             k=eigen_count,
