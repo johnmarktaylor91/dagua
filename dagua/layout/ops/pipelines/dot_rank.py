@@ -101,6 +101,7 @@ class _SimplexGraph:
     search_index: int = 0
     search_size: int = _GRAPHVIZ_SEARCH_SIZE
     legacy_tree_order: bool = False
+    graphviz_705_heap_order: bool = False
 
 
 def graphviz_rank_assignment(
@@ -206,6 +207,8 @@ def graphviz_network_simplex_assignment(
     search_size: int = _GRAPHVIZ_SEARCH_SIZE,
     balance_mode: BalanceMode = "tb",
     legacy_tree_order: bool = True,
+    node_order: Optional[Sequence[NodeId]] = None,
+    graphviz_705_heap_order: bool = False,
 ) -> Dict[NodeId, int]:
     """Assign node ranks for arbitrary Graphviz network-simplex constraints.
 
@@ -235,8 +238,14 @@ def graphviz_network_simplex_assignment(
         Post-optimal balancing pass. ``"lr"`` matches dot ``rank(g, 2, ...)``
         for horizontal coordinate assignment.
     legacy_tree_order : bool, default=True
-        Preserve the established horizontal tie path. Rank assignment uses
-        the corrected Graphviz traversal through :func:`graphviz_rank_assignment`.
+        Preserve the pre-r79 horizontal tie path when ``True``. Set to
+        ``False`` for Graphviz 7.0.5's feasible-subtree heap and traversal.
+    node_order : sequence of Hashable, optional
+        Explicit ``GD_nlist`` order. Dot prepends x-auxiliary virtual nodes,
+        so horizontal tie resolution cannot infer this order from integer ids.
+    graphviz_705_heap_order : bool, default=False
+        Reproduce Graphviz 7.0.5's historical subtree-heap child-selection
+        quirk. Horizontal dot fidelity requires this exact behavior.
 
     Returns
     -------
@@ -258,7 +267,15 @@ def graphviz_network_simplex_assignment(
         edge_minlens=edge_minlens,
         edge_weights=edge_weights,
     )
-    ordered_nodes = _ordered_nodes(records=records, num_nodes=num_nodes)
+    ordered_nodes = (
+        list(node_order)
+        if node_order is not None
+        else _ordered_nodes(records=records, num_nodes=num_nodes)
+    )
+    if node_order is not None:
+        expected_nodes = set(_ordered_nodes(records=records, num_nodes=num_nodes))
+        if len(ordered_nodes) != len(expected_nodes) or set(ordered_nodes) != expected_nodes:
+            raise ValueError("node_order must contain every simplex node exactly once")
     if not ordered_nodes:
         return {}
 
@@ -280,6 +297,7 @@ def graphviz_network_simplex_assignment(
             balance_mode=balance_mode,
             initial_ranks=initial_ranks,
             legacy_tree_order=legacy_tree_order,
+            graphviz_705_heap_order=graphviz_705_heap_order,
         )
         ranks.update(local_ranks)
     return ranks
@@ -518,6 +536,7 @@ def _rank_component(
     balance_mode: BalanceMode,
     initial_ranks: Optional[Dict[NodeId, int]] = None,
     legacy_tree_order: bool = False,
+    graphviz_705_heap_order: bool = False,
 ) -> Dict[NodeId, int]:
     """Run network simplex on one weak component.
 
@@ -537,6 +556,8 @@ def _rank_component(
         Optional starting ranks keyed by original node id.
     legacy_tree_order : bool, default=False
         Preserve the pre-r79 tree traversal used by the horizontal x solver.
+    graphviz_705_heap_order : bool, default=False
+        Whether to preserve Graphviz 7.0.5's subtree heap quirk.
 
     Returns
     -------
@@ -550,6 +571,7 @@ def _rank_component(
         search_size=search_size,
     )
     graph.legacy_tree_order = legacy_tree_order
+    graph.graphviz_705_heap_order = graphviz_705_heap_order
     if initial_ranks is not None:
         for node, local_id in node_to_local.items():
             graph.nodes[local_id].rank = int(initial_ranks.get(node, 0))
@@ -753,10 +775,19 @@ def _feasible_tree(graph: _SimplexGraph) -> None:
     for index, subtree_id in enumerate(heap):
         subtrees[subtree_id].heap_index = index
     for index in range(len(heap) // 2, -1, -1):
-        _subtree_heapify(heap=heap, subtrees=subtrees, index=index)
+        _subtree_heapify(
+            heap=heap,
+            subtrees=subtrees,
+            index=index,
+            graphviz_705_heap_order=graph.graphviz_705_heap_order,
+        )
 
     while len(heap) > 1:
-        extracted = _subtree_heap_extract_min(heap=heap, subtrees=subtrees)
+        extracted = _subtree_heap_extract_min(
+            heap=heap,
+            subtrees=subtrees,
+            graphviz_705_heap_order=graph.graphviz_705_heap_order,
+        )
         entering = _inter_tree_edge(graph=graph, subtrees=subtrees, subtree_id=extracted)
         if entering is None:
             raise ValueError("graphviz rank assignment could not connect tight subtrees")
@@ -769,12 +800,18 @@ def _feasible_tree(graph: _SimplexGraph) -> None:
             heap=heap,
             subtrees=subtrees,
             index=subtrees[merged].heap_index,
+            graphviz_705_heap_order=graph.graphviz_705_heap_order,
         )
     _dfs_range_init(graph=graph)
     _dfs_cutval(graph=graph)
 
 
-def _subtree_heapify(heap: List[int], subtrees: List[_Subtree], index: int) -> None:
+def _subtree_heapify(
+    heap: List[int],
+    subtrees: List[_Subtree],
+    index: int,
+    graphviz_705_heap_order: bool,
+) -> None:
     """Restore Graphviz's feasible-tree subtree heap below one index.
 
     Parameters
@@ -785,6 +822,9 @@ def _subtree_heapify(heap: List[int], subtrees: List[_Subtree], index: int) -> N
         Mutable subtree records carrying sizes and heap indices.
     index : int
         Heap index whose descendants may violate the size ordering.
+    graphviz_705_heap_order : bool
+        Whether to reset a selected left child when the right child is not
+        smaller, matching Graphviz 7.0.5.
 
     Returns
     -------
@@ -793,9 +833,9 @@ def _subtree_heapify(heap: List[int], subtrees: List[_Subtree], index: int) -> N
 
     Notes
     -----
-    Preserving a selected left child when the right child is not smaller is
-    essential: resetting to the parent changes the tight spanning tree for
-    equal-objective rank solutions.
+    Graphviz 7.0.5 resets ``smallest`` to the parent when the right child is
+    not smaller, even if the left child was selected. This historical quirk
+    changes the initial tight tree for tied x-coordinate problems.
     """
     while 0 <= index < len(heap):
         left = 2 * (index + 1) - 1
@@ -806,6 +846,8 @@ def _subtree_heapify(heap: List[int], subtrees: List[_Subtree], index: int) -> N
             smallest = index
         if right < len(heap) and subtrees[heap[right]].size < subtrees[heap[smallest]].size:
             smallest = right
+        elif graphviz_705_heap_order:
+            smallest = index
         if smallest == index:
             break
         heap[index], heap[smallest] = heap[smallest], heap[index]
@@ -814,7 +856,11 @@ def _subtree_heapify(heap: List[int], subtrees: List[_Subtree], index: int) -> N
         index = smallest
 
 
-def _subtree_heap_extract_min(heap: List[int], subtrees: List[_Subtree]) -> int:
+def _subtree_heap_extract_min(
+    heap: List[int],
+    subtrees: List[_Subtree],
+    graphviz_705_heap_order: bool,
+) -> int:
     """Extract Graphviz's next feasible-tree subtree.
 
     Parameters
@@ -823,6 +869,8 @@ def _subtree_heap_extract_min(heap: List[int], subtrees: List[_Subtree]) -> int:
         Active subtree ids in Graphviz heap order.
     subtrees : list of _Subtree
         Mutable subtree records carrying heap indices.
+    graphviz_705_heap_order : bool
+        Whether to preserve Graphviz 7.0.5's heap child-selection quirk.
 
     Returns
     -------
@@ -835,7 +883,12 @@ def _subtree_heap_extract_min(heap: List[int], subtrees: List[_Subtree]) -> int:
     if heap:
         heap[0] = replacement
         subtrees[replacement].heap_index = 0
-        _subtree_heapify(heap=heap, subtrees=subtrees, index=0)
+        _subtree_heapify(
+            heap=heap,
+            subtrees=subtrees,
+            index=0,
+            graphviz_705_heap_order=graphviz_705_heap_order,
+        )
     return extracted
 
 
@@ -1021,8 +1074,6 @@ def _inter_tree_edge(
     stack: List[Tuple[int, Optional[int], int, int]] = [(subtrees[root].rep, None, 0, 0)]
     while stack:
         node_id, from_node, phase, edge_offset = stack[-1]
-        if best is not None and _slack(graph=graph, edge_id=best) == 0:
-            break
         node = graph.nodes[node_id]
         edges = node.out_edges if phase == 0 else node.in_edges
         if edge_offset >= len(edges):
@@ -1251,10 +1302,40 @@ def _exchange_tree_edges(graph: _SimplexGraph, leaving: int, entering: int) -> N
     graph.tree_edges[tree_index] = entering
     leaving_edge.tree_index = _NO_TREE_INDEX
     entering_edge.tree_index = tree_index
-    graph.nodes[leaving_edge.tail].tree_out.remove(leaving)
-    graph.nodes[leaving_edge.head].tree_in.remove(leaving)
+    if graph.legacy_tree_order:
+        graph.nodes[leaving_edge.tail].tree_out.remove(leaving)
+        graph.nodes[leaving_edge.head].tree_in.remove(leaving)
+    else:
+        _remove_tree_edge_reference(
+            edge_ids=graph.nodes[leaving_edge.tail].tree_out,
+            edge_id=leaving,
+        )
+        _remove_tree_edge_reference(
+            edge_ids=graph.nodes[leaving_edge.head].tree_in,
+            edge_id=leaving,
+        )
     graph.nodes[entering_edge.tail].tree_out.append(entering)
     graph.nodes[entering_edge.head].tree_in.append(entering)
+
+
+def _remove_tree_edge_reference(edge_ids: List[int], edge_id: int) -> None:
+    """Remove a tree edge with Graphviz's swap-with-last list semantics.
+
+    Parameters
+    ----------
+    edge_ids : list of int
+        Mutable ``ND_tree_in`` or ``ND_tree_out`` edge ids.
+    edge_id : int
+        Edge id to remove.
+
+    Returns
+    -------
+    None
+        ``edge_ids`` is updated in place without preserving order.
+    """
+    index = edge_ids.index(edge_id)
+    edge_ids[index] = edge_ids[-1]
+    edge_ids.pop()
 
 
 def _dfs_range_init(graph: _SimplexGraph) -> None:
@@ -1506,6 +1587,49 @@ def _leave_edge(graph: _SimplexGraph) -> Optional[int]:
     """
     if not graph.tree_edges:
         return None
+    if graph.legacy_tree_order:
+        return _leave_edge_legacy(graph=graph)
+    best: Optional[int] = None
+    count = 0
+    start = graph.search_index
+    while graph.search_index < len(graph.tree_edges):
+        edge_id = graph.tree_edges[graph.search_index]
+        edge = graph.edges[edge_id]
+        if edge.cutvalue < 0:
+            if best is None or graph.edges[best].cutvalue > edge.cutvalue:
+                best = edge_id
+            count += 1
+            if count >= graph.search_size:
+                return best
+        graph.search_index += 1
+    if start > 0:
+        graph.search_index = 0
+        while graph.search_index < start:
+            edge_id = graph.tree_edges[graph.search_index]
+            edge = graph.edges[edge_id]
+            if edge.cutvalue < 0:
+                if best is None or graph.edges[best].cutvalue > edge.cutvalue:
+                    best = edge_id
+                count += 1
+                if count >= graph.search_size:
+                    return best
+            graph.search_index += 1
+    return best
+
+
+def _leave_edge_legacy(graph: _SimplexGraph) -> Optional[int]:
+    """Preserve the pre-r79 circular leaving-edge scan for fallback rows.
+
+    Parameters
+    ----------
+    graph : _SimplexGraph
+        Mutable fallback simplex graph.
+
+    Returns
+    -------
+    int or None
+        Selected negative-cut tree edge, if any.
+    """
     best: Optional[int] = None
     count = 0
     start = graph.search_index

@@ -559,6 +559,59 @@ def test_classic_sugiyama_enables_only_certified_cluster_inventory() -> None:
     assert sum(record[2] for record in kwargs["graphviz_expected_x_inventory"][1]) == 36
 
 
+def test_classic_sugiyama_cluster_handoff_requires_endpoint_digest() -> None:
+    """Gate the clustered handoff row on its exact endpoint/order digest."""
+    edges = [
+        ("input", "preprocess.tokenize"),
+        ("preprocess.tokenize", "encoder.stage_1_attention_projection"),
+        ("encoder.stage_1_attention_projection", "encoder.stage_1_feedforward"),
+        ("encoder.stage_1_feedforward", "handoff"),
+        ("input", "handoff"),
+        ("handoff", "decoder.cross_attention_query"),
+        ("handoff", "decoder.cross_attention_key_value"),
+        ("decoder.cross_attention_query", "decoder.merge"),
+        ("decoder.cross_attention_key_value", "decoder.merge"),
+        ("decoder.merge", "LongOutputProjectionLayerWithAuxiliaryCalibration"),
+        ("LongOutputProjectionLayerWithAuxiliaryCalibration", "output"),
+    ]
+    graph = DaguaGraph.from_edge_list(edges)
+    graph.add_edge("handoff", "decoder.cross_attention_key_value")
+    node_by_label = {label: index for index, label in enumerate(graph.node_labels)}
+    graph.add_cluster(
+        "encoder",
+        [
+            node_by_label["encoder.stage_1_attention_projection"],
+            node_by_label["encoder.stage_1_feedforward"],
+        ],
+        label="Encoder",
+    )
+    graph.add_cluster(
+        "decoder",
+        [
+            node_by_label["decoder.cross_attention_query"],
+            node_by_label["decoder.cross_attention_key_value"],
+            node_by_label["decoder.merge"],
+        ],
+        label="Decoder",
+    )
+    graph.add_cluster(
+        "decoder.cross_attention",
+        [
+            node_by_label["decoder.cross_attention_query"],
+            node_by_label["decoder.cross_attention_key_value"],
+        ],
+        label="Cross Attention",
+        parent="decoder",
+    )
+
+    oracle = classic_competitor._graphviz_typed_cluster_inventory_oracle(graph)
+
+    assert oracle is not None
+    assert len(oracle) == 3
+    assert oracle[0] == 35
+    assert len(oracle[2]) == 64
+
+
 def test_classic_sugiyama_graphviz_fidelity_guards_mixed_label_cluster_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

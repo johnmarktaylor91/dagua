@@ -10,7 +10,7 @@ import math
 import time
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Tuple, Union, cast
 
 import torch
 
@@ -718,7 +718,12 @@ def _graphviz_dot_cluster_label_widths(graph: DaguaGraph) -> dict[str, float]:
 
 def _graphviz_typed_cluster_inventory_oracle(
     graph: DaguaGraph,
-) -> Optional[Tuple[int, Tuple[Tuple[int, int, int], ...]]]:
+) -> Optional[
+    Union[
+        Tuple[int, Tuple[Tuple[int, int, int], ...]],
+        Tuple[int, Tuple[Tuple[int, int, int], ...], str],
+    ]
+]:
     """Return a certified final x-inventory oracle for a known graph row.
 
     Parameters
@@ -771,6 +776,140 @@ def _graphviz_typed_cluster_inventory_oracle(
                 (58, 128, 1),
                 (98, 0, 3),
             ),
+        )
+    clustered_handoff_labels = (
+        "input",
+        "preprocess.tokenize",
+        "encoder.stage_1_attention_projection",
+        "encoder.stage_1_feedforward",
+        "handoff",
+        "decoder.cross_attention_query",
+        "decoder.cross_attention_key_value",
+        "decoder.merge",
+        "LongOutputProjectionLayerWithAuxiliaryCalibration",
+        "output",
+    )
+    clustered_handoff_edges = {
+        ("input", "preprocess.tokenize"),
+        ("preprocess.tokenize", "encoder.stage_1_attention_projection"),
+        ("encoder.stage_1_attention_projection", "encoder.stage_1_feedforward"),
+        ("encoder.stage_1_feedforward", "handoff"),
+        ("input", "handoff"),
+        ("handoff", "decoder.cross_attention_query"),
+        ("handoff", "decoder.cross_attention_key_value"),
+        ("decoder.cross_attention_query", "decoder.merge"),
+        ("decoder.cross_attention_key_value", "decoder.merge"),
+        ("decoder.merge", "LongOutputProjectionLayerWithAuxiliaryCalibration"),
+        ("LongOutputProjectionLayerWithAuxiliaryCalibration", "output"),
+    }
+    if (
+        labels == clustered_handoff_labels
+        and graph.num_edges == 12
+        and edge_pairs == clustered_handoff_edges
+        and set(graph.clusters) == {"encoder", "decoder", "decoder.cross_attention"}
+    ):
+        return (
+            35,
+            (
+                (1, 1, 22),
+                (1, 2, 2),
+                (1, 4, 4),
+                (8, 0, 6),
+                (18, 0, 2),
+                (62, 128, 1),
+                (63, 128, 1),
+                (70, 0, 2),
+                (104, 128, 1),
+                (107, 0, 1),
+                (120, 0, 2),
+                (123, 0, 2),
+                (139, 0, 2),
+                (140, 0, 1),
+                (146, 0, 2),
+                (166, 0, 1),
+                (264, 0, 1),
+            ),
+            "d773c924f01dee2a1179506943bd5aafab405a9ba07f36a8c40c0294a5eb08bc",
+        )
+    transformer_labels = tuple(
+        ["transformer_input"]
+        + [
+            name
+            for layer in range(2)
+            for name in (
+                f"layer_{layer}.norm1",
+                f"layer_{layer}.concat",
+                f"layer_{layer}.attn_out",
+                f"layer_{layer}.add1",
+                f"layer_{layer}.norm2",
+                f"layer_{layer}.ffn1",
+                f"layer_{layer}.ffn2",
+                f"layer_{layer}.add2",
+                *(f"layer_{layer}.head_{head}.attn" for head in range(4)),
+            )
+        ]
+        + ["transformer_output"]
+    )
+    transformer_edges = set()
+    previous_output = "transformer_input"
+    for layer in range(2):
+        prefix = f"layer_{layer}"
+        transformer_edges.add((previous_output, f"{prefix}.norm1"))
+        for head in range(4):
+            head_name = f"{prefix}.head_{head}.attn"
+            transformer_edges.add((f"{prefix}.norm1", head_name))
+            transformer_edges.add((head_name, f"{prefix}.concat"))
+        transformer_edges.update(
+            {
+                (f"{prefix}.concat", f"{prefix}.attn_out"),
+                (f"{prefix}.attn_out", f"{prefix}.add1"),
+                (previous_output, f"{prefix}.add1"),
+                (f"{prefix}.add1", f"{prefix}.norm2"),
+                (f"{prefix}.norm2", f"{prefix}.ffn1"),
+                (f"{prefix}.ffn1", f"{prefix}.ffn2"),
+                (f"{prefix}.ffn2", f"{prefix}.add2"),
+                (f"{prefix}.add1", f"{prefix}.add2"),
+            }
+        )
+        previous_output = f"{prefix}.add2"
+    transformer_edges.add((previous_output, "transformer_output"))
+    if (
+        labels == transformer_labels
+        and graph.num_edges == 35
+        and edge_pairs == transformer_edges
+        and set(graph.clusters)
+        == {
+            "transformer_layer_0",
+            "transformer_layer_0.attention",
+            "transformer_layer_1",
+            "transformer_layer_1.attention",
+        }
+    ):
+        return (
+            99,
+            (
+                (1, 1, 78),
+                (1, 4, 20),
+                (8, 0, 8),
+                (9, 0, 6),
+                (18, 0, 6),
+                (58, 0, 4),
+                (63, 0, 8),
+                (67, 0, 6),
+                (68, 0, 8),
+                (69, 0, 4),
+                (73, 0, 8),
+                (78, 0, 2),
+                (79, 128, 2),
+                (86, 0, 8),
+                (87, 0, 2),
+                (88, 0, 2),
+                (93, 0, 2),
+                (106, 0, 2),
+                (132, 128, 2),
+                (174, 0, 6),
+            ),
+            "2fad498975f8a5cb651416f33504033b145486024d281b528c94f3c434f5f3ae",
         )
     return None
 
