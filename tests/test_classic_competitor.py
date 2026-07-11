@@ -841,6 +841,7 @@ def test_graphviz_base_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None
         engine: str = "dot",
         timeout: float = 300.0,
         seed: Optional[int] = None,
+        graph_attributes: Optional[Any] = None,
     ) -> torch.Tensor:
         """Capture Graphviz utility arguments for the regression test.
 
@@ -854,13 +855,15 @@ def test_graphviz_base_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None
             Requested timeout in seconds.
         seed : int | None, default=None
             Optional Graphviz seed.
+        graph_attributes : Mapping[str, object] | None, default=None
+            Optional Graphviz graph-attribute overrides; ignored by this fake.
 
         Returns
         -------
         torch.Tensor
             Dummy position tensor with shape ``[N, 2]``.
         """
-        del seed
+        del seed, graph_attributes
         observed["engine"] = engine
         observed["timeout"] = timeout
         return torch.zeros((graph.num_nodes, 2))
@@ -887,6 +890,7 @@ def test_graphviz_base_classifies_timeout(monkeypatch: pytest.MonkeyPatch) -> No
         engine: str = "dot",
         timeout: float = 300.0,
         seed: Optional[int] = None,
+        graph_attributes: Optional[Any] = None,
     ) -> torch.Tensor:
         """Raise a timeout to validate adapter error normalization.
 
@@ -900,13 +904,15 @@ def test_graphviz_base_classifies_timeout(monkeypatch: pytest.MonkeyPatch) -> No
             Requested timeout in seconds.
         seed : int | None, default=None
             Optional Graphviz seed.
+        graph_attributes : Mapping[str, object] | None, default=None
+            Optional Graphviz graph-attribute overrides; ignored by this fake.
 
         Returns
         -------
         torch.Tensor
             This helper never returns because it always raises.
         """
-        del graph, engine, seed
+        del graph, engine, seed, graph_attributes
         raise subprocess.TimeoutExpired(cmd="sfdp", timeout=timeout)
 
     monkeypatch.setattr(
