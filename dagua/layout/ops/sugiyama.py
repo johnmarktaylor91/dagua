@@ -66,6 +66,7 @@ _SUGIYAMA_GRAPHVIZ_CLUSTER_LABEL_WIDTHS_KEY = "sugiyama_graphviz_cluster_label_w
 _GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS = 18.0
 _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES = 50
+_GRAPHVIZ_TYPED_X_MAX_EDGE_DENSITY = 2.0
 _GRAPHVIZ_VIRTUAL_NODE_CLASS = 2
 _GRAPHVIZ_SINGLETON_NODE_CLASS = 1
 _GRAPHVIZ_ORDINARY_NODE_CLASS = 0
@@ -3979,6 +3980,7 @@ def _graphviz_x_coordinate_assignment(
     graphviz_cluster_label_widths: Optional[Mapping[str, float]] = None,
     graphviz_node_order: Optional[Sequence[int]] = None,
     expanded_edge_origins: Optional[Sequence[int]] = None,
+    use_typed_inventory: bool = True,
 ) -> torch.Tensor:
     """Assign Graphviz dot x coordinates with an auxiliary network simplex.
 
@@ -4022,6 +4024,10 @@ def _graphviz_x_coordinate_assignment(
         allocates one slack node per saved fast edge.
     expanded_edge_origins : sequence of int, optional
         ``ED_to_orig`` ids aligned to expanded fast edges.
+    use_typed_inventory : bool, default=True
+        Whether the typed normal/virtual/slack inventory is structurally
+        supported for this graph. Dense long-edge graphs retain the legacy
+        inventory until fast-edge compaction has full multiset parity.
 
     Returns
     -------
@@ -4044,13 +4050,8 @@ def _graphviz_x_coordinate_assignment(
 
     graphviz_node_sep = (
         float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
-        if graphviz_left_widths is not None
-        or num_original_nodes > _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+        if graphviz_left_widths is not None or not use_typed_inventory
         else _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS
-    )
-    use_typed_inventory = (
-        num_original_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
-        or graphviz_cluster_members is not None
     )
     if use_typed_inventory:
         inventory = _build_graphviz_x_inventory(
@@ -7586,6 +7587,12 @@ class _CoordinateAssignment(Op):
         node_sep = state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)
 
         if self.use_graphviz_xcoord:
+            use_typed_inventory = self.use_graphviz_cluster_skeleton or (
+                not problem.clusters
+                and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+                and int(problem.edge_index.shape[1])
+                <= _GRAPHVIZ_TYPED_X_MAX_EDGE_DENSITY * problem.num_nodes
+            )
             graphviz_left_widths = expanded_graph.graphviz_left_widths if problem.clusters else None
             graphviz_right_widths = (
                 expanded_graph.graphviz_right_widths if problem.clusters else None
@@ -7619,11 +7626,10 @@ class _CoordinateAssignment(Op):
                     else None
                 ),
                 graphviz_node_order=(
-                    expanded_graph.graphviz_node_order
-                    if problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
-                    else None
+                    expanded_graph.graphviz_node_order if use_typed_inventory else None
                 ),
                 expanded_edge_origins=expanded_graph.expanded_edge_origins,
+                use_typed_inventory=use_typed_inventory,
             )
         else:
             expanded_positions = _coordinate_assignment(
