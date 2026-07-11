@@ -108,6 +108,20 @@ def test_graphviz_mincross_counts_sparse_wide_rank_edges() -> None:
     assert sorted(ordering[1]) == [2, 3, 4, 5, 6]
 
 
+def test_graphviz_mincross_orders_weak_components_independently() -> None:
+    """Concatenate independently minimized components in decomposition order."""
+    ranks = [[0, 2], [1, 3]]
+    edges = [(0, 1), (2, 3)]
+
+    ordering = graphviz_mincross(
+        ranks=ranks,
+        edges=edges,
+        node_order=[2, 3, 0, 1],
+    )
+
+    assert ordering == [[2, 0], [3, 1]]
+
+
 def test_graphviz_cluster_containment_keeps_rank_blocks_contiguous() -> None:
     """Collect same-rank cluster members into one mincross block."""
     ranks = [[0, 1, 2, 3], [4, 5]]
@@ -134,8 +148,8 @@ def test_graphviz_cluster_skeleton_flag_preserves_interleaved_order() -> None:
 def test_graphviz_cluster_skeleton_flag_preserves_platform_order() -> None:
     """Pin the inactive platform skeleton state without the removed x tie."""
     assert _cluster_skeleton_visible_order("kitchen_sink_platform_graph") == [
-        [16, 12],
-        [17, 13],
+        [12, 16],
+        [13, 17],
         [0, 14],
         [1, 15],
         [2],

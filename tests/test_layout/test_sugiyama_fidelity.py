@@ -510,6 +510,29 @@ def test_sugiyama_graphviz_edge_labels_create_midpoint_label_dummy() -> None:
     assert expanded.node_sizes[2, 1].item() == pytest.approx(10.0)
 
 
+def test_sugiyama_graphviz_class2_sorts_outgoing_edges_by_head() -> None:
+    """Match cgraph ``agfstout`` order before Graphviz creates virtual chains."""
+    edge_index = torch.tensor(
+        [[0, 0, 0, 1], [3, 1, 2, 3]],
+        dtype=torch.long,
+    )
+    created_node_order: list[int] = []
+
+    edge_order = _edge_processing_order(
+        edge_index=edge_index,
+        num_nodes=4,
+        use_graphviz_edge_order=True,
+        use_igraph_edge_order=False,
+        igraph_edge_order_sources=None,
+        igraph_edge_order_targets=None,
+        igraph_edge_order_ids=None,
+        created_node_order=created_node_order,
+    )
+
+    assert edge_order == [1, 2, 0, 3]
+    assert created_node_order == [0, 1, 2, 3]
+
+
 def test_sugiyama_graphviz_label_dummy_uses_asymmetric_x_widths() -> None:
     """Graphviz x constraints should use label-node ND_lw/ND_rw separately."""
     edge_index = torch.tensor([[0], [1]], dtype=torch.long)
