@@ -7,8 +7,10 @@ import shutil
 from pathlib import Path
 
 import pytest
+import torch
 from PIL import Image, ImageColor
 
+from dagua.graph import DaguaGraph
 from scripts.build_gallery_audit import (
     ARROW_DEMO_EDGE_WIDTH,
     ARROW_DEMO_NODE_FRACTION,
@@ -33,6 +35,7 @@ from scripts.build_gallery_audit import (
     _graphviz_node_attrs,
     _is_dark_background,
     _panel_widths,
+    _position_bounds_with_margin,
     _prepare_reference_render,
     _reference_card_annotation,
     _reference_card_inset,
@@ -44,6 +47,35 @@ from scripts.build_gallery_audit import (
     build_reference_items,
 )
 from scripts.generate_cosmetic_album import VARIED_EXTERNAL_LABELS
+
+
+def test_position_bounds_follow_large_coordinate_bbox() -> None:
+    """Gallery limits should follow position scale instead of fixed pixel dimensions.
+
+    Returns
+    -------
+    None
+        The node-aware bounds and proportional margin are asserted in place.
+    """
+
+    graph = DaguaGraph.from_edge_list([("left", "right")])
+    graph.compute_node_sizes()
+    positions = torch.tensor([[10_000.0, -4_000.0], [18_000.0, 8_000.0]])
+    assert graph.node_sizes is not None
+    sizes = graph.node_sizes.detach().cpu()
+    raw_x_min = float((positions[:, 0] - sizes[:, 0] / 2.0).min())
+    raw_x_max = float((positions[:, 0] + sizes[:, 0] / 2.0).max())
+    raw_y_min = float((positions[:, 1] - sizes[:, 1] / 2.0).min())
+    raw_y_max = float((positions[:, 1] + sizes[:, 1] / 2.0).max())
+
+    x_min, x_max, y_min, y_max = _position_bounds_with_margin(graph, positions)
+
+    assert x_min == pytest.approx(raw_x_min - 0.05 * (raw_x_max - raw_x_min))
+    assert x_max == pytest.approx(raw_x_max + 0.05 * (raw_x_max - raw_x_min))
+    assert y_min == pytest.approx(raw_y_min - 0.05 * (raw_y_max - raw_y_min))
+    assert y_max == pytest.approx(raw_y_max + 0.05 * (raw_y_max - raw_y_min))
+    assert x_max - x_min > 800.0
+    assert y_max - y_min > 600.0
 
 
 def test_gallery_audit_inventory_matches_expected_counts() -> None:
