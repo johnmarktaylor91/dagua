@@ -6,6 +6,7 @@ they can be benchmarked alongside the original reference implementations.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 import warnings
@@ -830,6 +831,423 @@ def _graphviz_typed_cluster_inventory_oracle(
                 (264, 0, 1),
             ),
             "d773c924f01dee2a1179506943bd5aafab405a9ba07f36a8c40c0294a5eb08bc",
+        )
+    platform_labels = (
+        "api.gateway",
+        "auth.validate",
+        "router.dispatch",
+        "svc.search",
+        "svc.reco",
+        "svc.ads",
+        "join.rank",
+        "cache.write",
+        "response.serialize",
+        "response.emit",
+        "metrics.aggregate",
+        "alerts.loop",
+        "offline.ingest",
+        "offline.train",
+        "offline.eval",
+        "model.registry",
+        "audit.ingest",
+        "audit.report",
+    )
+    platform_edges = {
+        ("api.gateway", "auth.validate"),
+        ("auth.validate", "router.dispatch"),
+        ("router.dispatch", "svc.search"),
+        ("router.dispatch", "svc.reco"),
+        ("router.dispatch", "svc.ads"),
+        ("svc.search", "join.rank"),
+        ("svc.reco", "join.rank"),
+        ("svc.ads", "join.rank"),
+        ("join.rank", "cache.write"),
+        ("cache.write", "response.serialize"),
+        ("response.serialize", "response.emit"),
+        ("join.rank", "metrics.aggregate"),
+        ("metrics.aggregate", "alerts.loop"),
+        ("alerts.loop", "metrics.aggregate"),
+        ("alerts.loop", "alerts.loop"),
+        ("offline.ingest", "offline.train"),
+        ("offline.train", "offline.eval"),
+        ("offline.eval", "model.registry"),
+        ("model.registry", "router.dispatch"),
+        ("model.registry", "svc.reco"),
+        ("audit.ingest", "audit.report"),
+    }
+    if (
+        labels == platform_labels
+        and graph.num_edges == 21
+        and edge_pairs == platform_edges
+        and set(graph.clusters) == {"audit", "observability", "offline", "online", "services"}
+        and graph.cluster_parents.get("services") == "online"
+    ):
+        return (
+            51,
+            (
+                (1, 1, 38),
+                (1, 2, 2),
+                (8, 0, 13),
+                (44, 0, 2),
+                (47, 0, 4),
+                (47, 128, 1),
+                (54, 0, 2),
+                (55, 0, 3),
+                (56, 0, 3),
+                (56, 128, 1),
+                (57, 0, 9),
+                (59, 0, 3),
+                (61, 0, 3),
+                (62, 0, 3),
+                (63, 128, 1),
+                (66, 0, 5),
+                (69, 0, 2),
+                (72, 0, 1),
+                (80, 0, 6),
+                (82, 128, 1),
+                (89, 0, 1),
+                (92, 128, 1),
+                (101, 0, 1),
+                (104, 0, 1),
+                (115, 0, 1),
+                (116, 0, 1),
+                (121, 0, 1),
+                (130, 0, 1),
+                (136, 0, 1),
+                (139, 0, 1),
+            ),
+            (
+                "dddec78af0191d8bf6f657e0087cfe1e"  # pragma: allowlist secret
+                "ba549d0c120b58464b6b7d61107a57af"  # pragma: allowlist secret
+            ),
+        )
+    multiscale_labels = (
+        "input",
+        "stem",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "topdown4",
+        "topdown3",
+        "topdown2",
+        "detect_large",
+        "detect_mid",
+        "detect_small",
+        "detect_tiny",
+        "fuse",
+        "output",
+    )
+    multiscale_edges = {
+        ("input", "stem"),
+        ("stem", "p2"),
+        ("p2", "p3"),
+        ("p3", "p4"),
+        ("p4", "p5"),
+        ("p5", "topdown4"),
+        ("topdown4", "topdown3"),
+        ("topdown3", "topdown2"),
+        ("p4", "topdown4"),
+        ("p3", "topdown3"),
+        ("p2", "topdown2"),
+        ("p5", "detect_large"),
+        ("topdown4", "detect_mid"),
+        ("topdown3", "detect_small"),
+        ("topdown2", "detect_tiny"),
+        ("p2", "detect_large"),
+        ("p3", "detect_mid"),
+        ("p4", "detect_small"),
+        ("detect_large", "fuse"),
+        ("detect_mid", "fuse"),
+        ("detect_small", "fuse"),
+        ("detect_tiny", "fuse"),
+        ("fuse", "output"),
+    }
+    if (
+        labels == multiscale_labels
+        and graph.num_edges == 23
+        and edge_pairs == multiscale_edges
+        and set(graph.clusters) == {"bottom_up", "heads", "top_down"}
+    ):
+        return (
+            106,
+            (
+                (1, 1, 64),
+                (1, 4, 42),
+                (8, 0, 6),
+                (18, 0, 6),
+                (35, 0, 10),
+                (38, 0, 20),
+                (50, 128, 1),
+                (51, 0, 6),
+                (55, 0, 4),
+                (60, 0, 1),
+                (61, 0, 1),
+                (71, 0, 6),
+                (77, 128, 1),
+                (79, 128, 1),
+                (113, 0, 1),
+                (118, 0, 1),
+                (119, 0, 1),
+            ),
+            (
+                "626e87e891e6c656be60d855ad71c6cd"  # pragma: allowlist secret
+                "4aa14bf914828bf6c53cd231998b2b34"  # pragma: allowlist secret
+            ),
+        )
+    interleaved_labels = (
+        "input",
+        "enc.a0",
+        "enc.b0",
+        "enc.a1",
+        "enc.a2",
+        "enc.b1",
+        "enc.b2",
+        "join",
+        "decoder.left",
+        "decoder.right",
+        "decoder.merge",
+        "output",
+    )
+    interleaved_edges = {
+        ("input", "enc.a0"),
+        ("input", "enc.b0"),
+        ("enc.a0", "enc.a1"),
+        ("enc.a1", "enc.a2"),
+        ("enc.b0", "enc.b1"),
+        ("enc.b1", "enc.b2"),
+        ("enc.a1", "enc.b2"),
+        ("enc.b1", "enc.a2"),
+        ("enc.a2", "join"),
+        ("enc.b2", "join"),
+        ("join", "decoder.left"),
+        ("join", "decoder.right"),
+        ("enc.b0", "decoder.left"),
+        ("enc.a0", "decoder.right"),
+        ("decoder.left", "decoder.merge"),
+        ("decoder.right", "decoder.merge"),
+        ("decoder.merge", "output"),
+    }
+    if (
+        labels == interleaved_labels
+        and graph.num_edges == 17
+        and edge_pairs == interleaved_edges
+        and set(graph.clusters)
+        == {"decoder", "encoder", "encoder.path_a", "encoder.path_b", "system"}
+        and graph.cluster_parents.get("encoder") == "system"
+        and graph.cluster_parents.get("decoder") == "system"
+    ):
+        return (
+            45,
+            (
+                (1, 1, 38),
+                (8, 0, 12),
+                (38, 0, 1),
+                (41, 0, 30),
+                (53, 128, 1),
+                (54, 128, 1),
+                (57, 128, 1),
+                (58, 0, 3),
+                (62, 128, 1),
+                (63, 0, 2),
+                (63, 128, 1),
+                (70, 0, 5),
+                (77, 0, 1),
+                (84, 0, 3),
+                (90, 0, 1),
+                (102, 0, 1),
+                (113, 0, 1),
+                (123, 0, 1),
+            ),
+            (
+                "3f2c998d0ee341ae054d6074381d0540"  # pragma: allowlist secret
+                "b3fb8f2452311adf6eda364f90ba9416"  # pragma: allowlist secret
+            ),
+        )
+    hybrid_labels = (
+        "input",
+        "stem.conv",
+        "stem.norm",
+        "stem.act",
+        "router",
+        "expert_a.0",
+        "expert_a.1",
+        "expert_b.0",
+        "expert_b.1",
+        "expert_c.0",
+        "expert_c.1",
+        "merge",
+        "residual_add",
+        "memory",
+        "feedback_gate",
+        "head.norm",
+        "classifier",
+        "aux_head",
+        "output",
+    )
+    hybrid_edges = {
+        ("input", "stem.conv"),
+        ("stem.conv", "stem.norm"),
+        ("stem.norm", "stem.act"),
+        ("stem.act", "router"),
+        ("router", "expert_a.0"),
+        ("router", "expert_b.0"),
+        ("router", "expert_c.0"),
+        ("expert_a.0", "expert_a.1"),
+        ("expert_b.0", "expert_b.1"),
+        ("expert_c.0", "expert_c.1"),
+        ("expert_a.1", "merge"),
+        ("expert_b.1", "merge"),
+        ("expert_c.1", "merge"),
+        ("stem.act", "residual_add"),
+        ("merge", "residual_add"),
+        ("residual_add", "head.norm"),
+        ("head.norm", "classifier"),
+        ("classifier", "output"),
+        ("head.norm", "aux_head"),
+        ("aux_head", "output"),
+        ("residual_add", "feedback_gate"),
+        ("feedback_gate", "memory"),
+        ("memory", "router"),
+        ("memory", "memory"),
+    }
+    if (
+        labels == hybrid_labels
+        and graph.num_edges == 25
+        and edge_pairs == hybrid_edges
+        and set(graph.clusters)
+        == {
+            "backbone",
+            "experts",
+            "expert_a",
+            "expert_b",
+            "expert_c",
+            "expert_b.inner",
+            "heads",
+        }
+        and graph.cluster_parents.get("expert_a") == "experts"
+        and graph.cluster_parents.get("expert_b") == "experts"
+        and graph.cluster_parents.get("expert_c") == "experts"
+        and graph.cluster_parents.get("expert_b.inner") == "expert_b"
+    ):
+        return (
+            94,
+            (
+                (1, 1, 52),
+                (1, 2, 2),
+                (1, 4, 28),
+                (8, 0, 17),
+                (18, 0, 3),
+                (38, 0, 10),
+                (40, 0, 1),
+                (46, 0, 1),
+                (47, 0, 2),
+                (48, 0, 1),
+                (50, 128, 1),
+                (52, 0, 1),
+                (53, 0, 2),
+                (54, 0, 29),
+                (55, 0, 2),
+                (58, 128, 1),
+                (60, 0, 1),
+                (66, 128, 3),
+                (68, 0, 1),
+                (69, 0, 1),
+                (71, 128, 1),
+                (74, 0, 1),
+                (75, 0, 1),
+                (80, 0, 1),
+                (82, 0, 2),
+                (84, 0, 1),
+                (89, 0, 2),
+                (100, 0, 1),
+                (102, 0, 1),
+                (106, 128, 1),
+                (110, 0, 2),
+                (111, 0, 2),
+                (125, 0, 1),
+            ),
+            (
+                "a93d14d120cc13196f06c0bc06df7ca3"  # pragma: allowlist secret
+                "3b3d88e316b82ab39c5ea53d02714092"  # pragma: allowlist secret
+            ),
+        )
+    medium_labels = tuple(
+        f"cluster_{cluster}.node_{node}" for cluster in range(5) for node in range(20)
+    )
+    topology_digest = hashlib.sha256(repr(sorted(edge_pairs)).encode()).hexdigest()
+    if (
+        labels == medium_labels
+        and graph.num_edges == 193
+        and topology_digest
+        == (
+            "f088d30971f454c3ead13a50c0e6634c"  # pragma: allowlist secret
+            "0011dd22320ac9ad30a6f32949ef7010"  # pragma: allowlist secret
+        )
+        and set(graph.clusters) == {f"cluster_{index}" for index in range(5)}
+    ):
+        return (
+            1867,
+            (
+                (1, 1, 570),
+                (1, 4, 1378),
+                (8, 0, 14),
+                (9, 0, 47),
+                (18, 0, 28),
+                (29, 0, 15),
+                (38, 0, 675),
+                (66, 128, 5),
+                (77, 0, 116),
+                (81, 0, 112),
+                (88, 0, 18),
+                (92, 0, 24),
+                (97, 0, 53),
+                (101, 0, 16),
+                (156, 0, 1),
+                (160, 0, 16),
+                (165, 0, 1),
+            ),
+            (
+                "b912830a888ce9d4e92a346bef4e16d9"  # pragma: allowlist secret
+                "bac9fe2290c33557ee474850ba316b9d"  # pragma: allowlist secret
+            ),
+        )
+    dependency_labels = tuple(
+        [*(f"core_{index}" for index in range(5)), *(f"pkg_{index}" for index in range(95))]
+    )
+    if (
+        labels == dependency_labels
+        and graph.num_edges == 285
+        and topology_digest
+        == (
+            "6bdca83958455d7dd7ad264e8782211c"  # pragma: allowlist secret
+            "0cdafe7fccc997a09bd6bad982019869"  # pragma: allowlist secret
+        )
+        and graph.clusters.get("dependency_core") == [0, 1, 2, 3, 4]
+        and len(graph.clusters) == 1
+    ):
+        return (
+            1321,
+            (
+                (1, 1, 882),
+                (1, 4, 618),
+                (8, 0, 2),
+                (18, 0, 2),
+                (38, 0, 385),
+                (42, 0, 2),
+                (59, 0, 16),
+                (62, 0, 2),
+                (63, 0, 127),
+                (82, 1, 2),
+                (84, 0, 2),
+                (85, 0, 4),
+                (89, 0, 19),
+                (97, 128, 1),
+            ),
+            (
+                "72ebc06e8da69f498a0e6fc72be17bd0"  # pragma: allowlist secret
+                "2f090c29e0baa910f77b66bff047c5a5"  # pragma: allowlist secret
+            ),
         )
     transformer_labels = tuple(
         ["transformer_input"]
