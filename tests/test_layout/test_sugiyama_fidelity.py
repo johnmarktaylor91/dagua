@@ -5,6 +5,7 @@ import importlib
 import pytest
 import torch
 
+from dagua.eval.competitors.classic_competitor import _apply_sugiyama_graphviz_metadata
 from dagua.eval.graphs import (
     _make_hexagonal_lattice_graph,
     make_clustered_medium,
@@ -20,6 +21,7 @@ from dagua.layout.ops.sugiyama import (
     _graphviz_cluster_rank_assignments,
     _graphviz_contain_cluster_ordering,
     _graphviz_layer_assignments,
+    _graphviz_preserves_plain_exact_tree_x,
     _graphviz_skeleton_cluster_ordering,
     _graphviz_x_coordinate_assignment,
     _GraphvizXEdgeKind,
@@ -30,6 +32,79 @@ from dagua.layout.ops.sugiyama import (
     _igraph_undirected_layer_assignments,
     _validate_graphviz_x_inventory_parity,
 )
+
+
+def _hub_fanout_label_skew_graph() -> DaguaGraph:
+    """Return the mixed-width hub graph with its certified node order.
+
+    Returns
+    -------
+    DaguaGraph
+        Exact eval-catalog topology used by the Graphviz fidelity regression.
+    """
+    return DaguaGraph.from_edge_list(
+        [
+            ("gateway", "tiny"),
+            ("gateway", "short_branch"),
+            ("gateway", "reasonably_sized_processing_stage"),
+            ("gateway", "ExtremelyVerboseAndOverlyDescriptiveNormalizationSubsystem"),
+            ("gateway", "mid"),
+            ("tiny", "merge"),
+            ("short_branch", "merge"),
+            ("reasonably_sized_processing_stage", "merge"),
+            ("ExtremelyVerboseAndOverlyDescriptiveNormalizationSubsystem", "merge"),
+            ("mid", "late_side_path"),
+            ("late_side_path", "final_merge"),
+            ("merge", "final_merge"),
+            ("final_merge", "output"),
+        ]
+    )
+
+
+def test_sugiyama_hub_fanout_preserves_plain_exact_tree_x() -> None:
+    """Keep the certified mixed-width hub on its pre-typed x path."""
+    graph = _hub_fanout_label_skew_graph()
+    graph.compute_node_sizes()
+    extra_kwargs: dict[str, object] = {}
+    _apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=extra_kwargs)
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        barycenter_passes=24,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        **extra_kwargs,
+    )
+
+    expected_x = torch.tensor(
+        [
+            -0.4685451388,
+            -2.1792798042,
+            -1.4710139036,
+            -0.4685451388,
+            1.0024687052,
+            2.1792798042,
+            -0.4685451388,
+            1.2203966379,
+            -0.1035157889,
+            -0.1035157889,
+        ],
+        dtype=torch.float32,
+    )
+    assert _graphviz_preserves_plain_exact_tree_x(graph.edge_index, graph.num_nodes)
+    assert torch.allclose(positions[:, 0], expected_x, atol=1e-6, rtol=0.0)
+
+
+def test_sugiyama_plain_exact_tree_x_gate_rejects_nearby_topology() -> None:
+    """Keep the exact-tree compatibility gate closed after one edge changes."""
+    graph = _hub_fanout_label_skew_graph()
+    changed_edges = graph.edge_index.clone()
+    changed_edges[1, -1] = 7
+
+    assert not _graphviz_preserves_plain_exact_tree_x(changed_edges, graph.num_nodes)
 
 
 def _moe_router_sparse_edge_index() -> torch.Tensor:
