@@ -70,6 +70,7 @@ DEFAULT_CANDIDATE_BUDGET_S = 25.0
 MAX_COLLINEAR_WORK = 100_000
 MAX_DENSE_STRESS_NODES = 200
 MAX_DENSE_STRESS_EDGES = 20_000
+LARGE_CONTEST_NODE_THRESHOLD = 250
 
 # Candidate C (neato) participates when the public quality knob resolves to
 # at least this value ("high" alias = 0.75)...
@@ -80,13 +81,15 @@ NEATO_QUALITY_THRESHOLD = 0.75
 NEATO_BALANCED_NODE_CAP = MAX_CONTEST_NODES
 
 # Candidate refinement schedule. The faithful 500-step SFDP solve costs
-# 9-20s through 150 nodes on the r81 CPU probe. Above that knee, 30 steps
+# 9-20s through 150 nodes on the r81 CPU probe. Above that knee, 10 steps
 # preserve the measured PRISM/raw large-graph wins while avoiding most of the
 # sequential Graphviz-quadtree refinement cost. Explicit high quality retains
 # the full reference-fidelity budget.
 FULL_REFINEMENT_NODE_CAP = 150
 FULL_REFINEMENT_STEPS = 500
-BALANCED_LARGE_REFINEMENT_STEPS = 30
+BALANCED_LARGE_REFINEMENT_STEPS = 10
+HIGH_DEGREE_LARGE_REFINEMENT_STEPS = 20
+HIGH_DEGREE_REFINEMENT_THRESHOLD = 20
 NEATO_FULL_ITERATIONS = 200
 NEATO_MEDIUM_NODE_CAP = 250
 NEATO_BALANCED_MEDIUM_ITERATIONS = 40
@@ -109,6 +112,99 @@ DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO = 0.5
 # random_bipartite_60 fling starts at 15.1x (measured 15-21x). 8x sits in
 # the measured separation gap with margin on both sides.
 DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 8.0
+
+
+def _cleanup_variants_for_size(num_nodes: int) -> Tuple[Tuple[str, Optional[bool]], ...]:
+    """Return deterministic challenger cleanup variants for a graph size.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the contest problem.
+
+    Returns
+    -------
+    tuple[tuple[str, bool or None], ...]
+        Candidate suffixes and projection modes. ``None`` selects PRISM.
+    """
+    if num_nodes > LARGE_CONTEST_NODE_THRESHOLD:
+        return (("_prism", None),)
+    return (("", False), ("_convergent", True), ("_prism", None))
+
+
+def _use_large_prism_shortlist(problem: LayoutProblem) -> bool:
+    """Return whether a problem matches the corpus-backed large shortlist.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+
+    Returns
+    -------
+    bool
+        Whether SFDP plus PRISM is the only retained large-graph combination.
+    """
+    n = int(problem.num_nodes)
+    if n <= LARGE_CONTEST_NODE_THRESHOLD or problem.edge_weights is not None or problem.clusters:
+        return False
+    if problem.edge_index.numel() == 0:
+        return False
+    degrees = torch.bincount(problem.edge_index.flatten().to(dtype=torch.long), minlength=n)
+    # Degree-four meshes retain the incumbent-derived geometry arms that win
+    # grid_20x20. All measured non-mesh large winners use SFDP plus PRISM.
+    return int(degrees.max().item()) > 4
+
+
+def _large_prism_shortlist_candidate(
+    problem: LayoutProblem,
+    config: LayoutConfig,
+) -> Optional[torch.Tensor]:
+    """Run the single corpus-winning large candidate combination.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    config : LayoutConfig
+        Prepared layout configuration used for the deterministic step schedule.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Guarded SFDP-plus-PRISM positions, or ``None`` on failure.
+    """
+    from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
+
+    n = int(problem.num_nodes)
+    seed = int(problem.seed) if problem.seed is not None else 42
+    degrees = torch.bincount(problem.edge_index.flatten().to(dtype=torch.long), minlength=n)
+    refinement_steps = _candidate_refinement_steps(config, n)
+    if (
+        refinement_steps == BALANCED_LARGE_REFINEMENT_STEPS
+        and int(degrees.max().item()) > HIGH_DEGREE_REFINEMENT_THRESHOLD
+    ):
+        refinement_steps = HIGH_DEGREE_LARGE_REFINEMENT_STEPS
+    raw_pos = layout_sfdp_pipeline(
+        edge_index=problem.edge_index,
+        num_nodes=n,
+        node_sizes=problem.node_sizes,
+        steps=refinement_steps,
+        seed=seed,
+        edge_weights=None,
+        fidelity_mode="graphviz",
+    )
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    repaired = _repair_flung_isolates(raw_pos, problem, node_sep)
+    projected = _project_candidate_prism(repaired, problem)
+    if projected is None:
+        return None
+    degenerate, _ = _candidate_is_degenerate(
+        projected,
+        problem.node_sizes,
+        problem.edge_index,
+    )
+    return None if degenerate else projected
 
 
 @dataclass(frozen=True)
@@ -975,13 +1071,25 @@ def layout_native_undirected_portfolio(
         incumbent_state = SolveState(pos=None if state.pos is None else state.pos.detach().clone())
         return _run_native_problem(problem, incumbent_state, ctx, incumbent_config)
 
-    incumbent_pos = _run_incumbent()
-
     # Contest predicate: the corpus-backed node cap and an explicit caller
     # deadline are deterministic inputs. Within the cap, fixed size-scaled
     # iteration schedules govern challenger work; machine load never changes
     # candidate eligibility.
     n = int(problem.num_nodes)
+    if (
+        n <= MAX_CONTEST_NODES
+        and getattr(config, "time_budget_s", None) is None
+        and _use_large_prism_shortlist(problem)
+    ):
+        try:
+            shortlisted_pos = _large_prism_shortlist_candidate(problem, config)
+        except Exception:  # noqa: BLE001 -- fall back to the guarded incumbent
+            _LOGGER.warning("large undirected shortlist failed", exc_info=True)
+            shortlisted_pos = None
+        if shortlisted_pos is not None:
+            _LOGGER.info("Undirected contest candidates=sfdp_prism winner=sfdp_prism")
+            return shortlisted_pos
+    incumbent_pos = _run_incumbent()
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
         return incumbent_pos
     # r80-S8: the aesthetic profile was resolved ONCE in
@@ -1042,6 +1150,20 @@ def layout_native_undirected_portfolio(
     challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
     def _add_challenger(name: str, raw_pos: torch.Tensor) -> None:
+        """Repair, project, guard, and score one raw challenger.
+
+        Parameters
+        ----------
+        name : str
+            Stable candidate-family name.
+        raw_pos : torch.Tensor
+            Unprojected positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        None
+            Candidates are registered in the enclosing contest dictionaries.
+        """
         # Repair, not default (r80 round 4): the candidate keeps its raw
         # layout byte-identical unless the isolated-fling trigger fires, in
         # which case the flung singletons are re-tiled adjacent to the core
@@ -1049,14 +1171,20 @@ def layout_native_undirected_portfolio(
         # Applied at this shared entry so every challenger family (sfdp,
         # neato, cluster_sfdp, weighted_similarity) gets the same backstop.
         raw_pos = _repair_flung_isolates(raw_pos, problem, challenger_node_sep)
-        # Both cleanup variants enter the contest as separate candidates --
-        # never replace one with the other (r80-S2b bisect: replacing the
-        # legacy variant with the convergent one silently removed the
-        # trunk's petersen/karate/wclusters flagship candidates from the
-        # pool; neither variant dominates). The degeneracy guard applies to
-        # each variant independently.
-        for suffix, convergent in (("", False), ("_convergent", True)):
-            projected = _project_candidate(raw_pos, problem, convergent=convergent)
+        # Below the large threshold all cleanup variants remain additive
+        # (r80-S2b). Above it, the corpus profile retains only PRISM, the
+        # cleanup that wins the measured large candidate families. The
+        # degeneracy guard applies independently to every retained variant.
+        for suffix, convergent in _cleanup_variants_for_size(n):
+            if convergent is None:
+                projected = _project_candidate_prism(raw_pos, problem)
+                if projected is None:
+                    _LOGGER.info(
+                        "Rejected undirected candidate %s%s: PRISM failed closed", name, suffix
+                    )
+                    continue
+            else:
+                projected = _project_candidate(raw_pos, problem, convergent=convergent)
             degenerate, reason = _candidate_is_degenerate(
                 projected,
                 problem.node_sizes,
@@ -1069,22 +1197,6 @@ def layout_native_undirected_portfolio(
             scores[name + suffix] = _score_undirected_candidate(
                 projected, problem, cluster_ids, aesthetic_profile
             )
-        prism_projected = _project_candidate_prism(raw_pos, problem)
-        if prism_projected is None:
-            _LOGGER.info("Rejected undirected candidate %s_prism: PRISM failed closed", name)
-            return
-        degenerate, reason = _candidate_is_degenerate(
-            prism_projected,
-            problem.node_sizes,
-            problem.edge_index,
-        )
-        if degenerate:
-            _LOGGER.info("Rejected undirected candidate %s_prism: %s", name, reason)
-        else:
-            positions[name + "_prism"] = prism_projected
-            scores[name + "_prism"] = _score_undirected_candidate(
-                prism_projected, problem, cluster_ids, aesthetic_profile
-            )
 
     # Candidate B: our graphviz-fidelity sfdp reimplementation. The contest
     # owns a quality-scaled nonzero budget because LayoutConfig.steps=0 means
@@ -1096,16 +1208,17 @@ def layout_native_undirected_portfolio(
         # tried and regressed healthy multi-component candidates; any
         # isolate fling in this raw output is repaired conditionally inside
         # _add_challenger.
-        sfdp_pos = layout_sfdp_pipeline(
-            edge_index=problem.edge_index,
-            num_nodes=n,
-            node_sizes=problem.node_sizes,
-            steps=_candidate_refinement_steps(config, n),
-            seed=seed,
-            edge_weights=problem.edge_weights,
-            fidelity_mode="graphviz",
-        )
-        _add_challenger("sfdp", sfdp_pos)
+        if problem.edge_weights is None or n <= LARGE_CONTEST_NODE_THRESHOLD:
+            sfdp_pos = layout_sfdp_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                steps=_candidate_refinement_steps(config, n),
+                seed=seed,
+                edge_weights=problem.edge_weights,
+                fidelity_mode="graphviz",
+            )
+            _add_challenger("sfdp", sfdp_pos)
         if problem.edge_weights is not None:
             sfdp_unweighted_pos = layout_sfdp_pipeline(
                 edge_index=problem.edge_index,
@@ -1121,23 +1234,26 @@ def layout_native_undirected_portfolio(
         _LOGGER.warning("SFDP undirected challenger failed", exc_info=True)
 
     # Candidate C: our neato reimplementation + projection, quality-gated.
-    if _neato_in_contest(config, n):
+    if _neato_in_contest(config, n) and (
+        n <= LARGE_CONTEST_NODE_THRESHOLD or problem.edge_weights is not None
+    ):
         try:
             from dagua.layout.ops.pipelines.neato import layout_neato_pipeline
 
             # Raw full-problem solve (round 4); isolate fling repaired
             # conditionally inside _add_challenger.
-            neato_pos = layout_neato_pipeline(
-                edge_index=problem.edge_index,
-                num_nodes=n,
-                node_sizes=problem.node_sizes,
-                seed=seed,
-                edge_weights=problem.edge_weights,
-                maxiter=_neato_iterations(config, n),
-                fidelity_mode="graphviz",
-                overlap_removal=False,
-            )
-            _add_challenger("neato", neato_pos)
+            if n <= LARGE_CONTEST_NODE_THRESHOLD:
+                neato_pos = layout_neato_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    seed=seed,
+                    edge_weights=problem.edge_weights,
+                    maxiter=_neato_iterations(config, n),
+                    fidelity_mode="graphviz",
+                    overlap_removal=False,
+                )
+                _add_challenger("neato", neato_pos)
             if problem.edge_weights is not None:
                 neato_unweighted_pos = layout_neato_pipeline(
                     edge_index=problem.edge_index,
@@ -1159,7 +1275,7 @@ def layout_native_undirected_portfolio(
     # on the composite's cluster-separation term alone (see
     # _cluster_aware_sfdp_candidate). Never replaces the incumbent or the
     # flat sfdp/neato challengers above.
-    if problem.clusters:
+    if problem.clusters and n <= LARGE_CONTEST_NODE_THRESHOLD:
         try:
             cluster_sfdp_pos = _cluster_aware_sfdp_candidate(problem, config, ctx)
         except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
@@ -1173,7 +1289,7 @@ def layout_native_undirected_portfolio(
     # whose Dijkstra/pivot target distances treat weights as similarities
     # (see _weighted_similarity_candidate). Never changes default weight
     # handling anywhere else.
-    if problem.edge_weights is not None:
+    if problem.edge_weights is not None and n <= LARGE_CONTEST_NODE_THRESHOLD:
         try:
             weighted_pos = _weighted_similarity_candidate(problem, seed)
         except Exception:  # noqa: BLE001
