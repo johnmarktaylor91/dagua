@@ -135,25 +135,25 @@ def test_graphviz_cluster_containment_keeps_rank_blocks_contiguous() -> None:
 
 
 def test_graphviz_cluster_skeleton_flag_uses_class1_interleaved_order() -> None:
-    """Pin interleaved ordering after source-faithful class-1 collapse."""
+    """Pin interleaved ordering after traced recursive skeleton installation."""
     assert _cluster_skeleton_visible_order("interleaved_cluster_crosstalk") == [
         [0],
         [2, 1],
         [5, 3, 8, 9],
-        [4, 6, 10],
-        [7, 11],
+        [6, 4, 10],
+        [11, 7],
     ]
 
 
 def test_graphviz_cluster_skeleton_flag_preserves_platform_order() -> None:
-    """Pin the inactive platform skeleton state without the removed x tie."""
+    """Pin the traced top-level platform cluster order."""
     assert _cluster_skeleton_visible_order("kitchen_sink_platform_graph") == [
-        [12, 16],
-        [13, 17],
+        [16, 12],
+        [17, 13],
         [0, 14],
         [1, 15],
         [2],
-        [3, 5, 4],
+        [5, 3, 4],
         [6],
         [7, 10],
         [8, 11],
