@@ -16,15 +16,18 @@ from dagua.layout.ops.pipelines.native_undirected import (
     BALANCED_LARGE_REFINEMENT_STEPS,
     DEGENERACY_MAX_ISOLATED_SPREAD_RATIO,
     FULL_REFINEMENT_STEPS,
+    LARGE_CONTEST_NODE_THRESHOLD,
     MAX_CONTEST_NODES,
     NEATO_QUALITY_THRESHOLD,
     _candidate_is_degenerate,
     _candidate_is_eligible,
     _candidate_refinement_steps,
+    _cleanup_variants_for_size,
     _neato_in_contest,
     _project_candidate_prism,
     _repair_flung_isolates,
     _score_undirected_candidate,
+    _use_large_prism_shortlist,
 )
 from dagua.layout.ops.state import LayoutProblem
 
@@ -363,7 +366,7 @@ def test_candidate_refinement_schedule_preserves_high_quality() -> None:
 
     assert _candidate_refinement_steps(balanced, 150) == FULL_REFINEMENT_STEPS
     assert _candidate_refinement_steps(balanced, 500) == BALANCED_LARGE_REFINEMENT_STEPS
-    assert BALANCED_LARGE_REFINEMENT_STEPS == 30
+    assert BALANCED_LARGE_REFINEMENT_STEPS == 10
     assert _candidate_refinement_steps(high, 500) == FULL_REFINEMENT_STEPS
 
 
@@ -435,6 +438,28 @@ def test_general_challengers_cover_500_node_corpus() -> None:
 
     assert MAX_CONTEST_NODES >= 500
     assert not hasattr(native_undirected, "MAX_GENERAL_CHALLENGER_NODES")
+
+
+def test_large_contest_runs_only_prism_cleanup() -> None:
+    """Large contests retain only the corpus-winning PRISM cleanup path."""
+    assert _cleanup_variants_for_size(LARGE_CONTEST_NODE_THRESHOLD) == (
+        ("", False),
+        ("_convergent", True),
+        ("_prism", None),
+    )
+    assert _cleanup_variants_for_size(LARGE_CONTEST_NODE_THRESHOLD + 1) == (("_prism", None),)
+
+
+def test_large_shortlist_retains_degree_four_mesh_incumbent() -> None:
+    """Large shortlist excludes mesh topology and includes higher-degree graphs."""
+    n = LARGE_CONTEST_NODE_THRESHOLD + 1
+    mesh_edges = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long)
+    mesh_problem = LayoutProblem(edge_index=mesh_edges, num_nodes=n)
+    hub_edges = torch.tensor([[0, 0, 0, 0, 0], [1, 2, 3, 4, 5]], dtype=torch.long)
+    hub_problem = LayoutProblem(edge_index=hub_edges, num_nodes=n)
+
+    assert _use_large_prism_shortlist(mesh_problem) is False
+    assert _use_large_prism_shortlist(hub_problem) is True
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
