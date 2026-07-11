@@ -44,6 +44,12 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _MIN_TARGET_DISTANCE = 1.0e-6
 
+#: SolveState.extras key carrying the resolved target unit scale (points per
+#: graph-distance unit). Written by :class:`ScaleStressTargetDistances`;
+#: consumed by :class:`PrepareWarmStartStressMajorization` so the SMACOF
+#: polish rebuilds its targets in the same unit as the scaled SGD terms.
+STRESS_TARGET_UNIT_SCALE_KEY = "stress_target_unit_scale"
+
 
 def _node_bounding_radii(node_sizes: torch.Tensor | None) -> np.ndarray:
     """Return half-diagonal node radii on CPU.
@@ -348,6 +354,190 @@ class InflateStressTargetDistances(Op):
         )
 
 
+def _mean_adjacent_radii_sum(problem: LayoutProblem) -> float:
+    """Return the mean summed endpoint radii over unique adjacent pairs.
+
+    This is the smallest center distance (in points) at which two average
+    adjacent nodes just avoid box overlap -- the natural "one graph-distance
+    unit" for point-unit stress targets.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs with optional ``node_sizes``.
+
+    Returns
+    -------
+    float
+        Mean adjacent ``r_i + r_j`` in points, or ``1.0`` when node sizes or
+        edges are absent (making unit scaling a no-op).
+    """
+    radii = _node_bounding_radii(problem.node_sizes)
+    if radii.size == 0:
+        return 1.0
+    edge_pairs = _adjacent_pair_set(problem.edge_index)
+    if not edge_pairs:
+        return 1.0
+    total = 0.0
+    for source, target in edge_pairs:
+        total += float(radii[source] + radii[target])
+    return max(total / len(edge_pairs), 1.0e-9)
+
+
+@dataclass(frozen=True)
+class ScaleStressTargetDistancesConfig:
+    """Configuration for :class:`ScaleStressTargetDistances`.
+
+    Parameters
+    ----------
+    mode : {"points", "fixed"}, default="points"
+        ``"points"`` resolves the scale as the mean adjacent summed node
+        radii (see ``_mean_adjacent_radii_sum``); ``"fixed"`` uses ``value``.
+    value : float, default=1.0
+        Explicit scale used when ``mode="fixed"``.
+    targets : tuple[str, ...], default=("pivot", "exact", "sgd2")
+        Target representations to scale. ``"pivot"`` scales Pivot-MDS rows
+        (``state.pivot_distances``); ``"exact"`` scales exact Stress-SGD term
+        arrays (recomputing their inverse-square weights) and any dense
+        ``state.distance_matrix`` (the approximate-mode pivot rows written by
+        ``stress_sgd_prepare_terms``); ``"sgd2"`` scales the prepared
+        SGD2-multi stress terms in ``state.extras["sgd2_prepared"]``.
+    """
+
+    mode: str = "points"
+    value: float = 1.0
+    targets: Tuple[str, ...] = ("pivot", "exact", "sgd2")
+
+
+@register_op
+@dataclass(frozen=True)
+class ScaleStressTargetDistances(Op):
+    """Scale stress target distances from graph units into point units.
+
+    Why this op exists (r81-P2 measured defect): the native stress core
+    builds targets in GRAPH-DISTANCE units (hops, or weighted costs) while
+    node boxes live in POINTS. Size-aware inflation then pushes ADJACENT
+    targets to ``d + r_i + r_j`` (~50-60pt) but leaves every non-adjacent
+    pair at its bare hop distance (2-5pt) -- i.e. deep inside each other's
+    node boxes. The optimizer is forced to emit overlap soup (measured on
+    sbm_4x30: 2838 of 7140 pairs overlapping raw) and the overlap projector
+    does the real layout. Scaling ALL targets by one unit ``K`` (mean
+    adjacent ``r_i + r_j``) before inflation removes the contradiction:
+    measured composite gains of +3 to +49 on the undirected loser class,
+    including small_world_500 42.9 -> 67.3 (beats the best external 66.4).
+
+    The op scales whichever configured target representations are present
+    and records the resolved unit in
+    ``state.extras[STRESS_TARGET_UNIT_SCALE_KEY]`` so later stages that
+    rebuild targets from scratch (SMACOF polish) can apply the same unit.
+    """
+
+    config: ScaleStressTargetDistancesConfig = field(
+        default_factory=ScaleStressTargetDistancesConfig
+    )
+
+    name: ClassVar[str] = "scale_stress_target_distances"
+    category: ClassVar[OpCategory] = OpCategory.DISTANCE
+    reads: ClassVar[Tuple[str, ...]] = ("pivot_distances", "distance_matrix", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pivot_distances", "distance_matrix", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Scale the configured target representations by the unit scale.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs (node sizes and edges resolve the unit).
+        state : SolveState
+            Mutable state carrying distance targets.
+        ctx : RuntimeContext
+            Runtime context. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with the configured targets scaled and the resolved unit
+            recorded in ``extras``.
+        """
+        del ctx
+        if self.config.mode not in {"points", "fixed"}:
+            raise ValueError("ScaleStressTargetDistances mode must be 'points' or 'fixed'.")
+        if self.config.value <= 0.0:
+            raise ValueError("ScaleStressTargetDistances value must be positive.")
+        unknown = set(self.config.targets) - {"pivot", "exact", "sgd2"}
+        if unknown:
+            raise ValueError(f"Unknown ScaleStressTargetDistances targets: {sorted(unknown)}")
+
+        scale = (
+            _mean_adjacent_radii_sum(problem)
+            if self.config.mode == "points"
+            else float(self.config.value)
+        )
+        state.extras[STRESS_TARGET_UNIT_SCALE_KEY] = scale
+        if scale == 1.0:
+            return state
+
+        if "pivot" in self.config.targets and state.pivot_distances is not None:
+            state.pivot_distances = state.pivot_distances * scale
+        if "exact" in self.config.targets:
+            if "stress_sgd_distances" in state.extras:
+                distances = np.asarray(state.extras["stress_sgd_distances"]) * scale
+                state.extras["stress_sgd_distances"] = distances
+                state.extras["stress_sgd_weights"] = (1.0 / np.square(distances)).astype(
+                    distances.dtype,
+                    copy=False,
+                )
+            if state.distance_matrix is not None:
+                state.distance_matrix = state.distance_matrix * scale
+        if "sgd2" in self.config.targets and "sgd2_prepared" in state.extras:
+            state.extras["sgd2_prepared"] = self._scale_sgd2_prepared(
+                state.extras["sgd2_prepared"],
+                scale,
+            )
+        return state
+
+    @staticmethod
+    def _scale_sgd2_prepared(prepared: object, scale: float) -> object:
+        """Return a prepared SGD2-multi state with scaled stress targets.
+
+        Parameters
+        ----------
+        prepared : object
+            Frozen ``_PreparedState`` from ``sgd2_multi_init_state``.
+        scale : float
+            Unit scale in points per graph-distance unit.
+
+        Returns
+        -------
+        object
+            New prepared state with scaled distances and recomputed
+            inverse-square weights (same ``1 / (d^2 + eps)`` form used by
+            ``sgd2_multi._build_stress_terms``).
+        """
+        import dataclasses
+
+        from dagua.layout.ops.sgd2_multi import _EPS as _SGD2_EPS
+
+        replacements: dict[str, torch.Tensor] = {}
+        all_pairs = getattr(prepared, "all_pairs_distances", None)
+        if all_pairs is not None:
+            replacements["all_pairs_distances"] = all_pairs * scale
+        stress_distances = getattr(prepared, "stress_distances", None)
+        if stress_distances is not None:
+            scaled = stress_distances * scale
+            replacements["stress_distances"] = scaled
+            replacements["stress_weights"] = 1.0 / (scaled.square() + _SGD2_EPS)
+        if not replacements:
+            return prepared
+        return dataclasses.replace(prepared, **replacements)
+
+
 @dataclass(frozen=True)
 class PrepareWarmStartStressMajorizationConfig:
     """Configuration for :class:`PrepareWarmStartStressMajorization`.
@@ -424,6 +614,13 @@ class PrepareWarmStartStressMajorization(Op):
         fill_value = max_distance + 1.0 if problem.num_nodes > 1 else 0.0
         target_distances = np.where(finite_mask, raw_distances, fill_value).astype(np.float64)
         np.fill_diagonal(target_distances, 0.0)
+
+        # Rebuilt-from-scratch targets must share the unit of the (possibly
+        # point-scaled) SGD terms; see ScaleStressTargetDistances. Default
+        # 1.0 keeps the historical behavior bit-identical.
+        unit_scale = float(state.extras.get(STRESS_TARGET_UNIT_SCALE_KEY, 1.0))
+        if unit_scale != 1.0:
+            target_distances *= unit_scale
 
         if self.config.size_aware:
             target_distances = _inflate_dense_adjacent_distances(
@@ -659,4 +856,7 @@ __all__ = [
     "ResetConvergence",
     "RunWarmStartStressSGDApproximateSchedule",
     "RunWarmStartStressSGDApproximateScheduleConfig",
+    "STRESS_TARGET_UNIT_SCALE_KEY",
+    "ScaleStressTargetDistances",
+    "ScaleStressTargetDistancesConfig",
 ]
