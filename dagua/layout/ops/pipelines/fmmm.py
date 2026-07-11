@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import math
 import os
-import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
@@ -13,13 +12,11 @@ import torch
 from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.cluster_geometry import ClusterTree
 from dagua.layout.ops.fmmm import (
-    _GALAXY_CHOICE_LOWER,
-    _build_hierarchy,
     _FinalizeFMMMPositions,
     _InitializeCoarsestLevel,
     _InitializeFMMMState,
     _InitializeFMMMStateConfig,
-    _prolong_positions,
+    _RandomNodeSet,
     _RefineCoarsestLevel,
     _SingleLevelFallback,
     _UncoarsenLoop,
@@ -56,6 +53,10 @@ _OGDF_FMMM_EPSILON = 0.1
 _OGDF_FMMM_BILLION = 1_000_000_000
 _OGDF_FMMM_MAAR_TIP_IMPROVEMENT = 0.99999
 _OGDF_FMMM_NEARLY_EQUAL_DELTA = 1.0e-10
+_OGDF_FMMM_NMM_MIN_NODES = 175
+_OGDF_FMMM_NMM_PARTICLES_PER_LEAF = 25
+_OGDF_FMMM_NMM_PRECISION = 4
+_OGDF_FMMM_RANDOM_TRIES = 20
 _OGDF_FMMM_IDEAL_EDGE_LENGTH = _OGDF_FMMM_UNIT_EDGE_LENGTH + 2.0 * math.sqrt(
     (_OGDF_FMMM_DEFAULT_NODE_WIDTH / 2.0) ** 2 + (_OGDF_FMMM_DEFAULT_NODE_HEIGHT / 2.0) ** 2
 )
@@ -147,6 +148,698 @@ class _OgdfMt19937:
                 value = self.raw()
             return int(low) + (value // scaling)
         raise ValueError("OGDF FMMM port only supports 32-bit or smaller ranges.")
+
+    def random(self) -> float:
+        """Return OGDF FMMM's open-interval random fraction.
+
+        Returns
+        -------
+        float
+            ``(randomNumber(1, BILLION) + 1) / (BILLION + 2)``.
+        """
+        return float(self.randint(1, _OGDF_FMMM_BILLION) + 1) / float(_OGDF_FMMM_BILLION + 2)
+
+
+@dataclass
+class _OgdfNmmCell:
+    """One cell in OGDF's reduced ``QuadTreeNM``.
+
+    Parameters
+    ----------
+    level : int
+        Absolute quadtree level.
+    down_left : tuple[float, float]
+        Lower-left corner of the small cell.
+    boxlength : float
+        Side length of the small cell.
+    nodes : list[int]
+        Particles stored by a leaf, in graph-node order.
+    parent : _OgdfNmmCell, optional
+        Parent cell in the reduced tree.
+    """
+
+    level: int
+    down_left: Tuple[float, float]
+    boxlength: float
+    nodes: list[int]
+    parent: Optional["_OgdfNmmCell"] = None
+    children: list["_OgdfNmmCell"] = field(default_factory=list)
+    center: complex = 0j
+    multipole: list[complex] = field(default_factory=list)
+    local: list[complex] = field(default_factory=list)
+    interaction: list["_OgdfNmmCell"] = field(default_factory=list)
+    direct_one: list["_OgdfNmmCell"] = field(default_factory=list)
+    direct_two: list["_OgdfNmmCell"] = field(default_factory=list)
+    multipole_sources: list["_OgdfNmmCell"] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Initialize mutable cell collections.
+
+        Returns
+        -------
+        None
+            Initializes per-cell tree and expansion storage.
+        """
+        self.children = []
+        self.multipole = [0j] * (_OGDF_FMMM_NMM_PRECISION + 1)
+        self.local = [0j] * (_OGDF_FMMM_NMM_PRECISION + 1)
+        self.interaction = []
+        self.direct_one = []
+        self.direct_two = []
+        self.multipole_sources = []
+
+    def is_leaf(self) -> bool:
+        """Return whether this reduced-tree cell has no children.
+
+        Returns
+        -------
+        bool
+            ``True`` for a leaf cell.
+        """
+        return not self.children
+
+
+def _ogdf_nmm_nearly_equal(first: float, second: float) -> bool:
+    """Return OGDF ``numexcept::nearly_equal`` for two doubles.
+
+    Parameters
+    ----------
+    first : float
+        First value.
+    second : float
+        Reference value whose relative interval is tested.
+
+    Returns
+    -------
+    bool
+        Whether ``first`` lies within ``1e-10`` relative error of ``second``.
+    """
+    if second > 0.0:
+        lower = second * (1.0 - _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+        upper = second * (1.0 + _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+    else:
+        lower = second * (1.0 + _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+        upper = second * (1.0 - _OGDF_FMMM_NEARLY_EQUAL_DELTA)
+    return lower <= first <= upper
+
+
+def _ogdf_nmm_smallest_cell(
+    cell: _OgdfNmmCell,
+    positions: Sequence[Sequence[float]],
+) -> None:
+    """Shrink a cell iteratively exactly like OGDF's default NMM option.
+
+    Parameters
+    ----------
+    cell : _OgdfNmmCell
+        Cell to shrink in place.
+    positions : Sequence[Sequence[float]]
+        Current particle positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    None
+        Updates the cell level, corner, and side length in place.
+    """
+    if not cell.nodes:
+        return
+    x_values = [positions[node][0] for node in cell.nodes]
+    y_values = [positions[node][1] for node in cell.nodes]
+    min_x = min(x_values)
+    max_x = max(x_values)
+    min_y = min(y_values)
+    max_y = max(y_values)
+    if min_x == max_x and min_y == max_y:
+        return
+    while max_x - min_x >= 1.0e-300 or max_y - min_y >= 1.0e-300:
+        half = cell.boxlength / 2.0
+        x0, y0 = cell.down_left
+        mid_x = x0 + half
+        mid_y = y0 + half
+        left = x0 <= min_x and max_x < mid_x
+        right = mid_x <= min_x and max_x < x0 + cell.boxlength
+        bottom = y0 <= min_y and max_y < mid_y
+        top = mid_y <= min_y and max_y < y0 + cell.boxlength
+        if left and top:
+            cell.down_left = (x0, mid_y)
+        elif right and top:
+            cell.down_left = (mid_x, mid_y)
+        elif left and bottom:
+            cell.down_left = (x0, y0)
+        elif right and bottom:
+            cell.down_left = (mid_x, y0)
+        else:
+            return
+        cell.level += 1
+        cell.boxlength = half
+
+
+def _ogdf_nmm_build_reduced_tree(
+    positions: Sequence[Sequence[float]],
+    boxlength: float,
+    down_left_corner: Tuple[float, float],
+) -> _OgdfNmmCell:
+    """Build OGDF's reduced bucket quadtree for NMM.
+
+    Parameters
+    ----------
+    positions : Sequence[Sequence[float]]
+        Current particle positions with shape ``[N, 2]``.
+    boxlength : float
+        Current FMMM computational-box side length.
+    down_left_corner : tuple[float, float]
+        Current computational-box lower-left corner.
+
+    Returns
+    -------
+    _OgdfNmmCell
+        Root of the reduced quadtree.
+
+    Notes
+    -----
+    OGDF's ``SubtreeBySubtree`` builder materializes complete temporary
+    subtrees, removes empty and degenerate nodes, and collapses every subtree
+    holding at most 25 particles. Constructing the resulting canonical reduced
+    tree directly gives the same retained cells and LT/RT/LB/RB traversal order.
+    """
+    root = _OgdfNmmCell(0, down_left_corner, boxlength, list(range(len(positions))))
+
+    def reduce(cell: _OgdfNmmCell) -> _OgdfNmmCell:
+        _ogdf_nmm_smallest_cell(cell, positions)
+        if len(cell.nodes) <= _OGDF_FMMM_NMM_PARTICLES_PER_LEAF:
+            return cell
+        half = cell.boxlength / 2.0
+        x0, y0 = cell.down_left
+        mid_x = x0 + half
+        mid_y = y0 + half
+        buckets: list[list[int]] = [[], [], [], []]
+        for node in cell.nodes:
+            x_coord, y_coord = positions[node]
+            right = x_coord >= mid_x
+            top = y_coord >= mid_y
+            bucket = 1 if right and top else 0 if top else 3 if right else 2
+            buckets[bucket].append(node)
+        corners = ((x0, mid_y), (mid_x, mid_y), (x0, y0), (mid_x, y0))
+        retained: list[_OgdfNmmCell] = []
+        for nodes, corner in zip(buckets, corners):
+            if not nodes:
+                continue
+            child = _OgdfNmmCell(cell.level + 1, corner, half, nodes, parent=cell)
+            retained.append(reduce(child))
+        if len(retained) == 1:
+            only = retained[0]
+            only.parent = cell.parent
+            return only
+        cell.nodes = []
+        cell.children = retained
+        for child in retained:
+            child.parent = cell
+        return cell
+
+    return reduce(root)
+
+
+def _ogdf_nmm_form_multipoles(
+    cell: _OgdfNmmCell,
+    positions: Sequence[Sequence[float]],
+    rng: _OgdfMt19937,
+    leaves: list[_OgdfNmmCell],
+) -> None:
+    """Form OGDF multipole coefficients bottom-up in tree order.
+
+    Parameters
+    ----------
+    cell : _OgdfNmmCell
+        Current reduced-tree cell.
+    positions : Sequence[Sequence[float]]
+        Current particle positions with shape ``[N, 2]``.
+    rng : _OgdfMt19937
+        Shared OGDF global RNG stream used to waggle cell centers.
+    leaves : list[_OgdfNmmCell]
+        Output leaf list in OGDF preorder.
+
+    Returns
+    -------
+    None
+        Populates centers and multipole coefficients in place.
+    """
+    random_y = float(rng.randint(1, _OGDF_FMMM_BILLION) + 1) / float(_OGDF_FMMM_BILLION + 2)
+    cell.center = complex(
+        cell.down_left[0] + cell.boxlength * 0.5,
+        cell.down_left[1] + cell.boxlength * (0.5 + 0.001 * random_y),
+    )
+    if cell.is_leaf():
+        leaves.append(cell)
+        cell.multipole[0] = complex(float(len(cell.nodes)), 0.0)
+        for node in cell.nodes:
+            delta = complex(positions[node][0], positions[node][1]) - cell.center
+            power = delta
+            for order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+                cell.multipole[order] += -power / float(order)
+                power *= delta
+        return
+    for child in cell.children:
+        _ogdf_nmm_form_multipoles(child, positions, rng, leaves)
+        shift = child.center - cell.center
+        powers = [1.0 + 0j]
+        for _ in range(_OGDF_FMMM_NMM_PRECISION):
+            powers.append(powers[-1] * shift)
+        cell.multipole[0] += child.multipole[0]
+        for order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+            value = -child.multipole[0] * powers[order] / float(order)
+            for source_order in range(1, order + 1):
+                value += (
+                    child.multipole[source_order]
+                    * powers[order - source_order]
+                    * float(math.comb(order - 1, source_order - 1))
+                )
+            cell.multipole[order] += value
+
+
+def _ogdf_nmm_well_separated(first: _OgdfNmmCell, second: _OgdfNmmCell) -> bool:
+    """Return OGDF's asymmetric small-cell well-separation predicate.
+
+    Parameters
+    ----------
+    first : _OgdfNmmCell
+        First reduced-tree cell.
+    second : _OgdfNmmCell
+        Second reduced-tree cell.
+
+    Returns
+    -------
+    bool
+        Whether the cells are well separated.
+    """
+    first_box = [
+        first.down_left[0],
+        first.down_left[0] + first.boxlength,
+        first.down_left[1],
+        first.down_left[1] + first.boxlength,
+    ]
+    second_box = [
+        second.down_left[0],
+        second.down_left[0] + second.boxlength,
+        second.down_left[1],
+        second.down_left[1] + second.boxlength,
+    ]
+    if first.boxlength <= second.boxlength:
+        second_box = [
+            second.down_left[0] - second.boxlength,
+            second.down_left[0] + 2.0 * second.boxlength,
+            second.down_left[1] - second.boxlength,
+            second.down_left[1] + 2.0 * second.boxlength,
+        ]
+    else:
+        first_box = [
+            first.down_left[0] - first.boxlength,
+            first.down_left[0] + 2.0 * first.boxlength,
+            first.down_left[1] - first.boxlength,
+            first.down_left[1] + 2.0 * first.boxlength,
+        ]
+    x_overlap = not (
+        first_box[1] <= second_box[0]
+        or _ogdf_nmm_nearly_equal(first_box[1], second_box[0])
+        or second_box[1] <= first_box[0]
+        or _ogdf_nmm_nearly_equal(second_box[1], first_box[0])
+    )
+    y_overlap = not (
+        first_box[3] <= second_box[2]
+        or _ogdf_nmm_nearly_equal(first_box[3], second_box[2])
+        or second_box[3] <= first_box[2]
+        or _ogdf_nmm_nearly_equal(second_box[3], first_box[2])
+    )
+    return not (x_overlap and y_overlap)
+
+
+def _ogdf_nmm_bordering(first: _OgdfNmmCell, second: _OgdfNmmCell) -> bool:
+    """Return OGDF's reduced-cell bordering predicate.
+
+    Parameters
+    ----------
+    first : _OgdfNmmCell
+        First reduced-tree cell.
+    second : _OgdfNmmCell
+        Second reduced-tree cell.
+
+    Returns
+    -------
+    bool
+        Whether the two dyadic cells border one another.
+    """
+    first_box = [
+        first.down_left[0],
+        first.down_left[0] + first.boxlength,
+        first.down_left[1],
+        first.down_left[1] + first.boxlength,
+    ]
+    second_box = [
+        second.down_left[0],
+        second.down_left[0] + second.boxlength,
+        second.down_left[1],
+        second.down_left[1] + second.boxlength,
+    ]
+
+    def less_equal(left: float, right: float) -> bool:
+        return left <= right or _ogdf_nmm_nearly_equal(left, right)
+
+    def contained(one: Sequence[float], two: Sequence[float]) -> bool:
+        return (
+            less_equal(two[0], one[0])
+            and less_equal(one[1], two[1])
+            and less_equal(two[2], one[2])
+            and less_equal(one[3], two[3])
+        ) or (
+            less_equal(one[0], two[0])
+            and less_equal(two[1], one[1])
+            and less_equal(one[2], two[2])
+            and less_equal(two[3], one[3])
+        )
+
+    if contained(first_box, second_box):
+        return False
+    if first.boxlength <= second.boxlength:
+        moving, fixed, length = first_box, second_box, first.boxlength
+    else:
+        moving, fixed, length = second_box, first_box, second.boxlength
+    if moving[0] < fixed[0]:
+        moving[0] += length
+        moving[1] += length
+    elif moving[1] > fixed[1]:
+        moving[0] -= length
+        moving[1] -= length
+    if moving[2] < fixed[2]:
+        moving[2] += length
+        moving[3] += length
+    elif moving[3] > fixed[3]:
+        moving[2] -= length
+        moving[3] -= length
+    return contained(first_box, second_box)
+
+
+def _ogdf_nmm_complex_log(value: complex) -> complex:
+    """Evaluate OGDF's guarded complex logarithm.
+
+    Parameters
+    ----------
+    value : complex
+        Complex argument.
+
+    Returns
+    -------
+    complex
+        Complex logarithm after OGDF's negative-real-axis perturbation.
+    """
+    import cmath
+
+    if value.real <= 0.0 and value.imag == 0.0:
+        value += 1.0e-7
+    return cmath.log(value)
+
+
+def _ogdf_nmm_add_shifted_parent_local(cell: _OgdfNmmCell) -> None:
+    """Shift the parent's local expansion to a child cell.
+
+    Parameters
+    ----------
+    cell : _OgdfNmmCell
+        Child receiving its parent's expansion.
+
+    Returns
+    -------
+    None
+        Adds translated coefficients in place.
+    """
+    if cell.parent is None:
+        return
+    shift = cell.center - cell.parent.center
+    powers = [1.0 + 0j]
+    for _ in range(_OGDF_FMMM_NMM_PRECISION):
+        powers.append(powers[-1] * shift)
+    for order in range(_OGDF_FMMM_NMM_PRECISION + 1):
+        value = 0j
+        for source_order in range(order, _OGDF_FMMM_NMM_PRECISION + 1):
+            value += (
+                float(math.comb(source_order, order))
+                * cell.parent.local[source_order]
+                * powers[source_order - order]
+            )
+        cell.local[order] += value
+
+
+def _ogdf_nmm_add_local(source: _OgdfNmmCell, target: _OgdfNmmCell) -> None:
+    """Translate one cell's multipole expansion into a target local expansion.
+
+    Parameters
+    ----------
+    source : _OgdfNmmCell
+        Source multipole cell.
+    target : _OgdfNmmCell
+        Target local-expansion cell.
+
+    Returns
+    -------
+    None
+        Adds translated coefficients in place.
+    """
+    delta = target.center - source.center
+    target.local[0] += source.multipole[0] * _ogdf_nmm_complex_log(delta)
+    power = delta
+    for order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+        target.local[0] += source.multipole[order] / power
+        power *= delta
+    delta_power = delta
+    for local_order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+        sign_plus = 1.0 if (local_order + 1) % 2 == 0 else -1.0
+        sign = -sign_plus
+        value = sign_plus * source.multipole[0] / (delta_power * float(local_order))
+        factor = sign / delta_power
+        delta_power *= delta
+        inner = 0j
+        multipole_power = delta
+        for source_order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+            inner += (
+                float(math.comb(local_order + source_order - 1, source_order - 1))
+                * source.multipole[source_order]
+                / multipole_power
+            )
+            multipole_power *= delta
+        target.local[local_order] += value + factor * inner
+
+
+def _ogdf_nmm_add_leaf_local(
+    positions: Sequence[Sequence[float]],
+    source: _OgdfNmmCell,
+    target: _OgdfNmmCell,
+) -> None:
+    """Add direct particle potentials to an interior target expansion.
+
+    Parameters
+    ----------
+    positions : Sequence[Sequence[float]]
+        Current particle positions with shape ``[N, 2]``.
+    source : _OgdfNmmCell
+        Source leaf cell.
+    target : _OgdfNmmCell
+        Target interior cell.
+
+    Returns
+    -------
+    None
+        Adds local coefficients in place.
+    """
+    for node in source.nodes:
+        delta = target.center - complex(positions[node][0], positions[node][1])
+        target.local[0] += _ogdf_nmm_complex_log(delta)
+        power = delta
+        for order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+            sign = 1.0 if (order + 1) % 2 == 0 else -1.0
+            target.local[order] += sign / (power * float(order))
+            power *= delta
+
+
+def _ogdf_nmm_form_interactions(
+    positions: Sequence[Sequence[float]],
+    cell: _OgdfNmmCell,
+) -> None:
+    """Build OGDF WSPRLS lists and local expansions recursively.
+
+    Parameters
+    ----------
+    positions : Sequence[Sequence[float]]
+        Current particle positions with shape ``[N, 2]``.
+    cell : _OgdfNmmCell
+        Current target cell.
+
+    Returns
+    -------
+    None
+        Populates interaction lists and local expansions in place.
+    """
+    queue = (
+        list(cell.children)
+        if cell.parent is None
+        else list(cell.parent.direct_one) + list(cell.parent.interaction)
+    )
+    interaction: list[_OgdfNmmCell] = []
+    local_sources: list[_OgdfNmmCell] = []
+    leaf_local_sources: list[_OgdfNmmCell] = []
+    direct_one: list[_OgdfNmmCell] = []
+    direct_two: list[_OgdfNmmCell] = []
+    while queue:
+        selected = queue.pop(0)
+        if _ogdf_nmm_well_separated(cell, selected):
+            local_sources.append(selected)
+        elif cell.level < selected.level:
+            interaction.append(selected)
+        elif not selected.is_leaf():
+            queue.extend(selected.children)
+        elif _ogdf_nmm_bordering(cell, selected):
+            direct_one.append(selected)
+        elif selected is not cell and cell.is_leaf():
+            direct_two.append(selected)
+        elif selected is not cell:
+            leaf_local_sources.append(selected)
+    cell.interaction = interaction
+    cell.direct_one = direct_one
+    cell.direct_two = direct_two
+    _ogdf_nmm_add_shifted_parent_local(cell)
+    for source in local_sources:
+        _ogdf_nmm_add_local(source, cell)
+    for source in leaf_local_sources:
+        _ogdf_nmm_add_leaf_local(positions, source, cell)
+    if not cell.is_leaf():
+        for child in cell.children:
+            _ogdf_nmm_form_interactions(positions, child)
+        return
+    pending = list(interaction)
+    while pending:
+        selected = pending.pop(0)
+        if selected.is_leaf():
+            if _ogdf_nmm_bordering(cell, selected):
+                direct_one.append(selected)
+            else:
+                direct_two.append(selected)
+        elif _ogdf_nmm_bordering(cell, selected):
+            pending.extend(selected.children)
+        else:
+            cell.multipole_sources.append(selected)
+    cell.direct_one = direct_one
+    cell.direct_two = direct_two
+
+
+def _ogdf_nmm_pair_force(
+    positions: Sequence[Sequence[float]],
+    source: int,
+    target: int,
+) -> Tuple[float, float]:
+    """Return the exact repulsive force of ``source`` on ``target``.
+
+    Parameters
+    ----------
+    positions : Sequence[Sequence[float]]
+        Current particle positions with shape ``[N, 2]``.
+    source : int
+        Source particle index.
+    target : int
+        Target particle index.
+
+    Returns
+    -------
+    tuple[float, float]
+        Repulsive force vector.
+    """
+    dx = positions[target][0] - positions[source][0]
+    dy = positions[target][1] - positions[source][1]
+    distance = math.sqrt(dx * dx + dy * dy)
+    if distance == 0.0:
+        return 0.0, 0.0
+    scalar = 1.0 / (distance * distance)
+    return scalar * dx, scalar * dy
+
+
+def _ogdf_fmmm_nmm_repulsive_forces(
+    positions: list[list[float]],
+    boxlength: float,
+    down_left_corner: Tuple[float, float],
+    rng: _OgdfMt19937,
+) -> list[list[float]]:
+    """Calculate repulsive forces with OGDF's New Multipole Method.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Current particle positions with shape ``[N, 2]``.
+    boxlength : float
+        Current FMMM computational-box side length.
+    down_left_corner : tuple[float, float]
+        Current computational-box lower-left corner.
+    rng : _OgdfMt19937
+        Shared OGDF global RNG stream.
+
+    Returns
+    -------
+    list[list[float]]
+        NMM repulsive force vectors with shape ``[N, 2]``.
+    """
+    root = _ogdf_nmm_build_reduced_tree(positions, boxlength, down_left_corner)
+    leaves: list[_OgdfNmmCell] = []
+    _ogdf_nmm_form_multipoles(root, positions, rng, leaves)
+    _ogdf_nmm_form_interactions(positions, root)
+    direct = [[0.0, 0.0] for _ in positions]
+    local_force = [[0.0, 0.0] for _ in positions]
+    multipole_force = [[0.0, 0.0] for _ in positions]
+    for leaf in leaves:
+        for node in leaf.nodes:
+            value = 0j
+            power = 1.0 + 0j
+            delta = complex(positions[node][0], positions[node][1]) - leaf.center
+            for order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+                value += float(order) * leaf.local[order] * power
+                power *= delta
+            local_force[node][0] = value.real
+            local_force[node][1] = -value.imag
+        for source_cell in leaf.multipole_sources:
+            for node in leaf.nodes:
+                delta = complex(positions[node][0], positions[node][1]) - source_cell.center
+                inverse_power = 1.0 / delta
+                value = source_cell.multipole[0] * inverse_power
+                for order in range(1, _OGDF_FMMM_NMM_PRECISION + 1):
+                    inverse_power /= delta
+                    value -= float(order) * source_cell.multipole[order] * inverse_power
+                multipole_force[node][0] += value.real
+                multipole_force[node][1] -= value.imag
+        for source_pos, source in enumerate(leaf.nodes[:-1]):
+            for target in leaf.nodes[source_pos + 1 :]:
+                fx, fy = _ogdf_nmm_pair_force(positions, source, target)
+                direct[target][0] += fx
+                direct[target][1] += fy
+                direct[source][0] -= fx
+                direct[source][1] -= fy
+        for neighbor in leaf.direct_one:
+            if leaf.boxlength > neighbor.boxlength or (
+                leaf.boxlength == neighbor.boxlength and leaf.down_left < neighbor.down_left
+            ):
+                for target in leaf.nodes:
+                    for source in neighbor.nodes:
+                        fx, fy = _ogdf_nmm_pair_force(positions, source, target)
+                        direct[target][0] += fx
+                        direct[target][1] += fy
+                        direct[source][0] -= fx
+                        direct[source][1] -= fy
+        for source_cell in leaf.direct_two:
+            for target in leaf.nodes:
+                for source in source_cell.nodes:
+                    fx, fy = _ogdf_nmm_pair_force(positions, source, target)
+                    direct[target][0] += fx
+                    direct[target][1] += fy
+    return [
+        [
+            direct[node][0] + local_force[node][0] + multipole_force[node][0],
+            direct[node][1] + local_force[node][1] + multipole_force[node][1],
+        ]
+        for node in range(len(positions))
+    ]
 
 
 def _ogdf_fmmm_norm(point: Tuple[float, float]) -> float:
@@ -249,7 +942,11 @@ def _ogdf_fmmm_update_box(positions: list[list[float]]) -> Tuple[float, Tuple[fl
     return boxlength, down_left
 
 
-def _ogdf_fmmm_random_placement(num_nodes: int, seed: int) -> list[list[float]]:
+def _ogdf_fmmm_random_placement(
+    num_nodes: int,
+    seed: int,
+    rng: Optional[_OgdfMt19937] = None,
+) -> list[list[float]]:
     """Create OGDF FMMM random initial positions.
 
     Parameters
@@ -258,13 +955,16 @@ def _ogdf_fmmm_random_placement(num_nodes: int, seed: int) -> list[list[float]]:
         Number of nodes to place.
     seed : int
         OGDF ``randSeed`` value.
+    rng : _OgdfMt19937, optional
+        Shared RNG stream. If omitted, a freshly seeded stream is created.
 
     Returns
     -------
     list[list[float]]
         Mutable coordinates in OGDF output units.
     """
-    rng = _OgdfMt19937(seed)
+    if rng is None:
+        rng = _OgdfMt19937(seed)
     boxlength, _ = _ogdf_fmmm_initial_box(num_nodes)
     positions: list[list[float]] = []
     for _ in range(num_nodes):
@@ -791,6 +1491,7 @@ def _ogdf_fmmm_force_iteration(
     fine_tuning_step: int,
     cool_factor: float,
     ideal_edge_lengths: Optional[Sequence[float]] = None,
+    rng: Optional[_OgdfMt19937] = None,
 ) -> Tuple[float, Tuple[float, float], float]:
     """Execute one OGDF FMMM force iteration.
 
@@ -814,6 +1515,8 @@ def _ogdf_fmmm_force_iteration(
         Incoming cool factor.
     ideal_edge_lengths : Sequence[float], optional
         Desired edge lengths aligned with ``edges`` for multilevel fidelity.
+    rng : _OgdfMt19937, optional
+        Shared OGDF RNG stream. Required when the level uses NMM.
 
     Returns
     -------
@@ -830,6 +1533,36 @@ def _ogdf_fmmm_force_iteration(
         down_left_corner,
         boxlength,
     )
+    if len(positions) >= _OGDF_FMMM_NMM_MIN_NODES:
+        if rng is None:
+            raise ValueError("OGDF NMM force calculation requires a shared RNG stream.")
+        attr_list = _ogdf_fmmm_attractive_forces(positions, edges, ideal_edge_lengths)
+        rep_list = _ogdf_fmmm_nmm_repulsive_forces(
+            positions,
+            boxlength,
+            down_left_corner,
+            rng,
+        )
+        force_list, cool_factor = _ogdf_fmmm_combined_forces(
+            attr_list,
+            rep_list,
+            boxlength,
+            iter_index,
+            fine_tuning_step,
+            cool_factor,
+            average_ideal_edge_length,
+        )
+        force_list = _ogdf_fmmm_prevent_oscillations(
+            force_list,
+            last_movement,
+            iter_index,
+        )
+        for node_index, force in enumerate(force_list):
+            positions[node_index][0] += force[0]
+            positions[node_index][1] += force[1]
+        boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
+        return boxlength, down_left_corner, cool_factor
+
     position_tensor = torch.tensor(positions, dtype=torch.float64)
     attr = _ogdf_fmmm_tensor_attractive_forces(position_tensor, edges, ideal_edge_lengths)
     rep = _ogdf_fmmm_tensor_repulsive_forces(position_tensor)
@@ -1439,6 +2172,514 @@ def _ogdf_fmmm_level_edge_lengths(edge_lengths: torch.Tensor) -> list[float]:
     return [float(length) for length in edge_lengths.detach().to(device="cpu").tolist()]
 
 
+@dataclass
+class _OgdfFmmmLevel:
+    """One exact OGDF FMMM hierarchy level.
+
+    Parameters
+    ----------
+    edges : list[tuple[int, int]]
+        Simple undirected edges in OGDF graph iteration order.
+    edge_lengths : list[float]
+        Desired edge lengths aligned with ``edges``.
+    num_nodes : int
+        Node count on this level.
+    masses : list[int]
+        Collapsed-node masses used by galaxy selection.
+    """
+
+    edges: list[Tuple[int, int]]
+    edge_lengths: list[float]
+    num_nodes: int
+    masses: list[int]
+
+
+@dataclass
+class _OgdfFmmmHierarchyStep:
+    """Exact metadata for one OGDF hierarchy transition and prolongation.
+
+    Parameters
+    ----------
+    mapping : list[int]
+        Fine-node to coarse-node mapping.
+    node_types : list[int]
+        OGDF sun, planet, planet-with-moons, and moon type codes.
+    dedicated_sun : list[int]
+        Fine-level sun assigned to every node.
+    dedicated_sun_distance : list[float]
+        Path distance from each node to its dedicated sun.
+    pm_nodes : list[int]
+        Planet-with-moons nodes in fine graph order.
+    moon_children : list[list[int]]
+        Moon lists aligned with fine nodes.
+    lambda_values : list[list[float]]
+        Inter-solar interpolation fractions in fine edge order.
+    neighbor_suns : list[list[int]]
+        Neighboring fine-level suns aligned with lambda values.
+    moon_edges : set[int]
+        Fine edge ids selected as moon edges.
+    """
+
+    mapping: list[int]
+    node_types: list[int]
+    dedicated_sun: list[int]
+    dedicated_sun_distance: list[float]
+    pm_nodes: list[int]
+    moon_children: list[list[int]]
+    lambda_values: list[list[float]]
+    neighbor_suns: list[list[int]]
+    moon_edges: set[int]
+
+
+def _ogdf_fmmm_level_adjacency(level: _OgdfFmmmLevel) -> list[list[Tuple[int, int]]]:
+    """Build adjacency entries in OGDF edge insertion order.
+
+    Parameters
+    ----------
+    level : _OgdfFmmmLevel
+        Hierarchy level.
+
+    Returns
+    -------
+    list[list[tuple[int, int]]]
+        Per-node ``(neighbor, edge_id)`` entries.
+    """
+    adjacency: list[list[Tuple[int, int]]] = [[] for _ in range(level.num_nodes)]
+    for edge_id, (source, target) in enumerate(level.edges):
+        adjacency[source].append((target, edge_id))
+        adjacency[target].append((source, edge_id))
+    return adjacency
+
+
+def _ogdf_fmmm_coarsen_level(
+    level: _OgdfFmmmLevel,
+    seed: int,
+) -> Tuple[_OgdfFmmmHierarchyStep, _OgdfFmmmLevel]:
+    """Collapse one level with OGDF's solar-system galaxy partition.
+
+    Parameters
+    ----------
+    level : _OgdfFmmmLevel
+        Fine hierarchy level.
+    seed : int
+        ``randSeed`` used to reseed OGDF's private ``Set`` stream per level.
+
+    Returns
+    -------
+    tuple[_OgdfFmmmHierarchyStep, _OgdfFmmmLevel]
+        Exact prolongation metadata and coarse graph.
+    """
+    adjacency = _ogdf_fmmm_level_adjacency(level)
+    star_masses = [
+        level.masses[node] + sum(level.masses[neighbor] for neighbor, _ in neighbors)
+        for node, neighbors in enumerate(adjacency)
+    ]
+    selectable = _RandomNodeSet.from_star_masses(star_masses)
+    rng = _OgdfMt19937(seed)
+    mapping = [-1] * level.num_nodes
+    node_types = [0] * level.num_nodes
+    dedicated_sun = [-1] * level.num_nodes
+    dedicated_distance = [0.0] * level.num_nodes
+    sun_to_coarse: Dict[int, int] = {}
+
+    while not selectable.empty():
+        sun = selectable.get_random_node_with_lowest_star_mass(  # type: ignore[arg-type]
+            rng,
+            _OGDF_FMMM_RANDOM_TRIES,
+        )
+        coarse_node = len(sun_to_coarse)
+        sun_to_coarse[sun] = coarse_node
+        mapping[sun] = coarse_node
+        node_types[sun] = 1
+        dedicated_sun[sun] = sun
+        planets: list[int] = []
+        for planet, edge_id in adjacency[sun]:
+            node_types[planet] = 2
+            dedicated_sun[planet] = sun
+            dedicated_distance[planet] = level.edge_lengths[edge_id]
+            mapping[planet] = coarse_node
+            planets.append(planet)
+        for planet in planets:
+            selectable.delete(planet)
+        for planet in planets:
+            for possible_moon, _ in adjacency[planet]:
+                selectable.delete(possible_moon)
+
+    moon_children: list[list[int]] = [[] for _ in range(level.num_nodes)]
+    moon_edges: set[int] = set()
+    for node in range(level.num_nodes):
+        if node_types[node] != 0:
+            continue
+        nearest = -1
+        nearest_edge = -1
+        nearest_distance = 0.0
+        for neighbor, edge_id in adjacency[node]:
+            if node_types[neighbor] not in (2, 3):
+                continue
+            distance = level.edge_lengths[edge_id]
+            if nearest < 0 or nearest_distance > distance:
+                nearest = neighbor
+                nearest_edge = edge_id
+                nearest_distance = distance
+        if nearest < 0:
+            raise RuntimeError("OGDF galaxy partition produced a moon without a planet neighbor.")
+        moon_edges.add(nearest_edge)
+        sun = dedicated_sun[nearest]
+        dedicated_sun[node] = sun
+        dedicated_distance[node] = nearest_distance + dedicated_distance[nearest]
+        mapping[node] = sun_to_coarse[sun]
+        node_types[node] = 4
+        node_types[nearest] = 3
+        moon_children[nearest].append(node)
+
+    coarse_masses = [0] * len(sun_to_coarse)
+    for coarse_node in mapping:
+        coarse_masses[coarse_node] += 1
+    lambda_values: list[list[float]] = [[] for _ in range(level.num_nodes)]
+    neighbor_suns: list[list[int]] = [[] for _ in range(level.num_nodes)]
+    coarse_edges: list[Tuple[int, int]] = []
+    coarse_lengths: list[float] = []
+    pair_to_edge: dict[Tuple[int, int], int] = {}
+    for edge_id, (source, target) in enumerate(level.edges):
+        source_sun = dedicated_sun[source]
+        target_sun = dedicated_sun[target]
+        if source_sun == target_sun:
+            continue
+        coarse_source = sun_to_coarse[source_sun]
+        coarse_target = sun_to_coarse[target_sun]
+        new_length = (
+            dedicated_distance[source] + level.edge_lengths[edge_id] + dedicated_distance[target]
+        )
+        lambda_values[source].append(dedicated_distance[source] / new_length)
+        lambda_values[target].append(dedicated_distance[target] / new_length)
+        neighbor_suns[source].append(target_sun)
+        neighbor_suns[target].append(source_sun)
+        pair = (
+            (coarse_source, coarse_target)
+            if coarse_source < coarse_target
+            else (coarse_target, coarse_source)
+        )
+        coarse_edge_id = pair_to_edge.get(pair)
+        if coarse_edge_id is None:
+            coarse_edge_id = len(coarse_edges)
+            pair_to_edge[pair] = coarse_edge_id
+            coarse_edges.append((coarse_source, coarse_target))
+            coarse_lengths.append(new_length)
+    step = _OgdfFmmmHierarchyStep(
+        mapping=mapping,
+        node_types=node_types,
+        dedicated_sun=dedicated_sun,
+        dedicated_sun_distance=dedicated_distance,
+        pm_nodes=[node for node in range(level.num_nodes) if node_types[node] == 3],
+        moon_children=moon_children,
+        lambda_values=lambda_values,
+        neighbor_suns=neighbor_suns,
+        moon_edges=moon_edges,
+    )
+    return step, _OgdfFmmmLevel(
+        edges=coarse_edges,
+        edge_lengths=coarse_lengths,
+        num_nodes=len(sun_to_coarse),
+        masses=coarse_masses,
+    )
+
+
+def _ogdf_fmmm_build_hierarchy(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    seed: int,
+) -> Tuple[list[_OgdfFmmmLevel], list[_OgdfFmmmHierarchyStep]]:
+    """Build OGDF's exact FMMM hierarchy from a simple input graph.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Input edges with shape ``[2, E]``.
+    num_nodes : int
+        Fine graph node count.
+    seed : int
+        OGDF ``randSeed``.
+
+    Returns
+    -------
+    tuple[list[_OgdfFmmmLevel], list[_OgdfFmmmHierarchyStep]]
+        Levels from fine to coarse and transition metadata.
+    """
+    base_edges = _ogdf_fmmm_simple_edges(edge_index)
+    levels = [_OgdfFmmmLevel(base_edges, [1.0] * len(base_edges), num_nodes, [1] * num_nodes)]
+    steps: list[_OgdfFmmmHierarchyStep] = []
+    bad_edge_count = 0
+    while levels[-1].num_nodes > 50:
+        if len(levels) > 1 and len(levels[-1].edges) > 0.8 * float(len(levels[-2].edges)):
+            if bad_edge_count < 5:
+                bad_edge_count += 1
+            else:
+                break
+        step, coarse = _ogdf_fmmm_coarsen_level(levels[-1], seed)
+        if coarse.num_nodes >= levels[-1].num_nodes:
+            break
+        steps.append(step)
+        levels.append(coarse)
+    return levels, steps
+
+
+def _ogdf_fmmm_waggled_position(
+    source: Sequence[float],
+    target: Sequence[float],
+    lambda_value: float,
+    rng: _OgdfMt19937,
+) -> list[float]:
+    """Return OGDF's waggled interpolation between two points.
+
+    Parameters
+    ----------
+    source : Sequence[float]
+        Source point.
+    target : Sequence[float]
+        Target point.
+    lambda_value : float
+        Interpolation fraction.
+    rng : _OgdfMt19937
+        Shared OGDF RNG stream.
+
+    Returns
+    -------
+    list[float]
+        Waggled point.
+    """
+    center = [
+        source[0] + lambda_value * (target[0] - source[0]),
+        source[1] + lambda_value * (target[1] - source[1]),
+    ]
+    radius = 0.05 * math.hypot(target[0] - source[0], target[1] - source[1]) * rng.random()
+    angle = 2.0 * math.pi * rng.random()
+    return [center[0] + math.cos(angle) * radius, center[1] + math.sin(angle) * radius]
+
+
+def _ogdf_fmmm_sector_position(
+    center: Sequence[float],
+    radius: float,
+    angle_one: float,
+    angle_two: float,
+    rng: _OgdfMt19937,
+) -> list[float]:
+    """Place a node randomly on an OGDF placement sector.
+
+    Parameters
+    ----------
+    center : Sequence[float]
+        Dedicated sun position.
+    radius : float
+        Dedicated sun distance.
+    angle_one : float
+        Sector start angle.
+    angle_two : float
+        Sector end angle.
+    rng : _OgdfMt19937
+        Shared OGDF RNG stream.
+
+    Returns
+    -------
+    list[float]
+        Point on the selected circular sector.
+    """
+    angle = angle_one + (angle_two - angle_one) * rng.random()
+    return [center[0] + math.cos(angle) * radius, center[1] + math.sin(angle) * radius]
+
+
+def _ogdf_fmmm_prolong_positions(
+    coarse_positions: Sequence[Sequence[float]],
+    coarse_level: _OgdfFmmmLevel,
+    fine_level: _OgdfFmmmLevel,
+    step: _OgdfFmmmHierarchyStep,
+    rng: _OgdfMt19937,
+) -> list[list[float]]:
+    """Prolong a level with OGDF's ``InitialPlacementMult::Advanced`` path.
+
+    Parameters
+    ----------
+    coarse_positions : Sequence[Sequence[float]]
+        Coarse positions with shape ``[N_coarse, 2]``.
+    coarse_level : _OgdfFmmmLevel
+        Coarse hierarchy level.
+    fine_level : _OgdfFmmmLevel
+        Fine hierarchy level.
+    step : _OgdfFmmmHierarchyStep
+        Fine-to-coarse transition metadata.
+    rng : _OgdfMt19937
+        Shared OGDF global RNG stream.
+
+    Returns
+    -------
+    list[list[float]]
+        Fine positions with shape ``[N_fine, 2]``.
+    """
+    positions = [[0.0, 0.0] for _ in range(fine_level.num_nodes)]
+    placed = [False] * fine_level.num_nodes
+    for node, node_type in enumerate(step.node_types):
+        if node_type == 1:
+            positions[node] = list(coarse_positions[step.mapping[node]])
+            placed[node] = True
+    coarse_adjacency = _ogdf_fmmm_level_adjacency(coarse_level)
+    angles: dict[int, Tuple[float, float]] = {}
+    for coarse_node in range(coarse_level.num_nodes):
+        center = coarse_positions[coarse_node]
+        adjacent = [coarse_positions[neighbor] for neighbor, _ in coarse_adjacency[coarse_node]]
+        angle_one = 0.0
+        angle_two = 0.0
+        if not adjacent:
+            angle_two = 2.0 * math.pi
+        elif len(adjacent) == 1:
+            angle_one = _ogdf_fmmm_angle(
+                (center[0], center[1]),
+                (center[0] + 1.0, center[1]),
+                (adjacent[0][0], adjacent[0][1]),
+            )
+            angle_two = angle_one + math.pi
+        else:
+            for index, point in enumerate(adjacent[:10]):
+                candidate = _ogdf_fmmm_angle(
+                    (center[0], center[1]),
+                    (center[0] + 1.0, center[1]),
+                    (point[0], point[1]),
+                )
+                gap = min(
+                    _ogdf_fmmm_angle(
+                        (center[0], center[1]),
+                        (point[0], point[1]),
+                        (other[0], other[1]),
+                    )
+                    for other_index, other in enumerate(adjacent)
+                    if other_index != index and other != point
+                )
+                if index == 0 or gap > angle_two - angle_one:
+                    angle_one = candidate
+                    angle_two = candidate + gap
+            if angle_one == angle_two:
+                angle_two = angle_one + math.pi
+        sun = next(
+            node
+            for node, mapped in enumerate(step.mapping)
+            if mapped == coarse_node and step.node_types[node] == 1
+        )
+        angles[sun] = (angle_one, angle_two)
+    fine_adjacency = _ogdf_fmmm_level_adjacency(fine_level)
+
+    def barycenter(candidates: Sequence[Sequence[float]]) -> list[float]:
+        return [
+            sum(point[0] for point in candidates) / float(len(candidates)),
+            sum(point[1] for point in candidates) / float(len(candidates)),
+        ]
+
+    def calculated_position(
+        sun_position: Sequence[float],
+        neighbor_position: Sequence[float],
+        sun_distance: float,
+        neighbor_distance: float,
+    ) -> list[float]:
+        distance = math.hypot(
+            sun_position[0] - neighbor_position[0],
+            sun_position[1] - neighbor_position[1],
+        )
+        interpolation = (
+            sun_distance + (distance - sun_distance - neighbor_distance) / 2.0
+        ) / distance
+        return _ogdf_fmmm_waggled_position(
+            sun_position,
+            neighbor_position,
+            interpolation,
+            rng,
+        )
+
+    for node, node_type in enumerate(step.node_types):
+        if node_type not in (2, 4):
+            continue
+        sun = step.dedicated_sun[node]
+        candidates: list[list[float]] = []
+        for neighbor, edge_id in fine_adjacency[node]:
+            if (
+                step.dedicated_sun[neighbor] == sun
+                and step.node_types[neighbor] != 1
+                and placed[neighbor]
+            ):
+                candidates.append(
+                    calculated_position(
+                        positions[sun],
+                        positions[neighbor],
+                        step.dedicated_sun_distance[node],
+                        fine_level.edge_lengths[edge_id],
+                    )
+                )
+        if step.lambda_values[node]:
+            for fraction, neighbor_sun in zip(
+                step.lambda_values[node],
+                step.neighbor_suns[node],
+            ):
+                candidates.append(
+                    _ogdf_fmmm_waggled_position(
+                        positions[sun],
+                        positions[neighbor_sun],
+                        fraction,
+                        rng,
+                    )
+                )
+        elif not candidates:
+            angle_one, angle_two = angles[sun]
+            candidates.append(
+                _ogdf_fmmm_sector_position(
+                    positions[sun],
+                    step.dedicated_sun_distance[node],
+                    angle_one,
+                    angle_two,
+                    rng,
+                )
+            )
+        positions[node] = barycenter(candidates)
+        placed[node] = True
+    for node in step.pm_nodes:
+        sun = step.dedicated_sun[node]
+        candidates = []
+        for neighbor, edge_id in fine_adjacency[node]:
+            if (
+                edge_id not in step.moon_edges
+                and step.dedicated_sun[neighbor] == sun
+                and step.node_types[neighbor] != 1
+                and placed[neighbor]
+            ):
+                candidates.append(
+                    calculated_position(
+                        positions[sun],
+                        positions[neighbor],
+                        step.dedicated_sun_distance[node],
+                        fine_level.edge_lengths[edge_id],
+                    )
+                )
+        for moon in step.moon_children[node]:
+            candidates.append(
+                _ogdf_fmmm_waggled_position(
+                    positions[sun],
+                    positions[moon],
+                    step.dedicated_sun_distance[node] / step.dedicated_sun_distance[moon],
+                    rng,
+                )
+            )
+        for fraction, neighbor_sun in zip(
+            step.lambda_values[node],
+            step.neighbor_suns[node],
+        ):
+            candidates.append(
+                _ogdf_fmmm_waggled_position(
+                    positions[sun],
+                    positions[neighbor_sun],
+                    fraction,
+                    rng,
+                )
+            )
+        positions[node] = barycenter(candidates)
+        placed[node] = True
+    return positions
+
+
 def _ogdf_fmmm_scale_hierarchy_lengths(
     levels: Sequence[Any],
     hierarchy_steps: Sequence[Any],
@@ -1458,7 +2699,12 @@ def _ogdf_fmmm_scale_hierarchy_lengths(
         Mutates the private hierarchy objects in place.
     """
     for level in levels:
-        level.edge_lengths = level.edge_lengths * _OGDF_FMMM_IDEAL_EDGE_LENGTH
+        if isinstance(level.edge_lengths, list):
+            level.edge_lengths = [
+                length * _OGDF_FMMM_IDEAL_EDGE_LENGTH for length in level.edge_lengths
+            ]
+        else:
+            level.edge_lengths = level.edge_lengths * _OGDF_FMMM_IDEAL_EDGE_LENGTH
     for step in hierarchy_steps:
         step.dedicated_sun_distance = [
             float(distance) * _OGDF_FMMM_IDEAL_EDGE_LENGTH
@@ -1513,6 +2759,7 @@ def _ogdf_fmmm_postprocess_fidelity(
     boxlength: float,
     down_left_corner: Tuple[float, float],
     cool_factor: float,
+    rng: Optional[_OgdfMt19937] = None,
 ) -> Tuple[float, Tuple[float, float], float]:
     """Run OGDF FMMM level-0 cooldown, fine-tune, resize, pack, and floor.
 
@@ -1532,6 +2779,8 @@ def _ogdf_fmmm_postprocess_fidelity(
         Current computational box lower-left corner.
     cool_factor : float
         Current OGDF cool factor.
+    rng : _OgdfMt19937, optional
+        Shared OGDF RNG stream used when the finest level takes the NMM path.
 
     Returns
     -------
@@ -1553,6 +2802,7 @@ def _ogdf_fmmm_postprocess_fidelity(
             1,
             cool_factor,
             ideal_edge_lengths,
+            rng,
         )
 
     if edges:
@@ -1570,6 +2820,7 @@ def _ogdf_fmmm_postprocess_fidelity(
             2,
             cool_factor,
             ideal_edge_lengths,
+            rng,
         )
 
     if edges:
@@ -1611,36 +2862,31 @@ def _layout_ogdf_fmmm_multilevel_fidelity(
     torch.Tensor
         Final OGDF-coordinate positions with shape ``[N, 2]``.
     """
-    levels, hierarchy_steps = _build_hierarchy(
+    levels, hierarchy_steps = _ogdf_fmmm_build_hierarchy(
         edge_index,
         num_nodes,
-        seed=seed,
-        edge_weights=None,
-        galaxy_choice=_GALAXY_CHOICE_LOWER,
-        sum_parallel_weights=False,
+        seed,
     )
     _ogdf_fmmm_scale_hierarchy_lengths(levels, hierarchy_steps)
     max_level = len(levels) - 1
-    positions = _ogdf_fmmm_random_placement(levels[max_level].num_nodes, seed)
+    force_rng = _OgdfMt19937(seed)
+    positions = _ogdf_fmmm_random_placement(levels[max_level].num_nodes, seed, force_rng)
     boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
-    prolong_rng = random.Random(seed)
 
     for act_level in range(max_level, -1, -1):
         if act_level < max_level:
-            coarse_positions = torch.tensor(positions, dtype=torch.float64)
-            fine_positions = _prolong_positions(
-                coarse_positions,
+            positions = _ogdf_fmmm_prolong_positions(
+                positions,
+                levels[act_level + 1],
+                levels[act_level],
                 hierarchy_steps[act_level],
-                prolong_rng,
+                force_rng,
             )
-            positions = [
-                [float(point[0].item()), float(point[1].item())] for point in fine_positions
-            ]
             boxlength, down_left_corner = _ogdf_fmmm_update_box(positions)
 
         level = levels[act_level]
-        edges = _ogdf_fmmm_level_edges(level.edge_index)
-        ideal_edge_lengths = _ogdf_fmmm_level_edge_lengths(level.edge_lengths)
+        edges = level.edges
+        ideal_edge_lengths = level.edge_lengths
         last_movement = [[0.0, 0.0] for _ in range(level.num_nodes)]
         cool_factor = 1.0
         max_iterations = _ogdf_fmmm_max_mult_iter(
@@ -1660,6 +2906,7 @@ def _layout_ogdf_fmmm_multilevel_fidelity(
                 0,
                 cool_factor,
                 ideal_edge_lengths,
+                force_rng,
             )
 
         if act_level == 0:
@@ -1671,6 +2918,7 @@ def _layout_ogdf_fmmm_multilevel_fidelity(
                 boxlength,
                 down_left_corner,
                 cool_factor,
+                force_rng,
             )
 
     del boxlength, down_left_corner, cool_factor
