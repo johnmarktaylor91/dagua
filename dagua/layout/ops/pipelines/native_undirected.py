@@ -80,12 +80,13 @@ NEATO_QUALITY_THRESHOLD = 0.75
 NEATO_BALANCED_NODE_CAP = MAX_CONTEST_NODES
 
 # Candidate refinement schedule. The faithful 500-step SFDP solve costs
-# 9-20s through 150 nodes on the r81 CPU probe. Above that knee, 150 steps
-# keeps the measured 500-node solve near the 60s default envelope; explicit
-# high quality retains the full reference-fidelity budget.
+# 9-20s through 150 nodes on the r81 CPU probe. Above that knee, 30 steps
+# preserve the measured PRISM/raw large-graph wins while avoiding most of the
+# sequential Graphviz-quadtree refinement cost. Explicit high quality retains
+# the full reference-fidelity budget.
 FULL_REFINEMENT_NODE_CAP = 150
 FULL_REFINEMENT_STEPS = 500
-BALANCED_LARGE_REFINEMENT_STEPS = 150
+BALANCED_LARGE_REFINEMENT_STEPS = 30
 NEATO_FULL_ITERATIONS = 200
 NEATO_MEDIUM_NODE_CAP = 250
 NEATO_BALANCED_MEDIUM_ITERATIONS = 40
