@@ -426,7 +426,6 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
         k: int,
         which: str,
         ncv: int,
-        v0: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Capture sparse eigensolver sizing.
 
@@ -440,15 +439,12 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
             ARPACK eigenvalue selector.
         ncv : int
             Requested Lanczos vector count.
-        v0 : numpy.ndarray
-            Deterministic ARPACK start vector with shape ``[N]``.
-
         Returns
         -------
         tuple[numpy.ndarray, numpy.ndarray]
             Eigenvalues and eigenvectors.
         """
-        captured.update({"k": k, "which": which, "ncv": ncv, "v0_size": int(v0.shape[0])})
+        captured.update({"k": k, "which": which, "ncv": ncv})
         return np.array([0.0, 1.0, 2.0]), np.eye(laplacian.shape[0], k)
 
     monkeypatch.setattr(embed_ops.sparse_linalg, "eigsh", _eigsh)
@@ -460,12 +456,44 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
         networkx_fidelity=True,
     )
 
-    assert captured == {"k": 3, "which": "SM", "ncv": 22, "v0_size": 500}
+    assert captured == {"k": 3, "which": "SM", "ncv": 22}
 
 
-def test_networkx_fidelity_disconnected_sparse_fallback_returns_zero_space() -> None:
-    """Disconnected sparse unnormalized Laplacians should not truncate zero modes."""
+def test_networkx_fidelity_disconnected_sparse_uses_reference_arpack_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disconnected fidelity layouts should preserve NetworkX's ARPACK semantics."""
     laplacian = _multi_component_path_laplacian(component_size=125, component_count=4)
+    captured: dict[str, object] = {}
+
+    def _eigsh(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Capture the exact sparse call used for a disconnected Laplacian.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.csr_matrix
+            Sparse Laplacian matrix with shape ``[N, N]``.
+        k : int
+            Requested eigenpair count.
+        which : str
+            ARPACK eigenvalue selector.
+        ncv : int
+            Requested Lanczos vector count.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            Synthetic eigenpairs spanning three zero modes.
+        """
+        captured.update({"shape": matrix.shape, "k": k, "which": which, "ncv": ncv})
+        return np.zeros(k, dtype=np.float64), np.eye(matrix.shape[0], k, dtype=np.float64)
+
+    monkeypatch.setattr(embed_ops.sparse_linalg, "eigsh", _eigsh)
 
     coordinates = _sparse_spectral_embedding(
         laplacian=laplacian,
@@ -473,9 +501,9 @@ def test_networkx_fidelity_disconnected_sparse_fallback_returns_zero_space() -> 
         symmetric=True,
         networkx_fidelity=True,
     )
-    residual = np.linalg.norm(laplacian @ coordinates) / np.linalg.norm(coordinates)
 
-    assert residual <= 1.0e-8
+    assert captured == {"shape": (500, 500), "k": 3, "which": "SM", "ncv": 22}
+    np.testing.assert_array_equal(coordinates, np.eye(500, 3)[:, 1:3])
 
 
 def test_networkx_fidelity_random_walk_sparse_uses_symmetric_path(

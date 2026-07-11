@@ -846,7 +846,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         "classic_spectral_unnormalized",
         "classic_spectral",
         "Spectral (unnormalized)",
-        {"normalization": "unnormalized"},
+        {"normalization": "unnormalized", "fidelity_mode": "networkx"},
         "nx_spectral",
         {"dim": 2, "scale": 1.0},
         True,
