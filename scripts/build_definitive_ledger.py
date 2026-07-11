@@ -658,7 +658,7 @@ GLOSSARY = [
     (
         TIER_NO_CANONICAL_REFERENCE,
         "No canonical reference exists for the variant (e.g. Graphviz SFDP ignores the "
-        "theta/steps/p_neg2 attributes, so those variants have nothing real to match).",
+        "theta/steps (maxiter) attributes, so those variants have nothing real to match).",
     ),
 ]
 
