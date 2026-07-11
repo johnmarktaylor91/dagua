@@ -170,7 +170,12 @@ def layout_sugiyama_pipeline(
     graphviz_cluster_label_widths: Optional[Dict[str, float]] = None,
     graphviz_apply_cluster_constraints: bool = False,
     graphviz_enable_cluster_skeleton: bool = False,
-    graphviz_expected_x_inventory: Optional[Tuple[int, Tuple[Tuple[int, int, int], ...]]] = None,
+    graphviz_expected_x_inventory: Optional[
+        Union[
+            Tuple[int, Tuple[Tuple[int, int, int], ...]],
+            Tuple[int, Tuple[Tuple[int, int, int], ...], str],
+        ]
+    ] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
