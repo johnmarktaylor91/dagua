@@ -10,12 +10,19 @@ from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline,
     _choose_native_pipeline_baseline,
+    _unshear_bimodal_edges,
 )
 from dagua.layout.ops.pipelines.native_undirected import (
+    BALANCED_LARGE_REFINEMENT_STEPS,
     DEGENERACY_MAX_ISOLATED_SPREAD_RATIO,
+    FULL_REFINEMENT_STEPS,
+    MAX_CONTEST_NODES,
     NEATO_QUALITY_THRESHOLD,
     _candidate_is_degenerate,
+    _candidate_is_eligible,
+    _candidate_refinement_steps,
     _neato_in_contest,
+    _project_candidate_prism,
     _repair_flung_isolates,
     _score_undirected_candidate,
 )
@@ -336,12 +343,7 @@ def test_collapsed_challenger_loses_to_sane_incumbent() -> None:
 
 
 def test_neato_contest_quality_gate() -> None:
-    """Candidate C joins at quality >= high, or at balanced for small graphs.
-
-    The balanced-quality node cap is probe-derived: every balanced-quality
-    contest win for neato in P8_PORTFOLIO_PROBE.md sits at n <= 80 where its
-    SMACOF loop converges in seconds; above the cap it is slow and never won.
-    """
+    """Candidate C joins throughout the contest cap with scheduled work."""
     from dagua.layout.ops.pipelines.native_undirected import NEATO_BALANCED_NODE_CAP
 
     balanced = LayoutConfig(seed=42, quality="balanced")
@@ -351,7 +353,87 @@ def test_neato_contest_quality_gate() -> None:
     assert _neato_in_contest(balanced, NEATO_BALANCED_NODE_CAP) is True
     assert _neato_in_contest(high, NEATO_BALANCED_NODE_CAP + 1) is True
     assert NEATO_QUALITY_THRESHOLD == 0.75
-    assert NEATO_BALANCED_NODE_CAP == 80
+    assert NEATO_BALANCED_NODE_CAP == MAX_CONTEST_NODES
+
+
+def test_candidate_refinement_schedule_preserves_high_quality() -> None:
+    """Large balanced solves are bounded while high quality keeps 500 steps."""
+    balanced = LayoutConfig(seed=42, quality="balanced")
+    high = LayoutConfig(seed=42, quality="high")
+
+    assert _candidate_refinement_steps(balanced, 150) == FULL_REFINEMENT_STEPS
+    assert _candidate_refinement_steps(balanced, 500) == BALANCED_LARGE_REFINEMENT_STEPS
+    assert _candidate_refinement_steps(high, 500) == FULL_REFINEMENT_STEPS
+
+
+def test_prism_candidate_finishes_residual_overlaps_to_zero() -> None:
+    """PRISM plus its residual scale loop reaches literal zero overlaps."""
+    positions = torch.tensor(
+        [[0.0, 0.0], [9.0, 0.0], [18.0, 0.0], [27.0, 0.0]], dtype=torch.float32
+    )
+    node_sizes = torch.full((4, 2), 20.0)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    projected = _project_candidate_prism(positions, problem)
+
+    from dagua.metrics import count_overlaps
+
+    assert count_overlaps(projected.cpu(), node_sizes) == 0
+
+
+def test_prism_duplicate_positions_fail_closed() -> None:
+    """PRISM rejects duplicate positions instead of returning extreme coordinates."""
+    positions = torch.tensor([[0.0, 0.0], [0.0, 0.0], [100.0, 100.0]])
+    node_sizes = torch.full((3, 2), 10.0)
+    edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=3,
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+
+    assert _project_candidate_prism(positions, problem) is None
+
+
+def test_geometry_candidate_rejects_overlap_increase() -> None:
+    """The adversarial collinear dodge that adds an overlap is ineligible."""
+    from dagua.layout.ops.pipelines.dagua_native import _collinear_dodge
+
+    edge_index = torch.tensor([[0, 0, 1, 1, 2, 3, 4], [2, 1, 5, 7, 3, 5, 5]], dtype=torch.long)
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.0, 10.0],
+            [0.0, 20.0],
+            [15.4435, -2.0417],
+            [3.3375, 13.7076],
+            [-20.0198, -22.4181],
+            [50.0, 50.0],
+            [50.0, 50.0],
+        ]
+    )
+    node_sizes = torch.full((8, 2), 2.0)
+    candidate = _collinear_dodge(positions, edge_index, delta=0.15)
+
+    assert candidate is not None
+    eligible, reason = _candidate_is_eligible(candidate, positions, node_sizes, edge_index)
+    assert eligible is False
+    assert reason == "overlaps increased 1->2"
+
+
+def test_general_challengers_cover_500_node_corpus() -> None:
+    """The contest cap covers the corpus without a smaller challenger cutoff."""
+    from dagua.layout.ops.pipelines import native_undirected
+
+    assert MAX_CONTEST_NODES >= 500
+    assert not hasattr(native_undirected, "MAX_GENERAL_CHALLENGER_NODES")
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
@@ -741,6 +823,34 @@ def test_weighted_undirected_contest_reaches_weighted_similarity_candidate() -> 
     assert all(calls)
 
 
+def test_stress_points_candidate_uses_point_targets() -> None:
+    """The additive stress challenger should match an explicit point-unit solve."""
+    from dagua.layout.ops.pipelines.native_stress import (
+        NativeStressConfig,
+        layout_native_stress_pipeline,
+    )
+    from dagua.layout.ops.pipelines.native_undirected import _stress_points_candidate
+
+    graph = _ring_with_chords()
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+    )
+
+    candidate_pos = _stress_points_candidate(problem, seed=42)
+    direct_pos = layout_native_stress_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+        config=NativeStressConfig(target_unit="points", seed=42),
+    )
+
+    torch.testing.assert_close(candidate_pos, direct_pos, rtol=0.0, atol=0.0)
+
+
 def test_new_candidates_share_the_degeneracy_guard() -> None:
     """New candidates D and E are added via the shared ``_add_challenger`` path.
 
@@ -762,3 +872,20 @@ def test_new_candidates_share_the_degeneracy_guard() -> None:
 
     assert degenerate is True
     assert reason != ""
+
+
+def test_unshear_orthogonalizes_sheared_grid_edge_families() -> None:
+    """The grid challenger maps two sheared direction families to right angles."""
+    pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.5, 1.0], [1.5, 1.0], [1.0, 2.0], [2.0, 2.0]])
+    edge_index = torch.tensor([[0, 2, 4, 0, 1, 2], [1, 3, 5, 2, 3, 4]], dtype=torch.long)
+
+    unsheared = _unshear_bimodal_edges(pos, edge_index)
+
+    assert unsheared is not None
+    vectors = unsheared[edge_index[1]] - unsheared[edge_index[0]]
+    horizontal = vectors[:3].mean(dim=0)
+    diagonal = vectors[3:].mean(dim=0)
+    cosine = torch.dot(horizontal, diagonal) / (
+        torch.linalg.vector_norm(horizontal) * torch.linalg.vector_norm(diagonal)
+    )
+    assert float(torch.abs(cosine).item()) < 1e-5
