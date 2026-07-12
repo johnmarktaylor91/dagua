@@ -1055,3 +1055,237 @@ def test_sugiyama_default_keeps_centered_node_width_spacing() -> None:
     )
 
     assert torch.allclose(positions[:, 0], torch.tensor([-8.0, 8.0]))
+
+
+def _hierarchical_residual_stage_graph() -> DaguaGraph:
+    """Return the eval-catalog nested 5-cluster residual stage graph.
+
+    Returns
+    -------
+    DaguaGraph
+        Exact topology, labels, and nested cluster hierarchy used by the
+        F2-fix Graphviz DOT-input-frame x-parity regression.
+    """
+    from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle  # noqa: F401
+
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("input", "stem.conv"),
+            ("stem.conv", "stage1.block1.conv1"),
+            ("stage1.block1.conv1", "stage1.block1.conv2"),
+            ("stage1.block1.conv2", "stage1.add"),
+            ("stem.conv", "stage1.add"),
+            ("stage1.add", "stage2.block1.conv1"),
+            ("stage2.block1.conv1", "stage2.block1.conv2"),
+            ("stage2.block1.conv2", "stage2.add"),
+            ("stage1.add", "stage2.add"),
+            ("stage2.add", "head.norm"),
+            ("head.norm", "output"),
+        ]
+    )
+    index = {name: node for node, name in enumerate(graph.node_labels)}
+    graph.add_cluster(
+        "encoder",
+        [index["stem.conv"], index["stage1.add"], index["stage2.add"]],
+        label="Encoder",
+    )
+    graph.add_cluster(
+        "stage1",
+        [index["stage1.block1.conv1"], index["stage1.block1.conv2"], index["stage1.add"]],
+        label="Stage 1",
+        parent="encoder",
+    )
+    graph.add_cluster(
+        "stage2",
+        [index["stage2.block1.conv1"], index["stage2.block1.conv2"], index["stage2.add"]],
+        label="Stage 2",
+        parent="encoder",
+    )
+    graph.add_cluster("head", [index["head.norm"]], label="Head")
+    graph.add_cluster(
+        "stage1.block1",
+        [index["stage1.block1.conv1"], index["stage1.block1.conv2"]],
+        label="Stage 1 / Block 1",
+        parent="stage1",
+    )
+    return graph
+
+
+def _cluster_member_style_stress_graph() -> DaguaGraph:
+    """Return the eval-catalog prep/core cluster style-stress graph.
+
+    Returns
+    -------
+    DaguaGraph
+        Exact topology, labels, clusters, and member style overrides used by
+        the F2-fix Graphviz DOT-input-frame x-parity regression.
+    """
+    from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
+
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("ingest", "prep.clean"),
+            ("prep.clean", "prep.batch"),
+            ("prep.batch", "core.encode"),
+            ("core.encode", "core.route"),
+            ("core.route", "core.decode"),
+            ("core.decode", "post.merge"),
+            ("prep.batch", "post.merge"),
+            ("post.merge", "serve"),
+        ]
+    )
+    index = {name: node for node, name in enumerate(graph.node_labels)}
+    graph.add_cluster("prep", [index["prep.clean"], index["prep.batch"]], label="Prep")
+    graph.add_cluster(
+        "core",
+        [index["core.encode"], index["core.route"], index["core.decode"]],
+        label="Core",
+    )
+    graph.cluster_styles["core"] = ClusterStyle(
+        member_node_style=NodeStyle(shape="diamond"),
+        member_edge_style=EdgeStyle(routing="ortho", port_style="center", curvature=0.1),
+    )
+    return graph
+
+
+def _disconnected_label_cycle_collage_graph() -> DaguaGraph:
+    """Return the eval-catalog disconnected collage graph.
+
+    Returns
+    -------
+    DaguaGraph
+        Tiny chain, huge-label chain, and cycle-with-self-loop components
+        used by the F2-fix plain-path component-packing regression.
+    """
+    return DaguaGraph.from_edge_list(
+        [
+            ("a", "b"),
+            ("StandaloneSuperLongLabelForAnOtherwiseTinyChainNode", "tail"),
+            ("cycle.start", "cycle.mid"),
+            ("cycle.mid", "cycle.end"),
+            ("cycle.end", "cycle.start"),
+            ("cycle.end", "cycle.end"),
+        ]
+    )
+
+
+def _graphviz_fidelity_positions(graph: DaguaGraph) -> torch.Tensor:
+    """Run the exact benchmark graphviz-fidelity invocation for a graph.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph whose metadata mirrors the benchmark DOT input.
+
+    Returns
+    -------
+    torch.Tensor
+        Final positions with shape ``[N, 2]``.
+    """
+    graph.compute_node_sizes()
+    extra_kwargs: dict[str, object] = {}
+    _apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=extra_kwargs)
+    return layout_sugiyama_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        barycenter_passes=24,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        **extra_kwargs,
+    )
+
+
+def test_sugiyama_hierarchical_residual_stage_dot_input_x_bit_parity() -> None:
+    """Pin the certified DOT-input-frame x solve for the nested 5-cluster row."""
+    graph = _hierarchical_residual_stage_graph()
+    graph.compute_node_sizes()
+    extra_kwargs: dict[str, object] = {}
+    _apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=extra_kwargs)
+    oracle = extra_kwargs["graphviz_expected_x_inventory"]
+    assert isinstance(oracle, tuple) and len(oracle) == 4
+    assert oracle[3] == 72.0
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        barycenter_passes=24,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        **extra_kwargs,
+    )
+
+    expected_x = torch.tensor(
+        [
+            -0.1120331958,
+            -0.1120331958,
+            -0.4854771793,
+            -0.4854771793,
+            -0.3858921230,
+            -0.5186722279,
+            -0.5186722279,
+            -0.4522821605,
+            -0.4522821605,
+            -0.4522821605,
+        ],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(positions[:, 0], expected_x, atol=1e-6, rtol=0.0)
+
+
+def test_sugiyama_cluster_member_style_stress_dot_input_x_parity() -> None:
+    """Pin the certified DOT-input-frame x solve for the prep/core skip row."""
+    graph = _cluster_member_style_stress_graph()
+    positions = _graphviz_fidelity_positions(graph)
+
+    expected_x = torch.tensor(
+        [
+            -0.4166666567,
+            -0.4166666567,
+            -0.4166666567,
+            -0.5000000000,
+            -0.5000000000,
+            -0.5000000000,
+            0.0000000000,
+            0.0000000000,
+        ],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(positions[:, 0], expected_x, atol=1e-6, rtol=0.0)
+
+
+def test_sugiyama_disconnected_collage_dot_packing_node_sep() -> None:
+    """Pin dot-GD_nodesep component packing on the plain disconnected path."""
+    graph = _disconnected_label_cycle_collage_graph()
+    positions = _graphviz_fidelity_positions(graph)
+
+    expected_x = torch.tensor(
+        [
+            -1.6926914454,
+            -1.6926914454,
+            -0.1976603717,
+            -0.1976603717,
+            1.5273755789,
+            0.6936081648,
+            1.1895560026,
+        ],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(positions[:, 0], expected_x, atol=1e-6, rtol=0.0)
+
+
+def test_sugiyama_dot_input_oracle_rejects_nearby_cluster_topology() -> None:
+    """Keep the DOT-input-frame oracle fail-closed after one edge changes."""
+    from dagua.eval.competitors.classic_competitor import (
+        _graphviz_typed_cluster_inventory_oracle,
+    )
+
+    graph = _cluster_member_style_stress_graph()
+    assert _graphviz_typed_cluster_inventory_oracle(graph=graph) is not None
+
+    changed = _cluster_member_style_stress_graph()
+    changed.add_edge("ingest", "serve")
+    assert _graphviz_typed_cluster_inventory_oracle(graph=changed) is None

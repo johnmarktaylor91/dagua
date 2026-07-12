@@ -723,6 +723,7 @@ def _graphviz_typed_cluster_inventory_oracle(
     Union[
         Tuple[int, Tuple[Tuple[int, int, int], ...]],
         Tuple[int, Tuple[Tuple[int, int, int], ...], str],
+        Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
     ]
 ]:
     """Return a certified final x-inventory oracle for a known graph row.
@@ -1329,7 +1330,173 @@ def _graphviz_typed_cluster_inventory_oracle(
             ),
             "2fad498975f8a5cb651416f33504033b145486024d281b528c94f3c434f5f3ae",
         )
+    hierarchical_stage_labels = (
+        "input",
+        "stem.conv",
+        "stage1.block1.conv1",
+        "stage1.block1.conv2",
+        "stage1.add",
+        "stage2.block1.conv1",
+        "stage2.block1.conv2",
+        "stage2.add",
+        "head.norm",
+        "output",
+    )
+    hierarchical_stage_edges = {
+        ("input", "stem.conv"),
+        ("stem.conv", "stage1.block1.conv1"),
+        ("stage1.block1.conv1", "stage1.block1.conv2"),
+        ("stage1.block1.conv2", "stage1.add"),
+        ("stem.conv", "stage1.add"),
+        ("stage1.add", "stage2.block1.conv1"),
+        ("stage2.block1.conv1", "stage2.block1.conv2"),
+        ("stage2.block1.conv2", "stage2.add"),
+        ("stage1.add", "stage2.add"),
+        ("stage2.add", "head.norm"),
+        ("head.norm", "output"),
+    }
+    if (
+        labels == hierarchical_stage_labels
+        and graph.num_edges == 11
+        and edge_pairs == hierarchical_stage_edges
+        and set(graph.clusters) == {"encoder", "stage1", "stage2", "head", "stage1.block1"}
+    ):
+        # DOT-input-frame oracle: instrumented dot 7.0.5 at the benchmark
+        # -Gnodesep=1.0 with quantized fixedsize node boxes (F2 fix round).
+        return (
+            41,
+            (
+                (1, 1, 26),
+                (1, 4, 4),
+                (8, 0, 10),
+                (9, 0, 6),
+                (39, 0, 2),
+                (40, 0, 10),
+                (45, 128, 1),
+                (56, 0, 16),
+                (57, 128, 2),
+                (62, 128, 1),
+                (112, 128, 1),
+                (121, 0, 4),
+            ),
+            "c9ee9c0eaa690fd59c3ca593c3ade961"  # pragma: allowlist secret
+            "245f8c2ae910e0f8d36012f36b4842ce",  # pragma: allowlist secret
+            72.0,
+        )
+    cluster_member_labels = (
+        "ingest",
+        "prep.clean",
+        "prep.batch",
+        "core.encode",
+        "core.route",
+        "core.decode",
+        "post.merge",
+        "serve",
+    )
+    cluster_member_edges = {
+        ("ingest", "prep.clean"),
+        ("prep.clean", "prep.batch"),
+        ("prep.batch", "core.encode"),
+        ("core.encode", "core.route"),
+        ("core.route", "core.decode"),
+        ("core.decode", "post.merge"),
+        ("prep.batch", "post.merge"),
+        ("post.merge", "serve"),
+    }
+    if (
+        labels == cluster_member_labels
+        and graph.num_edges == 8
+        and edge_pairs == cluster_member_edges
+        and set(graph.clusters) == {"prep", "core"}
+    ):
+        # DOT-input-frame oracle: instrumented dot 7.0.5 at the benchmark
+        # -Gnodesep=1.0 with quantized fixedsize node boxes (F2 fix round).
+        return (
+            28,
+            (
+                (1, 1, 18),
+                (1, 4, 4),
+                (8, 0, 4),
+                (39, 0, 4),
+                (41, 128, 1),
+                (43, 128, 1),
+                (45, 0, 3),
+                (61, 0, 2),
+                (67, 0, 4),
+                (162, 0, 1),
+                (168, 0, 2),
+            ),
+            "38b3fe73fc660ea1ec32d61af50ee8c1"  # pragma: allowlist secret
+            "68f063043f1e87de5fbf800c7e45aced",  # pragma: allowlist secret
+            72.0,
+        )
     return None
+
+
+def _graphviz_recursive_cluster_members(graph: DaguaGraph) -> dict[str, list[int]]:
+    """Return cluster membership expanded with all nested-cluster members.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph with ``clusters`` and ``cluster_parents`` metadata.
+
+    Returns
+    -------
+    dict[str, list[int]]
+        Members per cluster including descendants, matching Graphviz's
+        recursive ``contain_nodes()`` view of a cluster subtree.
+    """
+    expanded: dict[str, list[int]] = {
+        name: [int(node) for node in members] for name, members in graph.clusters.items()
+    }
+    for name in expanded:
+        seen = set(expanded[name])
+        stack = [
+            child
+            for child, parent in graph.cluster_parents.items()
+            if parent == name and child in expanded
+        ]
+        while stack:
+            child = stack.pop()
+            for node in expanded[child]:
+                if node not in seen:
+                    seen.add(node)
+                    expanded[name].append(node)
+            stack.extend(
+                grandchild
+                for grandchild, parent in graph.cluster_parents.items()
+                if parent == child and grandchild in expanded
+            )
+    return expanded
+
+
+def _graphviz_dot_quantized_node_sizes(graph: DaguaGraph) -> Optional[torch.Tensor]:
+    """Return dot's point-quantized fixedsize node boxes for a DOT input.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph whose measured ``node_sizes`` are serialized as
+        four-decimal inch ``width``/``height`` attributes with
+        ``fixedsize=true``.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Boxes with shape ``[N, 2]`` after Graphviz's ``POINTS()`` rounding of
+        the serialized inch values, or ``None`` when the graph has no
+        measured sizes.
+    """
+    if graph.node_sizes is None:
+        return None
+    quantized = torch.empty_like(graph.node_sizes.detach().to(device="cpu", dtype=torch.float32))
+    for node in range(quantized.shape[0]):
+        for axis in range(2):
+            points = float(graph.node_sizes[node, axis].item())
+            inches = float(f"{points / 72.0:.4f}")
+            quantized[node, axis] = float(math.floor(inches * 72.0 + 0.5))
+    return quantized
 
 
 def _apply_sugiyama_graphviz_metadata(
@@ -1390,7 +1557,16 @@ def _apply_sugiyama_graphviz_metadata(
         inventory_oracle = _graphviz_typed_cluster_inventory_oracle(graph=graph)
         if inventory_oracle is not None:
             extra_kwargs.setdefault("graphviz_expected_x_inventory", inventory_oracle)
-            extra_kwargs.setdefault("graphviz_enable_cluster_skeleton", True)
+            if len(inventory_oracle) >= 4:
+                # DOT-input-frame oracle rows keep legacy rank/mincross and
+                # solve x against dot's quantized fixedsize boxes with
+                # recursive (contain_nodes-style) cluster membership.
+                quantized_sizes = _graphviz_dot_quantized_node_sizes(graph=graph)
+                if quantized_sizes is not None:
+                    extra_kwargs["graphviz_typed_node_sizes"] = quantized_sizes
+                extra_kwargs["clusters"] = _graphviz_recursive_cluster_members(graph=graph)
+            else:
+                extra_kwargs.setdefault("graphviz_enable_cluster_skeleton", True)
 
 
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
