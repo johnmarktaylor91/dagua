@@ -12,7 +12,19 @@ import math
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
+from typing import (
+    Any,
+    ClassVar,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+    cast,
+)
 
 import torch
 
@@ -99,11 +111,26 @@ _GRAPHVIZ_705_SIMPLEX_CERTIFIED_DIGESTS = frozenset(
             "d773c924f01dee2a1179506943bd5aafa"  # pragma: allowlist secret
             "b405a9ba07f36a8c40c0294a5eb08bc"  # pragma: allowlist secret
         ),
+        # F2 fix round: hierarchical_residual_stage, endpoint parity proven
+        # against the instrumented dot 7.0.5 DOT-input-frame x trace.
+        (
+            "c9ee9c0eaa690fd59c3ca593c3ade961"  # pragma: allowlist secret
+            "245f8c2ae910e0f8d36012f36b4842ce"  # pragma: allowlist secret
+        ),
+        # F2 fix round: cluster_member_style_stress, endpoint parity proven
+        # against the instrumented dot 7.0.5 DOT-input-frame x trace.
+        (
+            "38b3fe73fc660ea1ec32d61af50ee8c1"  # pragma: allowlist secret
+            "68f063043f1e87de5fbf800c7e45aced"  # pragma: allowlist secret
+        ),
     }
 )
 
 _GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS = 18.0
+# ``splines.c selfRightSpace()`` reserves a fixed SELF_EDGE_SIZE=18 points of
+# right clearance per self-loop regardless of GD_nodesep.
+_GRAPHVIZ_SELF_EDGE_SIZE_POINTS = 18.0
 _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES = 50
 _GRAPHVIZ_TYPED_X_MAX_EDGE_DENSITY = 2.0
 _GRAPHVIZ_VIRTUAL_NODE_CLASS = 2
@@ -1962,7 +1989,9 @@ def _expand_long_edges_with_dummy_nodes(
             graphviz_right_widths[node] = half_width
         for node in graphviz_self_loop_nodes or set():
             if 0 <= node < num_original_nodes:
-                graphviz_right_widths[node] += float(graphviz_virtual_node_sep)
+                # SELF_EDGE_SIZE is a fixed 18-point constant in Graphviz,
+                # independent of the DOT-input nodesep.
+                graphviz_right_widths[node] += _GRAPHVIZ_SELF_EDGE_SIZE_POINTS
     expanded_sources: list[int] = []
     expanded_targets: list[int] = []
     expanded_edge_origins: list[int] = []
@@ -5722,9 +5751,11 @@ def _graphviz_x_coordinate_assignment(
         Union[
             Tuple[int, Tuple[Tuple[int, int, int], ...]],
             Tuple[int, Tuple[Tuple[int, int, int], ...], str],
+            Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
         ]
     ] = None,
     use_typed_inventory: bool = True,
+    use_dot_packing_node_sep: bool = False,
 ) -> torch.Tensor:
     """Assign Graphviz dot x coordinates with an auxiliary network simplex.
 
@@ -5776,6 +5807,10 @@ def _graphviz_x_coordinate_assignment(
         Whether the typed normal/virtual/slack inventory is structurally
         supported for this graph. Dense long-edge graphs retain the legacy
         inventory until fast-edge compaction has full multiset parity.
+    use_dot_packing_node_sep : bool, default=False
+        Whether plain typed LR constraints use dot's DOT-input ``GD_nodesep``
+        (``node_sep`` inches in points). Disconnected inputs pack components
+        through binding LR chains, so the true nodesep must be used there.
 
     Returns
     -------
@@ -5796,12 +5831,19 @@ def _graphviz_x_coordinate_assignment(
     if num_nodes == 0:
         return positions.to(output_device)
 
-    graphviz_node_sep = (
-        float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
-        if not use_typed_inventory
-        or (graphviz_left_widths is not None and graphviz_cluster_members is None)
-        else _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS
-    )
+    if use_typed_inventory and _graphviz_expected_dot_input_inventory(expected_typed_inventory):
+        # 4-tuple oracles are certified against an instrumented dot run at
+        # the DOT-input nodesep; the inventory must be built in that frame.
+        graphviz_node_sep = float(cast(Tuple[Any, ...], expected_typed_inventory)[3])
+    elif use_typed_inventory and use_dot_packing_node_sep and graphviz_cluster_members is None:
+        graphviz_node_sep = float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
+    else:
+        graphviz_node_sep = (
+            float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
+            if not use_typed_inventory
+            or (graphviz_left_widths is not None and graphviz_cluster_members is None)
+            else _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS
+        )
     if use_typed_inventory:
         inventory = _build_graphviz_x_inventory(
             layers=layers,
@@ -5820,7 +5862,7 @@ def _graphviz_x_coordinate_assignment(
             graphviz_node_order=graphviz_node_order,
             graphviz_weight_classes=graphviz_weight_classes,
             use_raw_initial_ranks=(
-                (expected_typed_inventory is not None and len(expected_typed_inventory) == 3)
+                (expected_typed_inventory is not None and len(expected_typed_inventory) >= 3)
                 or (graphviz_cluster_members is None and num_original_nodes == 40)
             ),
         )
@@ -5831,7 +5873,7 @@ def _graphviz_x_coordinate_assignment(
             )
         use_graphviz_705_simplex = (
             expected_typed_inventory is not None
-            and len(expected_typed_inventory) == 3
+            and len(expected_typed_inventory) >= 3
             and expected_typed_inventory[2] in _GRAPHVIZ_705_SIMPLEX_CERTIFIED_DIGESTS
         )
         aux_edges = [(edge.tail, edge.head, edge.minlen, edge.weight) for edge in inventory.edges]
@@ -6075,6 +6117,7 @@ def _validate_graphviz_x_inventory_parity(
     expected: Union[
         Tuple[int, Tuple[Tuple[int, int, int], ...]],
         Tuple[int, Tuple[Tuple[int, int, int], ...], str],
+        Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
     ],
 ) -> None:
     """Require exact instrumented Graphviz parity before a typed solve.
@@ -6110,7 +6153,7 @@ def _validate_graphviz_x_inventory_parity(
             f"nodes={len(inventory.nodes)}/{expected_node_count}, "
             f"multiset={actual_multiset!r}/{expected_multiset!r}"
         )
-    if len(expected) == 3:
+    if len(expected) >= 3 and expected[2]:
         expected_digest = expected[2]
         actual_digest = _graphviz_x_inventory_digest(inventory=inventory)
         if actual_digest != expected_digest:
@@ -9402,11 +9445,24 @@ class _ExpandDummyNodes(Op):
         use_graphviz_edge_order = bool(state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY, False))
         use_igraph_source_order = bool(state.extras.get(_SUGIYAMA_IGRAPH_SOURCE_ORDER_KEY, False))
         use_igraph_edge_order = self.use_igraph_edge_order and use_igraph_source_order
+        dot_input_cluster_x = use_graphviz_edge_order and _graphviz_expected_dot_input_inventory(
+            state.extras.get(_SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY)
+        )
+        plain_component_packing = (
+            use_graphviz_edge_order
+            and not self.use_graphviz_cluster_skeleton
+            and not problem.clusters
+            and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+            and _graphviz_has_multiple_weak_components(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+            )
+        )
         node_sizes = state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY]
         if use_graphviz_edge_order:
             node_size_key = (
                 _SUGIYAMA_GRAPHVIZ_TYPED_NODE_SIZES_KEY
-                if self.use_graphviz_cluster_skeleton
+                if self.use_graphviz_cluster_skeleton or dot_input_cluster_x
                 else _SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY
             )
             node_sizes = state.extras.get(node_size_key, node_sizes)
@@ -9414,8 +9470,17 @@ class _ExpandDummyNodes(Op):
         if use_graphviz_edge_order:
             graphviz_virtual_node_sep = (
                 float(state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)) * _GRAPHVIZ_POINTS_PER_INCH
-                if not self.use_graphviz_cluster_skeleton
-                and (problem.clusters or problem.num_nodes > _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES)
+                if (
+                    not self.use_graphviz_cluster_skeleton
+                    and (
+                        problem.clusters
+                        or problem.num_nodes > _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+                        # Disconnected DOT inputs pack components through
+                        # binding LR constraints, so plain virtual nodes must
+                        # carry dot's true GD_nodesep-derived width.
+                        or plain_component_packing
+                    )
+                )
                 else _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS
             )
         graphviz_edge_order_sources: Optional[torch.Tensor] = None
@@ -9423,6 +9488,7 @@ class _ExpandDummyNodes(Op):
         if use_graphviz_edge_order and (
             (not problem.clusters and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES)
             or self.use_graphviz_cluster_skeleton
+            or dot_input_cluster_x
         ):
             oriented_edges = state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY]
             reversed_mask = state.extras[_SUGIYAMA_REVERSED_MASK_KEY].to(
@@ -9466,22 +9532,27 @@ class _ExpandDummyNodes(Op):
             use_graphviz_edge_order=use_graphviz_edge_order,
             graphviz_edge_order_sources=graphviz_edge_order_sources,
             graphviz_edge_order_targets=graphviz_edge_order_targets,
-            graphviz_sort_outgoing=(not problem.clusters or self.use_graphviz_cluster_skeleton),
+            graphviz_sort_outgoing=(
+                not problem.clusters or self.use_graphviz_cluster_skeleton or dot_input_cluster_x
+            ),
             use_igraph_edge_order=use_igraph_edge_order,
             igraph_edge_order_sources=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_SOURCES_KEY),
             igraph_edge_order_targets=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY),
             igraph_edge_order_ids=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_EDGE_IDS_KEY),
             graphviz_virtual_node_sep=graphviz_virtual_node_sep,
             clusters=problem.clusters
-            if use_graphviz_edge_order and self.use_graphviz_cluster_skeleton
+            if use_graphviz_edge_order
+            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
             else None,
             cluster_parents=problem.cluster_parents
-            if use_graphviz_edge_order and self.use_graphviz_cluster_skeleton
+            if use_graphviz_edge_order
+            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
             else None,
             graphviz_cluster_label_widths=state.extras.get(
                 _SUGIYAMA_GRAPHVIZ_CLUSTER_LABEL_WIDTHS_KEY
             )
-            if use_graphviz_edge_order and self.use_graphviz_cluster_skeleton
+            if use_graphviz_edge_order
+            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
             else None,
             graphviz_self_loop_nodes={
                 int(node)
@@ -9490,7 +9561,8 @@ class _ExpandDummyNodes(Op):
                 .to(device="cpu", dtype=torch.long)
                 .tolist()
             }
-            if use_graphviz_edge_order and self.use_graphviz_cluster_skeleton
+            if use_graphviz_edge_order
+            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
             else None,
         )
         state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY] = expanded_graph
@@ -9717,6 +9789,58 @@ class _BarycenterOrdering(Op):
         return state
 
 
+def _graphviz_expected_dot_input_inventory(expected: Any) -> bool:
+    """Return whether an expected x inventory targets the DOT-input frame.
+
+    Parameters
+    ----------
+    expected : Any
+        Candidate ``graphviz_expected_x_inventory`` payload.
+
+    Returns
+    -------
+    bool
+        ``True`` for 4-tuple oracles ``(count, multiset, digest, nodesep)``
+        certified against an instrumented dot run at the benchmark DOT-input
+        ``nodesep`` (points). Such rows keep legacy rank/mincross and route
+        only the x auxiliary graph through the typed cluster inventory.
+    """
+    return isinstance(expected, tuple) and len(expected) >= 4
+
+
+def _graphviz_has_multiple_weak_components(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether the original graph has more than one weak component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original directed edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least two weakly connected components exist.
+    """
+    if num_nodes <= 1:
+        return False
+    parent = list(range(num_nodes))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    for tail, head in zip(edge_cpu[0].tolist(), edge_cpu[1].tolist()):
+        root_tail, root_head = find(int(tail)), find(int(head))
+        if root_tail != root_head:
+            parent[root_tail] = root_head
+    return len({find(node) for node in range(num_nodes)}) > 1
+
+
 def _graphviz_preserves_plain_exact_tree_x(edge_index: torch.Tensor, num_nodes: int) -> bool:
     """Return whether a plain graph retains the certified exact-tree x path.
 
@@ -9829,10 +9953,12 @@ class _CoordinateAssignment(Op):
         node_sep = state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)
 
         if self.use_graphviz_xcoord:
-            certified_cluster_inventory = (
-                self.use_graphviz_cluster_skeleton
-                and _SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY in state.extras
+            dot_input_cluster_x = _graphviz_expected_dot_input_inventory(
+                state.extras.get(_SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY)
             )
+            certified_cluster_inventory = (
+                self.use_graphviz_cluster_skeleton or dot_input_cluster_x
+            ) and _SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY in state.extras
             use_typed_inventory = certified_cluster_inventory or (
                 not problem.clusters
                 and not _graphviz_preserves_plain_exact_tree_x(
@@ -9842,6 +9968,14 @@ class _CoordinateAssignment(Op):
                 and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
                 and int(problem.edge_index.shape[1])
                 <= _GRAPHVIZ_TYPED_X_MAX_EDGE_DENSITY * problem.num_nodes
+            )
+            use_dot_packing_node_sep = (
+                use_typed_inventory
+                and not problem.clusters
+                and _graphviz_has_multiple_weak_components(
+                    edge_index=problem.edge_index,
+                    num_nodes=problem.num_nodes,
+                )
             )
             graphviz_left_widths = expanded_graph.graphviz_left_widths if problem.clusters else None
             graphviz_right_widths = (
@@ -9880,6 +10014,7 @@ class _CoordinateAssignment(Op):
                     _SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY
                 ),
                 use_typed_inventory=use_typed_inventory,
+                use_dot_packing_node_sep=use_dot_packing_node_sep,
             )
         else:
             expanded_positions = _coordinate_assignment(
@@ -9900,7 +10035,12 @@ class _CoordinateAssignment(Op):
         # slicing back to the original node set.
         state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY] = expanded_positions
         state.pos = expanded_positions[: problem.num_nodes]
-        if self.use_graphviz_xcoord and problem.clusters and not self.use_graphviz_cluster_skeleton:
+        if (
+            self.use_graphviz_xcoord
+            and problem.clusters
+            and not self.use_graphviz_cluster_skeleton
+            and not certified_cluster_inventory
+        ):
             state.pos = _apply_graphviz_cluster_x_constraints(
                 positions=state.pos,
                 clusters=problem.clusters,
