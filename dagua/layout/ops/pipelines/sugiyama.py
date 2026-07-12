@@ -174,6 +174,7 @@ def layout_sugiyama_pipeline(
         Union[
             Tuple[int, Tuple[Tuple[int, int, int], ...]],
             Tuple[int, Tuple[Tuple[int, int, int], ...], str],
+            Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
         ]
     ] = None,
     config: Optional["LayoutConfig"] = None,
