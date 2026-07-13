@@ -1079,6 +1079,30 @@ def run(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Provenance guard must FAIL-CLOSED, not merely report: any unbacked/skipped
+    # verdict-bearing changed-family row -- or a --stale-map with no usable coverage
+    # (empty/missing --winners) -- fails sign-off.
+    coverage = summary.get("stale_guard_coverage") or {}
+    cov_unbacked = sum(c["unbacked"] for c in coverage.values())
+    cov_skipped = sum(c["skipped_no_winner"] for c in coverage.values())
+    coverage_disabled = bool(stale_map) and not coverage
+    if (cov_unbacked or cov_skipped or coverage_disabled) and not args.allow_unexplained:
+        reason = (
+            "coverage disabled (--stale-map given without a usable --winners map)"
+            if coverage_disabled
+            else (
+                f"{cov_unbacked} unbacked + {cov_skipped} skipped "
+                "verdict-bearing changed-family rows"
+            )
+        )
+        print(
+            "ERROR: provenance guard coverage gap -- "
+            f"{reason} (see LEDGER.md guard section). Fail-closed sign-off requires full "
+            "coverage; pass --allow-unexplained to override.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
