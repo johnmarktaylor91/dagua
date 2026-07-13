@@ -243,6 +243,7 @@ _EXPECTED_OP_MODULES = (
     "dagre",
     "distance",
     "drl",
+    "elk",
     "edge_route",
     "embed",
     "fcose",
