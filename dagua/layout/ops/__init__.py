@@ -231,6 +231,7 @@ __all__ = [
 _EXPECTED_OP_MODULES = (
     "anneal",
     "barycenter",
+    "brandes_koepf",
     "cluster_arrange",
     "cluster_driver",
     "coarsen",
@@ -239,6 +240,7 @@ _EXPECTED_OP_MODULES = (
     "coordinate",
     "crossing_swap",
     "davidson_harel",
+    "dagre",
     "distance",
     "drl",
     "edge_route",
