@@ -330,11 +330,16 @@ def test_stale_map_flags_without_changing_tier(tmp_path):
         mode_a_row(engine="classic_gem_iters100", mean_diag_B=1e-5, dist_equivalent=True),
     ]
     jsonl, _ = write_inputs(tmp_path, rows)
-    # Fake eval root: fmmm winner dir dated old (mtime set to 2020), gem dir fresh.
+    # Fake eval root: fmmm winner dir dated old (mtime set to 1970), gem dir fresh.
+    # Each winner dir must contain an `ok` record for its combo so the fail-closed
+    # coverage guard counts the row as BACKED (a dir lacking the combo is a coverage gap).
     eval_root = tmp_path / "eval_output"
-    for d in ("olddir", "newdir"):
+    dir_combo = {"olddir": "g::classic_fmmm_steps10", "newdir": "g::classic_gem_iters100"}
+    for d, cid in dir_combo.items():
         (eval_root / f"benchmark_100seed_{d}").mkdir(parents=True)
-        (eval_root / f"benchmark_100seed_{d}" / "results.json").write_text("{}")
+        (eval_root / f"benchmark_100seed_{d}" / "results.json").write_text(
+            json.dumps({f"{cid}::seed42": {"status": "ok"}})
+        )
     os.utime(eval_root / "benchmark_100seed_olddir" / "results.json", (0, 0))  # 1970
     winners = tmp_path / "winners.json"
     winners.write_text(
