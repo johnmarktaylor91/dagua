@@ -309,28 +309,72 @@ def compute_stale_flags(
 
 
 def compute_stale_coverage(
-    combos: list[str],
-    engines: dict,
+    ledger_rows: list[dict],
     stale_map: dict | None,
     winners: dict | None,
+    eval_root: str,
 ) -> dict:
-    """Report guard COVERAGE per stale-map substring so a scope gap cannot hide.
+    """Honest, FAIL-CLOSED guard coverage per stale-map family.
 
-    For each engine-family substring: how many combos matched it, how many were
-    EVALUATED (had a winners-map entry, so the guard could resolve a date), and how
-    many were SKIPPED for lacking a winners entry (`compute_stale_flags` silently
-    `continue`s past those -- the exact blind spot that hid 60 sugiyama rows).
+    Counts only VERDICT-BEARING rows -- no-verdict tiers (NO_CANONICAL_REFERENCE,
+    INSUFFICIENT_DATA, aggregates) have no verdict, so staleness is meaningless and they
+    are out of scope. A row is BACKED only if its winning dir actually contains an ``ok``
+    raw record for the combo; a winners key pointing at a dir that LACKS the combo is
+    UNBACKED (a fail-open provenance defect), NOT covered. Full coverage requires
+    unbacked == 0 AND skipped == 0 for every family.
     """
     cov: dict = {}
     if not stale_map or not winners:
         return cov
+    no_verdict = {
+        TIER_NO_CANONICAL_REFERENCE,
+        TIER_INSUFFICIENT_DATA,
+        TIER_AGGREGATE_INSUFFICIENT,
+        TIER_AGGREGATE_STALE_REFERENCE,
+    }
+    dir_cache: dict = {}
+
+    def combos_in_dir(dname: str) -> set:
+        if dname in dir_cache:
+            return dir_cache[dname]
+        found: set = set()
+        for cand in (
+            os.path.join(eval_root, f"benchmark_100seed_{dname}", "results.json"),
+            os.path.join(eval_root, dname, "results.json"),
+        ):
+            if os.path.exists(cand):
+                try:
+                    with open(cand) as fh:
+                        data = json.load(fh)
+                    for k, v in data.items():
+                        if isinstance(v, dict) and v.get("status") == "ok":
+                            parts = k.split("::")
+                            if len(parts) >= 2:
+                                found.add(f"{parts[0]}::{parts[1]}")
+                except (OSError, ValueError):
+                    pass
+                break
+        dir_cache[dname] = found
+        return found
+
     for sub in stale_map:
-        matched = [c for c in combos if sub in engines.get(c, "")]
-        skipped = [c for c in matched if winners.get(c) is None]
+        matched = [
+            r for r in ledger_rows if sub in (r.get("engine") or "") and r["tier"] not in no_verdict
+        ]
+        backed = unbacked = skipped = 0
+        for r in matched:
+            wd = winners.get(r["combo_id"])
+            if wd is None:
+                skipped += 1
+            elif r["combo_id"] in combos_in_dir(wd):
+                backed += 1
+            else:
+                unbacked += 1
         cov[sub] = {
             "matched": len(matched),
-            "evaluated": len(matched) - len(skipped),
-            "skipped_no_winner": len(skipped),
+            "backed": backed,
+            "unbacked": unbacked,
+            "skipped_no_winner": skipped,
         }
     return cov
 
@@ -840,19 +884,25 @@ def render_ledger_md(ledger_rows: list[dict], summary: dict, priors: dict) -> st
     coverage = summary.get("stale_guard_coverage") or {}
     if coverage:
         total_matched = sum(c["matched"] for c in coverage.values())
-        total_eval = sum(c["evaluated"] for c in coverage.values())
+        total_backed = sum(c["backed"] for c in coverage.values())
+        total_unbacked = sum(c["unbacked"] for c in coverage.values())
         total_skipped = sum(c["skipped_no_winner"] for c in coverage.values())
         add(
-            f"Guard coverage: **{total_eval}/{total_matched}** rows matching a stale-map "
-            f"engine family were EVALUATED against their winning-dir date; "
-            f"**{total_skipped}** matched but had no winners-map entry (NOT evaluated)."
+            f"Guard coverage (VERDICT-BEARING rows only; fail-closed): "
+            f"**{total_backed}/{total_matched}** are BACKED by an `ok` raw record in their "
+            f"winning dir. **{total_unbacked}** have a winners key pointing at a dir that "
+            f"LACKS the combo (unbacked); **{total_skipped}** have no winners entry. Full "
+            f"coverage requires unbacked == 0 AND skipped == 0 (no-verdict rows are out of scope)."
         )
         add("")
-        add("| Engine family (stale-map) | Matched | Evaluated | Skipped (no winner) |")
-        add("| --- | ---: | ---: | ---: |")
+        add("| Engine family (stale-map) | Verdict rows | Backed | Unbacked | Skipped |")
+        add("| --- | ---: | ---: | ---: | ---: |")
         for sub in sorted(coverage):
             c = coverage[sub]
-            add(f"| `{sub}` | {c['matched']} | {c['evaluated']} | {c['skipped_no_winner']} |")
+            add(
+                f"| `{sub}` | {c['matched']} | {c['backed']} | "
+                f"{c['unbacked']} | {c['skipped_no_winner']} |"
+            )
         add("")
     if stale_rows:
         n_benign = summary["stale_code_benign_rows"]
@@ -865,11 +915,17 @@ def render_ledger_md(ledger_rows: list[dict], summary: dict, priors: dict) -> st
         for r in stale_rows:
             add(f"| `{r['combo_id']}` | `{r['tier']}` | {r['stale_reason']} |")
     elif coverage:
-        add(
-            "0 stale-code rows: every EVALUATED row's winning dir is at or after its "
-            "engine's most-recent fix date. Any 'skipped (no winner)' rows above were "
-            "NOT checked -- widen the winners map to close that gap."
-        )
+        gap = sum(c["unbacked"] + c["skipped_no_winner"] for c in coverage.values())
+        if gap == 0:
+            add(
+                "0 stale-code rows, and every verdict-bearing changed-family row is BACKED by "
+                "an `ok` raw record at or after its engine's fix date. Full fail-closed coverage."
+            )
+        else:
+            add(
+                f"0 stale-code rows among backed rows, but {gap} verdict-bearing rows are "
+                "unbacked or skipped -- provenance NOT fully closed; widen/correct the winners map."
+            )
     else:
         add("Stale-code guard not run (no --stale-map/--winners provided).")
     add("")
@@ -969,9 +1025,10 @@ def run(argv=None) -> int:
     combos = [combo_id(r) for r in rows]
     engines = {combo_id(r): (r.get("engine") or "") for r in rows}
     stale_flags = compute_stale_flags(combos, engines, stale_map, winners, args.eval_root)
-    stale_coverage = compute_stale_coverage(combos, engines, stale_map, winners)
 
     ledger_rows = build_ledger_rows(rows, priors, causes, stale_flags)
+    # Coverage needs tiers (verdict-bearing filter) + the eval root (dir-contains check).
+    stale_coverage = compute_stale_coverage(ledger_rows, stale_map, winners, args.eval_root)
 
     # Invariant (d): exactly one tier per row, counts total the input.
     assert len(ledger_rows) == len(rows)
