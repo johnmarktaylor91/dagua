@@ -21,6 +21,16 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "drl": ("dagua.layout.ops.pipelines.drl", "layout_drl_pipeline"),
     "dagre": ("dagua.layout.ops.pipelines.dagre", "layout_dagre_pipeline"),
+    "elk": ("dagua.layout.ops.pipelines.elk", "layout_elk_pipeline"),
+    "elk_layered_bk": (
+        "dagua.layout.ops.pipelines.elk",
+        "layout_elk_layered_bk_pipeline",
+    ),
+    "elk_layered_ns": (
+        "dagua.layout.ops.pipelines.elk",
+        "layout_elk_layered_ns_pipeline",
+    ),
+    "elk_lp": ("dagua.layout.ops.pipelines.elk", "layout_elk_lp_pipeline"),
     "dagua_flat": (
         "dagua.layout.ops.pipelines.dagua_flat",
         "layout_dagua_flat_pipeline",
