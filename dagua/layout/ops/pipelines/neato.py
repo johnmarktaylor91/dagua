@@ -240,6 +240,27 @@ def _graphviz_cell_value(value: float, step: int) -> int:
     return math.trunc(((value + 1.0) / step) - 1.0)
 
 
+def _graphviz_pointf_cell_value(value: float, step: int) -> float:
+    """Return ``CELL``'s intermediate value for a Graphviz ``pointf``.
+
+    Parameters
+    ----------
+    value : float
+        Point coordinate in Graphviz points.
+    step : int
+        Polyomino grid step in points.
+
+    Returns
+    -------
+    float
+        Floating cell coordinate produced when Graphviz's ``CELL`` macro is
+        applied to a ``pointf`` rather than an integer ``point``.
+    """
+    if value >= 0.0:
+        return value / float(step)
+    return ((value + 1.0) / float(step)) - 1.0
+
+
 def _graphviz_grid(size: float, step: int) -> int:
     """Return Graphviz's ``GRID`` cell count for a size.
 
@@ -308,6 +329,28 @@ def _cell_point(point: Tuple[float, float], step: int) -> Tuple[int, int]:
     return (_graphviz_cell_value(point[0], step), _graphviz_cell_value(point[1], step))
 
 
+def _pointf_cell_point(point: Tuple[float, float], step: int) -> Tuple[float, float]:
+    """Map a pointf coordinate through Graphviz's ``CELL`` macro.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Point coordinate in Graphviz points.
+    step : int
+        Polyomino grid step in points.
+
+    Returns
+    -------
+    tuple[float, float]
+        Floating cell coordinate retained by Graphviz when the destination is
+        a ``pointf``.
+    """
+    return (
+        _graphviz_pointf_cell_value(point[0], step),
+        _graphviz_pointf_cell_value(point[1], step),
+    )
+
+
 def _bresenham_cells(start: Tuple[int, int], end: Tuple[int, int]) -> List[Tuple[int, int]]:
     """Return cells crossed by Graphviz's ``fillLine`` Bresenham walk.
 
@@ -355,6 +398,30 @@ def _bresenham_cells(start: Tuple[int, int], end: Tuple[int, int]) -> List[Tuple
             d -= ay
         y += sy
         d += ax
+
+
+def _graphviz_fill_line_cells(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+) -> List[Tuple[int, int]]:
+    """Return cells crossed by Graphviz ``fillLine`` for pointf endpoints.
+
+    Parameters
+    ----------
+    start : tuple[float, float]
+        Starting cell coordinate. Graphviz rounds this inside ``fillLine``.
+    end : tuple[float, float]
+        Ending cell coordinate. Graphviz rounds this inside ``fillLine``.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Cells crossed by the Bresenham walk.
+    """
+    return _bresenham_cells(
+        (_graphviz_round(start[0]), _graphviz_round(start[1])),
+        (_graphviz_round(end[0]), _graphviz_round(end[1])),
+    )
 
 
 def _component_bbox_points(
@@ -427,23 +494,34 @@ def _generate_node_polyomino(
     dy = -float(_graphviz_round(min_y))
     cells: Set[Tuple[int, int]] = set()
     shifted_centers: List[Tuple[int, int]] = []
+    shifted_pointf_centers: List[Tuple[float, float]] = []
     for node_index in range(positions_points.shape[0]):
-        x = _graphviz_round(float(positions_points[node_index, 0].item())) + dx
-        y = _graphviz_round(float(positions_points[node_index, 1].item())) + dy
-        half_width = _graphviz_round(margin + float(sizes_points[node_index, 0].item()) / 2.0)
-        half_height = _graphviz_round(margin + float(sizes_points[node_index, 1].item()) / 2.0)
+        raw_x = float(positions_points[node_index, 0].item())
+        raw_y = float(positions_points[node_index, 1].item())
+        x = _graphviz_round(raw_x) + dx
+        y = _graphviz_round(raw_y) + dy
+        half_width = math.trunc(margin + float(sizes_points[node_index, 0].item()) / 2.0)
+        half_height = math.trunc(margin + float(sizes_points[node_index, 1].item()) / 2.0)
         lower = _cell_point((x - half_width, y - half_height), step)
         upper = _cell_point((x + half_width, y + half_height), step)
         for cell_x in range(lower[0], upper[0] + 1):
             for cell_y in range(lower[1], upper[1] + 1):
                 cells.add((cell_x, cell_y))
         shifted_centers.append(_cell_point((x, y), step))
+        shifted_pointf_centers.append((raw_x + dx, raw_y + dy))
 
     local_edges_cpu = local_edges.detach().to(device="cpu", dtype=torch.long)
     for source, target in zip(local_edges_cpu[0].tolist(), local_edges_cpu[1].tolist()):
         if source == target:
             continue
-        cells.update(_bresenham_cells(shifted_centers[source], shifted_centers[target]))
+        # pack.c:fillEdge receives the already-integer tail cell, but applies
+        # CELL directly to the head pointf and rounds it inside fillLine.
+        cells.update(
+            _graphviz_fill_line_cells(
+                (float(shifted_centers[source][0]), float(shifted_centers[source][1])),
+                _pointf_cell_point(shifted_pointf_centers[target], step),
+            )
+        )
 
     width_cells = _graphviz_grid(max_x - min_x + 2.0 * margin, step)
     height_cells = _graphviz_grid(max_y - min_y + 2.0 * margin, step)
