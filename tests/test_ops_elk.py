@@ -98,6 +98,24 @@ def test_elk_restart_sweeps_keep_strictly_better_order() -> None:
     assert _count_order_crossings(ordered, edges) == 0
 
 
+def test_elk_restart_sweeps_reorder_same_layer_isolate() -> None:
+    """Match ELK's randomized ordering of a first-layer isolate.
+
+    Returns
+    -------
+    None
+        The disconnected graph fixture must place the isolate before the
+        incident node under the default verification seed.
+    """
+    layers = [[0, 4], [1], [2], [3]]
+    edges = [(0, 1), (2, 3)]
+
+    ordered = _restart_sweep_orders(layers, edges, random_seed=42, thoroughness=7)
+
+    assert ordered[0] == [4, 0]
+    assert _count_order_crossings(ordered, edges) == 0
+
+
 def test_elk_default_greedy_cycle_breaks_cycle_4_like_elkjs() -> None:
     """Match elkjs default GREEDY cycle-breaking on a four-cycle.
 
