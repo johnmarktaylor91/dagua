@@ -74,11 +74,6 @@ def test_build_calibration_suite_renders_subset(tmp_path: Path, monkeypatch) -> 
         "_render_graphviz_png",
         lambda dot_source, output_path, engine: _write_placeholder_png(output_path),
     )
-    monkeypatch.setattr(
-        calibration,
-        "_render_matplotlib_png",
-        lambda scene, output_path: _write_placeholder_png(output_path),
-    )
 
     result = calibration.build_calibration_suite(
         output_dir=str(output_dir),
@@ -94,7 +89,6 @@ def test_build_calibration_suite_renders_subset(tmp_path: Path, monkeypatch) -> 
     assert manifest["total_images"] == 1
     assert manifest["cases"][0]["case_id"] == "lineweight_0.25"
     assert Path(manifest["cases"][0]["graphviz_cache"]).exists()
-    assert Path(manifest["cases"][0]["matplotlib_cache"]).exists()
 
 
 def test_build_calibration_suite_reuses_cached_references(
@@ -104,7 +98,7 @@ def test_build_calibration_suite_reuses_cached_references(
     """Cached Graphviz and matplotlib references should be reused on rerun."""
 
     output_dir = tmp_path / "calibration"
-    calls = {"graphviz": 0, "matplotlib": 0}
+    calls = {"graphviz": 0}
 
     def fake_graphviz(dot_source: str, output_path: Path, engine: str) -> None:
         """Record a Graphviz render and emit a placeholder PNG.
@@ -128,29 +122,8 @@ def test_build_calibration_suite_reuses_cached_references(
         calls["graphviz"] += 1
         _write_placeholder_png(output_path)
 
-    def fake_matplotlib(scene: calibration.CalibrationScene, output_path: Path) -> None:
-        """Record a matplotlib reference render and emit a placeholder PNG.
-
-        Parameters
-        ----------
-        scene : calibration.CalibrationScene
-            Render scene.
-        output_path : Path
-            Destination image path.
-
-        Returns
-        -------
-        None
-            Writes the placeholder PNG.
-        """
-
-        del scene
-        calls["matplotlib"] += 1
-        _write_placeholder_png(output_path)
-
     monkeypatch.setattr(calibration, "_graphviz_available", lambda: True)
     monkeypatch.setattr(calibration, "_render_graphviz_png", fake_graphviz)
-    monkeypatch.setattr(calibration, "_render_matplotlib_png", fake_matplotlib)
 
     calibration.build_calibration_suite(
         output_dir=str(output_dir),
@@ -161,7 +134,7 @@ def test_build_calibration_suite_reuses_cached_references(
         case_ids=["lineweight_0.25"],
     )
 
-    assert calls == {"graphviz": 1, "matplotlib": 1}
+    assert calls == {"graphviz": 1}
 
 
 def test_build_graphviz_dot_emits_positions_for_all_nodes() -> None:

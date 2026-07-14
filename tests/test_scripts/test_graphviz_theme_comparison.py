@@ -137,3 +137,77 @@ def test_render_dagua_theme_uses_graphviz_positions(
     assert observed["output"] == str(output_path)
     assert observed["dpi"] == 210
     assert observed["graph"] is observed["render_graph"]
+
+
+def test_arrowhead_atlas_categories_match_expected_counts() -> None:
+    """The four labeled arrowhead atlas categories should match F2's counts."""
+
+    categories = graphviz_theme_comparison._arrowhead_atlas_categories()
+
+    assert len(categories["primitive"]) == 23
+    assert len(categories["alias"]) == 4
+    assert len(categories["gv_modifier"]) == 42
+    assert len(categories["compound"]) >= 12
+    assert set(categories.keys()) == {"primitive", "alias", "gv_modifier", "compound"}
+
+
+def test_arrowhead_atlas_graph_has_four_labeled_clusters() -> None:
+    """The atlas graph should carry one cluster per category, each labeled."""
+
+    graph, title = graphviz_theme_comparison._make_arrowhead_atlas()
+
+    assert title == "Arrowhead Atlas"
+    assert len(graph.cluster_labels) == 4
+    for label in graph.cluster_labels.values():
+        assert any(
+            label.startswith(f"{category} (")
+            for category in ("primitive", "alias", "gv_modifier", "compound")
+        )
+
+
+def test_registry_arrow_types_replaces_hard_coded_tuple() -> None:
+    """Arrow type enumeration should come from the live arrowhead registry."""
+
+    from dagua.render.edges.arrowheads import available_arrowheads
+
+    assert graphviz_theme_comparison._registry_arrow_types() == tuple(available_arrowheads())
+    assert not hasattr(graphviz_theme_comparison, "ARROW_TYPES")
+
+
+def test_shape_atlas_covers_supported_gap_and_waived_buckets() -> None:
+    """The shape atlas should render supported, gap, and waived-sample buckets."""
+
+    graph, title = graphviz_theme_comparison._make_shape_atlas()
+
+    assert title == "Shape Atlas"
+    labels = graph.node_labels
+    assert any(label == "ellipse" for label in labels)
+    assert any(label.startswith("GAP: ") for label in labels)
+    gap_labels = {label.removeprefix("GAP: ") for label in labels if label.startswith("GAP: ")}
+    assert gap_labels == set(graphviz_theme_comparison.GV_SHAPE_GAP_COMMON) | set(
+        graphviz_theme_comparison.GV_SHAPE_WAIVED_SAMPLE
+    )
+
+
+def test_spline_stress_scene_has_back_edges_flat_edge_and_self_loops() -> None:
+    """The spline-stress case should exercise back-edges, a flat edge, and self-loops."""
+
+    graph, title = graphviz_theme_comparison._make_spline_stress()
+
+    assert title == "Spline Stress"
+    edge_index = graph.edge_index.detach().cpu().numpy()
+    sources = [graph.node_labels[i] for i in edge_index[0]]
+    targets = [graph.node_labels[i] for i in edge_index[1]]
+    self_loops = sum(1 for s, t in zip(sources, targets) if s == t)
+    assert self_loops >= 2
+    assert "flat a" in graph.node_labels and "flat b" in graph.node_labels
+
+
+def test_cluster_nest_deep_scene_has_five_nesting_levels() -> None:
+    """The deep-nesting cluster case should chain five parent-linked clusters."""
+
+    graph, title = graphviz_theme_comparison._make_cluster_nest_deep()
+
+    assert title == "Cluster Nest Deep"
+    assert len(graph.cluster_labels) == 5
+    assert len(graph.cluster_parents) == 4
