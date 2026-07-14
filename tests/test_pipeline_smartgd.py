@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from pathlib import Path
 
 import torch
 
@@ -104,7 +105,7 @@ def test_smartgd_public_dispatch_returns_positions() -> None:
 
 def test_smartgd_pretrained_checkpoint_loads_strictly_when_available() -> None:
     """The shipped SmartGD checkpoint should load into the ported architecture."""
-    checkpoint = "/tmp/smartgd-ref/generator_stress_only.pt"
+    checkpoint = Path.home() / "tools" / "dagua-refs" / "smartgd" / "generator_stress_only.pt"
     try:
         state_dict = torch.load(checkpoint, map_location=torch.device("cpu"))
     except FileNotFoundError:
