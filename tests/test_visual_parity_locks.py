@@ -6,6 +6,7 @@ Do not edit by hand. Regenerate with:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Dict, List
 
@@ -50,34 +51,36 @@ def test_lock_graphviz_edge_arrowhead_normal_svg_declared() -> None:
         The test asserts the committed current values remain locked.
     """
 
-    expected = {
-        "coverage_cell_id": "graphviz.edge.arrowhead.normal",
-        "metrics": [
-            {
-                "current": 1.0,
-                "metric_id": "arrow_polygon_iou",
-                "status": "pass",
-                "tolerance": 0.98,
-                "validated_tripwire": True,
-            },
-            {
-                "current": 1.0,
-                "metric_id": "arrow_len_pct",
-                "status": "pass",
-                "tolerance": 0.98,
-                "validated_tripwire": True,
-            },
-            {
-                "current": 1.0,
-                "metric_id": "arrow_fill_mode",
-                "status": "pass",
-                "tolerance": 0.98,
-                "validated_tripwire": True,
-            },
-        ],
-        "parity_status": "in_tolerance",
-        "support_status": "supported",
-    }
+    expected = json.loads("""
+        {
+            "coverage_cell_id": "graphviz.edge.arrowhead.normal",
+            "metrics": [
+                {
+                    "current": 1.0,
+                    "metric_id": "arrow_polygon_iou",
+                    "status": "pass",
+                    "tolerance": 0.98,
+                    "validated_tripwire": true
+                },
+                {
+                    "current": 1.0,
+                    "metric_id": "arrow_len_pct",
+                    "status": "pass",
+                    "tolerance": 0.98,
+                    "validated_tripwire": true
+                },
+                {
+                    "current": 1.0,
+                    "metric_id": "arrow_fill_mode",
+                    "status": "pass",
+                    "tolerance": 0.98,
+                    "validated_tripwire": true
+                }
+            ],
+            "parity_status": "in_tolerance",
+            "support_status": "supported"
+        }
+    """)
     by_id = {str(row["row_id"]): row for row in _locked_rows()}
     row = by_id["graphviz.edge.arrowhead.normal.svg_declared"]
     actual = ledger.lock_expectation(row)

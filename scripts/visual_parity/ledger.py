@@ -10,7 +10,6 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from pprint import pformat
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
 from scripts.visual_parity.io import read_coverage_matrix, read_ledger, write_ledger
@@ -30,6 +29,7 @@ Do not edit by hand. Regenerate with:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Dict, List
 
@@ -63,7 +63,6 @@ def _locked_rows() -> List[Dict[str, object]]:
 
     data = read_ledger(LEDGER_PATH)
     return [row for row in data["rows"] if row.get("locked") is True]
-
 '''
 
 
@@ -479,7 +478,10 @@ def render_lock_tests(ledger: Mapping[str, Any]) -> str:
         return "".join(chunks)
     for row in rows:
         name = _test_name(str(row["row_id"]))
-        expected = pformat(_lock_expectation(row), sort_dicts=True, width=88)
+        expected_json = json.dumps(_lock_expectation(row), sort_keys=True, indent=4)
+        indented = "\n".join(
+            ("        " + line) if line else "" for line in expected_json.splitlines()
+        )
         chunks.append(
             f"\n\ndef test_lock_{name}() -> None:\n"
             f'    """Protect locked row {row["row_id"]}.\n\n'
@@ -488,7 +490,9 @@ def render_lock_tests(ledger: Mapping[str, Any]) -> str:
             "    None\n"
             "        The test asserts the committed current values remain locked.\n"
             '    """\n\n'
-            f"    expected = {expected}\n"
+            '    expected = json.loads("""\n'
+            f"{indented}\n"
+            '    """)\n'
             '    by_id = {str(row["row_id"]): row for row in _locked_rows()}\n'
             f"    row = by_id[{json.dumps(row['row_id'])}]\n"
             "    actual = ledger.lock_expectation(row)\n"
