@@ -416,9 +416,11 @@ def verify() -> list[FidelityResult]:
                 "NNP-NET rebuilt with --seed wired to srand, PivotMDS, and TensorFlow/Keras."
             ),
             residual_cause=(
-                "dagua/layout/ops/pipelines/nnpnet.py:459 and :478 now run PMDS-style "
-                "features plus the Keras MLP; the remaining gap is PMDS/teacher alignment "
-                "before the deterministic Keras forward path."
+                "dagua/layout/ops/pipelines/nnpnet_reference.py reproduces PMDS "
+                "features, the BH tsNET* teacher, and the Keras MLP bit-exactly "
+                "in memory; the only residual is the reference Graph::saveToVNA "
+                "6-significant-digit text serialization (Graph.h operator<< "
+                "default precision), a ~5e-7 quantization floor."
             ),
         ),
     ]
