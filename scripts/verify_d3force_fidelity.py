@@ -299,16 +299,23 @@ def _write_report(path: Path, rows: List[Dict[str, Any]], lcg_match: bool) -> No
             f"| {row['name']} | {row['residual']:.12g} | "
             f"{row['anisotropic_residual']:.12g} | {row['tier']} |"
         )
-    lines.extend(
-        [
-            "",
-            "Named residual: full-layout divergence first appears at the many-body force stage.",
-            "The current native op matches d3-force's LCG, phyllotaxis initialization, link force,",
-            "center force, and velocity-Verlet order, but uses direct ordered-pair n-body",
-            "evaluation instead of d3-quadtree Barnes-Hut traversal. This is a mathematical",
-            "summation/approximation-order gap, not runtime delegation.",
-        ]
-    )
+    if distributional or close:
+        lines.extend(
+            [
+                "",
+                "Named residual: at least one graph remains above the bit-exact threshold.",
+                "Investigate the first divergent force stage with small tick-by-tick probes.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Named residual: none. The native pipeline matches d3-force's LCG, phyllotaxis",
+                "initialization, link force, d3-quadtree Barnes-Hut many-body traversal, center",
+                "force, and velocity-Verlet order within the bit-exact threshold.",
+            ]
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
 
@@ -348,7 +355,8 @@ def main() -> None:
             f"anisotropic={row['anisotropic_residual']:.12g} tier={row['tier']}"
         )
     print(f"bit_exact={bit_exact} close={close} distributional={distributional}")
-    print("first_divergent_stage=many_body_barnes_hut_vs_direct")
+    divergent_stage = "unknown" if close or distributional else "none"
+    print(f"first_divergent_stage={divergent_stage}")
 
 
 if __name__ == "__main__":
