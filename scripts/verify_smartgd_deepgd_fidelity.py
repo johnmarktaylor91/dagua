@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-import torch
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+import torch  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SMART_REF_ROOT = Path.home() / "tools" / "dagua-refs" / "smartgd"
 DEEP_REF_ROOT = Path.home() / "tools" / "dagua-refs" / "deepgd"
+_SEEDS = (7, 42)
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -50,6 +54,95 @@ def _path_edge_index(num_nodes: int) -> torch.Tensor:
     )
 
 
+def _cycle_edge_index(num_nodes: int) -> torch.Tensor:
+    """Build a deterministic cycle graph.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, N]``.
+    """
+    if num_nodes <= 1:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.tensor(
+        [list(range(num_nodes)), [*range(1, num_nodes), 0]],
+        dtype=torch.long,
+    )
+
+
+def _star_edge_index(num_nodes: int) -> torch.Tensor:
+    """Build a deterministic star graph.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, max(N - 1, 0)]``.
+    """
+    if num_nodes <= 1:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.tensor(
+        [[0] * (num_nodes - 1), list(range(1, num_nodes))],
+        dtype=torch.long,
+    )
+
+
+def _corpus() -> list[tuple[str, torch.Tensor, int]]:
+    """Return the small deterministic neural-fidelity graph corpus.
+
+    Returns
+    -------
+    list[tuple[str, torch.Tensor, int]]
+        Graph name, edge tensor, and node count triples.
+    """
+    return [
+        ("path8", _path_edge_index(8), 8),
+        ("cycle9", _cycle_edge_index(9), 9),
+        ("star10", _star_edge_index(10), 10),
+    ]
+
+
+def _reference_device() -> torch.device:
+    """Return the preferred deterministic inference device.
+
+    Returns
+    -------
+    torch.device
+        CUDA when available, otherwise CPU.
+    """
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _set_deterministic(seed: int) -> None:
+    """Configure PyTorch deterministic inference for one seed.
+
+    Parameters
+    ----------
+    seed : int
+        Seed for CPU and CUDA RNGs.
+
+    Returns
+    -------
+    None
+        Global PyTorch deterministic settings are updated in-place.
+    """
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def _quality_scores(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -71,9 +164,11 @@ def _quality_scores(
     dict[str, float]
         Stress, crossings, and neighborhood-preservation metrics.
     """
-    stress = metrics.sampled_stress(pos, edge_index, num_nodes, n_sources=min(20, num_nodes))
-    crossings = metrics.count_crossings(pos, edge_index)
-    neighborhood = metrics.neighborhood_preservation(pos, edge_index, num_nodes, k=3)
+    cpu_pos = pos.detach().cpu()
+    cpu_edges = edge_index.detach().cpu()
+    stress = metrics.sampled_stress(cpu_pos, cpu_edges, num_nodes, n_sources=min(20, num_nodes))
+    crossings = metrics.count_crossings(cpu_pos, cpu_edges)
+    neighborhood = metrics.neighborhood_preservation(cpu_pos, cpu_edges, num_nodes, k=3)
     return {
         "sampled_stress": float(stress["sampled_stress"]),
         "edge_crossings": float(crossings),
@@ -106,13 +201,15 @@ def _procrustes_residual(pos_a: torch.Tensor, pos_b: torch.Tensor) -> float:
     )
 
 
-def _load_smartgd_reference(checkpoint: Path) -> Optional[torch.nn.Module]:
+def _load_smartgd_reference(checkpoint: Path, device: torch.device) -> Optional[torch.nn.Module]:
     """Load the cloned SmartGD reference generator.
 
     Parameters
     ----------
     checkpoint : pathlib.Path
         Checkpoint path.
+    device : torch.device
+        Target inference device.
 
     Returns
     -------
@@ -136,9 +233,121 @@ def _load_smartgd_reference(checkpoint: Path) -> Optional[torch.nn.Module]:
             node_attr_dim=2,
         )
     )
-    model.load_state_dict(torch.load(checkpoint, map_location=torch.device("cpu")))
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.to(device)
     model.eval()
     return model
+
+
+def _first_divergent_stage(exact: bool) -> str:
+    """Return the known first divergent stage label.
+
+    Parameters
+    ----------
+    exact : bool
+        Whether reference and port tensors are bit-exact.
+
+    Returns
+    -------
+    str
+        Stage label for verifier output.
+    """
+    return "none" if exact else "block1_dynamic_edge_feature_expansion"
+
+
+def _verify_model(
+    *,
+    name: str,
+    checkpoint: Path,
+    config_factory: Callable[[int], SmartGDConfig],
+    reference_loader: Callable[[Path, torch.device], Optional[torch.nn.Module]],
+    model_builder: Callable[[SmartGDConfig], torch.nn.Module],
+    pipeline_forward: Callable[..., torch.Tensor],
+) -> bool:
+    """Run neural reference-vs-port checks over the deterministic corpus.
+
+    Parameters
+    ----------
+    name : str
+        Algorithm label for report output.
+    checkpoint : pathlib.Path
+        Released checkpoint path.
+    config_factory : Callable[[int], SmartGDConfig]
+        Factory returning a seeded port configuration.
+    reference_loader : Callable[[pathlib.Path, torch.device], torch.nn.Module | None]
+        Loader for the upstream reference model.
+    model_builder : Callable[[SmartGDConfig], torch.nn.Module]
+        Builder for the Dagua port model.
+    pipeline_forward : Callable[..., torch.Tensor]
+        Dagua pipeline forward helper.
+
+    Returns
+    -------
+    bool
+        ``True`` when every corpus graph is bit-exact and deterministic.
+    """
+    device = _reference_device()
+    reference_model = reference_loader(checkpoint, device)
+    if reference_model is None:
+        print(f"{name}.pretrained_available: false")
+        return False
+
+    config = config_factory(_SEEDS[0])
+    port_model = model_builder(config).to(device)
+    port_model.load_state_dict(torch.load(checkpoint, map_location=device))
+    port_model.eval()
+
+    all_exact = True
+    deterministic = True
+    worst_residual = 0.0
+    worst_max_abs = 0.0
+    for seed in _SEEDS:
+        _set_deterministic(seed)
+        seeded_config = config_factory(seed)
+        for graph_name, edge_index, num_nodes in _corpus():
+            prepared = prepare_smartgd_data(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                init_pos=None,
+                device=device,
+                seed=seed,
+            )
+            with torch.no_grad():
+                ref_pos = reference_model(*prepared)
+                port_pos = port_model(*prepared)
+            exact = bool(torch.equal(ref_pos, port_pos))
+            all_exact = all_exact and exact
+            residual = _procrustes_residual(ref_pos.detach().cpu(), port_pos.detach().cpu())
+            max_abs = float((ref_pos - port_pos).abs().max().item())
+            worst_residual = max(worst_residual, residual)
+            worst_max_abs = max(worst_max_abs, max_abs)
+            first = pipeline_forward(edge_index, num_nodes, seeded_config, device=device)
+            second = pipeline_forward(edge_index, num_nodes, seeded_config, device=device)
+            deterministic = deterministic and bool(torch.equal(first, second))
+            print(
+                f"{name}.case.{graph_name}.seed{seed}: "
+                f"exact={exact} max_abs={max_abs:.8g} procrustes={residual:.8g}"
+            )
+
+    quality_edge_index, quality_nodes = _path_edge_index(8), 8
+    pipeline_pos = pipeline_forward(quality_edge_index, quality_nodes, config, device=device)
+    quality = _quality_scores(pipeline_pos, quality_edge_index, quality_nodes)
+
+    tier = "positional_bit_exact" if all_exact else "positional_close"
+    print(f"{name}.pretrained_available: true")
+    print(f"{name}.checkpoint: {checkpoint}")
+    print(f"{name}.device: {device}")
+    print(f"{name}.deterministic_algorithms: {torch.are_deterministic_algorithms_enabled()}")
+    print(f"{name}.pipeline_repeat_exact: {deterministic}")
+    print(f"{name}.fidelity_tier: {tier}")
+    print(f"{name}.port_correctness_exact: {all_exact}")
+    print(f"{name}.port_correctness_max_abs: {worst_max_abs:.8g}")
+    print(f"{name}.port_correctness_procrustes_residual: {worst_residual:.8g}")
+    print(f"{name}.first_divergent_stage: {_first_divergent_stage(all_exact)}")
+    print(f"{name}.quality_scores:")
+    for key, value in quality.items():
+        print(f"  {key}: {value:.8g}")
+    return all_exact and deterministic
 
 
 def _verify_smartgd() -> bool:
@@ -147,57 +356,32 @@ def _verify_smartgd() -> bool:
     Returns
     -------
     bool
-        ``True`` when the similarity gate passes.
+        ``True`` when the bit-exact and deterministic gates pass.
     """
     checkpoint = SMART_REF_ROOT / "generator_stress_only.pt"
-    edge_index = _path_edge_index(8)
-    config = SmartGDConfig(checkpoint_path=str(checkpoint), use_reference_checkpoint=False, seed=42)
-    reference_model = _load_smartgd_reference(checkpoint)
-    if reference_model is None:
-        print("smartgd.pretrained_available: false")
-        return False
-
-    prepared = prepare_smartgd_data(
-        edge_index=edge_index,
-        num_nodes=8,
-        init_pos=None,
-        device=torch.device("cpu"),
-        seed=42,
+    return _verify_model(
+        name="smartgd",
+        checkpoint=checkpoint,
+        config_factory=lambda seed: SmartGDConfig(
+            checkpoint_path=str(checkpoint),
+            use_reference_checkpoint=False,
+            seed=seed,
+        ),
+        reference_loader=_load_smartgd_reference,
+        model_builder=build_smartgd_model,
+        pipeline_forward=smartgd_reference_forward,
     )
-    port_model = build_smartgd_model(config)
-    port_model.load_state_dict(torch.load(checkpoint, map_location=torch.device("cpu")))
-    port_model.eval()
-    with torch.no_grad():
-        ref_pos = reference_model(*prepared)
-        port_pos = port_model(*prepared)
-    residual = _procrustes_residual(ref_pos, port_pos)
-    exact = bool(torch.equal(ref_pos, port_pos))
-    close = residual < 0.01
-    pipeline_pos = smartgd_reference_forward(edge_index, 8, config, device="cpu")
-    quality = _quality_scores(pipeline_pos, edge_index, 8)
-
-    print("smartgd.pretrained_available: true")
-    print(f"smartgd.checkpoint: {checkpoint}")
-    print(f"smartgd.port_correctness_exact: {exact}")
-    print(f"smartgd.port_correctness_procrustes_residual: {residual:.8g}")
-    print(
-        "smartgd.first_divergent_stage: none"
-        if exact
-        else "smartgd.first_divergent_stage: dynamic_edge_feature_router"
-    )
-    print("smartgd.quality_scores:")
-    for key, value in quality.items():
-        print(f"  {key}: {value:.8g}")
-    return close
 
 
-def _load_deepgd_reference(checkpoint: Path) -> Optional[torch.nn.Module]:
+def _load_deepgd_reference(checkpoint: Path, device: torch.device) -> Optional[torch.nn.Module]:
     """Load the cloned DeepGD reference generator.
 
     Parameters
     ----------
     checkpoint : pathlib.Path
         Checkpoint path.
+    device : torch.device
+        Target inference device.
 
     Returns
     -------
@@ -221,7 +405,8 @@ def _load_deepgd_reference(checkpoint: Path) -> Optional[torch.nn.Module]:
             node_attr_dim=2,
         )
     )
-    model.load_state_dict(torch.load(checkpoint, map_location=torch.device("cpu")))
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.to(device)
     model.eval()
     return model
 
@@ -235,45 +420,18 @@ def _verify_deepgd() -> bool:
         ``True`` when the similarity gate passes.
     """
     checkpoint = DEEP_REF_ROOT / "model_stress_only.pt"
-    edge_index = _path_edge_index(8)
-    config = DeepGDConfig(checkpoint_path=str(checkpoint), use_reference_checkpoint=False, seed=42)
-    reference_model = _load_deepgd_reference(checkpoint)
-    if reference_model is None:
-        print("deepgd.pretrained_available: false")
-        return False
-
-    prepared = prepare_smartgd_data(
-        edge_index=edge_index,
-        num_nodes=8,
-        init_pos=None,
-        device=torch.device("cpu"),
-        seed=42,
+    return _verify_model(
+        name="deepgd",
+        checkpoint=checkpoint,
+        config_factory=lambda seed: DeepGDConfig(
+            checkpoint_path=str(checkpoint),
+            use_reference_checkpoint=False,
+            seed=seed,
+        ),
+        reference_loader=_load_deepgd_reference,
+        model_builder=build_deepgd_model,
+        pipeline_forward=deepgd_reference_forward,
     )
-    port_model = build_deepgd_model(config)
-    port_model.load_state_dict(torch.load(checkpoint, map_location=torch.device("cpu")))
-    port_model.eval()
-    with torch.no_grad():
-        ref_pos = reference_model(*prepared)
-        port_pos = port_model(*prepared)
-    residual = _procrustes_residual(ref_pos, port_pos)
-    exact = bool(torch.equal(ref_pos, port_pos))
-    close = residual < 0.01
-    pipeline_pos = deepgd_reference_forward(edge_index, 8, config, device="cpu")
-    quality = _quality_scores(pipeline_pos, edge_index, 8)
-
-    print("deepgd.pretrained_available: true")
-    print(f"deepgd.checkpoint: {checkpoint}")
-    print(f"deepgd.port_correctness_exact: {exact}")
-    print(f"deepgd.port_correctness_procrustes_residual: {residual:.8g}")
-    print(
-        "deepgd.first_divergent_stage: none"
-        if exact
-        else "deepgd.first_divergent_stage: dynamic_edge_feature_router"
-    )
-    print("deepgd.quality_scores:")
-    for key, value in quality.items():
-        print(f"  {key}: {value:.8g}")
-    return close
 
 
 def main() -> int:
