@@ -70,7 +70,7 @@ def test_lock_graphviz_edge_arrowhead_normal_svg_declared() -> None:
                     "validated_tripwire": true
                 },
                 {
-                    "current": 1.0,
+                    "current": 0.9807,
                     "metric_id": "arrow_fill_mode",
                     "status": "pass",
                     "tolerance": 0.98,

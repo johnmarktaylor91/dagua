@@ -119,6 +119,8 @@ Ingestion and dashboard:
 
 `python -m scripts.visual_parity.ledger --init`
 
+`python -m scripts.visual_parity.ledger --seed-baseline`
+
 `python -m scripts.visual_parity.ledger --generate-lock-tests`
 
 `python -m scripts.visual_parity.dashboard --out eval_output/visual_parity_v2/dashboard/index.md`

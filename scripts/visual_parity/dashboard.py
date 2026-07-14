@@ -133,6 +133,7 @@ def build_markdown(coverage: Mapping[str, Any], ledger: Mapping[str, Any]) -> st
     round_values = [
         float(round_entry.get("gates_summary", {}).get("global_in_tol_pct", 0.0))
         for round_entry in ledger.get("rounds", [])
+        if round_entry.get("gates_summary", {}).get("global_in_tol_pct") is not None
     ]
     parts = [
         "# Visual Parity v2 Dashboard",
@@ -148,6 +149,36 @@ def build_markdown(coverage: Mapping[str, Any], ledger: Mapping[str, Any]) -> st
                 ["locked_rows", sum(1 for row in rows if row.get("locked") is True)],
                 ["blocked_upstream", len(blocked)],
                 ["sparkline", _sparkline(round_values)],
+            ],
+        ),
+        "",
+        "## Baseline Rounds",
+        "",
+        _table(
+            [
+                "round",
+                "track",
+                "lane_label",
+                "geometry_mode",
+                "global_in_tol_pct",
+                "mean_l1",
+                "mean_ssim",
+                "cards",
+                "tripwires",
+            ],
+            [
+                [
+                    round_entry.get("round_id", ""),
+                    round_entry.get("track", ""),
+                    round_entry.get("lane_label", ""),
+                    round_entry.get("geometry_mode", ""),
+                    round_entry.get("gates_summary", {}).get("global_in_tol_pct", ""),
+                    round_entry.get("gates_summary", {}).get("pixel_mean_l1_rgb_per_pixel", ""),
+                    round_entry.get("gates_summary", {}).get("pixel_mean_ssim", ""),
+                    round_entry.get("gates_summary", {}).get("manifest_cards", ""),
+                    round_entry.get("tripwires", ""),
+                ]
+                for round_entry in ledger.get("rounds", [])
             ],
         ),
         "",
