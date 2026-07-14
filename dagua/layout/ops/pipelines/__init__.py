@@ -189,6 +189,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.webcola",
         "layout_webcola_constrained_pipeline",
     ),
+    "word2vecgd": ("dagua.layout.ops.pipelines.word2vecgd", "layout_word2vecgd_pipeline"),
     "yifanhu": ("dagua.layout.ops.pipelines.yifanhu", "layout_yifanhu_pipeline"),
 }
 
