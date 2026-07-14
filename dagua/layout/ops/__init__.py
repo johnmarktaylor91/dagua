@@ -250,6 +250,7 @@ _EXPECTED_OP_MODULES = (
     "cytoscape",
     "d3dag",
     "d3force",
+    "d3tree",
     "davidson_harel",
     "dagre",
     "distance",
