@@ -143,8 +143,7 @@ def test_circo_disconnected_components_use_graphviz_pack() -> None:
     Returns
     -------
     None
-        Packed components should be centered and vertically separated by the
-        Graphviz pack.c polyomino helper.
+        Packed components should match the Graphviz pack.c polyomino helper.
     """
     edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
     positions = layout_circo_pipeline(
@@ -154,8 +153,11 @@ def test_circo_disconnected_components_use_graphviz_pack() -> None:
         fidelity_dtype=torch.float64,
     )
 
-    torch.testing.assert_close(positions.mean(dim=0), torch.zeros(2, dtype=torch.float64))
-    assert torch.unique(positions[:, 1]).numel() > 1
+    expected = torch.tensor(
+        [[-62.0, -6.0], [46.0, -6.0], [50.0, 50.0], [158.0, 50.0], [-6.0, 50.0]],
+        dtype=torch.float64,
+    )
+    torch.testing.assert_close(positions, expected)
 
 
 def test_circo_production_pipeline_has_no_runtime_delegation() -> None:
