@@ -151,6 +151,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "neato": ("dagua.layout.ops.pipelines.neato", "layout_neato_pipeline"),
     "neulay": ("dagua.layout.ops.pipelines.neulay", "layout_neulay_pipeline"),
     "osage": ("dagua.layout.ops.pipelines.osage", "layout_osage_pipeline"),
+    "pacmap": ("dagua.layout.ops.pipelines.pacmap", "layout_pacmap_pipeline"),
     "planar": ("dagua.layout.ops.pipelines.planar", "layout_planar_pipeline"),
     "pivot_mds": (
         "dagua.layout.ops.pipelines.pivot_mds",
@@ -206,6 +207,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.webcola",
         "layout_webcola_constrained_pipeline",
     ),
+    "word2vecgd": ("dagua.layout.ops.pipelines.word2vecgd", "layout_word2vecgd_pipeline"),
     "yifanhu": ("dagua.layout.ops.pipelines.yifanhu", "layout_yifanhu_pipeline"),
 }
 
