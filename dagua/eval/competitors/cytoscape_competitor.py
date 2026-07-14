@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence
 
 import torch
@@ -13,6 +15,26 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
+
+_DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
+
+
+def _node_subprocess_env() -> Dict[str, str]:
+    """Return a Node environment that can resolve durable Cytoscape packages.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables for Cytoscape subprocesses.
+    """
+    env = dict(os.environ)
+    paths = [str(_DURABLE_NODE_MODULES)] if _DURABLE_NODE_MODULES.exists() else []
+    existing = env.get("NODE_PATH", "")
+    if existing:
+        paths.append(existing)
+    if paths:
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
 
 
 _CYTOSCAPE_SCRIPT = r"""
@@ -283,6 +305,7 @@ class CytoscapeCompetitor(CompetitorBase):
                 input=json.dumps(payload),
                 capture_output=True,
                 text=True,
+                env=_node_subprocess_env(),
                 timeout=timeout,
             )
             elapsed = time.perf_counter() - start
