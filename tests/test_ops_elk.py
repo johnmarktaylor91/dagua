@@ -10,7 +10,10 @@ from dagua.layout.ops.elk import (
     ElkBreakCycles,
     ElkMinimizeCrossings,
     ElkPrepareGraph,
+    _count_order_crossings,
     _JavaRandom,
+    _restart_sweep_orders,
+    _shuffle_layer_orders,
 )
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -61,6 +64,38 @@ def test_java_random_matches_known_next_int_sequence() -> None:
     rng = _JavaRandom(1)
 
     assert [rng.next_int(4), rng.next_int(10), rng.next_int(10)] == [2, 8, 7]
+
+
+def test_java_shuffle_matches_collections_shuffle_sequence() -> None:
+    """Pin Java ``Collections.shuffle`` semantics for ELK restarts.
+
+    Returns
+    -------
+    None
+        Per-layer shuffles must use Java's backward Fisher-Yates order.
+    """
+    rng = _JavaRandom(1)
+
+    assert _shuffle_layer_orders([[0, 1, 2, 3], [4, 5, 6]], rng) == [[3, 0, 1, 2], [5, 6, 4]]
+
+
+def test_elk_restart_sweeps_keep_strictly_better_order() -> None:
+    """Keep the earliest order that strictly improves crossing count.
+
+    Returns
+    -------
+    None
+        A crossing two-layer order should be replaced by the first sweep's
+        zero-crossing order.
+    """
+    layers = [[0, 1], [2, 3]]
+    edges = [(0, 3), (1, 2)]
+
+    assert _count_order_crossings(layers, edges) == 1
+    ordered = _restart_sweep_orders(layers, edges, random_seed=1, thoroughness=7)
+
+    assert ordered == [[0, 1], [3, 2]]
+    assert _count_order_crossings(ordered, edges) == 0
 
 
 def test_elk_default_greedy_cycle_breaks_cycle_4_like_elkjs() -> None:

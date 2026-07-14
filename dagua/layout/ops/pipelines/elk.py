@@ -31,6 +31,8 @@ def build_elk_pipeline(
     layering_strategy: str = "network_simplex",
     crossing_minimization_strategy: str = "layer_sweep",
     node_placement_strategy: str = "brandes_koepf",
+    random_seed: Optional[int] = None,
+    thoroughness: int = 7,
 ) -> Pipeline:
     """Build the native ELK Layered-style node-placement pipeline.
 
@@ -53,6 +55,12 @@ def build_elk_pipeline(
         Crossing minimization selector.
     node_placement_strategy : str, default="brandes_koepf"
         Node placement selector. ``brandes_koepf`` uses the shared BK op.
+    random_seed : int | None, optional
+        Public ELK random seed for randomized layer-sweep restarts. ``None``
+        reads the seed from ``LayoutProblem``.
+    thoroughness : int, default=7
+        Number of layer-sweep restart attempts; the first attempt is model
+        order, later attempts are Java-Random shuffles.
 
     Returns
     -------
@@ -69,6 +77,8 @@ def build_elk_pipeline(
                 layering_strategy=layering_strategy,
                 crossing_minimization_strategy=crossing_minimization_strategy,
                 node_placement_strategy=node_placement_strategy,
+                random_seed=random_seed,
+                thoroughness=thoroughness,
             ),
             ElkBreakCycles(),
             ElkAssignLayers(),
@@ -95,11 +105,13 @@ def layout_elk_pipeline(
     layering_strategy: str = "network_simplex",
     crossing_minimization_strategy: str = "layer_sweep",
     node_placement_strategy: str = "brandes_koepf",
+    random_seed: Optional[int] = None,
+    thoroughness: int = 7,
     variant: Optional[str] = None,
     fidelity_dtype: Optional[torch.dtype] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> torch.Tensor:
-    """Run the deterministic ELK Layered-style pipeline.
+    """Run the native ELK Layered-style pipeline.
 
     Parameters
     ----------
@@ -110,7 +122,7 @@ def layout_elk_pipeline(
     node_sizes : torch.Tensor | None, optional
         Node box widths and heights with shape ``[N, 2]``.
     seed : int | None, default=42
-        Accepted for API consistency; ELK Layered is deterministic.
+        Public random seed used by ELK-style layer-sweep restarts.
     edge_weights : torch.Tensor | None, optional
         Accepted for pipeline API consistency; ignored by this source stage.
     direction : str | None, optional
@@ -134,6 +146,11 @@ def layout_elk_pipeline(
         Exposed ELK crossing strategy selector.
     node_placement_strategy : str, default="brandes_koepf"
         Exposed ELK node placement selector.
+    random_seed : int | None, optional
+        ELK-specific alias for ``seed``. When supplied, it drives the
+        Java-compatible restart RNG.
+    thoroughness : int, default=7
+        Number of layer-sweep restart attempts.
     variant : str | None, optional
         Named variants: ``elk_layered_ns``, ``elk_layered_bk``, or ``elk_lp``.
     fidelity_dtype : torch.dtype | None, optional
@@ -152,7 +169,7 @@ def layout_elk_pipeline(
     RuntimeError
         If the composed pipeline does not produce positions.
     """
-    del seed, edge_weights, fidelity_dtype
+    del edge_weights, fidelity_dtype
     resolved_direction = direction or str(getattr(config, "direction", "DOWN"))
     resolved_node_spacing = node_node_spacing
     if nodeNode is not None:
@@ -162,6 +179,9 @@ def layout_elk_pipeline(
     resolved_between_layers = between_layers_spacing
     if node_node_between_layers is not None:
         resolved_between_layers = float(node_node_between_layers)
+    resolved_seed = int(random_seed if random_seed is not None else (42 if seed is None else seed))
+    if config is not None and random_seed is None and seed is None:
+        resolved_seed = int(getattr(config, "seed", resolved_seed))
 
     if variant is not None:
         normalized_variant = variant.lower()
@@ -180,6 +200,7 @@ def layout_elk_pipeline(
         edge_index=edge_index,
         num_nodes=num_nodes,
         node_sizes=node_sizes,
+        seed=resolved_seed,
     )
     state = SolveState()
     context = RuntimeContext(plan=ExecutionPlan(device="cpu"))
@@ -191,6 +212,8 @@ def layout_elk_pipeline(
         layering_strategy=layering_strategy,
         crossing_minimization_strategy=crossing_minimization_strategy,
         node_placement_strategy=node_placement_strategy,
+        random_seed=resolved_seed,
+        thoroughness=thoroughness,
     )
     final_state = pipeline.apply(problem, state, context)
     if final_state.pos is None:
