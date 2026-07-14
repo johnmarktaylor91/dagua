@@ -318,7 +318,7 @@ def _stage_note(algorithm: str, row: Dict[str, Any]) -> str:
     if row["name"] == "grid_5x5":
         return "intra-block circular ordering after block discovery"
     if row["name"] == "random_dag_50":
-        return "block-tree coordinate placement after matched blockpath ordering"
+        return "component packing after positional-identical main block-tree placement"
     return "block-tree coordinate placement after owned block discovery"
 
 
@@ -389,11 +389,12 @@ def _write_report(
             "component-packing residuals from Graphviz `pack.c`, a separable post-layout step.",
             "",
             "The current circo implementation uses Graphviz-style owned block-cutpoint discovery, "
-            "`circpos.c` child fan scaling/rotation, and Graphviz inch-to-local node-size "
-            "conversion for block radii. Simple paths, simple cycles, the long-skip case, "
-            "binary trees, and org-chart trees are positional-or-better. The remaining circo "
-            "residuals first diverge in `blockpath.c` ordering for biconnected grids/random "
-            "DAGs, with disconnected also requiring Graphviz component packing.",
+            "`circpos.c` child fan scaling/rotation, Graphviz rounded point node sizes, and "
+            "`pack.c` `CL_OFFSET` component packing for disconnected circo layouts. "
+            "`disconnected` is now bit-exact, and the `random_dag_50` 48-node main component "
+            "is positional-identical before packing. The remaining circo residual first "
+            "diverges in `pack.c` singleton-component placement after the matched main "
+            "block-tree layout.",
             "",
         ]
     )
