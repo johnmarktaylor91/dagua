@@ -2,7 +2,7 @@
 
 These ops are source ports of the small deterministic layouts in
 ``networkx.drawing.layout``.  They intentionally do not import NetworkX; the
-reference package is used only by competitor adapters and fidelity scripts.
+reference package is used only by evaluation reference adapters and fidelity scripts.
 """
 
 from __future__ import annotations
