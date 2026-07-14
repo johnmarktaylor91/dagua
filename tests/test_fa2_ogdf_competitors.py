@@ -17,6 +17,7 @@ from dagua.eval.competitors.networkx_competitor import NetworkXSpectral
 from dagua.eval.competitors.ogdf_competitor import (
     OGDFFMMM,
     OGDFBalloon,
+    OGDFBertault,
     OGDFDavidsonHarel,
     OGDFFpp,
     OGDFGem,
@@ -73,6 +74,7 @@ def test_fa2_and_ogdf_competitors_registered() -> None:
         "ogdf_sugiyama",
         "ogdf_davidson_harel",
         "ogdf_balloon",
+        "ogdf_bertault",
         "ogdf_fpp",
         "ogdf_schnyder",
     } <= names
@@ -224,6 +226,7 @@ def test_ogdf_adapters_forward_seed_to_runner(monkeypatch: pytest.MonkeyPatch) -
         OGDFDavidsonHarel(),
         OGDFSugiyama(),
         OGDFBalloon(),
+        OGDFBertault(),
         OGDFFpp(),
         OGDFSchnyder(),
     ]
