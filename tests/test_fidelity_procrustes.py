@@ -162,8 +162,8 @@ def test_procrustes_known_good_equivalent() -> None:
     assert row["verdict"] == "strong_equivalent"
 
 
-def test_procrustes_known_bad_divergent() -> None:
-    """A sheared reimplementation should fail equivalence and route to divergent."""
+def test_procrustes_known_bad_partial_match() -> None:
+    """A sheared stochastic reimplementation should fail equivalence softly."""
     orig = _build_layouts(((1.0, 0.0), (0.0, 1.0)), 0.01, 10, side="orig", rng_seed=1)
     reimpl = _build_layouts(((1.0, 0.35), (0.0, 1.0)), 0.01, 10, side="reimpl", rng_seed=2)
 
@@ -181,7 +181,7 @@ def test_procrustes_known_bad_divergent() -> None:
     for metric_name in QUALITY_METRICS:
         row[f"{metric_name}_tost_pvalue_1x_bh"] = 0.5
     finalize_group_row(row)
-    assert row["verdict"] == "divergent"
+    assert row["verdict"] == "partial_match"
 
 
 def test_procrustes_pooled_within_regression() -> None:
