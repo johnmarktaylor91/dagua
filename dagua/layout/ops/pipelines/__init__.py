@@ -139,6 +139,11 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "layout_stress_sgd_pipeline",
     ),
     "sugiyama": ("dagua.layout.ops.pipelines.sugiyama", "layout_sugiyama_pipeline"),
+    "tsne": ("dagua.layout.ops.pipelines.tsne_graph", "layout_tsne_pipeline"),
+    "tsne_graph": (
+        "dagua.layout.ops.pipelines.tsne_graph",
+        "layout_tsne_graph_pipeline",
+    ),
     "tsnet": ("dagua.layout.ops.pipelines.tsnet", "layout_tsnet_pipeline"),
     "tutte": ("dagua.layout.ops.pipelines.tutte", "layout_tutte_pipeline"),
     "twopi": ("dagua.layout.ops.pipelines.twopi", "layout_twopi_pipeline"),
