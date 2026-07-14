@@ -21,6 +21,20 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "drl": ("dagua.layout.ops.pipelines.drl", "layout_drl_pipeline"),
     "dagre": ("dagua.layout.ops.pipelines.dagre", "layout_dagre_pipeline"),
+    "d3dag": ("dagua.layout.ops.pipelines.d3dag", "layout_d3dag_pipeline"),
+    "d3dag_simplex": (
+        "dagua.layout.ops.pipelines.d3dag",
+        "layout_d3dag_simplex_pipeline",
+    ),
+    "d3dag_longestpath": (
+        "dagua.layout.ops.pipelines.d3dag",
+        "layout_d3dag_longestpath_pipeline",
+    ),
+    "d3dag_opt": ("dagua.layout.ops.pipelines.d3dag", "layout_d3dag_opt_pipeline"),
+    "d3dag_greedy": (
+        "dagua.layout.ops.pipelines.d3dag",
+        "layout_d3dag_greedy_pipeline",
+    ),
     "d3force": ("dagua.layout.ops.pipelines.d3force", "layout_d3force_pipeline"),
     "d3force_default": (
         "dagua.layout.ops.pipelines.d3force",
