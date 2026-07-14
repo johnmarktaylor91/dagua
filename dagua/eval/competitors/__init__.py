@@ -14,6 +14,7 @@ from dagua.eval.competitors import (
     d3force_competitor,  # noqa: F401
     dagre_competitor,  # noqa: F401
     dagua_competitor,  # noqa: F401
+    drgraph_largevis_competitor,  # noqa: F401
     elk_competitor,  # noqa: F401
     fa2_competitor,  # noqa: F401
     gephi_competitor,  # noqa: F401

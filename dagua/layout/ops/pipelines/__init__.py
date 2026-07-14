@@ -41,6 +41,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "layout_davidson_harel_pipeline",
     ),
     "deepgd": ("dagua.layout.ops.pipelines.deepgd", "layout_deepgd_pipeline"),
+    "drgraph": ("dagua.layout.ops.pipelines.drgraph", "layout_drgraph_pipeline"),
     "drl": ("dagua.layout.ops.pipelines.drl", "layout_drl_pipeline"),
     "dagre": ("dagua.layout.ops.pipelines.dagre", "layout_dagre_pipeline"),
     "d3dag": ("dagua.layout.ops.pipelines.d3dag", "layout_d3dag_pipeline"),
@@ -93,6 +94,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "graphopt": ("dagua.layout.ops.pipelines.graphopt", "layout_graphopt_pipeline"),
     "hde": ("dagua.layout.ops.pipelines.hde", "layout_hde_pipeline"),
     "kk": ("dagua.layout.ops.pipelines.kk", "layout_kk_pipeline"),
+    "largevis": ("dagua.layout.ops.pipelines.largevis", "layout_largevis_pipeline"),
     "lgl": ("dagua.layout.ops.pipelines.lgl", "layout_lgl_pipeline"),
     "linlog": ("dagua.layout.ops.pipelines.linlog", "layout_linlog_pipeline"),
     "maxent_stress": (
