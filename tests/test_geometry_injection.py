@@ -50,6 +50,17 @@ def test_parse_spline_pos_yields_segments_and_endpoint() -> None:
     assert segments[0].endpoint == (100.0, 20.0)
 
 
+def test_parse_spline_pos_accepts_wrapped_coordinate_pair() -> None:
+    """Graphviz may wrap a spline point after the comma."""
+
+    segments = parse_spline_pos(
+        "n0->n1",
+        "e,100,20 20,100 40,100 50,80 60,70 70,60 80,40 100,\\\n20",
+    )
+
+    assert segments[-1].end == (100.0, 20.0)
+
+
 def test_parse_graphviz_dot_geometry_extracts_canvas_nodes_and_edges() -> None:
     """Graphviz ``-Tdot`` output should parse into the frozen geometry schema."""
 

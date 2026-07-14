@@ -23,6 +23,9 @@ _ATTR_BLOCK_RE = re.compile(
     re.S,
 )
 _SUBGRAPH_RE = re.compile(r"subgraph\s+(?P<id>cluster[\w:.-]*)\s*\{(?P<body>.*?)\}", re.S)
+_POINT_TOKEN_RE = re.compile(
+    r"(?:[es],)?[-+]?(?:\d+(?:\.\d*)?|\.\d+),\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+)
 
 
 def dot_source_hash(dot_source: str) -> str:
@@ -164,7 +167,10 @@ def parse_spline_pos(edge_id: str, pos: str) -> List[SplineSegment]:
         Cubic spline segments. The control-point grammar is ``3k+1`` points.
     """
 
-    tokens = [token for token in pos.replace("\\\n", " ").split() if token]
+    normalized_pos = pos.replace("\\\n", "")
+    tokens = [
+        re.sub(r"\s+", "", match.group(0)) for match in _POINT_TOKEN_RE.finditer(normalized_pos)
+    ]
     endpoint: Optional[Tuple[float, float]] = None
     startpoint: Optional[Tuple[float, float]] = None
     points: List[Tuple[float, float]] = []
@@ -398,8 +404,7 @@ def graphviz_geometry(
         _run_dot_command(engine, "svg", dot_path, svg_path)
     if not xdot_path.exists():
         _run_dot_command(engine, "dot", dot_path, xdot_path)
-    if not png_path.exists():
-        _run_dot_command(engine, "png", dot_path, png_path, dpi=dpi)
+    _run_dot_command(engine, "png", dot_path, png_path, dpi=dpi)
 
     geometry = parse_graphviz_dot_geometry(
         xdot_path.read_text(encoding="utf-8"),
