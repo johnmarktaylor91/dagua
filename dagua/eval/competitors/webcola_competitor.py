@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
@@ -17,6 +19,26 @@ if TYPE_CHECKING:
 
 _DEFAULT_STEPS = 50
 _DEFAULT_LINK_DISTANCE = 20.0
+_DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
+
+
+def _node_subprocess_env() -> Dict[str, str]:
+    """Return a Node environment that can resolve durable WebCola packages.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables for WebCola subprocesses.
+    """
+    env = dict(os.environ)
+    paths = [str(_DURABLE_NODE_MODULES)] if _DURABLE_NODE_MODULES.exists() else []
+    existing = env.get("NODE_PATH", "")
+    if existing:
+        paths.append(existing)
+    if paths:
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
+
 
 _WEBCOLA_SCRIPT = r"""
 const cola = require('webcola');
@@ -190,6 +212,7 @@ class WebColaCompetitor(CompetitorBase):
                 input=input_data,
                 capture_output=True,
                 text=True,
+                env=_node_subprocess_env(),
                 timeout=timeout,
             )
             elapsed = time.perf_counter() - start
@@ -230,6 +253,7 @@ class WebColaCompetitor(CompetitorBase):
             result = subprocess.run(
                 ["node", "-e", "require('webcola')"],
                 capture_output=True,
+                env=_node_subprocess_env(),
                 timeout=10,
             )
             return result.returncode == 0

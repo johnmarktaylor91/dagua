@@ -15,7 +15,9 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, get_ru
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
-_REFERENCE_JAR = Path("/tmp/sparse-stress-ref/manual-build/sparse-stress.jar")
+_REFERENCE_JAR = (
+    Path.home() / "tools" / "dagua-refs" / "sparse-stress" / "manual-build" / "sparse-stress.jar"
+)
 _DEFAULT_SEED = 0
 _DEFAULT_PIVOTS = 8
 _DEFAULT_ITERATIONS = 20
