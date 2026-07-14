@@ -11,7 +11,7 @@ from dagua.layout.ops.cytoscape import CytoscapeCircleClusters, CytoscapeFinaliz
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
-def build_cise_pipeline(node_separation: float = 60.0) -> Pipeline:
+def build_cise_pipeline(node_separation: float = 12.5) -> Pipeline:
     """Build the Cytoscape CiSE-style circular-cluster pipeline.
 
     Parameters
@@ -39,7 +39,7 @@ def layout_cise_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     clusters: Optional[dict[str, Any]] = None,
     cluster_parents: Optional[dict[str, Optional[str]]] = None,
-    nodeSeparation: float = 60.0,
+    nodeSeparation: float = 12.5,
     randomize: bool = False,
     gravity: float = 0.25,
     gravityRange: float = 3.8,
