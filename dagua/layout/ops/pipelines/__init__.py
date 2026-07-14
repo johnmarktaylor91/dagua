@@ -90,6 +90,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "layout_dagua_native_pipeline",
     ),
     "dot": ("dagua.layout.ops.pipelines.dot", "layout_dot_pipeline"),
+    "elk": ("dagua.layout.ops.pipelines.elk", "layout_elk_pipeline"),
     "elk_force": ("dagua.layout.ops.pipelines.elk_force", "layout_elk_force_pipeline"),
     "elk_mrtree": ("dagua.layout.ops.pipelines.elk_mrtree", "layout_elk_mrtree_pipeline"),
     "elk_radial": ("dagua.layout.ops.pipelines.elk_radial", "layout_elk_radial_pipeline"),
