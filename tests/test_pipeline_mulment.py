@@ -284,3 +284,48 @@ def test_mulment_rejects_invalid_parameters(kwargs: dict[str, float]) -> None:
     """
     with pytest.raises(ValueError):
         layout_mulment_pipeline(_path_edge_index(3), 3, **kwargs)
+
+
+def test_mulment_glibc_rand_stream_is_bit_exact() -> None:
+    """The glibc ``rand()`` replica must match glibc's TYPE_3 outputs.
+
+    Ground-truth values were captured from a C program calling
+    ``srand(seed); rand();`` against glibc on the fidelity host.
+
+    Returns
+    -------
+    None
+        Assertions pin the exact random streams.
+    """
+    from dagua.layout.ops.pipelines.mulment import _GlibcRand
+
+    expected = {
+        13: [1358590890, 733184381, 1941561279, 279246991, 1306448764, 718348024],
+        17: [1227918265, 3978157, 263514239, 1969574147, 1833982879, 488658959],
+        23: [1562469902, 1039845534, 2025653534, 739593874, 994290584, 1198075102],
+    }
+    for seed, values in expected.items():
+        rng = _GlibcRand(seed)
+        assert [rng.rand() for _ in range(len(values))] == values
+
+
+def test_mulment_engine_default_steps_selects_reference_preset() -> None:
+    """``steps == 0`` (engine default) must select the KaDraw fast preset.
+
+    Returns
+    -------
+    None
+        The assertion compares default-dispatch output with the preset run.
+    """
+    edge_index = _path_edge_index(8)
+
+    preset = layout_mulment_pipeline(edge_index, 8, seed=5, fidelity_dtype=torch.float64)
+    zero_steps = layout_mulment_pipeline(
+        edge_index,
+        8,
+        steps=0,
+        seed=5,
+        fidelity_dtype=torch.float64,
+    )
+
+    assert torch.equal(preset, zero_steps)

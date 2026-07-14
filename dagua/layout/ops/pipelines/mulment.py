@@ -1325,7 +1325,11 @@ def layout_mulment_pipeline(
     node_sizes : torch.Tensor, optional
         Optional node sizes with shape ``[N, 2]``.
     steps : int, default=13
-        MaxEnt outer iterations (KaDraw fast preset).
+        MaxEnt outer iterations (KaDraw fast preset). ``0`` selects the
+        preset default so engine dispatch with ``LayoutConfig.steps == 0``
+        keeps reference behavior; pass ``MulMentConfig(steps=0)`` to
+        ``build_mulment_pipeline`` to skip optimization entirely. Negative
+        values raise.
     seed : int, default=42
         Seed for both KaDraw RNG streams (MT19937 tie-breaks and glibc
         ``rand()`` coordinates).
@@ -1363,7 +1367,7 @@ def layout_mulment_pipeline(
         return torch.zeros((1, 2), dtype=resolved_dtype, device=device)
 
     config = MulMentConfig(
-        steps=steps,
+        steps=steps if steps != 0 else _DEFAULT_OUTER_ITERATIONS,
         inner_iterations=inner_iterations,
         alpha=alpha,
         min_alpha=min_alpha,
