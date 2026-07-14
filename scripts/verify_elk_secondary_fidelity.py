@@ -176,7 +176,12 @@ def _edge_index(edges: Sequence[Sequence[int]]) -> torch.Tensor:
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
 
 
-def _pipeline_positions(algorithm: str, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _pipeline_positions(
+    algorithm: str,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+) -> torch.Tensor:
     """Run one local ELK secondary pipeline.
 
     Parameters
@@ -187,13 +192,15 @@ def _pipeline_positions(algorithm: str, edge_index: torch.Tensor, num_nodes: int
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of nodes.
+    node_sizes : torch.Tensor
+        Node size tensor with shape ``[N, 2]`` matching the ELK reference input.
 
     Returns
     -------
     torch.Tensor
         Position tensor with shape ``[N, 2]``.
     """
-    node_sizes = torch.full((num_nodes, 2), 120.0, dtype=torch.float64)
+    node_sizes = node_sizes.to(dtype=torch.float64)
     if algorithm == "elk_force":
         return layout_elk_force_pipeline(edge_index, num_nodes, node_sizes, seed=DEFAULT_SEED)
     if algorithm == "elk_stress":
@@ -239,18 +246,33 @@ def _evaluate(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         Per-algorithm, per-graph metric rows.
     """
     rows: List[Dict[str, Any]] = []
+    fixture_graphs: Dict[Tuple[str, str], DaguaGraph] = {}
+    for algorithm in {str(entry["algorithm"]) for entry in payload["graphs"]}:
+        for graph_name, graph in _verification_graphs(algorithm):
+            fixture_graphs[(algorithm, graph_name)] = graph
+
     for entry in payload["graphs"]:
         algorithm = str(entry["algorithm"])
+        graph_name = str(entry["name"])
         edge_index = _edge_index(entry["edges"])
         num_nodes = int(entry["num_nodes"])
+        fixture_graph = fixture_graphs[(algorithm, graph_name)]
+        if fixture_graph.node_sizes is None:
+            fixture_graph.compute_node_sizes()
+        assert fixture_graph.node_sizes is not None
         reference = torch.tensor(entry["reference_positions"], dtype=torch.float64)
-        actual = _pipeline_positions(algorithm, edge_index, num_nodes)
+        actual = _pipeline_positions(
+            algorithm,
+            edge_index,
+            num_nodes,
+            fixture_graph.node_sizes,
+        )
         residual = procrustes_rmsd(actual, reference)
         anisotropic = anisotropic_procrustes(actual, reference)
         rows.append(
             {
                 "algorithm": algorithm,
-                "name": entry["name"],
+                "name": graph_name,
                 "num_nodes": num_nodes,
                 "num_edges": int(edge_index.shape[1]),
                 "d_R": residual,
@@ -297,12 +319,14 @@ def _write_report(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
             "",
             "## Residuals",
             "",
-            "- `elk_force`: first-divergent stage is initial graph import / node "
-            "micro-layout; local port matches the documented Eades/FR displacement "
-            "loop but not ELK's pre-layout coordinates.",
-            "- `elk_stress`: first-divergent stage is initial graph import; the "
-            "majorization update follows the ELK loop, but starts from local "
-            "deterministic coordinates.",
+            "- `elk_force`: first-divergent stage is final JavaScript/Java numeric "
+            "serialization; the local port matches `ForceLayoutProvider`, "
+            "`AbstractForceModel.layout`, and `FruchtermanReingoldModel` init/order "
+            "against the cached `elkjs` references to float-rounding residuals.",
+            "- `elk_stress`: first-divergent stage is final JavaScript/Java numeric "
+            "serialization; the local port now uses `StressLayoutProvider`'s "
+            "Force warm start and `StressMajorization.computeNewPosition` "
+            "Gauss-Seidel update order.",
             "- `elk_mrtree`: first-divergent stage is ELK treeification / ordering / "
             "compaction; local implementation uses the existing Reingold-Tilford "
             "tidy-tree op.",

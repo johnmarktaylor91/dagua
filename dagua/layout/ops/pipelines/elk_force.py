@@ -28,10 +28,10 @@ def layout_elk_force_pipeline(
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 1,
     iterations: int = 300,
-    model: str = "eades",
+    model: str = "fruchterman_reingold",
     spacing: float = 80.0,
     repulsion: float = 5.0,
-    temperature: float = 1.0,
+    temperature: float = 0.001,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
@@ -49,13 +49,13 @@ def layout_elk_force_pipeline(
         ELK random seed for coincident-node jitter.
     iterations : int, default=300
         Number of model iterations.
-    model : str, default="eades"
+    model : str, default="fruchterman_reingold"
         Force model: ``"eades"`` or ``"fruchterman_reingold"``.
     spacing : float, default=80.0
         ELK node-node spacing.
     repulsion : float, default=5.0
         Eades repulsion factor.
-    temperature : float, default=1.0
+    temperature : float, default=0.001
         FR temperature.
     edge_weights : torch.Tensor, optional
         Accepted for engine compatibility; ELK Force ignores weights.
