@@ -122,6 +122,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.multipartite",
         "layout_multipartite_pipeline",
     ),
+    "mulment": ("dagua.layout.ops.pipelines.mulment", "layout_mulment_pipeline"),
     "native_force_directed": (
         "dagua.layout.ops.pipelines.native_force_directed",
         "layout_native_force_directed_pipeline",
@@ -156,6 +157,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "neato": ("dagua.layout.ops.pipelines.neato", "layout_neato_pipeline"),
     "neulay": ("dagua.layout.ops.pipelines.neulay", "layout_neulay_pipeline"),
+    "nnpnet": ("dagua.layout.ops.pipelines.nnpnet", "layout_nnpnet_pipeline"),
     "osage": ("dagua.layout.ops.pipelines.osage", "layout_osage_pipeline"),
     "pacmap": ("dagua.layout.ops.pipelines.pacmap", "layout_pacmap_pipeline"),
     "omega": ("dagua.layout.ops.pipelines.omega", "layout_omega_pipeline"),
