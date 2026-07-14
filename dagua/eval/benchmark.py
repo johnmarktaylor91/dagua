@@ -108,6 +108,7 @@ DEFAULT_COMPETITOR_ORDER = [
     "classic_fa2",
     "classic_stress_sgd",
     "classic_sgd2_multi",
+    "dot",
     "classic_sugiyama",
     "classic_spectral",
     "classic_classical_mds",
@@ -123,6 +124,7 @@ DEFAULT_COMPETITOR_ORDER = [
     "classic_neulay",
     "classic_maxent_stress",
     "classic_davidson_harel",
+    "fdp",
     "classic_fmmm",
     "classic_sfdp",
     "classic_drl",
@@ -648,7 +650,7 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         "umap_graph": "umap",
         "tsne_graph": "sklearn",
     }
-    if name.startswith("classic_"):
+    if name.startswith("classic_") or name in {"dot", "fdp"}:
         # Classic adapters are Dagua-owned implementations, so their cache key
         # should track our source changes instead of an external package.
         return f"{name}:{_dagua_source_signature()}"
