@@ -156,6 +156,15 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "osage": ("dagua.layout.ops.pipelines.osage", "layout_osage_pipeline"),
     "pacmap": ("dagua.layout.ops.pipelines.pacmap", "layout_pacmap_pipeline"),
     "omega": ("dagua.layout.ops.pipelines.omega", "layout_omega_pipeline"),
+    "openord": ("dagua.layout.ops.pipelines.openord", "layout_openord_pipeline"),
+    "openord_final": (
+        "dagua.layout.ops.pipelines.openord",
+        "layout_openord_final_pipeline",
+    ),
+    "openord_refine": (
+        "dagua.layout.ops.pipelines.openord",
+        "layout_openord_refine_pipeline",
+    ),
     "planar": ("dagua.layout.ops.pipelines.planar", "layout_planar_pipeline"),
     "pivot_mds": (
         "dagua.layout.ops.pipelines.pivot_mds",
