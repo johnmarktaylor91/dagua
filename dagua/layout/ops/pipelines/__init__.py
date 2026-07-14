@@ -56,6 +56,19 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.d3dag",
         "layout_d3dag_greedy_pipeline",
     ),
+    "d3_tree": ("dagua.layout.ops.pipelines.d3_tree", "layout_d3_tree_pipeline"),
+    "d3_tree_radial": (
+        "dagua.layout.ops.pipelines.d3_tree",
+        "layout_d3_tree_radial_pipeline",
+    ),
+    "d3_cluster": (
+        "dagua.layout.ops.pipelines.d3_cluster",
+        "layout_d3_cluster_pipeline",
+    ),
+    "d3_cluster_radial": (
+        "dagua.layout.ops.pipelines.d3_cluster",
+        "layout_d3_cluster_radial_pipeline",
+    ),
     "d3force": ("dagua.layout.ops.pipelines.d3force", "layout_d3force_pipeline"),
     "d3force_default": (
         "dagua.layout.ops.pipelines.d3force",
