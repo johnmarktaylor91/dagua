@@ -369,7 +369,6 @@ def verify() -> list[FidelityResult]:
         dagua_layout=lambda seed: layout_mulment_pipeline(
             mulment_edges,
             mulment_graph.num_nodes,
-            steps=4,
             seed=seed,
             fidelity_dtype=torch.float64,
         ),
@@ -403,9 +402,10 @@ def verify() -> list[FidelityResult]:
                 "KaDraw rebuilt with --seed wired to config.seed and ran single-thread."
             ),
             residual_cause=(
-                "dagua/layout/ops/pipelines/mulment.py:446 "
-                "_build_kadraw_hierarchy calls _kadraw_label_propagation_mapping; "
-                "the first non-identical stage is label-propagation coarsening."
+                "Full algorithm match (hierarchy, both RNG streams, fast-approx "
+                "refinement); residual is the reference's float32 CoordType "
+                "arithmetic vs dagua float64 plus 6-significant-digit coordinate "
+                "output, ~1e-5 floor."
             ),
         ),
         FidelityResult(
@@ -416,9 +416,11 @@ def verify() -> list[FidelityResult]:
                 "NNP-NET rebuilt with --seed wired to srand, PivotMDS, and TensorFlow/Keras."
             ),
             residual_cause=(
-                "dagua/layout/ops/pipelines/nnpnet.py intentionally uses a deterministic ridge "
-                "projection at line 324 where the reference trains a Keras MLP in "
-                "NNP-NET/LayoutMethods/NNPNET.cpp::trainPlusInfer."
+                "dagua/layout/ops/pipelines/nnpnet_reference.py reproduces PMDS "
+                "features, the BH tsNET* teacher, and the Keras MLP bit-exactly "
+                "in memory; the only residual is the reference Graph::saveToVNA "
+                "6-significant-digit text serialization (Graph.h operator<< "
+                "default precision), a ~5e-7 quantization floor."
             ),
         ),
     ]

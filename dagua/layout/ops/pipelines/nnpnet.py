@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.base import Op, Pipeline
@@ -13,6 +14,7 @@ from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency,
     layout_device,
 )
+from dagua.layout.ops.pipelines import nnpnet_reference as _reference
 from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -23,6 +25,13 @@ _DEFAULT_SUBGRAPH_SIZE = 10_000
 _DEFAULT_RIDGE = 1.0e-3
 _DEFAULT_OUTPUT_SCALE = 50.0
 _EPSILON = 1.0e-9
+_REFERENCE_BATCH_SIZE = 64
+_REFERENCE_BASE_STEPS_PER_EPOCH = 250
+_REFERENCE_TEACHER_MAX_ITER = 750
+_REFERENCE_THETA = 0.25
+_REFERENCE_INIT_PIVOTS = 250
+_REFERENCE_MODE_MIN_NODES = 7
+_REFERENCE_MODE_MAX_NODES = 128
 
 
 @dataclass(frozen=True)
@@ -155,6 +164,66 @@ def _pivot_distance_embedding(distances: torch.Tensor, embedding_size: int) -> t
     return features / biggest
 
 
+def _reference_pmds_embedding(
+    distances: torch.Tensor,
+    embedding_size: int,
+    seed: int,
+) -> torch.Tensor:
+    """Create the reference PMDS embedding used as NNP-NET features.
+
+    Parameters
+    ----------
+    distances : torch.Tensor
+        Dense graph distances with shape ``[N, N]``.
+    embedding_size : int
+        Number of output embedding coordinates.
+    seed : int
+        Seed for the reference PMDS eigensolver initialization.
+
+    Returns
+    -------
+    torch.Tensor
+        PMDS features with shape ``[N, embedding_size]``.
+    """
+    num_nodes = int(distances.shape[0])
+    num_pivots = min(num_nodes, embedding_size)
+    pivot_distances = _pivot_distance_embedding(distances, num_pivots).T.to(dtype=torch.float32)
+    pivot_distances = pivot_distances * torch.clamp(
+        distances.max().to(dtype=torch.float32),
+        min=_EPSILON,
+    )
+
+    squared = pivot_distances.square()
+    normalization = squared.sum() / float(num_nodes * num_pivots)
+    column_normalization = squared.sum(dim=1, keepdim=True) / float(num_nodes)
+    row_normalization = squared.mean(dim=0, keepdim=True)
+    centered = -0.5 * (squared + normalization - column_normalization - row_normalization)
+
+    gram = centered @ centered.T
+    eigenvalues, eigenvectors = torch.linalg.eigh(gram.to(dtype=torch.float64))
+    order = torch.argsort(eigenvalues, descending=True)
+    dims = min(embedding_size, int(order.numel()))
+    selected_values = torch.clamp(eigenvalues[order[:dims]], min=0.0)
+    selected_vectors = eigenvectors[:, order[:dims]]
+    coords = centered.T.to(dtype=torch.float64) @ selected_vectors
+    scales = torch.sqrt(torch.sqrt(selected_values).clamp_min(_EPSILON))
+    coords = coords / scales.unsqueeze(0)
+    coords = coords.to(dtype=torch.float32)
+
+    if dims < embedding_size:
+        padding = torch.zeros((num_nodes, embedding_size - dims), dtype=torch.float32)
+        coords = torch.cat([coords, padding], dim=1)
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed))
+    signs = torch.where(
+        torch.rand((embedding_size,), generator=generator) >= 0.5,
+        torch.tensor(1.0, dtype=torch.float32),
+        torch.tensor(-1.0, dtype=torch.float32),
+    )
+    return _minmax_normalize(coords * signs)
+
+
 def _sample_teacher_nodes(features: torch.Tensor, subgraph_size: int) -> torch.Tensor:
     """Select deterministic farthest-first teacher nodes.
 
@@ -231,6 +300,217 @@ def _fit_projection(features: torch.Tensor, labels: torch.Tensor, ridge: float) 
     return torch.linalg.solve(gram + penalty, design.T @ labels.to(dtype=features.dtype))
 
 
+def _minmax_normalize(positions: torch.Tensor) -> torch.Tensor:
+    """Normalize coordinates with the reference graph min/max rule.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Coordinates with shape ``[N, D]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinates scaled to the reference ``[0, 1]`` box convention.
+    """
+    minimum = positions.min(dim=0, keepdim=True).values
+    maximum = positions.max(dim=0, keepdim=True).values
+    max_size = torch.clamp((maximum - minimum).max(), min=_EPSILON)
+    return (positions - minimum) / max_size
+
+
+def _keras_train_plus_infer(
+    train_features: torch.Tensor,
+    train_labels: torch.Tensor,
+    full_features: torch.Tensor,
+    seed: int,
+    epochs: int,
+) -> Optional[torch.Tensor]:
+    """Train and apply the reference Keras MLP.
+
+    Parameters
+    ----------
+    train_features : torch.Tensor
+        Training features with shape ``[S, P]``.
+    train_labels : torch.Tensor
+        Training labels with shape ``[S, 2]``.
+    full_features : torch.Tensor
+        Inference features with shape ``[N, P]``.
+    seed : int
+        TensorFlow/Keras random seed.
+    epochs : int
+        Number of training epochs.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Predicted coordinates with shape ``[N, 2]`` when TensorFlow is
+        available and there is a full reference batch; otherwise ``None``.
+    """
+    batch_aligned = int(train_features.shape[0]) - (
+        int(train_features.shape[0]) % _REFERENCE_BATCH_SIZE
+    )
+    if batch_aligned <= 0:
+        return None
+
+    # Reference-parity TF configuration: the reference adapter runs the
+    # binary with oneDNN disabled (alignment-dependent kernels break
+    # cross-process determinism) and single-threaded TF reductions. These
+    # only take effect when TensorFlow initializes in this process.
+    import os
+
+    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+    try:
+        import tensorflow as tf
+    except Exception:
+        return None
+
+    try:
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+    except RuntimeError:
+        pass
+    try:
+        tf.config.set_visible_devices([], "GPU")
+    except RuntimeError:
+        pass
+
+    tf.keras.backend.clear_session()
+    tf.keras.utils.set_random_seed(int(seed))
+
+    feature_array = train_features[:batch_aligned].detach().cpu().to(dtype=torch.float32).numpy()
+    label_array = train_labels[:batch_aligned].detach().cpu().to(dtype=torch.float32).numpy()
+    full_array = full_features.detach().cpu().to(dtype=torch.float32).numpy()
+
+    model = tf.keras.Sequential(
+        [
+            tf.keras.layers.InputLayer(
+                input_shape=[int(full_features.shape[1])],
+                batch_size=_REFERENCE_BATCH_SIZE,
+            ),
+            tf.keras.layers.Dense(256, activation="leaky_relu"),
+            tf.keras.layers.Dense(512, activation="leaky_relu"),
+            tf.keras.layers.Dense(256, activation="leaky_relu"),
+            tf.keras.layers.Dense(int(train_labels.shape[1])),
+        ]
+    )
+    model.compile(optimizer="Adam", loss=tf.keras.losses.MeanSquaredError())
+    model.fit(
+        feature_array,
+        label_array,
+        epochs=max(1, int(epochs)),
+        batch_size=_REFERENCE_BATCH_SIZE,
+        verbose=0,
+    )
+    predictions = model.predict(full_array, batch_size=4096, verbose=0)
+    return torch.from_numpy(np.asarray(predictions, dtype=np.float32))
+
+
+def _reference_mode_eligible(problem: LayoutProblem, adjacency: list[list[int]]) -> bool:
+    """Decide whether the reference-exact NNP-NET port applies.
+
+    The exact port replicates the upstream C++ semantics (which require a
+    connected unweighted graph and a positive adjusted perplexity) and uses
+    sequential scalar arithmetic, so it is gated to small graphs.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs.
+    adjacency : list[list[int]]
+        Canonical reference adjacency.
+
+    Returns
+    -------
+    bool
+        True when the reference-exact path should run.
+    """
+    if problem.edge_weights is not None:
+        return False
+    if not _REFERENCE_MODE_MIN_NODES <= problem.num_nodes <= _REFERENCE_MODE_MAX_NODES:
+        return False
+    return _reference.is_connected(adjacency)
+
+
+def _reference_mode_positions(
+    problem: LayoutProblem,
+    config: NNPNetConfig,
+    adjacency: list[list[int]],
+) -> torch.Tensor:
+    """Run the reference-exact NNP-NET stages.
+
+    Stages mirror the upstream binary at fixed seed: seeded PivotMDS features
+    (glibc rand power iteration), Barnes-Hut tsNET* teacher initialized by an
+    unseeded-default PivotMDS, reference min/max normalization, and the Keras
+    MLP forward path. Falls back to the deterministic ridge projection when
+    TensorFlow is unavailable.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs.
+    config : NNPNetConfig
+        Pipeline configuration.
+    adjacency : list[list[int]]
+        Canonical reference adjacency.
+
+    Returns
+    -------
+    torch.Tensor
+        Final positions with shape ``[N, 2]`` in ``config.fidelity_dtype``.
+    """
+    pivots = min(config.embedding_size, problem.num_nodes)
+    embedding = _reference.reference_pmds(
+        adjacency,
+        dims=config.embedding_size,
+        pivots=pivots,
+        seed=problem.seed,
+    ).astype(np.float32)
+    if np.isnan(embedding).any():
+        embedding = _reference.reference_pivot_embedding(
+            adjacency,
+            config.embedding_size,
+        )
+    else:
+        embedding = _reference.graph_normalize(embedding)
+
+    teacher_init = _reference.reference_pmds(
+        adjacency,
+        dims=2,
+        pivots=min(_REFERENCE_INIT_PIVOTS, problem.num_nodes),
+        seed=0,
+    )
+    teacher = _reference.reference_tsnet_star(
+        adjacency,
+        teacher_init,
+        perplexity=config.perplexity,
+        theta=_REFERENCE_THETA,
+        max_iter=_REFERENCE_TEACHER_MAX_ITER,
+    )
+    teacher = _reference.graph_normalize(teacher)
+
+    features = torch.from_numpy(embedding)
+    labels = torch.from_numpy(teacher.astype(np.float32))
+    epochs = max(1, int(round(float(config.steps) / _REFERENCE_BASE_STEPS_PER_EPOCH)))
+    neural = _keras_train_plus_infer(features, labels, features, problem.seed, epochs)
+    if neural is not None:
+        return neural.to(dtype=config.fidelity_dtype)
+
+    weights = _fit_projection(
+        features.to(dtype=config.fidelity_dtype),
+        labels.to(dtype=config.fidelity_dtype),
+        config.ridge,
+    )
+    design = torch.cat(
+        [
+            features.to(dtype=config.fidelity_dtype),
+            torch.ones((problem.num_nodes, 1), dtype=config.fidelity_dtype),
+        ],
+        dim=1,
+    )
+    return _normalize_positions(design @ weights, config.output_scale)
+
+
 def _normalize_positions(positions: torch.Tensor, output_scale: float) -> torch.Tensor:
     """Center and scale final coordinates.
 
@@ -298,13 +578,21 @@ class NNPNetProjectNeighborhood(Op):
         """
         del ctx
 
+        adjacency = _reference.canonical_adjacency(
+            problem.edge_index.detach().cpu().numpy(),
+            problem.num_nodes,
+        )
+        if _reference_mode_eligible(problem, adjacency):
+            state.pos = _reference_mode_positions(problem, self.config, adjacency)
+            return state
+
         distances = _distance_matrix(
             problem.edge_index,
             problem.num_nodes,
             self.config.fidelity_dtype,
             problem.edge_weights,
         )
-        features = _pivot_distance_embedding(distances, self.config.embedding_size)
+        features = _reference_pmds_embedding(distances, self.config.embedding_size, problem.seed)
         teacher_nodes = _sample_teacher_nodes(features, self.config.subgraph_size)
         teacher_edges = _induced_edge_index(problem.edge_index.detach().cpu(), teacher_nodes)
         teacher = (
@@ -320,6 +608,19 @@ class NNPNetProjectNeighborhood(Op):
             .detach()
             .cpu()
         )
+        teacher = _minmax_normalize(teacher.to(dtype=torch.float32))
+
+        epochs = max(1, int(round(float(self.config.steps) / _REFERENCE_BASE_STEPS_PER_EPOCH)))
+        neural = _keras_train_plus_infer(
+            features[teacher_nodes],
+            teacher,
+            features,
+            problem.seed,
+            epochs,
+        )
+        if neural is not None:
+            state.pos = neural.to(dtype=self.config.fidelity_dtype)
+            return state
 
         weights = _fit_projection(features[teacher_nodes], teacher, self.config.ridge)
         design = torch.cat(

@@ -407,6 +407,17 @@ class NNPNetReferenceCompetitor(_ReferenceBinaryCompetitor):
         input_path = workdir / "graph.txt"
         output_path = workdir / "layout.vna"
         _write_nnpnet_graph(input_path, graph)
+        environment = dict(os.environ)
+        environment.update(
+            {
+                # Deterministic reference runs: oneDNN kernels pick
+                # alignment-dependent computation orders (ASLR-variable across
+                # processes), and the reference threadpool/TF reductions race.
+                "TF_ENABLE_ONEDNN_OPTS": "0",
+                "NNPNET_NUM_THREADS": "1",
+                "NNPNET_TF_THREADS": "1",
+            }
+        )
         command = [
             binary,
             str(input_path),
@@ -433,6 +444,7 @@ class NNPNetReferenceCompetitor(_ReferenceBinaryCompetitor):
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=environment,
         )
         if completed.returncode != 0:
             raise RuntimeError((completed.stderr or completed.stdout).strip())
