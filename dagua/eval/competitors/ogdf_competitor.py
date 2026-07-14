@@ -443,6 +443,15 @@ class OGDFBalloon(_OGDFBase):
 
 
 @register
+class OGDFBertault(_OGDFBase):
+    """Competitor adapter for OGDF's Bertault layout."""
+
+    name = "ogdf_bertault"
+    algorithm = "bertault"
+    max_nodes = 10_000
+
+
+@register
 class OGDFFpp(_OGDFBase):
     """Competitor adapter for OGDF's FPP planar layout."""
 
