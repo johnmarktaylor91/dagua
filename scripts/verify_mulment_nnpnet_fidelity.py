@@ -369,7 +369,6 @@ def verify() -> list[FidelityResult]:
         dagua_layout=lambda seed: layout_mulment_pipeline(
             mulment_edges,
             mulment_graph.num_nodes,
-            steps=4,
             seed=seed,
             fidelity_dtype=torch.float64,
         ),
@@ -403,9 +402,10 @@ def verify() -> list[FidelityResult]:
                 "KaDraw rebuilt with --seed wired to config.seed and ran single-thread."
             ),
             residual_cause=(
-                "dagua/layout/ops/pipelines/mulment.py:436 "
-                "_kadraw_label_propagation_mapping still has a later tie-break stream "
-                "drift after the level-2 quotient-order divergence was closed."
+                "Full algorithm match (hierarchy, both RNG streams, fast-approx "
+                "refinement); residual is the reference's float32 CoordType "
+                "arithmetic vs dagua float64 plus 6-significant-digit coordinate "
+                "output, ~1e-5 floor."
             ),
         ),
         FidelityResult(
