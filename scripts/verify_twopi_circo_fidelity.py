@@ -318,7 +318,7 @@ def _stage_note(algorithm: str, row: Dict[str, Any]) -> str:
     if row["name"] == "grid_5x5":
         return "intra-block circular ordering after block discovery"
     if row["name"] == "random_dag_50":
-        return "blockpath ordering before block-tree coordinate placement"
+        return "block-tree coordinate placement after matched blockpath ordering"
     return "block-tree coordinate placement after owned block discovery"
 
 
