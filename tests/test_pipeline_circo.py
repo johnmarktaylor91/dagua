@@ -137,6 +137,27 @@ def test_circo_pipeline_uses_node_sizes_for_block_radii() -> None:
     assert not torch.allclose(small, large)
 
 
+def test_circo_disconnected_components_use_graphviz_pack() -> None:
+    """Pin disconnected circo component packing away from row offsets.
+
+    Returns
+    -------
+    None
+        Packed components should be centered and vertically separated by the
+        Graphviz pack.c polyomino helper.
+    """
+    edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+    positions = layout_circo_pipeline(
+        edge_index=edge_index,
+        num_nodes=5,
+        node_sizes=torch.full((5, 2), 36.0, dtype=torch.float64),
+        fidelity_dtype=torch.float64,
+    )
+
+    torch.testing.assert_close(positions.mean(dim=0), torch.zeros(2, dtype=torch.float64))
+    assert torch.unique(positions[:, 1]).numel() > 1
+
+
 def test_circo_production_pipeline_has_no_runtime_delegation() -> None:
     """Guard the implementation against Graphviz subprocess delegation.
 
