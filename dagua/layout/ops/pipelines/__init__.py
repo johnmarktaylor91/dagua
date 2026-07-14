@@ -15,6 +15,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "arc": ("dagua.layout.ops.pipelines.arc", "layout_arc_pipeline"),
     "bfs": ("dagua.layout.ops.pipelines.bfs", "layout_bfs_pipeline"),
     "balloon": ("dagua.layout.ops.pipelines.balloon", "layout_balloon_pipeline"),
+    "bertault": ("dagua.layout.ops.pipelines.bertault", "layout_bertault_pipeline"),
     "bipartite": (
         "dagua.layout.ops.pipelines.bipartite",
         "layout_bipartite_pipeline",
