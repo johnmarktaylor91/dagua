@@ -28,8 +28,8 @@ def layout_elk_stress_pipeline(
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 1,
     desired_edge_length: float = 100.0,
-    epsilon: float = 1.0e-4,
-    iteration_limit: int = 200,
+    epsilon: float = 1.0e-3,
+    iteration_limit: int = 2_147_483_647,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
@@ -47,9 +47,9 @@ def layout_elk_stress_pipeline(
         Accepted for API consistency; ELK Stress is deterministic.
     desired_edge_length : float, default=100.0
         Desired edge length.
-    epsilon : float, default=1e-4
+    epsilon : float, default=1e-3
         Relative stress-improvement threshold.
-    iteration_limit : int, default=200
+    iteration_limit : int, default=2147483647
         Maximum majorization iterations.
     edge_weights : torch.Tensor, optional
         Accepted for engine compatibility; this ELK mode uses option lengths.
