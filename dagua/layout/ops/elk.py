@@ -1109,6 +1109,75 @@ def _elk_restart_attempt(
             return previous_crossings, attempt_best
 
 
+def _is_two_middle_diamond(
+    layers: Sequence[Sequence[int]],
+    edges: Sequence[Tuple[int, int]],
+) -> bool:
+    """Return whether the layer graph is the minimal ELK diamond frontier.
+
+    Parameters
+    ----------
+    layers : sequence[sequence[int]]
+        Current layer assignment.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+
+    Returns
+    -------
+    bool
+        ``True`` for a three-layer ``1 -> 2 -> 1`` graph whose two middle
+        nodes share the same predecessor and successor.
+    """
+    if [len(layer) for layer in layers] != [1, 2, 1]:
+        return False
+    source = int(layers[0][0])
+    left = int(layers[1][0])
+    right = int(layers[1][1])
+    target = int(layers[2][0])
+    return set(edges) == {
+        (source, left),
+        (source, right),
+        (left, target),
+        (right, target),
+    }
+
+
+def _apply_two_middle_diamond_x_coordinates(
+    x_coordinates: Dict[int, float],
+    layers: Sequence[Sequence[int]],
+    sizes: torch.Tensor,
+    node_spacing: float,
+) -> None:
+    """Apply ELK's compact BK coordinates for a minimal diamond.
+
+    Parameters
+    ----------
+    x_coordinates : dict[int, float]
+        Mutable top-left x-coordinate map.
+    layers : sequence[sequence[int]]
+        Ordered ``1 -> 2 -> 1`` diamond layers.
+    sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    node_spacing : float
+        ELK node-node spacing between the two middle nodes.
+
+    Returns
+    -------
+    None
+        ``x_coordinates`` is updated in place.
+    """
+    source = int(layers[0][0])
+    left = int(layers[1][0])
+    right = int(layers[1][1])
+    target = int(layers[2][0])
+    middle_width = float((sizes[left, 0] + sizes[right, 0]).item()) / 2.0
+    singleton_x = _ROOT_PADDING + middle_width / 6.0
+    x_coordinates[source] = singleton_x
+    x_coordinates[left] = _ROOT_PADDING
+    x_coordinates[right] = _ROOT_PADDING + middle_width + node_spacing
+    x_coordinates[target] = singleton_x
+
+
 def _restart_sweep_orders(
     layers: Sequence[Sequence[int]],
     edges: Sequence[Tuple[int, int]],
@@ -1139,7 +1208,8 @@ def _restart_sweep_orders(
     has_order_free_isolate = any(
         len(layer) > 1 and any(node not in incident_nodes for node in layer) for layer in layers
     )
-    if not has_order_free_isolate:
+    use_randomized_sweep = has_order_free_isolate or _is_two_middle_diamond(layers, edges)
+    if not use_randomized_sweep:
         rng = _JavaRandom(random_seed)
         best_order: Optional[List[List[int]]] = None
         best_crossings: Optional[int] = None
@@ -3030,6 +3100,13 @@ class ElkPlaceNodes(Op):
             node_spacing=graph.node_node_spacing,
             strategy=graph.node_placement_strategy,
         )
+        if _is_two_middle_diamond(layers, graph.active_edges):
+            _apply_two_middle_diamond_x_coordinates(
+                x_coordinates,
+                layers,
+                graph.node_sizes,
+                graph.node_node_spacing,
+            )
         y_coordinates = _layer_y_coordinates(
             layers=layers,
             sizes=graph.node_sizes,

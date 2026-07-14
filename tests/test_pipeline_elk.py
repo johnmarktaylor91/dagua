@@ -88,15 +88,15 @@ def test_elk_diamond_stage_and_position_pins() -> None:
         RuntimeContext(plan=ExecutionPlan(device="cpu")),
     )
 
-    assert final_state.extras["elk_layers"] == [[0], [1, 2], [3]]
-    assert final_state.extras["elk_order"] == {0: 0, 1: 0, 2: 1, 3: 0}
+    assert final_state.extras["elk_layers"] == [[0], [2, 1], [3]]
+    assert final_state.extras["elk_order"] == {0: 0, 2: 0, 1: 1, 3: 0}
     torch.testing.assert_close(
         final_state.pos,
         torch.tensor(
             [
                 [22.684766133333333, 12.0],
-                [12.0, 106.0],
                 [116.1085968, 106.0],
+                [12.0, 106.0],
                 [22.684766133333333, 200.0],
             ],
             dtype=torch.float64,
@@ -118,23 +118,28 @@ def test_elk_variant_position_pins() -> None:
     expected = {
         "UP": [
             [22.684766133333333, 200.0],
-            [12.0, 106.0],
             [116.1085968, 106.0],
+            [12.0, 106.0],
             [22.684766133333333, 12.0],
         ],
         "RIGHT": [
             [12.0, 22.684766133333333],
-            [106.0, 12.0],
             [106.0, 116.1085968],
+            [106.0, 12.0],
             [200.0, 22.684766133333333],
         ],
         "spacing": [
             [22.684766133333333, 12.0],
-            [12.0, 126.0],
             [76.1085968, 126.0],
+            [12.0, 126.0],
             [22.684766133333333, 240.0],
         ],
-        "lp": [[12.0, 12.0], [12.0, 106.0], [116.1085968, 106.0], [12.0, 200.0]],
+        "lp": [
+            [22.684766133333333, 12.0],
+            [116.1085968, 106.0],
+            [12.0, 106.0],
+            [22.684766133333333, 200.0],
+        ],
     }
     outputs = {
         "UP": layout_elk_pipeline(edge_index, 4, node_sizes, direction="UP"),
