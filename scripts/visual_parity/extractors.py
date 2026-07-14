@@ -677,8 +677,10 @@ def symmetric_mean_point_to_polyline(left: Sequence[Point], right: Sequence[Poin
         Mean symmetric distance in points.
     """
 
+    if not left and not right:
+        return 0.0
     if not left or not right:
-        raise NotImplementedError("wired in E1")
+        return float("inf")
     left_mean = sum(_point_to_polyline_distance(point, right) for point in left) / len(left)
     right_mean = sum(_point_to_polyline_distance(point, left) for point in right) / len(right)
     return (left_mean + right_mean) / 2.0

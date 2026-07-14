@@ -137,8 +137,11 @@ def test_current_ledger_global_floor_is_enforced() -> None:
     """Assert the current v2 ledger floor is consumed by the parity test."""
 
     lock_config = _ledger_lock_config()
+    locked_payload = {
+        feature: float(floor) for feature, floor in lock_config["locked_features"].items()
+    }
     _assert_ledger_locks(
-        _metric_payload({}, global_pct=float(lock_config["global_floor_pct"])),
+        _metric_payload(locked_payload, global_pct=float(lock_config["global_floor_pct"])),
         lock_config,
     )
 

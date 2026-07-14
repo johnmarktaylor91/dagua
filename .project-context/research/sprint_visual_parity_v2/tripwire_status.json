@@ -1,15 +1,6 @@
 {
-  "failed_metric_ids": [
-    "arrow_compound_order",
-    "arrow_fill_mode,arrow_polygon_iou",
-    "cluster_rect_metric",
-    "corridor_ink_ratio",
-    "harness_l1",
-    "label_glyph_extent_pt",
-    "node_autosize_w_pt",
-    "node_fill"
-  ],
-  "generated_at": "2026-07-14T21:08:17.764541+00:00",
+  "failed_metric_ids": [],
+  "generated_at": "2026-07-14T22:24:50.314137+00:00",
   "results": [
     {
       "evidence": [],
@@ -23,15 +14,13 @@
         "injected": 2.0,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764269+00:00",
+      "run_at": "2026-07-14T22:24:50.313244+00:00",
       "status": "pass",
       "tripwire_id": "tw_font"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "corridor_ink_ratio"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "corridor_ink_ratio",
       "min_effect_size": "< style threshold",
       "notes": "",
@@ -39,17 +28,15 @@
         "clean": false,
         "clean_fired": false,
         "injected": true,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764334+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.313375+00:00",
+      "status": "pass",
       "tripwire_id": "tw_stem"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "label_glyph_extent_pt"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "label_glyph_extent_pt",
       "min_effect_size": "delta > 20%",
       "notes": "",
@@ -57,17 +44,15 @@
         "clean": 0.0,
         "clean_fired": false,
         "injected": 0.4,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764360+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.313451+00:00",
+      "status": "pass",
       "tripwire_id": "tw_trunc"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "label_glyph_extent_pt"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "label_glyph_extent_pt",
       "min_effect_size": "delta > 5%",
       "notes": "",
@@ -75,17 +60,15 @@
         "clean": 0.0,
         "clean_fired": false,
         "injected": 0.060000000000000026,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764384+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.313521+00:00",
+      "status": "pass",
       "tripwire_id": "tw_kern"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "arrow_fill_mode,arrow_polygon_iou"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "arrow_fill_mode,arrow_polygon_iou",
       "min_effect_size": "mode mismatch; iou < 0.80",
       "notes": "",
@@ -93,17 +76,15 @@
         "clean": false,
         "clean_fired": false,
         "injected": true,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764406+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.313589+00:00",
+      "status": "pass",
       "tripwire_id": "tw_arrowfill"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "arrow_compound_order"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "arrow_compound_order",
       "min_effect_size": "mismatch",
       "notes": "",
@@ -111,17 +92,15 @@
         "clean": false,
         "clean_fired": false,
         "injected": true,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764427+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.313655+00:00",
+      "status": "pass",
       "tripwire_id": "tw_arroworder"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "node_autosize_w_pt"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "node_autosize_w_pt",
       "min_effect_size": "delta > 15%",
       "notes": "",
@@ -129,17 +108,15 @@
         "clean": 0.0,
         "clean_fired": false,
         "injected": 0.2,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764446+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.313718+00:00",
+      "status": "pass",
       "tripwire_id": "tw_size"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "node_fill"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "node_fill",
       "min_effect_size": ">= 1 panel",
       "notes": "",
@@ -147,10 +124,10 @@
         "clean": false,
         "clean_fired": false,
         "injected": true,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764467+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.313784+00:00",
+      "status": "pass",
       "tripwire_id": "tw_color"
     },
     {
@@ -158,17 +135,20 @@
       "failed_metric_ids": [],
       "metric_id": "spline_path_dist_pt",
       "min_effect_size": "> 3pt",
-      "notes": "wired in E1",
-      "observed_effect": {},
-      "run_at": "2026-07-14T21:08:17.764493+00:00",
-      "status": "skipped",
+      "notes": "",
+      "observed_effect": {
+        "clean": 0.0,
+        "clean_fired": false,
+        "injected": 7.0,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:24:50.313857+00:00",
+      "status": "pass",
       "tripwire_id": "tw_spline"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "cluster_rect_metric"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "cluster_rect_metric",
       "min_effect_size": ">= 1 panel",
       "notes": "",
@@ -176,17 +156,15 @@
         "clean": false,
         "clean_fired": false,
         "injected": true,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764497+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.314006+00:00",
+      "status": "pass",
       "tripwire_id": "tw_cluster"
     },
     {
       "evidence": [],
-      "failed_metric_ids": [
-        "harness_l1"
-      ],
+      "failed_metric_ids": [],
       "metric_id": "harness_l1",
       "min_effect_size": "any",
       "notes": "",
@@ -194,13 +172,13 @@
         "clean": false,
         "clean_fired": false,
         "injected": true,
-        "injected_fired": false
+        "injected_fired": true
       },
-      "run_at": "2026-07-14T21:08:17.764520+00:00",
-      "status": "fail",
+      "run_at": "2026-07-14T22:24:50.314071+00:00",
+      "status": "pass",
       "tripwire_id": "tw_scalehide"
     }
   ],
   "schema_version": 2,
-  "status": "fail"
+  "status": "pass"
 }

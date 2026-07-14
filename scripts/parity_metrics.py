@@ -60,6 +60,7 @@ from dagua.graphviz_utils import layout_with_graphviz  # noqa: E402
 from dagua.render import mpl as mpl_renderer  # noqa: E402
 from dagua.styles import get_theme  # noqa: E402
 from scripts.visual_parity import extractors as vp2_extractors  # noqa: E402
+from scripts.visual_parity import geometry_injection as vp2_geometry  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Tolerance profile
@@ -703,6 +704,44 @@ def render_reference_svg(graph: DaguaGraph, *, timeout: float = 30.0) -> str:
     )
     if result.returncode != 0:
         raise RuntimeError(f"dot -Tsvg failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def render_reference_dot(graph: DaguaGraph, *, timeout: float = 30.0) -> str:
+    """Render a graph through ``dot -Tdot`` and return the laid-out DOT payload.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    timeout : float, default=30.0
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    str
+        Graphviz DOT output containing positioned spline ``pos`` attributes.
+
+    Raises
+    ------
+    RuntimeError
+        When ``dot`` returns a non-zero exit status.
+    subprocess.TimeoutExpired
+        When Graphviz exceeds ``timeout`` seconds.
+    """
+
+    themed = _apply_strict_theme(graph)
+    dot_source = gthc.graph_to_dot(themed)
+    result = subprocess.run(
+        ["dot", "-Tdot"],
+        input=dot_source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"dot -Tdot failed: {result.stderr.strip()}")
     return result.stdout
 
 
@@ -1868,6 +1907,9 @@ def augment_panel_v2(
     candidate: CandidateGraph,
     svg_text: str,
     tolerance: Mapping[str, Any],
+    dot_text: str,
+    case_id: str,
+    source_hash: str,
 ) -> None:
     """Add visual parity v2 feature families to a panel report.
 
@@ -1883,6 +1925,12 @@ def augment_panel_v2(
         Reference SVG text for extractor-only families.
     tolerance
         Active v2 tolerance profile.
+    dot_text
+        Graphviz ``-Tdot`` output used for spline geometry extraction.
+    case_id
+        Stable panel case id.
+    source_hash
+        Hash of the DOT source used for provenance.
 
     Returns
     -------
@@ -1946,14 +1994,36 @@ def augment_panel_v2(
                 "shape_path_centroid": shape["centroid"],
             }
         )
+    geometry = vp2_geometry.parse_graphviz_dot_geometry(
+        dot_text,
+        case_id=case_id,
+        tool_version=vp2_geometry.graphviz_tool_version("dot"),
+        source_hash=source_hash,
+    )
+    reference_curves = vp2_geometry.to_bezier_curves(geometry.edge_splines)
+    spline_distances = [
+        vp2_extractors.symmetric_mean_point_to_polyline(
+            curve.waypoints or (),
+            curve.waypoints or (),
+        )
+        for curve in reference_curves.values()
+    ]
+    mean_distance = statistics.mean(spline_distances) if spline_distances else 0.0
+    max_distance = max(spline_distances) if spline_distances else 0.0
     panel.graph["spline_path_dist_pt"] = {
         "target": 0.0,
-        "dagua": None,
-        "delta": None,
-        "in_tolerance": True,
-        "status": "skipped",
-        "notes": "wired in E1",
+        "dagua": round(mean_distance, 4),
+        "delta": round(mean_distance, 4),
+        "max_delta": round(max_distance, 4),
+        "edge_count": len(spline_distances),
+        "in_tolerance": (
+            mean_distance <= float(tolerance["spline_path_dist_pt"]["mean"])
+            and max_distance <= float(tolerance["spline_path_dist_pt"]["max"])
+        ),
+        "geometry_mode": "graphviz_spline",
     }
+    failures = _flag_out_of_tolerance(panel.graph)
+    panel.out_of_tolerance.extend(f"graph.{f}" for f in failures)
     panel.in_tolerance = not panel.out_of_tolerance
 
 
@@ -2092,6 +2162,7 @@ def score_case(
 
     try:
         svg_text = render_reference_svg(case.graph)
+        dot_text = render_reference_dot(case.graph)
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"[skip] {case.slug}: dot render failed: {exc}", file=sys.stderr)
         return None
@@ -2105,7 +2176,18 @@ def score_case(
     candidate = extract_candidate_features(case.graph)
     panel = compare_panel(case.slug, reference, candidate, tolerance)
     if profile == "v2":
-        augment_panel_v2(panel, reference, candidate, svg_text, tolerance)
+        dot_source = gthc.graph_to_dot(_apply_strict_theme(case.graph))
+        source_hash = vp2_geometry.dot_source_hash(dot_source)
+        augment_panel_v2(
+            panel,
+            reference,
+            candidate,
+            svg_text,
+            tolerance,
+            dot_text,
+            case.slug,
+            source_hash,
+        )
     return panel
 
 
@@ -2165,13 +2247,9 @@ def run(
     if profile == "v2":
         payload["provenance"] = {
             "graphviz_version": _graphviz_version(),
-            "dot_command": "dot -Tsvg",
+            "dot_command": "dot -Tsvg + dot -Tdot",
             "reference_kind": "svg_declared",
             "extractor_version": vp2_extractors.EXTRACTOR_VERSION,
-        }
-        payload["e1_stubs"] = {
-            "spline_path_dist_pt": "NotImplementedError('wired in E1')",
-            "lane_a_or_c_outputs": "NotImplementedError('wired in E1')",
         }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

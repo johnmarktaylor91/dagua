@@ -14,8 +14,8 @@ from scripts.visual_parity import tripwires
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_all_tripwires_present_with_e1_spline_skip() -> None:
-    """Assert all 11 tripwires exist and only spline is skipped."""
+def test_all_tripwires_present_and_passing() -> None:
+    """Assert all 11 tripwires exist and pass."""
 
     results = tripwires.run_all()
     by_id = {result.tripwire_id: result for result in results}
@@ -32,10 +32,7 @@ def test_all_tripwires_present_with_e1_spline_skip() -> None:
         "tw_cluster",
         "tw_scalehide",
     }
-    assert by_id["tw_spline"].status == "skipped"
     for tripwire_id, result in by_id.items():
-        if tripwire_id == "tw_spline":
-            continue
         assert result.status == "pass"
         assert result.observed_effect["clean_fired"] is False
         assert result.observed_effect["injected_fired"] is True
@@ -105,8 +102,11 @@ def test_threshold_weakening_makes_all_exit_nonzero(tmp_path: Path) -> None:
     assert report["failed_metric_ids"]
 
 
-@pytest.mark.skip(reason="tw_spline is wired in E1 when Lane A polylines are available")
 def test_spline_tripwire_fires_after_e1_wiring() -> None:
-    """Placeholder for E1 spline-path interlock wiring."""
+    """Assert the spline tripwire fires on a flattened spline."""
 
-    raise NotImplementedError("wired in E1")
+    by_id = {result.tripwire_id: result for result in tripwires.run_all()}
+    spline = by_id["tw_spline"]
+    assert spline.status == "pass"
+    assert spline.observed_effect["clean"] == pytest.approx(0.0)
+    assert spline.observed_effect["injected"] > 3.0
