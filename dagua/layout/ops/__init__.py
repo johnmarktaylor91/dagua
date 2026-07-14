@@ -85,6 +85,7 @@ from dagua.layout.ops.loss_classic import (
     UMAPCrossEntropyLoss,
     UMAPCrossEntropyLossConfig,
 )
+from dagua.layout.ops.networkx_simple import NetworkXSimpleLayout
 from dagua.layout.ops.postprocess import (
     CenterPositions,
     DirectionTransform,
@@ -193,6 +194,7 @@ __all__ = [
     "GEMUpdateTemperatures",
     "CircoAssignCircularCoordinates",
     "TwopiAssignRadialCoordinates",
+    "NetworkXSimpleLayout",
     # Taxonomy
     "OpCategory",
     "register_op",
@@ -267,6 +269,7 @@ _EXPECTED_OP_MODULES = (
     "loss_engine",
     "maxent_stress",
     "native_stress",
+    "networkx_simple",
     "neulay",
     "optimize",
     "ordering",
