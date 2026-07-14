@@ -1,4 +1,4 @@
-"""Graphviz competitor adapters — dot, sfdp, neato, fdp engines."""
+"""Graphviz competitor adapters — dot, sfdp, neato, fdp, twopi, circo engines."""
 
 from __future__ import annotations
 
@@ -1002,3 +1002,23 @@ class GraphvizFdp(_GraphvizBase):
     engine = "fdp"
     max_nodes = 5_000
     variant_param_names = frozenset({"K", "maxiter"})
+
+
+@register
+class GraphvizTwopi(_GraphvizBase):
+    """Graphviz twopi radial layout adapter."""
+
+    name = "graphviz_twopi"
+    engine = "twopi"
+    max_nodes = 10_000
+    variant_param_names = frozenset({"ranksep", "root"})
+
+
+@register
+class GraphvizCirco(_GraphvizBase):
+    """Graphviz circo circular layout adapter."""
+
+    name = "graphviz_circo"
+    engine = "circo"
+    max_nodes = 10_000
+    variant_param_names = frozenset({"nodesep"})
