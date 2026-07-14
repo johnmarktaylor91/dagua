@@ -9,7 +9,7 @@ the layered spacing options exposed by the adapter.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Dict, Hashable, List, Mapping, Sequence, Set, Tuple
+from typing import ClassVar, Dict, Hashable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -144,6 +144,8 @@ class _ElkGraph:
     layering_strategy: str
     crossing_minimization_strategy: str
     node_placement_strategy: str
+    random_seed: int
+    thoroughness: int
 
 
 def _normalize_choice(value: str, supported: Set[str], option_name: str) -> str:
@@ -623,6 +625,118 @@ def _median(values: Sequence[int]) -> float:
     return (ordered[middle - 1] + ordered[middle]) / 2.0
 
 
+def _shuffle_layer_orders(layers: Sequence[Sequence[int]], rng: _JavaRandom) -> List[List[int]]:
+    """Shuffle each layer with Java ``Collections.shuffle`` semantics.
+
+    Parameters
+    ----------
+    layers : sequence[sequence[int]]
+        Initial layer orders.
+    rng : _JavaRandom
+        Java-compatible RNG seeded from the public ELK random seed.
+
+    Returns
+    -------
+    list[list[int]]
+        Per-layer shuffled node orders.
+    """
+    shuffled = [list(layer) for layer in layers]
+    for layer in shuffled:
+        for index in range(len(layer), 1, -1):
+            swap_index = rng.next_int(index)
+            layer[index - 1], layer[swap_index] = layer[swap_index], layer[index - 1]
+    return shuffled
+
+
+def _count_order_crossings(
+    layers: Sequence[Sequence[int]],
+    edges: Sequence[Tuple[int, int]],
+) -> int:
+    """Count layer-order crossings induced by the current node order.
+
+    Parameters
+    ----------
+    layers : sequence[sequence[int]]
+        Ordered node layers.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+
+    Returns
+    -------
+    int
+        Number of pairwise edge-order inversions between common layer spans.
+    """
+    layer_by_node = {
+        node: layer_index for layer_index, layer in enumerate(layers) for node in layer
+    }
+    order_by_node = {node: index for layer in layers for index, node in enumerate(layer)}
+    span_edges: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+    for source, target in edges:
+        source_layer = layer_by_node.get(source)
+        target_layer = layer_by_node.get(target)
+        if source_layer is None or target_layer is None or source_layer == target_layer:
+            continue
+        if source_layer > target_layer:
+            source, target = target, source
+            source_layer, target_layer = target_layer, source_layer
+        span_edges.setdefault((source_layer, target_layer), []).append((source, target))
+
+    crossings = 0
+    for grouped_edges in span_edges.values():
+        for left_index, (left_source, left_target) in enumerate(grouped_edges):
+            left_source_order = order_by_node[left_source]
+            left_target_order = order_by_node[left_target]
+            for right_source, right_target in grouped_edges[left_index + 1 :]:
+                source_delta = left_source_order - order_by_node[right_source]
+                target_delta = left_target_order - order_by_node[right_target]
+                if source_delta * target_delta < 0:
+                    crossings += 1
+    return crossings
+
+
+def _restart_sweep_orders(
+    layers: Sequence[Sequence[int]],
+    edges: Sequence[Tuple[int, int]],
+    *,
+    random_seed: int,
+    thoroughness: int,
+) -> List[List[int]]:
+    """Run ELK-style randomized layer-sweep restarts and keep the best order.
+
+    Parameters
+    ----------
+    layers : sequence[sequence[int]]
+        Deterministic model-order layer assignment.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+    random_seed : int
+        Public ELK random seed for restart shuffles.
+    thoroughness : int
+        Number of crossing-minimization attempts. Attempt zero is
+        deterministic; subsequent attempts start from shuffled layer orders.
+
+    Returns
+    -------
+    list[list[int]]
+        Ordered layers from the earliest strictly best crossing score.
+    """
+    rng = _JavaRandom(random_seed)
+    best_order: Optional[List[List[int]]] = None
+    best_crossings: Optional[int] = None
+    for attempt in range(thoroughness):
+        initial = [list(layer) for layer in layers]
+        if attempt > 0:
+            initial = _shuffle_layer_orders(layers, rng)
+        candidate = _sweep_orders(initial, edges)
+        crossings = _count_order_crossings(candidate, edges)
+        if best_crossings is None or crossings < best_crossings:
+            best_order = candidate
+            best_crossings = crossings
+    if best_order is None:
+        return [list(layer) for layer in layers]
+    return best_order
+
+
 def _sweep_orders(layers: List[List[int]], edges: Sequence[Tuple[int, int]]) -> List[List[int]]:
     """Improve within-layer order with deterministic median sweeps.
 
@@ -899,6 +1013,8 @@ class ElkPrepareGraph(Op):
         layering_strategy: str = "network_simplex",
         crossing_minimization_strategy: str = "layer_sweep",
         node_placement_strategy: str = "brandes_koepf",
+        random_seed: Optional[int] = None,
+        thoroughness: int = 7,
     ) -> None:
         """Store validated ELK pipeline options.
 
@@ -918,6 +1034,10 @@ class ElkPrepareGraph(Op):
             Crossing minimization strategy selector.
         node_placement_strategy : str, default="brandes_koepf"
             Node placement strategy selector.
+        random_seed : int | None, optional
+            Public ELK random seed. ``None`` reads ``problem.seed``.
+        thoroughness : int, default=7
+            Number of layer-sweep restart attempts.
 
         Returns
         -------
@@ -926,9 +1046,13 @@ class ElkPrepareGraph(Op):
         """
         if node_node_spacing < 0.0 or between_layers_spacing < 0.0:
             raise ValueError("ELK spacing values must be non-negative.")
+        if thoroughness < 1:
+            raise ValueError("ELK thoroughness must be at least 1.")
         self.direction = _normalize_direction(direction)
         self.node_node_spacing = float(node_node_spacing)
         self.between_layers_spacing = float(between_layers_spacing)
+        self.random_seed = None if random_seed is None else int(random_seed)
+        self.thoroughness = int(thoroughness)
         self.cycle_breaking_strategy = _normalize_choice(
             cycle_breaking_strategy, _SUPPORTED_CYCLE_STRATEGIES, "cycle_breaking_strategy"
         )
@@ -990,6 +1114,8 @@ class ElkPrepareGraph(Op):
             layering_strategy=self.layering_strategy,
             crossing_minimization_strategy=self.crossing_minimization_strategy,
             node_placement_strategy=self.node_placement_strategy,
+            random_seed=self.random_seed if self.random_seed is not None else int(problem.seed),
+            thoroughness=self.thoroughness,
         )
         return state
 
@@ -1090,7 +1216,7 @@ class ElkMinimizeCrossings(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Run deterministic layer sweeps.
+        """Run layer-sweep crossing minimization with ELK-style restarts.
 
         Parameters
         ----------
@@ -1108,7 +1234,15 @@ class ElkMinimizeCrossings(Op):
         """
         del problem, ctx
         graph = state.extras[ELK_GRAPH_KEY]
-        ordered = _sweep_orders(state.extras[ELK_LAYERS_KEY], graph.active_edges)
+        if graph.crossing_minimization_strategy == "layer_sweep":
+            ordered = _restart_sweep_orders(
+                state.extras[ELK_LAYERS_KEY],
+                graph.active_edges,
+                random_seed=graph.random_seed,
+                thoroughness=graph.thoroughness,
+            )
+        else:
+            ordered = _sweep_orders(state.extras[ELK_LAYERS_KEY], graph.active_edges)
         state.extras[ELK_LAYERS_KEY] = ordered
         state.extras[ELK_ORDER_KEY] = {
             node: index for layer in ordered for index, node in enumerate(layer)
