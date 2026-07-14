@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import subprocess
 import sys
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import torch
+from scipy import stats
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dagua.eval import distributional_fidelity as df  # noqa: E402
 from dagua.eval.equivalence_metrics import procrustes_rmsd  # noqa: E402
 from dagua.layout.ops.largevis import (  # noqa: E402
     build_geodesic_knn_graph,
@@ -31,7 +35,31 @@ DEFAULT_REPORT = ROOT / "docs" / "algorithms" / "drgraph_largevis_fidelity.md"
 DEFAULT_LARGEVIS_BINARY = Path("/tmp/LargeVis/Linux/LargeVis")
 DEFAULT_DRGRAPH_BINARY = Path("/tmp/DRGraph/Vis")
 REFERENCE_SEED = 314159265
+DEFAULT_SEEDS = (
+    REFERENCE_SEED,
+    1,
+    2,
+    3,
+    5,
+    8,
+    13,
+    21,
+    34,
+    55,
+    89,
+    144,
+    233,
+    377,
+    610,
+    987,
+    1597,
+    2584,
+    4181,
+    6765,
+)
 LARGEVIS_REFERENCE_SAMPLES = 3
+TOST_ALPHA = 0.05
+PROCRUSTES_BAND_FLOOR = 1.0e-6
 
 
 @dataclass(frozen=True)
@@ -68,11 +96,39 @@ class ReferenceRun:
         Procrustes RMSD between two reference runs.
     command : str
         Reference command used for the first run.
+    seed : int
+        Reference RNG seed.
     """
 
     positions: np.ndarray
     repeat_residual: float
     command: str
+    seed: int
+
+
+@dataclass(frozen=True)
+class StressTost:
+    """Sampled-stress TOST result.
+
+    Parameters
+    ----------
+    passed : bool
+        Whether the TOST accepted stress equivalence.
+    margin : float
+        Symmetric stress equivalence margin.
+    pvalue : float
+        Maximum one-sided t-test p-value.
+    dagua_mean : float
+        Mean dagua sampled stress.
+    reference_mean : float
+        Mean reference sampled stress.
+    """
+
+    passed: bool
+    margin: float
+    pvalue: float
+    dagua_mean: float
+    reference_mean: float
 
 
 def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
@@ -224,38 +280,41 @@ def _write_drgraph_input(path: Path, graph: VerificationGraph) -> None:
 
 
 def _run_reference_twice(
-    command_factory: Callable[[Path, Path], list[str]],
+    command_factory: Callable[[Path, Path, int], list[str]],
     input_path: Path,
     output_stem: Path,
     env: dict[str, str],
+    seed: int,
 ) -> ReferenceRun:
     """Run one reference twice and collect deterministic coordinates.
 
     Parameters
     ----------
-    command_factory : Callable[[pathlib.Path, pathlib.Path], list[str]]
-        Factory receiving input and output paths.
+    command_factory : Callable[[pathlib.Path, pathlib.Path, int], list[str]]
+        Factory receiving input path, output path, and seed.
     input_path : pathlib.Path
         Reference input file.
     output_stem : pathlib.Path
         Prefix for output files.
     env : dict[str, str]
         Runtime environment.
+    seed : int
+        Reference RNG seed.
 
     Returns
     -------
     ReferenceRun
         First-run positions and repeat residual.
     """
-    first_output = output_stem.with_suffix(".out1")
-    second_output = output_stem.with_suffix(".out2")
-    first_command = command_factory(input_path, first_output)
-    second_command = command_factory(input_path, second_output)
+    first_output = output_stem.with_suffix(f".seed{seed}.out1")
+    second_output = output_stem.with_suffix(f".seed{seed}.out2")
+    first_command = command_factory(input_path, first_output, seed)
+    second_command = command_factory(input_path, second_output, seed)
     _run_command(first_command, env)
     _run_command(second_command, env)
     first = _read_positions(first_output)
     second = _read_positions(second_output)
-    return ReferenceRun(first, float(procrustes_rmsd(first, second)), " ".join(first_command))
+    return ReferenceRun(first, float(procrustes_rmsd(first, second)), " ".join(first_command), seed)
 
 
 def _largevis_reference(
@@ -263,6 +322,7 @@ def _largevis_reference(
     graph: VerificationGraph,
     workdir: Path,
     env: dict[str, str],
+    seed: int,
 ) -> ReferenceRun:
     """Run the LargeVis C++ graph-mode reference.
 
@@ -276,6 +336,8 @@ def _largevis_reference(
         Temporary working directory.
     env : dict[str, str]
         Runtime environment.
+    seed : int
+        Reference RNG seed.
 
     Returns
     -------
@@ -285,7 +347,7 @@ def _largevis_reference(
     input_path = workdir / f"{graph.name}.largevis.in"
     _write_largevis_input(input_path, graph)
 
-    def command_factory(source: Path, output: Path) -> list[str]:
+    def command_factory(source: Path, output: Path, run_seed: int) -> list[str]:
         """Build the LargeVis command.
 
         Parameters
@@ -294,6 +356,8 @@ def _largevis_reference(
             Input path.
         output : pathlib.Path
             Output path.
+        run_seed : int
+            Reference RNG seed.
 
         Returns
         -------
@@ -322,9 +386,11 @@ def _largevis_reference(
             "7",
             "-perp",
             "50",
+            "--seed",
+            str(run_seed),
         ]
 
-    return _run_reference_twice(command_factory, input_path, workdir / graph.name, env)
+    return _run_reference_twice(command_factory, input_path, workdir / graph.name, env, seed)
 
 
 def _drgraph_reference(
@@ -332,6 +398,7 @@ def _drgraph_reference(
     graph: VerificationGraph,
     workdir: Path,
     env: dict[str, str],
+    seed: int,
 ) -> ReferenceRun:
     """Run the DRGraph C++ graph-layout reference.
 
@@ -345,6 +412,8 @@ def _drgraph_reference(
         Temporary working directory.
     env : dict[str, str]
         Runtime environment.
+    seed : int
+        Reference RNG seed.
 
     Returns
     -------
@@ -354,7 +423,7 @@ def _drgraph_reference(
     input_path = workdir / f"{graph.name}.drgraph.in"
     _write_drgraph_input(input_path, graph)
 
-    def command_factory(source: Path, output: Path) -> list[str]:
+    def command_factory(source: Path, output: Path, run_seed: int) -> list[str]:
         """Build the DRGraph command.
 
         Parameters
@@ -363,6 +432,8 @@ def _drgraph_reference(
             Input path.
         output : pathlib.Path
             Output path.
+        run_seed : int
+            Reference RNG seed.
 
         Returns
         -------
@@ -393,9 +464,11 @@ def _drgraph_reference(
             "-1",
             "-B",
             "-1",
+            "--seed",
+            str(run_seed),
         ]
 
-    return _run_reference_twice(command_factory, input_path, workdir / graph.name, env)
+    return _run_reference_twice(command_factory, input_path, workdir / graph.name, env, seed)
 
 
 def _quality_label(stress_value: float) -> str:
@@ -454,7 +527,162 @@ def _format_float(value: float) -> str:
     return f"{value:.6g}"
 
 
-def _run_rows(args: argparse.Namespace) -> list[dict[str, float | str]]:
+def _parse_seeds(value: str) -> list[int]:
+    """Parse a comma-separated seed list.
+
+    Parameters
+    ----------
+    value : str
+        Comma-separated integer seeds.
+
+    Returns
+    -------
+    list[int]
+        Parsed seed values.
+    """
+    seeds = [int(part.strip()) for part in value.split(",") if part.strip()]
+    if len(seeds) < 2:
+        raise argparse.ArgumentTypeError("At least two seeds are required.")
+    return seeds
+
+
+def _sampled_stress_value(positions: np.ndarray, graph: VerificationGraph) -> float:
+    """Compute sampled stress for one coordinate array.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Position array with shape ``[N, 2]``.
+    graph : VerificationGraph
+        Graph fixture.
+
+    Returns
+    -------
+    float
+        Sampled stress value.
+    """
+    tensor = torch.as_tensor(positions, dtype=torch.float32)
+    return float(
+        sampled_stress(
+            tensor,
+            graph.edge_index,
+            graph.num_nodes,
+            n_sources=20,
+            n_targets=50,
+        )["sampled_stress"]
+    )
+
+
+def _stress_tost(dagua_values: list[float], reference_values: list[float]) -> StressTost:
+    """Run a paired TOST over sampled-stress distributions.
+
+    Parameters
+    ----------
+    dagua_values : list[float]
+        Per-seed dagua sampled-stress values.
+    reference_values : list[float]
+        Per-seed reference sampled-stress values.
+
+    Returns
+    -------
+    StressTost
+        TOST summary with reference-spread-tied margin.
+    """
+    dagua = np.asarray(dagua_values, dtype=np.float64)
+    reference = np.asarray(reference_values, dtype=np.float64)
+    diff = dagua - reference
+    reference_mean = float(np.mean(reference))
+    dagua_mean = float(np.mean(dagua))
+    reference_spread = float(np.std(reference, ddof=1)) if reference.size > 1 else 0.0
+    margin = max(0.25 * abs(reference_mean), reference_spread, 1.0e-6)
+    sd = float(np.std(diff, ddof=1)) if diff.size > 1 else 0.0
+    mean_diff = float(np.mean(diff))
+    if sd <= 1.0e-12:
+        pvalue = 0.0 if abs(mean_diff) <= margin else 1.0
+    else:
+        se = sd / math.sqrt(diff.size)
+        p_low = float(stats.t.sf((mean_diff + margin) / se, df=diff.size - 1))
+        p_high = float(stats.t.cdf((mean_diff - margin) / se, df=diff.size - 1))
+        pvalue = max(p_low, p_high)
+    return StressTost(
+        passed=bool(pvalue <= TOST_ALPHA),
+        margin=float(margin),
+        pvalue=float(pvalue),
+        dagua_mean=dagua_mean,
+        reference_mean=reference_mean,
+    )
+
+
+def _distributional_row(
+    algorithm: str,
+    graph: VerificationGraph,
+    references: list[ReferenceRun],
+    dagua_positions: list[np.ndarray],
+    cause: str,
+) -> dict[str, float | str | bool]:
+    """Build one matched-seed distributional result row.
+
+    Parameters
+    ----------
+    algorithm : str
+        Algorithm label.
+    graph : VerificationGraph
+        Graph fixture.
+    references : list[ReferenceRun]
+        Reference runs for matched seeds.
+    dagua_positions : list[numpy.ndarray]
+        Dagua positions for the same seeds as ``references``.
+    cause : str
+        Residual cause summary.
+
+    Returns
+    -------
+    dict[str, float | str | bool]
+        Distributional result row.
+    """
+    rng = np.random.default_rng(REFERENCE_SEED)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+        mode = df.analyze_mode_a(
+            dagua_positions,
+            [reference.positions for reference in references],
+            rng,
+        )
+    dagua_spread = float(mode["plain_mean_W_D"])
+    reference_spread = float(mode["plain_mean_W_R"])
+    between = float(mode["mean_B_offdiag"])
+    within_band = max(dagua_spread, reference_spread, PROCRUSTES_BAND_FLOOR)
+    procrustes_pass = between <= within_band
+    dagua_stress = [_sampled_stress_value(positions, graph) for positions in dagua_positions]
+    reference_stress = [
+        _sampled_stress_value(reference.positions, graph) for reference in references
+    ]
+    stress = _stress_tost(dagua_stress, reference_stress)
+    equivalent = bool(mode["dist_equivalent"]) and procrustes_pass and stress.passed
+    return {
+        "algorithm": algorithm,
+        "graph": graph.name,
+        "seed_count": len(references),
+        "distributional_tier": (
+            "DISTRIBUTIONAL_EQUIVALENT" if equivalent else "not_distributional_equivalent"
+        ),
+        "within_dagua": dagua_spread,
+        "within_reference": reference_spread,
+        "between": between,
+        "within_band": within_band,
+        "procrustes_pass": procrustes_pass,
+        "split_pass": bool(mode["dist_equivalent"]),
+        "stress_tost_pass": stress.passed,
+        "stress_tost_pvalue": stress.pvalue,
+        "stress_tost_margin": stress.margin,
+        "dagua_stress_mean": stress.dagua_mean,
+        "reference_stress_mean": stress.reference_mean,
+        "repeat_max": max(float(reference.repeat_residual) for reference in references),
+        "cause": cause,
+    }
+
+
+def _run_rows(args: argparse.Namespace) -> list[dict[str, float | str | bool]]:
     """Run all verification rows.
 
     Parameters
@@ -464,7 +692,7 @@ def _run_rows(args: argparse.Namespace) -> list[dict[str, float | str]]:
 
     Returns
     -------
-    list[dict[str, float | str]]
+    list[dict[str, float | str | bool]]
         Per-graph verification rows.
     """
     if not args.largevis_binary.exists():
@@ -472,46 +700,86 @@ def _run_rows(args: argparse.Namespace) -> list[dict[str, float | str]]:
     if not args.drgraph_binary.exists():
         raise FileNotFoundError(f"DRGraph reference binary not found: {args.drgraph_binary}")
 
-    rows: list[dict[str, float | str]] = []
+    rows: list[dict[str, float | str | bool]] = []
     env = _runtime_env()
     with tempfile.TemporaryDirectory(prefix="drgraph_largevis_verify.") as tmp:
         workdir = Path(tmp)
         for graph in _verification_graphs():
-            largevis_ref = _largevis_reference(args.largevis_binary, graph, workdir, env)
-            largevis_pos = layout_largevis_pipeline(
-                graph.edge_index,
-                graph.num_nodes,
-                samples=LARGEVIS_REFERENCE_SAMPLES,
-                seed=REFERENCE_SEED,
-            )
+            largevis_refs = [
+                _largevis_reference(args.largevis_binary, graph, workdir, env, seed)
+                for seed in args.seeds
+            ]
+            largevis_positions = [
+                layout_largevis_pipeline(
+                    graph.edge_index,
+                    graph.num_nodes,
+                    samples=LARGEVIS_REFERENCE_SAMPLES,
+                    seed=seed,
+                )
+                .detach()
+                .cpu()
+                .numpy()
+                for seed in args.seeds
+            ]
             rows.append(
                 _row(
                     "largevis",
                     graph,
-                    largevis_ref,
-                    largevis_pos,
+                    largevis_refs[0],
+                    torch.as_tensor(largevis_positions[0], dtype=torch.float32),
                     "GSL rand48 now matched; residual remains from source graph/input ordering "
                     "and stochastic negative-sampling trajectory divergence.",
                 )
             )
-
-            drgraph_ref = _drgraph_reference(args.drgraph_binary, graph, workdir, env)
-            drgraph_samples = graph.num_nodes + 3
-            drgraph_pos = layout_drgraph_pipeline(
-                graph.edge_index,
-                graph.num_nodes,
-                samples=drgraph_samples,
-                seed=REFERENCE_SEED,
-                multilevel=False,
+            rows.append(
+                _distributional_row(
+                    "largevis",
+                    graph,
+                    largevis_refs,
+                    largevis_positions,
+                    "Seed patch works for the single-thread optimizer; residual is the "
+                    "Hogwild-style sampled negative-trajectory/input-order divergence "
+                    "between implementations.",
+                )
             )
+
+            drgraph_samples = graph.num_nodes + 3
+            drgraph_refs = [
+                _drgraph_reference(args.drgraph_binary, graph, workdir, env, seed)
+                for seed in args.seeds
+            ]
+            drgraph_positions = [
+                layout_drgraph_pipeline(
+                    graph.edge_index,
+                    graph.num_nodes,
+                    samples=drgraph_samples,
+                    seed=seed,
+                    multilevel=False,
+                )
+                .detach()
+                .cpu()
+                .numpy()
+                for seed in args.seeds
+            ]
             rows.append(
                 _row(
                     "drgraph",
                     graph,
-                    drgraph_ref,
-                    drgraph_pos,
+                    drgraph_refs[0],
+                    torch.as_tensor(drgraph_positions[0], dtype=torch.float32),
                     "GSL rand48 now matched; residual remains from DRGraph multilevel/input "
                     "ordering and stochastic negative-sampling trajectory divergence.",
+                )
+            )
+            rows.append(
+                _distributional_row(
+                    "drgraph",
+                    graph,
+                    drgraph_refs,
+                    drgraph_positions,
+                    "Seed patch covers the CPU graph-layout path; residual is the Hogwild-style "
+                    "sampled negative-trajectory plus DRGraph input/multilevel ordering "
+                    "divergence.",
                 )
             )
     return rows
@@ -566,14 +834,14 @@ def _row(
     }
 
 
-def _write_report(path: Path, rows: list[dict[str, float | str]]) -> None:
+def _write_report(path: Path, rows: list[dict[str, float | str | bool]]) -> None:
     """Write the fidelity markdown report.
 
     Parameters
     ----------
     path : pathlib.Path
         Destination report path.
-    rows : list[dict[str, float | str]]
+    rows : list[dict[str, float | str | bool]]
         Per-graph quality rows.
 
     Returns
@@ -590,8 +858,9 @@ def _write_report(path: Path, rows: list[dict[str, float | str]]) -> None:
         "sampling, GSL `rand48` RNG emulation, and sampled SGD updates.",
         "",
         "Named residual stage: `reference_runtime_rng`. GSL is available from conda "
-        "and both C++ references build and run single-threaded with the fixed source "
-        "seed `314159265`.",
+        "and both C++ references build and run single-threaded with patched `--seed` "
+        "support. The default seed list keeps the historical fixed source seed "
+        "`314159265` as the first matched seed.",
         "",
         "## Reference build/run",
         "",
@@ -602,6 +871,8 @@ def _write_report(path: Path, rows: list[dict[str, float | str]]) -> None:
         "- DRGraph clone: `/tmp/DRGraph`; built with CMake using conda Boost and "
         "`-I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib`, linking `gsl gslcblas`.",
         "- Runtime uses `LD_LIBRARY_PATH=$CONDA_PREFIX/lib`.",
+        "- Both CLIs are patched locally to accept `--seed`/`-seed`; omitted seeds "
+        "preserve the upstream default `314159265`.",
         "- LargeVis CLI `-samples` is in millions; `-samples 0` executes the "
         "three-sample single-thread reference smoke path. DRGraph `-samples 1` "
         "executes `N + 3` single-thread samples on these graphs.",
@@ -618,11 +889,49 @@ def _write_report(path: Path, rows: list[dict[str, float | str]]) -> None:
         "",
         "## Results",
         "",
-        "| algorithm | graph | tier | ref residual | ref repeat | sampled stress | "
-        "quality | residual cause |",
-        "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+        "| algorithm | graph | seed n | distributional tier | within D | within R | "
+        "between | band | proc | split | stress TOST | repeat max | residual cause |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | --- | --- | --- | ---: | --- |",
     ]
     for row in rows:
+        if "distributional_tier" not in row:
+            continue
+        lines.append(
+            "| {algorithm} | {graph} | {seed_count} | {tier} | {within_dagua} | "
+            "{within_reference} | {between} | {within_band} | {procrustes} | {split} | "
+            "{stress} (p={stress_p}) | {repeat_max} | {cause} |".format(
+                algorithm=row["algorithm"],
+                graph=row["graph"],
+                seed_count=row["seed_count"],
+                tier=row["distributional_tier"],
+                within_dagua=_format_float(float(row["within_dagua"])),
+                within_reference=_format_float(float(row["within_reference"])),
+                between=_format_float(float(row["between"])),
+                within_band=_format_float(float(row["within_band"])),
+                procrustes="PASS" if bool(row["procrustes_pass"]) else "FAIL",
+                split="PASS" if bool(row["split_pass"]) else "FAIL",
+                stress="PASS" if bool(row["stress_tost_pass"]) else "FAIL",
+                stress_p=_format_float(float(row["stress_tost_pvalue"])),
+                repeat_max=_format_float(float(row["repeat_max"])),
+                cause=row["cause"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Fixed-seed residuals",
+            "",
+            "The first seed in the distributional run is the historical source seed "
+            "`314159265`; these rows preserve the previous single-seed diagnostics.",
+            "",
+            "| algorithm | graph | tier | ref residual | ref repeat | sampled stress | "
+            "quality | residual cause |",
+            "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in rows:
+        if "distributional_tier" in row:
+            continue
         lines.append(
             "| {algorithm} | {graph} | {tier} | {reference_residual} | "
             "{reference_repeat_residual} | {stress} | {quality} | {cause} |".format(
@@ -642,12 +951,15 @@ def _write_report(path: Path, rows: list[dict[str, float | str]]) -> None:
             "## Notes",
             "",
             "- Production pipelines do not call adapters, subprocesses, or reference clones.",
-            "- The C++ references are repeat-deterministic in this single-thread setup.",
+            "- The patched C++ references are repeat-deterministic in this single-thread setup "
+            "when the same seed is passed.",
             "- The Python optimizer now uses a GSL `rand48` emulator and the source "
             "negative-sampling skip rules. Remaining residuals are therefore reported "
-            "as `DISTRIBUTIONAL`, not positional or bit-exact.",
-            "- A full distributional TOST claim would require a patched multi-seed "
-            "reference harness; the upstream CLIs hard-code the seed in the optimizer.",
+            "against the matched-seed distribution, not as positional or bit-exact.",
+            "- DRGraph still contains unpatched CUDA "
+            "`curandSetPseudoRandomGeneratorSeed(time(NULL))` in the optional GPU visualizer "
+            "path, but this verification uses the CPU visualizer with `-threads 1`; the "
+            "production dagua pipeline never delegates to that path.",
             "",
         ]
     )
@@ -667,12 +979,40 @@ def main() -> int:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--largevis-binary", type=Path, default=DEFAULT_LARGEVIS_BINARY)
     parser.add_argument("--drgraph-binary", type=Path, default=DEFAULT_DRGRAPH_BINARY)
+    parser.add_argument(
+        "--seeds",
+        type=_parse_seeds,
+        default=list(DEFAULT_SEEDS),
+        help="Comma-separated matched seed list for distributional verification.",
+    )
     args = parser.parse_args()
 
     rows = _run_rows(args)
     _write_report(args.report, rows)
 
     for row in rows:
+        if "distributional_tier" in row:
+            print(
+                "{algorithm} {graph}: distributional_tier={tier} seeds={seed_count} "
+                "within_dagua={within_dagua} within_reference={within_reference} "
+                "between={between} within_band={within_band} procrustes={procrustes} "
+                "split={split} stress_tost={stress} stress_p={stress_p} repeat_max={repeat}".format(
+                    algorithm=row["algorithm"],
+                    graph=row["graph"],
+                    tier=row["distributional_tier"],
+                    seed_count=row["seed_count"],
+                    within_dagua=_format_float(float(row["within_dagua"])),
+                    within_reference=_format_float(float(row["within_reference"])),
+                    between=_format_float(float(row["between"])),
+                    within_band=_format_float(float(row["within_band"])),
+                    procrustes="PASS" if bool(row["procrustes_pass"]) else "FAIL",
+                    split="PASS" if bool(row["split_pass"]) else "FAIL",
+                    stress="PASS" if bool(row["stress_tost_pass"]) else "FAIL",
+                    stress_p=_format_float(float(row["stress_tost_pvalue"])),
+                    repeat=_format_float(float(row["repeat_max"])),
+                )
+            )
+            continue
         print(
             "{algorithm} {graph}: tier={tier} ref_residual={reference_residual} "
             "ref_repeat={reference_repeat_residual} quality={quality} "
