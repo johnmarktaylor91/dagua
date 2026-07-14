@@ -18,12 +18,72 @@ _PERPLEXITY_TOLERANCE = 1.0e-5
 _PERPLEXITY_STEPS = 200
 _GRADIENT_CLIP_LARGEVIS = 5.0
 _GRADIENT_CLIP_DRGRAPH = 1.0
-_NEGATIVE_TABLE_SIZE_CAP = 100_000
+_REFERENCE_NEGATIVE_TABLE_SIZE = 100_000_000
 _REFERENCE_SEED = 314159265
 _DEFAULT_PERPLEXITY = 50.0
 _DEFAULT_LARGEVIS_GAMMA = 7.0
 _DEFAULT_DRGRAPH_GAMMA = 0.01
 _DEFAULT_ALPHA = 1.0
+_RAND48_MULTIPLIER = 0x5DEECE66D
+_RAND48_INCREMENT = 0xB
+_RAND48_MASK = (1 << 48) - 1
+_RAND48_SEED_SUFFIX = 0x330E
+
+
+class _GslRand48:
+    """Minimal emulator for GSL's ``gsl_rng_rand48`` generator.
+
+    Parameters
+    ----------
+    seed : int
+        Integer seed passed to ``gsl_rng_set``.
+    """
+
+    def __init__(self, seed: int) -> None:
+        """Initialize the rand48 state.
+
+        Parameters
+        ----------
+        seed : int
+            Integer seed passed to ``gsl_rng_set``.
+
+        Returns
+        -------
+        None
+            The generator state is initialized in place.
+        """
+        self._state = ((int(seed) & 0xFFFFFFFF) << 16 | _RAND48_SEED_SUFFIX) & _RAND48_MASK
+
+    def random_sample(self, shape: Optional[tuple[int, ...]] = None) -> float | np.ndarray:
+        """Return one or more uniforms from ``[0, 1)``.
+
+        Parameters
+        ----------
+        shape : tuple[int, ...], optional
+            Optional output shape. ``None`` returns a scalar float.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Uniform random value or array of values.
+        """
+        if shape is None:
+            return self._next_uniform()
+        values = np.empty(shape, dtype=np.float64)
+        for index in np.ndindex(shape):
+            values[index] = self._next_uniform()
+        return values
+
+    def _next_uniform(self) -> float:
+        """Advance the rand48 LCG and return a double uniform.
+
+        Returns
+        -------
+        float
+            Next uniform random value from ``[0, 1)``.
+        """
+        self._state = (_RAND48_MULTIPLIER * self._state + _RAND48_INCREMENT) & _RAND48_MASK
+        return self._state / float(1 << 48)
 
 
 @dataclass(frozen=True)
@@ -403,7 +463,7 @@ def _alias_table(weights: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return alias, prob
 
 
-def _sample_alias(alias: np.ndarray, prob: np.ndarray, rng: np.random.RandomState) -> int:
+def _sample_alias(alias: np.ndarray, prob: np.ndarray, rng: _GslRand48) -> int:
     """Sample one alias-table item using the reference two-uniform scheme.
 
     Parameters
@@ -412,8 +472,8 @@ def _sample_alias(alias: np.ndarray, prob: np.ndarray, rng: np.random.RandomStat
         Alias index table with shape ``[E]``.
     prob : numpy.ndarray
         Probability threshold table with shape ``[E]``.
-    rng : numpy.random.RandomState
-        Deterministic random number generator.
+    rng : _GslRand48
+        Source-compatible deterministic random number generator.
 
     Returns
     -------
@@ -423,12 +483,14 @@ def _sample_alias(alias: np.ndarray, prob: np.ndarray, rng: np.random.RandomStat
     n_items = int(prob.size)
     if n_items == 0:
         return 0
-    index = int((n_items - 0.1) * float(rng.random_sample()))
-    return index if float(rng.random_sample()) <= float(prob[index]) else int(alias[index])
+    first = float(np.float32(rng.random_sample()))
+    second = float(np.float32(rng.random_sample()))
+    index = int((n_items - 0.1) * first)
+    return index if second <= float(prob[index]) else int(alias[index])
 
 
-def _negative_table(graph: LargeVisGraph) -> np.ndarray:
-    """Build the LargeVis/DRGraph degree^0.75 negative-sampling table.
+def _negative_cdf(graph: LargeVisGraph) -> np.ndarray:
+    """Build the degree^0.75 negative-sampling cumulative distribution.
 
     Parameters
     ----------
@@ -438,26 +500,49 @@ def _negative_table(graph: LargeVisGraph) -> np.ndarray:
     Returns
     -------
     numpy.ndarray
-        Node IDs sampled according to weighted out-degree to the ``0.75`` power.
+        Cumulative node probabilities with shape ``[N]``. Empty graphs return
+        an empty array.
     """
     if graph.num_nodes <= 0:
-        return np.empty((0,), dtype=np.int64)
+        return np.empty((0,), dtype=np.float64)
     weights = np.zeros(graph.num_nodes, dtype=np.float64)
     np.add.at(weights, graph.source, graph.weight.astype(np.float64))
     weights = np.power(weights, 0.75)
     total = float(weights.sum())
     if total <= 0.0:
-        return np.arange(graph.num_nodes, dtype=np.int64)
-    table_size = max(graph.num_nodes, min(_NEGATIVE_TABLE_SIZE_CAP, graph.num_nodes * 1024))
-    table = np.empty(table_size, dtype=np.int64)
-    cumulative = weights[0]
-    node = 0
-    for index in range(table_size):
-        table[index] = node
-        if index / float(table_size) > cumulative / total and node < graph.num_nodes - 1:
-            node += 1
-            cumulative += weights[node]
-    return table
+        return np.linspace(
+            1.0 / max(graph.num_nodes, 1),
+            1.0,
+            graph.num_nodes,
+            dtype=np.float64,
+        )
+    cdf = np.cumsum(weights, dtype=np.float64) / total
+    cdf[-1] = 1.0
+    return cdf
+
+
+def _sample_negative(cdf: np.ndarray, rng: _GslRand48) -> int:
+    """Sample a node as if using the source ``1e8`` entry table.
+
+    Parameters
+    ----------
+    cdf : numpy.ndarray
+        Cumulative node probabilities with shape ``[N]``.
+    rng : _GslRand48
+        Source-compatible deterministic random number generator.
+
+    Returns
+    -------
+    int
+        Sampled node index.
+    """
+    if cdf.size == 0:
+        return 0
+    table_index = int(
+        float(np.float32(rng.random_sample())) * (_REFERENCE_NEGATIVE_TABLE_SIZE - 0.1)
+    )
+    fraction = table_index / float(_REFERENCE_NEGATIVE_TABLE_SIZE)
+    return min(int(np.searchsorted(cdf, fraction, side="left")), int(cdf.size) - 1)
 
 
 def _default_sample_count(num_nodes: int) -> int:
@@ -498,13 +583,13 @@ def optimize_largevis_embedding(
     numpy.ndarray
         Position array with shape ``[N, 2]``.
     """
-    rng = np.random.RandomState(int(config.seed))
+    rng = _GslRand48(int(config.seed))
     positions = ((rng.random_sample((graph.num_nodes, 2)) - 0.5) / 2.0 * 0.0001).astype(np.float32)
     if graph.num_nodes == 0 or graph.weight.size == 0:
         return positions
 
     alias, prob = _alias_table(graph.weight)
-    neg_table = _negative_table(graph)
+    neg_cdf = _negative_cdf(graph)
     samples = (
         int(config.samples)
         if config.samples is not None
@@ -514,13 +599,21 @@ def optimize_largevis_embedding(
     alpha0 = float(config.alpha)
     gamma = float(config.gamma)
     negative_samples = max(int(config.negative_samples), 0)
+    is_drgraph = isinstance(config, DRGraphConfig)
     clip = _GRADIENT_CLIP_DRGRAPH if drgraph_ab is not None else _GRADIENT_CLIP_LARGEVIS
     a = drgraph_ab[0] if drgraph_ab is not None else -1.0
     b = drgraph_ab[1] if drgraph_ab is not None else -1.0
+    alpha_update_interval = 100 if is_drgraph else 10_000
+    edge_count_actual = 0
+    last_edge_count = 0
+    cur_alpha = alpha0
 
     for step in range(samples):
-        cur_alpha = alpha0 * (1.0 - step / (samples + 1.0))
-        cur_alpha = max(cur_alpha, alpha0 * 0.0001)
+        if step - last_edge_count > alpha_update_interval:
+            edge_count_actual += step - last_edge_count
+            last_edge_count = step
+            cur_alpha = alpha0 * (1.0 - edge_count_actual / (samples + 1.0))
+            cur_alpha = max(cur_alpha, alpha0 * 0.0001)
         edge_id = _sample_alias(alias, prob, rng)
         source = int(graph.source[edge_id])
         positive_target = int(graph.target[edge_id])
@@ -530,9 +623,8 @@ def optimize_largevis_embedding(
             if sample_id == 0:
                 target = positive_target
             else:
-                table_index = int((len(neg_table) - 0.1) * float(rng.random_sample()))
-                target = int(neg_table[table_index])
-                if target == positive_target or target == source:
+                target = _sample_negative(neg_cdf, rng)
+                if target == positive_target or (is_drgraph and target == source):
                     continue
             diff = cur - positions[target]
             squared_distance = float(np.dot(diff, diff))
