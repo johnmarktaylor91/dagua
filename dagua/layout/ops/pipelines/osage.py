@@ -16,7 +16,7 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 @register_op
 @dataclass
-class GraphvizOsageArrayLayout(Op):
+class OsageArrayPackLayout(Op):
     """Assign Graphviz osage-style array-packed coordinates.
 
     Parameters
@@ -94,11 +94,7 @@ def build_osage_pipeline(
     """
     del scale
     return Pipeline(
-        [
-            GraphvizOsageArrayLayout(
-                dtype=torch.float64 if fidelity_dtype is None else fidelity_dtype
-            )
-        ],
+        [OsageArrayPackLayout(dtype=torch.float64 if fidelity_dtype is None else fidelity_dtype)],
         name="osage_pipeline",
     )
 
@@ -148,4 +144,4 @@ def layout_osage_pipeline(
     return state.pos
 
 
-__all__ = ["GraphvizOsageArrayLayout", "build_osage_pipeline", "layout_osage_pipeline"]
+__all__ = ["OsageArrayPackLayout", "build_osage_pipeline", "layout_osage_pipeline"]
