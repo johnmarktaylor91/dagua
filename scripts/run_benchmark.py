@@ -726,6 +726,46 @@ def engine_is_stochastic_for_run(engine_name: str, seed_refs: set[str]) -> bool:
     )
 
 
+# Engines whose fidelity tier is per-seed EXACT (POSITIONAL_IDENTICAL or
+# MODE_B_BIT_EXACT on every corpus graph, zero DISTRIBUTIONAL_EQUIVALENT rows)
+# per the frozen definitive fidelity ledger
+# (eval_output/fidelity_definitive_ledger/ledger.jsonl). These are stochastic in
+# the harness (a seed is consumed) but the reimpl reproduces the reference
+# bit-for-bit given the seed, so a large seed battery only re-confirms the same
+# match. A few seeds fully characterize their (still seed-varying) QUALITY
+# distribution. Per JMT: "for deterministic or bit-identical algos 3-5 seeds is
+# plenty; we only need the 100 for algos in the statistical-indistinguishability
+# category." Any engine with even one DISTRIBUTIONAL_EQUIVALENT graph is
+# deliberately EXCLUDED here and keeps the full battery (TOST needs the spread).
+BIT_EXACT_STOCHASTIC_ENGINES: frozenset[str] = frozenset(
+    {
+        "classic_maxent_stress_alpha2",
+        "classic_maxent_stress_default",
+        "classic_maxent_stress_entropy",
+        "classic_maxent_stress_steps400",
+        "classic_maxent_stress_steps50",
+        "classic_pivot_mds_10",
+        "classic_pivot_mds_100",
+        "classic_pivot_mds_200",
+        "classic_pivot_mds_50",
+        "classic_sgd2_multi_batch128",
+        "classic_sgd2_multi_batch8",
+        "classic_sgd2_multi_default",
+        "classic_sgd2_multi_lr001",
+        "classic_sgd2_multi_lr01",
+        "classic_sgd2_multi_stress_only",
+        "classic_sgd2_multi_with_aspect",
+        "classic_stress_maj_default",
+        "classic_stress_maj_iter50",
+        "classic_stress_maj_iter500",
+    }
+)
+
+# Seed count for the per-seed-exact allowlist above (enough to characterize the
+# quality distribution without re-confirming the same bit-exact match 100x).
+BIT_EXACT_SEED_COUNT = 5
+
+
 def seeds_for_engine(
     engine_name: str,
     seed_count: int,
@@ -750,10 +790,16 @@ def seeds_for_engine(
     -------
     list[int | None]
         One deterministic ``None`` entry or a contiguous stochastic seed range.
+        Per-seed-exact engines (:data:`BIT_EXACT_STOCHASTIC_ENGINES`) are capped
+        at :data:`BIT_EXACT_SEED_COUNT` seeds -- never expanded beyond the
+        requested ``seed_count``.
     """
     if not engine_is_stochastic_for_run(engine_name, seed_refs or set()):
         return [None]
-    return list(range(seed_start, seed_start + seed_count))
+    effective_count = seed_count
+    if engine_name in BIT_EXACT_STOCHASTIC_ENGINES:
+        effective_count = min(seed_count, BIT_EXACT_SEED_COUNT)
+    return list(range(seed_start, seed_start + effective_count))
 
 
 def resolve_worker_count(workers_arg: str) -> int:
