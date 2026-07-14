@@ -65,6 +65,7 @@ def test_is_record_complete_requires_positions_when_enabled(tmp_path: Path) -> N
         skip_reason=None,
         original_for=[],
         reimpl_of=[],
+        git_sha="test-sha",
     )
 
     assert not is_record_complete(record, output_dir=tmp_path, save_positions=True)
@@ -93,6 +94,7 @@ def test_is_record_complete_treats_running_records_as_incomplete(tmp_path: Path)
         skip_reason=None,
         original_for=[],
         reimpl_of=[],
+        git_sha="test-sha",
     )
 
     assert not is_record_complete(record, output_dir=tmp_path, save_positions=True)
