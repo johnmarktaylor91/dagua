@@ -16,7 +16,7 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
-_DEFAULT_REFERENCE_ROOT = Path("/tmp/coregd-ref")
+_DEFAULT_REFERENCE_ROOT = Path.home() / "tools" / "dagua-refs" / "coregd"
 _DEFAULT_CONFIG = _DEFAULT_REFERENCE_ROOT / "configs" / "config_rome.json"
 _DEFAULT_CHECKPOINT = _DEFAULT_REFERENCE_ROOT / "checkpoints" / "core_rome.pt"
 
@@ -71,7 +71,7 @@ class CoreGDCompetitor(CompetitorBase):
                 name=self.name,
                 pos=None,
                 runtime_seconds=time.perf_counter() - start,
-                error="CoRe-GD reference clone/checkpoint missing at /tmp/coregd-ref.",
+                error=f"CoRe-GD reference clone/checkpoint missing at {_DEFAULT_REFERENCE_ROOT}.",
             )
         try:
             from dagua.layout.ops.pipelines.coregd import (

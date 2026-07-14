@@ -42,6 +42,7 @@ def _ensure_elkjs_node_path() -> None:
         ``os.environ`` is updated only for this verification process.
     """
     candidates = [
+        Path.home() / "tools" / "dagua-refs" / "node_modules",
         ROOT / "node_modules",
         Path("/home/jtaylor/projects/dagua/node_modules"),
         Path.home() / ".nvm/versions/node/v24.18.0/lib/node_modules",

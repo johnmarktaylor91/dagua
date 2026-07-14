@@ -32,8 +32,8 @@ from dagua.layout.ops.pipelines.largevis import layout_largevis_pipeline  # noqa
 from dagua.metrics import sampled_stress  # noqa: E402
 
 DEFAULT_REPORT = ROOT / "docs" / "algorithms" / "drgraph_largevis_fidelity.md"
-DEFAULT_LARGEVIS_BINARY = Path("/tmp/LargeVis/Linux/LargeVis")
-DEFAULT_DRGRAPH_BINARY = Path("/tmp/DRGraph/Vis")
+DEFAULT_LARGEVIS_BINARY = Path.home() / "tools" / "dagua-refs" / "largevis" / "Linux" / "LargeVis"
+DEFAULT_DRGRAPH_BINARY = Path.home() / "tools" / "dagua-refs" / "drgraph" / "Vis"
 REFERENCE_SEED = 314159265
 DEFAULT_SEEDS = (
     REFERENCE_SEED,
@@ -864,11 +864,11 @@ def _write_report(path: Path, rows: list[dict[str, float | str | bool]]) -> None
         "",
         "## Reference build/run",
         "",
-        "- LargeVis clone: `/tmp/LargeVis`; built with "
+        "- LargeVis clone: `~/tools/dagua-refs/largevis`; built with "
         "`g++ LargeVis.cpp main.cpp -o LargeVis -I$CONDA_PREFIX/include "
         "-L$CONDA_PREFIX/lib -lm -pthread -lgsl -lgslcblas -Ofast -march=native "
         "-ffast-math`.",
-        "- DRGraph clone: `/tmp/DRGraph`; built with CMake using conda Boost and "
+        "- DRGraph clone: `~/tools/dagua-refs/drgraph`; built with CMake using conda Boost and "
         "`-I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib`, linking `gsl gslcblas`.",
         "- Runtime uses `LD_LIBRARY_PATH=$CONDA_PREFIX/lib`.",
         "- Both CLIs are patched locally to accept `--seed`/`-seed`; omitted seeds "

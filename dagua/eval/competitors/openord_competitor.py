@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_SEED = 0
 _DEFAULT_EDGE_CUT = 32.0 / 40.0
-_REFERENCE_ROOT = Path("/tmp/openord-ref")
+_REFERENCE_ROOT = Path.home() / "tools" / "dagua-refs" / "openord"
 
 
 def _reference_binary(name: str, reference_root: Path) -> Path:

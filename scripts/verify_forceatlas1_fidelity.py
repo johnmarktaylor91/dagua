@@ -22,7 +22,7 @@ from dagua.metrics import composite, quick  # noqa: E402
 GEPHI_TOOLKIT_URL = (
     "https://repo1.maven.org/maven2/org/gephi/gephi-toolkit/0.10.1/gephi-toolkit-0.10.1-all.jar"
 )
-GEPHI_CACHE_DIR = Path("/tmp/dagua-fa1-gephi")
+GEPHI_CACHE_DIR = Path.home() / "tools" / "dagua-refs" / "gephi-forceatlas1"
 GEPHI_TOOLKIT_JAR = GEPHI_CACHE_DIR / "gephi-toolkit-0.10.1-all.jar"
 RUNNER_SOURCE = ROOT / "scripts/gephi_forceatlas1_runner/ForceAtlas1ReferenceRunner.java"
 RUNNER_CLASSES = GEPHI_CACHE_DIR / "classes"
