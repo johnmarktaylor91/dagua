@@ -715,6 +715,57 @@ def classify_graph(
             direction_is_declared=explicit_direction is not None,
         )
 
+    large_dense_fast_path = num_nodes > 50_000 and num_edges > num_nodes - 1
+    if large_dense_fast_path:
+        resolved_layers = (
+            _resolve_layer_assignments(edge_index, num_nodes, layer_assignments)
+            if layer_assignments is not None
+            else None
+        )
+        num_layers, avg_layer_width, max_layer_width, layer_width_cv = _analyze_layers(
+            resolved_layers,
+            num_nodes,
+        )
+        num_layers_effective = _effective_layer_count(resolved_layers)
+        edge_to_node_ratio = float(num_edges) / float(num_nodes) if num_nodes > 0 else 0.0
+        is_planar_hint = (num_edges < 3 * num_nodes - 6) if num_nodes >= 3 else True
+        is_semantically_directed = (
+            bool(explicit_direction) if explicit_direction is not None else True
+        )
+        topology_tags = _derive_topology_tags(
+            family=GraphFamily.GENERAL,
+            num_nodes=num_nodes,
+            num_layers=num_layers,
+            max_layer_width=max_layer_width,
+            max_degree=0,
+            edge_to_node_ratio=edge_to_node_ratio,
+            layer_width_cv=layer_width_cv,
+            is_planar_hint=is_planar_hint,
+            is_directed_acyclic=False,
+        )
+        return GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=0,
+            num_layers=num_layers,
+            avg_layer_width=avg_layer_width,
+            is_planar_hint=is_planar_hint,
+            is_acyclic=False,
+            max_layer_width=max_layer_width,
+            layer_width_cv=layer_width_cv,
+            edge_to_node_ratio=edge_to_node_ratio,
+            is_directed_acyclic=False,
+            topology_tags=topology_tags,
+            is_semantically_directed=is_semantically_directed,
+            num_layers_effective=num_layers_effective,
+            cyclicity_ratio=0.0,
+            has_dominant_component=True,
+            is_planar=is_planar_hint if num_nodes > 1500 else None,
+            planar_embedding=None,
+            direction_is_declared=explicit_direction is not None,
+            reciprocal_edge_ratio=0.0,
+        )
+
     degree = _compute_degree(edge_index, num_nodes)
     max_degree = int(degree.max().item()) if degree.numel() > 0 else 0
     num_components = _count_components(edge_index, num_nodes)
@@ -752,11 +803,8 @@ def classify_graph(
     edge_to_node_ratio = float(num_edges) / float(num_nodes) if num_nodes > 0 else 0.0
     cyclicity_ratio = 0.0 if is_directed_acyclic else _cyclicity_ratio(edge_index, num_nodes)
 
-    large_dense_fast_path = num_nodes > 50_000 and num_edges > num_nodes - 1
     if explicit_direction is not None:
         is_semantically_directed = bool(explicit_direction)
-    elif large_dense_fast_path:
-        is_semantically_directed = True
     else:
         is_semantically_directed = _infer_semantically_directed(
             edge_index,
@@ -774,8 +822,6 @@ def classify_graph(
         family = GraphFamily.WIDE_LAYERED
     elif is_forest:
         family = GraphFamily.FOREST
-    elif large_dense_fast_path:
-        family = GraphFamily.GENERAL
     elif not is_directed_acyclic:
         if cyclicity_ratio > 0.3 or is_semantically_directed is False:
             family = GraphFamily.FORCE_DIRECTED
