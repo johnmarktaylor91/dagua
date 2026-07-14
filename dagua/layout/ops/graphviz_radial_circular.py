@@ -76,6 +76,242 @@ class _CircoDirectedBlockGraph:
     edge_endpoints: List[Tuple[int, int]]
 
 
+@dataclass
+class _CircoBlockPathEdge:
+    """Mutable edge record for Graphviz ``blockpath.c`` skeleton construction.
+
+    Parameters
+    ----------
+    tail : int
+        Directed tail node.
+    head : int
+        Directed head node.
+    seq : int
+        Cgraph edge sequence in the cloned working graph.
+    orig_id : int or None
+        Original block-local edge id. ``None`` marks compensating edges and
+        pair edges whose original output edge has already been deleted.
+    active : bool, default=True
+        Whether the edge is still present in the working graph.
+    """
+
+    tail: int
+    head: int
+    seq: int
+    orig_id: Optional[int]
+    active: bool = True
+
+
+class _CircoBlockPathGraph:
+    """Cgraph-order derived graph used by Graphviz ``remove_pair_edges``.
+
+    Parameters
+    ----------
+    nodes : list[int]
+        Block nodes in cgraph node iteration order.
+    edges : list[_CircoBlockPathEdge]
+        Mutable working-graph edges.
+    next_seq : int
+        Next cgraph edge sequence for compensating edges.
+    """
+
+    def __init__(
+        self,
+        nodes: List[int],
+        edges: List[_CircoBlockPathEdge],
+        next_seq: int,
+    ) -> None:
+        """Initialize a mutable blockpath working graph.
+
+        Parameters
+        ----------
+        nodes : list[int]
+            Block nodes in cgraph node iteration order.
+        edges : list[_CircoBlockPathEdge]
+            Mutable working-graph edges.
+        next_seq : int
+            Next cgraph edge sequence for newly inserted edges.
+
+        Returns
+        -------
+        None
+            The graph stores mutable edge state for the blockpath port.
+        """
+        self.nodes = nodes
+        self.node_rank = {node: rank for rank, node in enumerate(nodes)}
+        self.edges = edges
+        self.next_seq = next_seq
+        self.active_nodes = set(nodes)
+        self.degree = {node: 0 for node in nodes}
+        for edge in edges:
+            self.degree[edge.tail] += 1
+            self.degree[edge.head] += 1
+
+    @classmethod
+    def from_edge_index(
+        cls,
+        edge_index: torch.Tensor,
+        nodes: Sequence[int],
+    ) -> "_CircoBlockPathGraph":
+        """Build the cloned working graph used by ``remove_pair_edges``.
+
+        Parameters
+        ----------
+        edge_index : torch.Tensor
+            Original graph connectivity tensor with shape ``[2, E]``.
+        nodes : sequence[int]
+            Block nodes in cgraph node iteration order.
+
+        Returns
+        -------
+        _CircoBlockPathGraph
+            Mutable directed graph with clone-graph edge sequence numbers.
+        """
+        ordered_nodes = list(nodes)
+        node_rank = {node: rank for rank, node in enumerate(ordered_nodes)}
+        original_edges = _circo_derived_edges(edge_index, ordered_nodes)
+        clone_order = sorted(
+            original_edges,
+            key=lambda item: (node_rank[item[1]], node_rank[item[2]], item[0]),
+        )
+        edges = [
+            _CircoBlockPathEdge(tail=source, head=target, seq=seq, orig_id=edge_id)
+            for seq, (edge_id, source, target) in enumerate(clone_order)
+        ]
+        return cls(ordered_nodes, edges, len(edges))
+
+    def incident_edge_ids(self, node: int) -> List[int]:
+        """Return ``agfstedge``/``agnxtedge`` edge ids for ``node``.
+
+        Parameters
+        ----------
+        node : int
+            Active node whose incident edges are requested.
+
+        Returns
+        -------
+        list[int]
+            Working edge ids in cgraph incident-edge iteration order.
+        """
+        outgoing = [
+            (self.node_rank[edge.head], edge.seq, edge_id)
+            for edge_id, edge in enumerate(self.edges)
+            if (
+                edge.active
+                and edge.tail == node
+                and edge.head in self.active_nodes
+                and edge.tail in self.active_nodes
+            )
+        ]
+        incoming = [
+            (self.node_rank[edge.tail], edge.seq, edge_id)
+            for edge_id, edge in enumerate(self.edges)
+            if (
+                edge.active
+                and edge.head == node
+                and edge.tail in self.active_nodes
+                and edge.head in self.active_nodes
+            )
+        ]
+        return [edge_id for _, _, edge_id in sorted(outgoing)] + [
+            edge_id for _, _, edge_id in sorted(incoming)
+        ]
+
+    def neighbor(self, edge_id: int, node: int) -> int:
+        """Return the opposite endpoint of an incident edge.
+
+        Parameters
+        ----------
+        edge_id : int
+            Working edge id.
+        node : int
+            Incident endpoint.
+
+        Returns
+        -------
+        int
+            Opposite endpoint.
+        """
+        edge = self.edges[edge_id]
+        return edge.tail if edge.head == node else edge.head
+
+    def find_edge(self, tail: int, head: int) -> Optional[int]:
+        """Return the first active strict-undirected edge between two nodes.
+
+        Parameters
+        ----------
+        tail : int
+            First endpoint from Graphviz's ``agfindedge`` call.
+        head : int
+            Second endpoint from Graphviz's ``agfindedge`` call.
+
+        Returns
+        -------
+        int or None
+            Matching working edge id, or ``None`` when no edge exists.
+        """
+        candidates = [
+            (edge.seq, edge_id)
+            for edge_id, edge in enumerate(self.edges)
+            if (
+                edge.active
+                and (
+                    (edge.tail == tail and edge.head == head)
+                    or (edge.tail == head and edge.head == tail)
+                )
+                and tail in self.active_nodes
+                and head in self.active_nodes
+            )
+        ]
+        if not candidates:
+            return None
+        return min(candidates)[1]
+
+    def add_edge(self, tail: Optional[int], head: int) -> None:
+        """Add a Graphviz compensating edge to the working graph.
+
+        Parameters
+        ----------
+        tail : int or None
+            Directed tail node. Graphviz can call ``agedge`` with ``NULL`` in
+            one degenerate branch; the Python port ignores that non-edge.
+        head : int
+            Directed head node.
+
+        Returns
+        -------
+        None
+            Edge and degree state are updated in place.
+        """
+        if tail is None:
+            return
+        self.edges.append(
+            _CircoBlockPathEdge(tail=tail, head=head, seq=self.next_seq, orig_id=None)
+        )
+        self.next_seq += 1
+        self.degree[tail] += 1
+        self.degree[head] += 1
+
+    def delete_node(self, node: int) -> None:
+        """Delete a node from the working graph after degree updates.
+
+        Parameters
+        ----------
+        node : int
+            Active node to remove.
+
+        Returns
+        -------
+        None
+            Incident edges are marked inactive and the node is removed.
+        """
+        self.active_nodes.discard(node)
+        for edge in self.edges:
+            if edge.active and (edge.tail == node or edge.head == node):
+                edge.active = False
+        self.degree[node] = 0
+
+
 def _graphviz_twopi_leaf_steps(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
     """Compute Graphviz twopi's minimum steps from each node to any leaf.
 
@@ -129,6 +365,40 @@ def _edge_pairs(edge_index: torch.Tensor) -> List[Tuple[int, int]]:
         return []
     edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
     return [(int(source), int(target)) for source, target in edge_cpu.t().tolist()]
+
+
+def _circo_derived_edges(
+    edge_index: torch.Tensor,
+    nodes: Sequence[int],
+) -> List[Tuple[int, int, int]]:
+    """Return Graphviz circo's strict-undirected derived block edges.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
+    nodes : sequence[int]
+        Block nodes in cgraph node iteration order.
+
+    Returns
+    -------
+    list[tuple[int, int, int]]
+        ``(derived_edge_id, tail, head)`` records. The tail/head orientation is
+        the first input orientation Graphviz inserted into the strict
+        undirected derived graph.
+    """
+    node_set = set(nodes)
+    seen: Set[Tuple[int, int]] = set()
+    derived: List[Tuple[int, int, int]] = []
+    for source, target in _edge_pairs(edge_index):
+        if source == target or source not in node_set or target not in node_set:
+            continue
+        key = (min(source, target), max(source, target))
+        if key in seen:
+            continue
+        seen.add(key)
+        derived.append((len(derived), source, target))
+    return derived
 
 
 def choose_twopi_root(edge_index: torch.Tensor, num_nodes: int, root: Optional[int] = None) -> int:
@@ -655,30 +925,6 @@ def _graphviz_owned_block_tree(
     return root
 
 
-def _block_induced_adjacency(
-    adjacency: Sequence[Sequence[int]],
-    nodes: Sequence[int],
-) -> Dict[int, List[int]]:
-    """Return the induced adjacency for one owned block.
-
-    Parameters
-    ----------
-    adjacency : sequence[sequence[int]]
-        Full strict undirected adjacency.
-    nodes : sequence[int]
-        Nodes owned by the block.
-
-    Returns
-    -------
-    dict[int, list[int]]
-        Block-local neighbor lists.
-    """
-    node_set = set(nodes)
-    return {
-        node: [neighbor for neighbor in adjacency[node] if neighbor in node_set] for node in nodes
-    }
-
-
 def _circo_directed_block_graph(
     edge_index: torch.Tensor,
     nodes: Sequence[int],
@@ -698,21 +944,24 @@ def _circo_directed_block_graph(
         Directed block-local edge-order metadata.
     """
     ordered_nodes = list(nodes)
-    node_set = set(ordered_nodes)
+    node_rank = {node: rank for rank, node in enumerate(ordered_nodes)}
     out_neighbors: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
     in_neighbors: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
     out_edges: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
     in_edges: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
     edge_endpoints: List[Tuple[int, int]] = []
-    for source, target in _edge_pairs(edge_index):
-        if source == target or source not in node_set or target not in node_set:
-            continue
-        edge_id = len(edge_endpoints)
+    for edge_id, source, target in _circo_derived_edges(edge_index, ordered_nodes):
         edge_endpoints.append((source, target))
         out_neighbors[source].append(target)
         in_neighbors[target].append(source)
         out_edges[source].append(edge_id)
         in_edges[target].append(edge_id)
+
+    for node in ordered_nodes:
+        out_neighbors[node].sort(key=lambda neighbor: node_rank[neighbor])
+        in_neighbors[node].sort(key=lambda neighbor: node_rank[neighbor])
+        out_edges[node].sort(key=lambda edge_id: (node_rank[edge_endpoints[edge_id][1]], edge_id))
+        in_edges[node].sort(key=lambda edge_id: (node_rank[edge_endpoints[edge_id][0]], edge_id))
 
     incident_edges = {node: out_edges[node] + in_edges[node] for node in ordered_nodes}
     return _CircoDirectedBlockGraph(
@@ -724,186 +973,166 @@ def _circo_directed_block_graph(
     )
 
 
-def _block_edges_from_adjacency(induced: Dict[int, List[int]]) -> Set[Tuple[int, int]]:
-    """Return undirected edge keys from induced adjacency.
+def _circo_find_pair_edges(
+    graph: _CircoBlockPathGraph,
+    node: int,
+    output_edge_ids: Set[int],
+) -> None:
+    """Port Graphviz ``find_pair_edges`` for one current node.
 
     Parameters
     ----------
-    induced : dict[int, list[int]]
-        Block-local neighbor lists.
+    graph : _CircoBlockPathGraph
+        Mutable clone graph used by ``remove_pair_edges``.
+    node : int
+        Current node popped from the degree list.
+    output_edge_ids : set[int]
+        Original block-local edge ids still present in the output skeleton.
 
     Returns
     -------
-    set[tuple[int, int]]
-        Unique undirected edge keys.
+    None
+        Pair edges are deleted from ``output_edge_ids`` and compensating edges
+        are inserted into ``graph`` in Graphviz order.
     """
-    return {
-        (min(node, neighbor), max(node, neighbor))
-        for node, neighbors in induced.items()
-        for neighbor in neighbors
-        if node != neighbor
-    }
+    edge_count = 0
+    node_degree = graph.degree[node]
+    neighbors_with: List[int] = []
+    neighbors_without: List[int] = []
+    incident = graph.incident_edge_ids(node)
+
+    for edge_id in incident:
+        first = graph.neighbor(edge_id, node)
+        has_pair_edge = False
+        for pair_edge_id in incident:
+            if pair_edge_id == edge_id:
+                continue
+            second = graph.neighbor(pair_edge_id, node)
+            found_edge_id = graph.find_edge(first, second)
+            if found_edge_id is None:
+                continue
+            has_pair_edge = True
+            if graph.node_rank[first] < graph.node_rank[second]:
+                edge_count += 1
+                original_id = graph.edges[found_edge_id].orig_id
+                if original_id is not None:
+                    output_edge_ids.discard(original_id)
+                    graph.edges[found_edge_id].orig_id = None
+        if has_pair_edge:
+            neighbors_with.append(first)
+        else:
+            neighbors_without.append(first)
+
+    diff = node_degree - 1 - edge_count
+    if diff <= 0:
+        return
+    if diff < len(neighbors_without):
+        mark = 0
+        while mark + 1 < len(neighbors_without):
+            tail = neighbors_without[mark]
+            head = neighbors_without[mark + 1]
+            graph.add_edge(tail, head)
+            diff -= 1
+            mark += 2
+        mark = 2
+        while diff > 0:
+            tail = neighbors_without[0]
+            head = neighbors_without[mark]
+            graph.add_edge(tail, head)
+            mark += 1
+            diff -= 1
+    elif diff == len(neighbors_without):
+        tail = None if not neighbors_with else neighbors_with[0]
+        for head in neighbors_without:
+            graph.add_edge(tail, head)
 
 
-def _circo_block_skeleton(
-    induced: Dict[int, List[int]],
+def _circo_remove_pair_edges(
+    edge_index: torch.Tensor,
     nodes: Sequence[int],
-) -> Dict[int, List[int]]:
-    """Build Graphviz's ``remove_pair_edges`` skeleton for a block.
+) -> Tuple[_CircoBlockPathGraph, Set[int]]:
+    """Port Graphviz ``remove_pair_edges`` for one block.
 
     Parameters
     ----------
-    induced : dict[int, list[int]]
-        Block-local neighbor lists in edge traversal order.
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
     nodes : sequence[int]
-        Block nodes in graph order.
+        Block nodes in cgraph node iteration order.
+
+    Returns
+    -------
+    tuple[_CircoBlockPathGraph, set[int]]
+        Mutated clone graph and original edge ids remaining in the output
+        skeleton subgraph.
+    """
+    graph = _CircoBlockPathGraph.from_edge_index(edge_index, nodes)
+    output_edge_ids = {edge.orig_id for edge in graph.edges if edge.orig_id is not None}
+    degree_list = list(nodes)
+    degree_list.sort(key=lambda item: -graph.degree[item])
+
+    for _ in range(len(nodes) - 3):
+        if not degree_list:
+            break
+        current = degree_list.pop()
+        if current is None:
+            break
+        incident_edge_ids = graph.incident_edge_ids(current)
+        adjacent_nodes = [graph.neighbor(edge_id, current) for edge_id in incident_edge_ids]
+        for adjacent in adjacent_nodes:
+            if adjacent in degree_list:
+                degree_list.remove(adjacent)
+
+        _circo_find_pair_edges(graph, current, output_edge_ids)
+
+        for edge_id in incident_edge_ids:
+            adjacent = graph.neighbor(edge_id, current)
+            graph.degree[adjacent] -= 1
+            degree_list.append(adjacent)
+        degree_list.sort(key=lambda item: -graph.degree[item])
+        graph.delete_node(current)
+
+    return graph, output_edge_ids
+
+
+def _circo_block_skeleton(
+    directed: _CircoDirectedBlockGraph,
+    edge_index: torch.Tensor,
+) -> Dict[int, List[int]]:
+    """Build Graphviz's directed ``remove_pair_edges`` skeleton for a block.
+
+    Parameters
+    ----------
+    directed : _CircoDirectedBlockGraph
+        Block-local directed edge metadata in cgraph node order.
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
 
     Returns
     -------
     dict[int, list[int]]
-        Skeleton adjacency containing original block edges that survived
-        Graphviz's pair-edge removal pass.
+        Skeleton incident adjacency in cgraph ``agfstedge`` order.
     """
+    nodes = directed.nodes
     if len(nodes) <= 3:
-        return {node: list(induced[node]) for node in nodes}
+        return {
+            node: [
+                directed.edge_endpoints[edge_id][1]
+                if directed.edge_endpoints[edge_id][0] == node
+                else directed.edge_endpoints[edge_id][0]
+                for edge_id in directed.incident_edges[node]
+            ]
+            for node in nodes
+        }
 
-    active = {node: True for node in nodes}
-    mutable: Dict[int, List[int]] = {node: list(induced[node]) for node in nodes}
-    output_edges = _block_edges_from_adjacency(induced)
-    degree = {node: len(mutable[node]) for node in nodes}
-    in_degree_list = {node: False for node in nodes}
-    timestamp = {node: 0 for node in nodes}
-    tick = 0
-
-    def insert_degree_node(node: int) -> None:
-        """Insert a node into the simulated Graphviz degree list.
-
-        Parameters
-        ----------
-        node : int
-            Active node to insert.
-
-        Returns
-        -------
-        None
-            Degree-list bookkeeping is updated in place.
-        """
-        nonlocal tick
-        if not active[node]:
-            return
-        tick += 1
-        timestamp[node] = tick
-        in_degree_list[node] = True
-
-    def remove_degree_node(node: int) -> None:
-        """Remove a node from the simulated Graphviz degree list.
-
-        Parameters
-        ----------
-        node : int
-            Node to remove if present.
-
-        Returns
-        -------
-        None
-            Degree-list bookkeeping is updated in place.
-        """
-        in_degree_list[node] = False
-
-    def first_degree_node() -> Optional[int]:
-        """Pop the smallest-degree, most-recently-inserted node.
-
-        Returns
-        -------
-        int or None
-            Selected node, or ``None`` when the list is empty.
-        """
-        candidates = [node for node in nodes if active[node] and in_degree_list[node]]
-        if not candidates:
-            return None
-        selected = min(candidates, key=lambda node: (degree[node], -timestamp[node]))
-        in_degree_list[selected] = False
-        return selected
-
+    _, output_edge_ids = _circo_remove_pair_edges(edge_index, nodes)
+    skeleton: Dict[int, List[int]] = {node: [] for node in nodes}
     for node in nodes:
-        insert_degree_node(node)
-
-    for _ in range(len(nodes) - 3):
-        current = first_degree_node()
-        if current is None:
-            break
-        incident = [neighbor for neighbor in mutable[current] if active.get(neighbor, False)]
-        for neighbor in incident:
-            remove_degree_node(neighbor)
-
-        neighbors_with: List[int] = []
-        neighbors_without: List[int] = []
-        edge_count = 0
-        for first in incident:
-            has_pair_edge = False
-            for second in incident:
-                if second == first:
-                    continue
-                edge_key = (min(first, second), max(first, second))
-                if second in mutable[first]:
-                    has_pair_edge = True
-                    if first < second:
-                        edge_count += 1
-                        output_edges.discard(edge_key)
-            if has_pair_edge:
-                neighbors_with.append(first)
-            else:
-                neighbors_without.append(first)
-
-        diff = len(incident) - 1 - edge_count
-        if diff > 0:
-            if diff < len(neighbors_without):
-                mark = 0
-                while mark + 1 < len(neighbors_without) and diff > 0:
-                    tail = neighbors_without[mark]
-                    head = neighbors_without[mark + 1]
-                    if head not in mutable[tail]:
-                        mutable[tail].append(head)
-                        mutable[head].append(tail)
-                        degree[tail] += 1
-                        degree[head] += 1
-                    diff -= 1
-                    mark += 2
-                mark = 2
-                while diff > 0 and mark < len(neighbors_without):
-                    tail = neighbors_without[0]
-                    head = neighbors_without[mark]
-                    if head not in mutable[tail]:
-                        mutable[tail].append(head)
-                        mutable[head].append(tail)
-                        degree[tail] += 1
-                        degree[head] += 1
-                    mark += 1
-                    diff -= 1
-            elif diff == len(neighbors_without) and neighbors_with:
-                tail = neighbors_with[0]
-                for head in neighbors_without:
-                    if head not in mutable[tail]:
-                        mutable[tail].append(head)
-                        mutable[head].append(tail)
-                        degree[tail] += 1
-                        degree[head] += 1
-
-        active[current] = False
-        for neighbor in incident:
-            if current in mutable[neighbor]:
-                mutable[neighbor].remove(current)
-            degree[neighbor] = max(0, degree[neighbor] - 1)
-            insert_degree_node(neighbor)
-        mutable[current] = []
-        degree[current] = 0
-
-    skeleton = {node: [] for node in nodes}
-    for node in nodes:
-        for neighbor in induced[node]:
-            edge_key = (min(node, neighbor), max(node, neighbor))
-            if edge_key in output_edges and neighbor not in skeleton[node]:
-                skeleton[node].append(neighbor)
+        for edge_id in directed.incident_edges[node]:
+            if edge_id not in output_edge_ids:
+                continue
+            source, target = directed.edge_endpoints[edge_id]
+            skeleton[node].append(target if source == node else source)
     return skeleton
 
 
@@ -1081,12 +1310,11 @@ def _circo_block_order(
     list[int]
         Circular node order for the block.
     """
-    nodes = list(block.nodes)
+    nodes = sorted(block.nodes)
     if len(nodes) <= 2:
         return nodes
     directed = _circo_directed_block_graph(edge_index, nodes)
-    induced = _block_induced_adjacency(adjacency, nodes)
-    skeleton = _circo_block_skeleton(induced, nodes)
+    skeleton = _circo_block_skeleton(directed, edge_index)
     tree, parent = _circo_spanning_tree(skeleton, nodes)
     ordered = _longest_tree_path(tree, parent, nodes)
     ordered_set = set(ordered)
@@ -1155,8 +1383,10 @@ def _circo_count_all_crossings(
                     and open_target != node
                 ):
                     crossings += 1
-            if edge_id in open_edges:
-                open_edges.remove(edge_id)
+            # Circo runs on a strict-undirected cgraph. Graphviz 7.0.5 adds
+            # one in/out edge image to the open-edge set and later attempts to
+            # remove the opposite image, so the delete misses. Keeping the edge
+            # open reproduces blockpath.c's crossing-reduction decisions.
 
         for edge_id in directed.incident_edges[node]:
             if edge_order[edge_id] == 0:
