@@ -1686,6 +1686,8 @@ class DaguaGraph:
                 )
 
         g = cls(**kwargs)
+        initial_node_sizes = g.node_sizes
+        initial_node_font_sizes = g.node_font_sizes
         g.edge_index = ei
         g.num_nodes = num_nodes
         g.node_labels = [str(i) for i in range(num_nodes)]
@@ -1696,6 +1698,20 @@ class DaguaGraph:
         g.edge_styles = [None] * edge_index.shape[1]
         g._id_to_index = {i: i for i in range(num_nodes)}
         g._index_to_id = list(range(num_nodes))
+        if initial_node_sizes is not None:
+            if initial_node_sizes.shape != (num_nodes, 2):
+                raise ValueError(
+                    f"node_sizes shape {tuple(initial_node_sizes.shape)} != ({num_nodes}, 2)"
+                )
+            g.node_sizes = initial_node_sizes.to(dtype=g.size_dtype)
+            g._node_sizes_revision = g.revision
+        if initial_node_font_sizes is not None:
+            if initial_node_font_sizes.shape[0] != num_nodes:
+                raise ValueError(
+                    f"node_font_sizes length {initial_node_font_sizes.shape[0]} != "
+                    f"num_nodes {num_nodes}"
+                )
+            g.node_font_sizes = initial_node_font_sizes.to(dtype=g.size_dtype)
         if edge_weights is not None:
             if edge_weights.shape[0] != edge_index.shape[1]:
                 raise ValueError(
