@@ -121,6 +121,68 @@ def test_build_mulment_pipeline_matches_public_adapter() -> None:
     assert torch.equal(final_state.pos, public)
 
 
+def test_mulment_builds_label_propagation_hierarchy_in_isolation() -> None:
+    """MulMent should expose the KaDraw-style LP hierarchy before layout.
+
+    Returns
+    -------
+    None
+        Assertions pin level sizes and merge maps independently of positions.
+    """
+    edge_index = _edge_index_from_edges(
+        [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 8),
+            (8, 9),
+            (9, 10),
+            (10, 11),
+            (0, 6),
+            (1, 7),
+            (2, 8),
+            (3, 9),
+            (4, 10),
+            (5, 11),
+        ]
+    )
+    config = MulMentConfig(steps=0, max_levels=4, fidelity_dtype=torch.float64)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=12, seed=7)
+
+    final_state = build_mulment_pipeline(config).apply(
+        problem,
+        SolveState(),
+        RuntimeContext(plan=ExecutionPlan(device="cpu")),
+    )
+
+    assert final_state.hierarchy is not None
+    assert [(level.num_fine, level.num_nodes) for level in final_state.hierarchy] == [
+        (12, 12),
+        (12, 12),
+        (12, 6),
+        (6, 6),
+    ]
+    assert final_state.hierarchy[2].fine_to_coarse is not None
+    assert final_state.hierarchy[2].fine_to_coarse.tolist() == [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+
+
 def test_mulment_engine_dispatch_returns_finite_positions() -> None:
     """The public engine should dispatch ``algorithm='mulment'``.
 
