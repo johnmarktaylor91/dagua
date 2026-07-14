@@ -9,6 +9,7 @@ uniformly.
 from dagua.eval.competitors import (
     classic_competitor,  # noqa: F401
     cytoscape_fcose_competitor,  # noqa: F401
+    d3force_competitor,  # noqa: F401
     dagre_competitor,  # noqa: F401
     dagua_competitor,  # noqa: F401
     elk_competitor,  # noqa: F401

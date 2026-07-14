@@ -239,6 +239,7 @@ _EXPECTED_OP_MODULES = (
     "converge",
     "coordinate",
     "crossing_swap",
+    "d3force",
     "davidson_harel",
     "dagre",
     "distance",
