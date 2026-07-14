@@ -9,7 +9,7 @@ the layered spacing options exposed by the adapter.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Dict, Hashable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import ClassVar, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -36,6 +36,8 @@ NodeId = Hashable
 _ROOT_PADDING = 12.0
 _ELK_DEFAULT_EDGE_NODE_SPACING = 10.0
 _ELK_DEFAULT_EDGE_EDGE_SPACING = 10.0
+_ELK_BK_STRAIGHTENING_THRESHOLD = float("1.7976931348623157e308")
+_ELK_BK_LAYOUT_SIZE_EPSILON = 1.0e-9
 _SUPPORTED_CYCLE_STRATEGIES = {"greedy", "depth_first", "interactive", "model_order"}
 _SUPPORTED_LAYERING_STRATEGIES = {
     "network_simplex",
@@ -1356,6 +1358,44 @@ def _elk_bk_connected_successor(
     return target in graph.successors.get(source, ()) or source in graph.successors.get(target, ())
 
 
+def _elk_bk_edge_port_positions(
+    graph: _ElkBkGraph,
+    source: NodeId,
+    target: NodeId,
+) -> Tuple[float, float]:
+    """Return generated source/target port offsets for one normalized edge.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    source : Hashable
+        Directed edge source.
+    target : Hashable
+        Directed edge target.
+
+    Returns
+    -------
+    tuple[float, float]
+        Source and target offsets on the BK placement axis.
+
+    Notes
+    -----
+    ELK generates implicit ports for plain nodes. The layered port placer
+    distributes same-side ports evenly across the node extent in edge order;
+    BK's ``insideBlockShift`` then uses those offsets instead of node centers.
+    """
+    source_successors = graph.successors.get(source, [])
+    target_predecessors = graph.predecessors.get(target, [])
+    source_index = source_successors.index(target)
+    target_index = target_predecessors.index(source)
+    source_port = graph.sizes[source] * float(source_index + 1) / float(len(source_successors) + 1)
+    target_port = (
+        graph.sizes[target] * float(target_index + 1) / float(len(target_predecessors) + 1)
+    )
+    return source_port, target_port
+
+
 def _elk_bk_inside_block_shift(graph: _ElkBkGraph, layout: _ElkBkLayout) -> None:
     """Compute ELK's per-block inner shifts for center ports.
 
@@ -1391,8 +1431,7 @@ def _elk_bk_inside_block_shift(graph: _ElkBkGraph, layout: _ElkBkLayout) -> None
             if _elk_bk_connected_successor(graph, current, next_node):
                 source = current if next_node in graph.successors.get(current, ()) else next_node
                 target = next_node if source == current else current
-                source_port = graph.sizes[source] / 2.0
-                target_port = graph.sizes[target] / 2.0
+                source_port, target_port = _elk_bk_edge_port_positions(graph, source, target)
                 if layout.hdir == "LEFT":
                     port_pos_diff = target_port - source_port
                 else:
@@ -1460,6 +1499,305 @@ def _elk_bk_place_classes(
             layout.shift[node] = value
 
 
+def _elk_bk_endpoint_port_position(
+    graph: _ElkBkGraph,
+    edge: Tuple[NodeId, NodeId],
+    node: NodeId,
+) -> float:
+    """Return a node's generated port offset on one edge.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    edge : tuple[Hashable, Hashable]
+        Directed normalized edge.
+    node : Hashable
+        Endpoint whose offset is requested.
+
+    Returns
+    -------
+    float
+        Port offset on the BK placement axis.
+    """
+    source, target = edge
+    source_port, target_port = _elk_bk_edge_port_positions(graph, source, target)
+    return source_port if node == source else target_port
+
+
+def _elk_bk_edges_for_threshold(
+    graph: _ElkBkGraph,
+    layout: _ElkBkLayout,
+    node: NodeId,
+    is_root: bool,
+) -> Iterable[Tuple[NodeId, NodeId]]:
+    """Yield ELK ``pickEdge`` candidates for threshold straightening.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Current alignment and compaction state.
+    node : Hashable
+        Free node whose incident edges are inspected.
+    is_root : bool
+        Whether ``node`` is considered the first node of its block.
+
+    Returns
+    -------
+    Iterable[tuple[Hashable, Hashable]]
+        Directed normalized edges in ELK's incident-edge iteration direction.
+    """
+    if is_root:
+        if layout.hdir == "RIGHT":
+            return ((predecessor, node) for predecessor in graph.predecessors.get(node, ()))
+        return ((node, successor) for successor in graph.successors.get(node, ()))
+    if layout.hdir == "LEFT":
+        return ((predecessor, node) for predecessor in graph.predecessors.get(node, ()))
+    return ((node, successor) for successor in graph.successors.get(node, ()))
+
+
+def _elk_bk_other_node(edge: Tuple[NodeId, NodeId], node: NodeId) -> NodeId:
+    """Return the other endpoint of an incident normalized edge.
+
+    Parameters
+    ----------
+    edge : tuple[Hashable, Hashable]
+        Directed normalized edge.
+    node : Hashable
+        One endpoint of ``edge``.
+
+    Returns
+    -------
+    Hashable
+        The opposite endpoint.
+    """
+    source, target = edge
+    return target if source == node else source
+
+
+def _elk_bk_min_y(graph: _ElkBkGraph, layout: _ElkBkLayout, node: NodeId) -> float:
+    """Return ELK ``BKAlignedLayout.getMinY`` without margins.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph. Present for symmetry with ``getMaxY``.
+    layout : _ElkBkLayout
+        Current compaction layout.
+    node : Hashable
+        Node whose block-relative minimum is requested.
+
+    Returns
+    -------
+    float
+        Minimum occupied coordinate on the BK placement axis.
+    """
+    del graph
+    return layout.y[layout.root[node]] + layout.inner_shift[node]
+
+
+def _elk_bk_max_y(graph: _ElkBkGraph, layout: _ElkBkLayout, node: NodeId) -> float:
+    """Return ELK ``BKAlignedLayout.getMaxY`` without margins.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Current compaction layout.
+    node : Hashable
+        Node whose block-relative maximum is requested.
+
+    Returns
+    -------
+    float
+        Maximum occupied coordinate on the BK placement axis.
+    """
+    return layout.y[layout.root[node]] + layout.inner_shift[node] + graph.sizes[node]
+
+
+def _elk_bk_neighbor_in_layer(
+    graph: _ElkBkGraph,
+    node: NodeId,
+    offset: int,
+) -> Optional[NodeId]:
+    """Return a same-layer neighbor by order offset.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    node : Hashable
+        Node whose layer neighbor is queried.
+    offset : int
+        ``-1`` for the upper/previous neighbor, ``1`` for lower/next.
+
+    Returns
+    -------
+    Hashable | None
+        Neighbor node if it exists.
+    """
+    layer = graph.layers[graph.layer_index[node]]
+    index = graph.node_index[node] + offset
+    if 0 <= index < len(layer):
+        return layer[index]
+    return None
+
+
+def _elk_bk_check_space_above(
+    graph: _ElkBkGraph,
+    layout: _ElkBkLayout,
+    block_node: NodeId,
+    delta: float,
+    node_spacing: float,
+) -> float:
+    """Return how far a block can move toward previous same-layer nodes.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Current compaction layout.
+    block_node : Hashable
+        Any node in the block being moved.
+    delta : float
+        Requested positive movement.
+    node_spacing : float
+        ELK ``spacing.nodeNode``.
+
+    Returns
+    -------
+    float
+        Feasible movement not exceeding ``delta``.
+    """
+    available_space = delta
+    current = block_node
+    while True:
+        current = layout.align[current]
+        neighbor = _elk_bk_neighbor_in_layer(graph, current, -1)
+        if neighbor is not None:
+            spacing = _elk_bk_spacing(current, neighbor, graph.dummy_nodes, node_spacing)
+            available_space = min(
+                available_space,
+                _elk_bk_min_y(graph, layout, current)
+                - (_elk_bk_max_y(graph, layout, neighbor) + spacing),
+            )
+        if current == block_node:
+            return available_space
+
+
+def _elk_bk_check_space_below(
+    graph: _ElkBkGraph,
+    layout: _ElkBkLayout,
+    block_node: NodeId,
+    delta: float,
+    node_spacing: float,
+) -> float:
+    """Return how far a block can move toward next same-layer nodes.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Current compaction layout.
+    block_node : Hashable
+        Any node in the block being moved.
+    delta : float
+        Requested positive movement.
+    node_spacing : float
+        ELK ``spacing.nodeNode``.
+
+    Returns
+    -------
+    float
+        Feasible movement not exceeding ``delta``.
+    """
+    available_space = delta
+    current = block_node
+    while True:
+        current = layout.align[current]
+        neighbor = _elk_bk_neighbor_in_layer(graph, current, 1)
+        if neighbor is not None:
+            spacing = _elk_bk_spacing(current, neighbor, graph.dummy_nodes, node_spacing)
+            available_space = min(
+                available_space,
+                _elk_bk_min_y(graph, layout, neighbor)
+                - (_elk_bk_max_y(graph, layout, current) + spacing),
+            )
+        if current == block_node:
+            return available_space
+
+
+def _elk_bk_shift_block(layout: _ElkBkLayout, block_node: NodeId, delta: float) -> None:
+    """Shift all concrete node coordinates of one aligned block.
+
+    Parameters
+    ----------
+    layout : _ElkBkLayout
+        Current compaction layout.
+    block_node : Hashable
+        Any node in the cyclic block.
+    delta : float
+        Coordinate delta to add.
+
+    Returns
+    -------
+    None
+        ``layout.y`` is mutated for every node in the block.
+    """
+    current = block_node
+    while True:
+        layout.y[current] += delta
+        current = layout.align[current]
+        if current == block_node:
+            break
+
+
+def _elk_bk_calculate_delta(
+    graph: _ElkBkGraph,
+    layout: _ElkBkLayout,
+    edge: Tuple[NodeId, NodeId],
+    fixed_node: NodeId,
+    block_node: NodeId,
+) -> float:
+    """Return ELK's port delta for post-process edge straightening.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Current compaction layout.
+    edge : tuple[Hashable, Hashable]
+        Edge whose ports are compared.
+    fixed_node : Hashable
+        Endpoint whose block is treated as fixed.
+    block_node : Hashable
+        Endpoint whose block may move.
+
+    Returns
+    -------
+    float
+        Positive if ``block_node`` lies after ``fixed_node`` on the placement
+        axis, negative if it lies before.
+    """
+    fixed_pos = (
+        layout.y[fixed_node]
+        + layout.inner_shift[fixed_node]
+        + _elk_bk_endpoint_port_position(graph, edge, fixed_node)
+    )
+    block_pos = (
+        layout.y[block_node]
+        + layout.inner_shift[block_node]
+        + _elk_bk_endpoint_port_position(graph, edge, block_node)
+    )
+    return block_pos - fixed_pos
+
+
 def _elk_bk_horizontal_compaction(
     graph: _ElkBkGraph,
     layout: _ElkBkLayout,
@@ -1483,6 +1821,9 @@ def _elk_bk_horizontal_compaction(
     """
     class_edges: Dict[NodeId, List[Tuple[NodeId, float]]] = {}
     class_nodes: List[NodeId] = []
+    block_finished: Set[NodeId] = set()
+    postprocess_queue: List[Tuple[NodeId, bool, Optional[Tuple[NodeId, NodeId]]]] = []
+    postprocess_stack: List[Tuple[NodeId, bool, Tuple[NodeId, NodeId]]] = []
 
     def class_node(node: NodeId) -> NodeId:
         """Register a class-graph node in creation order.
@@ -1502,6 +1843,152 @@ def _elk_bk_horizontal_compaction(
             class_nodes.append(node)
         return node
 
+    def pick_edge(node: NodeId, is_root: bool) -> Tuple[Optional[Tuple[NodeId, NodeId]], bool]:
+        """Pick ELK's first threshold-straightening edge candidate.
+
+        Parameters
+        ----------
+        node : Hashable
+            Free node inspected by ``ThresholdStrategy``.
+        is_root : bool
+            Whether the free node is viewed as the block root.
+
+        Returns
+        -------
+        tuple[tuple[Hashable, Hashable] | None, bool]
+            Picked edge and whether any candidate existed for possible later
+            post-processing.
+        """
+        has_edges = False
+        for edge in _elk_bk_edges_for_threshold(graph, layout, node, is_root):
+            if layout.straightened[layout.root[node]]:
+                continue
+            has_edges = True
+            other = _elk_bk_other_node(edge, node)
+            if layout.root[other] in block_finished:
+                return edge, True
+        return None, has_edges
+
+    def threshold_bound(node: NodeId, is_root: bool) -> float:
+        """Return the threshold that would straighten one extra incident edge.
+
+        Parameters
+        ----------
+        node : Hashable
+            Free node inspected by ``ThresholdStrategy``.
+        is_root : bool
+            Whether the free node is viewed as the block root.
+
+        Returns
+        -------
+        float
+            ELK threshold value or the direction-specific neutral infinity.
+        """
+        invalid = float("inf") if layout.vdir == "UP" else float("-inf")
+        picked_edge, has_edges = pick_edge(node, is_root)
+        if picked_edge is None:
+            if has_edges:
+                postprocess_queue.append((node, is_root, picked_edge))
+            return invalid
+
+        source, target = picked_edge
+        if is_root:
+            root_port = target if layout.hdir == "RIGHT" else source
+            other_port = source if layout.hdir == "RIGHT" else target
+        else:
+            root_port = target if layout.hdir == "LEFT" else source
+            other_port = source if layout.hdir == "LEFT" else target
+        other_root = layout.root[other_port]
+        threshold = (
+            layout.y[other_root]
+            + layout.inner_shift[other_port]
+            + _elk_bk_endpoint_port_position(graph, picked_edge, other_port)
+            - layout.inner_shift[root_port]
+            - _elk_bk_endpoint_port_position(graph, picked_edge, root_port)
+        )
+        layout.straightened[layout.root[source]] = True
+        layout.straightened[layout.root[target]] = True
+        return threshold
+
+    def calculate_threshold(
+        old_threshold: float,
+        block_root: NodeId,
+        current_node: NodeId,
+    ) -> float:
+        """Calculate ELK's simple straightening threshold for a block node.
+
+        Parameters
+        ----------
+        old_threshold : float
+            Previous threshold value for the current block.
+        block_root : Hashable
+            Root of the block currently being placed.
+        current_node : Hashable
+            Node within the block currently being inspected.
+
+        Returns
+        -------
+        float
+            Updated threshold.
+        """
+        is_root = block_root == current_node
+        is_last = layout.align[current_node] == block_root
+        if not (is_root or is_last):
+            return old_threshold
+        threshold = old_threshold
+        if is_root:
+            threshold = threshold_bound(block_root, True)
+        if threshold in (float("inf"), float("-inf")) and is_last:
+            threshold = threshold_bound(current_node, False)
+        return threshold
+
+    def process_postprocessable(node: NodeId, edge: Tuple[NodeId, NodeId]) -> bool:
+        """Try to move one postponed block to straighten a candidate edge.
+
+        Parameters
+        ----------
+        node : Hashable
+            Free node whose block may move.
+        edge : tuple[Hashable, Hashable]
+            Incident edge selected by ``pickEdge``.
+
+        Returns
+        -------
+        bool
+            ``True`` if the block moved.
+        """
+        fixed_node = _elk_bk_other_node(edge, node)
+        delta = _elk_bk_calculate_delta(graph, layout, edge, fixed_node, node)
+        if 0.0 < delta < _ELK_BK_STRAIGHTENING_THRESHOLD:
+            available_space = _elk_bk_check_space_above(graph, layout, node, delta, node_spacing)
+            _elk_bk_shift_block(layout, node, -available_space)
+            return available_space > 0.0
+        if 0.0 < -delta < _ELK_BK_STRAIGHTENING_THRESHOLD:
+            available_space = _elk_bk_check_space_below(graph, layout, node, -delta, node_spacing)
+            _elk_bk_shift_block(layout, node, available_space)
+            return available_space > 0.0
+        return False
+
+    def postprocess_thresholds() -> None:
+        """Run ELK's two-order post-processing for late straightening edges.
+
+        Returns
+        -------
+        None
+            ``layout.y`` may be mutated by feasible block shifts.
+        """
+        while postprocess_queue:
+            node, is_root, _ = postprocess_queue.pop(0)
+            picked_edge, _ = pick_edge(node, is_root)
+            if picked_edge is None:
+                continue
+            moved = process_postprocessable(node, picked_edge)
+            if not moved:
+                postprocess_stack.append((node, is_root, picked_edge))
+        while postprocess_stack:
+            node, _, edge = postprocess_stack.pop()
+            process_postprocessable(node, edge)
+
     def place_block(root: NodeId) -> None:
         """Recursively place one aligned block.
 
@@ -1520,6 +2007,7 @@ def _elk_bk_horizontal_compaction(
         is_initial_assignment = True
         layout.y[root] = 0.0
         current = root
+        threshold = float("-inf") if layout.vdir == "DOWN" else float("inf")
         while True:
             current_index = graph.node_index[current]
             layer = graph.layers[graph.layer_index[current]]
@@ -1532,6 +2020,7 @@ def _elk_bk_horizontal_compaction(
                 )
                 neighbor_root = layout.root[neighbor]
                 place_block(neighbor_root)
+                threshold = calculate_threshold(threshold, root, current)
                 if layout.sink[root] == root:
                     layout.sink[root] = layout.sink[neighbor_root]
                 if layout.sink[root] == layout.sink[neighbor_root]:
@@ -1545,9 +2034,9 @@ def _elk_bk_horizontal_compaction(
                             - layout.inner_shift[current]
                         )
                         layout.y[root] = (
-                            min(new_position, float("inf"))
+                            min(new_position, threshold)
                             if is_initial_assignment
-                            else min(layout.y[root], new_position)
+                            else min(layout.y[root], new_position, threshold)
                         )
                     else:
                         new_position = (
@@ -1558,9 +2047,9 @@ def _elk_bk_horizontal_compaction(
                             - layout.inner_shift[current]
                         )
                         layout.y[root] = (
-                            max(new_position, float("-inf"))
+                            max(new_position, threshold)
                             if is_initial_assignment
-                            else max(layout.y[root], new_position)
+                            else max(layout.y[root], new_position, threshold)
                         )
                     is_initial_assignment = False
                 else:
@@ -1585,9 +2074,12 @@ def _elk_bk_horizontal_compaction(
                             - node_spacing
                         )
                     class_edges[sink].append((neighbor_sink, required_space))
+            else:
+                threshold = calculate_threshold(threshold, root, current)
             current = layout.align[current]
             if current == root:
                 break
+        block_finished.add(root)
 
     layer_sequence = list(graph.layers)
     if layout.hdir == "LEFT":
@@ -1611,6 +2103,7 @@ def _elk_bk_horizontal_compaction(
                     layout.vdir == "DOWN" and sink_shift < float("inf")
                 ):
                     layout.y[node] += sink_shift
+    postprocess_thresholds()
 
 
 def _elk_bk_layout_size(graph: _ElkBkGraph, layout: _ElkBkLayout) -> float:
@@ -1756,14 +2249,25 @@ def _elk_brandes_koepf_x_coordinates(
         _elk_bk_vertical_alignment(graph, layout, marked_edges)
         _elk_bk_inside_block_shift(graph, layout)
         _elk_bk_horizontal_compaction(graph, layout, node_spacing)
-    balanced = _elk_bk_balanced_layout(graph, layouts)
-    chosen = balanced if _elk_bk_check_order(graph, balanced) else None
+    if graph.dummy_nodes:
+        balanced = _elk_bk_balanced_layout(graph, layouts)
+        chosen = balanced if _elk_bk_check_order(graph, balanced) else None
+    else:
+        chosen = None
     if chosen is None:
+        # ELK's default favors straight edges, so BKNodePlacer skips the
+        # balanced median layout on ordinary layered graphs. For dummy-chain
+        # long edges we first try the historical balanced path above to avoid
+        # regressing existing long-edge fidelity pins while the dummy port model
+        # remains less complete than the no-dummy BK path fixed here.
         for layout in layouts:
             if _elk_bk_check_order(graph, layout):
-                if chosen is None or _elk_bk_layout_size(graph, chosen) > _elk_bk_layout_size(
-                    graph, layout
-                ):
+                if chosen is None:
+                    chosen = layout
+                    continue
+                chosen_size = _elk_bk_layout_size(graph, chosen)
+                layout_size = _elk_bk_layout_size(graph, layout)
+                if chosen_size > layout_size + _ELK_BK_LAYOUT_SIZE_EPSILON:
                     chosen = layout
     if chosen is None:
         chosen = layouts[0]
