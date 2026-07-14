@@ -634,6 +634,19 @@ class NetworkXARF(_NetworkXBase):
 
 
 @register
+class NetworkXPlanar(_NetworkXBase):
+    """Competitor adapter for NetworkX's Chrobak-Payne planar layout."""
+
+    name = "nx_planar"
+    max_nodes = 100_000
+    layout_func = "planar_layout"
+    layout_kwargs = {"scale": 1.0}
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset({"scale", "output_dtype", "output_scale"})
+
+
+@register
 class NetworkXLaplacianSpectral(_NetworkXBase):
     """Competitor adapter for NetworkX-backed Laplacian spectral variants."""
 

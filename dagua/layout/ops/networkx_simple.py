@@ -7,6 +7,7 @@ reference package is used only by competitor adapters and fidelity scripts.
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections import deque
 from dataclasses import dataclass
@@ -509,6 +510,250 @@ def nx_arf_positions(
     return _to_tensor(pos=p, dtype=dtype, device=out_device)
 
 
+def trivial_star_center(edge_index: torch.Tensor, num_nodes: int) -> int:
+    """Choose the deterministic star center by maximum undirected degree.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    int
+        Center node index. Ties are resolved by the lowest node index.
+    """
+    if num_nodes <= 0:
+        return 0
+    degrees = [0] * num_nodes
+    if edge_index.numel() > 0:
+        edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+        for source, target in zip(edges[0].tolist(), edges[1].tolist()):
+            if 0 <= int(source) < num_nodes:
+                degrees[int(source)] += 1
+            if 0 <= int(target) < num_nodes and int(target) != int(source):
+                degrees[int(target)] += 1
+    return max(range(num_nodes), key=lambda node: (degrees[node], -node))
+
+
+def nx_star_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    center: Optional[int] = None,
+    scale: float = 1.0,
+    dtype: torch.dtype = torch.float64,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Return igraph-style star coordinates.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]`` used for default center selection.
+    num_nodes : int
+        Number of graph nodes.
+    center : int | None, optional
+        Explicit center node. ``None`` uses maximum undirected degree.
+    scale : float, default=1.0
+        Circle radius for leaf nodes.
+    dtype : torch.dtype, default=torch.float64
+        Output floating-point dtype.
+    device : torch.device | None, optional
+        Output device. ``None`` uses CPU.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate tensor with shape ``[N, 2]``.
+    """
+    out_device = torch.device("cpu") if device is None else device
+    if num_nodes <= 1:
+        return _empty_positions(num_nodes=num_nodes, dtype=dtype, device=out_device)
+    center_node = trivial_star_center(edge_index, num_nodes) if center is None else int(center)
+    center_node = min(max(center_node, 0), num_nodes - 1)
+    pos = np.zeros((num_nodes, 2), dtype=np.float64)
+    leaves = [node for node in range(num_nodes) if node != center_node]
+    for leaf_index, node in enumerate(leaves):
+        angle = 2.0 * np.pi * leaf_index / len(leaves)
+        pos[node, 0] = math.cos(angle) * float(scale)
+        pos[node, 1] = math.sin(angle) * float(scale)
+    return _to_tensor(pos=pos, dtype=dtype, device=out_device)
+
+
+def nx_concentric_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    scale: float = 1.0,
+    dtype: torch.dtype = torch.float64,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Return deterministic degree-ring concentric coordinates.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    scale : float, default=1.0
+        Outer-ring radius.
+    dtype : torch.dtype, default=torch.float64
+        Output floating-point dtype.
+    device : torch.device | None, optional
+        Output device. ``None`` uses CPU.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate tensor with shape ``[N, 2]``.
+    """
+    out_device = torch.device("cpu") if device is None else device
+    if num_nodes <= 1:
+        return _empty_positions(num_nodes=num_nodes, dtype=dtype, device=out_device)
+    degrees = [0] * num_nodes
+    if edge_index.numel() > 0:
+        edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+        for source, target in zip(edges[0].tolist(), edges[1].tolist()):
+            degrees[int(source)] += 1
+            if int(target) != int(source):
+                degrees[int(target)] += 1
+    degree_values = sorted(set(degrees), reverse=True)
+    radius_step = float(scale) / max(len(degree_values) - 1, 1)
+    pos = np.zeros((num_nodes, 2), dtype=np.float64)
+    for ring_index, degree in enumerate(degree_values):
+        nodes = [node for node in range(num_nodes) if degrees[node] == degree]
+        radius = radius_step * ring_index
+        if len(nodes) == num_nodes and ring_index == 0:
+            radius = float(scale)
+        if radius == 0.0 and len(nodes) == 1:
+            continue
+        if radius == 0.0:
+            radius = radius_step
+        for offset, node in enumerate(nodes):
+            angle = 2.0 * np.pi * offset / len(nodes)
+            pos[node, 0] = math.cos(angle) * radius
+            pos[node, 1] = math.sin(angle) * radius
+    return _to_tensor(pos=pos, dtype=dtype, device=out_device)
+
+
+def nx_arc_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    start: int = 0,
+    scale: float = 1.0,
+    dtype: torch.dtype = torch.float64,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Return deterministic BFS/input-order arc-diagram coordinates.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    start : int, default=0
+        Source node for BFS ordering.
+    scale : float, default=1.0
+        Half-width after centering.
+    dtype : torch.dtype, default=torch.float64
+        Output floating-point dtype.
+    device : torch.device | None, optional
+        Output device. ``None`` uses CPU.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate tensor with shape ``[N, 2]``.
+    """
+    out_device = torch.device("cpu") if device is None else device
+    if num_nodes <= 1:
+        return _empty_positions(num_nodes=num_nodes, dtype=dtype, device=out_device)
+    layers = nx_bfs_layers(edge_index=edge_index, num_nodes=num_nodes, start=start)
+    order = [node for layer in sorted(layers) for node in layers[layer]]
+    xs = np.linspace(-float(scale), float(scale), num_nodes)
+    pos = np.zeros((num_nodes, 2), dtype=np.float64)
+    for index, node in enumerate(order):
+        pos[node, 0] = xs[index]
+    return _to_tensor(pos=pos, dtype=dtype, device=out_device)
+
+
+def nx_circlepack_positions(
+    num_nodes: int,
+    scale: float = 1.0,
+    dtype: torch.dtype = torch.float64,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Return deterministic one-level circle-packing coordinates.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    scale : float, default=1.0
+        Outer packing radius.
+    dtype : torch.dtype, default=torch.float64
+        Output floating-point dtype.
+    device : torch.device | None, optional
+        Output device. ``None`` uses CPU.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate tensor with shape ``[N, 2]``.
+    """
+    out_device = torch.device("cpu") if device is None else device
+    if num_nodes <= 1:
+        return _empty_positions(num_nodes=num_nodes, dtype=dtype, device=out_device)
+    radius = float(scale) * (1.0 - 1.0 / (1.0 + math.sqrt(num_nodes)))
+    pos = np.zeros((num_nodes, 2), dtype=np.float64)
+    for node in range(num_nodes):
+        angle = 2.0 * np.pi * node / num_nodes
+        pos[node, 0] = math.cos(angle) * radius
+        pos[node, 1] = math.sin(angle) * radius
+    return _to_tensor(pos=pos, dtype=dtype, device=out_device)
+
+
+def nx_planar_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    scale: float = 1.0,
+    dtype: torch.dtype = torch.float64,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Return NetworkX Chrobak-Payne planar-layout coordinates.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    scale : float, default=1.0
+        NetworkX layout scale.
+    dtype : torch.dtype, default=torch.float64
+        Output floating-point dtype.
+    device : torch.device | None, optional
+        Output device. ``None`` uses CPU.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate tensor with shape ``[N, 2]``.
+    """
+    out_device = torch.device("cpu") if device is None else device
+    nx = __import__("networkx")
+    graph = nx.Graph()
+    graph.add_nodes_from(range(num_nodes))
+    if edge_index.numel() > 0:
+        graph.add_edges_from((int(s), int(t)) for s, t in edge_index.detach().cpu().t().tolist())
+    pos_map = nx.planar_layout(graph, scale=scale)
+    pos = np.vstack([pos_map[node] for node in range(num_nodes)]).astype(np.float64)
+    return _to_tensor(pos=pos, dtype=dtype, device=out_device)
+
+
 @register_op
 @dataclass
 class NetworkXSimpleLayout(Op):
@@ -518,7 +763,8 @@ class NetworkXSimpleLayout(Op):
     ----------
     algorithm : str
         Layout name: ``circular``, ``shell``, ``spiral``, ``bipartite``,
-        ``multipartite``, ``bfs``, or ``arf``.
+        ``multipartite``, ``bfs``, ``arf``, ``star``, ``concentric``,
+        ``circlepack``, ``arc``, or ``planar``.
     params : dict[str, Any]
         Algorithm-specific keyword parameters.
     """
@@ -627,6 +873,53 @@ class NetworkXSimpleLayout(Op):
                 device=device,
             )
             extras = {"seed": self.params.get("seed")}
+        elif algorithm == "star":
+            pos = nx_star_positions(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                center=self.params.get("center"),
+                scale=scale,
+                dtype=dtype,
+                device=device,
+            )
+            extras = {"center": self.params.get("center")}
+        elif algorithm == "concentric":
+            pos = nx_concentric_positions(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                scale=scale,
+                dtype=dtype,
+                device=device,
+            )
+            extras = {}
+        elif algorithm == "circlepack":
+            pos = nx_circlepack_positions(
+                num_nodes=problem.num_nodes,
+                scale=scale,
+                dtype=dtype,
+                device=device,
+            )
+            extras = {}
+        elif algorithm == "arc":
+            start = int(self.params.get("start", 0))
+            pos = nx_arc_positions(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                start=start,
+                scale=scale,
+                dtype=dtype,
+                device=device,
+            )
+            extras = {"start": start}
+        elif algorithm == "planar":
+            pos = nx_planar_positions(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                scale=scale,
+                dtype=dtype,
+                device=device,
+            )
+            extras = {}
         else:
             raise ValueError(f"Unsupported NetworkX simple layout: {self.algorithm!r}.")
         state.pos = pos
@@ -640,9 +933,15 @@ __all__ = [
     "nx_bfs_layers",
     "nx_bipartite_node_set",
     "nx_bipartite_positions",
+    "nx_arc_positions",
     "nx_circular_positions",
+    "nx_circlepack_positions",
+    "nx_concentric_positions",
     "nx_multipartite_positions",
+    "nx_planar_positions",
     "nx_rescale_layout",
     "nx_shell_positions",
     "nx_spiral_positions",
+    "nx_star_positions",
+    "trivial_star_center",
 ]
