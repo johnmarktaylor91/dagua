@@ -1605,6 +1605,11 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
             "fidelity_mode": "igraph",
         },
     ),
+    "dot": _ClassicLayoutSpec(
+        import_path="dagua.layout.ops.pipelines.dot",
+        function_name="layout_dot_pipeline",
+        default_params={"barycenter_passes": 24},
+    ),
     "classic_spectral": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.spectral",
         function_name="layout_spectral_pipeline",
@@ -1664,6 +1669,11 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
         import_path="dagua.layout.ops.pipelines.fmmm",
         function_name="layout_fmmm_pipeline",
         default_params={"steps": 200, "fidelity_mode": True},
+    ),
+    "fdp": _ClassicLayoutSpec(
+        import_path="dagua.layout.ops.pipelines.fdp",
+        function_name="layout_fdp_pipeline",
+        default_params={"steps": 200},
     ),
     "classic_graphopt": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.graphopt",
@@ -2472,6 +2482,47 @@ class ClassicSugiyama(_ClassicBase):
 
 
 @register
+class Dot(_ClassicBase):
+    """Competitor wrapper for the public Graphviz DOT fidelity algorithm."""
+
+    name = "dot"
+    max_nodes = 5_000
+    variant_param_names = frozenset(
+        {
+            "barycenter_passes",
+            "rank_sep",
+            "node_sep",
+            "use_node_sizes_for_spacing",
+            "center_coordinates",
+        }
+    )
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the public DOT fidelity layout.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            API-compatible seed forwarded to deterministic tie handling.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        return self.layout_with_variant(graph=graph, timeout=timeout, seed=seed)
+
+
+@register
 class ClassicSpectral(_ClassicBase):
     """Competitor wrapper for the classic spectral layout reimplementation."""
 
@@ -3087,6 +3138,39 @@ class ClassicFMMM(_ClassicBase):
             )
 
 
+@register
+class Fdp(_ClassicBase):
+    """Competitor wrapper for the public Graphviz FDP fidelity algorithm."""
+
+    name = "fdp"
+    max_nodes = 5_000
+    variant_param_names = frozenset({"steps"})
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the public FDP fidelity layout.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the Graphviz-compatible start positions.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        return self.layout_with_variant(graph=graph, timeout=timeout, seed=seed)
+
+
 # ── New algorithms (March 2026) ──────────────────────────────────────────────
 
 
@@ -3198,9 +3282,12 @@ def _quick_classic(
         if graph.edge_weights is not None and fn_name not in _UNWEIGHTED_REFERENCE_LAYOUTS:
             extra_kwargs.setdefault("edge_weights", graph.edge_weights)
         if (
-            fn_name == "layout_fmmm_pipeline"
+            fn_name in {"layout_fmmm_pipeline", "layout_fdp_pipeline"}
             and graph.clusters
-            and extra_kwargs.get("fidelity_mode") == "graphviz_fdp"
+            and (
+                fn_name == "layout_fdp_pipeline"
+                or extra_kwargs.get("fidelity_mode") == "graphviz_fdp"
+            )
         ):
             extra_kwargs.setdefault("clusters", graph.clusters)
             extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
@@ -3230,7 +3317,7 @@ def _quick_classic(
                 node_sizes=graphviz_sfdp_node_sizes,
             ):
                 node_sizes = graphviz_sfdp_node_sizes
-        if (
+        if fn_name == "layout_dot_pipeline" or (
             fn_name == "layout_sugiyama_pipeline"
             and extra_kwargs.get("fidelity_mode") == "graphviz"
         ):
