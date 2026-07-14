@@ -1,6 +1,6 @@
 # Trivial deterministic layout fidelity
 
-References: igraph-style star angles; documented degree-ring concentric; documented one-level circlepack; Graphviz-osage placeholder uses the same deterministic ordering as production pending a source port; standard BFS arc ordering; NetworkX 3.6.1 planar_layout for Chrobak-Payne planar.
+References: igraph-style star angles; documented degree-ring concentric; documented one-level circlepack; real Graphviz osage via the osage engine with packmode=array; standard BFS arc ordering.
 
 | Layout | Graph | d_R | max_abs | Class | Reason |
 | --- | --- | ---: | ---: | --- | --- |
@@ -35,15 +35,15 @@ References: igraph-style star angles; documented degree-ring concentric; documen
 | circlepack | random_dag_50 | 3.637e-17 | 0.000e+00 | bit-exact |  |
 | circlepack | k5_non_planar | 2.972e-18 | 0.000e+00 | bit-exact |  |
 | osage | single_node | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| osage | small_chain | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| osage | binary_tree | 0.000e+00 | 0.000e+00 | bit-exact |  |
+| osage | small_chain | 8.623e-19 | 0.000e+00 | bit-exact |  |
+| osage | binary_tree | 7.392e-17 | 0.000e+00 | bit-exact |  |
 | osage | diamond | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| osage | grid_5x5 | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| osage | long_skip | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| osage | disconnected | 0.000e+00 | 0.000e+00 | bit-exact |  |
+| osage | grid_5x5 | 3.029e-18 | 0.000e+00 | bit-exact |  |
+| osage | long_skip | 2.233e-16 | 0.000e+00 | bit-exact |  |
+| osage | disconnected | 5.722e-17 | 0.000e+00 | bit-exact |  |
 | osage | cycle_4 | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| osage | random_dag_50 | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| osage | k5_non_planar | 0.000e+00 | 0.000e+00 | bit-exact |  |
+| osage | random_dag_50 | 2.404e-16 | 0.000e+00 | bit-exact |  |
+| osage | k5_non_planar | 1.388e-16 | 0.000e+00 | bit-exact |  |
 | arc | single_node | 0.000e+00 | 0.000e+00 | bit-exact |  |
 | arc | small_chain | 0.000e+00 | 0.000e+00 | bit-exact |  |
 | arc | binary_tree | 0.000e+00 | 0.000e+00 | bit-exact |  |
@@ -54,22 +54,11 @@ References: igraph-style star angles; documented degree-ring concentric; documen
 | arc | cycle_4 | 0.000e+00 | 0.000e+00 | bit-exact |  |
 | arc | random_dag_50 | 0.000e+00 | 0.000e+00 | bit-exact |  |
 | arc | k5_non_planar | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| planar | single_node | 0.000e+00 | 0.000e+00 | bit-exact |  |
-| planar | small_chain | 4.147e-16 | 0.000e+00 | bit-exact |  |
-| planar | binary_tree | 2.064e-16 | 0.000e+00 | bit-exact |  |
-| planar | diamond | 4.275e-16 | 0.000e+00 | bit-exact |  |
-| planar | grid_5x5 | 2.136e-16 | 0.000e+00 | bit-exact |  |
-| planar | long_skip | 1.784e-16 | 0.000e+00 | bit-exact |  |
-| planar | disconnected | 3.630e-35 | 0.000e+00 | bit-exact |  |
-| planar | cycle_4 | 4.275e-16 | 0.000e+00 | bit-exact |  |
-| planar | random_dag_50 | N/A | N/A | N/A | G is not planar. |
-| planar | k5_non_planar | N/A | N/A | N/A | G is not planar. |
 
 ## Summary
 
 - `star`: 10 bit-exact, 0 positional, 0 N/A; max d_R=3.179e-16.
 - `concentric`: 10 bit-exact, 0 positional, 0 N/A; max d_R=1.170e-16.
 - `circlepack`: 10 bit-exact, 0 positional, 0 N/A; max d_R=1.063e-16.
-- `osage`: 10 bit-exact, 0 positional, 0 N/A; max d_R=0.000e+00.
+- `osage`: 10 bit-exact, 0 positional, 0 N/A; max d_R=2.404e-16.
 - `arc`: 10 bit-exact, 0 positional, 0 N/A; max d_R=0.000e+00.
-- `planar`: 8 bit-exact, 0 positional, 2 N/A; max d_R=4.275e-16.
