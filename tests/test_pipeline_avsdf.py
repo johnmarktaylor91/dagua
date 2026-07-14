@@ -63,20 +63,25 @@ def test_avsdf_is_deterministic_and_records_order() -> None:
     assert sorted(state.extras["avsdf_order"]) == list(range(6))
 
 
-def test_avsdf_production_pipeline_has_no_runtime_delegation() -> None:
-    """Production AVSDF code must not call the Node reference adapter.
+def test_cytoscape_family_production_pipelines_have_no_runtime_delegation() -> None:
+    """Production Cytoscape-family code must not call reference adapters.
 
     Returns
     -------
     None
-        Source text should contain no subprocess or Cytoscape imports.
+        Source text should contain no subprocess or competitor hooks.
     """
     root = Path(__file__).parents[1]
     for path in [
         root / "dagua" / "layout" / "ops" / "cytoscape.py",
         root / "dagua" / "layout" / "ops" / "pipelines" / "avsdf.py",
+        root / "dagua" / "layout" / "ops" / "pipelines" / "cose.py",
+        root / "dagua" / "layout" / "ops" / "pipelines" / "cose_bilkent.py",
+        root / "dagua" / "layout" / "ops" / "pipelines" / "cise.py",
     ]:
         source = path.read_text()
         assert "subprocess" not in source
         assert "require(" not in source
-        assert "cytoscape(" not in source
+        assert "dagua.eval.competitors" not in source
+        assert "cytoscape_competitor" not in source
+        assert "layout_with_variant" not in source

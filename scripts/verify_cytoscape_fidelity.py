@@ -184,7 +184,7 @@ def main() -> None:
             reference_layout="cose",
             runner=layout_cose_pipeline,
             options={"numIter": 5, "randomize": False, "animate": False, "fit": False},
-            residual_note="spring update clipping/temperature stage",
+            residual_note="core init/first-force closed; residual multi-step cached-bounds drift",
         ),
         FidelityCase(
             algorithm="cose_bilkent",

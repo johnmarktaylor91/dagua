@@ -2,8 +2,7 @@
 
 The operations in this module are native Python/PyTorch ports of the small
 deterministic parts of Cytoscape's layout family plus a legacy CoSE-compatible
-spring step. Reference adapters live under ``dagua.eval.competitors`` and are
-not imported here.
+spring step. Reference adapters are intentionally not imported here.
 """
 
 from __future__ import annotations
@@ -22,6 +21,10 @@ _MIN_DISTANCE = 1.0e-9
 _AVSDF_DEFAULT_NODE_SEPARATION = 60.0
 _COSE_DEFAULT_NODE_WIDTH = 1.0
 _COSE_DEFAULT_NODE_HEIGHT = 1.0
+_COSE_DEFAULT_RENDERED_NODE_CENTER = 15.0
+_CYTOSCAPE_LCG_MULTIPLIER = 1664525
+_CYTOSCAPE_LCG_INCREMENT = 1013904223
+_CYTOSCAPE_LCG_MODULUS = 4294967296
 
 
 def _node_sizes(problem: LayoutProblem, device: torch.device) -> torch.Tensor:
@@ -120,6 +123,137 @@ def _unique_edges(edge_index: torch.Tensor, num_nodes: int) -> list[tuple[int, i
             seen.add(key)
             result.append((source, target))
     return result
+
+
+def _cytoscape_random(state: SolveState, seed: int) -> float:
+    """Return the next value from the verifier's seeded Cytoscape RNG.
+
+    Parameters
+    ----------
+    state : SolveState
+        Mutable solve state used to persist the JavaScript LCG state.
+    seed : int
+        Initial seed supplied to the Cytoscape reference adapter.
+
+    Returns
+    -------
+    float
+        Pseudorandom value in ``[0, 1)`` matching the Node reference adapter.
+    """
+    raw_state = state.extras.get("cytoscape_random_state")
+    if raw_state is None:
+        raw_state = int(seed) & 0xFFFFFFFF
+        if raw_state == 0:
+            raw_state = 1
+    next_state = (
+        _CYTOSCAPE_LCG_MULTIPLIER * int(raw_state) + _CYTOSCAPE_LCG_INCREMENT
+    ) & 0xFFFFFFFF
+    state.extras["cytoscape_random_state"] = next_state
+    return next_state / _CYTOSCAPE_LCG_MODULUS
+
+
+def _clipping_point(
+    node_center: torch.Tensor,
+    node_size: torch.Tensor,
+    direction_x: torch.Tensor,
+    direction_y: torch.Tensor,
+) -> torch.Tensor:
+    """Return Cytoscape core CoSE's rectangle clipping point.
+
+    Parameters
+    ----------
+    node_center : torch.Tensor
+        Node center coordinate with shape ``[2]``.
+    node_size : torch.Tensor
+        Node size with shape ``[2]`` as ``[width, height]``.
+    direction_x : torch.Tensor
+        X component of the direction vector.
+    direction_y : torch.Tensor
+        Y component of the direction vector.
+
+    Returns
+    -------
+    torch.Tensor
+        Clipping point with shape ``[2]``.
+    """
+    x_coord = node_center[0]
+    y_coord = node_center[1]
+    width = torch.clamp(node_size[0], min=_COSE_DEFAULT_NODE_WIDTH)
+    height = torch.clamp(node_size[1], min=_COSE_DEFAULT_NODE_HEIGHT)
+
+    if float(direction_x.item()) == 0.0 and float(direction_y.item()) > 0.0:
+        return torch.stack((x_coord, y_coord + height / 2.0))
+    if float(direction_x.item()) == 0.0 and float(direction_y.item()) < 0.0:
+        # Cytoscape's core CoSE source returns ``Y + H / 2`` for this case.
+        return torch.stack((x_coord, y_coord + height / 2.0))
+
+    direction_slope = direction_y / direction_x
+    node_slope = height / width
+    if (
+        float(direction_x.item()) > 0.0
+        and float(direction_slope.item()) >= float((-node_slope).item())
+        and float(direction_slope.item()) <= float(node_slope.item())
+    ):
+        return torch.stack(
+            (x_coord + width / 2.0, y_coord + width * direction_y / (2.0 * direction_x))
+        )
+    if (
+        float(direction_x.item()) < 0.0
+        and float(direction_slope.item()) >= float((-node_slope).item())
+        and float(direction_slope.item()) <= float(node_slope.item())
+    ):
+        return torch.stack(
+            (x_coord - width / 2.0, y_coord - width * direction_y / (2.0 * direction_x))
+        )
+    if float(direction_y.item()) > 0.0 and (
+        float(direction_slope.item()) <= float((-node_slope).item())
+        or float(direction_slope.item()) >= float(node_slope.item())
+    ):
+        return torch.stack(
+            (x_coord + height * direction_x / (2.0 * direction_y), y_coord + height / 2.0)
+        )
+    if float(direction_y.item()) < 0.0 and (
+        float(direction_slope.item()) <= float((-node_slope).item())
+        or float(direction_slope.item()) >= float(node_slope.item())
+    ):
+        return torch.stack(
+            (x_coord - height * direction_x / (2.0 * direction_y), y_coord - height / 2.0)
+        )
+
+    return torch.stack((x_coord, y_coord))
+
+
+def _cose_bounds(
+    state: SolveState,
+    pos: torch.Tensor,
+    sizes: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return cached Cytoscape core CoSE node bounds.
+
+    Parameters
+    ----------
+    state : SolveState
+        Mutable solve state carrying bounds between force iterations.
+    pos : torch.Tensor
+        Node center coordinates with shape ``[N, 2]``.
+    sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ``min_x``, ``max_x``, ``min_y``, and ``max_y`` vectors.
+    """
+    bounds = state.extras.get("cose_bounds")
+    if bounds is not None:
+        return bounds
+    min_x = pos[:, 0] - sizes[:, 0] / 2.0
+    max_x = pos[:, 0] + sizes[:, 0] / 2.0
+    min_y = pos[:, 1] - sizes[:, 1] / 2.0
+    max_y = pos[:, 1] + sizes[:, 1] / 2.0
+    cached = (min_x, max_x, min_y, max_y)
+    state.extras["cose_bounds"] = cached
+    return cached
 
 
 def _avsdf_order(neighbors: list[set[int]]) -> list[int]:
@@ -492,6 +626,9 @@ class CytoscapeCoSEStep(Op):
     edge_elasticity: float = 32.0
     gravity: float = 1.0
     temperature: float = 1000.0
+    node_overlap: float = 4.0
+    client_width: float = 1.0
+    client_height: float = 1.0
 
     def apply(
         self,
@@ -522,39 +659,80 @@ class CytoscapeCoSEStep(Op):
         device = pos.device
         dtype = pos.dtype
         sizes = _node_sizes(problem, device=device).to(dtype=dtype)
-        forces = torch.zeros_like(pos)
+        min_x, max_x, min_y, max_y = _cose_bounds(state, pos, sizes)
+        offsets = torch.zeros_like(pos)
         for source in range(problem.num_nodes):
             for target in range(source + 1, problem.num_nodes):
                 delta = pos[target] - pos[source]
-                distance_sq = torch.clamp(torch.dot(delta, delta), min=_MIN_DISTANCE)
-                distance = torch.sqrt(distance_sq)
-                force = (2.0 * self.node_repulsion) / distance_sq
-                vector = force * delta / distance
-                forces[source] -= vector
-                forces[target] += vector
+                if float(delta[0].item()) == 0.0 and float(delta[1].item()) == 0.0:
+                    random_x = -1.0 + 2.0 * _cytoscape_random(state, problem.seed)
+                    random_y = -1.0 + 2.0 * _cytoscape_random(state, problem.seed)
+                    delta = torch.tensor([random_x, random_y], dtype=dtype, device=device)
+                if float(delta[0].item()) > 0.0:
+                    overlap_x = max_x[source] - min_x[target]
+                else:
+                    overlap_x = max_x[target] - min_x[source]
+                if float(delta[1].item()) > 0.0:
+                    overlap_y = max_y[source] - min_y[target]
+                else:
+                    overlap_y = max_y[target] - min_y[source]
+                if float(overlap_x.item()) >= 0.0 and float(overlap_y.item()) >= 0.0:
+                    overlap = torch.sqrt(overlap_x * overlap_x + overlap_y * overlap_y)
+                    force = self.node_overlap * overlap
+                    distance = torch.clamp(torch.linalg.vector_norm(delta), min=_MIN_DISTANCE)
+                    vector = force * delta / distance
+                else:
+                    point_source = _clipping_point(pos[source], sizes[source], delta[0], delta[1])
+                    point_target = _clipping_point(pos[target], sizes[target], -delta[0], -delta[1])
+                    clipped_delta = point_target - point_source
+                    distance_sq = torch.clamp(
+                        torch.dot(clipped_delta, clipped_delta),
+                        min=_MIN_DISTANCE,
+                    )
+                    distance = torch.sqrt(distance_sq)
+                    force = (2.0 * self.node_repulsion) / distance_sq
+                    vector = force * clipped_delta / distance
+                offsets[source] -= vector
+                offsets[target] += vector
         for source, target in _unique_edges(problem.edge_index, problem.num_nodes):
             delta = pos[target] - pos[source]
-            distance = torch.clamp(torch.linalg.vector_norm(delta), min=_MIN_DISTANCE)
-            clipped_distance = torch.clamp(
-                distance - 0.5 * torch.linalg.vector_norm(sizes[source] + sizes[target]),
-                min=_MIN_DISTANCE,
-            )
-            force = ((self.ideal_edge_length - clipped_distance) ** 2) / self.edge_elasticity
-            vector = force * delta / distance
-            forces[source] += vector
-            forces[target] -= vector
+            if float(delta[0].item()) == 0.0 and float(delta[1].item()) == 0.0:
+                continue
+            point_source = _clipping_point(pos[source], sizes[source], delta[0], delta[1])
+            point_target = _clipping_point(pos[target], sizes[target], -delta[0], -delta[1])
+            clipped_delta = point_target - point_source
+            distance = torch.linalg.vector_norm(clipped_delta)
+            if float(distance.item()) != 0.0:
+                force = ((self.ideal_edge_length - distance) ** 2) / self.edge_elasticity
+                vector = force * clipped_delta / distance
+            else:
+                vector = torch.zeros(2, dtype=dtype, device=device)
+            offsets[source] += vector
+            offsets[target] -= vector
         if self.gravity > 0.0 and problem.num_nodes > 0:
-            center = pos.mean(dim=0)
+            center = torch.tensor(
+                [self.client_height / 2.0, self.client_width / 2.0],
+                dtype=dtype,
+                device=device,
+            )
             gravity_delta = center[None, :] - pos
             gravity_dist = torch.clamp(
                 torch.linalg.vector_norm(gravity_delta, dim=1),
                 min=_MIN_DISTANCE,
             )
-            forces += self.gravity * gravity_delta / gravity_dist[:, None]
-        magnitude = torch.clamp(torch.linalg.vector_norm(forces, dim=1), min=_MIN_DISTANCE)
-        scale = torch.clamp(torch.full_like(magnitude, self.temperature) / magnitude, max=1.0)
-        state.pos = pos + forces * scale[:, None]
-        state.forces = forces
+            offsets += self.gravity * gravity_delta / gravity_dist[:, None]
+        magnitude = torch.linalg.vector_norm(offsets, dim=1)
+        scale = torch.ones_like(magnitude)
+        mask = magnitude > self.temperature
+        scale[mask] = self.temperature / magnitude[mask]
+        state.pos = pos + offsets * scale[:, None]
+        state.extras["cose_bounds"] = (
+            state.pos[:, 0] - sizes[:, 0],
+            state.pos[:, 0] + sizes[:, 0],
+            state.pos[:, 1] - sizes[:, 1],
+            state.pos[:, 1] + sizes[:, 1],
+        )
+        state.forces = offsets
         return state
 
 
@@ -569,6 +747,8 @@ class CytoscapeInitialPlacement(Op):
     writes: ClassVar[tuple[str, ...]] = ("pos",)
     randomize: bool = False
     extent: float = 1000.0
+    client_width: float = 1.0
+    client_height: float = 1.0
 
     def apply(
         self,
@@ -595,19 +775,35 @@ class CytoscapeInitialPlacement(Op):
         device = torch.device(ctx.plan.device)
         if state.pos is not None and not self.randomize:
             state.pos = state.pos.to(device=device, dtype=torch.float32)
+            sizes = _node_sizes(problem, device=device).to(dtype=state.pos.dtype)
+            state.extras["cose_bounds"] = (
+                state.pos[:, 0] - sizes[:, 0] / 2.0,
+                state.pos[:, 0] + sizes[:, 0] / 2.0,
+                state.pos[:, 1] - sizes[:, 1] / 2.0,
+                state.pos[:, 1] + sizes[:, 1] / 2.0,
+            )
             return state
         if problem.num_nodes == 0:
             state.pos = torch.empty((0, 2), dtype=torch.float32, device=device)
             return state
-        angles = torch.arange(problem.num_nodes, dtype=torch.float64)
-        angles = 2.0 * math.pi * angles / max(problem.num_nodes, 1)
-        radius = self.extent / (2.0 * math.pi)
-        pos = torch.stack((radius * torch.cos(angles), radius * torch.sin(angles)), dim=1)
+        pos = torch.full(
+            (problem.num_nodes, 2),
+            _COSE_DEFAULT_RENDERED_NODE_CENTER,
+            dtype=torch.float64,
+        )
         if self.randomize:
-            generator = torch.Generator(device="cpu").manual_seed(int(problem.seed))
-            pos = torch.rand((problem.num_nodes, 2), generator=generator, dtype=torch.float64)
-            pos = pos * self.extent
+            pos = torch.empty((problem.num_nodes, 2), dtype=torch.float64)
+            for node_index in range(problem.num_nodes):
+                pos[node_index, 0] = _cytoscape_random(state, problem.seed) * self.client_width
+                pos[node_index, 1] = _cytoscape_random(state, problem.seed) * self.client_height
         state.pos = pos.to(device=device, dtype=torch.float32)
+        sizes = _node_sizes(problem, device=device).to(dtype=state.pos.dtype)
+        state.extras["cose_bounds"] = (
+            state.pos[:, 0] - sizes[:, 0] / 2.0,
+            state.pos[:, 0] + sizes[:, 0] / 2.0,
+            state.pos[:, 1] - sizes[:, 1] / 2.0,
+            state.pos[:, 1] + sizes[:, 1] / 2.0,
+        )
         return state
 
 

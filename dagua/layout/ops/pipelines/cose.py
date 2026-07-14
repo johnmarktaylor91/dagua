@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 
-from dagua.layout.ops.base import Pipeline, Repeat
+from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.cytoscape import (
     CytoscapeCoSEStep,
     CytoscapeFinalize,
@@ -63,25 +63,19 @@ def build_cose_pipeline(
             break
         temperatures.append(temperature)
         temperature *= cooling_factor
-    return Pipeline(
-        [
-            CytoscapeInitialPlacement(randomize=randomize),
-            Repeat(
-                n=len(temperatures),
-                ops=[
-                    CytoscapeCoSEStep(
-                        ideal_edge_length=ideal_edge_length,
-                        node_repulsion=node_repulsion,
-                        edge_elasticity=edge_elasticity,
-                        gravity=gravity,
-                        temperature=initial_temp,
-                    )
-                ],
-            ),
-            CytoscapeFinalize(),
-        ],
-        name="cose_pipeline",
+    ops = [CytoscapeInitialPlacement(randomize=randomize)]
+    ops.extend(
+        CytoscapeCoSEStep(
+            ideal_edge_length=ideal_edge_length,
+            node_repulsion=node_repulsion,
+            edge_elasticity=edge_elasticity,
+            gravity=gravity,
+            temperature=temperature,
+        )
+        for temperature in temperatures
     )
+    ops.append(CytoscapeFinalize())
+    return Pipeline(ops, name="cose_pipeline")
 
 
 def layout_cose_pipeline(
