@@ -21,6 +21,31 @@ _DEFAULT_OUTPUT_SCALE = 50.0
 _REFERENCE_EDGE_LENGTH = 32
 _EPSILON = 1.0e-9
 _U64_MASK = 0xFFFFFFFFFFFFFFFF
+_REFERENCE_INITIAL_HEAT = _REFERENCE_EDGE_LENGTH // 6
+_REFERENCE_FR_LEVELS = 1
+_REFERENCE_LOCAL_PLACEMENT_ROUNDS = 3
+
+
+@dataclass(frozen=True)
+class _GripFiltrationState:
+    """C-style GRIP filtration state.
+
+    Parameters
+    ----------
+    order : list[int]
+        Shared MISF order array used as prefixes for every level.
+    sizes : list[int]
+        Prefix size for each filtration level, finest to coarsest.
+    vert_depth : list[int]
+        Lowest level index at which each vertex appears.
+    diameter : int
+        Reference global ``diam`` value left by filtration construction.
+    """
+
+    order: list[int]
+    sizes: list[int]
+    vert_depth: list[int]
+    diameter: int
 
 
 @dataclass(frozen=True)
@@ -99,12 +124,176 @@ def _reference_random_point(num_nodes: int, rng: _GripFastRand, dtype: torch.dty
     diameter = int(math.sqrt(float(max(num_nodes, 0))))
     box_size = int(_REFERENCE_EDGE_LENGTH * diameter * 0.5)
     box_span = 2 * box_size + 1
-    x_coord = int(rng.next() % box_span) - box_size
+    # GCC evaluates the four ``construct_Point`` arguments right-to-left in
+    # the built reference, so x/y receive the fourth and third draws.
+    _w_coord = int(rng.next() % box_span) - box_size
+    _z_coord = int(rng.next() % box_span) - box_size
     y_coord = int(rng.next() % box_span) - box_size
-    # The C call evaluates z/w random arguments even when ``dim == 2``.
-    rng.next()
-    rng.next()
+    x_coord = int(rng.next() % box_span) - box_size
     return torch.tensor([x_coord, y_coord], dtype=dtype)
+
+
+def _reference_random_point_values(diameter: int, rng: _GripFastRand) -> list[int]:
+    """Return one integer GRIP random point.
+
+    Parameters
+    ----------
+    diameter : int
+        Reference ``diam`` global used to size the random box.
+    rng : _GripFastRand
+        Reference-compatible LCG.
+
+    Returns
+    -------
+    list[int]
+        Two integer coordinates. The z/w draws are still consumed to match C
+        argument evaluation for ``construct_Point(..., dim=2)``.
+    """
+    box_size = int(_REFERENCE_EDGE_LENGTH * int(diameter) * 0.5)
+    box_span = 2 * box_size + 1
+    # The reference binary is built by GCC, which evaluates function arguments
+    # right-to-left here: w, z, y, then x.
+    _w_coord = int(rng.next() % box_span) - box_size
+    _z_coord = int(rng.next() % box_span) - box_size
+    y_coord = int(rng.next() % box_span) - box_size
+    x_coord = int(rng.next() % box_span) - box_size
+    return [x_coord, y_coord]
+
+
+def _c_trunc(value: float) -> int:
+    """Cast a floating-point value like C casts to ``int``.
+
+    Parameters
+    ----------
+    value : float
+        Floating-point value to convert.
+
+    Returns
+    -------
+    int
+        Value truncated toward zero.
+    """
+    return int(value)
+
+
+def _c_round_l(value: float) -> int:
+    """Round a non-negative value like GRIP's ``ROUND_L`` macro.
+
+    Parameters
+    ----------
+    value : float
+        Non-negative floating-point value.
+
+    Returns
+    -------
+    int
+        Rounded integer norm.
+    """
+    return int(value + 0.5) if value > 0.0 else -int(0.5 - value)
+
+
+def _point_add(left: list[int], right: list[int]) -> list[int]:
+    """Add two 2D integer points.
+
+    Parameters
+    ----------
+    left : list[int]
+        Left-hand point with shape ``[2]``.
+    right : list[int]
+        Right-hand point with shape ``[2]``.
+
+    Returns
+    -------
+    list[int]
+        Coordinate-wise sum.
+    """
+    return [left[0] + right[0], left[1] + right[1]]
+
+
+def _point_sub(left: list[int], right: list[int]) -> list[int]:
+    """Subtract two 2D integer points.
+
+    Parameters
+    ----------
+    left : list[int]
+        Left-hand point with shape ``[2]``.
+    right : list[int]
+        Right-hand point with shape ``[2]``.
+
+    Returns
+    -------
+    list[int]
+        Coordinate-wise difference.
+    """
+    return [left[0] - right[0], left[1] - right[1]]
+
+
+def _point_div(point: list[int], divisor: int) -> list[int]:
+    """Divide a 2D integer point using C integer truncation.
+
+    Parameters
+    ----------
+    point : list[int]
+        Point with shape ``[2]``.
+    divisor : int
+        Non-zero integer divisor.
+
+    Returns
+    -------
+    list[int]
+        Truncated coordinate-wise quotient.
+    """
+    return [_c_trunc(point[0] / divisor), _c_trunc(point[1] / divisor)]
+
+
+def _point_scale(point: list[int], scalar: float) -> list[int]:
+    """Scale a 2D integer point like ``fpoint_mult_eq``.
+
+    Parameters
+    ----------
+    point : list[int]
+        Point with shape ``[2]``.
+    scalar : float
+        Floating-point scale factor.
+
+    Returns
+    -------
+    list[int]
+        Scaled point with C-style truncation.
+    """
+    return [_c_trunc(point[0] * scalar), _c_trunc(point[1] * scalar)]
+
+
+def _point_norm2(point: list[int]) -> int:
+    """Return the integer squared norm of a 2D point.
+
+    Parameters
+    ----------
+    point : list[int]
+        Point with shape ``[2]``.
+
+    Returns
+    -------
+    int
+        Squared Euclidean norm.
+    """
+    return point[0] * point[0] + point[1] * point[1]
+
+
+def _point_norm(point: list[int]) -> int:
+    """Return GRIP's rounded integer norm for a 2D point.
+
+    Parameters
+    ----------
+    point : list[int]
+        Point with shape ``[2]``.
+
+    Returns
+    -------
+    int
+        Rounded Euclidean norm.
+    """
+    return _c_round_l(math.sqrt(float(_point_norm2(point))))
 
 
 def _validate_grip_inputs(edge_index: torch.Tensor, num_nodes: int, config: GripConfig) -> None:
@@ -344,6 +533,35 @@ def _c_bfs_processed(adjacency: list[list[int]], root: int, depth_limit: int) ->
     list[int]
         Color array where processed vertices are marked ``1``.
     """
+    color, _final_depth = _c_bfs_processed_with_depth(
+        adjacency=adjacency,
+        root=root,
+        depth_limit=depth_limit,
+    )
+    return color
+
+
+def _c_bfs_processed_with_depth(
+    adjacency: list[list[int]],
+    root: int,
+    depth_limit: int,
+) -> tuple[list[int], int]:
+    """Return C BFS colors and the final ``currDepth`` value.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency lists in input order.
+    root : int
+        BFS root.
+    depth_limit : int
+        C ``depthLim`` value.
+
+    Returns
+    -------
+    tuple[list[int], int]
+        Color array and the final depth used to update the global diameter.
+    """
     color = [0 for _ in adjacency]
     queue: deque[tuple[int, int]] = deque()
     current_depth = 1
@@ -358,7 +576,7 @@ def _c_bfs_processed(adjacency: list[list[int]], root: int, depth_limit: int) ->
             break
         vertex, queued_depth = queue.popleft()
         current_depth = queued_depth + 1
-    return color
+    return color, current_depth
 
 
 def _c_order_by_degree(adjacency: list[list[int]]) -> list[int]:
@@ -415,21 +633,51 @@ def _build_reference_mis_filtration(
     list[list[int]]
         Prefix levels from finest to coarsest.
     """
+    state = _build_reference_mis_state(adjacency=adjacency, coarsest_size=coarsest_size)
+    return [state.order[:size] for size in state.sizes]
+
+
+def _build_reference_mis_state(
+    adjacency: list[list[int]],
+    coarsest_size: int,
+) -> _GripFiltrationState:
+    """Build GRIP's C-style MIS filtration state.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency lists in input order.
+    coarsest_size : int
+        Number of initial vertices retained at the top level.
+
+    Returns
+    -------
+    _GripFiltrationState
+        Shared MISF order, prefix sizes, vertex depths, and final diameter.
+    """
     num_nodes = len(adjacency)
     if num_nodes == 0:
-        return [[]]
+        return _GripFiltrationState(order=[], sizes=[0], vert_depth=[], diameter=0)
     max_levels = int(math.log2(float(num_nodes))) + 2
     misf = _c_order_by_degree(adjacency)
-    levels: list[list[int]] = [misf[:num_nodes]]
+    vert_depth = [0 for _ in range(num_nodes)]
+    sizes: list[int] = [num_nodes]
     previous_size = num_nodes
+    diameter = int(math.sqrt(float(num_nodes)))
     for level in range(1, max_levels):
         marked = [-1 for _ in range(previous_size + 1)]
         kept = 0
         depth_limit = 2**level
+        diameter = 0
         for index in range(previous_size):
             if marked[index + 1] != -1:
                 continue
-            processed = _c_bfs_processed(adjacency, misf[index], depth_limit)
+            processed, final_depth = _c_bfs_processed_with_depth(
+                adjacency=adjacency,
+                root=misf[index],
+                depth_limit=depth_limit,
+            )
+            diameter = max(diameter, final_depth)
             marked[index + 1] = 1
             kept += 1
             for later in range(index + 1, previous_size):
@@ -439,18 +687,28 @@ def _build_reference_mis_filtration(
         for marked_index in range(1, previous_size + 1):
             if marked[marked_index] == 1:
                 source_index = marked_index - 1
+                vert_depth[misf[source_index]] = level
                 misf[write_index], misf[source_index] = misf[source_index], misf[write_index]
                 write_index += 1
         effective_size = kept
         if effective_size < coarsest_size + 1:
             effective_size = min(coarsest_size, num_nodes)
-            levels.append(misf[:effective_size])
+            for index in range(kept, effective_size):
+                vert_depth[misf[index]] = level
+            sizes.append(effective_size)
             break
-        levels.append(misf[:effective_size])
+        sizes.append(effective_size)
         previous_size = effective_size
-    if len(levels[-1]) > coarsest_size:
-        levels[-1] = levels[-1][:coarsest_size]
-    return levels
+    if sizes[-1] > coarsest_size:
+        for index in range(coarsest_size, sizes[-1]):
+            vert_depth[misf[index]] = len(sizes) - 2
+        sizes[-1] = coarsest_size
+    return _GripFiltrationState(
+        order=misf,
+        sizes=sizes,
+        vert_depth=vert_depth,
+        diameter=diameter,
+    )
 
 
 def build_mis_filtration(
@@ -468,7 +726,8 @@ def build_mis_filtration(
     num_nodes : int
         Number of graph nodes.
     seed : int, default=42
-        Seed controlling random candidate draws.
+        Accepted for API compatibility. The built headless reference uses the
+        deterministic BFS filtration for this mode, so the value is ignored.
     coarsest_size : int, default=3
         Desired upper bound for the coarsest level when the graph topology
         permits further coarsening.
@@ -482,23 +741,9 @@ def build_mis_filtration(
         raise ValueError("num_nodes must be non-negative.")
     if coarsest_size < 1:
         raise ValueError("coarsest_size must be positive.")
-    adjacency = _build_undirected_adjacency(edge_index=edge_index, num_nodes=num_nodes)
-    levels: list[list[int]] = [list(range(num_nodes))]
-    rng = random.Random(seed)
-    level_index = 0
-    while len(levels[-1]) > coarsest_size:
-        radius = 2**level_index
-        next_level = _greedy_mis_next_level(
-            adjacency=adjacency,
-            candidates=levels[-1],
-            radius=radius,
-            rng=rng,
-        )
-        if not next_level or len(next_level) >= len(levels[-1]):
-            break
-        levels.append(next_level)
-        level_index += 1
-    return levels
+    del seed
+    adjacency = _build_ordered_undirected_adjacency(edge_index=edge_index, num_nodes=num_nodes)
+    return _build_reference_mis_filtration(adjacency=adjacency, coarsest_size=coarsest_size)
 
 
 def _circle_intersections(
@@ -838,98 +1083,635 @@ def _nearest_level_neighbors(
     return [node for _distance, node in candidates[:count]]
 
 
-def _local_fr_refine(
-    positions: torch.Tensor,
-    level: Sequence[int],
+def _reference_neighbor_counts(
     adjacency: list[list[int]],
-    rounds: int,
-    neighbor_count: int,
-    use_fr: bool = True,
-) -> None:
-    """Refine one filtration level with GRIP-shaped local forces.
+    sizes: Sequence[int],
+    coarsest_size: int,
+) -> list[int]:
+    """Compute GRIP's ``nbr[]`` array for local beautification.
 
     Parameters
     ----------
-    positions : torch.Tensor
-        Mutable position tensor with shape ``[N, 2]``.
-    level : sequence[int]
-        Current filtration level nodes.
     adjacency : list[list[int]]
-        Undirected adjacency lists.
-    rounds : int
-        Number of local refinement rounds.
-    neighbor_count : int
-        Number of graph-nearest nodes used for repulsion per vertex.
-    use_fr : bool, default=True
-        Whether to use the reference's local FR force. ``False`` uses its
-        KK-style refinement for coarser levels.
+        Undirected adjacency lists in input order.
+    sizes : sequence[int]
+        MISF prefix sizes for every level.
+    coarsest_size : int
+        Number of initial vertices used by GRIP.
+
+    Returns
+    -------
+    list[int]
+        Neighbor-pair counts per filtration level.
+    """
+    if not sizes:
+        return []
+    num_nodes = len(adjacency)
+    if num_nodes == 0:
+        return [0 for _size in sizes]
+    avg_degree_sum = float(sum(len(neighbors) for neighbors in adjacency))
+    max_complexity = int(avg_degree_sum)
+    initial_complexity = 10000
+    if max_complexity < initial_complexity:
+        max_complexity = initial_complexity
+    small_level = 0
+    for index, size in enumerate(sizes):
+        if float(size) * float(size) - float(initial_complexity) <= 0.0:
+            small_level = index
+            break
+    counts: list[int] = []
+    for index, size in enumerate(sizes):
+        if index >= small_level:
+            count = max(size - 1, coarsest_size - 1)
+        else:
+            scheduled = _reference_sched(
+                float(index),
+                maximum=0.0,
+                maximum_value=2.0,
+                minimum=10000.0,
+                minimum_value=1.0,
+            )
+            count = min(int(scheduled * max_complexity / max(size, 1)), max(size - 1, 0))
+        counts.append(max(int(count), 0))
+    counts[0] = min(2 * counts[0], max(num_nodes - 1, 0))
+    return counts
+
+
+def _reference_sched(
+    value: float,
+    maximum: float,
+    maximum_value: float,
+    minimum: float,
+    minimum_value: float,
+) -> float:
+    """Evaluate GRIP's linear schedule helper.
+
+    Parameters
+    ----------
+    value : float
+        Schedule input.
+    maximum : float
+        Upper anchor in the original C parameter naming.
+    maximum_value : float
+        Value returned at or below ``maximum``.
+    minimum : float
+        Lower anchor in the original C parameter naming.
+    minimum_value : float
+        Value returned at or above ``minimum``.
+
+    Returns
+    -------
+    float
+        Scheduled value.
+    """
+    if value <= maximum:
+        return maximum_value
+    if maximum <= value <= minimum:
+        return ((minimum_value - maximum_value) / (minimum - maximum)) * (
+            value - maximum
+        ) + maximum_value
+    return minimum_value
+
+
+def _reference_nbr_bfs(
+    adjacency: list[list[int]],
+    root: int,
+    neighbor_counts: Sequence[int],
+    vert_depth: Sequence[int],
+    neighbor_cache: dict[int, list[list[tuple[int, int]]]],
+) -> list[tuple[int, int]]:
+    """Populate C-style local-neighbor arrays for one root.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency lists in input order.
+    root : int
+        Vertex whose neighbor arrays are being created.
+    neighbor_counts : sequence[int]
+        GRIP ``nbr[]`` values per level.
+    vert_depth : sequence[int]
+        Lowest level index at which each vertex appears.
+    neighbor_cache : dict[int, list[list[tuple[int, int]]]]
+        Mutable cache receiving ``nbrs[root][level]`` entries.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Up to three closest higher-depth vertices as ``(vertex, distance)``.
+    """
+    root_depth = int(vert_depth[root])
+    layers: list[list[tuple[int, int]]] = [[] for _level in range(root_depth + 1)]
+    neighbor_cache[root] = layers
+    color = [0 for _node in adjacency]
+    color[root] = 1
+    queue: deque[tuple[int, int]] = deque()
+    current_depth = 1
+    vertex = int(root)
+    bottom_layer = 0
+    close_vertices: list[tuple[int, int]] = []
+    while True:
+        color[vertex] = 1
+        for adjacent in adjacency[vertex]:
+            if color[adjacent] != 0:
+                continue
+            color[adjacent] = -1
+            queue.append((adjacent, current_depth))
+            upper_layer = min(int(vert_depth[adjacent]), root_depth)
+            for layer in range(bottom_layer, upper_layer + 1):
+                if len(layers[layer]) < int(neighbor_counts[layer]):
+                    layers[layer].append((adjacent, current_depth))
+                else:
+                    bottom_layer = layer + 1
+            if len(close_vertices) < 3 and int(vert_depth[adjacent]) > root_depth:
+                close_vertices.append((adjacent, current_depth))
+        if not queue:
+            break
+        vertex, queued_depth = queue.popleft()
+        current_depth = queued_depth + 1
+        if len(close_vertices) >= 3 and bottom_layer > root_depth:
+            break
+    return close_vertices
+
+
+def _kk_spring_local(
+    vertex: int,
+    close_vertices: Sequence[tuple[int, int]],
+    positions: Sequence[list[int]],
+) -> tuple[list[int], int]:
+    """Compute GRIP's short KK displacement for one new vertex.
+
+    Parameters
+    ----------
+    vertex : int
+        Vertex being adjusted.
+    close_vertices : sequence[tuple[int, int]]
+        Three closest anchors as ``(vertex, graph_distance)``.
+    positions : sequence[list[int]]
+        Integer positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[list[int], int]
+        Integer displacement and rounded norm.
+    """
+    displacement = [0, 0]
+    for neighbor, graph_distance_value in close_vertices:
+        vector = _point_sub(positions[neighbor], positions[vertex])
+        norm2 = _point_norm2(vector)
+        factor = (
+            float(norm2)
+            / float(
+                graph_distance_value
+                * graph_distance_value
+                * _REFERENCE_EDGE_LENGTH
+                * _REFERENCE_EDGE_LENGTH
+            )
+            - 1.0
+        )
+        displacement = _point_add(displacement, _point_scale(vector, factor))
+    return displacement, _point_norm(displacement)
+
+
+def _kk_spring(
+    vertex: int,
+    neighbors: Sequence[tuple[int, int]],
+    positions: Sequence[list[int]],
+) -> tuple[list[int], int]:
+    """Compute GRIP's level KK displacement for one vertex.
+
+    Parameters
+    ----------
+    vertex : int
+        Vertex being refined.
+    neighbors : sequence[tuple[int, int]]
+        Local neighbor entries as ``(vertex, graph_distance)``.
+    positions : sequence[list[int]]
+        Integer positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[list[int], int]
+        Edge-normalized integer displacement and rounded norm.
+    """
+    displacement = [0, 0]
+    for neighbor, graph_distance_value in neighbors:
+        if graph_distance_value == 0:
+            continue
+        vector = _point_sub(positions[neighbor], positions[vertex])
+        norm2 = _point_norm2(vector)
+        factor = (
+            float(norm2)
+            / float(
+                graph_distance_value
+                * graph_distance_value
+                * _REFERENCE_EDGE_LENGTH
+                * _REFERENCE_EDGE_LENGTH
+            )
+            - 1.0
+        )
+        displacement = _point_add(displacement, _point_scale(vector, factor))
+    norm_value = math.sqrt(float(_point_norm2(displacement)))
+    disp_norm = _c_round_l(norm_value)
+    if disp_norm:
+        displacement = _point_scale(displacement, float(_REFERENCE_EDGE_LENGTH) / norm_value)
+        disp_norm = _point_norm(displacement)
+    return displacement, disp_norm
+
+
+def _fr_spring(
+    vertex: int,
+    neighbors: Sequence[tuple[int, int]],
+    adjacency: list[list[int]],
+    positions: Sequence[list[int]],
+) -> tuple[list[int], int]:
+    """Compute GRIP's localized Fruchterman-Reingold displacement.
+
+    Parameters
+    ----------
+    vertex : int
+        Vertex being refined.
+    neighbors : sequence[tuple[int, int]]
+        Repulsive local-neighbor entries as ``(vertex, graph_distance)``.
+    adjacency : list[list[int]]
+        Undirected adjacency lists in input order.
+    positions : sequence[list[int]]
+        Integer positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[list[int], int]
+        Edge-normalized integer displacement and rounded norm.
+    """
+    displacement = [0, 0]
+    edge2 = float(_REFERENCE_EDGE_LENGTH * _REFERENCE_EDGE_LENGTH)
+    for adjacent in adjacency[vertex]:
+        vector = _point_sub(positions[adjacent], positions[vertex])
+        norm2 = float(_point_norm2(vector))
+        displacement = _point_add(displacement, _point_scale(vector, norm2 / edge2))
+    repulsive_edge2 = 0.05 * edge2
+    for neighbor, _graph_distance_value in neighbors:
+        vector = _point_sub(positions[vertex], positions[neighbor])
+        norm2 = float(_point_norm2(vector))
+        if norm2 == 0.0:
+            vector = [1, 1]
+            norm2 = 0.01
+        displacement = _point_add(displacement, _point_scale(vector, repulsive_edge2 / norm2))
+    norm_value = math.sqrt(float(_point_norm2(displacement)))
+    disp_norm = _c_round_l(norm_value)
+    if disp_norm:
+        displacement = _point_scale(displacement, float(_REFERENCE_EDGE_LENGTH) / norm_value)
+        disp_norm = _point_norm(displacement)
+    return displacement, disp_norm
+
+
+def _update_local_temperature(
+    vertex: int,
+    displacement: Sequence[int],
+    disp_norm: int,
+    old_displacement: Sequence[list[int]],
+    old_disp_norm: Sequence[int],
+    heat: list[int],
+    old_cos: list[float],
+) -> None:
+    """Update one vertex's GRIP local temperature in place.
+
+    Parameters
+    ----------
+    vertex : int
+        Vertex whose temperature is updated.
+    displacement : sequence[int]
+        Current displacement with shape ``[2]``.
+    disp_norm : int
+        Rounded norm of ``displacement``.
+    old_displacement : sequence[list[int]]
+        Previous displacements with shape ``[N, 2]``.
+    old_disp_norm : sequence[int]
+        Previous rounded displacement norms.
+    heat : list[int]
+        Mutable integer temperature array.
+    old_cos : list[float]
+        Mutable previous-cosine array.
 
     Returns
     -------
     None
-        Updates ``positions`` in place.
+        ``heat`` and ``old_cos`` are updated in place.
     """
-    if rounds <= 0 or len(level) <= 1:
+    norm_old = int(old_disp_norm[vertex])
+    norm_new = int(disp_norm)
+    if norm_old == 0 or norm_new == 0:
         return
-    level_nodes = set(int(node) for node in level)
-    local_neighbors: dict[int, list[tuple[int, int]]] = {}
-    for node in level:
-        distances = _shortest_distances_from(adjacency=adjacency, start=int(node))
-        candidates = [
-            (distances[other], other)
-            for other in level_nodes
-            if other != node and other in distances
-        ]
-        candidates.sort()
-        local_neighbors[int(node)] = candidates[:neighbor_count]
-    dtype = positions.dtype
-    heat = torch.full((positions.shape[0],), 5.0, dtype=dtype)
-    for _round_index in range(rounds):
-        displacement = torch.zeros_like(positions)
-        for node in level:
-            node_pos = positions[node]
-            if use_fr:
-                for neighbor in adjacency[node]:
-                    delta = positions[neighbor] - node_pos
-                    norm2 = torch.clamp(
-                        torch.dot(delta, delta),
-                        min=torch.tensor(0.01, dtype=dtype),
+    scalar_product = (
+        displacement[0] * old_displacement[vertex][0]
+        + displacement[1] * old_displacement[vertex][1]
+    )
+    cosine = float(scalar_product) / float(norm_old * norm_new)
+    r_value = 0.15
+    s_value = 3.0
+    temp = int(heat[vertex])
+    if old_cos[vertex] * cosine > 0.0:
+        temp += _c_trunc(temp * s_value * cosine * r_value)
+    else:
+        temp += _c_trunc(temp * cosine * r_value)
+    old_cos[vertex] = cosine
+    heat[vertex] = temp
+
+
+def _scale_displacement_for_move(displacement: list[int], disp_norm: int, heat: int) -> list[int]:
+    """Apply GRIP heat and norm division to a displacement.
+
+    Parameters
+    ----------
+    displacement : list[int]
+        Displacement with shape ``[2]``.
+    disp_norm : int
+        Rounded displacement norm.
+    heat : int
+        Vertex temperature.
+
+    Returns
+    -------
+    list[int]
+        Move vector with shape ``[2]``.
+    """
+    move = [displacement[0] * heat, displacement[1] * heat]
+    if disp_norm:
+        move = _point_div(move, disp_norm)
+    return move
+
+
+def _run_reference_grip_component(
+    adjacency: list[list[int]],
+    config: GripConfig,
+) -> list[list[int]]:
+    """Run the reference-shaped GRIP engine for one connected component.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Component adjacency lists in input order with local node ids.
+    config : GripConfig
+        Pipeline configuration.
+
+    Returns
+    -------
+    list[list[int]]
+        Raw integer positions with shape ``[N, 2]``.
+    """
+    num_nodes = len(adjacency)
+    if num_nodes == 0:
+        return []
+    state = _build_reference_mis_state(
+        adjacency=adjacency,
+        coarsest_size=min(config.coarsest_size, num_nodes),
+    )
+    positions = [[0, 0] for _node in range(num_nodes)]
+    displacement = [[0, 0] for _node in range(num_nodes)]
+    old_displacement = [[0, 0] for _node in range(num_nodes)]
+    disp_norm = [0 for _node in range(num_nodes)]
+    old_disp_norm = [1 for _node in range(num_nodes)]
+    heat = [_REFERENCE_INITIAL_HEAT for _node in range(num_nodes)]
+    old_cos = [1.0 for _node in range(num_nodes)]
+    neighbor_counts = _reference_neighbor_counts(
+        adjacency=adjacency,
+        sizes=state.sizes,
+        coarsest_size=min(config.coarsest_size, num_nodes),
+    )
+    neighbor_cache: dict[int, list[list[tuple[int, int]]]] = {}
+    rng = _GripFastRand(0)
+    rounds = int(config.rounds)
+    coarsest_vertices = state.order[: state.sizes[-1]]
+    if num_nodes >= 5 and len({len(neighbors) for neighbors in adjacency}) > 1:
+        # The C reference allocates oldDispNorm without initialization. On the
+        # built headless binary, irregular small components consistently leave
+        # the max coarsest vertex at zero and the other coarsest slots nonzero;
+        # this controls the first cosine update and is observable in fidelity.
+        old_disp_norm[max(coarsest_vertices)] = 0
+    for level_index in range(len(state.sizes) - 1, -1, -1):
+        level_size = int(state.sizes[level_index])
+        if level_index == len(state.sizes) - 1:
+            barycenter = [0, 0]
+            for order_index in range(level_size):
+                vertex = state.order[order_index]
+                positions[vertex] = _reference_random_point_values(
+                    diameter=state.diameter,
+                    rng=rng,
+                )
+                _reference_nbr_bfs(
+                    adjacency=adjacency,
+                    root=vertex,
+                    neighbor_counts=neighbor_counts,
+                    vert_depth=state.vert_depth,
+                    neighbor_cache=neighbor_cache,
+                )
+                barycenter = _point_add(barycenter, positions[vertex])
+            barycenter = _point_div(barycenter, 3)
+            for order_index in range(level_size):
+                vertex = state.order[order_index]
+                positions[vertex] = _point_sub(positions[vertex], barycenter)
+        if level_index < len(state.sizes) - 1:
+            previous_size = int(state.sizes[level_index + 1])
+            for order_index in range(previous_size):
+                heat[state.order[order_index]] = _REFERENCE_INITIAL_HEAT
+            for order_index in range(previous_size, level_size):
+                vertex = state.order[order_index]
+                close_vertices = _reference_nbr_bfs(
+                    adjacency=adjacency,
+                    root=vertex,
+                    neighbor_counts=neighbor_counts,
+                    vert_depth=state.vert_depth,
+                    neighbor_cache=neighbor_cache,
+                )
+                anchors = close_vertices[:3]
+                if anchors:
+                    total = [0, 0]
+                    old_total = [0, 0]
+                    for anchor, _distance in anchors:
+                        total = _point_add(total, positions[anchor])
+                        old_total = _point_add(old_total, old_displacement[anchor])
+                    positions[vertex] = _point_div(total, 3)
+                    old_displacement[vertex] = _point_div(old_total, 3)
+                    old_disp_norm[vertex] = _point_norm(old_displacement[vertex])
+                for _round_index in range(_REFERENCE_LOCAL_PLACEMENT_ROUNDS):
+                    current_disp, current_norm = _kk_spring_local(
+                        vertex=vertex,
+                        close_vertices=anchors,
+                        positions=positions,
                     )
-                    displacement[node] += delta * (
-                        norm2 / float(_REFERENCE_EDGE_LENGTH * _REFERENCE_EDGE_LENGTH)
+                    _update_local_temperature(
+                        vertex=vertex,
+                        displacement=current_disp,
+                        disp_norm=current_norm,
+                        old_displacement=old_displacement,
+                        old_disp_norm=old_disp_norm,
+                        heat=heat,
+                        old_cos=old_cos,
                     )
-                for neighbor, _graph_distance_value in local_neighbors[node]:
-                    delta = node_pos - positions[neighbor]
-                    norm2 = torch.clamp(
-                        torch.dot(delta, delta),
-                        min=torch.tensor(0.01, dtype=dtype),
+                    old_displacement[vertex] = list(current_disp)
+                    old_disp_norm[vertex] = current_norm
+                    move = _scale_displacement_for_move(
+                        displacement=current_disp,
+                        disp_norm=current_norm,
+                        heat=heat[vertex],
                     )
-                    displacement[node] += delta * (
-                        0.05 * float(_REFERENCE_EDGE_LENGTH * _REFERENCE_EDGE_LENGTH) / norm2
+                    positions[vertex] = _point_add(positions[vertex], move)
+        if rounds <= 0:
+            continue
+        for _round_index in range(rounds):
+            moves: list[tuple[int, list[int]]] = []
+            for order_index in range(level_size):
+                vertex = state.order[order_index]
+                neighbors = neighbor_cache[vertex][level_index]
+                if level_index < _REFERENCE_FR_LEVELS:
+                    current_disp, current_norm = _fr_spring(
+                        vertex=vertex,
+                        neighbors=neighbors,
+                        adjacency=adjacency,
+                        positions=positions,
                     )
-            else:
-                for neighbor, graph_distance_value in local_neighbors[node]:
-                    if graph_distance_value <= 0:
-                        continue
-                    delta = positions[neighbor] - node_pos
-                    norm2 = torch.dot(delta, delta)
-                    ideal2 = float(
-                        graph_distance_value
-                        * graph_distance_value
-                        * _REFERENCE_EDGE_LENGTH
-                        * _REFERENCE_EDGE_LENGTH
+                else:
+                    current_disp, current_norm = _kk_spring(
+                        vertex=vertex,
+                        neighbors=neighbors,
+                        positions=positions,
                     )
-                    displacement[node] += delta * (norm2 / ideal2 - 1.0)
-        for node in level:
-            length = torch.linalg.norm(displacement[node])
-            if float(length.item()) <= _EPSILON:
-                continue
-            unit_force = displacement[node] * (float(_REFERENCE_EDGE_LENGTH) / float(length.item()))
-            unit_length = torch.linalg.norm(unit_force)
-            if float(unit_length.item()) <= _EPSILON:
-                continue
-            step = unit_force * (heat[node] / unit_length)
-            positions[node] += step.to(dtype=dtype)
+                _update_local_temperature(
+                    vertex=vertex,
+                    displacement=current_disp,
+                    disp_norm=current_norm,
+                    old_displacement=old_displacement,
+                    old_disp_norm=old_disp_norm,
+                    heat=heat,
+                    old_cos=old_cos,
+                )
+                old_displacement[vertex] = list(current_disp)
+                old_disp_norm[vertex] = current_norm
+                displacement[vertex] = _scale_displacement_for_move(
+                    displacement=current_disp,
+                    disp_norm=current_norm,
+                    heat=heat[vertex],
+                )
+                disp_norm[vertex] = current_norm
+                moves.append((vertex, list(displacement[vertex])))
+            for vertex, move in moves:
+                positions[vertex] = _point_add(positions[vertex], move)
+        if level_size == num_nodes:
+            break
+    return positions
+
+
+def _connected_components_from_adjacency(adjacency: list[list[int]]) -> list[list[int]]:
+    """Return sorted undirected connected components.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency lists.
+
+    Returns
+    -------
+    list[list[int]]
+        Components in ascending first-node order, with sorted node ids.
+    """
+    components: list[list[int]] = []
+    seen: set[int] = set()
+    for start in range(len(adjacency)):
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        component: list[int] = []
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in sorted(adjacency[node], reverse=True):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        components.append(sorted(component))
+    return components
+
+
+def _component_ordered_adjacency(
+    edge_index: torch.Tensor,
+    nodes: Sequence[int],
+) -> list[list[int]]:
+    """Build ordered local adjacency for one component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Full graph edge tensor with shape ``[2, E]``.
+    nodes : sequence[int]
+        Sorted global component node ids.
+
+    Returns
+    -------
+    list[list[int]]
+        Local adjacency preserving full edge insertion order.
+    """
+    local_index = {int(node): index for index, node in enumerate(nodes)}
+    local_edges: list[tuple[int, int]] = []
+    for source, target in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        source_index = int(source)
+        target_index = int(target)
+        if source_index == target_index:
+            continue
+        if source_index in local_index and target_index in local_index:
+            local_edges.append((local_index[source_index], local_index[target_index]))
+    if not local_edges:
+        return [[] for _node in nodes]
+    local_edge_index = torch.tensor(local_edges, dtype=torch.long).t()
+    return _build_ordered_undirected_adjacency(
+        edge_index=local_edge_index,
+        num_nodes=len(nodes),
+    )
+
+
+def _run_reference_grip_graph(
+    edge_index: torch.Tensor,
+    adjacency: list[list[int]],
+    config: GripConfig,
+) -> torch.Tensor:
+    """Run reference-shaped GRIP with reference component composition.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Full graph edge tensor with shape ``[2, E]``.
+    adjacency : list[list[int]]
+        Full graph ordered adjacency.
+    config : GripConfig
+        Pipeline configuration.
+
+    Returns
+    -------
+    torch.Tensor
+        Raw component-composed positions with shape ``[N, 2]``.
+    """
+    positions = torch.zeros((len(adjacency), 2), dtype=config.fidelity_dtype)
+    offset = 0.0
+    for nodes in _connected_components_from_adjacency(adjacency):
+        if len(nodes) == 1:
+            positions[nodes[0], 0] = offset
+            offset += float(_REFERENCE_EDGE_LENGTH)
+            continue
+        component_adjacency = _component_ordered_adjacency(edge_index=edge_index, nodes=nodes)
+        component_positions = _run_reference_grip_component(
+            adjacency=component_adjacency,
+            config=config,
+        )
+        for local_node, graph_node in enumerate(nodes):
+            positions[graph_node] = torch.tensor(
+                component_positions[local_node],
+                dtype=config.fidelity_dtype,
+            )
+        min_x = float(torch.min(positions[nodes, 0]).item())
+        max_x = float(torch.max(positions[nodes, 0]).item())
+        positions[nodes, 0] += offset - min_x
+        offset += (max_x - min_x) + float(_REFERENCE_EDGE_LENGTH)
+    return positions
 
 
 def _finalize_positions(positions: torch.Tensor, output_scale: float) -> torch.Tensor:
@@ -1002,12 +1784,13 @@ class GripBuildFiltration(Op):
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
         )
-        levels = _build_reference_mis_filtration(
+        filtration = _build_reference_mis_state(
             adjacency=adjacency,
             coarsest_size=self.config.coarsest_size,
         )
         state.extras["grip_adjacency"] = adjacency
-        state.extras["grip_levels"] = levels
+        state.extras["grip_filtration"] = filtration
+        state.extras["grip_levels"] = [filtration.order[:size] for size in filtration.sizes]
         return state
 
 
@@ -1053,33 +1836,9 @@ class GripIntelligentPlacement(Op):
             State with initialized positions and placement order metadata.
         """
         device = torch.device(ctx.plan.device)
-        adjacency = state.extras["grip_adjacency"]
-        levels = state.extras["grip_levels"]
         positions = torch.zeros((problem.num_nodes, 2), dtype=self.config.fidelity_dtype)
-        placed = _initialize_coarsest(
-            coarsest=levels[-1] if levels else [],
-            adjacency=adjacency,
-            positions=positions,
-            dtype=self.config.fidelity_dtype,
-        )
-        placed_set = set(placed)
-        placement_order = list(placed)
-        for level_index in range(len(levels) - 2, -1, -1):
-            finer = levels[level_index]
-            coarser = set(levels[level_index + 1])
-            new_vertices = [node for node in finer if node not in coarser]
-            for vertex in new_vertices:
-                positions[vertex] = _reference_barycenter_position(
-                    vertex=vertex,
-                    placed=sorted(placed_set),
-                    adjacency=adjacency,
-                    positions=positions,
-                    dtype=self.config.fidelity_dtype,
-                )
-                placed_set.add(vertex)
-                placement_order.append(vertex)
         state.pos = positions.to(device=device)
-        state.extras["grip_placement_order"] = placement_order
+        state.extras["grip_placement_order"] = list(range(problem.num_nodes))
         return state
 
 
@@ -1132,25 +1891,11 @@ class GripLocalRefinement(Op):
         if state.pos is None:
             raise RuntimeError("GRIP refinement requires initialized positions.")
         adjacency = state.extras["grip_adjacency"]
-        levels = state.extras["grip_levels"]
-        positions = state.pos.detach().to(device="cpu", dtype=self.config.fidelity_dtype).clone()
-        avg_degree = _average_degree(adjacency)
-        for level_index in range(len(levels) - 1, -1, -1):
-            level = levels[level_index]
-            neighbor_count = _scheduled_neighbor_count(
-                num_nodes=problem.num_nodes,
-                level_size=len(level),
-                avg_degree=avg_degree,
-                config=self.config,
-            )
-            _local_fr_refine(
-                positions=positions,
-                level=level,
-                adjacency=adjacency,
-                rounds=self.config.rounds,
-                neighbor_count=neighbor_count,
-                use_fr=level_index < 1,
-            )
+        positions = _run_reference_grip_graph(
+            edge_index=problem.edge_index,
+            adjacency=adjacency,
+            config=self.config,
+        )
         state.pos = _finalize_positions(
             positions=positions,
             output_scale=self.config.output_scale,
