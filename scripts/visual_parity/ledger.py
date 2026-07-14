@@ -325,7 +325,7 @@ def init_ledger() -> Dict[str, Any]:
         "environment": {
             "repo": str(Path.cwd()),
             "branch": _version(["git", "branch", "--show-current"]),
-            "base_commit": _version(["git", "rev-parse", "--short=12", "HEAD"]),
+            "base_commit": _version(["git", "rev-parse", "--short", "HEAD"]),
             "python": platform.python_version(),
             "graphviz": _version(["dot", "-V"]),
             "matplotlib": _module_version("matplotlib"),
