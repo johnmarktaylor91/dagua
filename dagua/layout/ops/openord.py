@@ -12,7 +12,6 @@ from dagua.layout.ops.drl import (
     DRLDensityGridConfig,
     _build_undirected_adjacency,
     _DrlParameters,
-    _initialize_positions,
     _PhaseParameters,
     _run_reference_drl,
 )
@@ -239,6 +238,31 @@ def _resolve_openord_parameters(
     )
 
 
+def _initialize_openord_positions(num_nodes: int) -> torch.Tensor:
+    """Create OpenOrd's default initial coordinates.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]`` and dtype ``float64``. The
+        reference ``Node`` constructor sets both coordinates to zero unless a
+        ``.real`` file provides fixed coordinates.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes`` is negative.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    return torch.zeros((num_nodes, 2), dtype=torch.float64)
+
+
 @register_op
 @dataclass(frozen=True)
 class OpenOrdPrepareState(Op):
@@ -320,11 +344,7 @@ class OpenOrdInitializePositions(Op):
             State with initial ``float64`` positions.
         """
         del ctx
-        state.pos = _initialize_positions(
-            num_nodes=problem.num_nodes,
-            seed=problem.seed,
-            fidelity_mode=False,
-        )
+        state.pos = _initialize_openord_positions(num_nodes=problem.num_nodes)
         return state
 
 
@@ -371,6 +391,7 @@ class OpenOrdPhaseSolve(Op):
             params=state.extras["openord_params"],
             seed=problem.seed,
             density_config=self.density_grid,
+            rng_kind="libc",
         )
         return state
 
@@ -423,5 +444,6 @@ __all__ = [
     "OpenOrdPrepareState",
     "OpenOrdPrepareStateConfig",
     "_OPENORD_PRESETS",
+    "_initialize_openord_positions",
     "_resolve_openord_parameters",
 ]
