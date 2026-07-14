@@ -251,6 +251,101 @@ def _break_cycles_depth_first(
     ]
 
 
+def _break_cycles_greedy(
+    num_nodes: int,
+    edges: Sequence[Tuple[int, int]],
+) -> List[Tuple[int, int]]:
+    """Return an acyclic orientation using ELK's greedy source/sink removal.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    edges : sequence[tuple[int, int]]
+        Directed edge pairs in model order.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Edge pairs after reversing edges whose greedy marks run backward.
+    """
+    incoming = _predecessors(num_nodes, edges)
+    outgoing = _successors(num_nodes, edges)
+    indegree = [len(incoming[node]) for node in range(num_nodes)]
+    outdegree = [len(outgoing[node]) for node in range(num_nodes)]
+    marks = [0] * num_nodes
+    sources = [node for node in range(num_nodes) if indegree[node] == 0 and outdegree[node] > 0]
+    sinks = [node for node in range(num_nodes) if outdegree[node] == 0]
+    next_right = -1
+    next_left = 1
+    unprocessed = num_nodes
+
+    def remove_node(node: int, mark: int) -> None:
+        """Mark one node and update unprocessed neighbor degrees.
+
+        Parameters
+        ----------
+        node : int
+            Node selected by the greedy cycle breaker.
+        mark : int
+            Signed ordering mark assigned by the source/sink pass.
+
+        Returns
+        -------
+        None
+            ``marks``, ``indegree``, ``outdegree``, ``sources``, and ``sinks``
+            are updated in place.
+        """
+        marks[node] = mark
+        for target in outgoing[node]:
+            if marks[target] == 0:
+                indegree[target] -= 1
+                if indegree[target] <= 0 and outdegree[target] > 0:
+                    sources.append(target)
+        for source in incoming[node]:
+            if marks[source] == 0:
+                outdegree[source] -= 1
+                if outdegree[source] <= 0 and indegree[source] > 0:
+                    sinks.append(source)
+
+    while unprocessed > 0:
+        while sinks:
+            sink = sinks.pop(0)
+            if marks[sink] != 0:
+                continue
+            remove_node(sink, next_right)
+            next_right -= 1
+            unprocessed -= 1
+        while sources:
+            source = sources.pop(0)
+            if marks[source] != 0:
+                continue
+            remove_node(source, next_left)
+            next_left += 1
+            unprocessed -= 1
+        if unprocessed > 0:
+            candidates = [node for node in range(num_nodes) if marks[node] == 0]
+            max_outflow = max(outdegree[node] - indegree[node] for node in candidates)
+            # ELK's default greedy breaker samples ties from a seeded RNG.  The
+            # model-order choice is deterministic and matches the documented
+            # model-order variant without introducing runtime randomness.
+            node = min(
+                node for node in candidates if outdegree[node] - indegree[node] == max_outflow
+            )
+            remove_node(node, next_left)
+            next_left += 1
+            unprocessed -= 1
+
+    shift_base = num_nodes + 1
+    normalized_marks = [mark + shift_base if mark < 0 else mark for mark in marks]
+    return [
+        (target, source)
+        if normalized_marks[source] > normalized_marks[target]
+        else (source, target)
+        for source, target in edges
+    ]
+
+
 def _longest_path_layers(num_nodes: int, edges: Sequence[Tuple[int, int]]) -> List[int]:
     """Assign layers by longest source-to-node path.
 
@@ -426,32 +521,27 @@ def _layer_x_coordinates(
     dict[int, float]
         Top-left x coordinate per node.
     """
-    layer_by_node = {
-        node: layer_index for layer_index, layer in enumerate(layers) for node in layer
-    }
-    has_long_span = any(
-        abs(layer_by_node.get(target, 0) - layer_by_node.get(source, 0)) != 1
-        for source, targets in successors.items()
-        for target in targets
-    )
     if strategy == "brandes_koepf":
-        if not has_long_span:
-            centers = brandes_koepf_x_assignment(
-                layering=layers,
-                predecessors=predecessors,
-                successors=successors,
-                widths={node: float(sizes[node, 0]) for layer in layers for node in layer},
-                dummy_nodes=set(),
-                node_sep=node_spacing,
-                edge_sep=node_spacing,
-            )
-            if not centers:
-                return {}
-            left_extent = min(centers[node] - float(sizes[node, 0]) / 2.0 for node in centers)
-            return {
-                node: centers[node] - float(sizes[node, 0]) / 2.0 - left_extent + _ROOT_PADDING
-                for node in centers
-            }
+        normalized_layers, normalized_predecessors, normalized_successors, widths, dummy_nodes = (
+            _normalize_long_edges_for_bk(layers, predecessors, successors, sizes)
+        )
+        centers = brandes_koepf_x_assignment(
+            layering=normalized_layers,
+            predecessors=normalized_predecessors,
+            successors=normalized_successors,
+            widths=widths,
+            dummy_nodes=dummy_nodes,
+            node_sep=node_spacing,
+            edge_sep=node_spacing,
+        )
+        real_nodes = [node for layer in layers for node in layer]
+        if not centers:
+            return {}
+        left_extent = min(centers[node] - float(sizes[node, 0]) / 2.0 for node in real_nodes)
+        return {
+            node: centers[node] - float(sizes[node, 0]) / 2.0 - left_extent + _ROOT_PADDING
+            for node in real_nodes
+        }
 
     coordinates: Dict[int, float] = {}
     for layer in layers:
@@ -460,6 +550,99 @@ def _layer_x_coordinates(
             coordinates[node] = cursor
             cursor += float(sizes[node, 0]) + node_spacing
     return coordinates
+
+
+def _normalize_long_edges_for_bk(
+    layers: Sequence[Sequence[int]],
+    predecessors: Mapping[int, Sequence[int]],
+    successors: Mapping[int, Sequence[int]],
+    sizes: torch.Tensor,
+) -> Tuple[
+    List[List[NodeId]],
+    Dict[NodeId, List[NodeId]],
+    Dict[NodeId, List[NodeId]],
+    Dict[NodeId, float],
+    Set[NodeId],
+]:
+    """Split long edges into dummy chains for Brandes-Koepf placement.
+
+    Parameters
+    ----------
+    layers : sequence[sequence[int]]
+        Ordered real-node layers.
+    predecessors : mapping[int, sequence[int]]
+        Real-node predecessor lists.
+    successors : mapping[int, sequence[int]]
+        Real-node successor lists.
+    sizes : torch.Tensor
+        Real node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple
+        Normalized layers, predecessor map, successor map, width map, and the
+        set of dummy node ids introduced for long edge segments.
+    """
+    layer_by_node = {
+        node: layer_index for layer_index, layer in enumerate(layers) for node in layer
+    }
+    normalized_layers: List[List[NodeId]] = [list(layer) for layer in layers]
+    normalized_predecessors: Dict[NodeId, List[NodeId]] = {
+        node: [] for layer in normalized_layers for node in layer
+    }
+    normalized_successors: Dict[NodeId, List[NodeId]] = {
+        node: [] for layer in normalized_layers for node in layer
+    }
+    widths: Dict[NodeId, float] = {
+        node: float(sizes[node, 0]) for layer in layers for node in layer
+    }
+    dummy_nodes: Set[NodeId] = set()
+
+    def add_segment(source: NodeId, target: NodeId) -> None:
+        """Add one normalized edge segment.
+
+        Parameters
+        ----------
+        source : Hashable
+            Segment source node id.
+        target : Hashable
+            Segment target node id.
+
+        Returns
+        -------
+        None
+            Normalized predecessor and successor maps are updated in place.
+        """
+        normalized_successors.setdefault(source, []).append(target)
+        normalized_predecessors.setdefault(target, []).append(source)
+
+    edge_index = 0
+    for source in sorted(successors):
+        for target in successors[source]:
+            source_layer = layer_by_node[source]
+            target_layer = layer_by_node[target]
+            span = target_layer - source_layer
+            if abs(span) <= 1:
+                add_segment(source, target)
+                continue
+            step = 1 if span > 0 else -1
+            previous: NodeId = source
+            for layer_index in range(source_layer + step, target_layer, step):
+                dummy: NodeId = ("elk_dummy", edge_index, layer_index)
+                dummy_nodes.add(dummy)
+                widths[dummy] = 0.0
+                insertion_layer = normalized_layers[layer_index]
+                insertion_layer.append(dummy)
+                add_segment(previous, dummy)
+                previous = dummy
+            add_segment(previous, target)
+            edge_index += 1
+
+    for node in list(normalized_predecessors):
+        normalized_predecessors[node] = list(dict.fromkeys(normalized_predecessors[node]))
+    for node in list(normalized_successors):
+        normalized_successors[node] = list(dict.fromkeys(normalized_successors[node]))
+    return normalized_layers, normalized_predecessors, normalized_successors, widths, dummy_nodes
 
 
 def _apply_direction(positions: torch.Tensor, sizes: torch.Tensor, direction: str) -> torch.Tensor:
@@ -643,7 +826,10 @@ class ElkBreakCycles(Op):
         """
         del ctx
         graph = state.extras[ELK_GRAPH_KEY]
-        graph.active_edges = _break_cycles_depth_first(problem.num_nodes, graph.edges)
+        if graph.cycle_breaking_strategy == "greedy":
+            graph.active_edges = _break_cycles_greedy(problem.num_nodes, graph.edges)
+        else:
+            graph.active_edges = _break_cycles_depth_first(problem.num_nodes, graph.edges)
         return state
 
 
