@@ -21,7 +21,8 @@ _DEFAULT_EDGE_NET_DEPTH = 2
 _DEFAULT_EDGE_NET_WIDTH = 16
 _DEFAULT_EDGE_ATTR_DIM = 2
 _DEFAULT_NODE_ATTR_DIM = 2
-_DEFAULT_EPS = 1.0e-7
+_DEFAULT_EPS = 1.0e-5
+_DEFAULT_REFERENCE_ROOT = Path.home() / "tools" / "dagua-refs" / "smartgd"
 
 
 @dataclass(frozen=True)
@@ -49,11 +50,11 @@ class SmartGDConfig:
         Input coordinate feature count.
     checkpoint_path : str, optional
         Optional generator checkpoint path. When omitted, random weights are
-        used unless ``objective`` resolves to a bundled reference checkpoint.
+        used unless ``objective`` resolves to a durable reference checkpoint.
     objective : str, default="stress"
         Built-in checkpoint selector, ``"stress"`` or ``"crossings"``.
     use_reference_checkpoint : bool, default=True
-        Whether to load the `/tmp/smartgd-ref` checkpoint when available.
+        Whether to load the cloned reference checkpoint when available.
     seed : int, default=42
         Deterministic seed for random initialization and fallback positions.
     """
@@ -320,7 +321,7 @@ class EdgeFeatureExpansion(nn.Module):
             Base edge attribute width.
         expansions : EdgeFeatureExpansions
             Expansion flags.
-        eps : float, default=1e-7
+        eps : float, default=1e-5
             Division guard matching the reference constant.
         """
         super().__init__()
@@ -328,12 +329,15 @@ class EdgeFeatureExpansion(nn.Module):
         self.edge_attr_dim = edge_attr_dim
         self.expansions = expansions
         self.eps = eps
+        # Upstream traces this helper with a fixed 1-channel dummy payload,
+        # independent of configured feature widths. Matching that trace shape
+        # preserves checkpoint-level floating point behavior.
         self.get_edge_feat = torch.jit.trace_module(
             _TracedEdgeFeatureExpansion(expansions=expansions, eps=eps),
             inputs={
                 "forward": {
-                    "node_feat": torch.zeros((1, max(node_feat_dim, 0)), dtype=torch.float32),
-                    "edge_attr": torch.zeros((1, max(edge_attr_dim, 0)), dtype=torch.float32),
+                    "node_feat": torch.zeros((1, 1), dtype=torch.float32),
+                    "edge_attr": torch.zeros((1, 1), dtype=torch.float32),
                     "edge_index": torch.zeros((2, 1), dtype=torch.long),
                 }
             },
@@ -759,7 +763,7 @@ class GeneratorFeatureRouter(nn.Module):
             Base edge attribute width.
         edge_feat_expansion : EdgeFeatureExpansions
             Expansion flags.
-        eps : float, default=1e-7
+        eps : float, default=1e-5
             Division guard.
         """
         super().__init__()
@@ -876,7 +880,7 @@ class GeneratorLayer(nn.Module):
             GNN dropout.
         root_weight : bool, default=True
             NNConv root transform flag.
-        eps : float, default=1e-7
+        eps : float, default=1e-5
             Division guard.
         """
         super().__init__()
@@ -1002,7 +1006,7 @@ class GeneratorBlock(nn.Module):
             GNN dropout.
         root_weight : bool, default=True
             NNConv root transform flag.
-        eps : float, default=1e-7
+        eps : float, default=1e-5
             Division guard.
         """
         super().__init__()
@@ -1433,7 +1437,7 @@ def _checkpoint_for_config(config: SmartGDConfig) -> Optional[Path]:
     name = (
         "generator_xing_only.pt" if config.objective == "crossings" else "generator_stress_only.pt"
     )
-    candidate = Path("/tmp/smartgd-ref") / name
+    candidate = _DEFAULT_REFERENCE_ROOT / name
     return candidate if candidate.exists() else None
 
 

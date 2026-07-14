@@ -16,6 +16,8 @@ from dagua.layout.ops.pipelines.smartgd import (
     smartgd_reference_forward,
 )
 
+_DEFAULT_REFERENCE_ROOT = Path.home() / "tools" / "dagua-refs" / "deepgd"
+
 
 @dataclass(frozen=True)
 class DeepGDConfig(SmartGDConfig):
@@ -24,7 +26,7 @@ class DeepGDConfig(SmartGDConfig):
     Parameters
     ----------
     checkpoint_path : str, optional
-        Optional generator checkpoint path. When omitted, the `/tmp/deepgd-ref`
+        Optional generator checkpoint path. When omitted, the cloned reference
         stress-only checkpoint is used when available.
     use_reference_checkpoint : bool, default=True
         Whether to load the cloned reference checkpoint when available.
@@ -89,7 +91,7 @@ def _checkpoint_for_config(config: DeepGDConfig) -> Optional[Path]:
         return Path(config.checkpoint_path)
     if not config.use_reference_checkpoint:
         return None
-    candidate = Path("/tmp/deepgd-ref/model_stress_only.pt")
+    candidate = _DEFAULT_REFERENCE_ROOT / "model_stress_only.pt"
     return candidate if candidate.exists() else None
 
 
