@@ -127,6 +127,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.reingold_tilford",
         "layout_reingold_tilford_pipeline",
     ),
+    "radial_tree": ("dagua.layout.ops.pipelines.radial_tree", "layout_radial_tree_pipeline"),
     "sfdp": ("dagua.layout.ops.pipelines.sfdp", "layout_sfdp_pipeline"),
     "sgd2_multi": (
         "dagua.layout.ops.pipelines.sgd2_multi",
@@ -139,6 +140,10 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "stress_majorization": (
         "dagua.layout.ops.pipelines.stress_majorization",
         "layout_stress_majorization_pipeline",
+    ),
+    "smacof_nonmetric": (
+        "dagua.layout.ops.pipelines.smacof_nonmetric",
+        "layout_smacof_nonmetric_pipeline",
     ),
     "stress_sgd": (
         "dagua.layout.ops.pipelines.stress_sgd",
