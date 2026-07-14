@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -31,14 +31,19 @@ class _CircoBlock:
         child blocks through ``child``/``parent`` links.
     child : int or None, optional
         Node in this block nearest to the parent block.
+    parent_node : int or None, optional
+        Parent-block node connected to ``child``. This is Graphviz's
+        ``BLK_PARENT`` value and is needed for exact child attachment.
     children : list[_CircoBlock], optional
         Child blocks attached below this block.
     """
 
     nodes: List[int]
     child: Optional[int] = None
+    parent_node: Optional[int] = None
     children: List["_CircoBlock"] = field(default_factory=list)
     ordered: List[int] = field(default_factory=list)
+    psi: Dict[int, float] = field(default_factory=dict)
     radius: float = 0.0
     rad0: float = 0.0
     parent_pos: float = -1.0
@@ -619,6 +624,7 @@ def _graphviz_owned_block_tree(
         if parent_node is None or owner[parent_node] is None:
             continue
         block.child = child
+        block.parent_node = parent_node
         owner[parent_node].children.append(block)
     return root
 
@@ -647,13 +653,253 @@ def _block_induced_adjacency(
     }
 
 
-def _longest_tree_path(tree: Dict[int, List[int]], nodes: Sequence[int]) -> List[int]:
-    """Find Graphviz's DFS-tree diameter path for block ordering.
+def _block_edges_from_adjacency(induced: Dict[int, List[int]]) -> Set[Tuple[int, int]]:
+    """Return undirected edge keys from induced adjacency.
+
+    Parameters
+    ----------
+    induced : dict[int, list[int]]
+        Block-local neighbor lists.
+
+    Returns
+    -------
+    set[tuple[int, int]]
+        Unique undirected edge keys.
+    """
+    return {
+        (min(node, neighbor), max(node, neighbor))
+        for node, neighbors in induced.items()
+        for neighbor in neighbors
+        if node != neighbor
+    }
+
+
+def _circo_block_skeleton(
+    induced: Dict[int, List[int]],
+    nodes: Sequence[int],
+) -> Dict[int, List[int]]:
+    """Build Graphviz's ``remove_pair_edges`` skeleton for a block.
+
+    Parameters
+    ----------
+    induced : dict[int, list[int]]
+        Block-local neighbor lists in edge traversal order.
+    nodes : sequence[int]
+        Block nodes in graph order.
+
+    Returns
+    -------
+    dict[int, list[int]]
+        Skeleton adjacency containing original block edges that survived
+        Graphviz's pair-edge removal pass.
+    """
+    if len(nodes) <= 3:
+        return {node: list(induced[node]) for node in nodes}
+
+    active = {node: True for node in nodes}
+    mutable: Dict[int, List[int]] = {node: list(induced[node]) for node in nodes}
+    output_edges = _block_edges_from_adjacency(induced)
+    degree = {node: len(mutable[node]) for node in nodes}
+    in_degree_list = {node: False for node in nodes}
+    timestamp = {node: 0 for node in nodes}
+    tick = 0
+
+    def insert_degree_node(node: int) -> None:
+        """Insert a node into the simulated Graphviz degree list.
+
+        Parameters
+        ----------
+        node : int
+            Active node to insert.
+
+        Returns
+        -------
+        None
+            Degree-list bookkeeping is updated in place.
+        """
+        nonlocal tick
+        if not active[node]:
+            return
+        tick += 1
+        timestamp[node] = tick
+        in_degree_list[node] = True
+
+    def remove_degree_node(node: int) -> None:
+        """Remove a node from the simulated Graphviz degree list.
+
+        Parameters
+        ----------
+        node : int
+            Node to remove if present.
+
+        Returns
+        -------
+        None
+            Degree-list bookkeeping is updated in place.
+        """
+        in_degree_list[node] = False
+
+    def first_degree_node() -> Optional[int]:
+        """Pop the smallest-degree, most-recently-inserted node.
+
+        Returns
+        -------
+        int or None
+            Selected node, or ``None`` when the list is empty.
+        """
+        candidates = [node for node in nodes if active[node] and in_degree_list[node]]
+        if not candidates:
+            return None
+        selected = min(candidates, key=lambda node: (degree[node], -timestamp[node]))
+        in_degree_list[selected] = False
+        return selected
+
+    for node in nodes:
+        insert_degree_node(node)
+
+    for _ in range(len(nodes) - 3):
+        current = first_degree_node()
+        if current is None:
+            break
+        incident = [neighbor for neighbor in mutable[current] if active.get(neighbor, False)]
+        for neighbor in incident:
+            remove_degree_node(neighbor)
+
+        neighbors_with: List[int] = []
+        neighbors_without: List[int] = []
+        edge_count = 0
+        for first in incident:
+            has_pair_edge = False
+            for second in incident:
+                if second == first:
+                    continue
+                edge_key = (min(first, second), max(first, second))
+                if second in mutable[first]:
+                    has_pair_edge = True
+                    if first < second:
+                        edge_count += 1
+                        output_edges.discard(edge_key)
+            if has_pair_edge:
+                neighbors_with.append(first)
+            else:
+                neighbors_without.append(first)
+
+        diff = len(incident) - 1 - edge_count
+        if diff > 0:
+            if diff < len(neighbors_without):
+                mark = 0
+                while mark + 1 < len(neighbors_without) and diff > 0:
+                    tail = neighbors_without[mark]
+                    head = neighbors_without[mark + 1]
+                    if head not in mutable[tail]:
+                        mutable[tail].append(head)
+                        mutable[head].append(tail)
+                        degree[tail] += 1
+                        degree[head] += 1
+                    diff -= 1
+                    mark += 2
+                mark = 2
+                while diff > 0 and mark < len(neighbors_without):
+                    tail = neighbors_without[0]
+                    head = neighbors_without[mark]
+                    if head not in mutable[tail]:
+                        mutable[tail].append(head)
+                        mutable[head].append(tail)
+                        degree[tail] += 1
+                        degree[head] += 1
+                    mark += 1
+                    diff -= 1
+            elif diff == len(neighbors_without) and neighbors_with:
+                tail = neighbors_with[0]
+                for head in neighbors_without:
+                    if head not in mutable[tail]:
+                        mutable[tail].append(head)
+                        mutable[head].append(tail)
+                        degree[tail] += 1
+                        degree[head] += 1
+
+        active[current] = False
+        for neighbor in incident:
+            if current in mutable[neighbor]:
+                mutable[neighbor].remove(current)
+            degree[neighbor] = max(0, degree[neighbor] - 1)
+            insert_degree_node(neighbor)
+        mutable[current] = []
+        degree[current] = 0
+
+    skeleton = {node: [] for node in nodes}
+    for node in nodes:
+        for neighbor in induced[node]:
+            edge_key = (min(node, neighbor), max(node, neighbor))
+            if edge_key in output_edges and neighbor not in skeleton[node]:
+                skeleton[node].append(neighbor)
+    return skeleton
+
+
+def _circo_spanning_tree(
+    skeleton: Dict[int, List[int]],
+    nodes: Sequence[int],
+) -> Tuple[Dict[int, List[int]], Dict[int, Optional[int]]]:
+    """Construct Graphviz's DFS spanning forest for a block skeleton.
+
+    Parameters
+    ----------
+    skeleton : dict[int, list[int]]
+        Skeleton adjacency.
+    nodes : sequence[int]
+        Block nodes in graph order.
+
+    Returns
+    -------
+    tuple[dict[int, list[int]], dict[int, int or None]]
+        Tree adjacency and DFS parent map.
+    """
+    visited: Set[int] = set()
+    tree: Dict[int, List[int]] = {node: [] for node in nodes}
+    parent: Dict[int, Optional[int]] = {node: None for node in nodes}
+
+    def dfs(node: int) -> None:
+        """Depth-first search that records traversed skeleton edges.
+
+        Parameters
+        ----------
+        node : int
+            Current skeleton node.
+
+        Returns
+        -------
+        None
+            ``tree`` and ``parent`` are updated in place.
+        """
+        visited.add(node)
+        for neighbor in skeleton[node]:
+            if neighbor in visited:
+                continue
+            tree[node].append(neighbor)
+            tree[neighbor].append(node)
+            parent[neighbor] = node
+            dfs(neighbor)
+
+    for node in nodes:
+        if node not in visited:
+            parent[node] = None
+            dfs(node)
+    return tree, parent
+
+
+def _longest_tree_path(
+    tree: Dict[int, List[int]],
+    parent: Dict[int, Optional[int]],
+    nodes: Sequence[int],
+) -> List[int]:
+    """Find Graphviz's DFS-tree longest path for block ordering.
 
     Parameters
     ----------
     tree : dict[int, list[int]]
         Spanning tree adjacency.
+    parent : dict[int, int or None]
+        DFS parent map.
     nodes : sequence[int]
         Block nodes.
 
@@ -664,50 +910,82 @@ def _longest_tree_path(tree: Dict[int, List[int]], nodes: Sequence[int]) -> List
     """
     if len(nodes) <= 1:
         return list(nodes)
-    parent: Dict[int, Optional[int]] = {nodes[0]: None}
-    stack = [nodes[0]]
-    for node in stack:
-        for neighbor in tree[node]:
-            if neighbor not in parent:
-                parent[neighbor] = node
-                stack.append(neighbor)
-    leaves = [node for node in nodes if len(tree[node]) <= 1]
-    if not leaves:
+    leaf_one: Dict[int, Optional[int]] = {node: None for node in nodes}
+    leaf_two: Dict[int, Optional[int]] = {node: None for node in nodes}
+    dist_one = {node: 0 for node in nodes}
+    dist_two = {node: 0 for node in nodes}
+
+    def measure_distance(node: int, ancestor: int, distance: int, change: Optional[int]) -> None:
+        """Propagate one leaf distance up the DFS tree.
+
+        Parameters
+        ----------
+        node : int
+            Leaf node being measured.
+        ancestor : int
+            Current ancestor on the path toward the root.
+        distance : int
+            Distance from ``node`` to ``ancestor``.
+        change : int or None
+            Graphviz guard for replacing the previous best leaf path.
+
+        Returns
+        -------
+        None
+            Longest leaf data is updated in place.
+        """
+        ancestor_parent = parent[ancestor]
+        if ancestor_parent is None:
+            return
+        distance += 1
+        if dist_one[ancestor_parent] == 0:
+            leaf_one[ancestor_parent] = node
+            dist_one[ancestor_parent] = distance
+        elif distance > dist_one[ancestor_parent]:
+            if leaf_one[ancestor_parent] != change:
+                if not dist_two[ancestor_parent] or leaf_two[ancestor_parent] != change:
+                    change = leaf_one[ancestor_parent]
+                    leaf_two[ancestor_parent] = leaf_one[ancestor_parent]
+                    dist_two[ancestor_parent] = dist_one[ancestor_parent]
+            leaf_one[ancestor_parent] = node
+            dist_one[ancestor_parent] = distance
+        elif distance > dist_two[ancestor_parent]:
+            leaf_two[ancestor_parent] = node
+            dist_two[ancestor_parent] = distance
+            return
+        else:
+            return
+        measure_distance(node, ancestor_parent, distance, change)
+
+    for node in nodes:
+        if len(tree[node]) == 1:
+            measure_distance(node, node, 0, None)
+
+    common = nodes[0]
+    max_length = 0
+    for node in nodes:
+        length = dist_one[node] + dist_two[node]
+        if length > max_length:
+            common = node
+            max_length = length
+
+    if leaf_one[common] is None:
         return list(nodes)
-    best_pair = (leaves[0], leaves[0])
-    best_distance = -1
-    for source in leaves:
-        queue: deque[int] = deque([source])
-        dist = {source: 0}
-        pred: Dict[int, Optional[int]] = {source: None}
-        while queue:
-            node = queue.popleft()
-            for neighbor in tree[node]:
-                if neighbor not in dist:
-                    dist[neighbor] = dist[node] + 1
-                    pred[neighbor] = node
-                    queue.append(neighbor)
-        for target in leaves:
-            if dist.get(target, -1) > best_distance:
-                best_distance = dist[target]
-                best_pair = (source, target)
-    source, target = best_pair
-    queue = deque([source])
-    pred = {source: None}
-    while queue:
-        node = queue.popleft()
-        if node == target:
-            break
-        for neighbor in tree[node]:
-            if neighbor not in pred:
-                pred[neighbor] = node
-                queue.append(neighbor)
+
     path: List[int] = []
-    node: Optional[int] = target
-    while node is not None:
+    node = leaf_one[common]
+    while node is not None and node != common:
         path.append(node)
-        node = pred[node]
-    path.reverse()
+        node = parent[node]
+    path.append(common)
+
+    if dist_two[common] and leaf_two[common] is not None:
+        end_path: List[int] = []
+        node = leaf_two[common]
+        while node is not None and node != common:
+            end_path.append(node)
+            node = parent[node]
+        path.extend(reversed(end_path))
     return path
 
 
@@ -733,33 +1011,9 @@ def _circo_block_order(
     if len(nodes) <= 2:
         return nodes
     induced = _block_induced_adjacency(adjacency, nodes)
-    visited: Set[int] = set()
-    tree: Dict[int, List[int]] = {node: [] for node in nodes}
-
-    def dfs(node: int) -> None:
-        """Build the DFS spanning tree in neighbor order.
-
-        Parameters
-        ----------
-        node : int
-            Current node.
-
-        Returns
-        -------
-        None
-            The tree adjacency is mutated.
-        """
-        visited.add(node)
-        for neighbor in induced[node]:
-            if neighbor not in visited:
-                tree[node].append(neighbor)
-                tree[neighbor].append(node)
-                dfs(neighbor)
-
-    for node in nodes:
-        if node not in visited:
-            dfs(node)
-    ordered = _longest_tree_path(tree, nodes)
+    skeleton = _circo_block_skeleton(induced, nodes)
+    tree, parent = _circo_spanning_tree(skeleton, nodes)
+    ordered = _longest_tree_path(tree, parent, nodes)
     ordered_set = set(ordered)
     for node in nodes:
         if node in ordered_set:
@@ -780,8 +1034,9 @@ def _circo_block_order(
         if not placed:
             ordered.append(node)
         ordered_set.add(node)
+    parent_nodes = {child.parent_node for child in block.children}
     for index, node in enumerate(ordered):
-        if any(child.child == node for child in block.children):
+        if node in parent_nodes:
             return ordered[index:] + ordered[:index]
     return ordered
 
@@ -984,6 +1239,144 @@ def _subtree_nodes(block: _CircoBlock) -> List[int]:
     return nodes
 
 
+@dataclass
+class _CircoPosInfo:
+    """Graphviz ``posinfo_t`` equivalent for one parent attachment node.
+
+    Parameters
+    ----------
+    node : int
+        Parent node that owns the attached child blocks.
+    theta : float
+        Parent node angle on its block circle, in radians.
+    min_radius : float, default=0.0
+        Minimum center radius for this node's child blocks.
+    max_radius : float, default=0.0
+        Maximum radius of the attached child blocks.
+    diameter : float, default=0.0
+        Arc length needed by the attached child blocks.
+    scale : float, default=0.0
+        Scale factor applied to ``min_radius`` so adjacent parent-node child
+        fans do not overlap.
+    child_count : int, default=0
+        Number of child blocks attached to ``node``.
+    """
+
+    node: int
+    theta: float
+    min_radius: float = 0.0
+    max_radius: float = 0.0
+    diameter: float = 0.0
+    scale: float = 0.0
+    child_count: int = 0
+
+
+@dataclass
+class _CircoPosState:
+    """Mutable Graphviz ``posstate`` equivalent during child placement.
+
+    Parameters
+    ----------
+    block : _CircoBlock
+        Block whose children are being placed.
+    radius : float
+        Radius of the block's own circle.
+    subtree_radius : float
+        Maximum subtree radius observed while placing children.
+    node_angle : float
+        Angular stride between consecutive nodes in the block order.
+    neighbor : int or None
+        Entry cut vertex connecting this block to its parent.
+    first_angle : float, default=-1.0
+        First child angle for one-node blocks.
+    last_angle : float, default=-1.0
+        Last child angle for one-node blocks.
+    """
+
+    block: _CircoBlock
+    radius: float
+    subtree_radius: float
+    node_angle: float
+    neighbor: Optional[int]
+    first_angle: float = -1.0
+    last_angle: float = -1.0
+
+
+def _children_attached_to(block: _CircoBlock, parent_node: int) -> List[_CircoBlock]:
+    """Return child blocks attached to ``parent_node`` in sibling order.
+
+    Parameters
+    ----------
+    block : _CircoBlock
+        Parent block.
+    parent_node : int
+        Candidate parent-block node.
+
+    Returns
+    -------
+    list[_CircoBlock]
+        Child blocks whose Graphviz ``BLK_PARENT`` is ``parent_node``.
+    """
+    return [child for child in block.children if child.parent_node == parent_node]
+
+
+def _circo_get_info(parent: _CircoPosInfo, state: _CircoPosState, min_dist: float) -> float:
+    """Populate Graphviz child-size information for one parent node.
+
+    Parameters
+    ----------
+    parent : _CircoPosInfo
+        Parent attachment record to mutate.
+    state : _CircoPosState
+        Current block placement state.
+    min_dist : float
+        Minimum child-block separation distance.
+
+    Returns
+    -------
+    float
+        Maximum radius among child blocks attached to ``parent``.
+    """
+    max_radius = 0.0
+    diameter = 0.0
+    child_count = 0
+    for child in _children_attached_to(state.block, parent.node):
+        child_count += 1
+        max_radius = max(max_radius, child.radius)
+        diameter += 2.0 * child.radius + min_dist
+    parent.diameter = diameter
+    parent.child_count = child_count
+    parent.min_radius = state.radius + min_dist + max_radius
+    parent.max_radius = max_radius
+    return max_radius
+
+
+def _circo_set_info(first: _CircoPosInfo, second: _CircoPosInfo, delta: float) -> None:
+    """Apply Graphviz ``setInfo`` scale updates for adjacent parent fans.
+
+    Parameters
+    ----------
+    first : _CircoPosInfo
+        First parent attachment record.
+    second : _CircoPosInfo
+        Adjacent parent attachment record.
+    delta : float
+        Angular separation between parent nodes, in radians.
+
+    Returns
+    -------
+    None
+        ``scale`` fields are updated in place.
+    """
+    if delta <= 0.0 or first.min_radius <= 0.0 or second.min_radius <= 0.0:
+        return
+    scale = (first.diameter * second.min_radius) + (second.diameter * first.min_radius)
+    scale /= 2.0 * delta * first.min_radius * second.min_radius
+    scale = max(scale, 1.0)
+    first.scale = max(first.scale, scale)
+    second.scale = max(second.scale, scale)
+
+
 def _circo_child_rotation(
     block: _CircoBlock,
     points: Dict[int, Tuple[float, float]],
@@ -1032,9 +1425,176 @@ def _circo_child_rotation(
             best_dist = dist
     if best_node == neighbor:
         return 0.0
+    rho = block.rad0
+    radius_delta = block.radius - rho
+    if block.coalesced and -radius_delta < neighbor_x:
+        distance = math.hypot(x_offset, y_offset)
+        if distance == 0.0:
+            return 0.0
+        phi = math.atan2(neighbor_y, neighbor_x + radius_delta)
+        cos_phi = math.cos(phi)
+        if cos_phi == 0.0:
+            return 0.0
+        tangent = radius_delta - rho / cos_phi
+        asin_arg = (tangent / distance) * cos_phi
+        asin_arg = max(-1.0, min(1.0, asin_arg))
+        return theta + math.pi / 2.0 - phi - math.asin(asin_arg)
     phi = math.atan2(neighbor_y, neighbor_x)
-    rotation = theta + math.pi - phi
+    rotation = theta + math.pi - phi - block.psi.get(neighbor, 0.0)
     return rotation - _TWO_PI if rotation > _TWO_PI else rotation
+
+
+def _circo_position_children(
+    parent: _CircoPosInfo,
+    state: _CircoPosState,
+    length: int,
+    min_dist: float,
+    points: Dict[int, Tuple[float, float]],
+) -> None:
+    """Position all child blocks attached to one parent node.
+
+    Parameters
+    ----------
+    parent : _CircoPosInfo
+        Parent attachment record.
+    state : _CircoPosState
+        Current block placement state.
+    length : int
+        Number of nodes in the parent block circle.
+    min_dist : float
+        Minimum child-block separation distance.
+    points : dict[int, tuple[float, float]]
+        Mutable local point map.
+
+    Returns
+    -------
+    None
+        Child subtrees and placement state are updated in place.
+    """
+    if parent.child_count <= 0:
+        return
+    child_radius = parent.scale * parent.min_radius
+    adjusted_min_dist = min_dist
+    if length == 1:
+        child_angle = 0.0
+        required_radius = parent.diameter / _TWO_PI
+        child_radius = max(child_radius, required_radius)
+        spare_arc = _TWO_PI * child_radius - parent.diameter
+        if spare_arc > 0.0:
+            adjusted_min_dist += spare_arc / parent.child_count
+    else:
+        child_angle = parent.theta - parent.diameter / (2.0 * child_radius)
+
+    state.subtree_radius = max(state.subtree_radius, child_radius + parent.max_radius)
+    mindist_angle = adjusted_min_dist / child_radius
+    mid_child = (parent.child_count + 1) // 2
+    mid_angle = 0.0
+    placed_count = 0
+
+    for child in _children_attached_to(state.block, parent.node):
+        if len(child.ordered) <= 0:
+            continue
+        incident_angle = child.radius / child_radius
+        if length == 1:
+            if child_angle != 0.0:
+                if parent.child_count == 2:
+                    child_angle = math.pi
+                else:
+                    child_angle += incident_angle
+            if state.first_angle < 0.0:
+                state.first_angle = child_angle
+            state.last_angle = child_angle
+        elif parent.child_count == 1:
+            child_angle = parent.theta
+        else:
+            child_angle += incident_angle + mindist_angle / 2.0
+
+        delta_x = child_radius * math.cos(child_angle)
+        delta_y = child_radius * math.sin(child_angle)
+        rotation = _circo_child_rotation(child, points, delta_x, delta_y, child_angle)
+        _rotate_translate(points, _subtree_nodes(child), delta_x, delta_y, rotation)
+
+        if length == 1:
+            child_angle += incident_angle + mindist_angle
+        else:
+            child_angle += incident_angle + mindist_angle / 2.0
+        placed_count += 1
+        if placed_count == mid_child:
+            mid_angle = child_angle
+
+    if length > 1 and parent.node == state.neighbor:
+        state.block.psi[parent.node] = mid_angle
+
+
+def _circo_position_block_children(
+    block: _CircoBlock,
+    child_count: int,
+    length: int,
+    nodesep: float,
+    points: Dict[int, Tuple[float, float]],
+) -> float:
+    """Attach child blocks using Graphviz ``position`` formulas.
+
+    Parameters
+    ----------
+    block : _CircoBlock
+        Block whose children are already locally laid out.
+    child_count : int
+        Number of direct child blocks.
+    length : int
+        Number of nodes in ``block.ordered``.
+    nodesep : float
+        Minimum separation distance.
+    points : dict[int, tuple[float, float]]
+        Mutable local point map.
+
+    Returns
+    -------
+    float
+        Center angle used as ``parent_pos`` for one-node child blocks.
+    """
+    state = _CircoPosState(
+        block=block,
+        radius=block.radius,
+        subtree_radius=block.radius,
+        node_angle=_TWO_PI / max(length, 1),
+        neighbor=block.child,
+    )
+    parents: List[_CircoPosInfo] = []
+    max_radius = 0.0
+    parent_nodes = {child.parent_node for child in block.children}
+    for index, node in enumerate(block.ordered):
+        if node not in parent_nodes:
+            continue
+        parent = _CircoPosInfo(node=node, theta=float(index) * state.node_angle)
+        max_radius = _circo_get_info(parent, state, nodesep)
+        parents.append(parent)
+
+    if len(parents) == 1:
+        parents[0].scale = 1.0
+    elif len(parents) == 2:
+        delta = parents[1].theta - parents[0].theta
+        if delta > math.pi:
+            delta = _TWO_PI - delta
+        _circo_set_info(parents[0], parents[1], delta)
+    elif len(parents) > 2:
+        for index, current in enumerate(parents):
+            nxt = parents[0] if index + 1 == len(parents) else parents[index + 1]
+            delta = nxt.theta - current.theta
+            if index + 1 == len(parents):
+                delta += _TWO_PI
+            _circo_set_info(current, nxt, delta)
+
+    for parent in parents:
+        _circo_position_children(parent, state, length, nodesep, points)
+
+    if child_count == 1:
+        _rotate_translate(points, _subtree_nodes(block), -(max_radius + nodesep / 2.0), 0.0, 0.0)
+        block.radius += nodesep / 2.0 + max_radius
+        block.coalesced = True
+    else:
+        block.radius = state.subtree_radius
+    return (state.first_angle + state.last_angle) / 2.0 - math.pi
 
 
 def _layout_circo_block_tree(
@@ -1042,6 +1602,7 @@ def _layout_circo_block_tree(
     adjacency: Sequence[Sequence[int]],
     nodesep: float,
     points: Dict[int, Tuple[float, float]],
+    node_extents: Optional[Sequence[float]] = None,
 ) -> None:
     """Lay out one block tree using Graphviz circpos formulas.
 
@@ -1055,14 +1616,19 @@ def _layout_circo_block_tree(
         Minimum separation scale.
     points : dict[int, tuple[float, float]]
         Mutable local point map.
+    node_extents : sequence[float], optional
+        Per-node maximum dimensions in points. When supplied, this mirrors
+        Graphviz ``largest_nodesize`` for block radii.
 
     Returns
     -------
     None
         ``points`` and block radius metadata are updated in place.
     """
+    child_count = 0
     for child in block.children:
-        _layout_circo_block_tree(child, adjacency, nodesep, points)
+        _layout_circo_block_tree(child, adjacency, nodesep, points, node_extents)
+        child_count += 1
 
     block.ordered = _circo_block_order(adjacency, block)
     count = len(block.ordered)
@@ -1073,79 +1639,39 @@ def _layout_circo_block_tree(
     if count == 1:
         radius = 0.0
     else:
-        radius = max(float(nodesep) * count / _TWO_PI, float(nodesep))
+        largest_node = 0.0
+        if node_extents is not None:
+            largest_node = max((float(node_extents[node]) for node in block.ordered), default=0.0)
+        radius = (float(count) * (float(nodesep) + largest_node)) / _TWO_PI
+        if node_extents is None:
+            radius = max(radius, float(nodesep))
     for offset, node in enumerate(block.ordered):
         angle = _TWO_PI * offset / max(count, 1)
         points[node] = (radius * math.cos(angle), radius * math.sin(angle))
-    block.radius = radius if count > 1 else float(nodesep) / 2.0
+    if count > 1:
+        block.radius = radius
+    elif node_extents is not None:
+        block.radius = float(node_extents[block.ordered[0]]) / 2.0
+    else:
+        block.radius = float(nodesep) / 2.0
     block.rad0 = block.radius
     block.parent_pos = -1.0
 
-    if not block.children:
+    if child_count <= 0:
         return
 
-    child_count_by_parent: Dict[int, int] = defaultdict(int)
-    for child in block.children:
-        if child.child is not None:
-            parent_candidates = [
-                neighbor for neighbor in adjacency[child.child] if neighbor in set(block.nodes)
-            ]
-            if parent_candidates:
-                child_count_by_parent[parent_candidates[0]] += 1
-
-    subtree_radius = block.radius
-    for parent_node in block.ordered:
-        attached = [
-            child
-            for child in block.children
-            if child.child is not None
-            and any(neighbor == parent_node for neighbor in adjacency[child.child])
-        ]
-        if not attached:
-            continue
-        parent_index = block.ordered.index(parent_node)
-        parent_theta = parent_index * (_TWO_PI / max(count, 1))
-        max_child_radius = max(child.radius for child in attached)
-        diameter = sum(2.0 * child.radius + float(nodesep) for child in attached)
-        child_radius = block.radius + float(nodesep) + max_child_radius
-        if count == 1:
-            child_radius = max(child_radius, diameter / _TWO_PI)
-            child_angle = 0.0
-        elif len(attached) == 1:
-            child_angle = parent_theta
-        else:
-            child_angle = parent_theta - diameter / (2.0 * child_radius)
-        min_angle = float(nodesep) / max(child_radius, 1.0)
-        for child in attached:
-            incident = child.radius / max(child_radius, 1.0)
-            if count == 1:
-                if child_angle != 0.0:
-                    child_angle = math.pi if len(attached) == 2 else child_angle + incident
-            elif len(attached) > 1:
-                child_angle += incident + min_angle / 2.0
-            delta_x = child_radius * math.cos(child_angle)
-            delta_y = child_radius * math.sin(child_angle)
-            rotation = _circo_child_rotation(child, points, delta_x, delta_y, child_angle)
-            _rotate_translate(points, _subtree_nodes(child), delta_x, delta_y, rotation)
-            if count == 1:
-                child_angle += incident + min_angle
-            elif len(attached) > 1:
-                child_angle += incident + min_angle / 2.0
-            subtree_radius = max(subtree_radius, child_radius + child.radius)
-    if len(block.children) == 1:
-        child = block.children[0]
-        shift = -(child.radius + float(nodesep) / 2.0)
-        _rotate_translate(points, _subtree_nodes(block), shift, 0.0, 0.0)
-        block.radius += float(nodesep) / 2.0 + child.radius
-        block.coalesced = True
-    else:
-        block.radius = subtree_radius
+    center_angle = _circo_position_block_children(block, child_count, count, nodesep, points)
+    if count == 1 and block.parent_node is not None:
+        block.parent_pos = center_angle
+        if block.parent_pos < 0.0:
+            block.parent_pos += _TWO_PI
 
 
 def circo_positions(
     edge_index: torch.Tensor,
     num_nodes: int,
     nodesep: float = _DEFAULT_NODESEP_POINTS,
+    node_sizes: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, object]]:
     """Compute deterministic circular positions from biconnected blocks.
 
@@ -1157,6 +1683,8 @@ def circo_positions(
         Number of graph nodes.
     nodesep : float, default=18.0
         Approximate chord spacing between adjacent nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node sizes with shape ``[N, 2]`` in points.
 
     Returns
     -------
@@ -1180,6 +1708,16 @@ def circo_positions(
     blocks = biconnected_components(edge_index, num_nodes)
     adjacency = _simple_adjacency(edge_index, num_nodes)
     components = _circo_connected_components(adjacency)
+    node_extents: Optional[List[float]] = None
+    if node_sizes is not None and node_sizes.numel() > 0:
+        sizes_cpu = node_sizes.detach().to(device="cpu", dtype=torch.float64)
+        # Graphviz stores ND_width/ND_height in inches. The cached dagua
+        # sizes are points, while this port maps Graphviz mindist=1.0 to
+        # ``nodesep``; convert extents into the same local unit system.
+        size_scale = float(nodesep) / _DEFAULT_RANKSEP_POINTS
+        node_extents = [
+            float(max(width, height)) * size_scale for width, height in sizes_cpu.tolist()
+        ]
     block_gap = max(float(nodesep) * 8.0, 144.0)
     positions = torch.zeros((num_nodes, 2), dtype=torch.float64, device=device)
     block_orders: List[List[int]] = []
@@ -1189,7 +1727,7 @@ def circo_positions(
         if root is None:
             continue
         points: Dict[int, Tuple[float, float]] = {}
-        _layout_circo_block_tree(root, adjacency, nodesep, points)
+        _layout_circo_block_tree(root, adjacency, nodesep, points, node_extents)
         xs = [point[0] for point in points.values()]
         min_x = min(xs, default=0.0)
         max_x = max(xs, default=0.0)
@@ -1322,6 +1860,7 @@ class CircoAssignCircularCoordinates(Op):
             problem.edge_index,
             problem.num_nodes,
             nodesep=self.nodesep,
+            node_sizes=problem.node_sizes,
         )
         state.extras["circo"] = metadata
         return state
