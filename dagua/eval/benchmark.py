@@ -93,6 +93,8 @@ DEFAULT_COMPETITOR_ORDER = [
     "linlog",
     "cytoscape_fcose",
     "gephi_yifanhu",
+    "mulment_reference",
+    "nnpnet_reference",
     # OGDF family
     "ogdf_gem",
     "ogdf_fmmm",
@@ -130,6 +132,8 @@ DEFAULT_COMPETITOR_ORDER = [
     "classic_drl",
     "classic_lgl",
     "classic_fcose",
+    "mulment_reimpl",
+    "nnpnet_reimpl",
 ]
 VISUAL_MAX_NODES = 2_000
 CRITIC_MAX_NODES = 500
