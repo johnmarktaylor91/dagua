@@ -22,6 +22,7 @@ from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext,
 def build_openord_pipeline(
     options: OpenOrdOptions = "default",
     edge_cut: Optional[float] = None,
+    multilevel: Optional[bool] = None,
 ) -> Pipeline:
     """Build the composable OpenOrd operation pipeline.
 
@@ -31,6 +32,8 @@ def build_openord_pipeline(
         OpenOrd preset name or per-phase override provider.
     edge_cut : float, optional
         Edge-cutting ratio in ``[0, 1]``. ``None`` uses the preset default.
+    multilevel : bool, optional
+        Whether to force or disable the recursive OpenOrd coarsen/refine path.
 
     Returns
     -------
@@ -41,7 +44,11 @@ def build_openord_pipeline(
     return Pipeline(
         [
             OpenOrdPrepareState(
-                config=OpenOrdPrepareStateConfig(options=options, edge_cut=edge_cut)
+                config=OpenOrdPrepareStateConfig(
+                    options=options,
+                    edge_cut=edge_cut,
+                    multilevel=multilevel,
+                )
             ),
             OpenOrdInitializePositions(),
             OpenOrdPhaseSolve(),
@@ -59,6 +66,7 @@ def layout_openord_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     options: OpenOrdOptions = "default",
     edge_cut: Optional[float] = None,
+    multilevel: Optional[bool] = None,
     steps: int = 0,
     fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
@@ -81,6 +89,8 @@ def layout_openord_pipeline(
         Preset name or mapping/object of per-phase overrides.
     edge_cut : float, optional
         Edge-cutting ratio in ``[0, 1]``. ``None`` uses the preset default.
+    multilevel : bool, optional
+        Whether to force or disable the recursive coarsen/refine path.
     steps : int, default=0
         Accepted for LayoutConfig dispatch compatibility. OpenOrd uses phase
         iteration counts from ``options`` rather than a single global step.
@@ -130,7 +140,11 @@ def layout_openord_pipeline(
         edge_weights=edge_weights,
         seed=seed,
     )
-    state = build_openord_pipeline(options=options, edge_cut=edge_cut).apply(
+    state = build_openord_pipeline(
+        options=options,
+        edge_cut=edge_cut,
+        multilevel=multilevel,
+    ).apply(
         problem,
         SolveState(),
         RuntimeContext(plan=ExecutionPlan(device="cpu")),
