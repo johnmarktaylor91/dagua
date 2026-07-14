@@ -208,7 +208,12 @@ def _edge_index(edges: Sequence[Sequence[int]]) -> torch.Tensor:
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
 
 
-def _layout_algorithm(algorithm: str, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _layout_algorithm(
+    algorithm: str,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+) -> torch.Tensor:
     """Run one local algorithm pipeline.
 
     Parameters
@@ -219,6 +224,8 @@ def _layout_algorithm(algorithm: str, edge_index: torch.Tensor, num_nodes: int) 
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    node_sizes : torch.Tensor
+        Node size tensor with shape ``[N, 2]``.
 
     Returns
     -------
@@ -235,6 +242,7 @@ def _layout_algorithm(algorithm: str, edge_index: torch.Tensor, num_nodes: int) 
         return layout_circo_pipeline(
             edge_index=edge_index,
             num_nodes=num_nodes,
+            node_sizes=node_sizes,
             fidelity_dtype=torch.float64,
         )
     raise ValueError(f"Unknown algorithm: {algorithm}")
@@ -266,6 +274,7 @@ def _compare_cache(payload: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
                 algorithm,
                 graph_edge_index,
                 int(graph["num_nodes"]),
+                torch.tensor(graph["node_sizes"], dtype=torch.float64),
             )
             residual = procrustes_rmsd(positions.numpy(), reference.numpy())
             anisotropic = anisotropic_procrustes(positions.numpy(), reference.numpy())
@@ -306,6 +315,10 @@ def _stage_note(algorithm: str, row: Dict[str, Any]) -> str:
         return "angular wedge/order after BFS rings"
     if row["name"] == "disconnected":
         return "component packing plus block-tree coordinate placement"
+    if row["name"] == "grid_5x5":
+        return "intra-block circular ordering after block discovery"
+    if row["name"] == "random_dag_50":
+        return "blockpath ordering before block-tree coordinate placement"
     return "block-tree coordinate placement after owned block discovery"
 
 
@@ -375,11 +388,12 @@ def _write_report(
             "Graphviz JSON output-precision floor. The two large twopi residuals are named "
             "component-packing residuals from Graphviz `pack.c`, a separable post-layout step.",
             "",
-            "The current circo implementation uses Graphviz-style owned block-cutpoint discovery "
-            "and records block order metadata. Simple paths, simple cycles, and the long-skip "
-            "case are positional-or-better; remaining circo residuals first diverge in the "
-            "recursive block-tree coordinate placement/rotation stage, with disconnected also "
-            "requiring Graphviz component packing.",
+            "The current circo implementation uses Graphviz-style owned block-cutpoint discovery, "
+            "`circpos.c` child fan scaling/rotation, and Graphviz inch-to-local node-size "
+            "conversion for block radii. Simple paths, simple cycles, the long-skip case, "
+            "binary trees, and org-chart trees are positional-or-better. The remaining circo "
+            "residuals first diverge in `blockpath.c` ordering for biconnected grids/random "
+            "DAGs, with disconnected also requiring Graphviz component packing.",
             "",
         ]
     )
