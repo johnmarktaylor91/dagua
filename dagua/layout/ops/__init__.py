@@ -287,6 +287,7 @@ _EXPECTED_OP_MODULES = (
     "stress",
     "stress_sgd",
     "sugiyama",
+    "tfdp",
     "tsnet",
     "tutte",
     "umap",
