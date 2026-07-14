@@ -15,6 +15,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from dagua.eval.competitors.graphviz_competitor import GraphvizOsage
 from dagua.eval.equivalence_metrics import procrustes_rmsd
 from dagua.graph import DaguaGraph
 from dagua.layout.ops.networkx_simple import (
@@ -27,7 +28,6 @@ from dagua.layout.ops.pipelines.arc import layout_arc_pipeline
 from dagua.layout.ops.pipelines.circlepack import layout_circlepack_pipeline
 from dagua.layout.ops.pipelines.concentric import layout_concentric_pipeline
 from dagua.layout.ops.pipelines.osage import layout_osage_pipeline
-from dagua.layout.ops.pipelines.planar import layout_planar_pipeline
 from dagua.layout.ops.pipelines.star import layout_star_pipeline
 
 DEFAULT_REPORT = ROOT / "docs" / "algorithms" / "trivial_fidelity.md"
@@ -133,27 +133,6 @@ def _verification_graphs() -> List[Tuple[str, DaguaGraph]]:
     ]
 
 
-def _graph_to_nx_graph(graph: DaguaGraph) -> Any:
-    """Convert a Dagua graph to an integer-node NetworkX graph.
-
-    Parameters
-    ----------
-    graph : DaguaGraph
-        Source graph.
-
-    Returns
-    -------
-    Any
-        ``networkx.Graph`` with integer nodes.
-    """
-    nx = __import__("networkx")
-    graph_nx = nx.Graph()
-    graph_nx.add_nodes_from(range(graph.num_nodes))
-    if graph.edge_index.numel() > 0:
-        graph_nx.add_edges_from((int(s), int(t)) for s, t in graph.edge_index.t().tolist())
-    return graph_nx
-
-
 def _reference_positions(
     layout_name: str,
     graph: DaguaGraph,
@@ -181,15 +160,15 @@ def _reference_positions(
     if layout_name == "arc":
         return nx_arc_positions(graph.edge_index, graph.num_nodes).numpy(), None
     if layout_name == "osage":
-        return nx_arc_positions(graph.edge_index, graph.num_nodes).numpy(), None
-    if layout_name == "planar":
-        nx = __import__("networkx")
-        graph_nx = _graph_to_nx_graph(graph)
-        try:
-            pos = nx.planar_layout(graph_nx)
-        except Exception as exc:
-            return None, str(exc)
-        return np.vstack([pos[node] for node in range(graph.num_nodes)]), None
+        result = GraphvizOsage().layout_with_variant(
+            graph,
+            timeout=30.0,
+            seed=None,
+            variant_params={"packmode": "array"},
+        )
+        if result.pos is None:
+            return None, result.error or "Graphviz osage did not return positions."
+        return result.pos.detach().cpu().numpy(), None
     raise ValueError(f"Unsupported layout {layout_name!r}.")
 
 
@@ -214,7 +193,6 @@ def _candidate_positions(layout_name: str, graph: DaguaGraph) -> np.ndarray:
         "circlepack": layout_circlepack_pipeline,
         "arc": layout_arc_pipeline,
         "osage": layout_osage_pipeline,
-        "planar": layout_planar_pipeline,
     }
     positions = pipeline_by_name[layout_name](
         edge_index=graph.edge_index,
@@ -253,7 +231,7 @@ def _compare_layouts() -> List[Dict[str, Any]]:
         Per-layout, per-graph residual rows.
     """
     rows: List[Dict[str, Any]] = []
-    for layout_name in ("star", "concentric", "circlepack", "osage", "arc", "planar"):
+    for layout_name in ("star", "concentric", "circlepack", "osage", "arc"):
         for graph_name, graph in _verification_graphs():
             reference, reason = _reference_positions(layout_name, graph)
             if reference is None:
@@ -316,9 +294,8 @@ def _write_report(rows: List[Dict[str, Any]], path: Path) -> None:
         "# Trivial deterministic layout fidelity",
         "",
         "References: igraph-style star angles; documented degree-ring concentric; "
-        "documented one-level circlepack; Graphviz-osage placeholder uses the same "
-        "deterministic ordering as production pending a source port; standard BFS arc "
-        "ordering; NetworkX 3.6.1 planar_layout for Chrobak-Payne planar.",
+        "documented one-level circlepack; real Graphviz osage via the osage engine "
+        "with packmode=array; standard BFS arc ordering.",
         "",
         "| Layout | Graph | d_R | max_abs | Class | Reason |",
         "| --- | --- | ---: | ---: | --- | --- |",
@@ -331,7 +308,7 @@ def _write_report(rows: List[Dict[str, Any]], path: Path) -> None:
             f"{row['class']} | {row['reason']} |"
         )
     lines.extend(["", "## Summary", ""])
-    for layout_name in ("star", "concentric", "circlepack", "osage", "arc", "planar"):
+    for layout_name in ("star", "concentric", "circlepack", "osage", "arc"):
         layout_rows = [row for row in rows if row["layout"] == layout_name]
         bit_exact = sum(row["class"] == "bit-exact" for row in layout_rows)
         positional = sum(row["class"] == "positional" for row in layout_rows)
@@ -356,7 +333,7 @@ def main() -> None:
     """
     rows = _compare_layouts()
     _write_report(rows, DEFAULT_REPORT)
-    for layout_name in ("star", "concentric", "circlepack", "osage", "arc", "planar"):
+    for layout_name in ("star", "concentric", "circlepack", "osage", "arc"):
         layout_rows = [row for row in rows if row["layout"] == layout_name]
         bit_exact = sum(row["class"] == "bit-exact" for row in layout_rows)
         positional = sum(row["class"] == "positional" for row in layout_rows)

@@ -21,7 +21,6 @@ from dagua.layout.ops.pipelines.concentric import (
     layout_concentric_pipeline,
 )
 from dagua.layout.ops.pipelines.osage import build_osage_pipeline, layout_osage_pipeline
-from dagua.layout.ops.pipelines.planar import build_planar_pipeline, layout_planar_pipeline
 from dagua.layout.ops.pipelines.star import build_star_pipeline, layout_star_pipeline
 
 
@@ -37,33 +36,42 @@ def _path_edges() -> torch.Tensor:
 
 
 @pytest.mark.parametrize(
-    ("algorithm", "module", "function", "builder"),
+    ("algorithm", "module", "function", "builder", "op_name"),
     [
-        ("star", "dagua.layout.ops.pipelines.star", "layout_star_pipeline", build_star_pipeline),
+        (
+            "star",
+            "dagua.layout.ops.pipelines.star",
+            "layout_star_pipeline",
+            build_star_pipeline,
+            "networkx_simple_layout",
+        ),
         (
             "concentric",
             "dagua.layout.ops.pipelines.concentric",
             "layout_concentric_pipeline",
             build_concentric_pipeline,
+            "networkx_simple_layout",
         ),
         (
             "circlepack",
             "dagua.layout.ops.pipelines.circlepack",
             "layout_circlepack_pipeline",
             build_circlepack_pipeline,
+            "networkx_simple_layout",
         ),
-        ("arc", "dagua.layout.ops.pipelines.arc", "layout_arc_pipeline", build_arc_pipeline),
+        (
+            "arc",
+            "dagua.layout.ops.pipelines.arc",
+            "layout_arc_pipeline",
+            build_arc_pipeline,
+            "networkx_simple_layout",
+        ),
         (
             "osage",
             "dagua.layout.ops.pipelines.osage",
             "layout_osage_pipeline",
             build_osage_pipeline,
-        ),
-        (
-            "planar",
-            "dagua.layout.ops.pipelines.planar",
-            "layout_planar_pipeline",
-            build_planar_pipeline,
+            "graphviz_osage_array_layout",
         ),
     ],
 )
@@ -72,6 +80,7 @@ def test_trivial_geometric_pipeline_is_registered(
     module: str,
     function: str,
     builder: object,
+    op_name: str,
 ) -> None:
     """Register the public trivial-geometric algorithm.
 
@@ -85,6 +94,8 @@ def test_trivial_geometric_pipeline_is_registered(
         Expected pipeline function name.
     builder : object
         Pipeline builder callable.
+    op_name : str
+        Expected single operation name.
 
     Returns
     -------
@@ -93,7 +104,7 @@ def test_trivial_geometric_pipeline_is_registered(
     """
     assert PIPELINE_REGISTRY[algorithm] == (module, function)
     assert get_pipeline_function(algorithm.upper()).__name__ == function
-    assert [operation.name for operation in builder().ops] == ["networkx_simple_layout"]
+    assert [operation.name for operation in builder().ops] == [op_name]
 
 
 def test_star_matches_igraph_reference() -> None:
@@ -132,35 +143,6 @@ def test_arc_places_bfs_order_on_x_axis() -> None:
     np.testing.assert_allclose(actual[:, 0], np.linspace(-1.0, 1.0, 4), rtol=0.0, atol=0.0)
 
 
-def test_planar_matches_networkx_reference_and_rejects_non_planar() -> None:
-    """Match NetworkX planar coordinates and preserve non-planar failure.
-
-    Returns
-    -------
-    None
-        Planar graphs match the reference and K5 raises as NetworkX does.
-    """
-    nx = pytest.importorskip("networkx")
-    edge_index = _path_edges()
-    graph = nx.Graph()
-    graph.add_nodes_from(range(4))
-    graph.add_edges_from(edge_index.t().tolist())
-    expected = np.vstack([nx.planar_layout(graph)[node] for node in range(4)])
-
-    actual = layout_planar_pipeline(edge_index, 4).numpy()
-
-    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1.0e-12)
-    k5_edges = torch.tensor(
-        [
-            [source for source in range(5) for target in range(source + 1, 5)],
-            [target for source in range(5) for target in range(source + 1, 5)],
-        ],
-        dtype=torch.long,
-    )
-    with pytest.raises(Exception, match="not planar"):
-        layout_planar_pipeline(k5_edges, 5)
-
-
 @pytest.mark.parametrize(
     ("algorithm", "pipeline"),
     [
@@ -169,7 +151,6 @@ def test_planar_matches_networkx_reference_and_rejects_non_planar() -> None:
         ("circlepack", layout_circlepack_pipeline),
         ("arc", layout_arc_pipeline),
         ("osage", layout_osage_pipeline),
-        ("planar", layout_planar_pipeline),
     ],
 )
 def test_layout_config_algorithm_trivial_geometric_dispatches(
@@ -204,7 +185,8 @@ def test_trivial_geometric_pipelines_have_no_external_binary_delegation() -> Non
     Returns
     -------
     None
-        Production source must not call Graphviz, Node, or competitor adapters.
+        Production source must not call NetworkX, Graphviz, Node, or competitor
+        adapters.
     """
     root = Path(__file__).parents[1]
     source_paths = [
@@ -214,9 +196,18 @@ def test_trivial_geometric_pipelines_have_no_external_binary_delegation() -> Non
         root / "dagua" / "layout" / "ops" / "pipelines" / "circlepack.py",
         root / "dagua" / "layout" / "ops" / "pipelines" / "arc.py",
         root / "dagua" / "layout" / "ops" / "pipelines" / "osage.py",
-        root / "dagua" / "layout" / "ops" / "pipelines" / "planar.py",
     ]
     source = "\n".join(path.read_text() for path in source_paths)
-    assert "subprocess" not in source
+    forbidden = (
+        "subprocess",
+        "competitor",
+        "GraphvizOsage",
+        "import networkx",
+        '__import__("networkx")',
+        "__import__('networkx')",
+        "nx.",
+    )
+    for token in forbidden:
+        assert token not in source
     assert "graphviz_competitor" not in source
     assert "dagre_competitor" not in source

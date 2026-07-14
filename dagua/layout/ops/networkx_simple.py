@@ -716,27 +716,28 @@ def nx_circlepack_positions(
     return _to_tensor(pos=pos, dtype=dtype, device=out_device)
 
 
-def nx_planar_positions(
-    edge_index: torch.Tensor,
+def graphviz_osage_array_positions(
     num_nodes: int,
-    scale: float = 1.0,
+    node_sizes: Optional[torch.Tensor] = None,
     dtype: torch.dtype = torch.float64,
     device: Optional[torch.device] = None,
+    separation: float = 4.0,
 ) -> torch.Tensor:
-    """Return NetworkX Chrobak-Payne planar-layout coordinates.
+    """Return Graphviz osage-style array-packed node centers.
 
     Parameters
     ----------
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
-    scale : float, default=1.0
-        NetworkX layout scale.
+    node_sizes : torch.Tensor | None, optional
+        Optional node-size tensor with shape ``[N, 2]`` in points. When absent,
+        Graphviz's default 0.75 x 0.5 inch node box is used.
     dtype : torch.dtype, default=torch.float64
         Output floating-point dtype.
     device : torch.device | None, optional
         Output device. ``None`` uses CPU.
+    separation : float, default=4.0
+        Point gap Graphviz leaves between packed boxes.
 
     Returns
     -------
@@ -744,13 +745,45 @@ def nx_planar_positions(
         Coordinate tensor with shape ``[N, 2]``.
     """
     out_device = torch.device("cpu") if device is None else device
-    nx = __import__("networkx")
-    graph = nx.Graph()
-    graph.add_nodes_from(range(num_nodes))
-    if edge_index.numel() > 0:
-        graph.add_edges_from((int(s), int(t)) for s, t in edge_index.detach().cpu().t().tolist())
-    pos_map = nx.planar_layout(graph, scale=scale)
-    pos = np.vstack([pos_map[node] for node in range(num_nodes)]).astype(np.float64)
+    if num_nodes <= 0:
+        return _empty_positions(num_nodes=num_nodes, dtype=dtype, device=out_device)
+    if node_sizes is None:
+        sizes = np.tile(np.array([[54.0, 36.0]], dtype=np.float64), (num_nodes, 1))
+    else:
+        sizes = node_sizes.detach().cpu().to(dtype=torch.float64).numpy()
+    rounded_sizes = np.round(sizes)
+    order = sorted(range(num_nodes), key=lambda node: (-rounded_sizes[node, 0], node))
+    columns = max(1, int(math.ceil(math.sqrt(num_nodes))))
+    rows = int(math.ceil(num_nodes / columns))
+
+    column_widths = np.zeros(columns, dtype=np.float64)
+    row_heights = np.zeros(rows, dtype=np.float64)
+    slots: dict[int, tuple[int, int]] = {}
+    for slot, node in enumerate(order):
+        row = slot // columns
+        column = slot % columns
+        slots[node] = (row, column)
+        column_widths[column] = max(column_widths[column], rounded_sizes[node, 0])
+        row_heights[row] = max(row_heights[row], rounded_sizes[node, 1])
+
+    x_centers = np.zeros(columns, dtype=np.float64)
+    cursor = 0.0
+    for column, width in enumerate(column_widths):
+        x_centers[column] = cursor + width / 2.0
+        cursor += width + separation
+
+    y_centers = np.zeros(rows, dtype=np.float64)
+    total_height = float(row_heights.sum() + separation * max(0, rows - 1))
+    cursor = total_height
+    for row, height in enumerate(row_heights):
+        cursor -= height
+        y_centers[row] = -(cursor + height / 2.0)
+        cursor -= separation
+
+    pos = np.zeros((num_nodes, 2), dtype=np.float64)
+    for node, (row, column) in slots.items():
+        pos[node, 0] = x_centers[column]
+        pos[node, 1] = y_centers[row]
     return _to_tensor(pos=pos, dtype=dtype, device=out_device)
 
 
@@ -764,7 +797,7 @@ class NetworkXSimpleLayout(Op):
     algorithm : str
         Layout name: ``circular``, ``shell``, ``spiral``, ``bipartite``,
         ``multipartite``, ``bfs``, ``arf``, ``star``, ``concentric``,
-        ``circlepack``, ``arc``, or ``planar``.
+        ``circlepack``, or ``arc``.
     params : dict[str, Any]
         Algorithm-specific keyword parameters.
     """
@@ -911,15 +944,6 @@ class NetworkXSimpleLayout(Op):
                 device=device,
             )
             extras = {"start": start}
-        elif algorithm == "planar":
-            pos = nx_planar_positions(
-                edge_index=problem.edge_index,
-                num_nodes=problem.num_nodes,
-                scale=scale,
-                dtype=dtype,
-                device=device,
-            )
-            extras = {}
         else:
             raise ValueError(f"Unsupported NetworkX simple layout: {self.algorithm!r}.")
         state.pos = pos
@@ -929,6 +953,7 @@ class NetworkXSimpleLayout(Op):
 
 __all__ = [
     "NetworkXSimpleLayout",
+    "graphviz_osage_array_positions",
     "nx_arf_positions",
     "nx_bfs_layers",
     "nx_bipartite_node_set",
@@ -938,7 +963,6 @@ __all__ = [
     "nx_circlepack_positions",
     "nx_concentric_positions",
     "nx_multipartite_positions",
-    "nx_planar_positions",
     "nx_rescale_layout",
     "nx_shell_positions",
     "nx_spiral_positions",
