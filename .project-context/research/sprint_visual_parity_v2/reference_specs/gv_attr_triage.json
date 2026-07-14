@@ -1,0 +1,787 @@
+{
+  "generated_at": "2026-07-14T20:12:03Z",
+  "pin": "graphviz 7.0.5",
+  "rows": [
+    {
+      "attribute": "Damping",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "K",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "URL",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "_background",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "area",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "arrowhead",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "arrowsize",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "arrowtail",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "bb",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "bgcolor",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "center",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "charset",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "class",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "clusterrank",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "color",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "colorscheme",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "comment",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "concentrate",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "constraint",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "decorate",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "dim",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "dimen",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "dir",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "diredgeconstraints",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "dpi",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "edgeURL",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "edgehref",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "edgetarget",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "edgetooltip",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "epsilon",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "esep",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "fillcolor",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "fixedsize",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "fontcolor",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "fontname",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "fontnames",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "fontpath",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "fontsize",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "forcelabels",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "gradientangle",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "headURL",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "head_lp",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "headclip",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "headhref",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "headlabel",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "headport",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "headtarget",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "headtooltip",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "height",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "href",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "id",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "image",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "imagepath",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "imagepos",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "imagescale",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "inputscale",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "label",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelURL",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelangle",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labeldistance",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelfloat",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelfontcolor",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelfontname",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelfontsize",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelhref",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labeljust",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labelloc",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labeltarget",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "labeltooltip",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "layer",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "layerlistsep",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "layers",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "layerselect",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "layersep",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "layout",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "len",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "levels",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "levelsgap",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "lhead",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "lp",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "ltail",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "margin",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "maxiter",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "mclimit",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "mindist",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "minlen",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "mode",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "model",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "newrank",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "nodesep",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "nojustify",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "normalize",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "notranslate",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "nslimit",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "nslimit1",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "ordering",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "orientation",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "outputorder",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "overlap",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "overlap_scaling",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "pack",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "packmode",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "pad",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "page",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "pagedir",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "penwidth",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "peripheries",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "pin",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "pos",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "quadtree",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "quantum",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "rank",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "rankdir",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "ranksep",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "ratio",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "rects",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "regular",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "repulsiveforce",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "resolution",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "root",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "rotate",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "samplepoints",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "scale",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "searchsize",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "sep",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "shape",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "shapefile",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "showboxes",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "sides",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "size",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "skew",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "smoothing",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "sortv",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "splines",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "start",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "style",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "stylesheet",
+      "review": "lane_c_seed",
+      "tag": "io-meta"
+    },
+    {
+      "attribute": "tailURL",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "tail_lp",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "tailclip",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "tailhref",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "taillabel",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "tailport",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "tailtarget",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "tailtooltip",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "target",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "tooltip",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "truecolor",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "vertices",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "viewport",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "voro_margin",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "weight",
+      "review": "lane_c_seed",
+      "tag": "layout"
+    },
+    {
+      "attribute": "width",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "xlabel",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "xlp",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    },
+    {
+      "attribute": "z",
+      "review": "lane_c_seed",
+      "tag": "cosmetic"
+    }
+  ],
+  "schema_version": 1
+}
