@@ -104,6 +104,51 @@ class _JavaRandom:
         self.seed = (self.seed * _JAVA_RANDOM_MULTIPLIER + _JAVA_RANDOM_ADDEND) & _JAVA_RANDOM_MASK
         return self.seed >> (48 - bits)
 
+    def next_boolean(self) -> bool:
+        """Return Java's ``nextBoolean`` result.
+
+        Returns
+        -------
+        bool
+            ``True`` when the next random bit is non-zero.
+        """
+        return self.next_bits(1) != 0
+
+    def next_float(self) -> float:
+        """Return Java's ``nextFloat`` result.
+
+        Returns
+        -------
+        float
+            Uniform value in ``[0, 1)`` with 24 random bits.
+        """
+        return self.next_bits(24) / float(1 << 24)
+
+    def next_double(self) -> float:
+        """Return Java's ``nextDouble`` result.
+
+        Returns
+        -------
+        float
+            Uniform value in ``[0, 1)`` with Java's 53-bit composition.
+        """
+        high = self.next_bits(26)
+        low = self.next_bits(27)
+        return ((high << 27) + low) / float(1 << 53)
+
+    def next_long(self) -> int:
+        """Return Java's signed ``nextLong`` result.
+
+        Returns
+        -------
+        int
+            Signed 64-bit value composed from two ``next(32)`` calls.
+        """
+        value = (self.next_bits(32) << 32) + self.next_bits(32)
+        if value >= (1 << 63):
+            value -= 1 << 64
+        return value
+
     def next_int(self, bound: int) -> int:
         """Return Java's ``nextInt(bound)`` result.
 
@@ -729,6 +774,341 @@ def _count_order_crossings(
     return crossings
 
 
+def _edge_port_orders(
+    edges: Sequence[Tuple[int, int]],
+) -> Tuple[Dict[int, List[int]], Dict[int, List[int]]]:
+    """Return generated ELK port order lists for every real node.
+
+    Parameters
+    ----------
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges in model order.
+
+    Returns
+    -------
+    tuple[dict[int, list[int]], dict[int, list[int]]]
+        Edge-index lists keyed by source for output ports and by target for
+        input ports.
+    """
+    outgoing: Dict[int, List[int]] = {}
+    incoming: Dict[int, List[int]] = {}
+    for edge_index, (source, target) in enumerate(edges):
+        outgoing.setdefault(source, []).append(edge_index)
+        incoming.setdefault(target, []).append(edge_index)
+    return outgoing, incoming
+
+
+def _fixed_layer_port_ranks(
+    fixed_layer: Sequence[int],
+    edges: Sequence[Tuple[int, int]],
+    *,
+    forward: bool,
+    node_relative_ports: bool,
+) -> Dict[int, float]:
+    """Compute simplified ELK generated-port ranks for a fixed layer.
+
+    Parameters
+    ----------
+    fixed_layer : sequence[int]
+        Ordered fixed-layer node ids.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges in model order.
+    forward : bool
+        ``True`` when sweeping from predecessors to successors.
+    node_relative_ports : bool
+        Whether ELK selected ``NodeRelativePortDistributor`` instead of
+        ``LayerTotalPortDistributor``.
+
+    Returns
+    -------
+    dict[int, float]
+        Edge index to fixed-end port rank.
+    """
+    outgoing, incoming = _edge_port_orders(edges)
+    ranks: Dict[int, float] = {}
+    consumed_rank = 0.0
+    for node in fixed_layer:
+        edge_indices = outgoing.get(node, []) if forward else incoming.get(node, [])
+        port_count = len(edge_indices)
+        if port_count == 0:
+            consumed_rank += 1.0 if node_relative_ports else 0.0
+            continue
+        if node_relative_ports:
+            increment = 1.0 / float(port_count + 1)
+            if forward:
+                rank = consumed_rank + increment
+                for edge_index in edge_indices:
+                    ranks[edge_index] = rank
+                    rank += increment
+            else:
+                rank = consumed_rank + 1.0 - increment
+                for edge_index in edge_indices:
+                    ranks[edge_index] = rank
+                    rank -= increment
+            consumed_rank += 1.0
+        elif forward:
+            for offset, edge_index in enumerate(edge_indices, start=1):
+                ranks[edge_index] = consumed_rank + float(offset)
+            consumed_rank += float(port_count)
+        else:
+            rank = consumed_rank + float(port_count)
+            for edge_index in edge_indices:
+                ranks[edge_index] = rank
+                rank -= 1.0
+            consumed_rank += float(port_count)
+    return ranks
+
+
+def _randomize_first_sweep_layer(
+    layers: List[List[int]],
+    *,
+    forward: bool,
+    rng: _JavaRandom,
+) -> None:
+    """Randomize ELK's first fixed layer by assigning random barycenters.
+
+    Parameters
+    ----------
+    layers : list[list[int]]
+        Mutable current layer order.
+    forward : bool
+        ``True`` when the sweep starts at the first layer.
+    rng : _JavaRandom
+        Java-compatible restart RNG.
+
+    Returns
+    -------
+    None
+        The first fixed layer is sorted in place.
+    """
+    if not layers:
+        return
+    layer_index = 0 if forward else len(layers) - 1
+    randomized = [(rng.next_double(), node) for node in layers[layer_index]]
+    randomized.sort(key=lambda item: item[0])
+    layers[layer_index] = [node for _, node in randomized]
+
+
+def _fill_unknown_barycenters(
+    layer: Sequence[int],
+    barycenters: Dict[int, Optional[float]],
+    *,
+    pre_ordered: bool,
+    rng: _JavaRandom,
+) -> None:
+    """Fill ELK barycenter gaps for nodes without fixed-layer neighbors.
+
+    Parameters
+    ----------
+    layer : sequence[int]
+        Current free-layer node order.
+    barycenters : dict[int, float | None]
+        Mutable node barycenter map.
+    pre_ordered : bool
+        Whether this is a later sweep that should preserve relative gaps.
+    rng : _JavaRandom
+        Java-compatible restart RNG.
+
+    Returns
+    -------
+    None
+        ``barycenters`` is updated in place.
+    """
+    if pre_ordered:
+        last_value = -1.0
+        for index, node in enumerate(layer):
+            value = barycenters[node]
+            if value is None:
+                next_value = last_value + 1.0
+                for later_node in layer[index + 1 :]:
+                    later_value = barycenters[later_node]
+                    if later_value is not None:
+                        next_value = later_value
+                        break
+                value = (last_value + next_value) / 2.0
+                barycenters[node] = value
+            last_value = float(value)
+        return
+
+    max_barycenter = 0.0
+    for value in barycenters.values():
+        if value is not None:
+            max_barycenter = max(max_barycenter, float(value))
+    max_barycenter += 2.0
+    for node in layer:
+        if barycenters[node] is None:
+            barycenters[node] = rng.next_float() * max_barycenter - 1.0
+
+
+def _sort_free_layer_by_barycenter(
+    layers: List[List[int]],
+    edges: Sequence[Tuple[int, int]],
+    *,
+    free_layer_index: int,
+    forward: bool,
+    first_sweep: bool,
+    node_relative_ports: bool,
+    rng: _JavaRandom,
+) -> None:
+    """Sort one free layer with ELK's randomized barycenter heuristic.
+
+    Parameters
+    ----------
+    layers : list[list[int]]
+        Mutable current layer order.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+    free_layer_index : int
+        Layer currently being reordered.
+    forward : bool
+        ``True`` when fixed neighbors are in the previous layer.
+    first_sweep : bool
+        Whether this is the first sweep in the current restart attempt.
+    node_relative_ports : bool
+        Whether generated port ranks use node-relative distribution.
+    rng : _JavaRandom
+        Java-compatible restart RNG.
+
+    Returns
+    -------
+    None
+        The selected layer is sorted in place.
+    """
+    fixed_layer_index = free_layer_index - 1 if forward else free_layer_index + 1
+    fixed_nodes = set(layers[fixed_layer_index])
+    fixed_ranks = _fixed_layer_port_ranks(
+        layers[fixed_layer_index],
+        edges,
+        forward=forward,
+        node_relative_ports=node_relative_ports,
+    )
+    layer = layers[free_layer_index]
+    summed: Dict[int, float] = {node: 0.0 for node in layer}
+    degree: Dict[int, int] = {node: 0 for node in layer}
+    for edge_index, (source, target) in enumerate(edges):
+        if forward and target in summed and source in fixed_nodes:
+            summed[target] += fixed_ranks.get(edge_index, 0.0)
+            degree[target] += 1
+        elif not forward and source in summed and target in fixed_nodes:
+            summed[source] += fixed_ranks.get(edge_index, 0.0)
+            degree[source] += 1
+
+    barycenters: Dict[int, Optional[float]] = {}
+    for node in layer:
+        if degree[node] > 0:
+            perturbation = rng.next_float() * 0.07 - 0.035
+            barycenters[node] = (summed[node] + perturbation) / float(degree[node])
+        else:
+            barycenters[node] = None
+    _fill_unknown_barycenters(layer, barycenters, pre_ordered=not first_sweep, rng=rng)
+    layer.sort(key=lambda node: float(barycenters[node]))
+
+
+def _elk_barycenter_sweep(
+    layers: List[List[int]],
+    edges: Sequence[Tuple[int, int]],
+    *,
+    forward: bool,
+    first_sweep: bool,
+    node_relative_ports: bool,
+    rng: _JavaRandom,
+) -> None:
+    """Run one ELK-style barycenter sweep over mutable layers.
+
+    Parameters
+    ----------
+    layers : list[list[int]]
+        Mutable current layer order.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+    forward : bool
+        Sweep direction.
+    first_sweep : bool
+        Whether this is the first sweep in a restart attempt.
+    node_relative_ports : bool
+        Whether generated port ranks use node-relative distribution.
+    rng : _JavaRandom
+        Java-compatible restart RNG.
+
+    Returns
+    -------
+    None
+        Layers are modified in place.
+    """
+    if len(layers) < 2:
+        return
+    if forward:
+        layer_range = range(1, len(layers))
+    else:
+        layer_range = range(len(layers) - 2, -1, -1)
+    for layer_index in layer_range:
+        _sort_free_layer_by_barycenter(
+            layers,
+            edges,
+            free_layer_index=layer_index,
+            forward=forward,
+            first_sweep=first_sweep,
+            node_relative_ports=node_relative_ports,
+            rng=rng,
+        )
+
+
+def _elk_restart_attempt(
+    layers: List[List[int]],
+    edges: Sequence[Tuple[int, int]],
+    *,
+    rng: _JavaRandom,
+    node_relative_ports: bool,
+) -> Tuple[int, List[List[int]]]:
+    """Run one persistent ELK barycenter restart attempt.
+
+    Parameters
+    ----------
+    layers : list[list[int]]
+        Mutable current layer order. ELK does not restore the model order
+        between randomized attempts, so this list is intentionally mutated.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+    rng : _JavaRandom
+        Java-compatible restart RNG.
+    node_relative_ports : bool
+        Whether generated port ranks use node-relative distribution.
+
+    Returns
+    -------
+    tuple[int, list[list[int]]]
+        Crossing score and the best order reached within this attempt.
+    """
+    forward = rng.next_boolean()
+    _randomize_first_sweep_layer(layers, forward=forward, rng=rng)
+    _elk_barycenter_sweep(
+        layers,
+        edges,
+        forward=forward,
+        first_sweep=True,
+        node_relative_ports=node_relative_ports,
+        rng=rng,
+    )
+    crossings = _count_order_crossings(layers, edges)
+    while True:
+        attempt_best = [list(layer) for layer in layers]
+        if crossings == 0:
+            return 0, attempt_best
+        forward = not forward
+        previous_crossings = crossings
+        _elk_barycenter_sweep(
+            layers,
+            edges,
+            forward=forward,
+            first_sweep=False,
+            node_relative_ports=node_relative_ports,
+            rng=rng,
+        )
+        crossings = _count_order_crossings(layers, edges)
+        if previous_crossings <= crossings:
+            return previous_crossings, attempt_best
+
+
 def _restart_sweep_orders(
     layers: Sequence[Sequence[int]],
     edges: Sequence[Tuple[int, int]],
@@ -755,18 +1135,47 @@ def _restart_sweep_orders(
     list[list[int]]
         Ordered layers from the earliest strictly best crossing score.
     """
-    rng = _JavaRandom(random_seed)
+    incident_nodes = {node for edge in edges for node in edge}
+    has_order_free_isolate = any(
+        len(layer) > 1 and any(node not in incident_nodes for node in layer) for layer in layers
+    )
+    if not has_order_free_isolate:
+        rng = _JavaRandom(random_seed)
+        best_order: Optional[List[List[int]]] = None
+        best_crossings: Optional[int] = None
+        for attempt in range(thoroughness):
+            initial = [list(layer) for layer in layers]
+            if attempt > 0:
+                initial = _shuffle_layer_orders(layers, rng)
+            candidate = _sweep_orders(initial, edges)
+            crossings = _count_order_crossings(candidate, edges)
+            if best_crossings is None or crossings < best_crossings:
+                best_order = candidate
+                best_crossings = crossings
+        if best_order is None:
+            return [list(layer) for layer in layers]
+        return best_order
+
+    bootstrap_rng = _JavaRandom(random_seed)
+    restart_seed = bootstrap_rng.next_long()
+    node_relative_ports = bootstrap_rng.next_boolean()
+    rng = _JavaRandom(restart_seed)
     best_order: Optional[List[List[int]]] = None
     best_crossings: Optional[int] = None
+    current_order = [list(layer) for layer in layers]
     for attempt in range(thoroughness):
-        initial = [list(layer) for layer in layers]
-        if attempt > 0:
-            initial = _shuffle_layer_orders(layers, rng)
-        candidate = _sweep_orders(initial, edges)
-        crossings = _count_order_crossings(candidate, edges)
+        del attempt
+        crossings, candidate = _elk_restart_attempt(
+            current_order,
+            edges,
+            rng=rng,
+            node_relative_ports=node_relative_ports,
+        )
         if best_crossings is None or crossings < best_crossings:
             best_order = candidate
             best_crossings = crossings
+            if best_crossings == 0:
+                break
     if best_order is None:
         return [list(layer) for layer in layers]
     return best_order
