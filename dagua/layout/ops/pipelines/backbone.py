@@ -118,7 +118,7 @@ def _edge_embeddedness(
     edges: List[Tuple[int, int]],
     neighbors: List[set[int]],
 ) -> np.ndarray:
-    """Score each edge by common-neighbor embeddedness.
+    """Score each edge by non-induced C4 embeddedness.
 
     Parameters
     ----------
@@ -134,14 +134,24 @@ def _edge_embeddedness(
 
     Notes
     -----
-    graphlayouts obtains an edge orbit from ``oaqc`` before prefix-Jaccard
-    reweighting. Dagua does not depend on ``oaqc``; common-neighbor
-    embeddedness is the simmelian backbone quantity used for the same ranking
-    stage and keeps this pipeline dependency-free at runtime.
+    graphlayouts uses ``oaqc::oaqc(..., non_ind_freq=TRUE)$e_orbits_non_ind[, 11]``.
+    In ``oaqc`` this is the per-edge non-induced 4-cycle count: for edge
+    ``(u, v)``, count distinct length-3 paths from ``u`` to ``v`` that do not
+    reuse either endpoint. Computing that orbit directly keeps the production
+    pipeline free of R runtime delegation.
     """
     scores = np.zeros(len(edges), dtype=np.float64)
     for index, (source, target) in enumerate(edges):
-        scores[index] = float(len(neighbors[source].intersection(neighbors[target])))
+        count = 0
+        for source_neighbor in neighbors[source]:
+            if source_neighbor == target:
+                continue
+            for target_neighbor in neighbors[target]:
+                if target_neighbor == source or target_neighbor == source_neighbor:
+                    continue
+                if target_neighbor in neighbors[source_neighbor]:
+                    count += 1
+        scores[index] = float(count)
     return scores
 
 
