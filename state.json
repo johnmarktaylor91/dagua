@@ -1,0 +1,15 @@
+{
+  "active_knob": null,
+  "audit_due_after": "g005",
+  "consecutive_no_improve": {},
+  "in_flight": null,
+  "max_rounds": 60,
+  "next_action_if_dark": "launch S0 by filing the round-0 VLM census before any S1 dial work",
+  "phase": "PRELAUNCH",
+  "round": "g000",
+  "run": "visual_parity_v2",
+  "s0_round0_vlm_census": "required",
+  "stop_criteria_ref": "RUNBOOK.md#7-stop-criteria-and-ratchets",
+  "sub_sprint": "S0",
+  "tripwires_last_pass": "g000"
+}
