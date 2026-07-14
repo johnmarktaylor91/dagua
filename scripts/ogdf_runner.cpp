@@ -17,6 +17,9 @@
 #include <ogdf/energybased/PivotMDS.h>
 #include <ogdf/energybased/StressMinimization.h>
 #include <ogdf/layered/SugiyamaLayout.h>
+#include <ogdf/misclayout/BalloonLayout.h>
+#include <ogdf/planarlayout/FPPLayout.h>
+#include <ogdf/planarlayout/SchnyderLayout.h>
 
 namespace {
 
@@ -207,7 +210,8 @@ void printHelp() {
 		<< "Reads JSON from stdin or --input with keys: nodes, edges, algorithm, seed,\n"
 		<< "gemRounds, fmmmFixedIterations, iterations, numberOfPivots. Writes JSON\n"
 		<< "positions to stdout or --output.\n"
-		<< "Algorithms: gem, fmmm, stress, pivot_mds, davidson_harel, sugiyama.\n";
+		<< "Algorithms: gem, fmmm, stress, pivot_mds, davidson_harel, sugiyama,\n"
+		<< "            balloon, fpp, schnyder.\n";
 }
 
 RunnerOptions parseArguments(const int argc, char** argv) {
@@ -351,6 +355,21 @@ void runLayout(
 	}
 	if (algorithm == "sugiyama") {
 		ogdf::SugiyamaLayout layout;
+		layout.call(graphAttributes);
+		return;
+	}
+	if (algorithm == "balloon") {
+		ogdf::BalloonLayout layout;
+		layout.call(graphAttributes);
+		return;
+	}
+	if (algorithm == "fpp") {
+		ogdf::FPPLayout layout;
+		layout.call(graphAttributes);
+		return;
+	}
+	if (algorithm == "schnyder") {
+		ogdf::SchnyderLayout layout;
 		layout.call(graphAttributes);
 		return;
 	}
