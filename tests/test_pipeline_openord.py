@@ -239,6 +239,33 @@ def test_openord_short_schedule_regression_pin() -> None:
     assert residual < 1.0e-6
 
 
+def test_openord_multilevel_triggers_at_twenty_nodes() -> None:
+    """Use the recursive OpenOrd path on the first larger-graph tier.
+
+    Returns
+    -------
+    None
+        The default 20-node layout must be deterministic, finite, and distinct
+        from the explicitly disabled single-level path.
+    """
+    graph = _graph_from_edges(
+        20,
+        [(node, node + 1) for node in range(19)] + [(node, node + 2) for node in range(0, 18, 3)],
+    )
+    multilevel = layout_openord_pipeline(graph.edge_index, graph.num_nodes, seed=7)
+    repeated = layout_openord_pipeline(graph.edge_index, graph.num_nodes, seed=7)
+    single_level = layout_openord_pipeline(
+        graph.edge_index,
+        graph.num_nodes,
+        seed=7,
+        multilevel=False,
+    )
+    assert torch.equal(multilevel, repeated)
+    assert torch.isfinite(multilevel).all()
+    assert multilevel.shape == (20, 2)
+    assert float(procrustes_rmsd(multilevel, single_level)) > 1.0e-3
+
+
 def test_openord_production_pipeline_has_no_runtime_delegation() -> None:
     """Guard the production pipeline against reference delegation.
 
