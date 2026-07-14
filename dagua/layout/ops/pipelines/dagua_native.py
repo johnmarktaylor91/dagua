@@ -1317,12 +1317,22 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     # INFERENCE alone is not sufficient: it mislabeled outerplanar_dag_20
     # and recurrent_feedback_cell as undirected, and the contest then
     # optimized the wrong composite flavor (-20 pts under directed scoring).
+    #
+    # Lattice-like DAGs are a second special case: corpus fixtures may be
+    # semantically undirected, but their one-way lattice orientation carries
+    # the layered geometric signal used by the native polish path. The
+    # undirected contest can pick an undirected-composite winner that loses
+    # the directed polish gate, so these stay on the baseline route.
+    is_lattice_like_dag = bool(getattr(structure, "is_directed_acyclic", False)) and (
+        "lattice_like" in tuple(getattr(structure, "topology_tags", ()))
+    )
     if (
         getattr(structure, "is_semantically_directed", True) is False
         and (
             bool(getattr(structure, "direction_is_declared", False))
             or float(getattr(structure, "reciprocal_edge_ratio", 0.0)) > 0.3
         )
+        and not is_lattice_like_dag
         and not bool(getattr(config, "_dagua_native_suppress_portfolio", False))
         and not bool(getattr(config, "try_planar_first", False))
     ):
