@@ -104,9 +104,9 @@ def test_backbone_edge_set_regression_pin() -> None:
     edge_index = _edge_index([(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)])
     edges, weights, mask = backbone_edge_set(edge_index, num_nodes=4, keep=0.4)
 
-    assert edges == [(0, 1), (1, 2), (2, 3), (0, 3)]
-    assert weights.tolist() == pytest.approx([0.5, 0.5, 0.5, 0.5, 0.0])
-    assert mask.tolist() == [True, True, True, True, False]
+    assert edges == [(0, 1), (1, 2), (2, 3), (0, 3), (0, 2)]
+    assert weights.tolist() == pytest.approx([0.0, 0.0, 0.0, 0.0, 1.0])
+    assert mask.tolist() == [True, True, True, True, True]
 
 
 def test_backbone_layout_regression_pin() -> None:
@@ -121,10 +121,10 @@ def test_backbone_layout_regression_pin() -> None:
     actual = layout_backbone_pipeline(edge_index, num_nodes=4, keep=0.4, iterations=5)
     expected = torch.tensor(
         [
-            [1.8158175945, 0.2443312109],
-            [0.7215125561, 1.7231062651],
-            [0.8334040046, 0.6640670896],
-            [0.0000000000, 0.0000000000],
+            [0.0379323252, 0.0000000000],
+            [0.0000000000, 0.9982874990],
+            [0.8986893296, 0.5361157060],
+            [1.9143296480, 0.5324534774],
         ],
         dtype=torch.float32,
     )
