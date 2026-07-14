@@ -20,11 +20,14 @@ from dagua.layout.ops._reingold_tilford import layout_igraph_reingold_tilford
 
 _DEFAULT_NODE_WIDTH = 120.0
 _DEFAULT_NODE_HEIGHT = 40.0
+_ELK_PADDING = 50.0
 _ELK_FORCE_SPACING = 80.0
 _ELK_FORCE_REPULSION = 5.0
+_ELK_FORCE_TEMPERATURE = 0.001
+_ELK_FORCE_DISP_BOUND_FACTOR = 16.0
 _ELK_STRESS_EDGE_LENGTH = 100.0
-_ELK_STRESS_EPSILON = 1.0e-4
-_ELK_STRESS_ITERATION_LIMIT = 200
+_ELK_STRESS_EPSILON = 1.0e-3
+_ELK_STRESS_ITERATION_LIMIT = 2_147_483_647
 _ELK_TREE_LAYER_SPACING = 100.0
 _ELK_TREE_NODE_SPACING = 40.0
 _JAVA_RANDOM_MULTIPLIER = 0x5DEECE66D
@@ -53,10 +56,10 @@ class ElkForceConfig:
     """
 
     iterations: int = 300
-    model: str = "eades"
+    model: str = "fruchterman_reingold"
     spacing: float = _ELK_FORCE_SPACING
     repulsion: float = _ELK_FORCE_REPULSION
-    temperature: float = 1.0
+    temperature: float = _ELK_FORCE_TEMPERATURE
     seed: int = 1
 
 
@@ -176,7 +179,36 @@ def _initial_model_positions(num_nodes: int, node_sizes: torch.Tensor) -> torch.
     return pos
 
 
-def _center_to_elk_topleft(pos: torch.Tensor, node_sizes: torch.Tensor) -> torch.Tensor:
+def _initial_random_positions(num_nodes: int, rng: JavaRandom, dtype: torch.dtype) -> torch.Tensor:
+    """Create ELK Force's non-interactive random initial center positions.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    rng : JavaRandom
+        Java-compatible random generator seeded from ``elk.randomSeed``.
+    dtype : torch.dtype
+        Output dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Center positions with shape ``[N, 2]``.
+    """
+    pos = torch.empty((num_nodes, 2), dtype=dtype)
+    pos_scale = float(num_nodes)
+    for node in range(num_nodes):
+        pos[node, 0] = rng.next_double() * pos_scale
+        pos[node, 1] = rng.next_double() * pos_scale
+    return pos
+
+
+def _center_to_elk_topleft(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float = 0.0,
+) -> torch.Tensor:
     """Convert internal center coordinates to ELK top-left coordinates.
 
     Parameters
@@ -185,6 +217,8 @@ def _center_to_elk_topleft(pos: torch.Tensor, node_sizes: torch.Tensor) -> torch
         Center coordinates with shape ``[N, 2]``.
     node_sizes : torch.Tensor
         Node sizes with shape ``[N, 2]``.
+    padding : float, default=0.0
+        Root graph padding added by ELK's force graph importer.
 
     Returns
     -------
@@ -195,7 +229,7 @@ def _center_to_elk_topleft(pos: torch.Tensor, node_sizes: torch.Tensor) -> torch
         return pos.clone()
     top_left = pos - node_sizes / 2.0
     mins = torch.min(top_left, dim=0).values
-    return top_left - mins
+    return top_left + (float(padding) - mins)
 
 
 def _connection_counts(num_nodes: int, edges: Sequence[Tuple[int, int]]) -> torch.Tensor:
@@ -251,16 +285,23 @@ def layout_elk_force(
     """
     cfg = config or ElkForceConfig()
     sizes = _node_sizes_or_default(node_sizes, num_nodes, dtype)
-    pos = _initial_model_positions(num_nodes, sizes)
+    rng = JavaRandom(cfg.seed)
+    pos = _initial_random_positions(num_nodes, rng, dtype)
     if num_nodes <= 1:
-        return _center_to_elk_topleft(pos, sizes).to(device=edge_index.device, dtype=dtype)
+        return _center_to_elk_topleft(pos, sizes, _ELK_PADDING).to(
+            device=edge_index.device,
+            dtype=dtype,
+        )
 
     connections = _connection_counts(num_nodes, _edge_pairs(edge_index))
-    rng = JavaRandom(cfg.seed)
     model = cfg.model.lower()
     iterations = max(0, int(cfg.iterations))
     temperature = float(cfg.temperature)
     threshold = temperature / float(iterations) if iterations > 0 else 0.0
+    displacement_bound = max(
+        float(num_nodes) * _ELK_FORCE_DISP_BOUND_FACTOR + float(edge_index.shape[1]),
+        _ELK_FORCE_DISP_BOUND_FACTOR * _ELK_FORCE_DISP_BOUND_FACTOR,
+    )
     total_width = float(torch.sum(sizes[:, 0]).item())
     total_height = float(torch.sum(sizes[:, 1]).item())
     area = max(total_width * total_height, 1.0)
@@ -269,6 +310,8 @@ def layout_elk_force(
 
     step = 0
     while step < iterations and (model != "fruchterman_reingold" or temperature > 0.0):
+        if model == "fruchterman_reingold":
+            temperature -= threshold
         displacement = torch.zeros_like(pos)
         for forcee in range(num_nodes):
             for forcer in range(num_nodes):
@@ -302,11 +345,13 @@ def layout_elk_force(
                             else float(cfg.repulsion) * 100.0
                         )
                 displacement[forcee] += vector * (force / length)
-        pos += torch.clamp(displacement, min=-float(cfg.spacing), max=float(cfg.spacing))
-        temperature -= threshold
+        pos += torch.clamp(displacement, min=-displacement_bound, max=displacement_bound)
         step += 1
 
-    return _center_to_elk_topleft(pos, sizes).to(device=edge_index.device, dtype=dtype)
+    return _center_to_elk_topleft(pos, sizes, _ELK_PADDING).to(
+        device=edge_index.device,
+        dtype=dtype,
+    )
 
 
 def _undirected_weighted_distances(
@@ -415,9 +460,21 @@ def layout_elk_stress(
         ELK top-left node coordinates with shape ``[N, 2]``.
     """
     sizes = _node_sizes_or_default(node_sizes, num_nodes, dtype)
-    pos = _initial_model_positions(num_nodes, sizes)
+    # ELK Stress performs a non-interactive ELK Force layout first, then
+    # imports those node locations as the stress-majorization warm start.
+    force_top_left = layout_elk_force(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=sizes,
+        config=ElkForceConfig(),
+        dtype=dtype,
+    ).to(device="cpu", dtype=dtype)
+    pos = force_top_left + sizes / 2.0
     if num_nodes <= 1:
-        return _center_to_elk_topleft(pos, sizes).to(device=edge_index.device, dtype=dtype)
+        return _center_to_elk_topleft(pos, sizes, _ELK_PADDING).to(
+            device=edge_index.device,
+            dtype=dtype,
+        )
 
     distances = _undirected_weighted_distances(
         num_nodes,
@@ -434,7 +491,6 @@ def layout_elk_stress(
     while True:
         if count > 0:
             previous = current
-        new_pos = pos.clone()
         for node in range(num_nodes):
             weight_sum = float(torch.sum(weights[node]).item())
             if weight_sum <= 0.0:
@@ -456,9 +512,8 @@ def layout_elk_stress(
                         float(pos[other, 1].item())
                         + graph_distance * float(pos[node, 1] - pos[other, 1]) / euclidean
                     )
-            new_pos[node, 0] = x_disp / weight_sum
-            new_pos[node, 1] = y_disp / weight_sum
-        pos = new_pos
+            pos[node, 0] = x_disp / weight_sum
+            pos[node, 1] = y_disp / weight_sum
         current = _stress_value(pos, distances, weights)
         done = (
             previous == 0.0 or (previous - current) / previous < epsilon or count >= iteration_limit
@@ -466,7 +521,10 @@ def layout_elk_stress(
         count += 1
         if done:
             break
-    return _center_to_elk_topleft(pos, sizes).to(device=edge_index.device, dtype=dtype)
+    return _center_to_elk_topleft(pos, sizes, _ELK_PADDING).to(
+        device=edge_index.device,
+        dtype=dtype,
+    )
 
 
 def layout_elk_mrtree(
