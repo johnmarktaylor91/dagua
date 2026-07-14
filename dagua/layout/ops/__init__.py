@@ -247,6 +247,7 @@ _EXPECTED_OP_MODULES = (
     "converge",
     "coordinate",
     "crossing_swap",
+    "cytoscape",
     "d3dag",
     "d3force",
     "davidson_harel",
