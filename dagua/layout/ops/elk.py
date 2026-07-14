@@ -23,6 +23,7 @@ from dagua.layout.ops.brandes_koepf import (
     BRANDES_KOEPF_X_KEY,
     brandes_koepf_x_assignment,
 )
+from dagua.layout.ops.dagre import _dagre_network_simplex_ranks
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -49,6 +50,84 @@ _SUPPORTED_NODE_PLACEMENT_STRATEGIES = {
     "network_simplex",
     "simple",
 }
+_JAVA_RANDOM_MULTIPLIER = 0x5DEECE66D
+_JAVA_RANDOM_ADDEND = 0xB
+_JAVA_RANDOM_MASK = (1 << 48) - 1
+_ELK_DEFAULT_RANDOM_SEED = 1
+
+
+class _JavaRandom:
+    """Small port of ``java.util.Random`` for ELK tie-breaking.
+
+    Parameters
+    ----------
+    seed : int
+        Public Java seed before the constructor's xor/scramble step.
+
+    Attributes
+    ----------
+    seed : int
+        Internal 48-bit LCG state.
+    """
+
+    def __init__(self, seed: int) -> None:
+        """Initialize the scrambled 48-bit LCG state.
+
+        Parameters
+        ----------
+        seed : int
+            Public Java seed.
+
+        Returns
+        -------
+        None
+            The RNG state is stored on the instance.
+        """
+        self.seed = (seed ^ _JAVA_RANDOM_MULTIPLIER) & _JAVA_RANDOM_MASK
+
+    def next_bits(self, bits: int) -> int:
+        """Return the next high-order random bits.
+
+        Parameters
+        ----------
+        bits : int
+            Number of high bits to return.
+
+        Returns
+        -------
+        int
+            Unsigned random value with ``bits`` significant bits.
+        """
+        self.seed = (self.seed * _JAVA_RANDOM_MULTIPLIER + _JAVA_RANDOM_ADDEND) & _JAVA_RANDOM_MASK
+        return self.seed >> (48 - bits)
+
+    def next_int(self, bound: int) -> int:
+        """Return Java's ``nextInt(bound)`` result.
+
+        Parameters
+        ----------
+        bound : int
+            Exclusive positive upper bound.
+
+        Returns
+        -------
+        int
+            Uniform integer in ``[0, bound)``.
+
+        Raises
+        ------
+        ValueError
+            If ``bound`` is not positive.
+        """
+        if bound <= 0:
+            raise ValueError("bound must be positive.")
+        if bound & (bound - 1) == 0:
+            return (bound * self.next_bits(31)) >> 31
+        while True:
+            bits = self.next_bits(31)
+            value = bits % bound
+            if bits - value + (bound - 1) >= 0:
+                return value
 
 
 @dataclass
@@ -279,6 +358,7 @@ def _break_cycles_greedy(
     next_right = -1
     next_left = 1
     unprocessed = num_nodes
+    rng = _JavaRandom(_ELK_DEFAULT_RANDOM_SEED)
 
     def remove_node(node: int, mark: int) -> None:
         """Mark one node and update unprocessed neighbor degrees.
@@ -326,12 +406,8 @@ def _break_cycles_greedy(
         if unprocessed > 0:
             candidates = [node for node in range(num_nodes) if marks[node] == 0]
             max_outflow = max(outdegree[node] - indegree[node] for node in candidates)
-            # ELK's default greedy breaker samples ties from a seeded RNG.  The
-            # model-order choice is deterministic and matches the documented
-            # model-order variant without introducing runtime randomness.
-            node = min(
-                node for node in candidates if outdegree[node] - indegree[node] == max_outflow
-            )
+            tied = [node for node in candidates if outdegree[node] - indegree[node] == max_outflow]
+            node = tied[rng.next_int(len(tied))]
             remove_node(node, next_left)
             next_left += 1
             unprocessed -= 1
@@ -377,6 +453,131 @@ def _longest_path_layers(num_nodes: int, edges: Sequence[Tuple[int, int]]) -> Li
             if indegree[target] == 0:
                 queue.append(target)
     return layers
+
+
+def _weak_components(num_nodes: int, edges: Sequence[Tuple[int, int]]) -> List[List[int]]:
+    """Return weakly connected components in first-node order.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    edges : sequence[tuple[int, int]]
+        Directed edge pairs, treated as undirected for component discovery.
+
+    Returns
+    -------
+    list[list[int]]
+        Components ordered by their smallest model-order node.
+    """
+    parent = list(range(num_nodes))
+
+    def find(node: int) -> int:
+        """Return the union-find root for one node.
+
+        Parameters
+        ----------
+        node : int
+            Node id.
+
+        Returns
+        -------
+        int
+            Root representative.
+        """
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: int, right: int) -> None:
+        """Merge two component sets.
+
+        Parameters
+        ----------
+        left : int
+            First node id.
+        right : int
+            Second node id.
+
+        Returns
+        -------
+        None
+            ``parent`` is mutated in place.
+        """
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for source, target in edges:
+        union(source, target)
+    groups: Dict[int, List[int]] = {}
+    for node in range(num_nodes):
+        groups.setdefault(find(node), []).append(node)
+    return sorted(groups.values(), key=lambda component: component[0])
+
+
+def _component_network_simplex_layers(
+    component: Sequence[int],
+    edges: Sequence[Tuple[int, int]],
+) -> Dict[int, int]:
+    """Assign ELK network-simplex layers inside one non-isolate component.
+
+    Parameters
+    ----------
+    component : sequence[int]
+        Original node ids in one weak component.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+
+    Returns
+    -------
+    dict[int, int]
+        Original node id to zero-based component-local layer.
+    """
+    local_by_node = {node: index for index, node in enumerate(component)}
+    rank_edges = [
+        (local_by_node[source], local_by_node[target], 1, 1)
+        for source, target in edges
+        if source in local_by_node and target in local_by_node
+    ]
+    if not rank_edges:
+        return {node: 0 for node in component}
+    ranks = _dagre_network_simplex_ranks(list(range(len(component))), rank_edges)
+    minimum = min(ranks.values())
+    return {node: int(ranks[local_by_node[node]] - minimum) for node in component}
+
+
+def _network_simplex_layers(num_nodes: int, edges: Sequence[Tuple[int, int]]) -> List[int]:
+    """Assign ELK-style layer indices with component packing bands.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    edges : sequence[tuple[int, int]]
+        Active acyclic graph edges.
+
+    Returns
+    -------
+    list[int]
+        Layer index per node, including disconnected-component y-band offsets.
+    """
+    components = _weak_components(num_nodes, edges)
+    incident_nodes = {node for edge in edges for node in edge}
+    nontrivial = [
+        component for component in components if any(node in incident_nodes for node in component)
+    ]
+    has_isolate = len(nontrivial) < len(components)
+    assignments = [0] * num_nodes
+    cursor = 1 if has_isolate and len(nontrivial) == 1 else 0
+    for component in nontrivial:
+        local_layers = _component_network_simplex_layers(component, edges)
+        for node in component:
+            assignments[node] = local_layers[node] + cursor
+        cursor += max(local_layers.values(), default=0) + 1
+    return assignments
 
 
 def _layers_from_assignments(assignments: Sequence[int]) -> List[List[int]]:
@@ -866,7 +1067,10 @@ class ElkAssignLayers(Op):
         """
         del ctx
         graph = state.extras[ELK_GRAPH_KEY]
-        assignments = _longest_path_layers(problem.num_nodes, graph.active_edges)
+        if graph.layering_strategy == "longest_path":
+            assignments = _longest_path_layers(problem.num_nodes, graph.active_edges)
+        else:
+            assignments = _network_simplex_layers(problem.num_nodes, graph.active_edges)
         state.extras[ELK_LAYERS_KEY] = _layers_from_assignments(assignments)
         return state
 
