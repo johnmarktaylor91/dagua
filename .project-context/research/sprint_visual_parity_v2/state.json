@@ -1,0 +1,13 @@
+{
+  "active_knob": null,
+  "audit_due_after": null,
+  "consecutive_no_improve": {},
+  "in_flight": null,
+  "max_rounds": 60,
+  "next_action_if_dark": "initialize S0 baseline before dispatching round work",
+  "phase": "S0",
+  "round": null,
+  "run": "visual_parity_v2",
+  "stop_criteria_ref": "RUNBOOK.md#stop-criteria",
+  "tripwires_last_pass": null
+}
