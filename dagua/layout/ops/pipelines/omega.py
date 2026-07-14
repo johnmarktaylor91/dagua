@@ -27,6 +27,7 @@ _DEFAULT_SHIFT = 1.0e-3
 _DEFAULT_UNIT_EDGE_LENGTH = 1.0
 _DEFAULT_SGD_ITERATIONS = 100
 _DEFAULT_SGD_EPS = 0.1
+_DEFAULT_EIGENVALUE_TOLERANCE = 1.0e-4
 _U32_MASK = 0xFFFFFFFF
 _U64_MASK = 0xFFFFFFFFFFFFFFFF
 _CHACHA_CONSTANTS = (0x61707865, 0x3320646E, 0x79622D32, 0x6B206574)
@@ -53,6 +54,21 @@ class _OmegaRng(Protocol):
         -------
         int
             Sampled integer.
+        """
+        ...
+
+    def gen_index(self, upper: int) -> int:
+        """Sample a slice index like ``rand::seq::gen_index``.
+
+        Parameters
+        ----------
+        upper : int
+            Exclusive upper bound.
+
+        Returns
+        -------
+        int
+            Sampled index.
         """
         ...
 
@@ -341,6 +357,48 @@ class _RustStdRng:
             if low <= zone:
                 return int(high)
 
+    def gen_range_u32(self, upper: int) -> int:
+        """Sample uniformly from ``0u32..upper`` using rand 0.8 arithmetic.
+
+        Parameters
+        ----------
+        upper : int
+            Exclusive upper bound, constrained to ``u32``.
+
+        Returns
+        -------
+        int
+            Sampled integer.
+        """
+        if upper <= 0 or upper > _U32_MASK:
+            raise ValueError("upper must be in 1..=u32::MAX.")
+        leading_zeros = 32 - int(upper).bit_length()
+        zone = (((int(upper) << leading_zeros) & _U32_MASK) - 1) & _U32_MASK
+        while True:
+            value = self.next_u32()
+            product = value * int(upper)
+            high = (product >> 32) & _U32_MASK
+            low = product & _U32_MASK
+            if low <= zone:
+                return int(high)
+
+    def gen_index(self, upper: int) -> int:
+        """Sample a slice index like Rust rand's private ``gen_index`` helper.
+
+        Parameters
+        ----------
+        upper : int
+            Exclusive upper bound.
+
+        Returns
+        -------
+        int
+            Sampled index.
+        """
+        if upper <= _U32_MASK:
+            return self.gen_range_u32(upper)
+        return self.gen_range_usize(upper)
+
     def shuffle(self, values: np.ndarray) -> None:
         """Shuffle values like Rust ``SliceRandom::shuffle``.
 
@@ -355,7 +413,7 @@ class _RustStdRng:
             ``values`` is shuffled in place.
         """
         for index in range(len(values) - 1, 0, -1):
-            swap_index = self.gen_range_usize(index + 1)
+            swap_index = self.gen_index(index + 1)
             values[index], values[swap_index] = values[swap_index], values[index]
 
 
@@ -386,6 +444,21 @@ class _NumpyOmegaRng:
             Sampled integer.
         """
         return int(self._rng.integers(0, upper))
+
+    def gen_index(self, upper: int) -> int:
+        """Sample a shuffle index.
+
+        Parameters
+        ----------
+        upper : int
+            Exclusive upper bound.
+
+        Returns
+        -------
+        int
+            Sampled index.
+        """
+        return self.gen_range_usize(upper)
 
     def shuffle(self, values: np.ndarray) -> None:
         """Shuffle values with NumPy.
@@ -609,6 +682,7 @@ def _solve_with_conjugate_gradient(
     row_entries: List[List[Tuple[int, np.float32]]],
     diagonal: np.ndarray,
     rhs: np.ndarray,
+    initial_solution: np.ndarray,
     cg_max_iterations: int,
     cg_tolerance: float,
 ) -> np.ndarray:
@@ -624,6 +698,9 @@ def _solve_with_conjugate_gradient(
         IC diagonal vector with shape ``[N]``.
     rhs : numpy.ndarray
         Right-hand side vector with shape ``[N]``.
+    initial_solution : numpy.ndarray
+        Mutable CG initial guess with shape ``[N]``. Rust RDMDS reuses this
+        vector across inverse-iteration solves instead of zeroing each system.
     cg_max_iterations : int
         Maximum CG iterations.
     cg_tolerance : float
@@ -634,7 +711,7 @@ def _solve_with_conjugate_gradient(
     numpy.ndarray
         Approximate solution vector with shape ``[N]``.
     """
-    solution = np.zeros_like(rhs, dtype=np.float32)
+    solution = initial_solution.astype(np.float32, copy=True)
     residual = np.float32(rhs - matrix @ solution)
     z_value = _apply_ic_preconditioner(row_entries, diagonal, residual)
     direction = z_value.copy()
@@ -732,7 +809,8 @@ def _rdmds_embedding_iterative(
     all_vectors = np.zeros((num_nodes, rank + 1), dtype=np.float32)
     all_vectors[:, 0] = np.float32(1.0 / math.sqrt(float(num_nodes)))
     all_values = np.zeros(rank + 1, dtype=np.float32)
-    tolerance = np.float32(1.0e-4)
+    y_value = np.zeros(num_nodes, dtype=np.float32)
+    tolerance = np.float32(_DEFAULT_EIGENVALUE_TOLERANCE)
     for eigen_index in range(1, rank + 1):
         x_iter = np.array(
             [rng.gen_range_f32(-1.0, 1.0) for _ in range(num_nodes)],
@@ -746,6 +824,7 @@ def _rdmds_embedding_iterative(
                 row_entries,
                 diagonal,
                 x_iter,
+                y_value,
                 cg_max_iterations=100,
                 cg_tolerance=1.0e-4,
             )
@@ -834,8 +913,9 @@ def _embedding_distance(embedding: np.ndarray, i: int, j: int, min_dist: float) 
     float
         Euclidean distance clamped to ``min_dist``.
     """
-    distance = float(np.linalg.norm(embedding[i] - embedding[j]))
-    return max(distance, float(min_dist))
+    delta = np.float32(embedding[i] - embedding[j])
+    distance = np.sqrt(np.float32(np.dot(delta, delta)))
+    return float(np.maximum(distance, np.float32(min_dist)))
 
 
 def _build_pairs(
@@ -872,8 +952,9 @@ def _build_pairs(
         if key in used:
             continue
         used.add(key)
-        distance = _embedding_distance(embedding, u, v, config.min_dist)
-        pairs.append(_OmegaPair(u, v, distance, 1.0 / (distance * distance)))
+        distance = np.float32(_embedding_distance(embedding, u, v, config.min_dist))
+        weight = np.float32(np.float32(1.0) / np.float32(distance * distance))
+        pairs.append(_OmegaPair(u, v, float(distance), float(weight)))
 
     for i in range(num_nodes):
         for _ in range(max(0, int(config.k))):
@@ -884,8 +965,9 @@ def _build_pairs(
             if key in used:
                 continue
             used.add(key)
-            distance = _embedding_distance(embedding, i, j, config.min_dist)
-            pairs.append(_OmegaPair(i, j, distance, 1.0 / (distance * distance)))
+            distance = np.float32(_embedding_distance(embedding, i, j, config.min_dist))
+            weight = np.float32(np.float32(1.0) / np.float32(distance * distance))
+            pairs.append(_OmegaPair(i, j, float(distance), float(weight)))
     return pairs
 
 
@@ -907,7 +989,9 @@ def _scheduler_bounds(pairs: List[_OmegaPair], epsilon: float) -> Tuple[float, f
     weights = [pair.weight for pair in pairs if pair.weight > 0.0]
     if not weights:
         return 0.0, 0.0
-    return float(epsilon) / max(weights), 1.0 / min(weights)
+    eta_min = np.float32(np.float32(epsilon) / np.float32(max(weights)))
+    eta_max = np.float32(np.float32(1.0) / np.float32(min(weights)))
+    return float(eta_min), float(eta_max)
 
 
 def _run_sparse_sgd(
@@ -941,26 +1025,31 @@ def _run_sparse_sgd(
     eta_min, eta_max = _scheduler_bounds(pairs, config.sgd_eps)
     if eta_max <= 0.0:
         return pos
-    decay = 0.0
+    decay = np.float32(0.0)
     if config.sgd_iterations > 1 and eta_min > 0.0:
-        decay = math.log(eta_max / eta_min) / float(config.sgd_iterations - 1)
+        decay = np.float32(
+            np.log(np.float32(eta_max) / np.float32(eta_min))
+            / np.float32(config.sgd_iterations - 1)
+        )
 
     sampler: _OmegaRng = _NumpyOmegaRng(rng) if isinstance(rng, np.random.Generator) else rng
     order = np.arange(len(pairs), dtype=np.int64)
     for step in range(config.sgd_iterations):
-        eta = eta_max * math.exp(-decay * float(step))
+        eta = np.float32(np.float32(eta_max) * np.exp(np.float32(-decay * np.float32(step))))
         sampler.shuffle(order)
         for pair_idx in order.tolist():
             pair = pairs[pair_idx]
-            delta = pos[pair.i] - pos[pair.j]
-            norm = float(np.linalg.norm(delta))
-            if norm <= 0.0:
+            delta = np.float32(pos[pair.i] - pos[pair.j])
+            norm = np.sqrt(np.float32(np.dot(delta, delta)))
+            if norm <= np.float32(0.0):
                 continue
-            mu = min(eta * pair.weight, 1.0)
-            ratio = 0.5 * (norm - pair.distance) / norm
-            move = delta * ratio * mu
-            pos[pair.i] -= move
-            pos[pair.j] += move
+            mu = np.minimum(np.float32(eta * np.float32(pair.weight)), np.float32(1.0))
+            ratio = np.float32(
+                np.float32(0.5) * np.float32(norm - np.float32(pair.distance)) / norm
+            )
+            move = np.float32(delta * ratio * mu)
+            pos[pair.i] = np.float32(pos[pair.i] - move)
+            pos[pair.j] = np.float32(pos[pair.j] + move)
     return pos
 
 
@@ -977,13 +1066,13 @@ def _initial_egraph_positions(num_nodes: int) -> np.ndarray:
     numpy.ndarray
         Initial position array with shape ``[N, 2]``.
     """
-    positions = np.zeros((num_nodes, 2), dtype=np.float64)
-    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+    positions = np.zeros((num_nodes, 2), dtype=np.float32)
+    golden_angle = np.float32(np.pi) * (np.float32(3.0) - np.sqrt(np.float32(5.0)))
     for index in range(num_nodes):
-        radius = 10.0 * math.sqrt(float(index))
-        theta = golden_angle * float(index)
-        positions[index, 0] = radius * math.cos(theta)
-        positions[index, 1] = radius * math.sin(theta)
+        radius = np.float32(10.0) * np.sqrt(np.float32(index))
+        theta = np.float32(golden_angle * np.float32(index))
+        positions[index, 0] = np.float32(radius * np.cos(theta))
+        positions[index, 1] = np.float32(radius * np.sin(theta))
     return positions
 
 
