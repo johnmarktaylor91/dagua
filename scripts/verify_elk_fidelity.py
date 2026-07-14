@@ -18,7 +18,14 @@ sys.path.insert(0, str(ROOT))
 from dagua.eval.competitors.elk_competitor import ElkLayered  # noqa: E402
 from dagua.eval.equivalence_metrics import anisotropic_procrustes, procrustes_rmsd  # noqa: E402
 from dagua.graph import DaguaGraph  # noqa: E402
-from dagua.layout.ops.pipelines.elk import layout_elk_pipeline  # noqa: E402
+from dagua.layout.ops.elk import ELK_LAYERS_KEY, ELK_ORDER_KEY  # noqa: E402
+from dagua.layout.ops.pipelines.elk import build_elk_pipeline  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 DEFAULT_CACHE = ROOT / "tests" / "fixtures" / "elk_reference_layouts.json"
 DEFAULT_REPORT = ROOT / "docs" / "algorithms" / "elk_fidelity.md"
@@ -250,11 +257,90 @@ def _first_divergent_phase(row: Mapping[str, Any]) -> Optional[str]:
     """
     if row["classification"] == "bit-exact":
         return None
+    if row["layer_index_match"] is False:
+        return "cycle breaking / layer assignment: first Y-band mismatch"
+    if row["ordering_match"] is False:
+        return "crossing minimization: within-layer order mismatch"
     if row["name"] in {"single_node", "small_chain"}:
         return "coordinate finalization: public adapter float32/top-left rounding"
     if row["name"].startswith("cycle"):
         return "cycle breaking: ELK GREEDY tie semantics not fully ported"
-    return "crossing minimization / node placement: ELK layer-sweep and BK tie semantics"
+    return "node placement: Brandes-Koepf balancing/spacing mismatch"
+
+
+def _reference_layer_indices(reference: torch.Tensor) -> List[int]:
+    """Derive layer indices from cached ELK top-left y coordinates.
+
+    Parameters
+    ----------
+    reference : torch.Tensor
+        Cached ELK positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    list[int]
+        Zero-based y-band index per node.
+    """
+    y_values = [round(float(value), 6) for value in reference[:, 1].tolist()]
+    layer_by_y = {value: index for index, value in enumerate(sorted(set(y_values)))}
+    return [layer_by_y[value] for value in y_values]
+
+
+def _reference_order(reference: torch.Tensor) -> Dict[int, int]:
+    """Derive within-layer order from cached ELK top-left coordinates.
+
+    Parameters
+    ----------
+    reference : torch.Tensor
+        Cached ELK positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    dict[int, int]
+        Node id to zero-based order within its y band.
+    """
+    rows: Dict[float, List[Tuple[float, int]]] = {}
+    for node, (x_coord, y_coord) in enumerate(reference.tolist()):
+        rows.setdefault(round(float(y_coord), 6), []).append((float(x_coord), node))
+    order: Dict[int, int] = {}
+    for y_coord in sorted(rows):
+        for index, (_, node) in enumerate(sorted(rows[y_coord])):
+            order[node] = index
+    return order
+
+
+def _pipeline_stage_metadata(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+) -> Tuple[List[int], Dict[int, int], torch.Tensor]:
+    """Run the native pipeline and return stage metadata plus positions.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed graph edges with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[list[int], dict[int, int], torch.Tensor]
+        Layer index per node, within-layer order map, and final positions.
+    """
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=num_nodes, node_sizes=node_sizes)
+    state = build_elk_pipeline().apply(
+        problem,
+        SolveState(),
+        RuntimeContext(plan=ExecutionPlan(device="cpu")),
+    )
+    layer_indices = [0] * num_nodes
+    for layer_index, layer in enumerate(state.extras[ELK_LAYERS_KEY]):
+        for node in layer:
+            layer_indices[int(node)] = layer_index
+    return layer_indices, dict(state.extras[ELK_ORDER_KEY]), state.pos
 
 
 def _compare_cache(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -274,19 +360,27 @@ def _compare_cache(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     for graph in payload["graphs"]:
         node_sizes = torch.tensor(graph["node_sizes"], dtype=torch.float64)
         reference = torch.tensor(graph["reference_positions"], dtype=torch.float64)
-        positions = layout_elk_pipeline(
-            edge_index=_edge_index(graph["edges"]),
+        edge_index = _edge_index(graph["edges"])
+        native_layers, native_order, native_positions = _pipeline_stage_metadata(
+            edge_index=edge_index,
             num_nodes=int(graph["num_nodes"]),
             node_sizes=node_sizes,
-            node_node_spacing=40.0,
-            between_layers_spacing=60.0,
-        ).to(dtype=torch.float32)
+        )
+        positions = native_positions.to(dtype=torch.float32)
+        reference_layers = _reference_layer_indices(reference)
+        reference_order = _reference_order(reference)
+        layer_index_match = native_layers == reference_layers
+        ordering_match = layer_index_match and all(
+            native_order.get(node) == reference_order[node] for node in reference_order
+        )
         residual = procrustes_rmsd(positions.numpy(), reference.numpy())
         anisotropic = anisotropic_procrustes(positions.numpy(), reference.numpy())
         row = {
             "name": graph["name"],
             "num_nodes": graph["num_nodes"],
             "num_edges": len(graph["edges"]),
+            "layer_index_match": layer_index_match,
+            "ordering_match": ordering_match,
             "procrustes_rmsd": residual,
             "anisotropic_rmsd": anisotropic["anisotropic_rmsd"],
             "max_abs_coordinate_diff": float((positions - reference).abs().max().item()),
@@ -327,14 +421,18 @@ def _write_report(path: Path, payload: Dict[str, Any], rows: Sequence[Dict[str, 
         "",
         f"Summary: {bit_exact}/{len(rows)} bit-exact, {close} close, {divergent} divergent.",
         "",
-        "| graph | N | E | d_R | anisotropic | max abs diff | class | first divergent phase |",
-        "|---|---:|---:|---:|---:|---:|---|---|",
+        "| graph | N | E | layer | order | d_R | anisotropic | max abs diff | "
+        "class | first divergent phase |",
+        "|---|---:|---:|---|---|---:|---:|---:|---|---|",
     ]
     for row in rows:
         lines.append(
-            "| {name} | {num_nodes} | {num_edges} | {procrustes_rmsd:.6g} | "
+            "| {name} | {num_nodes} | {num_edges} | {layer_match} | {order_match} | "
+            "{procrustes_rmsd:.6g} | "
             "{anisotropic_rmsd:.6g} | {max_abs_coordinate_diff:.6g} | "
             "{classification} | {phase} |".format(
+                layer_match="Y" if row["layer_index_match"] else "N",
+                order_match="Y" if row["ordering_match"] else "N",
                 phase=row["first_divergent_phase"] or "",
                 **row,
             )
@@ -381,7 +479,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     divergent = len(rows) - bit_exact - close
     for row in rows:
         print(
-            f"{row['name']}: d_R={row['procrustes_rmsd']:.6g} "
+            f"{row['name']}: layer={'Y' if row['layer_index_match'] else 'N'} "
+            f"order={'Y' if row['ordering_match'] else 'N'} "
+            f"d_R={row['procrustes_rmsd']:.6g} "
             f"anisotropic={row['anisotropic_rmsd']:.6g} class={row['classification']}"
         )
     print(f"summary: {bit_exact}/{len(rows)} bit-exact, {close} close, {divergent} divergent")
