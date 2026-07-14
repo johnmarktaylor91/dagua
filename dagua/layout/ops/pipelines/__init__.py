@@ -12,6 +12,7 @@ PipelineSpec = tuple[str, str]
 
 PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "arf": ("dagua.layout.ops.pipelines.arf", "layout_arf_pipeline"),
+    "arc": ("dagua.layout.ops.pipelines.arc", "layout_arc_pipeline"),
     "bfs": ("dagua.layout.ops.pipelines.bfs", "layout_bfs_pipeline"),
     "bipartite": (
         "dagua.layout.ops.pipelines.bipartite",
@@ -22,7 +23,9 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "layout_classical_mds_pipeline",
     ),
     "circular": ("dagua.layout.ops.pipelines.circular", "layout_circular_pipeline"),
+    "circlepack": ("dagua.layout.ops.pipelines.circlepack", "layout_circlepack_pipeline"),
     "circo": ("dagua.layout.ops.pipelines.circo", "layout_circo_pipeline"),
+    "concentric": ("dagua.layout.ops.pipelines.concentric", "layout_concentric_pipeline"),
     "davidson_harel": (
         "dagua.layout.ops.pipelines.davidson_harel",
         "layout_davidson_harel_pipeline",
@@ -114,6 +117,8 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "neato": ("dagua.layout.ops.pipelines.neato", "layout_neato_pipeline"),
     "neulay": ("dagua.layout.ops.pipelines.neulay", "layout_neulay_pipeline"),
+    "osage": ("dagua.layout.ops.pipelines.osage", "layout_osage_pipeline"),
+    "planar": ("dagua.layout.ops.pipelines.planar", "layout_planar_pipeline"),
     "pivot_mds": (
         "dagua.layout.ops.pipelines.pivot_mds",
         "layout_pivot_mds_pipeline",
@@ -130,6 +135,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "shell": ("dagua.layout.ops.pipelines.shell", "layout_shell_pipeline"),
     "spectral": ("dagua.layout.ops.pipelines.spectral", "layout_spectral_pipeline"),
     "spiral": ("dagua.layout.ops.pipelines.spiral", "layout_spiral_pipeline"),
+    "star": ("dagua.layout.ops.pipelines.star", "layout_star_pipeline"),
     "stress_majorization": (
         "dagua.layout.ops.pipelines.stress_majorization",
         "layout_stress_majorization_pipeline",
