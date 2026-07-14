@@ -36,6 +36,30 @@ _MT19937_MATRIX_A = 0x9908B0DF
 _MT19937_UPPER_MASK = 0x80000000
 _MT19937_LOWER_MASK = 0x7FFFFFFF
 _UINT32_MAX = 0xFFFFFFFF
+_LIBSTDCXX_REHASH_PRIMES = [
+    13,
+    29,
+    59,
+    127,
+    257,
+    541,
+    1109,
+    2357,
+    5087,
+    10273,
+    20753,
+    42043,
+    85229,
+    172933,
+    351061,
+    712697,
+    1447153,
+    2938679,
+    5967347,
+    12117689,
+    24607243,
+    49969847,
+]
 
 
 @dataclass(frozen=True)
@@ -277,7 +301,94 @@ def _weighted_adjacency(
         weight = float(weights_cpu[edge_id].item())
         rows[source][target] = rows[source].get(target, 0.0) + weight
         rows[target][source] = rows[target].get(source, 0.0) + weight
-    return [sorted(row.items()) for row in rows]
+    if edge_weights is None:
+        return [sorted(row.items()) for row in rows]
+    return [list(row.items()) for row in rows]
+
+
+def _boundary_pair_hash(source: int, target: int, partition_count: int) -> int:
+    """Return KaDraw's undirected quotient-edge hash.
+
+    Parameters
+    ----------
+    source : int
+        First quotient block.
+    target : int
+        Second quotient block.
+    partition_count : int
+        Number of quotient blocks.
+
+    Returns
+    -------
+    int
+        Hash value used by ``hash_boundary_pair`` in KaDraw.
+    """
+    lower = min(source, target)
+    upper = max(source, target)
+    return lower * partition_count + upper
+
+
+def _next_libstdcxx_bucket_count(required_size: int) -> int:
+    """Return libstdc++'s next rehash bucket count for small quotient maps.
+
+    Parameters
+    ----------
+    required_size : int
+        Number of elements after insertion.
+
+    Returns
+    -------
+    int
+        Prime bucket count used by libstdc++'s default rehash policy.
+    """
+    for prime in _LIBSTDCXX_REHASH_PRIMES:
+        if prime >= required_size:
+            return prime
+    return max(required_size * 2 + 1, _LIBSTDCXX_REHASH_PRIMES[-1])
+
+
+def _libstdcxx_unordered_boundary_order(
+    inserted_pairs: list[tuple[int, int]],
+    partition_count: int,
+) -> list[tuple[int, int]]:
+    """Replay KaDraw's ``std::unordered_map`` quotient edge iteration order.
+
+    Parameters
+    ----------
+    inserted_pairs : list[tuple[int, int]]
+        Directed cut-edge block pairs in the order seen by ``complete_boundary``.
+    partition_count : int
+        Number of quotient blocks.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Unique undirected pairs in libstdc++ iteration order.
+    """
+    order: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    bucket_count = 0
+
+    for source, target in inserted_pairs:
+        pair = (source, target) if source < target else (target, source)
+        if pair in seen:
+            continue
+        if bucket_count == 0 or len(seen) + 1 > bucket_count:
+            bucket_count = _next_libstdcxx_bucket_count(len(seen) + 1)
+            order.reverse()
+
+        bucket = _boundary_pair_hash(pair[0], pair[1], partition_count) % bucket_count
+        insert_at = 0
+        for index, existing in enumerate(order):
+            existing_bucket = (
+                _boundary_pair_hash(existing[0], existing[1], partition_count) % bucket_count
+            )
+            if existing_bucket == bucket:
+                insert_at = index
+                break
+        order.insert(insert_at, pair)
+        seen.add(pair)
+    return order
 
 
 def _kadraw_label_propagation_mapping(
@@ -369,6 +480,7 @@ def _kadraw_contract(
     """
     coarse_weights = [0] * coarse_num_nodes
     cut_weights: dict[tuple[int, int], float] = {}
+    inserted_pairs: list[tuple[int, int]] = []
     for source, neighbors in enumerate(adjacency):
         source_block = fine_to_coarse[source]
         coarse_weights[source_block] += node_weights[source]
@@ -376,6 +488,7 @@ def _kadraw_contract(
             target_block = fine_to_coarse[target]
             if source_block == target_block:
                 continue
+            inserted_pairs.append((source_block, target_block))
             key = (
                 (source_block, target_block)
                 if source_block < target_block
@@ -383,7 +496,7 @@ def _kadraw_contract(
             )
             cut_weights[key] = cut_weights.get(key, 0.0) + weight
 
-    pairs = sorted(cut_weights)
+    pairs = _libstdcxx_unordered_boundary_order(inserted_pairs, coarse_num_nodes)
     if not pairs:
         return (
             torch.empty((2, 0), dtype=torch.long),

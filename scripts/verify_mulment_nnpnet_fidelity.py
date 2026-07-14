@@ -403,9 +403,9 @@ def verify() -> list[FidelityResult]:
                 "KaDraw rebuilt with --seed wired to config.seed and ran single-thread."
             ),
             residual_cause=(
-                "dagua/layout/ops/pipelines/mulment.py:446 "
-                "_build_kadraw_hierarchy calls _kadraw_label_propagation_mapping; "
-                "the first non-identical stage is label-propagation coarsening."
+                "dagua/layout/ops/pipelines/mulment.py:436 "
+                "_kadraw_label_propagation_mapping still has a later tie-break stream "
+                "drift after the level-2 quotient-order divergence was closed."
             ),
         ),
         FidelityResult(
@@ -416,9 +416,9 @@ def verify() -> list[FidelityResult]:
                 "NNP-NET rebuilt with --seed wired to srand, PivotMDS, and TensorFlow/Keras."
             ),
             residual_cause=(
-                "dagua/layout/ops/pipelines/nnpnet.py intentionally uses a deterministic ridge "
-                "projection at line 324 where the reference trains a Keras MLP in "
-                "NNP-NET/LayoutMethods/NNPNET.cpp::trainPlusInfer."
+                "dagua/layout/ops/pipelines/nnpnet.py:459 and :478 now run PMDS-style "
+                "features plus the Keras MLP; the remaining gap is PMDS/teacher alignment "
+                "before the deterministic Keras forward path."
             ),
         ),
     ]
