@@ -16,9 +16,12 @@ from dagua.eval.competitors.fa2_competitor import FA2Reference
 from dagua.eval.competitors.networkx_competitor import NetworkXSpectral
 from dagua.eval.competitors.ogdf_competitor import (
     OGDFFMMM,
+    OGDFBalloon,
     OGDFDavidsonHarel,
+    OGDFFpp,
     OGDFGem,
     OGDFPivotMDS,
+    OGDFSchnyder,
     OGDFStress,
     OGDFSugiyama,
 )
@@ -69,6 +72,9 @@ def test_fa2_and_ogdf_competitors_registered() -> None:
         "ogdf_pivot_mds",
         "ogdf_sugiyama",
         "ogdf_davidson_harel",
+        "ogdf_balloon",
+        "ogdf_fpp",
+        "ogdf_schnyder",
     } <= names
 
 
@@ -217,12 +223,40 @@ def test_ogdf_adapters_forward_seed_to_runner(monkeypatch: pytest.MonkeyPatch) -
         OGDFPivotMDS(),
         OGDFDavidsonHarel(),
         OGDFSugiyama(),
+        OGDFBalloon(),
+        OGDFFpp(),
+        OGDFSchnyder(),
     ]
     for adapter in adapters:
         result = adapter.layout(graph, timeout=1.0, seed=123)
         assert result.error is None
 
     assert observed == [(adapter.algorithm, 123) for adapter in adapters]
+
+
+def test_ogdf_planar_adapters_reject_non_planar_before_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FPP and Schnyder should avoid the runner hang path for non-planar graphs."""
+    graph = DaguaGraph.from_edge_list([(i, j) for i in range(5) for j in range(i + 1, 5)])
+
+    def fail_run_ogdf(
+        graph: DaguaGraph,
+        algorithm: str,
+        timeout: float,
+        seed: Optional[int] = None,
+        options: Optional[dict[str, Any]] = None,
+    ) -> torch.Tensor:
+        """Fail if the non-planar gate lets execution reach the runner."""
+        del graph, algorithm, timeout, seed, options
+        raise AssertionError("runner should not be called for non-planar planar-layout inputs")
+
+    monkeypatch.setattr(ogdf_competitor, "_run_ogdf", fail_run_ogdf)
+
+    for adapter in (OGDFFpp(), OGDFSchnyder()):
+        result = adapter.layout(graph, timeout=1.0, seed=123)
+        assert result.pos is None
+        assert result.error == "requires planar graph"
 
 
 def test_networkx_available_check_returns_bool() -> None:
