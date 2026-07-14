@@ -33,6 +33,11 @@ import dagua
 from dagua import DaguaGraph, LayoutConfig
 from dagua.graphs import list_graphs, load
 from dagua.graphviz_utils import layout_with_graphviz
+from dagua.render.edges.arrowheads import (
+    ARROWHEAD_ALIASES,
+    ARROWHEAD_REGISTRY,
+    available_arrowheads,
+)
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle, get_theme
 
 WHITE = "#FFFFFF"
@@ -66,20 +71,234 @@ SUPPORTED_SHAPES: Tuple[str, ...] = (
     "cylinder",
     "trapezoid",
 )
-ARROW_TYPES: Tuple[str, ...] = (
-    "normal",
-    "vee",
-    "dot",
-    "diamond",
-    "tee",
+# Graphviz's own documented 42-shape arrowhead-modifier expansion (F2).
+# Sourced verbatim from graphviz's upstream doc generator
+# (doc/infosrc/arrowgen.tcl, `set arrows { ... }`), which produces exactly the
+# images shown on https://graphviz.org/doc/info/arrows.html. This is
+# graphviz's own 11-primitive grammar (box/crow/curve/diamond/dot/icurve/inv/
+# none/normal/tee/vee) combined with the o/l/r modifier grammar
+# (doc/infosrc/arrow_grammar: `aname = [modifiers] shape`); it is
+# independent of dagua's own 23-primitive ARROWHEAD_REGISTRY, which is a
+# superset that adds primitives graphviz does not define.
+GV_ARROW_MODIFIER_EXPANSIONS: Tuple[str, ...] = (
+    "box",
     "crow",
-    "circle",
-    "open",
+    "curve",
+    "diamond",
+    "dot",
+    "icurve",
+    "inv",
+    "lbox",
+    "lcrow",
+    "lcurve",
+    "ldiamond",
+    "licurve",
+    "linv",
+    "lnormal",
+    "ltee",
+    "lvee",
     "none",
+    "normal",
+    "obox",
+    "odiamond",
+    "odot",
+    "oinv",
+    "olbox",
+    "oldiamond",
+    "olinv",
+    "olnormal",
+    "onormal",
+    "orbox",
+    "ordiamond",
+    "orinv",
+    "ornormal",
+    "rbox",
+    "rcrow",
+    "rcurve",
+    "rdiamond",
+    "ricurve",
+    "rinv",
+    "rnormal",
+    "rtee",
+    "rvee",
+    "tee",
+    "vee",
 )
+assert len(GV_ARROW_MODIFIER_EXPANSIONS) == 42
+
+# A sampled set (>= 12) of 2-4 primitive compounds spanning dagua's own
+# ARROWHEAD_REGISTRY, each validated to parse via parse_arrowhead_spec.
+ARROWHEAD_COMPOUND_SAMPLES: Tuple[str, ...] = (
+    "invdot",
+    "odotinv",
+    "boxdiamond",
+    "odiamondbox",
+    "teevee",
+    "crowdot",
+    "lboxrdiamond",
+    "invodot",
+    "normalodot",
+    "diamondteevee",
+    "boxinvdot",
+    "veeodiamond",
+    "crownormaltee",
+    "odotinvbox",
+    "rdiamondlbox",
+    "boxinvdotvee",
+)
+assert len(ARROWHEAD_COMPOUND_SAMPLES) >= 12
+
+# Graphviz's authoritative 59-shape catalog (doc/infosrc/shapelist -- the
+# full source list used to generate shapes.html; polygon shapes + a few
+# special shapes such as point/plaintext). dagua's currently-supported
+# shapes map onto a subset of these names (see _DAGUA_SHAPE_TO_GRAPHVIZ);
+# the JMT-gate default cut line (FINAL_DESIGN.md section 13, item 2)
+# recommends implementing ~12-16 common gap shapes and waiving the
+# SynBio/exotic tier as out_of_scope. This module renders the gap and
+# waived shapes as PLACEHOLDER nodes (dagua-side falls back to "rect"); it
+# does not implement new shape drawing code -- that is separate follow-up
+# work, not part of Lane D's calibration-suite/atlas surgery.
+GV_SHAPE_CATALOG: Tuple[str, ...] = (
+    "box",
+    "polygon",
+    "ellipse",
+    "oval",
+    "circle",
+    "point",
+    "egg",
+    "triangle",
+    "plaintext",
+    "plain",
+    "diamond",
+    "trapezium",
+    "parallelogram",
+    "house",
+    "pentagon",
+    "hexagon",
+    "septagon",
+    "octagon",
+    "doublecircle",
+    "doubleoctagon",
+    "tripleoctagon",
+    "invtriangle",
+    "invtrapezium",
+    "invhouse",
+    "Mdiamond",
+    "Msquare",
+    "Mcircle",
+    "rect",
+    "rectangle",
+    "square",
+    "star",
+    "none",
+    "underline",
+    "cylinder",
+    "note",
+    "tab",
+    "folder",
+    "box3d",
+    "component",
+    "promoter",
+    "cds",
+    "terminator",
+    "utr",
+    "primersite",
+    "restrictionsite",
+    "fivepoverhang",
+    "threepoverhang",
+    "noverhang",
+    "assembly",
+    "signature",
+    "insulator",
+    "ribosite",
+    "rnastab",
+    "proteasesite",
+    "proteinstab",
+    "rpromoter",
+    "rarrow",
+    "larrow",
+    "lpromoter",
+)
+assert len(GV_SHAPE_CATALOG) == 59
+
+# dagua's currently-supported shapes, mapped to the graphviz name they are
+# considered a drop-in replacement for (introspected from
+# dagua/render/mpl.py's shape dispatch; kept here for the shape_atlas case
+# only -- not a behavioral change to dagua's shape rendering).
+DAGUA_SHAPE_TO_GRAPHVIZ: Dict[str, str] = {
+    "ellipse": "ellipse",
+    "circle": "circle",
+    "rect": "box",
+    "roundrect": "box",
+    "diamond": "diamond",
+    "triangle": "triangle",
+    "hexagon": "hexagon",
+    "parallelogram": "parallelogram",
+    "pentagon": "pentagon",
+    "octagon": "octagon",
+    "star": "star",
+    "cylinder": "cylinder",
+    "trapezoid": "trapezium",
+    "box3d": "box3d",
+    "double_circle": "doublecircle",
+}
+
+# JMT-gate recommended default cut line (FINAL_DESIGN.md section 13, item
+# 2): common shapes worth implementing next. "cylinder" and "box3d" are
+# already supported (see DAGUA_SHAPE_TO_GRAPHVIZ) so they are excluded here;
+# the remainder render as gap placeholders.
+GV_SHAPE_GAP_COMMON: Tuple[str, ...] = (
+    "house",
+    "invhouse",
+    "folder",
+    "tab",
+    "component",
+    "note",
+    "Msquare",
+    "Mdiamond",
+    "Mcircle",
+    "doubleoctagon",
+    "tripleoctagon",
+)
+
+# A representative SAMPLE of the SynBio/exotic tier recommended for
+# out_of_scope waiver. This is illustrative, not the authoritative waiver
+# list -- the exhaustive enumeration and waiver bookkeeping belongs to Lane
+# C's scripts.visual_parity.coverage + reference_specs/gv_attr_triage.json.
+GV_SHAPE_WAIVED_SAMPLE: Tuple[str, ...] = (
+    "promoter",
+    "cds",
+    "terminator",
+    "ribosite",
+    "proteasesite",
+    "rpromoter",
+    "rarrow",
+    "larrow",
+    "assembly",
+    "insulator",
+    "signature",
+    "invtrapezium",
+)
+
 DOT_ALLOWED_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:+"
 CLUSTER_NAME_SANITIZER = re.compile(r"[^0-9A-Za-z_]")
 SLUG_SANITIZER = re.compile(r"[^0-9A-Za-z]+")
+
+
+def _registry_arrow_types() -> Tuple[str, ...]:
+    """Return the registry-driven arrow type enumeration for showcase cases.
+
+    Replaces the previously hard-coded ``ARROW_TYPES`` tuple with a live
+    enumeration from ``dagua.render.edges.arrowheads.available_arrowheads``
+    (23 primitives + 4 aliases = 27 names).
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sorted arrowhead names, including aliases.
+    """
+
+    return tuple(available_arrowheads())
 
 
 @dataclass(frozen=True)
@@ -436,7 +655,7 @@ def _make_arrow_types() -> Tuple[DaguaGraph, str]:
     """
 
     graph = DaguaGraph(direction="TB")
-    for arrow in ARROW_TYPES:
+    for arrow in _registry_arrow_types():
         source = f"{arrow}_src"
         target = f"{arrow}_dst"
         graph.add_node(source, label=arrow)
@@ -544,6 +763,195 @@ def _make_cluster_showcase() -> Tuple[DaguaGraph, str]:
         graph.add_edge(source, target, style=EdgeStyle(width=1.0, opacity=0.8))
 
     return graph, "Cluster Showcase"
+
+
+def _arrowhead_atlas_categories() -> Dict[str, Tuple[str, ...]]:
+    """Return the four labeled arrowhead atlas categories (F2).
+
+    Returns
+    -------
+    dict[str, tuple[str, ...]]
+        Category name to ordered arrow-spec tuple: ``primitive`` (23 dagua
+        registry primitives), ``alias`` (4 dagua aliases), ``gv_modifier``
+        (42 graphviz-documented modifier expansions), and ``compound``
+        (>= 12 sampled 2-4 primitive compounds).
+    """
+
+    return {
+        "primitive": tuple(sorted(ARROWHEAD_REGISTRY.keys())),
+        "alias": tuple(sorted(ARROWHEAD_ALIASES.keys())),
+        "gv_modifier": GV_ARROW_MODIFIER_EXPANSIONS,
+        "compound": ARROWHEAD_COMPOUND_SAMPLES,
+    }
+
+
+def _make_arrowhead_atlas() -> Tuple[DaguaGraph, str]:
+    """Create the labeled arrowhead atlas: primitives, aliases, gv modifier
+    expansions, and sampled compounds (F2).
+
+    Each category is rendered as its own cluster so the four category labels
+    are visible on the composed comparison image. Every arrow spec is
+    rendered through dagua's real ``dagua.render()`` path (ARROWHEAD_REGISTRY
+    via ``build_arrowhead``), never a hand-rolled arrow drawer.
+
+    Returns
+    -------
+    tuple[DaguaGraph, str]
+        Graph and display title.
+    """
+
+    graph = DaguaGraph(direction="TB")
+    categories = _arrowhead_atlas_categories()
+    for category_name, specs in categories.items():
+        members: List[str] = []
+        for spec in specs:
+            source = f"{category_name}_{spec}_src"
+            target = f"{category_name}_{spec}_dst"
+            graph.add_node(source, label=spec)
+            graph.add_node(target, label="")
+            edge_style = EdgeStyle(
+                arrow=spec,
+                arrow_fill="hollow"
+                if spec.startswith("o") or spec in {"circle", "open"}
+                else "filled",
+                width=1.1,
+            )
+            _add_edge_with_graphviz_attrs(
+                graph,
+                source,
+                target,
+                style=edge_style,
+                graphviz_attrs={"arrowhead": spec, "penwidth": "1.10"},
+            )
+            members.extend([source, target])
+        graph.add_cluster(
+            _safe_cluster_id(category_name),
+            members,
+            label=f"{category_name} ({len(specs)})",
+        )
+    return graph, "Arrowhead Atlas"
+
+
+def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
+    """Create the labeled shape atlas: supported, gap, and waived-sample shapes.
+
+    Dagua-supported shapes render through dagua's real shape drawers. Gap
+    and waived shapes render as PLACEHOLDER nodes on the dagua side (a plain
+    "rect" fallback labeled with the missing shape name) while the graphviz
+    side renders the true reference shape, so the atlas documents coverage
+    without implementing new shape-drawing code (out of scope for this
+    surgery). See GV_SHAPE_GAP_COMMON / GV_SHAPE_WAIVED_SAMPLE for
+    provenance.
+
+    Returns
+    -------
+    tuple[DaguaGraph, str]
+        Graph and display title.
+    """
+
+    graph = DaguaGraph(direction="TB")
+    buckets: Tuple[Tuple[str, Tuple[str, ...], bool], ...] = (
+        ("supported", tuple(DAGUA_SHAPE_TO_GRAPHVIZ.keys()), True),
+        ("gap_common", GV_SHAPE_GAP_COMMON, False),
+        ("waived_sample", GV_SHAPE_WAIVED_SAMPLE, False),
+    )
+    for bucket_name, shape_names, is_supported in buckets:
+        members: List[str] = []
+        for shape_name in shape_names:
+            node_id = f"{bucket_name}_{shape_name}"
+            if is_supported:
+                dagua_shape = shape_name
+                label = shape_name
+                gv_attrs = _graphviz_shape_attrs(NodeStyle(shape=dagua_shape))
+                if dagua_shape == "double_circle":
+                    gv_attrs = {"shape": "doublecircle"}
+            else:
+                dagua_shape = "rect"
+                label = f"GAP: {shape_name}"
+                gv_attrs = {"shape": shape_name}
+            node_index = graph.add_node(node_id, label=label, style=NodeStyle(shape=dagua_shape))
+            _set_graphviz_node_attrs(graph, node_index, gv_attrs)
+            members.append(node_id)
+        graph.add_cluster(
+            _safe_cluster_id(bucket_name),
+            members,
+            label=f"{bucket_name} ({len(shape_names)})",
+        )
+    return graph, "Shape Atlas"
+
+
+def _make_spline_stress() -> Tuple[DaguaGraph, str]:
+    """Create a spline-stress scene: multi back-edge, flat-edge, self-loop.
+
+    Returns
+    -------
+    tuple[DaguaGraph, str]
+        Graph and display title.
+    """
+
+    graph = DaguaGraph(direction="TB")
+    chain = [f"stage_{index}" for index in range(5)]
+    for node_id in chain:
+        graph.add_node(node_id, label=node_id.replace("_", " "))
+    for index in range(len(chain) - 1):
+        graph.add_edge(chain[index], chain[index + 1])
+
+    # Multi back-edge: several edges pointing from later stages back to
+    # earlier ones (residual/skip-connection style routing stress).
+    graph.add_edge(chain[3], chain[0], style=EdgeStyle(style="dashed", color="#DC2626"))
+    graph.add_edge(chain[4], chain[1], style=EdgeStyle(style="dashed", color="#DC2626"))
+    graph.add_edge(chain[2], chain[0], style=EdgeStyle(style="dotted", color="#B91C1C"))
+
+    # Flat edge: same-rank connection (rank=same siblings under TB direction).
+    graph.add_node("flat_a", label="flat a")
+    graph.add_node("flat_b", label="flat b")
+    graph.add_edge("flat_a", "flat_b", style=EdgeStyle(width=1.4, color="#2563EB"))
+    graph.add_edge(chain[2], "flat_a")
+    graph.add_edge(chain[2], "flat_b")
+
+    # Self-loops on two different stages.
+    graph.add_edge(chain[1], chain[1], style=EdgeStyle(style="solid", arrow="normal"))
+    graph.add_edge(
+        chain[3], chain[3], style=EdgeStyle(style="dashed", arrow="vee", color="#059669")
+    )
+
+    return graph, "Spline Stress"
+
+
+def _make_cluster_nest_deep() -> Tuple[DaguaGraph, str]:
+    """Create a five-level deeply nested cluster scene.
+
+    Returns
+    -------
+    tuple[DaguaGraph, str]
+        Graph and display title.
+    """
+
+    graph = DaguaGraph(direction="TB")
+    depth = 5
+    level_nodes: List[List[str]] = []
+    for level in range(depth):
+        nodes = [f"L{level}_{index}" for index in range(2)]
+        for node_id in nodes:
+            graph.add_node(node_id, label=node_id)
+        level_nodes.append(nodes)
+    for level in range(depth - 1):
+        graph.add_edge(level_nodes[level][0], level_nodes[level + 1][0])
+        graph.add_edge(level_nodes[level][1], level_nodes[level + 1][1])
+        graph.add_edge(level_nodes[level][0], level_nodes[level + 1][1])
+
+    parent: Optional[str] = None
+    for level in range(depth):
+        cluster_name = f"cluster_level_{level}"
+        members: List[str] = [node for lvl in level_nodes[level:] for node in lvl]
+        graph.add_cluster(
+            cluster_name,
+            members,
+            label=f"Level {level}",
+            parent=parent,
+        )
+        parent = cluster_name
+    return graph, "Cluster Nest Deep"
 
 
 def _make_mixed_styles() -> Tuple[DaguaGraph, str]:
@@ -740,6 +1148,10 @@ def _custom_graph_cases() -> List[GraphCase]:
         _make_arrow_types,
         _make_fan_pattern,
         _make_cluster_showcase,
+        _make_arrowhead_atlas,
+        _make_shape_atlas,
+        _make_spline_stress,
+        _make_cluster_nest_deep,
         _make_mixed_styles,
         _make_tiny_graph,
         _make_dense_graph,
