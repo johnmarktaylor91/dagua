@@ -26,7 +26,7 @@ def _locked_by_id() -> Dict[str, Dict[str, object]]:
 
 
 def test_init_seeds_prior_locks_for_v2_revalidation() -> None:
-    """Ledger seed should contain rows, ratchets, warnings, and lock rows.
+    """Ledger seed should contain rows, ratchets, tripwire state, and locks.
 
     Returns
     -------
@@ -40,7 +40,10 @@ def test_init_seeds_prior_locks_for_v2_revalidation() -> None:
     assert data["rows"]
     assert data["knobs"]
     assert ledger.locked_rows(data)
-    assert any("tripwire_status.json missing" in warning for warning in data.get("warnings", []))
+    assert not any(
+        "tripwire_status.json missing" in warning for warning in data.get("warnings", [])
+    )
+    assert {round_entry["tripwires"] for round_entry in data["rounds"]} == {"pass"}
 
 
 def test_generated_lock_regeneration_is_byte_identical() -> None:

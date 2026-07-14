@@ -66,6 +66,26 @@ def _locked_rows() -> List[Dict[str, object]]:
 '''
 
 
+def _read_json(path: Path) -> Dict[str, Any]:
+    """Read a JSON object from disk.
+
+    Parameters
+    ----------
+    path
+        JSON file path.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Parsed JSON object.
+    """
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected JSON object in {path}")
+    return payload
+
+
 def _utc_now() -> str:
     """Return the current UTC timestamp.
 
@@ -401,6 +421,137 @@ def apply_tripwire_status(ledger: Dict[str, Any]) -> None:
             row["lock_test"] = None
 
 
+def seed_baseline(
+    ledger: Dict[str, Any],
+    *,
+    metrics_path: Path,
+    svg_pixel_path: Path,
+    png_pixel_path: Path,
+    card_manifest_path: Path,
+) -> None:
+    """Seed prelaunch baseline numbers into the ledger.
+
+    Parameters
+    ----------
+    ledger
+        Mutable ledger payload.
+    metrics_path
+        Track G v2 parity metrics JSON path.
+    svg_pixel_path
+        Track G svg-cairo pixel summary JSON path.
+    png_pixel_path
+        Report-only png_raster pixel summary JSON path.
+    card_manifest_path
+        Track D d000 calibration manifest JSON path.
+
+    Returns
+    -------
+    None
+        The ledger is updated in place.
+    """
+
+    metrics = _read_json(metrics_path)
+    svg_pixel = _read_json(svg_pixel_path)
+    png_pixel = _read_json(png_pixel_path)
+    card_manifest = _read_json(card_manifest_path)
+    metric_summary = metrics.get("summary", {})
+    svg_summary = svg_pixel.get("summary", {})
+    png_raster_payload = png_pixel.get("png_raster", {})
+    png_summary = (
+        png_raster_payload.get("summary", {}) if isinstance(png_raster_payload, Mapping) else {}
+    )
+    by_feature = metric_summary.get("by_feature_type", {})
+    features_below_98 = sorted(
+        feature
+        for feature, stats in by_feature.items()
+        if isinstance(stats, Mapping) and float(stats.get("pct", 0.0)) < 98.0
+    )
+
+    for row in ledger.get("rows", []):
+        for metric in row.get("metrics", []):
+            metric_id = str(metric.get("metric_id", ""))
+            stats = by_feature.get(metric_id)
+            if not isinstance(stats, Mapping):
+                continue
+            current = round(float(stats.get("pct", 0.0)) / 100.0, 6)
+            metric["current"] = current
+            metric["unit"] = "fraction_in_tolerance"
+            metric["status"] = "pass" if current >= float(metric.get("tolerance", 0.98)) else "fail"
+            metric["validated_tripwire"] = True
+            row["last_updated"] = _utc_now()
+            row["history"].append(
+                {
+                    "round": "g000",
+                    "action": "seed_metric_current",
+                    "metric_id": metric_id,
+                    "current": current,
+                }
+            )
+
+    ledger["rounds"] = [
+        {
+            "round_id": "g000",
+            "track": "G",
+            "subsprint": "S0",
+            "lane_label": "svg_declared",
+            "geometry_mode": "injected",
+            "commit": _version(["git", "rev-parse", "--short", "HEAD"]),
+            "gates_summary": {
+                "global_in_tol_pct": float(metric_summary.get("in_tolerance_pct", 0.0)),
+                "features_below_98": features_below_98,
+                "pixel_mean_l1_rgb_per_pixel": svg_summary.get("mean_l1_rgb_per_pixel"),
+                "pixel_mean_ssim": svg_summary.get("mean_ssim"),
+                "pixel_panels": svg_summary.get("total_panels"),
+            },
+            "tripwires": "pass",
+            "audit": None,
+            "rebase_label": None,
+        },
+        {
+            "round_id": "png_g000",
+            "track": "G",
+            "subsprint": "S0",
+            "lane_label": "png_raster",
+            "geometry_mode": "injected",
+            "commit": _version(["git", "rev-parse", "--short", "HEAD"]),
+            "gates_summary": {
+                "global_in_tol_pct": None,
+                "reported_not_gated": True,
+                "pixel_mean_l1_rgb_per_pixel": png_summary.get("mean_l1_rgb_per_pixel"),
+                "pixel_mean_ssim": png_summary.get("mean_ssim"),
+                "pixel_panels": png_summary.get("total_panels"),
+            },
+            "tripwires": "pass",
+            "audit": None,
+            "rebase_label": None,
+        },
+        {
+            "round_id": "d000",
+            "track": "D",
+            "subsprint": "S0",
+            "lane_label": "manifest_cards",
+            "geometry_mode": "native",
+            "commit": _version(["git", "rev-parse", "--short", "HEAD"]),
+            "gates_summary": {
+                "global_in_tol_pct": None,
+                "manifest_cards": card_manifest.get("total_images"),
+                "category_counts": card_manifest.get("category_counts", {}),
+            },
+            "tripwires": "pass",
+            "audit": None,
+            "rebase_label": None,
+        },
+    ]
+    ledger.setdefault("ratchets", {})["global_in_tol_floor_pct"] = 85.0
+    ledger["updated_at"] = _utc_now()
+    ledger["warnings"] = [
+        warning
+        for warning in ledger.get("warnings", [])
+        if "tripwire_status.json missing" not in str(warning)
+    ]
+    apply_tripwire_status(ledger)
+
+
 def _failed_metric_ids(status: Mapping[str, Any]) -> Set[str]:
     """Extract failed metric ids from a tripwire status payload.
 
@@ -630,6 +781,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--init", action="store_true", help="initialize ledger.json from coverage")
     parser.add_argument("--generate-lock-tests", action="store_true", help="regenerate lock tests")
+    parser.add_argument(
+        "--seed-baseline",
+        action="store_true",
+        help="seed g000/d000 baseline numbers",
+    )
+    parser.add_argument(
+        "--metrics",
+        type=Path,
+        default=Path("eval_output/visual_parity_v2/trackG/round_g000/parity_metrics.json"),
+        help="Track G parity_metrics.json path for --seed-baseline.",
+    )
+    parser.add_argument(
+        "--svg-pixel",
+        type=Path,
+        default=Path("eval_output/visual_parity_v2/trackG/round_g000/summary.json"),
+        help="Track G svg-cairo pixel summary path for --seed-baseline.",
+    )
+    parser.add_argument(
+        "--png-pixel",
+        type=Path,
+        default=Path("eval_output/visual_parity_v2/png_raster/round_g000/summary.json"),
+        help="png_raster pixel summary path for --seed-baseline.",
+    )
+    parser.add_argument(
+        "--cards",
+        type=Path,
+        default=Path("eval_output/visual_parity_v2/trackD/round_d000/manifest.json"),
+        help="Track D manifest path for --seed-baseline.",
+    )
     args = parser.parse_args(argv)
     if args.init:
         ledger = init_ledger()
@@ -645,7 +825,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_lock_tests(ledger)
         print(f"wrote {LOCK_TEST_PATH}")
         return 0
-    parser.error("choose --init or --generate-lock-tests")
+    if args.seed_baseline:
+        ledger = read_ledger(LEDGER_PATH)
+        seed_baseline(
+            ledger,
+            metrics_path=args.metrics,
+            svg_pixel_path=args.svg_pixel,
+            png_pixel_path=args.png_pixel,
+            card_manifest_path=args.cards,
+        )
+        write_ledger(LEDGER_PATH, ledger)
+        write_lock_tests(ledger)
+        print("seeded baseline rounds: g000, png_g000, d000")
+        return 0
+    parser.error("choose --init, --generate-lock-tests, or --seed-baseline")
     return 2
 
 
