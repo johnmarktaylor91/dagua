@@ -15,6 +15,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.classical_mds",
         "layout_classical_mds_pipeline",
     ),
+    "circo": ("dagua.layout.ops.pipelines.circo", "layout_circo_pipeline"),
     "davidson_harel": (
         "dagua.layout.ops.pipelines.davidson_harel",
         "layout_davidson_harel_pipeline",
@@ -125,6 +126,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "sugiyama": ("dagua.layout.ops.pipelines.sugiyama", "layout_sugiyama_pipeline"),
     "tsnet": ("dagua.layout.ops.pipelines.tsnet", "layout_tsnet_pipeline"),
+    "twopi": ("dagua.layout.ops.pipelines.twopi", "layout_twopi_pipeline"),
     "umap": ("dagua.layout.ops.pipelines.umap_layout", "layout_umap_layout_pipeline"),
     "yifanhu": ("dagua.layout.ops.pipelines.yifanhu", "layout_yifanhu_pipeline"),
 }

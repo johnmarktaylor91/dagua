@@ -5,7 +5,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from dagua.eval.competitors.graphviz_competitor import GraphvizDot, GraphvizFdp
+from dagua.eval.competitors.graphviz_competitor import (
+    GraphvizCirco,
+    GraphvizDot,
+    GraphvizFdp,
+    GraphvizTwopi,
+)
 from dagua.graph import DaguaGraph
 
 
@@ -126,3 +131,51 @@ def test_dot_keeps_seed_out_of_deterministic_subprocess(monkeypatch: Any) -> Non
     assert calls[0][:2] == ["dot", "-Tjson"]
     assert "-Gseed=17" not in calls[0]
     assert "-Gstart=17" not in calls[0]
+
+
+def test_twopi_and_circo_use_graphviz_engine_runner(monkeypatch: Any) -> None:
+    """The twopi and circo adapters should select their Graphviz engines.
+
+    Parameters
+    ----------
+    monkeypatch : Any
+        Pytest monkeypatch fixture.
+
+    Returns
+    -------
+    None
+        Assertions validate subprocess engine arguments and parsed positions.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Capture subprocess arguments and return a successful JSON payload.
+
+        Parameters
+        ----------
+        command : list[str]
+            Subprocess command passed by the adapter.
+        **kwargs : Any
+            Additional subprocess keyword arguments.
+
+        Returns
+        -------
+        SimpleNamespace
+            Minimal object matching ``subprocess.CompletedProcess`` fields used
+            by the adapter.
+        """
+        del kwargs
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=_graphviz_json_stdout(), stderr="")
+
+    monkeypatch.setattr("dagua.eval.competitors.graphviz_competitor.subprocess.run", fake_run)
+
+    twopi = GraphvizTwopi().layout(_tiny_graph())
+    circo = GraphvizCirco().layout(_tiny_graph())
+
+    assert twopi.error is None
+    assert circo.error is None
+    assert twopi.pos is not None
+    assert circo.pos is not None
+    assert calls[0][:3] == ["dot", "-Tjson", "-Ktwopi"]
+    assert calls[1][:3] == ["dot", "-Tjson", "-Kcirco"]
