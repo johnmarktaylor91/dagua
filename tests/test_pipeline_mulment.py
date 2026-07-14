@@ -267,7 +267,7 @@ def test_mulment_pipeline_does_not_delegate_to_reference_runtime() -> None:
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"steps": -1}, {"alpha": -1.0}, {"tol": 0.0}, {"coarsest_size": 0}, {"max_levels": -1}],
+    [{"steps": -1}, {"alpha": -1.0}, {"tol": 0.0}, {"inner_iterations": -1}, {"max_levels": -1}],
 )
 def test_mulment_rejects_invalid_parameters(kwargs: dict[str, float]) -> None:
     """Invalid MulMent parameters should fail before layout work starts.
