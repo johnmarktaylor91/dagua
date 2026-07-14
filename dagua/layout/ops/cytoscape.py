@@ -23,6 +23,7 @@ _CISE_DEFAULT_NODE_SEPARATION = 12.5
 _CISE_CLUSTER_MARGIN = 15.0
 _CISE_IDEAL_INTER_CLUSTER_EDGE_LENGTH = 70.0
 _CISE_DEFAULT_NODE_DIMENSION = 30.0
+_CISE_ROTATION_EPSILON = 1.0e-9
 _COSE_DEFAULT_NODE_WIDTH = 1.0
 _COSE_DEFAULT_NODE_HEIGHT = 1.0
 _COSE_DEFAULT_RENDERED_NODE_CENTER = 15.0
@@ -154,6 +155,81 @@ def _cytoscape_random(state: SolveState, seed: int) -> float:
     ) & 0xFFFFFFFF
     state.extras["cytoscape_random_state"] = next_state
     return next_state / _CYTOSCAPE_LCG_MODULUS
+
+
+def _best_cise_inter_cluster_rotation(
+    group: list[int],
+    group_index: int,
+    group_index_by_node: dict[int, int],
+    centers: list[tuple[float, float]],
+    local_pos: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> float:
+    """Return the CiSE rotation angle induced by inter-cluster edges.
+
+    Parameters
+    ----------
+    group : list[int]
+        Global node ids in one CiSE circle.
+    group_index : int
+        Index of ``group`` within the cluster list.
+    group_index_by_node : dict[int, int]
+        Mapping from global node id to cluster-circle index.
+    centers : list[tuple[float, float]]
+        Circle-center coordinates before local member offsets are applied.
+    local_pos : torch.Tensor
+        Current node coordinates with shape ``[N, 2]`` before cluster centers
+        are added.
+    edge_index : torch.Tensor
+        Global edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Rotation angle in radians. Positive angles are counter-clockwise in
+        the native coordinate system.
+    """
+    if len(group) < 2 or edge_index.numel() == 0:
+        return 0.0
+    center_x, center_y = centers[group_index]
+    cos_sum = 0.0
+    sin_sum = 0.0
+    edges = edge_index.detach().cpu().long()
+    for edge_pos in range(edges.shape[1]):
+        source = int(edges[0, edge_pos].item())
+        target = int(edges[1, edge_pos].item())
+        source_group = group_index_by_node.get(source)
+        target_group = group_index_by_node.get(target)
+        if source_group is None or target_group is None or source_group == target_group:
+            continue
+        if source_group == group_index:
+            local_node = source
+            other_group = target_group
+        elif target_group == group_index:
+            local_node = target
+            other_group = source_group
+        else:
+            continue
+        local_x = float(local_pos[local_node, 0])
+        local_y = float(local_pos[local_node, 1])
+        local_norm = math.hypot(local_x, local_y)
+        target_x = centers[other_group][0] - center_x
+        target_y = centers[other_group][1] - center_y
+        target_norm = math.hypot(target_x, target_y)
+        if local_norm <= _CISE_ROTATION_EPSILON or target_norm <= _CISE_ROTATION_EPSILON:
+            continue
+        local_x /= local_norm
+        local_y /= local_norm
+        target_x /= target_norm
+        target_y /= target_norm
+        # This is the closed-form 2D orthogonal Procrustes rotation for unit
+        # vectors.  It mirrors CiSE's force-driven rotation using all
+        # inter-cluster edge endpoints, not a single arbitrary member.
+        cos_sum += local_x * target_x + local_y * target_y
+        sin_sum += local_x * target_y - local_y * target_x
+    if abs(cos_sum) <= _CISE_ROTATION_EPSILON and abs(sin_sum) <= _CISE_ROTATION_EPSILON:
+        return 0.0
+    return math.atan2(sin_sum, cos_sum)
 
 
 def _clipping_point(
@@ -666,8 +742,6 @@ class CytoscapeCircleClusters(Op):
                 for index in range(len(groups))
             ]
 
-        inter_degree = [0] * problem.num_nodes
-        neighbor_center_sums = [(0.0, 0.0) for _ in groups]
         neighbor_center_counts = [0] * len(groups)
         edges = problem.edge_index.detach().cpu().long()
         for edge_pos in range(edges.shape[1]):
@@ -677,37 +751,20 @@ class CytoscapeCircleClusters(Op):
             target_group = group_index_by_node.get(target)
             if source_group is None or target_group is None or source_group == target_group:
                 continue
-            inter_degree[source] += 1
-            inter_degree[target] += 1
-            source_x, source_y = neighbor_center_sums[source_group]
-            target_x, target_y = neighbor_center_sums[target_group]
-            neighbor_center_sums[source_group] = (
-                source_x + centers[target_group][0],
-                source_y + centers[target_group][1],
-            )
-            neighbor_center_sums[target_group] = (
-                target_x + centers[source_group][0],
-                target_y + centers[source_group][1],
-            )
             neighbor_center_counts[source_group] += 1
             neighbor_center_counts[target_group] += 1
 
         for group_index, group in enumerate(groups):
             center_x, center_y = centers[group_index]
             if len(group) > 1 and neighbor_center_counts[group_index] > 0:
-                chosen_node = next(
-                    (node for node in group if inter_degree[node] == 0),
-                    group[0],
+                rotation = _best_cise_inter_cluster_rotation(
+                    group=group,
+                    group_index=group_index,
+                    group_index_by_node=group_index_by_node,
+                    centers=centers,
+                    local_pos=pos,
+                    edge_index=problem.edge_index,
                 )
-                target_x = (
-                    neighbor_center_sums[group_index][0] / neighbor_center_counts[group_index]
-                )
-                target_y = (
-                    neighbor_center_sums[group_index][1] / neighbor_center_counts[group_index]
-                )
-                target_angle = math.atan2(target_y - center_y, target_x - center_x)
-                current_angle = math.atan2(float(pos[chosen_node, 1]), float(pos[chosen_node, 0]))
-                rotation = target_angle - current_angle
                 cos_rotation = math.cos(rotation)
                 sin_rotation = math.sin(rotation)
                 for node in group:
