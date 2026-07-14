@@ -290,6 +290,7 @@ _EXPECTED_OP_MODULES = (
     "umap",
     "utility",
     "vcycle",
+    "webcola",
     "yifanhu",
 )
 
