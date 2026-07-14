@@ -1022,3 +1022,14 @@ class GraphvizCirco(_GraphvizBase):
     engine = "circo"
     max_nodes = 10_000
     variant_param_names = frozenset({"nodesep"})
+
+
+@register
+class GraphvizOsage(_GraphvizBase):
+    """Graphviz osage cluster-packing layout adapter."""
+
+    name = "graphviz_osage"
+    engine = "osage"
+    max_nodes = 10_000
+    supports_clusters = True
+    variant_param_names = frozenset({"pack", "packmode", "nodesep", "ranksep"})
