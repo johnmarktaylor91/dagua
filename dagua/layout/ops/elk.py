@@ -21,7 +21,6 @@ from dagua.layout.ops.brandes_koepf import (
     BRANDES_KOEPF_SUCCESSORS_KEY,
     BRANDES_KOEPF_WIDTHS_KEY,
     BRANDES_KOEPF_X_KEY,
-    brandes_koepf_x_assignment,
 )
 from dagua.layout.ops.dagre import _dagre_network_simplex_ranks
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -35,6 +34,8 @@ ELK_INTERNAL_POSITIONS_KEY = "elk_internal_positions"
 NodeId = Hashable
 
 _ROOT_PADDING = 12.0
+_ELK_DEFAULT_EDGE_NODE_SPACING = 10.0
+_ELK_DEFAULT_EDGE_EDGE_SPACING = 10.0
 _SUPPORTED_CYCLE_STRATEGIES = {"greedy", "depth_first", "interactive", "model_order"}
 _SUPPORTED_LAYERING_STRATEGIES = {
     "network_simplex",
@@ -146,6 +147,38 @@ class _ElkGraph:
     node_placement_strategy: str
     random_seed: int
     thoroughness: int
+
+
+@dataclass
+class _ElkBkGraph:
+    """Normalized graph used by ELK Brandes-Koepf placement."""
+
+    layers: List[List[NodeId]]
+    predecessors: Dict[NodeId, List[NodeId]]
+    successors: Dict[NodeId, List[NodeId]]
+    edge_ids: Dict[Tuple[NodeId, NodeId], int]
+    sizes: Dict[NodeId, float]
+    dummy_nodes: Set[NodeId]
+    real_nodes: List[int]
+    node_index: Dict[NodeId, int]
+    layer_index: Dict[NodeId, int]
+
+
+@dataclass
+class _ElkBkLayout:
+    """Mutable state for one ELK BK alignment."""
+
+    vdir: str
+    hdir: str
+    root: Dict[NodeId, NodeId]
+    align: Dict[NodeId, NodeId]
+    inner_shift: Dict[NodeId, float]
+    block_size: Dict[NodeId, float]
+    sink: Dict[NodeId, NodeId]
+    shift: Dict[NodeId, float]
+    y: Dict[NodeId, float]
+    straightened: Dict[NodeId, bool]
+    only_dummies: Dict[NodeId, bool]
 
 
 def _normalize_choice(value: str, supported: Set[str], option_name: str) -> str:
@@ -837,26 +870,13 @@ def _layer_x_coordinates(
         Top-left x coordinate per node.
     """
     if strategy == "brandes_koepf":
-        normalized_layers, normalized_predecessors, normalized_successors, widths, dummy_nodes = (
-            _normalize_long_edges_for_bk(layers, predecessors, successors, sizes)
+        del predecessors
+        return _elk_brandes_koepf_x_coordinates(
+            layers=layers,
+            successors=successors,
+            sizes=sizes,
+            node_spacing=node_spacing,
         )
-        centers = brandes_koepf_x_assignment(
-            layering=normalized_layers,
-            predecessors=normalized_predecessors,
-            successors=normalized_successors,
-            widths=widths,
-            dummy_nodes=dummy_nodes,
-            node_sep=node_spacing,
-            edge_sep=node_spacing,
-        )
-        real_nodes = [node for layer in layers for node in layer]
-        if not centers:
-            return {}
-        left_extent = min(centers[node] - float(sizes[node, 0]) / 2.0 for node in real_nodes)
-        return {
-            node: centers[node] - float(sizes[node, 0]) / 2.0 - left_extent + _ROOT_PADDING
-            for node in real_nodes
-        }
 
     coordinates: Dict[int, float] = {}
     for layer in layers:
@@ -958,6 +978,800 @@ def _normalize_long_edges_for_bk(
     for node in list(normalized_successors):
         normalized_successors[node] = list(dict.fromkeys(normalized_successors[node]))
     return normalized_layers, normalized_predecessors, normalized_successors, widths, dummy_nodes
+
+
+def _normalize_long_edges_for_elk_bk(
+    layers: Sequence[Sequence[int]],
+    successors: Mapping[int, Sequence[int]],
+    sizes: torch.Tensor,
+) -> _ElkBkGraph:
+    """Build ELK's BK working graph with long-edge dummy chains.
+
+    Parameters
+    ----------
+    layers : sequence[sequence[int]]
+        Ordered real-node layers.
+    successors : mapping[int, sequence[int]]
+        Real-node successor lists.
+    sizes : torch.Tensor
+        Real node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    _ElkBkGraph
+        Normalized BK graph with edge segment identifiers and dummy nodes.
+    """
+    layer_by_node = {
+        node: layer_index for layer_index, layer in enumerate(layers) for node in layer
+    }
+    normalized_layers: List[List[NodeId]] = [list(layer) for layer in layers]
+    normalized_predecessors: Dict[NodeId, List[NodeId]] = {
+        node: [] for layer in normalized_layers for node in layer
+    }
+    normalized_successors: Dict[NodeId, List[NodeId]] = {
+        node: [] for layer in normalized_layers for node in layer
+    }
+    edge_ids: Dict[Tuple[NodeId, NodeId], int] = {}
+    widths: Dict[NodeId, float] = {
+        node: float(sizes[node, 0]) for layer in layers for node in layer
+    }
+    dummy_nodes: Set[NodeId] = set()
+
+    def add_segment(source: NodeId, target: NodeId, edge_id: int) -> None:
+        """Add one normalized edge segment with a stable edge id.
+
+        Parameters
+        ----------
+        source : Hashable
+            Segment source node id.
+        target : Hashable
+            Segment target node id.
+        edge_id : int
+            Original edge index used for conflict marking.
+
+        Returns
+        -------
+        None
+            Normalized adjacency and edge-id maps are mutated.
+        """
+        normalized_successors.setdefault(source, []).append(target)
+        normalized_predecessors.setdefault(target, []).append(source)
+        edge_ids[(source, target)] = edge_id
+
+    edge_index = 0
+    for source in sorted(successors):
+        for target in successors[source]:
+            source_layer = layer_by_node[source]
+            target_layer = layer_by_node[target]
+            span = target_layer - source_layer
+            if abs(span) <= 1:
+                add_segment(source, target, edge_index)
+                edge_index += 1
+                continue
+            step = 1 if span > 0 else -1
+            previous: NodeId = source
+            for layer_index in range(source_layer + step, target_layer, step):
+                dummy: NodeId = ("elk_dummy", edge_index, layer_index)
+                dummy_nodes.add(dummy)
+                widths[dummy] = 0.0
+                normalized_layers[layer_index].append(dummy)
+                add_segment(previous, dummy, edge_index)
+                previous = dummy
+            add_segment(previous, target, edge_index)
+            edge_index += 1
+
+    for node in list(normalized_predecessors):
+        normalized_predecessors[node] = list(dict.fromkeys(normalized_predecessors[node]))
+    for node in list(normalized_successors):
+        normalized_successors[node] = list(dict.fromkeys(normalized_successors[node]))
+
+    node_index = {node: index for layer in normalized_layers for index, node in enumerate(layer)}
+    layer_index = {
+        node: layer_number for layer_number, layer in enumerate(normalized_layers) for node in layer
+    }
+    return _ElkBkGraph(
+        layers=normalized_layers,
+        predecessors=normalized_predecessors,
+        successors=normalized_successors,
+        edge_ids=edge_ids,
+        sizes=widths,
+        dummy_nodes=dummy_nodes,
+        real_nodes=[node for layer in layers for node in layer],
+        node_index=node_index,
+        layer_index=layer_index,
+    )
+
+
+def _elk_bk_spacing(
+    left: NodeId,
+    right: NodeId,
+    dummy_nodes: Set[NodeId],
+    node_spacing: float,
+) -> float:
+    """Return ELK's type-specific in-layer spacing.
+
+    Parameters
+    ----------
+    left : Hashable
+        First adjacent node.
+    right : Hashable
+        Second adjacent node.
+    dummy_nodes : set[Hashable]
+        Long-edge dummy nodes.
+    node_spacing : float
+        ELK ``spacing.nodeNode``.
+
+    Returns
+    -------
+    float
+        Spacing between node boxes along the BK placement axis.
+    """
+    left_dummy = left in dummy_nodes
+    right_dummy = right in dummy_nodes
+    if left_dummy and right_dummy:
+        return _ELK_DEFAULT_EDGE_EDGE_SPACING
+    if left_dummy or right_dummy:
+        return _ELK_DEFAULT_EDGE_NODE_SPACING
+    return node_spacing
+
+
+def _elk_bk_left_neighbors(graph: _ElkBkGraph) -> Dict[NodeId, List[NodeId]]:
+    """Return ELK left-neighbor lists sorted by order in the previous layer.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+
+    Returns
+    -------
+    dict[Hashable, list[Hashable]]
+        Predecessors sorted by layer index.
+    """
+    return {
+        node: sorted(neighbors, key=graph.node_index.__getitem__)
+        for node, neighbors in graph.predecessors.items()
+    }
+
+
+def _elk_bk_right_neighbors(graph: _ElkBkGraph) -> Dict[NodeId, List[NodeId]]:
+    """Return ELK right-neighbor lists sorted by order in the next layer.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+
+    Returns
+    -------
+    dict[Hashable, list[Hashable]]
+        Successors sorted by layer index.
+    """
+    return {
+        node: sorted(neighbors, key=graph.node_index.__getitem__)
+        for node, neighbors in graph.successors.items()
+    }
+
+
+def _elk_bk_incident_to_inner_segment(
+    graph: _ElkBkGraph,
+    node: NodeId,
+    layer1: int,
+    layer2: int,
+) -> bool:
+    """Return whether ``node`` is incident to an inner long-edge segment.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    node : Hashable
+        Candidate node from ``layer1``.
+    layer1 : int
+        Layer index of ``node``.
+    layer2 : int
+        Previous layer index to test.
+
+    Returns
+    -------
+    bool
+        ``True`` when both segment endpoints are long-edge dummy nodes.
+    """
+    if node not in graph.dummy_nodes:
+        return False
+    return any(
+        predecessor in graph.dummy_nodes and graph.layer_index[predecessor] == layer2
+        for predecessor in graph.predecessors.get(node, ())
+        if graph.layer_index[node] == layer1
+    )
+
+
+def _elk_bk_mark_conflicts(graph: _ElkBkGraph) -> Set[int]:
+    """Mark ELK BK type-1/type-2 conflict edge ids.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+
+    Returns
+    -------
+    set[int]
+        Edge ids that ELK's ``markConflicts`` excludes from alignment.
+    """
+    marked_edges: Set[int] = set()
+    number_of_layers = len(graph.layers)
+    if number_of_layers < 3:
+        return marked_edges
+    left_neighbors = _elk_bk_left_neighbors(graph)
+    layer_sizes = [len(layer) for layer in graph.layers]
+    for layer_number in range(1, number_of_layers - 1):
+        current_layer = graph.layers[layer_number + 1]
+        k_0 = 0
+        scan_position = 0
+        for layer_position, node in enumerate(current_layer):
+            incident = _elk_bk_incident_to_inner_segment(
+                graph, node, layer_number + 1, layer_number
+            )
+            if layer_position == layer_sizes[layer_number + 1] - 1 or incident:
+                k_1 = layer_sizes[layer_number] - 1
+                if incident:
+                    k_1 = graph.node_index[left_neighbors[node][0]]
+                while scan_position <= layer_position:
+                    scan_node = current_layer[scan_position]
+                    if not _elk_bk_incident_to_inner_segment(
+                        graph, scan_node, layer_number + 1, layer_number
+                    ):
+                        for upper_neighbor in left_neighbors.get(scan_node, ()):
+                            upper_index = graph.node_index[upper_neighbor]
+                            if upper_index < k_0 or upper_index > k_1:
+                                edge_id = graph.edge_ids.get((upper_neighbor, scan_node))
+                                if edge_id is not None:
+                                    marked_edges.add(edge_id)
+                    scan_position += 1
+                k_0 = k_1
+    return marked_edges
+
+
+def _elk_bk_new_layout(graph: _ElkBkGraph, vdir: str, hdir: str) -> _ElkBkLayout:
+    """Create one empty ELK BK aligned layout.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    vdir : str
+        ``"DOWN"`` or ``"UP"`` traversal direction.
+    hdir : str
+        ``"LEFT"`` or ``"RIGHT"`` traversal direction.
+
+    Returns
+    -------
+    _ElkBkLayout
+        Layout maps initialized like ``BKAlignedLayout``.
+    """
+    nodes = [node for layer in graph.layers for node in layer]
+    return _ElkBkLayout(
+        vdir=vdir,
+        hdir=hdir,
+        root={node: node for node in nodes},
+        align={node: node for node in nodes},
+        inner_shift={node: 0.0 for node in nodes},
+        block_size={},
+        sink={node: node for node in nodes},
+        shift={node: (float("-inf") if vdir == "UP" else float("inf")) for node in nodes},
+        y={},
+        straightened={node: False for node in nodes},
+        only_dummies={node: True for node in nodes},
+    )
+
+
+def _elk_bk_vertical_alignment(
+    graph: _ElkBkGraph,
+    layout: _ElkBkLayout,
+    marked_edges: Set[int],
+) -> None:
+    """Run ELK's median-neighbor vertical alignment for one direction.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Alignment state to mutate.
+    marked_edges : set[int]
+        Conflict edge ids from ``markConflicts``.
+
+    Returns
+    -------
+    None
+        ``layout`` root and align maps are updated in place.
+    """
+    left_neighbors = _elk_bk_left_neighbors(graph)
+    right_neighbors = _elk_bk_right_neighbors(graph)
+    layer_sequence = list(graph.layers)
+    if layout.hdir == "LEFT":
+        layer_sequence = list(reversed(layer_sequence))
+    for layer in layer_sequence:
+        previous_index = -1
+        nodes = list(layer)
+        if layout.vdir == "UP":
+            previous_index = 2**31 - 1
+            nodes = list(reversed(nodes))
+        for node in nodes:
+            neighbors = (
+                right_neighbors.get(node, [])
+                if layout.hdir == "LEFT"
+                else left_neighbors.get(node, [])
+            )
+            if not neighbors:
+                continue
+            degree = len(neighbors)
+            low = int(((degree + 1.0) // 2.0) - 1)
+            high = int(-(-((degree + 1.0) / 2.0) // 1) - 1)
+            median_range = range(high, low - 1, -1) if layout.vdir == "UP" else range(low, high + 1)
+            for median_index in median_range:
+                if layout.align[node] != node:
+                    continue
+                neighbor = neighbors[median_index]
+                edge_id = graph.edge_ids.get((neighbor, node), graph.edge_ids.get((node, neighbor)))
+                neighbor_index = graph.node_index[neighbor]
+                if edge_id in marked_edges:
+                    continue
+                if layout.vdir == "UP":
+                    can_align = previous_index > neighbor_index
+                else:
+                    can_align = previous_index < neighbor_index
+                if can_align:
+                    layout.align[neighbor] = node
+                    layout.root[node] = layout.root[neighbor]
+                    layout.align[node] = layout.root[node]
+                    layout.only_dummies[layout.root[node]] = (
+                        layout.only_dummies[layout.root[node]] and node in graph.dummy_nodes
+                    )
+                    previous_index = neighbor_index
+
+
+def _elk_bk_connected_successor(
+    graph: _ElkBkGraph,
+    source: NodeId,
+    target: NodeId,
+) -> bool:
+    """Return whether a normalized segment connects two nodes.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    source : Hashable
+        First node.
+    target : Hashable
+        Second node.
+
+    Returns
+    -------
+    bool
+        ``True`` if either directed segment exists.
+    """
+    return target in graph.successors.get(source, ()) or source in graph.successors.get(target, ())
+
+
+def _elk_bk_inside_block_shift(graph: _ElkBkGraph, layout: _ElkBkLayout) -> None:
+    """Compute ELK's per-block inner shifts for center ports.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Alignment state to mutate.
+
+    Returns
+    -------
+    None
+        ``inner_shift`` and ``block_size`` are updated.
+    """
+    roots = []
+    seen: Set[NodeId] = set()
+    for layer in graph.layers:
+        for node in layer:
+            root = layout.root[node]
+            if root not in seen:
+                seen.add(root)
+                roots.append(root)
+    for root in roots:
+        space_above = 0.0
+        space_below = graph.sizes[root]
+        layout.inner_shift[root] = 0.0
+        current = root
+        while True:
+            next_node = layout.align[current]
+            if next_node == root:
+                break
+            if _elk_bk_connected_successor(graph, current, next_node):
+                source = current if next_node in graph.successors.get(current, ()) else next_node
+                target = next_node if source == current else current
+                source_port = graph.sizes[source] / 2.0
+                target_port = graph.sizes[target] / 2.0
+                if layout.hdir == "LEFT":
+                    port_pos_diff = target_port - source_port
+                else:
+                    port_pos_diff = source_port - target_port
+            else:
+                port_pos_diff = 0.0
+            next_inner_shift = layout.inner_shift[current] + port_pos_diff
+            layout.inner_shift[next_node] = next_inner_shift
+            space_above = max(space_above, -next_inner_shift)
+            space_below = max(space_below, next_inner_shift + graph.sizes[next_node])
+            current = next_node
+        current = root
+        while True:
+            layout.inner_shift[current] += space_above
+            current = layout.align[current]
+            if current == root:
+                break
+        layout.block_size[root] = space_above + space_below
+
+
+def _elk_bk_place_classes(
+    layout: _ElkBkLayout,
+    class_edges: Mapping[NodeId, Sequence[Tuple[NodeId, float]]],
+    class_nodes: Sequence[NodeId],
+) -> None:
+    """Place ELK BK classes by longest-path propagation.
+
+    Parameters
+    ----------
+    layout : _ElkBkLayout
+        Layout receiving class shifts.
+    class_edges : mapping[Hashable, sequence[tuple[Hashable, float]]]
+        Class graph edges with required separations.
+    class_nodes : sequence[Hashable]
+        Class sinks in creation order.
+
+    Returns
+    -------
+    None
+        ``layout.shift`` is updated for class sink nodes.
+    """
+    indegree = {node: 0 for node in class_nodes}
+    for edges in class_edges.values():
+        for target, _ in edges:
+            indegree[target] = indegree.get(target, 0) + 1
+    queue = [node for node in class_nodes if indegree.get(node, 0) == 0]
+    class_shift: Dict[NodeId, Optional[float]] = {node: None for node in class_nodes}
+    while queue:
+        node = queue.pop(0)
+        if class_shift[node] is None:
+            class_shift[node] = 0.0
+        for target, separation in class_edges.get(node, ()):
+            candidate = float(class_shift[node]) + separation
+            if class_shift.get(target) is None:
+                class_shift[target] = candidate
+            elif layout.vdir == "DOWN":
+                class_shift[target] = min(float(class_shift[target]), candidate)
+            else:
+                class_shift[target] = max(float(class_shift[target]), candidate)
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+    for node, value in class_shift.items():
+        if value is not None:
+            layout.shift[node] = value
+
+
+def _elk_bk_horizontal_compaction(
+    graph: _ElkBkGraph,
+    layout: _ElkBkLayout,
+    node_spacing: float,
+) -> None:
+    """Run ELK's class/sink horizontal compaction for one alignment.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Alignment state to mutate.
+    node_spacing : float
+        ELK ``spacing.nodeNode``.
+
+    Returns
+    -------
+    None
+        ``layout.y`` stores top-left coordinates on the BK placement axis.
+    """
+    class_edges: Dict[NodeId, List[Tuple[NodeId, float]]] = {}
+    class_nodes: List[NodeId] = []
+
+    def class_node(node: NodeId) -> NodeId:
+        """Register a class-graph node in creation order.
+
+        Parameters
+        ----------
+        node : Hashable
+            Class sink node id.
+
+        Returns
+        -------
+        Hashable
+            The same node id.
+        """
+        if node not in class_edges:
+            class_edges[node] = []
+            class_nodes.append(node)
+        return node
+
+    def place_block(root: NodeId) -> None:
+        """Recursively place one aligned block.
+
+        Parameters
+        ----------
+        root : Hashable
+            Root node of the block to place.
+
+        Returns
+        -------
+        None
+            ``layout`` and class graph state are mutated.
+        """
+        if root in layout.y:
+            return
+        is_initial_assignment = True
+        layout.y[root] = 0.0
+        current = root
+        while True:
+            current_index = graph.node_index[current]
+            layer = graph.layers[graph.layer_index[current]]
+            has_neighbor = (layout.vdir == "DOWN" and current_index > 0) or (
+                layout.vdir == "UP" and current_index < len(layer) - 1
+            )
+            if has_neighbor:
+                neighbor = (
+                    layer[current_index + 1] if layout.vdir == "UP" else layer[current_index - 1]
+                )
+                neighbor_root = layout.root[neighbor]
+                place_block(neighbor_root)
+                if layout.sink[root] == root:
+                    layout.sink[root] = layout.sink[neighbor_root]
+                if layout.sink[root] == layout.sink[neighbor_root]:
+                    spacing = _elk_bk_spacing(current, neighbor, graph.dummy_nodes, node_spacing)
+                    if layout.vdir == "UP":
+                        new_position = (
+                            layout.y[neighbor_root]
+                            + layout.inner_shift[neighbor]
+                            - spacing
+                            - graph.sizes[current]
+                            - layout.inner_shift[current]
+                        )
+                        layout.y[root] = (
+                            min(new_position, float("inf"))
+                            if is_initial_assignment
+                            else min(layout.y[root], new_position)
+                        )
+                    else:
+                        new_position = (
+                            layout.y[neighbor_root]
+                            + layout.inner_shift[neighbor]
+                            + graph.sizes[neighbor]
+                            + spacing
+                            - layout.inner_shift[current]
+                        )
+                        layout.y[root] = (
+                            max(new_position, float("-inf"))
+                            if is_initial_assignment
+                            else max(layout.y[root], new_position)
+                        )
+                    is_initial_assignment = False
+                else:
+                    sink = class_node(layout.sink[root])
+                    neighbor_sink = class_node(layout.sink[neighbor_root])
+                    if layout.vdir == "UP":
+                        required_space = (
+                            layout.y[root]
+                            + layout.inner_shift[current]
+                            + graph.sizes[current]
+                            + node_spacing
+                            - layout.y[neighbor_root]
+                            - layout.inner_shift[neighbor]
+                        )
+                    else:
+                        required_space = (
+                            layout.y[root]
+                            + layout.inner_shift[current]
+                            - layout.y[neighbor_root]
+                            - layout.inner_shift[neighbor]
+                            - graph.sizes[neighbor]
+                            - node_spacing
+                        )
+                    class_edges[sink].append((neighbor_sink, required_space))
+            current = layout.align[current]
+            if current == root:
+                break
+
+    layer_sequence = list(graph.layers)
+    if layout.hdir == "LEFT":
+        layer_sequence = list(reversed(layer_sequence))
+    for layer in layer_sequence:
+        nodes = list(layer)
+        if layout.vdir == "UP":
+            nodes = list(reversed(nodes))
+        for node in nodes:
+            if layout.root[node] == node:
+                place_block(node)
+
+    _elk_bk_place_classes(layout, class_edges, class_nodes)
+    for layer in layer_sequence:
+        for node in layer:
+            root = layout.root[node]
+            layout.y[node] = layout.y[root]
+            if node == root:
+                sink_shift = layout.shift[layout.sink[node]]
+                if (layout.vdir == "UP" and sink_shift > float("-inf")) or (
+                    layout.vdir == "DOWN" and sink_shift < float("inf")
+                ):
+                    layout.y[node] += sink_shift
+
+
+def _elk_bk_layout_size(graph: _ElkBkGraph, layout: _ElkBkLayout) -> float:
+    """Return ELK ``BKAlignedLayout.layoutSize`` for one layout.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Completed aligned layout.
+
+    Returns
+    -------
+    float
+        Span from minimum block coordinate to maximum block extent.
+    """
+    minimum = float("inf")
+    maximum = float("-inf")
+    for layer in graph.layers:
+        for node in layer:
+            y_min = layout.y[node]
+            y_max = y_min + layout.block_size[layout.root[node]]
+            minimum = min(minimum, y_min)
+            maximum = max(maximum, y_max)
+    return maximum - minimum
+
+
+def _elk_bk_balanced_layout(graph: _ElkBkGraph, layouts: Sequence[_ElkBkLayout]) -> _ElkBkLayout:
+    """Create ELK's balanced median layout from four alignments.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layouts : sequence[_ElkBkLayout]
+        Completed layouts in ELK's default order.
+
+    Returns
+    -------
+    _ElkBkLayout
+        Balanced layout with ``inner_shift`` folded into ``y``.
+    """
+    balanced = _elk_bk_new_layout(graph, "DOWN", "RIGHT")
+    widths: List[float] = []
+    minimums: List[float] = []
+    maximums: List[float] = []
+    min_width_layout = 0
+    for index, layout in enumerate(layouts):
+        width = _elk_bk_layout_size(graph, layout)
+        widths.append(width)
+        if widths[min_width_layout] > width:
+            min_width_layout = index
+        layout_min = float("inf")
+        layout_max = float("-inf")
+        for layer in graph.layers:
+            for node in layer:
+                node_pos = layout.y[node] + layout.inner_shift[node]
+                layout_min = min(layout_min, node_pos)
+                layout_max = max(layout_max, node_pos + graph.sizes[node])
+        minimums.append(layout_min)
+        maximums.append(layout_max)
+    shifts: List[float] = []
+    for index, layout in enumerate(layouts):
+        if layout.vdir == "DOWN":
+            shifts.append(minimums[min_width_layout] - minimums[index])
+        else:
+            shifts.append(maximums[min_width_layout] - maximums[index])
+    for layer in graph.layers:
+        for node in layer:
+            samples = sorted(
+                layout.y[node] + layout.inner_shift[node] + shifts[index]
+                for index, layout in enumerate(layouts)
+            )
+            balanced.y[node] = (samples[1] + samples[2]) / 2.0
+            balanced.inner_shift[node] = 0.0
+    return balanced
+
+
+def _elk_bk_check_order(
+    graph: _ElkBkGraph,
+    layout: _ElkBkLayout,
+) -> bool:
+    """Validate ELK's in-layer ordering constraint for a layout.
+
+    Parameters
+    ----------
+    graph : _ElkBkGraph
+        Normalized BK graph.
+    layout : _ElkBkLayout
+        Candidate layout.
+
+    Returns
+    -------
+    bool
+        ``True`` if nodes remain strictly ordered without overlap.
+    """
+    for layer in graph.layers:
+        position = float("-inf")
+        for node in layer:
+            top = layout.y[node] + layout.inner_shift[node]
+            bottom = top + graph.sizes[node]
+            if top > position and bottom > position:
+                position = bottom
+            else:
+                return False
+    return True
+
+
+def _elk_brandes_koepf_x_coordinates(
+    layers: Sequence[Sequence[int]],
+    successors: Mapping[int, Sequence[int]],
+    sizes: torch.Tensor,
+    node_spacing: float,
+) -> Dict[int, float]:
+    """Assign top-left x coordinates using ELK BKNodePlacer semantics.
+
+    Parameters
+    ----------
+    layers : sequence[sequence[int]]
+        Ordered real-node layers.
+    successors : mapping[int, sequence[int]]
+        Real-node successor lists.
+    sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    node_spacing : float
+        ELK ``spacing.nodeNode`` value.
+
+    Returns
+    -------
+    dict[int, float]
+        Top-left x coordinates for real nodes.
+    """
+    graph = _normalize_long_edges_for_elk_bk(layers, successors, sizes)
+    marked_edges = _elk_bk_mark_conflicts(graph)
+    layouts = [
+        _elk_bk_new_layout(graph, "DOWN", "RIGHT"),
+        _elk_bk_new_layout(graph, "UP", "RIGHT"),
+        _elk_bk_new_layout(graph, "DOWN", "LEFT"),
+        _elk_bk_new_layout(graph, "UP", "LEFT"),
+    ]
+    for layout in layouts:
+        _elk_bk_vertical_alignment(graph, layout, marked_edges)
+        _elk_bk_inside_block_shift(graph, layout)
+        _elk_bk_horizontal_compaction(graph, layout, node_spacing)
+    balanced = _elk_bk_balanced_layout(graph, layouts)
+    chosen = balanced if _elk_bk_check_order(graph, balanced) else None
+    if chosen is None:
+        for layout in layouts:
+            if _elk_bk_check_order(graph, layout):
+                if chosen is None or _elk_bk_layout_size(graph, chosen) > _elk_bk_layout_size(
+                    graph, layout
+                ):
+                    chosen = layout
+    if chosen is None:
+        chosen = layouts[0]
+    raw_coordinates = {node: chosen.y[node] + chosen.inner_shift[node] for node in graph.real_nodes}
+    if not raw_coordinates:
+        return {}
+    left_extent = min(raw_coordinates[node] for node in graph.real_nodes)
+    return {node: value - left_extent + _ROOT_PADDING for node, value in raw_coordinates.items()}
 
 
 def _apply_direction(positions: torch.Tensor, sizes: torch.Tensor, direction: str) -> torch.Tensor:
