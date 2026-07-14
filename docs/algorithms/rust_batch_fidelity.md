@@ -8,8 +8,8 @@ Procrustes residual and records reference build status separately.
 
 | algorithm | reference runtime status | RNG | residual | tier | named residual | quality |
 | --- | --- | --- | ---: | --- | --- | --- |
-| omega | egraph-rs root `cargo build --release` and patched seeded `omega` CLI succeeded. | Reference CLI patched to accept `--seed`; Python port repeat residual=2.03133e-16. | 1.0299 | DISTRIBUTIONAL | rdmds-pair-sgd-stage | edge_length_cv=0.369031; overlap_count=13; dag_consistency=0.857143 |
-| tidy | tidy-tree crate and `tidy_reference` runner built with `cargo build --release --bin tidy_reference`. | deterministic; reference algorithm has no random stage; Python repeat residual=1.40204e-16. | 0.397285 | DISTRIBUTIONAL | apportion-contour-stage | edge_length_cv=0.398938; overlap_count=0; dag_consistency=1 |
+| omega | egraph-rs root `cargo build --release` and patched seeded `omega` CLI succeeded. | Reference CLI patched to accept `--seed`; Python port repeat residual=1.59486e-16. | 6.76896e-07 | POSITIONAL | rdmds-pair-sgd-stage | edge_length_cv=0.116821; overlap_count=15; dag_consistency=0.714286 |
+| tidy | tidy-tree crate and `tidy_reference` runner built with `cargo build --release --bin tidy_reference`. | deterministic; reference algorithm has no random stage; Python repeat residual=3.46945e-18. | 3.46945e-18 | BIT/SIMILARITY_EXACT | apportion-contour-stage | edge_length_cv=0.408002; overlap_count=0; dag_consistency=1 |
 
 ## Notes
 
