@@ -22,14 +22,14 @@ Result: **4/11 similarity-exact**, **0 close**, **7 divergent** at `d_R < 1e-9`.
 
 ## circo
 
-Result: **2/11 similarity-exact**, **0 close**, **9 divergent** at `d_R < 1e-9`.
+Result: **4/11 similarity-exact**, **0 close**, **7 divergent** at `d_R < 1e-9`.
 
 | graph | N | E | Procrustes d_R | anisotropic d_R | max raw diff | verdict | first divergent stage |
 |---|---:|---:|---:|---:|---:|---|---|
 | single_node | 1 | 0 | 0.000e+00 | 0.000e+00 | 3.800e+01 | bit-exact | none |
-| small_chain | 6 | 5 | 8.856e-02 | 8.847e-02 | 7.905e+02 | divergent | block ordering / block-tree placement |
+| small_chain | 6 | 5 | 0.000e+00 | 6.536e-17 | 6.825e+02 | bit-exact | none |
 | binary_tree | 11 | 10 | 6.049e-01 | 5.765e-01 | 1.304e+03 | divergent | block ordering / block-tree placement |
-| diamond | 4 | 4 | 1.000e+00 | 8.660e-01 | 2.232e+02 | divergent | block ordering / block-tree placement |
+| diamond | 4 | 4 | 1.357e-16 | 9.956e-17 | 2.052e+02 | bit-exact | none |
 | grid_5x5 | 25 | 40 | 1.198e+00 | 9.590e-01 | 1.197e+03 | divergent | block ordering / block-tree placement |
 | org_chart_small | 16 | 15 | 9.474e-01 | 8.343e-01 | 8.631e+02 | divergent | block ordering / block-tree placement |
 | long_skip | 5 | 6 | 1.370e-05 | 1.111e-05 | 2.280e+02 | divergent | block ordering / block-tree placement |
