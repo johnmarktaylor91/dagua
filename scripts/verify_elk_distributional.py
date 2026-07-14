@@ -660,8 +660,12 @@ def _report_table(results: Sequence[GraphResult]) -> List[str]:
     lines.extend(
         [
             "",
-            "Interpretation: the native port is still not expected to be per-seed bit-exact "
-            "beyond the known ceiling, because elkjs has hidden randomized layer-sweep state. "
+            "Interpretation: remaining per-seed mismatches first diverge at "
+            "`AbstractBarycenterPortDistributor.distributePortsWhileSweeping` generated-port "
+            "rank/order feedback, after the Java RNG stream has been matched through "
+            "`LayerSweepCrossingMinimizer.initialize`, `ISweepPortDistributor.create`, "
+            "`LayerSweepCrossingMinimizer.compareDifferentRandomizedLayouts`, and "
+            "`BarycenterHeuristic` randomization. "
             "The distributional tier is earned only where layers stay exact, scalar TOSTs pass, "
             "cross-seed variance is comparable, and the elkjs-vs-native Procrustes cloud sits "
             "inside the within-elkjs/native spread band.",
