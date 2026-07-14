@@ -174,12 +174,12 @@ def verify() -> list[FidelityResult]:
     results = [
         FidelityResult(
             algorithm="mulment",
-            tier="quality-faithful",
+            tier="coarsener-port",
             quality=_stress_quality(edge_index, mulment_a),
             residual=_rotation_invariant_residual(mulment_a, mulment_b),
             reference_runtime=(
                 "KaDraw kadraw target built and ran single-thread with --seed; "
-                "all target blocked by graphchecker Cairo link"
+                "label-propagation probe first diverges at level 3 (12->7 vs 12->6)"
             ),
             rng_matched=torch.equal(mulment_a, mulment_b),
         ),
