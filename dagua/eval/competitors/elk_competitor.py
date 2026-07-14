@@ -421,16 +421,13 @@ class ElkLayered(CompetitorBase):
         timeout : float, default=300.0
             Maximum runtime in seconds.
         seed : int | None, default=None
-            Accepted for interface consistency but ignored because ELK layered
-            is deterministic for a fixed input.
+            ELK random seed. ``None`` pins seed 1.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
-        del seed
-
         n = graph.num_nodes
         emitted_nodes: Set[int] = set()
         children = _build_elk_children(graph, None, _cluster_children(graph), emitted_nodes)
@@ -448,6 +445,8 @@ class ElkLayered(CompetitorBase):
                 "elk.direction": "DOWN",
                 "elk.spacing.nodeNode": "40",
                 "elk.layered.spacing.nodeNodeBetweenLayers": "60",
+                "elk.layered.thoroughness": "7",
+                "elk.randomSeed": 1 if seed is None else int(seed),
             },
             "children": children,
             "edges": edges,
