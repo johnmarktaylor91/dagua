@@ -267,6 +267,7 @@ _EXPECTED_OP_MODULES = (
     "hde",
     "init",
     "layering",
+    "largevis",
     "lgl",
     "loss_classic",
     "loss_engine",
