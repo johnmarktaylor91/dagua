@@ -21,6 +21,15 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "drl": ("dagua.layout.ops.pipelines.drl", "layout_drl_pipeline"),
     "dagre": ("dagua.layout.ops.pipelines.dagre", "layout_dagre_pipeline"),
+    "d3force": ("dagua.layout.ops.pipelines.d3force", "layout_d3force_pipeline"),
+    "d3force_default": (
+        "dagua.layout.ops.pipelines.d3force",
+        "layout_d3force_default_pipeline",
+    ),
+    "d3force_strong_repulsion": (
+        "dagua.layout.ops.pipelines.d3force",
+        "layout_d3force_strong_repulsion_pipeline",
+    ),
     "dagua_flat": (
         "dagua.layout.ops.pipelines.dagua_flat",
         "layout_dagua_flat_pipeline",
