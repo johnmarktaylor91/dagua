@@ -7,6 +7,7 @@ uniformly.
 
 # Import all competitor modules to trigger registration
 from dagua.eval.competitors import (
+    backbone_competitor,  # noqa: F401
     classic_competitor,  # noqa: F401
     coregd_competitor,  # noqa: F401
     cytoscape_competitor,  # noqa: F401
