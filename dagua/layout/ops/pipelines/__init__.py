@@ -79,6 +79,10 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "elk_radial": ("dagua.layout.ops.pipelines.elk_radial", "layout_elk_radial_pipeline"),
     "elk_stress": ("dagua.layout.ops.pipelines.elk_stress", "layout_elk_stress_pipeline"),
     "fa2": ("dagua.layout.ops.pipelines.fa2", "layout_fa2_pipeline"),
+    "forceatlas1": (
+        "dagua.layout.ops.pipelines.forceatlas1",
+        "layout_forceatlas1_pipeline",
+    ),
     "fdp": ("dagua.layout.ops.pipelines.fdp", "layout_fdp_pipeline"),
     "fpp": ("dagua.layout.ops.pipelines.fpp", "layout_fpp_pipeline"),
     "fmmm": ("dagua.layout.ops.pipelines.fmmm", "layout_fmmm_pipeline"),
