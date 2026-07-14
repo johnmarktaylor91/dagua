@@ -481,6 +481,8 @@ def test_default_competitor_order_covers_expected_and_available_competitors():
         "linlog",
         "cytoscape_fcose",
         "gephi_yifanhu",
+        "mulment_reference",
+        "nnpnet_reference",
         "ogdf_gem",
         "ogdf_fmmm",
         "ogdf_stress",
@@ -514,6 +516,8 @@ def test_default_competitor_order_covers_expected_and_available_competitors():
         "classic_drl",
         "classic_lgl",
         "classic_fcose",
+        "mulment_reimpl",
+        "nnpnet_reimpl",
     }
     order = set(DEFAULT_COMPETITOR_ORDER)
     available = {competitor.name for competitor in get_available_competitors()}
