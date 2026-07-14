@@ -65,6 +65,28 @@ def test_neato_polyomino_packing_matches_graphviz_scan_golden() -> None:
     assert torch.allclose(packed, expected)
 
 
+def test_neato_polyomino_edges_round_pointf_head_cells() -> None:
+    """Pin Graphviz ``pack.c:fillEdge`` pointf head-cell rounding.
+
+    Returns
+    -------
+    None
+        The edge cells should include the rounded pointf head endpoint rather
+        than the floored integer cell used for node boxes.
+    """
+    info = neato._generate_node_polyomino(
+        positions_points=torch.tensor([[0.0, 0.0], [400.0, 100.0]], dtype=torch.float64),
+        sizes_points=torch.zeros((2, 2), dtype=torch.float64),
+        local_edges=torch.tensor([[0], [1]], dtype=torch.long),
+        bbox=(0.0, 0.0, 400.0, 100.0),
+        step=154,
+        margin=0.0,
+        index=0,
+    )
+
+    assert info.cells == [(0, 0), (1, 0), (2, 0), (2, 1), (3, 1)]
+
+
 def test_neato_connected_graph_skips_component_packer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
