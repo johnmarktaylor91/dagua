@@ -22,7 +22,7 @@ Result: **4/11 similarity-exact**, **5 positional-identical**, **2 divergent**. 
 
 ## circo
 
-Result: **6/11 similarity-exact**, **4 positional-identical**, **1 divergent**. Thresholds: bit-exact `d_R < 1e-09`, positional `d_R < 1e-03`.
+Result: **6/11 similarity-exact**, **5 positional-identical**, **0 divergent**. Thresholds: bit-exact `d_R < 1e-09`, positional `d_R < 1e-03`.
 
 | graph | N | E | Procrustes d_R | anisotropic d_R | max raw diff | verdict | first divergent stage |
 |---|---:|---:|---:|---:|---:|---|---|
@@ -35,7 +35,7 @@ Result: **6/11 similarity-exact**, **4 positional-identical**, **1 divergent**. 
 | long_skip | 5 | 6 | 1.370e-05 | 1.111e-05 | 3.326e+02 | positional-identical | none |
 | disconnected | 5 | 2 | 4.350e-16 | 0.000e+00 | 1.770e+02 | bit-exact | none |
 | cycle_4 | 4 | 4 | 1.344e-16 | 9.778e-17 | 1.998e+02 | bit-exact | none |
-| random_dag_50 | 50 | 90 | 1.295e-01 | 1.289e-01 | 3.351e+03 | divergent | component packing after positional-identical main block-tree placement |
+| random_dag_50 | 50 | 90 | 2.771e-05 | 2.758e-05 | 3.351e+03 | positional-identical | none |
 | org_chart_deep | 79 | 78 | 1.108e-05 | 9.731e-06 | 1.016e+04 | positional-identical | none |
 
 ## Residual notes
