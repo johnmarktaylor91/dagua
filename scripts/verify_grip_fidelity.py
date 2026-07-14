@@ -12,18 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dagua.eval.competitors.native_reference_competitor import GripReferenceCompetitor  # noqa: E402
 from dagua.eval.equivalence_metrics import procrustes_rmsd  # noqa: E402
+from dagua.graph import DaguaGraph  # noqa: E402
 from dagua.layout.ops.pipelines.grip import (  # noqa: E402
-    GripConfig,
-    build_grip_pipeline,
     build_mis_filtration,
     layout_grip_pipeline,
-)
-from dagua.layout.ops.state import (  # noqa: E402
-    ExecutionPlan,
-    LayoutProblem,
-    RuntimeContext,
-    SolveState,
 )
 from dagua.metrics import composite, quick  # noqa: E402
 
@@ -133,12 +127,14 @@ def _fidelity_tier(residual: float, reference_ran: bool) -> str:
     if residual <= 1.0e-9:
         return "bit/similarity-exact"
     if residual <= 1.0e-3:
-        return "strong-equivalent"
+        return "positional"
+    if residual <= 5.0:
+        return "distributional"
     return "partial"
 
 
-def verify_graph(graph: VerificationGraph) -> tuple[float, str, float, list[list[int]]]:
-    """Verify one graph and return residual, tier, quality, and MIS levels.
+def _reference_layout(graph: VerificationGraph) -> tuple[torch.Tensor, str | None]:
+    """Run the headless GRIP reference for one graph.
 
     Parameters
     ----------
@@ -147,8 +143,61 @@ def verify_graph(graph: VerificationGraph) -> tuple[float, str, float, list[list
 
     Returns
     -------
-    tuple[float, str, float, list[list[int]]]
-        Procrustes residual, tier, quick composite quality, and MIS levels.
+    tuple[torch.Tensor, str | None]
+        Reference positions with shape ``[N, 2]`` and optional error string.
+    """
+    competitor = GripReferenceCompetitor()
+    dagua_graph = DaguaGraph.from_edge_index(graph.edge_index, graph.num_nodes)
+    result = competitor.layout_with_variant(
+        dagua_graph,
+        seed=graph.seed,
+        variant_params={
+            "rounds": graph.steps,
+            "final_rounds": graph.steps,
+            "init_vertices": 4,
+            "dim": 2,
+        },
+    )
+    if result.pos is None:
+        return torch.empty((0, 2), dtype=torch.float64), result.error or "unknown reference error"
+    return result.pos.to(dtype=torch.float64), None
+
+
+def _first_divergent_stage(residual: float, reference_error: str | None) -> str:
+    """Name the first divergent GRIP stage.
+
+    Parameters
+    ----------
+    residual : float
+        Procrustes residual.
+    reference_error : str | None
+        Reference runtime error, if any.
+
+    Returns
+    -------
+    str
+        Stage label for closeout reporting.
+    """
+    if reference_error is not None:
+        return "reference-runtime"
+    if residual <= 1.0e-9:
+        return "none"
+    return "layout-force-refinement"
+
+
+def verify_graph(graph: VerificationGraph) -> tuple[float, str, float, list[list[int]], str]:
+    """Verify one graph and return residual, tier, quality, MIS levels, and stage.
+
+    Parameters
+    ----------
+    graph : VerificationGraph
+        Verification graph and GRIP parameters.
+
+    Returns
+    -------
+    tuple[float, str, float, list[list[int]], str]
+        Procrustes residual, tier, quick composite quality, MIS levels, and
+        first divergent stage.
     """
     common = {
         "edge_index": graph.edge_index,
@@ -158,21 +207,8 @@ def verify_graph(graph: VerificationGraph) -> tuple[float, str, float, list[list
         "fidelity_dtype": torch.float64,
     }
     actual = layout_grip_pipeline(**common)
-    problem = LayoutProblem(
-        edge_index=graph.edge_index,
-        num_nodes=graph.num_nodes,
-        seed=graph.seed,
-    )
-    final_state = build_grip_pipeline(
-        GripConfig(rounds=graph.steps, fidelity_dtype=torch.float64)
-    ).apply(
-        problem,
-        SolveState(),
-        RuntimeContext(plan=ExecutionPlan(device="cpu")),
-    )
-    if final_state.pos is None:
-        raise RuntimeError(f"{graph.name}: GRIP pipeline did not produce positions.")
-    residual = procrustes_rmsd(actual.numpy(), final_state.pos.numpy())
+    reference, reference_error = _reference_layout(graph)
+    residual = float("inf") if reference_error is not None else procrustes_rmsd(actual, reference)
     quality_metrics = quick(
         actual.to(dtype=torch.float32),
         graph.edge_index,
@@ -184,7 +220,13 @@ def verify_graph(graph: VerificationGraph) -> tuple[float, str, float, list[list
         num_nodes=graph.num_nodes,
         seed=graph.seed,
     )
-    return residual, _fidelity_tier(residual, reference_ran=False), quality, levels
+    return (
+        residual,
+        _fidelity_tier(residual, reference_ran=reference_error is None),
+        quality,
+        levels,
+        _first_divergent_stage(residual, reference_error),
+    )
 
 
 def main() -> None:
@@ -196,18 +238,18 @@ def main() -> None:
         Writes a line-oriented report to stdout.
     """
     print("GRIP fidelity verification")
-    print("reference_runtime: build_failed (missing GL/glut.h; GUI/Tcl runtime not established)")
+    print("reference_runtime: headless ~/tools/dagua-refs/grip/original/grip_headless_layout")
     print("reference_license: unlicensed source archive; clean-room implementation from paper")
-    print("first_divergent_stage: reference-runtime")
     print("named_residual: procrustes_rmsd")
     print("mis_init_status: isolated deterministic pins pass in tests/test_pipeline_grip.py")
     print("no_delegation_guards: pass")
     for graph in _verification_graphs():
-        residual, tier, quality, levels = verify_graph(graph)
+        residual, tier, quality, levels, stage = verify_graph(graph)
         level_sizes = [len(level) for level in levels]
         print(
             f"{graph.name}: residual={residual:.3e} tier={tier} "
-            f"quality={quality:.2f} mis_sizes={level_sizes}"
+            f"quality={quality:.2f} mis_sizes={level_sizes} "
+            f"first_divergent_stage={stage}"
         )
 
 

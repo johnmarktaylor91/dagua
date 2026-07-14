@@ -306,9 +306,7 @@ def _run_sparse_sgd(
     numpy.ndarray
         Refined positions with shape ``[N, 2]``.
     """
-    pos = np.zeros((embedding.shape[0], 2), dtype=np.float64)
-    if embedding.shape[1] > 0:
-        pos[:, : min(2, embedding.shape[1])] = embedding[:, :2]
+    pos = _initial_egraph_positions(embedding.shape[0])
     if not pairs or config.sgd_iterations <= 0:
         return pos
 
@@ -335,6 +333,29 @@ def _run_sparse_sgd(
             pos[pair.i] -= move
             pos[pair.j] += move
     return pos
+
+
+def _initial_egraph_positions(num_nodes: int) -> np.ndarray:
+    """Return egraph-rs Euclidean 2D initial placement.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    numpy.ndarray
+        Initial position array with shape ``[N, 2]``.
+    """
+    positions = np.zeros((num_nodes, 2), dtype=np.float64)
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+    for index in range(num_nodes):
+        radius = 10.0 * math.sqrt(float(index))
+        theta = golden_angle * float(index)
+        positions[index, 0] = radius * math.cos(theta)
+        positions[index, 1] = radius * math.sin(theta)
+    return positions
 
 
 @register_op
