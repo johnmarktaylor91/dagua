@@ -140,6 +140,31 @@ def _tier(residual: float | None, reference_ran: bool) -> str:
     return "partial"
 
 
+def _overall_tier(residuals: list[float], reference_ran: bool) -> str:
+    """Classify the aggregate verification tier.
+
+    Parameters
+    ----------
+    residuals : list[float]
+        Per-graph Procrustes residuals from successful reference runs.
+    reference_ran : bool
+        Whether the R reference was available.
+
+    Returns
+    -------
+    str
+        Aggregate fidelity tier.
+    """
+    if not reference_ran or not residuals:
+        return "source-faithful-clean-room"
+    worst_residual = max(residuals)
+    if worst_residual <= BIT_EXACT_THRESHOLD:
+        return "reference-verified-bit/similarity-exact"
+    if worst_residual <= SIMILAR_THRESHOLD:
+        return "reference-verified-similarity-exact"
+    return "reference-verified-partial"
+
+
 def _reference_layout(
     graph: DaguaGraph,
     keep: float,
@@ -209,9 +234,11 @@ def main() -> int:
     """
     reference_available = BackboneCompetitor().available()
     print(f"reference_r_package_ran: {'yes' if reference_available else 'no'}")
-    print("named_residual: oaqc_edge_orbit_embeddedness_when_reference_unavailable")
+    print("named_residual: stress_initialization_mds_rng_parity")
     print("graph,residual,tier,quality,backbone_edge_set_matched")
 
+    residuals: list[float] = []
+    edge_matches: list[bool] = []
     for spec in _graphs():
         edge_index = _edge_index(spec.edges)
         graph = DaguaGraph.from_edge_list(spec.edges, num_nodes=spec.num_nodes)
@@ -246,12 +273,17 @@ def main() -> int:
                 or sorted(reference_edge_ids) == sorted(native_one_based_from_canonical)
                 else "no"
             )
+            residuals.append(residual)
+            edge_matches.append(edge_match == "yes")
         metrics = quick(actual, edge_index, seed=42)
         quality = composite(metrics)
         print(
             f"{spec.name},{_format_float(residual)},{_tier(residual, reference is not None)},"
             f"{quality:.3f},{edge_match}"
         )
+    if reference_available:
+        print(f"overall_tier: {_overall_tier(residuals, reference_available)}")
+        print(f"all_backbone_edge_sets_matched: {'yes' if all(edge_matches) else 'no'}")
     return 0
 
 
