@@ -25,6 +25,7 @@ from dagua.eval.competitors import (
     isom_competitor,  # noqa: F401
     linlog_competitor,  # noqa: F401
     mulment_nnpnet_competitor,  # noqa: F401
+    native_reference_competitor,  # noqa: F401
     networkx_competitor,  # noqa: F401
     neulay_competitor,  # noqa: F401
     neural_reference_competitor,  # noqa: F401
