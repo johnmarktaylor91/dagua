@@ -19,6 +19,24 @@ _DEFAULT_NODESEP_POINTS = 18.0
 _TWO_PI = 2.0 * math.pi
 
 
+def _graphviz_round_points(value: float) -> int:
+    """Round a point value like Graphviz's ``ROUND`` macro.
+
+    Parameters
+    ----------
+    value : float
+        Point-space value to round.
+
+    Returns
+    -------
+    int
+        Nearest integer point with half values rounded away from zero.
+    """
+    if value >= 0.0:
+        return int(math.floor(value + 0.5))
+    return int(math.ceil(value - 0.5))
+
+
 @dataclass
 class _CircoBlock:
     """Owned Graphviz circo block in the block-cutpoint tree.
@@ -2151,19 +2169,76 @@ def _circo_pack_component_positions(
     torch.Tensor
         Packed point coordinates with shape ``[N, 2]``.
     """
-    from dagua.layout.ops.pipelines.neato import _pack_component_positions
-
-    point_scale = _DEFAULT_RANKSEP_POINTS
-    positions_in = [local / point_scale for local in component_positions]
-    sizes_in = None if node_sizes is None else node_sizes / point_scale
-    packed_in = _pack_component_positions(
-        components=components,
-        component_positions=positions_in,
-        component_edges=component_edges,
-        num_nodes=num_nodes,
-        node_sizes=sizes_in,
+    from dagua.layout.ops.pipelines.neato import (
+        _GRAPHVIZ_DEFAULT_NODE_SIZE,
+        _GRAPHVIZ_POINTS_PER_INCH,
+        _component_bbox_points,
+        _compute_polyomino_step,
+        _generate_node_polyomino,
+        _place_polyomino_component,
     )
-    return packed_in * point_scale
+
+    if not component_positions:
+        return torch.empty((0, 2), dtype=torch.float64)
+
+    device = component_positions[0].device
+    dtype = component_positions[0].dtype
+    packed = torch.zeros((num_nodes, 2), dtype=dtype, device=device)
+    if node_sizes is None:
+        sizes_points = torch.empty((num_nodes, 2), dtype=dtype, device=device)
+        sizes_points[:, 0] = _GRAPHVIZ_DEFAULT_NODE_SIZE[0] * _GRAPHVIZ_POINTS_PER_INCH
+        sizes_points[:, 1] = _GRAPHVIZ_DEFAULT_NODE_SIZE[1] * _GRAPHVIZ_POINTS_PER_INCH
+    else:
+        sizes_points = node_sizes.to(device=device, dtype=dtype)
+        sizes_points = torch.round(sizes_points)
+
+    local_positions_points = [
+        local_pos.detach().to(device="cpu", dtype=torch.float64)
+        for local_pos in component_positions
+    ]
+    local_sizes_points = [
+        sizes_points[component].detach().to(device="cpu", dtype=torch.float64)
+        for component in components
+    ]
+    boxes = [
+        _component_bbox_points(local_points, local_sizes)
+        for local_points, local_sizes in zip(local_positions_points, local_sizes_points)
+    ]
+    # circoLayout uses getPackInfo(g, l_node, CL_OFFSET, &pinfo), while fdp/neato
+    # use CL_OFFSET / 2. Keep the margin in Graphviz points because circpos.c
+    # coordinates are already in the same point-space as ND_width/ND_height.
+    margin_points = 8.0
+    step = _compute_polyomino_step(boxes, margin_points)
+    polyominoes = [
+        _generate_node_polyomino(
+            positions_points=local_points,
+            sizes_points=local_sizes,
+            local_edges=local_edges,
+            bbox=box,
+            step=step,
+            margin=margin_points,
+            index=index,
+        )
+        for index, (local_points, local_sizes, local_edges, box) in enumerate(
+            zip(local_positions_points, local_sizes_points, component_edges, boxes)
+        )
+    ]
+    sorted_polyominoes = sorted(polyominoes, key=lambda info: -info.perimeter)
+    occupied: Set[Tuple[int, int]] = set()
+    offsets = [(0.0, 0.0)] * len(polyominoes)
+    for sorted_index, info in enumerate(sorted_polyominoes):
+        offsets[info.index] = _place_polyomino_component(
+            sorted_index=sorted_index,
+            info=info,
+            occupied=occupied,
+            step=step,
+            margin=margin_points,
+        )
+
+    for component, local_pos, offset_points in zip(components, component_positions, offsets):
+        offset = torch.tensor(offset_points, dtype=dtype, device=device)
+        packed[component] = local_pos + offset
+    return packed
 
 
 def circo_positions(
@@ -2208,14 +2283,16 @@ def circo_positions(
     adjacency = _simple_adjacency(edge_index, num_nodes)
     components = _circo_connected_components(adjacency)
     node_extents: Optional[List[float]] = None
+    layout_nodesep = float(nodesep)
     if node_sizes is not None and node_sizes.numel() > 0:
         sizes_cpu = node_sizes.detach().to(device="cpu", dtype=torch.float64)
-        # Graphviz stores ND_width/ND_height in inches. The cached dagua
-        # sizes are points, while this port maps Graphviz mindist=1.0 to
-        # ``nodesep``; convert extents into the same local unit system.
-        size_scale = float(nodesep) / _DEFAULT_RANKSEP_POINTS
+        # circpos.c computes with ``mindist=1.0`` in Graphviz's internal inch
+        # coordinate space. JSON output is emitted in points, so the fidelity
+        # path uses 72-point mindist and point-sized node extents.
+        layout_nodesep = _DEFAULT_RANKSEP_POINTS * (float(nodesep) / _DEFAULT_NODESEP_POINTS)
         node_extents = [
-            float(max(width, height)) * size_scale for width, height in sizes_cpu.tolist()
+            float(_graphviz_round_points(max(width, height)))
+            for width, height in sizes_cpu.tolist()
         ]
     positions = torch.zeros((num_nodes, 2), dtype=torch.float64, device=device)
     block_orders: List[List[int]] = []
@@ -2226,7 +2303,7 @@ def circo_positions(
         if root is None:
             continue
         points: Dict[int, Tuple[float, float]] = {}
-        _layout_circo_block_tree(root, adjacency, edge_index, nodesep, points, node_extents)
+        _layout_circo_block_tree(root, adjacency, edge_index, layout_nodesep, points, node_extents)
         local = torch.zeros((len(component), 2), dtype=torch.float64, device=device)
         for local_index, node in enumerate(component):
             x_value, y_value = points.get(node, (0.0, 0.0))
