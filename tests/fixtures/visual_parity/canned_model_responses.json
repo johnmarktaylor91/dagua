@@ -1,0 +1,123 @@
+{
+  "evidence_urls": [
+    "https://example.com/vision-model-roster",
+    "https://example.com/vision-release-notes"
+  ],
+  "image_limits": {
+    "max_images_per_call": 10,
+    "max_side_px": 2000
+  },
+  "candidates": [
+    {
+      "model": "candidate-primary",
+      "cost_latency_notes": "fast enough for round audits",
+      "response": {
+        "verdict": "FAIL",
+        "findings": [
+          {
+            "pair": "wrong_font",
+            "category": "typography",
+            "description": "font size differs",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "HIGH"
+          },
+          {
+            "pair": "invisible_edge_stem",
+            "category": "edges",
+            "description": "edge stem is missing",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "HIGH"
+          },
+          {
+            "pair": "truncated_label",
+            "category": "labels",
+            "description": "label is truncated",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "HIGH"
+          },
+          {
+            "pair": "arrow_fill_mismatch",
+            "category": "arrowheads",
+            "description": "arrow fill differs",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "MED"
+          },
+          {
+            "pair": "cluster_border_missing_one_side",
+            "category": "clusters",
+            "description": "cluster border is missing",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "MED"
+          },
+          {
+            "pair": "size_normalization_artifact",
+            "category": "canvas",
+            "description": "panel scale differs",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "MED"
+          }
+        ]
+      }
+    },
+    {
+      "model": "candidate-fallback",
+      "cost_latency_notes": "slower but eligible",
+      "response": {
+        "verdict": "FAIL",
+        "findings": [
+          {
+            "pair": "invisible_edge_stem",
+            "category": "edges",
+            "description": "edge stem is missing",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "HIGH"
+          },
+          {
+            "pair": "truncated_label",
+            "category": "labels",
+            "description": "label is truncated",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "HIGH"
+          },
+          {
+            "pair": "arrow_fill_mismatch",
+            "category": "arrowheads",
+            "description": "arrow fill differs",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "MED"
+          }
+        ]
+      }
+    },
+    {
+      "model": "candidate-rejected",
+      "cost_latency_notes": "flags a control",
+      "response": {
+        "verdict": "FAIL",
+        "findings": [
+          {
+            "pair": "invisible_edge_stem",
+            "category": "edges",
+            "description": "edge stem is missing",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "HIGH"
+          },
+          {
+            "pair": "truncated_label",
+            "category": "labels",
+            "description": "label is truncated",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "HIGH"
+          },
+          {
+            "pair": "true_noop_match",
+            "category": "canvas",
+            "description": "incorrectly flags clean match",
+            "finding_class": "real_cosmetic_gap",
+            "severity": "LOW"
+          }
+        ]
+      }
+    }
+  ]
+}
