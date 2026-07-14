@@ -11,10 +11,17 @@ import torch
 PipelineSpec = tuple[str, str]
 
 PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
+    "arf": ("dagua.layout.ops.pipelines.arf", "layout_arf_pipeline"),
+    "bfs": ("dagua.layout.ops.pipelines.bfs", "layout_bfs_pipeline"),
+    "bipartite": (
+        "dagua.layout.ops.pipelines.bipartite",
+        "layout_bipartite_pipeline",
+    ),
     "classical_mds": (
         "dagua.layout.ops.pipelines.classical_mds",
         "layout_classical_mds_pipeline",
     ),
+    "circular": ("dagua.layout.ops.pipelines.circular", "layout_circular_pipeline"),
     "circo": ("dagua.layout.ops.pipelines.circo", "layout_circo_pipeline"),
     "davidson_harel": (
         "dagua.layout.ops.pipelines.davidson_harel",
@@ -68,6 +75,10 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.maxent_stress",
         "layout_maxent_stress_pipeline",
     ),
+    "multipartite": (
+        "dagua.layout.ops.pipelines.multipartite",
+        "layout_multipartite_pipeline",
+    ),
     "native_force_directed": (
         "dagua.layout.ops.pipelines.native_force_directed",
         "layout_native_force_directed_pipeline",
@@ -115,7 +126,9 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.sgd2_multi",
         "layout_sgd2_multi_pipeline",
     ),
+    "shell": ("dagua.layout.ops.pipelines.shell", "layout_shell_pipeline"),
     "spectral": ("dagua.layout.ops.pipelines.spectral", "layout_spectral_pipeline"),
+    "spiral": ("dagua.layout.ops.pipelines.spiral", "layout_spiral_pipeline"),
     "stress_majorization": (
         "dagua.layout.ops.pipelines.stress_majorization",
         "layout_stress_majorization_pipeline",
