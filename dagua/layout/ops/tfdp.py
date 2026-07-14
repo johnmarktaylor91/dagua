@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.base import Op
@@ -180,6 +181,104 @@ def _pivot_distances(
     return torch.tensor(rows, dtype=dtype, device=indptr.device)
 
 
+def _reference_numpy_rng(seed: Optional[int]) -> np.random.RandomState:
+    """Return the reference-compatible NumPy RNG.
+
+    Parameters
+    ----------
+    seed : int or None
+        t-FDP reference seed. The original code only calls
+        ``np.random.seed`` when the seed is truthy; Dagua uses a private
+        ``RandomState`` so the same stream is reproducible without mutating
+        process-global NumPy state.
+
+    Returns
+    -------
+    numpy.random.RandomState
+        Legacy MT19937 random stream used by the reference PMDS path.
+    """
+    if seed:
+        return np.random.RandomState(int(seed))
+    return np.random.RandomState()
+
+
+def _numpy_pivot_distances(
+    indptr: torch.Tensor,
+    indices: torch.Tensor,
+    pivots: np.ndarray,
+    num_nodes: int,
+) -> np.ndarray:
+    """Compute reference PivotMDS shortest-path distances with NumPy arrays.
+
+    Parameters
+    ----------
+    indptr : torch.Tensor
+        CSR row pointer with shape ``[N + 1]``.
+    indices : torch.Tensor
+        CSR column indices with shape ``[2E]``.
+    pivots : numpy.ndarray
+        Pivot node indices with shape ``[P]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    numpy.ndarray
+        Float32 distance matrix with shape ``[P, N]``. Unvisited nodes remain
+        at zero, matching the zero-filled reference buffers.
+    """
+    indptr_np = indptr.detach().cpu().numpy().astype(np.int64, copy=False)
+    indices_np = indices.detach().cpu().numpy().astype(np.int64, copy=False)
+    distances = np.zeros((int(pivots.shape[0]), num_nodes), dtype=np.float32)
+    visited = np.zeros((int(pivots.shape[0]), num_nodes), dtype=np.int8)
+    queue = np.zeros((int(pivots.shape[0]), num_nodes), dtype=np.int32)
+    for pivot_row, pivot in enumerate(pivots.astype(np.int64, copy=False)):
+        left = 0
+        right = 1
+        queue[pivot_row, 0] = int(pivot)
+        visited[pivot_row, int(pivot)] = 1
+        while left < right:
+            node = int(queue[pivot_row, left])
+            for offset in range(int(indptr_np[node]), int(indptr_np[node + 1])):
+                neighbor = int(indices_np[offset])
+                if visited[pivot_row, neighbor]:
+                    continue
+                visited[pivot_row, neighbor] = 1
+                queue[pivot_row, right] = neighbor
+                right += 1
+                distances[pivot_row, neighbor] = distances[pivot_row, node] + 1.0
+            left += 1
+    return distances
+
+
+def _reference_power_iteration(
+    matrix: np.ndarray,
+    rng: np.random.RandomState,
+    iterations: int,
+) -> np.ndarray:
+    """Run the reference PMDS power iteration.
+
+    Parameters
+    ----------
+    matrix : numpy.ndarray
+        Square matrix with shape ``[P, P]``.
+    rng : numpy.random.RandomState
+        Legacy random stream used to initialize the vector.
+    iterations : int
+        Number of power iterations.
+
+    Returns
+    -------
+    numpy.ndarray
+        Unit-ish eigenvector estimate with shape ``[P]``.
+    """
+    vector = rng.rand(matrix.shape[1])
+    for _ in range(iterations):
+        next_vector = np.dot(matrix, vector)
+        vector = next_vector / np.linalg.norm(next_vector)
+    return vector
+
+
 def tfdp_scale_by_edge(
     pos: torch.Tensor,
     indptr: torch.Tensor,
@@ -241,34 +340,121 @@ def tfdp_pivot_mds(
     torch.Tensor
         Initial positions with shape ``[N, 2]``.
     """
+    del generator
+    return tfdp_pivot_mds_reference(
+        indptr=indptr,
+        indices=indices,
+        num_nodes=num_nodes,
+        pivots_count=pivots_count,
+        seed=None,
+        dtype=dtype,
+    )
+
+
+def _tfdp_pivot_mds_from_rng(
+    indptr: torch.Tensor,
+    indices: torch.Tensor,
+    num_nodes: int,
+    pivots_count: int,
+    dtype: torch.dtype,
+    rng: np.random.RandomState,
+) -> torch.Tensor:
+    """Compute reference PMDS from the current NumPy RNG stream state.
+
+    Parameters
+    ----------
+    indptr : torch.Tensor
+        CSR row pointer with shape ``[N + 1]``.
+    indices : torch.Tensor
+        CSR column indices.
+    num_nodes : int
+        Number of graph nodes.
+    pivots_count : int
+        Reference ``NP`` matrix width and maximum sampled pivot count.
+    dtype : torch.dtype
+        Coordinate dtype for the returned tensor.
+    rng : numpy.random.RandomState
+        Legacy NumPy RNG already advanced past the reference noise draw.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]`` before edge-length scaling.
+    """
     if num_nodes == 0:
         return torch.zeros((0, 2), dtype=dtype, device=indptr.device)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=dtype, device=indptr.device)
     pivot_total = min(max(int(pivots_count), 1), num_nodes)
-    if pivot_total >= num_nodes:
-        pivots = torch.arange(num_nodes, dtype=torch.long, device=indptr.device)
+    matrix_width = max(int(pivots_count), 1)
+    if matrix_width >= num_nodes:
+        pivots = np.arange(num_nodes, dtype=np.int64)
     else:
-        pivots = torch.randperm(num_nodes, generator=generator, device=indptr.device)[:pivot_total]
-    distances = _pivot_distances(indptr, indices, pivots, num_nodes, dtype)
-    squared = distances * distances
-    delta_is = squared.sum(dim=0) / float(pivot_total)
-    delta_rj = squared.sum(dim=1) / float(num_nodes)
+        pivots = rng.choice(np.arange(num_nodes), pivot_total, replace=False)
+    distances = _numpy_pivot_distances(indptr, indices, pivots, num_nodes)
+    squared = distances**2
+    delta_is = squared.sum(axis=0) / float(pivot_total)
+    delta_rj = squared.sum(axis=1) / float(num_nodes)
     sum_all = squared.sum() / float(num_nodes * pivot_total)
-    centered = -0.5 * (squared.T - delta_rj.unsqueeze(0) - delta_is.unsqueeze(1) + sum_all)
-    gram = centered.T @ centered
-    pos = torch.zeros((num_nodes, 2), dtype=dtype, device=indptr.device)
-    working = gram
+    centered = np.zeros((num_nodes, matrix_width), dtype=np.float64)
+    for node_index in range(num_nodes):
+        for pivot_index in range(pivot_total):
+            centered[node_index, pivot_index] = -0.5 * (
+                squared[pivot_index, node_index]
+                - delta_rj[pivot_index]
+                - delta_is[node_index]
+                + sum_all
+            )
+    working = np.dot(centered.T, centered)
+    pos = np.zeros((num_nodes, 2), dtype=np.float64)
     for axis in range(2):
-        vector = torch.rand((pivot_total,), generator=generator, dtype=dtype, device=indptr.device)
-        for _ in range(_PMDS_POWER_ITERATIONS):
-            next_vector = working @ vector
-            norm = torch.linalg.vector_norm(next_vector).clamp_min(torch.finfo(dtype).eps)
-            vector = next_vector / norm
-        eigenvalue = vector @ (working @ vector)
-        pos[:, axis] = centered @ vector
-        working = working - eigenvalue * torch.outer(vector, vector)
-    return pos
+        vector = _reference_power_iteration(working, rng, _PMDS_POWER_ITERATIONS).reshape(1, -1)
+        eigenvalue = np.dot(vector, np.dot(working, vector.T))
+        pos[:, axis] = np.dot(centered, vector.reshape(-1, 1)).reshape(-1)
+        working = working - eigenvalue / (np.linalg.norm(vector) ** 2) * np.dot(vector.T, vector)
+    return torch.tensor(pos, dtype=dtype, device=indptr.device)
+
+
+def tfdp_pivot_mds_reference(
+    indptr: torch.Tensor,
+    indices: torch.Tensor,
+    num_nodes: int,
+    pivots_count: int,
+    seed: Optional[int],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Compute the exact reference PivotMDS initializer.
+
+    Parameters
+    ----------
+    indptr : torch.Tensor
+        CSR row pointer with shape ``[N + 1]``.
+    indices : torch.Tensor
+        CSR column indices.
+    num_nodes : int
+        Number of graph nodes.
+    pivots_count : int
+        Reference ``NP`` matrix width and maximum sampled pivot count.
+    seed : int or None
+        NumPy seed used by the reference init stream.
+    dtype : torch.dtype
+        Coordinate dtype for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]`` before edge-length scaling.
+    """
+    rng = _reference_numpy_rng(seed)
+    _ = _DEFAULT_JITTER_SCALE * rng.randn(num_nodes, 2)
+    return _tfdp_pivot_mds_from_rng(
+        indptr=indptr,
+        indices=indices,
+        num_nodes=num_nodes,
+        pivots_count=pivots_count,
+        dtype=dtype,
+        rng=rng,
+    )
 
 
 def _compute_bias(indptr: torch.Tensor, indices: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -375,20 +561,17 @@ class TFDPInitialize(Op):
                 device=device,
             )
         else:
-            noise = _DEFAULT_JITTER_SCALE * torch.randn(
-                (problem.num_nodes, 2),
-                generator=generator,
-                dtype=dtype,
-                device=device,
-            )
-            pos = tfdp_pivot_mds(
+            rng = _reference_numpy_rng(self.config.seed)
+            noise_np = _DEFAULT_JITTER_SCALE * rng.randn(problem.num_nodes, 2)
+            pos = _tfdp_pivot_mds_from_rng(
                 indptr=indptr,
                 indices=indices,
                 num_nodes=problem.num_nodes,
                 pivots_count=self.config.pmds_pivots,
-                generator=generator,
                 dtype=dtype,
+                rng=rng,
             )
+            noise = torch.tensor(noise_np, dtype=dtype, device=device)
             pos = 2.0 * tfdp_scale_by_edge(pos, indptr, indices) * pos + noise
         state.pos = _center_by_range(pos.to(dtype=dtype))
         state.extras["tfdp_indptr"] = indptr
