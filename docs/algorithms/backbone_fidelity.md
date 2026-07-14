@@ -8,13 +8,15 @@ pipeline without runtime R delegation.
 - Reference: `schochastics/graphlayouts::layout_as_backbone`
 - Runtime delegation: none
 - Verification: `python scripts/verify_backbone_fidelity.py`
-- Current residual name: `oaqc_edge_orbit_embeddedness_when_reference_unavailable`
+- Current tier: `reference-verified-partial`
+- Current residual name: `stress_initialization_mds_rng_parity`
 
 ## Method
 
 The native pipeline has two bisection stages:
 
-1. `backbone_compute`: score edges by simmelian embeddedness, apply
+1. `backbone_compute`: score edges by the same non-induced C4 edge orbit used
+   by `oaqc::oaqc(..., non_ind_freq=TRUE)$e_orbits_non_ind[, 11]`, apply
    graphlayouts' maximum-prefix Jaccard reweighting, union the keep-fraction
    filter with the union maximum spanning tree, and expose selected backbone
    edges.
@@ -22,31 +24,33 @@ The native pipeline has two bisection stages:
    selected backbone graph, including MDS initialization, fixed stress seed 42,
    disconnected component layout, and row packing.
 
-The graphlayouts R reference additionally uses `oaqc::oaqc(...,
-non_ind_freq=TRUE)` edge orbit column 11 before prefix-Jaccard reweighting.
-Dagua does not add an `oaqc` runtime dependency, so the native port uses
-common-neighbor embeddedness for that simmelian edge score. This is the first
-named stage that can diverge from exact graphlayouts when `oaqc` is available.
+Dagua computes the `oaqc` edge orbit directly as the count of distinct
+length-3 paths between each edge's endpoints. It does not add an `oaqc` or R
+runtime dependency.
 
 ## Latest Local Verification
 
-On this environment, `Rscript` is present, but `graphlayouts`/`oaqc` were not
-fully available during implementation. The verifier therefore reports
-clean-room quality tiers unless those packages are installed.
+On this environment, `Rscript` is present and the R reference stack installs
+and runs. `oaqc` installed from CRAN. `igraph` and `graphlayouts` installed
+from CRAN after installing `lattice` from CRAN and `Matrix 1.6-5` from the CRAN
+archive, because current CRAN `Matrix` is not available for R 4.2.
 
-Expected verifier output shape:
+Measured verifier output:
 
 ```text
-reference_r_package_ran: no
-named_residual: oaqc_edge_orbit_embeddedness_when_reference_unavailable
+reference_r_package_ran: yes
+named_residual: stress_initialization_mds_rng_parity
 graph,residual,tier,quality,backbone_edge_set_matched
-path4,NA,quality-tier-clean-room,...
-cycle_diagonal,NA,quality-tier-clean-room,...
-triangle_tail,NA,quality-tier-clean-room,...
-two_components,NA,quality-tier-clean-room,...
+path4,0.00586404,partial,48.561,yes
+cycle_diagonal,0.000936847,similarity-exact,31.877,yes
+triangle_tail,0.0058558,partial,34.342,yes
+two_components,0.0189826,partial,58.480,yes
+overall_tier: reference-verified-partial
+all_backbone_edge_sets_matched: yes
 ```
 
-When `igraph`, `graphlayouts`, and `oaqc` are installed in R, the same script
-runs the reference adapter and reports rotation-invariant Procrustes residuals,
-per-graph tier, quality score, and whether the selected backbone edge set
-matches.
+The backbone edge set now matches the R reference on the verification corpus.
+The remaining residual is isolated to stress initialization parity:
+graphlayouts uses `igraph::layout_with_mds(...) + stats::runif(...)` under R's
+seed 42, while Dagua uses a NumPy-native MDS and RNG initialization before the
+same stress majorization update.
