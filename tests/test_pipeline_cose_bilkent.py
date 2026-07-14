@@ -44,3 +44,29 @@ def test_cose_bilkent_quality_tiers_run() -> None:
         )
         assert pos.shape == (4, 2)
         assert torch.isfinite(pos).all()
+
+
+def test_cose_bilkent_compound_groups_separate_centroids() -> None:
+    """Compound members should be laid out as grouped CoSE-Bilkent packs.
+
+    Returns
+    -------
+    None
+        Cluster centroids should be separated by the compound parent stage.
+    """
+    edge_index = torch.tensor(
+        [[0, 1, 3, 4, 2, 5], [1, 2, 4, 5, 3, 0]],
+        dtype=torch.long,
+    )
+    clusters = {"a": [0, 1, 2], "b": [3, 4, 5]}
+    pos = layout_cose_bilkent_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        steps=5,
+        seed=7,
+        clusters=clusters,
+    )
+
+    first_center = pos[torch.tensor(clusters["a"])].mean(dim=0)
+    second_center = pos[torch.tensor(clusters["b"])].mean(dim=0)
+    assert torch.linalg.vector_norm(first_center - second_center) > 100.0
