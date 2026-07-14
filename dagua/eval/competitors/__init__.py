@@ -26,6 +26,7 @@ from dagua.eval.competitors import (
     sgd2_competitor,  # noqa: F401
     sgd2_multi_competitor,  # noqa: F401
     smacof_competitor,  # noqa: F401
+    tfdp_competitor,  # noqa: F401
     tsne_competitor,  # noqa: F401
     umap_competitor,  # noqa: F401
 )
