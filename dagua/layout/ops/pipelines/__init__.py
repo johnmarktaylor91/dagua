@@ -154,6 +154,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "neulay": ("dagua.layout.ops.pipelines.neulay", "layout_neulay_pipeline"),
     "osage": ("dagua.layout.ops.pipelines.osage", "layout_osage_pipeline"),
     "pacmap": ("dagua.layout.ops.pipelines.pacmap", "layout_pacmap_pipeline"),
+    "omega": ("dagua.layout.ops.pipelines.omega", "layout_omega_pipeline"),
     "planar": ("dagua.layout.ops.pipelines.planar", "layout_planar_pipeline"),
     "pivot_mds": (
         "dagua.layout.ops.pipelines.pivot_mds",
@@ -201,6 +202,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "tfdp": ("dagua.layout.ops.pipelines.tfdp", "layout_tfdp_pipeline"),
     "tfdp_exact": ("dagua.layout.ops.pipelines.tfdp", "layout_tfdp_exact_pipeline"),
     "tfdp_random": ("dagua.layout.ops.pipelines.tfdp", "layout_tfdp_random_pipeline"),
+    "tidy": ("dagua.layout.ops.pipelines.tidy", "layout_tidy_pipeline"),
     "tutte": ("dagua.layout.ops.pipelines.tutte", "layout_tutte_pipeline"),
     "twopi": ("dagua.layout.ops.pipelines.twopi", "layout_twopi_pipeline"),
     "umap": ("dagua.layout.ops.pipelines.umap_layout", "layout_umap_layout_pipeline"),
