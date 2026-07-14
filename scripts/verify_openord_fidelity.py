@@ -69,6 +69,15 @@ def _verification_graphs() -> list[tuple[str, DaguaGraph]]:
             "weighted_square",
             _graph_from_edges("weighted_square", 4, [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)]),
         ),
+        (
+            "path_chords_20",
+            _graph_from_edges(
+                "path_chords_20",
+                20,
+                [(node, node + 1) for node in range(19)]
+                + [(node, node + 2) for node in range(0, 18, 3)],
+            ),
+        ),
     ]
 
 
@@ -162,7 +171,7 @@ def _write_report(path: Path, rows: list[dict[str, Any]], blocker: str | None) -
         lines.extend(["## Reference blocker", "", blocker, ""])
     lines.extend(
         [
-            "## Small-graph corpus",
+            "## Verification corpus",
             "",
             "| graph | residual | tier | native quality | reference quality |",
             "| --- | ---: | --- | ---: | ---: |",
@@ -184,8 +193,10 @@ def _write_report(path: Path, rows: list[dict[str, Any]], blocker: str | None) -
             "## Residual",
             "",
             "OpenOrd initialization and RNG now match the C++ source: default node coordinates "
-            "start at zero, and per-node random jumps use libc `srand`/`rand`. Remaining residual "
-            "is at final float/output precision on the small corpus.",
+            "start at zero, and per-node random jumps use libc `srand`/`rand`. The 20-node tier "
+            "uses the native recursive coarsen/refine path; the serial C++ reference remains the "
+            "comparison target until a small recursive reference graph avoids the source "
+            "average-link auto-threshold failure.",
             "",
         ]
     )
@@ -235,8 +246,9 @@ def main() -> int:
             f"reference_quality={_format_float(reference_quality)}"
         )
     print("phase_schedule_matched: yes")
-    print("rng_stream_matched: yes")
-    print("remaining_residual_stage: final float/output precision")
+    print("coarsening_recoord_matched: partial-native")
+    print("rng_stream_matched: per-layout libc stream aligned")
+    print("remaining_residual_stage: recursive average_link threshold/reference fixture")
     _write_report(DEFAULT_REPORT, rows, blocker)
     print(f"report: {DEFAULT_REPORT}")
     return 0
