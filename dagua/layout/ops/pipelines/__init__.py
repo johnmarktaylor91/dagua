@@ -151,6 +151,10 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "shell": ("dagua.layout.ops.pipelines.shell", "layout_shell_pipeline"),
     "smartgd": ("dagua.layout.ops.pipelines.smartgd", "layout_smartgd_pipeline"),
+    "sparse_stress": (
+        "dagua.layout.ops.pipelines.sparse_stress",
+        "layout_sparse_stress_pipeline",
+    ),
     "spectral": ("dagua.layout.ops.pipelines.spectral", "layout_spectral_pipeline"),
     "spiral": ("dagua.layout.ops.pipelines.spiral", "layout_spiral_pipeline"),
     "star": ("dagua.layout.ops.pipelines.star", "layout_star_pipeline"),
