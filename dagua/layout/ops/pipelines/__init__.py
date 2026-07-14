@@ -25,7 +25,14 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "circular": ("dagua.layout.ops.pipelines.circular", "layout_circular_pipeline"),
     "circlepack": ("dagua.layout.ops.pipelines.circlepack", "layout_circlepack_pipeline"),
     "circo": ("dagua.layout.ops.pipelines.circo", "layout_circo_pipeline"),
+    "avsdf": ("dagua.layout.ops.pipelines.avsdf", "layout_avsdf_pipeline"),
     "concentric": ("dagua.layout.ops.pipelines.concentric", "layout_concentric_pipeline"),
+    "cise": ("dagua.layout.ops.pipelines.cise", "layout_cise_pipeline"),
+    "cose": ("dagua.layout.ops.pipelines.cose", "layout_cose_pipeline"),
+    "cose_bilkent": (
+        "dagua.layout.ops.pipelines.cose_bilkent",
+        "layout_cose_bilkent_pipeline",
+    ),
     "davidson_harel": (
         "dagua.layout.ops.pipelines.davidson_harel",
         "layout_davidson_harel_pipeline",
