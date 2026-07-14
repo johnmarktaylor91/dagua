@@ -28,6 +28,8 @@ from dagua.eval.competitors import (
     neulay_competitor,  # noqa: F401
     ogdf_competitor,  # noqa: F401
     openord_competitor,  # noqa: F401
+    pacmap_competitor,  # noqa: F401
+    pipeline_reimpl_competitor,  # noqa: F401
     sgd2_competitor,  # noqa: F401
     sgd2_multi_competitor,  # noqa: F401
     smacof_competitor,  # noqa: F401
@@ -35,6 +37,7 @@ from dagua.eval.competitors import (
     tfdp_competitor,  # noqa: F401
     tsne_competitor,  # noqa: F401
     umap_competitor,  # noqa: F401
+    word2vecgd_competitor,  # noqa: F401
 )
 from dagua.eval.competitors.base import (
     _COMPETITORS,
