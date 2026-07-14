@@ -1,6 +1,6 @@
 {
   "failed_metric_ids": [],
-  "generated_at": "2026-07-14T22:24:50.314137+00:00",
+  "generated_at": "2026-07-14T22:57:26.724223+00:00",
   "results": [
     {
       "evidence": [],
@@ -14,7 +14,7 @@
         "injected": 2.0,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313244+00:00",
+      "run_at": "2026-07-14T22:57:26.723705+00:00",
       "status": "pass",
       "tripwire_id": "tw_font"
     },
@@ -30,7 +30,7 @@
         "injected": true,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313375+00:00",
+      "run_at": "2026-07-14T22:57:26.723786+00:00",
       "status": "pass",
       "tripwire_id": "tw_stem"
     },
@@ -46,7 +46,7 @@
         "injected": 0.4,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313451+00:00",
+      "run_at": "2026-07-14T22:57:26.723829+00:00",
       "status": "pass",
       "tripwire_id": "tw_trunc"
     },
@@ -62,7 +62,7 @@
         "injected": 0.060000000000000026,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313521+00:00",
+      "run_at": "2026-07-14T22:57:26.723866+00:00",
       "status": "pass",
       "tripwire_id": "tw_kern"
     },
@@ -78,7 +78,7 @@
         "injected": true,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313589+00:00",
+      "run_at": "2026-07-14T22:57:26.723902+00:00",
       "status": "pass",
       "tripwire_id": "tw_arrowfill"
     },
@@ -94,7 +94,7 @@
         "injected": true,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313655+00:00",
+      "run_at": "2026-07-14T22:57:26.723937+00:00",
       "status": "pass",
       "tripwire_id": "tw_arroworder"
     },
@@ -110,7 +110,7 @@
         "injected": 0.2,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313718+00:00",
+      "run_at": "2026-07-14T22:57:26.723971+00:00",
       "status": "pass",
       "tripwire_id": "tw_size"
     },
@@ -126,7 +126,7 @@
         "injected": true,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313784+00:00",
+      "run_at": "2026-07-14T22:57:26.724019+00:00",
       "status": "pass",
       "tripwire_id": "tw_color"
     },
@@ -142,7 +142,7 @@
         "injected": 7.0,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.313857+00:00",
+      "run_at": "2026-07-14T22:57:26.724065+00:00",
       "status": "pass",
       "tripwire_id": "tw_spline"
     },
@@ -158,7 +158,7 @@
         "injected": true,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.314006+00:00",
+      "run_at": "2026-07-14T22:57:26.724152+00:00",
       "status": "pass",
       "tripwire_id": "tw_cluster"
     },
@@ -174,7 +174,7 @@
         "injected": true,
         "injected_fired": true
       },
-      "run_at": "2026-07-14T22:24:50.314071+00:00",
+      "run_at": "2026-07-14T22:57:26.724188+00:00",
       "status": "pass",
       "tripwire_id": "tw_scalehide"
     }

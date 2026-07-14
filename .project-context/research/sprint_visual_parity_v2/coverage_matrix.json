@@ -5712,7 +5712,7 @@
       "waiver": null
     }
   ],
-  "generated_at": "2026-07-14T20:16:26Z",
+  "generated_at": "2026-07-14T22:30:21Z",
   "reference_pins": {
     "cairosvg": "2.8.2",
     "cytosnap": "npm error could not determine executable to run",
@@ -5728,7 +5728,7 @@
     {
       "cache_path": "reference_specs/gv_attrs.html",
       "id": "gv-attrs",
-      "retrieved_at": "2026-07-14T20:16:26Z",
+      "retrieved_at": "2026-07-14T22:30:21Z",
       "source_kind": "official_docs:downloaded",
       "source_url": "https://graphviz.org/doc/info/attrs.html",
       "version": "7.0.5"
@@ -5736,7 +5736,7 @@
     {
       "cache_path": "reference_specs/gv_arrows.html",
       "id": "gv-arrows",
-      "retrieved_at": "2026-07-14T20:16:26Z",
+      "retrieved_at": "2026-07-14T22:30:21Z",
       "source_kind": "official_docs:downloaded",
       "source_url": "https://graphviz.org/doc/info/arrows.html",
       "version": "7.0.5"
@@ -5744,7 +5744,7 @@
     {
       "cache_path": "reference_specs/gv_shapes.html",
       "id": "gv-shapes",
-      "retrieved_at": "2026-07-14T20:16:26Z",
+      "retrieved_at": "2026-07-14T22:30:21Z",
       "source_kind": "official_docs:downloaded",
       "source_url": "https://graphviz.org/doc/info/shapes.html",
       "version": "7.0.5"
@@ -5752,7 +5752,7 @@
     {
       "cache_path": "reference_specs/gv_colors.html",
       "id": "gv-colors",
-      "retrieved_at": "2026-07-14T20:16:26Z",
+      "retrieved_at": "2026-07-14T22:30:21Z",
       "source_kind": "official_docs:downloaded",
       "source_url": "https://graphviz.org/doc/info/colors.html",
       "version": "7.0.5"
