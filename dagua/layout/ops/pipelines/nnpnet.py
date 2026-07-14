@@ -14,6 +14,7 @@ from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency,
     layout_device,
 )
+from dagua.layout.ops.pipelines import nnpnet_reference as _reference
 from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -26,6 +27,11 @@ _DEFAULT_OUTPUT_SCALE = 50.0
 _EPSILON = 1.0e-9
 _REFERENCE_BATCH_SIZE = 64
 _REFERENCE_BASE_STEPS_PER_EPOCH = 250
+_REFERENCE_TEACHER_MAX_ITER = 750
+_REFERENCE_THETA = 0.25
+_REFERENCE_INIT_PIVOTS = 250
+_REFERENCE_MODE_MIN_NODES = 7
+_REFERENCE_MODE_MAX_NODES = 128
 
 
 @dataclass(frozen=True)
@@ -347,11 +353,23 @@ def _keras_train_plus_infer(
     if batch_aligned <= 0:
         return None
 
+    # Reference-parity TF configuration: the reference adapter runs the
+    # binary with oneDNN disabled (alignment-dependent kernels break
+    # cross-process determinism) and single-threaded TF reductions. These
+    # only take effect when TensorFlow initializes in this process.
+    import os
+
+    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     try:
         import tensorflow as tf
     except Exception:
         return None
 
+    try:
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+    except RuntimeError:
+        pass
     try:
         tf.config.set_visible_devices([], "GPU")
     except RuntimeError:
@@ -386,6 +404,111 @@ def _keras_train_plus_infer(
     )
     predictions = model.predict(full_array, batch_size=4096, verbose=0)
     return torch.from_numpy(np.asarray(predictions, dtype=np.float32))
+
+
+def _reference_mode_eligible(problem: LayoutProblem, adjacency: list[list[int]]) -> bool:
+    """Decide whether the reference-exact NNP-NET port applies.
+
+    The exact port replicates the upstream C++ semantics (which require a
+    connected unweighted graph and a positive adjusted perplexity) and uses
+    sequential scalar arithmetic, so it is gated to small graphs.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs.
+    adjacency : list[list[int]]
+        Canonical reference adjacency.
+
+    Returns
+    -------
+    bool
+        True when the reference-exact path should run.
+    """
+    if problem.edge_weights is not None:
+        return False
+    if not _REFERENCE_MODE_MIN_NODES <= problem.num_nodes <= _REFERENCE_MODE_MAX_NODES:
+        return False
+    return _reference.is_connected(adjacency)
+
+
+def _reference_mode_positions(
+    problem: LayoutProblem,
+    config: NNPNetConfig,
+    adjacency: list[list[int]],
+) -> torch.Tensor:
+    """Run the reference-exact NNP-NET stages.
+
+    Stages mirror the upstream binary at fixed seed: seeded PivotMDS features
+    (glibc rand power iteration), Barnes-Hut tsNET* teacher initialized by an
+    unseeded-default PivotMDS, reference min/max normalization, and the Keras
+    MLP forward path. Falls back to the deterministic ridge projection when
+    TensorFlow is unavailable.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs.
+    config : NNPNetConfig
+        Pipeline configuration.
+    adjacency : list[list[int]]
+        Canonical reference adjacency.
+
+    Returns
+    -------
+    torch.Tensor
+        Final positions with shape ``[N, 2]`` in ``config.fidelity_dtype``.
+    """
+    pivots = min(config.embedding_size, problem.num_nodes)
+    embedding = _reference.reference_pmds(
+        adjacency,
+        dims=config.embedding_size,
+        pivots=pivots,
+        seed=problem.seed,
+    ).astype(np.float32)
+    if np.isnan(embedding).any():
+        embedding = _reference.reference_pivot_embedding(
+            adjacency,
+            config.embedding_size,
+        )
+    else:
+        embedding = _reference.graph_normalize(embedding)
+
+    teacher_init = _reference.reference_pmds(
+        adjacency,
+        dims=2,
+        pivots=min(_REFERENCE_INIT_PIVOTS, problem.num_nodes),
+        seed=0,
+    )
+    teacher = _reference.reference_tsnet_star(
+        adjacency,
+        teacher_init,
+        perplexity=config.perplexity,
+        theta=_REFERENCE_THETA,
+        max_iter=_REFERENCE_TEACHER_MAX_ITER,
+    )
+    teacher = _reference.graph_normalize(teacher)
+
+    features = torch.from_numpy(embedding)
+    labels = torch.from_numpy(teacher.astype(np.float32))
+    epochs = max(1, int(round(float(config.steps) / _REFERENCE_BASE_STEPS_PER_EPOCH)))
+    neural = _keras_train_plus_infer(features, labels, features, problem.seed, epochs)
+    if neural is not None:
+        return neural.to(dtype=config.fidelity_dtype)
+
+    weights = _fit_projection(
+        features.to(dtype=config.fidelity_dtype),
+        labels.to(dtype=config.fidelity_dtype),
+        config.ridge,
+    )
+    design = torch.cat(
+        [
+            features.to(dtype=config.fidelity_dtype),
+            torch.ones((problem.num_nodes, 1), dtype=config.fidelity_dtype),
+        ],
+        dim=1,
+    )
+    return _normalize_positions(design @ weights, config.output_scale)
 
 
 def _normalize_positions(positions: torch.Tensor, output_scale: float) -> torch.Tensor:
@@ -454,6 +577,14 @@ class NNPNetProjectNeighborhood(Op):
             State with final positions in ``state.pos``.
         """
         del ctx
+
+        adjacency = _reference.canonical_adjacency(
+            problem.edge_index.detach().cpu().numpy(),
+            problem.num_nodes,
+        )
+        if _reference_mode_eligible(problem, adjacency):
+            state.pos = _reference_mode_positions(problem, self.config, adjacency)
+            return state
 
         distances = _distance_matrix(
             problem.edge_index,
