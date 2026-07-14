@@ -13,7 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dagua.eval.competitors.native_reference_competitor import (  # noqa: E402
+    OmegaReferenceCompetitor,
+    TidyReferenceCompetitor,
+)
 from dagua.eval.equivalence_metrics import procrustes_rmsd  # noqa: E402
+from dagua.graph import DaguaGraph  # noqa: E402
 from dagua.layout.ops.pipelines.omega import layout_omega_pipeline  # noqa: E402
 from dagua.layout.ops.pipelines.tidy import layout_tidy_pipeline  # noqa: E402
 from dagua.metrics import quick  # noqa: E402
@@ -85,7 +90,7 @@ def _omega_case() -> Dict[str, Any]:
         dtype=torch.long,
     )
     node_sizes = torch.full((6, 2), 1.0, dtype=torch.float64)
-    first = layout_omega_pipeline(
+    actual = layout_omega_pipeline(
         edge_index,
         6,
         k=4,
@@ -93,7 +98,29 @@ def _omega_case() -> Dict[str, Any]:
         seed=17,
         dtype=torch.float64,
     )
-    second = layout_omega_pipeline(
+    graph = DaguaGraph.from_edge_index(edge_index, 6)
+    reference = OmegaReferenceCompetitor().layout_with_variant(
+        graph,
+        seed=17,
+        variant_params={
+            "k": 4,
+            "sgd_iterations": 12,
+            "unit_edge_length": 1.0,
+        },
+    )
+    if reference.pos is None:
+        residual = float("inf")
+        tier = "REFERENCE_FAILED"
+        reference_status = reference.error or "omega reference failed"
+        named_residual = "reference-runtime"
+    else:
+        residual = procrustes_rmsd(actual, reference.pos)
+        tier = _tier(residual)
+        reference_status = (
+            "egraph-rs root `cargo build --release` and patched seeded `omega` CLI succeeded."
+        )
+        named_residual = "rdmds-pair-sgd-stage"
+    deterministic = layout_omega_pipeline(
         edge_index,
         6,
         k=4,
@@ -101,22 +128,17 @@ def _omega_case() -> Dict[str, Any]:
         seed=17,
         dtype=torch.float64,
     )
-    residual = procrustes_rmsd(first, second)
     return {
         "algorithm": "omega",
-        "reference_status": (
-            "egraph-rs `cargo build --bin omega` succeeded in "
-            "~/tools/dagua-refs/egraph-rs/crates/cli; shipped CLI uses thread_rng, so seeded "
-            "runtime reference is unavailable."
-        ),
+        "reference_status": reference_status,
         "rng": (
-            "Python port is seed deterministic; random pair order mirrors source "
-            "loops, but Rust CLI RNG is not seed-pinnable."
+            "Reference CLI patched to accept `--seed`; Python port repeat "
+            f"residual={procrustes_rmsd(actual, deterministic):.6g}."
         ),
         "residual": residual,
-        "tier": _tier(residual),
-        "named_residual": "reference_cli_seedability",
-        "quality": _quality(first, edge_index, node_sizes),
+        "tier": tier,
+        "named_residual": named_residual,
+        "quality": _quality(actual, edge_index, node_sizes),
     }
 
 
@@ -143,7 +165,7 @@ def _tidy_case() -> Dict[str, Any]:
         ],
         dtype=torch.float64,
     )
-    first = layout_tidy_pipeline(
+    actual = layout_tidy_pipeline(
         edge_index,
         6,
         node_sizes,
@@ -151,7 +173,25 @@ def _tidy_case() -> Dict[str, Any]:
         peer_margin=5.0,
         dtype=torch.float64,
     )
-    second = layout_tidy_pipeline(
+    graph = DaguaGraph.from_edge_index(edge_index, 6, node_sizes=node_sizes)
+    reference = TidyReferenceCompetitor().layout_with_variant(
+        graph,
+        variant_params={"parent_child_margin": 7.0, "peer_margin": 5.0},
+    )
+    if reference.pos is None:
+        residual = float("inf")
+        tier = "REFERENCE_FAILED"
+        reference_status = reference.error or "tidy reference failed"
+        named_residual = "reference-runtime"
+    else:
+        residual = procrustes_rmsd(actual, reference.pos)
+        tier = _tier(residual)
+        reference_status = (
+            "tidy-tree crate and `tidy_reference` runner built with "
+            "`cargo build --release --bin tidy_reference`."
+        )
+        named_residual = "apportion-contour-stage"
+    deterministic = layout_tidy_pipeline(
         edge_index,
         6,
         node_sizes,
@@ -159,18 +199,17 @@ def _tidy_case() -> Dict[str, Any]:
         peer_margin=5.0,
         dtype=torch.float64,
     )
-    residual = procrustes_rmsd(first, second)
     return {
         "algorithm": "tidy",
-        "reference_status": (
-            "tidy-tree crate built with `cargo build -p tidy-tree`; full workspace "
-            "failed on old wasm-bindgen with Rust 1.97."
+        "reference_status": reference_status,
+        "rng": (
+            "deterministic; reference algorithm has no random stage; Python "
+            f"repeat residual={procrustes_rmsd(actual, deterministic):.6g}."
         ),
-        "rng": "deterministic; reference algorithm has no random stage.",
         "residual": residual,
-        "tier": _tier(residual),
-        "named_residual": "workspace_wasm_bindgen_blocker",
-        "quality": _quality(first, edge_index, node_sizes),
+        "tier": tier,
+        "named_residual": named_residual,
+        "quality": _quality(actual, edge_index, node_sizes),
     }
 
 
@@ -226,13 +265,11 @@ def _write_report(path: Path, rows: List[Dict[str, Any]]) -> None:
             "",
             "## Notes",
             "",
-            "- Omega: first divergent reference stage is `reference_cli_seedability`; "
-            "the source CLI",
-            "  constructs `thread_rng()` internally, so a seeded bit-exact subprocess comparison",
-            "  needs a tiny reference runner or binding patch.",
-            "- tidy: first divergent reference stage is `workspace_wasm_bindgen_blocker`; "
-            "the crate",
-            "  needed for source inspection and tests builds, but the full workspace does not.",
+            "- Omega: first divergent reference stage is `rdmds-pair-sgd-stage`; the CLI now",
+            "  accepts a local `--seed` patch, so remaining residual is after reference",
+            "  RDMDS, pair construction, and SparseSGD arithmetic.",
+            "- tidy: first divergent reference stage is `apportion-contour-stage`; the runner",
+            "  calls the upstream `TidyTree::with_tidy_layout` implementation directly.",
             "- No dead code was introduced by the ports.",
             "",
         ]

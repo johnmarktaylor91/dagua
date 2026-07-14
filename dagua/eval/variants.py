@@ -2552,6 +2552,39 @@ VARIANT_REGISTRY.extend(
             True,
             True,
         ),
+        _variant(
+            "grip_reimpl_default",
+            "grip_reimpl",
+            "GRIP",
+            {},
+            "grip_reference",
+            {},
+            True,
+            False,
+            True,
+        ),
+        _variant(
+            "omega_reimpl_default",
+            "omega_reimpl",
+            "Omega/RDMDS",
+            {},
+            "omega_reference",
+            {},
+            True,
+            True,
+            True,
+        ),
+        _variant(
+            "tidy_reimpl_default",
+            "tidy_reimpl",
+            "tidy-tree",
+            {},
+            "tidy_reference",
+            {},
+            True,
+            False,
+            False,
+        ),
     ]
 )
 
@@ -2701,6 +2734,12 @@ _BASE_ENGINE_STOCHASTICITY: dict[str, bool] = {
     "nnpnet_reference": True,
     "openord_reimpl": True,
     "openord": True,
+    "grip_reimpl": False,
+    "grip_reference": False,
+    "omega_reimpl": True,
+    "omega_reference": True,
+    "tidy_reimpl": False,
+    "tidy_reference": False,
 }
 
 _BASE_ENGINE_HEAVY: dict[str, bool] = {
@@ -2746,6 +2785,12 @@ _BASE_ENGINE_HEAVY: dict[str, bool] = {
     "nnpnet_reference": True,
     "openord_reimpl": True,
     "openord": True,
+    "grip_reimpl": True,
+    "grip_reference": True,
+    "omega_reimpl": True,
+    "omega_reference": True,
+    "tidy_reimpl": False,
+    "tidy_reference": False,
 }
 
 _BASE_TIMEOUT_CAPS: dict[str, int] = {
