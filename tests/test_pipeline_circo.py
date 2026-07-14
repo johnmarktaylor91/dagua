@@ -108,6 +108,35 @@ def test_layout_config_algorithm_circo_dispatches() -> None:
     assert torch.isfinite(positions).all()
 
 
+def test_circo_pipeline_uses_node_sizes_for_block_radii() -> None:
+    """Exercise Graphviz-style node-size radii in branching block trees.
+
+    Returns
+    -------
+    None
+        Larger node sizes must change multi-block circo coordinates because
+        Graphviz includes ``largest_nodesize`` in block radii.
+    """
+    edge_index = torch.tensor(
+        [[0, 0, 1, 1, 2, 2], [1, 2, 3, 4, 5, 6]],
+        dtype=torch.long,
+    )
+    small = layout_circo_pipeline(
+        edge_index=edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 18.0, dtype=torch.float64),
+        fidelity_dtype=torch.float64,
+    )
+    large = layout_circo_pipeline(
+        edge_index=edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 72.0, dtype=torch.float64),
+        fidelity_dtype=torch.float64,
+    )
+
+    assert not torch.allclose(small, large)
+
+
 def test_circo_production_pipeline_has_no_runtime_delegation() -> None:
     """Guard the implementation against Graphviz subprocess delegation.
 
