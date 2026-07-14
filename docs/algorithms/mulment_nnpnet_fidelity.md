@@ -4,9 +4,9 @@
 
 - Reference: `karlsruhedraw/KaDraw`, multilevel coarsening plus MaxEnt-Stress local refinement.
 - Reference runtime: `kadraw` target built in `/tmp/KaDraw/build` and ran single-threaded with `--seed 7` on `examples/btree.graph`; full `all` target failed because `graphchecker` links object files that reference Cairo symbols but does not link `cairo`.
-- Port tier: quality-faithful. The Dagua pipeline uses Dagua heavy-edge coarsening metadata, optimizes the coarsest graph, projects positions through the hierarchy, and applies a KaDraw-style fixed-point MaxEnt local optimizer.
+- Port tier: coarsener-port. The Dagua pipeline now builds a KaDraw-style size-constrained label-propagation hierarchy, optimizes the coarsest graph, projects positions through the hierarchy, and applies a KaDraw-style fixed-point MaxEnt local optimizer. A standalone KaDraw probe on the 12-node hierarchy fixture matches the first two identity levels and first diverges at level 3 (`12->7` reference vs `12->6` Dagua), so the remaining gap is narrowed to LP tie/update semantics rather than Dagua heavy-edge matching.
 - Runtime delegation: none. The production pipeline does not import subprocess/FFI adapters.
-- RNG: seeded Torch CPU generators for coarsening, coarsest initialization, and uncoarsening jitter.
+- RNG: KaDraw-compatible MT19937/libstdc++ tie-break stream for coarsening; seeded Torch CPU generators remain for coarsest initialization.
 
 ## NNP-NET
 

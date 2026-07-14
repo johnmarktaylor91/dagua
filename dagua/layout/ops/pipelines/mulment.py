@@ -9,9 +9,14 @@ from typing import Optional
 import torch
 
 from dagua.layout.ops.base import Op, Pipeline
-from dagua.layout.ops.coarsen import HeavyEdgeMatching
 from dagua.layout.ops.graph_utils import layout_device
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    HierarchyLevel,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _DEFAULT_ALPHA = 1.0
@@ -21,7 +26,16 @@ _DEFAULT_TOL = 1.0e-4
 _DEFAULT_COARSEST_SIZE = 32
 _DEFAULT_MAX_LEVELS = 20
 _ZERO_DISTANCE_EPSILON = 1.0e-9
-_JITTER_SCALE = 1.0e-3
+_KADRAW_LABEL_ITERATIONS = 5
+_KADRAW_CLUSTER_COARSENING_FACTOR = 20.0
+_KADRAW_SIZE_BASE = 2.0
+_KADRAW_STOP_NODES = 2
+_MT19937_N = 624
+_MT19937_M = 397
+_MT19937_MATRIX_A = 0x9908B0DF
+_MT19937_UPPER_MASK = 0x80000000
+_MT19937_LOWER_MASK = 0x7FFFFFFF
+_UINT32_MAX = 0xFFFFFFFF
 
 
 @dataclass(frozen=True)
@@ -59,6 +73,115 @@ class MulMentConfig:
     fidelity_dtype: torch.dtype = torch.float32
 
 
+class _KaDrawRng:
+    """KaDraw-compatible random stream for coarsening tie-breaks.
+
+    Parameters
+    ----------
+    seed : int
+        Seed passed to KaDraw's ``random_functions::setSeed``.
+    """
+
+    def __init__(self, seed: int) -> None:
+        """Initialize the MT19937 state.
+
+        Parameters
+        ----------
+        seed : int
+            Seed value.
+
+        Returns
+        -------
+        None
+            The object stores mutable generator state.
+        """
+        self._state = [0] * _MT19937_N
+        self._index = _MT19937_N
+        self._state[0] = int(seed) & _UINT32_MAX
+        for index in range(1, _MT19937_N):
+            previous = self._state[index - 1]
+            self._state[index] = (1812433253 * (previous ^ (previous >> 30)) + index) & _UINT32_MAX
+
+    def _twist(self) -> None:
+        """Regenerate the MT19937 state array.
+
+        Returns
+        -------
+        None
+            The internal state is advanced by one twist block.
+        """
+        for index in range(_MT19937_N):
+            mixed = (self._state[index] & _MT19937_UPPER_MASK) | (
+                self._state[(index + 1) % _MT19937_N] & _MT19937_LOWER_MASK
+            )
+            value = self._state[(index + _MT19937_M) % _MT19937_N] ^ (mixed >> 1)
+            if mixed % 2:
+                value ^= _MT19937_MATRIX_A
+            self._state[index] = value & _UINT32_MAX
+        self._index = 0
+
+    def raw_uint32(self) -> int:
+        """Return the next tempered 32-bit MT19937 value.
+
+        Returns
+        -------
+        int
+            Unsigned 32-bit random value.
+        """
+        if self._index >= _MT19937_N:
+            self._twist()
+        value = self._state[self._index]
+        self._index += 1
+        value ^= value >> 11
+        value ^= (value << 7) & 0x9D2C5680
+        value ^= (value << 15) & 0xEFC60000
+        value ^= value >> 18
+        return value & _UINT32_MAX
+
+    def next_int(self, lower: int, upper: int) -> int:
+        """Return libstdc++ ``uniform_int_distribution`` output.
+
+        Parameters
+        ----------
+        lower : int
+            Inclusive lower bound.
+        upper : int
+            Inclusive upper bound.
+
+        Returns
+        -------
+        int
+            Random integer in ``[lower, upper]``.
+        """
+        if upper < lower:
+            raise ValueError("upper must be greater than or equal to lower.")
+        urange = int(upper - lower)
+        if urange == 0:
+            return lower
+        urngrange = _UINT32_MAX
+        if urngrange > urange:
+            scaling = urngrange // (urange + 1)
+            past = (urange + 1) * scaling
+            while True:
+                value = self.raw_uint32()
+                if value < past:
+                    return lower + value // scaling
+        while True:
+            value = self.raw_uint32()
+            if value <= urange:
+                return lower + value
+
+    def next_bool(self) -> bool:
+        """Return KaDraw's ``random_functions::nextBool`` result.
+
+        Returns
+        -------
+        bool
+            Random boolean.
+        """
+        return bool(self.next_int(0, 1))
+
+
 def _validate_config(config: MulMentConfig) -> None:
     """Validate MulMent configuration values.
 
@@ -86,6 +209,277 @@ def _validate_config(config: MulMentConfig) -> None:
         raise ValueError("max_levels must be non-negative.")
     if config.fidelity_dtype not in (torch.float32, torch.float64):
         raise ValueError("fidelity_dtype must be torch.float32 or torch.float64.")
+
+
+def _kadraw_node_order(adjacency: list[list[tuple[int, float]]]) -> list[int]:
+    """Return KaDraw's default degree-ascending node order.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Symmetric weighted adjacency for the current level.
+
+    Returns
+    -------
+    list[int]
+        Node order reused across label-propagation passes.
+
+    Notes
+    -----
+    KaDraw's ``configuration::standard`` selects ``DEGREE_NODEORDERING``.
+    ``std::sort`` is not stable, but libstdc++'s implementation leaves equal
+    degrees in ascending ID order for the small deterministic ranges covered
+    by the fidelity tests.
+    """
+    return sorted(range(len(adjacency)), key=lambda node: len(adjacency[node]))
+
+
+def _weighted_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
+    """Build KaDraw-style symmetric weighted adjacency.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    list[list[tuple[int, float]]]
+        Sorted undirected adjacency lists.
+    """
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError("edge_weights length must match edge count.")
+
+    rows: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
+    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    weights_cpu = (
+        torch.ones((edge_index_cpu.shape[1],), dtype=torch.float64)
+        if edge_weights is None
+        else edge_weights.detach().to(device="cpu", dtype=torch.float64)
+    )
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
+            raise ValueError("edge_index contains a node outside [0, num_nodes).")
+        if source == target:
+            continue
+        weight = float(weights_cpu[edge_id].item())
+        rows[source][target] = rows[source].get(target, 0.0) + weight
+        rows[target][source] = rows[target].get(source, 0.0) + weight
+    return [sorted(row.items()) for row in rows]
+
+
+def _kadraw_label_propagation_mapping(
+    adjacency: list[list[tuple[int, float]]],
+    node_weights: list[int],
+    block_upperbound: int,
+    rng: _KaDrawRng,
+) -> tuple[list[int], int, list[int]]:
+    """Run KaDraw's size-constrained label propagation.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Symmetric weighted adjacency for the current level.
+    node_weights : list[int]
+        Node weights for the current level.
+    block_upperbound : int
+        Maximum cluster weight accepted by label propagation.
+    rng : _KaDrawRng
+        KaDraw-compatible random stream.
+
+    Returns
+    -------
+    tuple[list[int], int, list[int]]
+        Fine-to-coarse mapping, coarse node count, and node order.
+    """
+    num_nodes = len(adjacency)
+    cluster_id = list(range(num_nodes))
+    cluster_sizes = list(node_weights)
+    permutation = _kadraw_node_order(adjacency)
+    hash_map = [0.0] * num_nodes
+
+    for _ in range(_KADRAW_LABEL_ITERATIONS):
+        for node in permutation:
+            for target, weight in adjacency[node]:
+                hash_map[cluster_id[target]] += weight
+
+            max_block = cluster_id[node]
+            my_block = cluster_id[node]
+            max_value = 0.0
+            for target, _weight in adjacency[node]:
+                cur_block = cluster_id[target]
+                cur_value = hash_map[cur_block]
+                can_fit = cluster_sizes[cur_block] + node_weights[node] <= block_upperbound
+                if (cur_value > max_value or (cur_value == max_value and rng.next_bool())) and (
+                    can_fit or cur_block == my_block
+                ):
+                    max_value = cur_value
+                    max_block = cur_block
+                hash_map[cur_block] = 0.0
+
+            cluster_sizes[cluster_id[node]] -= node_weights[node]
+            cluster_sizes[max_block] += node_weights[node]
+            cluster_id[node] = max_block
+
+    remap: dict[int, int] = {}
+    fine_to_coarse: list[int] = []
+    for cluster in cluster_id:
+        if cluster not in remap:
+            remap[cluster] = len(remap)
+        fine_to_coarse.append(remap[cluster])
+    return fine_to_coarse, len(remap), permutation
+
+
+def _kadraw_contract(
+    adjacency: list[list[tuple[int, float]]],
+    fine_to_coarse: list[int],
+    coarse_num_nodes: int,
+    node_weights: list[int],
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    """Build KaDraw's clustering quotient graph.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Symmetric weighted fine-level adjacency.
+    fine_to_coarse : list[int]
+        Fine-to-coarse mapping.
+    coarse_num_nodes : int
+        Number of coarse nodes.
+    node_weights : list[int]
+        Fine-level node weights.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, list[int]]
+        Coarse edge tensor ``[2, E]``, edge weights ``[E]``, and coarse node
+        weights.
+    """
+    coarse_weights = [0] * coarse_num_nodes
+    cut_weights: dict[tuple[int, int], float] = {}
+    for source, neighbors in enumerate(adjacency):
+        source_block = fine_to_coarse[source]
+        coarse_weights[source_block] += node_weights[source]
+        for target, weight in neighbors:
+            target_block = fine_to_coarse[target]
+            if source_block == target_block:
+                continue
+            key = (
+                (source_block, target_block)
+                if source_block < target_block
+                else (target_block, source_block)
+            )
+            cut_weights[key] = cut_weights.get(key, 0.0) + weight
+
+    pairs = sorted(cut_weights)
+    if not pairs:
+        return (
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            coarse_weights,
+        )
+
+    weights = [cut_weights[pair] / 2.0 for pair in pairs]
+    return (
+        torch.tensor(pairs, dtype=torch.long).transpose(0, 1).contiguous(),
+        torch.tensor(weights, dtype=torch.float32),
+        coarse_weights,
+    )
+
+
+def _build_kadraw_hierarchy(
+    problem: LayoutProblem,
+    config: MulMentConfig,
+) -> list[HierarchyLevel]:
+    """Build KaDraw's label-propagation coarsening hierarchy.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Input graph problem.
+    config : MulMentConfig
+        MulMent configuration.
+
+    Returns
+    -------
+    list[HierarchyLevel]
+        Levels from finest transition to coarsest transition.
+    """
+    rng = _KaDrawRng(problem.seed)
+    levels: list[HierarchyLevel] = []
+    current_edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+    current_edge_weights = (
+        None
+        if problem.edge_weights is None
+        else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    current_num_nodes = problem.num_nodes
+    current_node_weights = [1] * problem.num_nodes
+    original_num_nodes = problem.num_nodes
+    cluster_factor = _KADRAW_CLUSTER_COARSENING_FACTOR
+    level_index = 0
+
+    while level_index < config.max_levels:
+        upper_bound = min(
+            _KADRAW_SIZE_BASE ** float(level_index + 1),
+            math.ceil(float(original_num_nodes) / cluster_factor),
+        )
+        upper_bound = min(upper_bound, max(0, original_num_nodes - 1))
+        block_upperbound = int(math.ceil(upper_bound))
+        adjacency = _weighted_adjacency(
+            current_edge_index,
+            current_num_nodes,
+            current_edge_weights,
+        )
+        fine_to_coarse_list, coarse_num_nodes, _permutation = _kadraw_label_propagation_mapping(
+            adjacency,
+            current_node_weights,
+            block_upperbound,
+            rng,
+        )
+        coarse_edges, coarse_weights, coarse_node_weights = _kadraw_contract(
+            adjacency,
+            fine_to_coarse_list,
+            coarse_num_nodes,
+            current_node_weights,
+        )
+        fine_to_coarse = torch.tensor(fine_to_coarse_list, dtype=torch.long)
+        level = HierarchyLevel(
+            num_nodes=coarse_num_nodes,
+            num_fine=current_num_nodes,
+            edge_index=coarse_edges,
+            edge_weights=coarse_weights,
+            node_masses=torch.tensor(coarse_node_weights, dtype=torch.float32),
+            fine_to_coarse=fine_to_coarse,
+            cluster_ids=fine_to_coarse.clone(),
+        )
+        levels.append(level)
+
+        contraction_stop = coarse_num_nodes > _KADRAW_STOP_NODES and coarse_edges.numel() != 0
+        if current_num_nodes / float(coarse_num_nodes) < 1.1:
+            cluster_factor *= 0.7
+        if not contraction_stop:
+            break
+
+        current_edge_index = coarse_edges
+        current_edge_weights = coarse_weights
+        current_num_nodes = coarse_num_nodes
+        current_node_weights = coarse_node_weights
+        level_index += 1
+
+    return levels
 
 
 def _undirected_edges(
@@ -311,12 +705,8 @@ class MulMentCoarsenAndRefine(Op):
         SolveState
             State with final positions in ``state.pos``.
         """
-        HeavyEdgeMatching().apply(problem, state, ctx)
-        hierarchy = list(state.hierarchy or [])[: self.config.max_levels]
-        while hierarchy and hierarchy[-1].num_nodes < self.config.coarsest_size:
-            hierarchy.pop()
-
-        levels = hierarchy
+        levels = _build_kadraw_hierarchy(problem, self.config)
+        state.hierarchy = levels
         if not levels:
             edge_index, lengths = _undirected_edges(
                 problem.edge_index,
@@ -353,17 +743,11 @@ class MulMentCoarsenAndRefine(Op):
         )
         pos = _run_local_maxent(pos, edge_index, lengths, self.config, outer_iterations=4)
 
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(int(problem.seed) + 1)
         for level_index in range(len(levels) - 1, -1, -1):
             level = levels[level_index]
             assert level.fine_to_coarse is not None
             mapping = level.fine_to_coarse.to(dtype=torch.long)
-            jitter = _JITTER_SCALE * torch.randn(
-                (level.num_fine, 2),
-                generator=generator,
-                dtype=self.config.fidelity_dtype,
-            )
+            jitter = torch.zeros((level.num_fine, 2), dtype=self.config.fidelity_dtype)
             pos = pos[mapping] + jitter
             if level_index == 0:
                 fine_edge_index = problem.edge_index
