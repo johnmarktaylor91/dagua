@@ -182,21 +182,31 @@ def test_mulment_builds_label_propagation_hierarchy_in_isolation() -> None:
     assert [(level.num_fine, level.num_nodes) for level in final_state.hierarchy] == [
         (12, 12),
         (12, 12),
-        (12, 6),
-        (6, 6),
+        (12, 7),
+        (7, 6),
     ]
     assert final_state.hierarchy[2].fine_to_coarse is not None
     assert final_state.hierarchy[2].fine_to_coarse.tolist() == [
         0,
         1,
+        1,
         2,
+        3,
         3,
         4,
         5,
+        5,
+        2,
+        6,
+        6,
+    ]
+    assert final_state.hierarchy[3].fine_to_coarse is not None
+    assert final_state.hierarchy[3].fine_to_coarse.tolist() == [
         0,
         1,
         2,
         3,
+        0,
         4,
         5,
     ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.base import Op, Pipeline
@@ -23,6 +24,8 @@ _DEFAULT_SUBGRAPH_SIZE = 10_000
 _DEFAULT_RIDGE = 1.0e-3
 _DEFAULT_OUTPUT_SCALE = 50.0
 _EPSILON = 1.0e-9
+_REFERENCE_BATCH_SIZE = 64
+_REFERENCE_BASE_STEPS_PER_EPOCH = 250
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,66 @@ def _pivot_distance_embedding(distances: torch.Tensor, embedding_size: int) -> t
     return features / biggest
 
 
+def _reference_pmds_embedding(
+    distances: torch.Tensor,
+    embedding_size: int,
+    seed: int,
+) -> torch.Tensor:
+    """Create the reference PMDS embedding used as NNP-NET features.
+
+    Parameters
+    ----------
+    distances : torch.Tensor
+        Dense graph distances with shape ``[N, N]``.
+    embedding_size : int
+        Number of output embedding coordinates.
+    seed : int
+        Seed for the reference PMDS eigensolver initialization.
+
+    Returns
+    -------
+    torch.Tensor
+        PMDS features with shape ``[N, embedding_size]``.
+    """
+    num_nodes = int(distances.shape[0])
+    num_pivots = min(num_nodes, embedding_size)
+    pivot_distances = _pivot_distance_embedding(distances, num_pivots).T.to(dtype=torch.float32)
+    pivot_distances = pivot_distances * torch.clamp(
+        distances.max().to(dtype=torch.float32),
+        min=_EPSILON,
+    )
+
+    squared = pivot_distances.square()
+    normalization = squared.sum() / float(num_nodes * num_pivots)
+    column_normalization = squared.sum(dim=1, keepdim=True) / float(num_nodes)
+    row_normalization = squared.mean(dim=0, keepdim=True)
+    centered = -0.5 * (squared + normalization - column_normalization - row_normalization)
+
+    gram = centered @ centered.T
+    eigenvalues, eigenvectors = torch.linalg.eigh(gram.to(dtype=torch.float64))
+    order = torch.argsort(eigenvalues, descending=True)
+    dims = min(embedding_size, int(order.numel()))
+    selected_values = torch.clamp(eigenvalues[order[:dims]], min=0.0)
+    selected_vectors = eigenvectors[:, order[:dims]]
+    coords = centered.T.to(dtype=torch.float64) @ selected_vectors
+    scales = torch.sqrt(torch.sqrt(selected_values).clamp_min(_EPSILON))
+    coords = coords / scales.unsqueeze(0)
+    coords = coords.to(dtype=torch.float32)
+
+    if dims < embedding_size:
+        padding = torch.zeros((num_nodes, embedding_size - dims), dtype=torch.float32)
+        coords = torch.cat([coords, padding], dim=1)
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed))
+    signs = torch.where(
+        torch.rand((embedding_size,), generator=generator) >= 0.5,
+        torch.tensor(1.0, dtype=torch.float32),
+        torch.tensor(-1.0, dtype=torch.float32),
+    )
+    return _minmax_normalize(coords * signs)
+
+
 def _sample_teacher_nodes(features: torch.Tensor, subgraph_size: int) -> torch.Tensor:
     """Select deterministic farthest-first teacher nodes.
 
@@ -231,6 +294,100 @@ def _fit_projection(features: torch.Tensor, labels: torch.Tensor, ridge: float) 
     return torch.linalg.solve(gram + penalty, design.T @ labels.to(dtype=features.dtype))
 
 
+def _minmax_normalize(positions: torch.Tensor) -> torch.Tensor:
+    """Normalize coordinates with the reference graph min/max rule.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Coordinates with shape ``[N, D]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinates scaled to the reference ``[0, 1]`` box convention.
+    """
+    minimum = positions.min(dim=0, keepdim=True).values
+    maximum = positions.max(dim=0, keepdim=True).values
+    max_size = torch.clamp((maximum - minimum).max(), min=_EPSILON)
+    return (positions - minimum) / max_size
+
+
+def _keras_train_plus_infer(
+    train_features: torch.Tensor,
+    train_labels: torch.Tensor,
+    full_features: torch.Tensor,
+    seed: int,
+    epochs: int,
+) -> Optional[torch.Tensor]:
+    """Train and apply the reference Keras MLP.
+
+    Parameters
+    ----------
+    train_features : torch.Tensor
+        Training features with shape ``[S, P]``.
+    train_labels : torch.Tensor
+        Training labels with shape ``[S, 2]``.
+    full_features : torch.Tensor
+        Inference features with shape ``[N, P]``.
+    seed : int
+        TensorFlow/Keras random seed.
+    epochs : int
+        Number of training epochs.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Predicted coordinates with shape ``[N, 2]`` when TensorFlow is
+        available and there is a full reference batch; otherwise ``None``.
+    """
+    batch_aligned = int(train_features.shape[0]) - (
+        int(train_features.shape[0]) % _REFERENCE_BATCH_SIZE
+    )
+    if batch_aligned <= 0:
+        return None
+
+    try:
+        import tensorflow as tf
+    except Exception:
+        return None
+
+    try:
+        tf.config.set_visible_devices([], "GPU")
+    except RuntimeError:
+        pass
+
+    tf.keras.backend.clear_session()
+    tf.keras.utils.set_random_seed(int(seed))
+
+    feature_array = train_features[:batch_aligned].detach().cpu().to(dtype=torch.float32).numpy()
+    label_array = train_labels[:batch_aligned].detach().cpu().to(dtype=torch.float32).numpy()
+    full_array = full_features.detach().cpu().to(dtype=torch.float32).numpy()
+
+    model = tf.keras.Sequential(
+        [
+            tf.keras.layers.InputLayer(
+                input_shape=[int(full_features.shape[1])],
+                batch_size=_REFERENCE_BATCH_SIZE,
+            ),
+            tf.keras.layers.Dense(256, activation="leaky_relu"),
+            tf.keras.layers.Dense(512, activation="leaky_relu"),
+            tf.keras.layers.Dense(256, activation="leaky_relu"),
+            tf.keras.layers.Dense(int(train_labels.shape[1])),
+        ]
+    )
+    model.compile(optimizer="Adam", loss=tf.keras.losses.MeanSquaredError())
+    model.fit(
+        feature_array,
+        label_array,
+        epochs=max(1, int(epochs)),
+        batch_size=_REFERENCE_BATCH_SIZE,
+        verbose=0,
+    )
+    predictions = model.predict(full_array, batch_size=4096, verbose=0)
+    return torch.from_numpy(np.asarray(predictions, dtype=np.float32))
+
+
 def _normalize_positions(positions: torch.Tensor, output_scale: float) -> torch.Tensor:
     """Center and scale final coordinates.
 
@@ -304,7 +461,7 @@ class NNPNetProjectNeighborhood(Op):
             self.config.fidelity_dtype,
             problem.edge_weights,
         )
-        features = _pivot_distance_embedding(distances, self.config.embedding_size)
+        features = _reference_pmds_embedding(distances, self.config.embedding_size, problem.seed)
         teacher_nodes = _sample_teacher_nodes(features, self.config.subgraph_size)
         teacher_edges = _induced_edge_index(problem.edge_index.detach().cpu(), teacher_nodes)
         teacher = (
@@ -320,6 +477,19 @@ class NNPNetProjectNeighborhood(Op):
             .detach()
             .cpu()
         )
+        teacher = _minmax_normalize(teacher.to(dtype=torch.float32))
+
+        epochs = max(1, int(round(float(self.config.steps) / _REFERENCE_BASE_STEPS_PER_EPOCH)))
+        neural = _keras_train_plus_infer(
+            features[teacher_nodes],
+            teacher,
+            features,
+            problem.seed,
+            epochs,
+        )
+        if neural is not None:
+            state.pos = neural.to(dtype=self.config.fidelity_dtype)
+            return state
 
         weights = _fit_projection(features[teacher_nodes], teacher, self.config.ridge)
         design = torch.cat(
