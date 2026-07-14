@@ -255,6 +255,7 @@ _EXPECTED_OP_MODULES = (
     "distance",
     "drl",
     "edge_route",
+    "elk_secondary",
     "embed",
     "fcose",
     "fmmm",
