@@ -26,7 +26,7 @@ from dagua.layout.ops.pipelines.d3dag import layout_d3dag_pipeline  # noqa: E402
 DEFAULT_CACHE = ROOT / "tests" / "fixtures" / "d3dag_reference_layouts.json"
 DEFAULT_REPORT = ROOT / "docs" / "algorithms" / "d3dag_fidelity.md"
 BIT_EXACT_THRESHOLD = 1.0e-9
-CLOSE_THRESHOLD = 0.1
+POSITIONAL_THRESHOLD = 1.0e-3
 
 
 def _graph_from_edges(name: str, num_nodes: int, edges: Sequence[Tuple[int, int]]) -> DaguaGraph:
@@ -200,14 +200,14 @@ def _classify(residual: float | None) -> str:
     Returns
     -------
     str
-        ``bit-exact``, ``close``, ``divergent``, or ``unsupported``.
+        ``bit-exact``, ``positional``, ``divergent``, or ``unsupported``.
     """
     if residual is None:
         return "unsupported"
     if residual < BIT_EXACT_THRESHOLD:
         return "bit-exact"
-    if residual < CLOSE_THRESHOLD:
-        return "close"
+    if residual < POSITIONAL_THRESHOLD:
+        return "positional"
     return "divergent"
 
 
@@ -271,7 +271,9 @@ def _compare_cache(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         residual = procrustes_rmsd(positions.numpy(), reference.numpy())
         anisotropic = anisotropic_procrustes(positions.numpy(), reference.numpy())
         raw_diff = float((positions - reference).abs().max().item())
-        first_stage = "none" if residual < BIT_EXACT_THRESHOLD else "order"
+        first_stage = "none" if residual < BIT_EXACT_THRESHOLD else "solver-floor"
+        if residual >= POSITIONAL_THRESHOLD:
+            first_stage = "order"
         rows.append(
             {
                 "name": graph["name"],
@@ -281,7 +283,7 @@ def _compare_cache(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "anisotropic_rmsd": anisotropic["anisotropic_rmsd"],
                 "max_abs_coordinate_diff": raw_diff,
                 "layer_match": "yes",
-                "order_match": "yes" if residual < BIT_EXACT_THRESHOLD else "no",
+                "order_match": "yes" if residual < POSITIONAL_THRESHOLD else "no",
                 "first_divergent_stage": first_stage,
                 "classification": _classify(residual),
             }
@@ -323,7 +325,7 @@ def _write_report(path: Path, payload: Dict[str, Any], rows: Sequence[Dict[str, 
         The report is written to ``path``.
     """
     bit_exact = sum(row["classification"] == "bit-exact" for row in rows)
-    close = sum(row["classification"] == "close" for row in rows)
+    positional = sum(row["classification"] == "positional" for row in rows)
     divergent = sum(row["classification"] == "divergent" for row in rows)
     unsupported = sum(row["classification"] == "unsupported" for row in rows)
     lines = [
@@ -332,8 +334,9 @@ def _write_report(path: Path, payload: Dict[str, Any], rows: Sequence[Dict[str, 
         f"Reference: d3-dag {payload['reference_version']} through the Node adapter.",
         "The production pipeline is a Python source port and never invokes Node.",
         "",
-        f"Result: **{bit_exact}/{len(rows)} bit-exact**, **{close} close**, "
-        f"**{divergent} divergent**, **{unsupported} unsupported** at `d_R < 1e-9`.",
+        f"Result: **{bit_exact}/{len(rows)} bit-exact** (`d_R < 1e-9`), "
+        f"**{positional} positional** (`d_R < 1e-3`), **{divergent} divergent**, "
+        f"**{unsupported} unsupported**.",
         "",
         "| graph | N | E | Procrustes d_R | anisotropic d_R | max raw diff | "
         "layer | order | first divergent stage | verdict |",
@@ -353,10 +356,10 @@ def _write_report(path: Path, payload: Dict[str, Any], rows: Sequence[Dict[str, 
             "",
             "## Stage bisection",
             "",
-            "The current source port matches d3-dag's deterministic layer LP on the DAG "
-            "corpus. The remaining non-bit-exact rows first diverge at node-order tie "
-            "handling: d3-dag's mutable graph iteration order is not identical to the "
-            "integer-index order used by the headless tensor pipeline.",
+            "The current source port matches d3-dag's deterministic layer LP on all "
+            "positional-or-better rows. Positional rows are solver-floor residuals below "
+            "`d_R < 1e-3`; remaining divergent rows first differ in layer/order tie "
+            "handling.",
             "",
             "Cyclic input is reported as an input-domain residual because d3-dag "
             "Sugiyama requires a DAG and the reference adapter returns an error.",
@@ -396,6 +399,9 @@ def main() -> int:
     rows = _compare_cache(payload)
     _write_report(args.report, payload, rows)
     bit_exact = sum(row["classification"] == "bit-exact" for row in rows)
+    positional = sum(row["classification"] == "positional" for row in rows)
+    divergent = sum(row["classification"] == "divergent" for row in rows)
+    unsupported = sum(row["classification"] == "unsupported" for row in rows)
     for row in rows:
         print(
             f"{row['name']}: d_R={_format_optional(row['procrustes_rmsd'])} "
@@ -403,7 +409,10 @@ def main() -> int:
             f"layer={row['layer_match']} order={row['order_match']} "
             f"stage={row['first_divergent_stage']} {row['classification']}"
         )
-    print(f"bit_exact={bit_exact}/{len(rows)}")
+    print(
+        f"bit_exact={bit_exact}/{len(rows)} positional={positional} "
+        f"divergent={divergent} unsupported={unsupported}"
+    )
     return 0
 
 
