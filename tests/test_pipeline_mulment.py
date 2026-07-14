@@ -10,6 +10,8 @@ import pytest
 import torch
 
 import dagua
+from dagua.eval.competitors import get_competitor
+from dagua.eval.variants import base_pairings, get_variant, original_variant_name
 from dagua.layout.ops.pipelines import PIPELINE_REGISTRY, get_pipeline_function
 from dagua.layout.ops.pipelines.mulment import (
     MulMentConfig,
@@ -71,6 +73,23 @@ def test_mulment_pipeline_and_op_are_registered() -> None:
     assert get_pipeline_function("mulment") is layout_mulment_pipeline
     assert get_op_class("mulment_coarsen_refine").__name__ == "MulMentCoarsenAndRefine"
     assert "mulment_coarsen_refine" in list_ops()
+
+
+def test_mulment_reference_competitor_is_paired() -> None:
+    """MulMent reference and reimplementation should be benchmark paired.
+
+    Returns
+    -------
+    None
+        Assertions cover competitor and variant registry wiring.
+    """
+    variant = get_variant("mulment_reimpl_default")
+
+    assert get_competitor("mulment_reference") is not None
+    assert get_competitor("mulment_reimpl") is not None
+    assert base_pairings()["mulment_reimpl"] == ["mulment_reference"]
+    assert variant is not None
+    assert original_variant_name(variant) == "mulment_reference__for__mulment_reimpl_default"
 
 
 def test_mulment_is_seed_deterministic_and_seed_sensitive() -> None:

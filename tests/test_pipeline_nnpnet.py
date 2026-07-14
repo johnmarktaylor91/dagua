@@ -10,6 +10,8 @@ import pytest
 import torch
 
 import dagua
+from dagua.eval.competitors import get_competitor
+from dagua.eval.variants import base_pairings, get_variant, original_variant_name
 from dagua.layout.ops.pipelines import PIPELINE_REGISTRY, get_pipeline_function
 from dagua.layout.ops.pipelines.nnpnet import (
     NNPNetConfig,
@@ -72,6 +74,23 @@ def test_nnpnet_pipeline_and_op_are_registered() -> None:
     assert get_pipeline_function("nnpnet") is layout_nnpnet_pipeline
     assert get_op_class("nnpnet_project_neighborhood").__name__ == "NNPNetProjectNeighborhood"
     assert "nnpnet_project_neighborhood" in list_ops()
+
+
+def test_nnpnet_reference_competitor_is_paired() -> None:
+    """NNP-NET reference and reimplementation should be benchmark paired.
+
+    Returns
+    -------
+    None
+        Assertions cover competitor and variant registry wiring.
+    """
+    variant = get_variant("nnpnet_reimpl_default")
+
+    assert get_competitor("nnpnet_reference") is not None
+    assert get_competitor("nnpnet_reimpl") is not None
+    assert base_pairings()["nnpnet_reimpl"] == ["nnpnet_reference"]
+    assert variant is not None
+    assert original_variant_name(variant) == "nnpnet_reference__for__nnpnet_reimpl_default"
 
 
 def test_nnpnet_pivot_embedding_pins_farthest_pivot_order() -> None:
