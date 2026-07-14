@@ -43,6 +43,10 @@ from dagua.layout.ops.gem import (
     GEMSequentialStep,
     GEMUpdateTemperatures,
 )
+from dagua.layout.ops.graphviz_radial_circular import (
+    CircoAssignCircularCoordinates,
+    TwopiAssignRadialCoordinates,
+)
 from dagua.layout.ops.init import (
     CircularInit,
     CircularInitConfig,
@@ -187,6 +191,8 @@ __all__ = [
     "GEMComputeImpulse",
     "GEMSequentialStep",
     "GEMUpdateTemperatures",
+    "CircoAssignCircularCoordinates",
+    "TwopiAssignRadialCoordinates",
     # Taxonomy
     "OpCategory",
     "register_op",
@@ -251,6 +257,7 @@ _EXPECTED_OP_MODULES = (
     "force",
     "force_2d_init",
     "gem",
+    "graphviz_radial_circular",
     "init",
     "layering",
     "lgl",
