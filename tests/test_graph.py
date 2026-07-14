@@ -155,6 +155,22 @@ class TestFromEdgeIndex:
         with pytest.raises(ValueError, match="edge_weights length"):
             DaguaGraph.from_edge_index(ei, num_nodes=3, edge_weights=ew)
 
+    def test_from_edge_index_preserves_node_sizes(self) -> None:
+        """from_edge_index should keep explicit node boxes after edge invalidation.
+
+        Returns
+        -------
+        None
+            Assertions verify the tensor survives construction.
+        """
+        ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+        node_sizes = torch.tensor([[2.0, 3.0], [4.0, 5.0], [6.0, 7.0]])
+
+        graph = DaguaGraph.from_edge_index(ei, num_nodes=3, node_sizes=node_sizes)
+
+        assert graph.node_sizes is not None
+        assert torch.equal(graph.node_sizes, node_sizes.to(dtype=graph.size_dtype))
+
     def test_respects_index_dtype_override(self):
         ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.int64)
         g = DaguaGraph.from_edge_index(ei, num_nodes=3, index_dtype=torch.int32)
