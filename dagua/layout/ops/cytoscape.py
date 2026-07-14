@@ -19,6 +19,10 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _MIN_DISTANCE = 1.0e-9
 _AVSDF_DEFAULT_NODE_SEPARATION = 60.0
+_CISE_DEFAULT_NODE_SEPARATION = 12.5
+_CISE_CLUSTER_MARGIN = 15.0
+_CISE_IDEAL_INTER_CLUSTER_EDGE_LENGTH = 70.0
+_CISE_DEFAULT_NODE_DIMENSION = 30.0
 _COSE_DEFAULT_NODE_WIDTH = 1.0
 _COSE_DEFAULT_NODE_HEIGHT = 1.0
 _COSE_DEFAULT_RENDERED_NODE_CENTER = 15.0
@@ -553,7 +557,7 @@ class CytoscapeCircleClusters(Op):
     category: ClassVar[OpCategory] = OpCategory.COORDINATE
     reads: ClassVar[tuple[str, ...]] = ()
     writes: ClassVar[tuple[str, ...]] = ("pos", "extras")
-    node_separation: float = _AVSDF_DEFAULT_NODE_SEPARATION
+    node_separation: float = _CISE_DEFAULT_NODE_SEPARATION
 
     def apply(
         self,
@@ -582,7 +586,8 @@ class CytoscapeCircleClusters(Op):
             return AVSDFLayoutOp(node_separation=self.node_separation).apply(problem, state, ctx)
         groups: list[list[int]] = []
         assigned: set[int] = set()
-        for members in problem.clusters.values():
+        for cluster_id in sorted(problem.clusters):
+            members = problem.clusters[cluster_id]
             if isinstance(members, dict):
                 continue
             group = sorted(
@@ -594,19 +599,127 @@ class CytoscapeCircleClusters(Op):
         for node in range(problem.num_nodes):
             if node not in assigned:
                 groups.append([node])
-        outer_radius = max(self.node_separation, len(groups) * self.node_separation / math.pi)
+        group_index_by_node = {
+            node: group_index for group_index, group in enumerate(groups) for node in group
+        }
+        sizes = torch.full(
+            (problem.num_nodes, 2),
+            _CISE_DEFAULT_NODE_DIMENSION,
+            dtype=torch.float64,
+        )
         pos = torch.zeros((problem.num_nodes, 2), dtype=torch.float64)
         cluster_meta: list[dict[str, float]] = []
+        half_extents: list[float] = []
         for group_index, group in enumerate(groups):
-            center_angle = 2.0 * math.pi * group_index / max(len(groups), 1)
-            center_x = outer_radius * math.cos(center_angle)
-            center_y = outer_radius * math.sin(center_angle)
-            radius = max(self.node_separation, len(group) * self.node_separation / (2.0 * math.pi))
+            local_index_by_node = {node: index for index, node in enumerate(group)}
+            local_edges: list[tuple[int, int]] = []
+            edges = problem.edge_index.detach().cpu().long()
+            for edge_pos in range(edges.shape[1]):
+                source = int(edges[0, edge_pos].item())
+                target = int(edges[1, edge_pos].item())
+                if source in local_index_by_node and target in local_index_by_node:
+                    local_edges.append((local_index_by_node[source], local_index_by_node[target]))
+            if local_edges:
+                local_edge_index = torch.tensor(local_edges, dtype=torch.long).t().contiguous()
+            else:
+                local_edge_index = torch.empty((2, 0), dtype=torch.long)
+            local_problem = LayoutProblem(
+                edge_index=local_edge_index,
+                num_nodes=len(group),
+                node_sizes=sizes[torch.tensor(group, dtype=torch.long)],
+            )
+            local_state = AVSDFLayoutOp(node_separation=self.node_separation).apply(
+                local_problem,
+                SolveState(),
+                ctx,
+            )
+            if local_state.pos is None:
+                raise RuntimeError("CiSE cluster AVSDF placement did not produce positions.")
+            local_pos = local_state.pos.to(dtype=torch.float64)
+            local_pos = local_pos - local_pos.mean(dim=0, keepdim=True)
+            radius = float(torch.linalg.vector_norm(local_pos, dim=1).max().item())
+            max_dimension = float(sizes[torch.tensor(group, dtype=torch.long)].max().item())
+            half_extents.append(radius + _CISE_CLUSTER_MARGIN + max_dimension / 2.0)
             for local_index, node in enumerate(group):
-                angle = 2.0 * math.pi * local_index / max(len(group), 1)
-                pos[node, 0] = center_x + radius * math.cos(angle)
-                pos[node, 1] = center_y + radius * math.sin(angle)
-            cluster_meta.append({"x": center_x, "y": center_y, "r": radius})
+                pos[node] = local_pos[local_index]
+            cluster_meta.append({"x": 0.0, "y": 0.0, "r": radius})
+
+        if len(groups) == 2:
+            center_distance = (
+                half_extents[0] + half_extents[1] + _CISE_IDEAL_INTER_CLUSTER_EDGE_LENGTH
+            )
+            centers = [(-center_distance / 2.0, 0.0), (center_distance / 2.0, 0.0)]
+        else:
+            spacing = max(
+                _CISE_IDEAL_INTER_CLUSTER_EDGE_LENGTH,
+                max(half_extents, default=self.node_separation) * 2.0,
+            )
+            outer_radius = max(
+                spacing,
+                len(groups) * spacing / (2.0 * math.pi),
+            )
+            centers = [
+                (
+                    outer_radius * math.cos(2.0 * math.pi * index / max(len(groups), 1)),
+                    outer_radius * math.sin(2.0 * math.pi * index / max(len(groups), 1)),
+                )
+                for index in range(len(groups))
+            ]
+
+        inter_degree = [0] * problem.num_nodes
+        neighbor_center_sums = [(0.0, 0.0) for _ in groups]
+        neighbor_center_counts = [0] * len(groups)
+        edges = problem.edge_index.detach().cpu().long()
+        for edge_pos in range(edges.shape[1]):
+            source = int(edges[0, edge_pos].item())
+            target = int(edges[1, edge_pos].item())
+            source_group = group_index_by_node.get(source)
+            target_group = group_index_by_node.get(target)
+            if source_group is None or target_group is None or source_group == target_group:
+                continue
+            inter_degree[source] += 1
+            inter_degree[target] += 1
+            source_x, source_y = neighbor_center_sums[source_group]
+            target_x, target_y = neighbor_center_sums[target_group]
+            neighbor_center_sums[source_group] = (
+                source_x + centers[target_group][0],
+                source_y + centers[target_group][1],
+            )
+            neighbor_center_sums[target_group] = (
+                target_x + centers[source_group][0],
+                target_y + centers[source_group][1],
+            )
+            neighbor_center_counts[source_group] += 1
+            neighbor_center_counts[target_group] += 1
+
+        for group_index, group in enumerate(groups):
+            center_x, center_y = centers[group_index]
+            if len(group) > 1 and neighbor_center_counts[group_index] > 0:
+                chosen_node = next(
+                    (node for node in group if inter_degree[node] == 0),
+                    group[0],
+                )
+                target_x = (
+                    neighbor_center_sums[group_index][0] / neighbor_center_counts[group_index]
+                )
+                target_y = (
+                    neighbor_center_sums[group_index][1] / neighbor_center_counts[group_index]
+                )
+                target_angle = math.atan2(target_y - center_y, target_x - center_x)
+                current_angle = math.atan2(float(pos[chosen_node, 1]), float(pos[chosen_node, 0]))
+                rotation = target_angle - current_angle
+                cos_rotation = math.cos(rotation)
+                sin_rotation = math.sin(rotation)
+                for node in group:
+                    local_x = float(pos[node, 0])
+                    local_y = float(pos[node, 1])
+                    pos[node, 0] = local_x * cos_rotation - local_y * sin_rotation
+                    pos[node, 1] = local_x * sin_rotation + local_y * cos_rotation
+            for node in group:
+                pos[node, 0] += center_x
+                pos[node, 1] += center_y
+            cluster_meta[group_index]["x"] = center_x
+            cluster_meta[group_index]["y"] = center_y
         state.pos = pos.to(device=device, dtype=torch.float32)
         state.extras["cise_cluster_circles"] = cluster_meta
         return state
