@@ -50,6 +50,32 @@ class _CircoBlock:
     coalesced: bool = False
 
 
+@dataclass(frozen=True)
+class _CircoDirectedBlockGraph:
+    """Directed cgraph-style edge view for one circo block.
+
+    Parameters
+    ----------
+    nodes : list[int]
+        Block nodes in Graphviz subgraph iteration order.
+    out_neighbors : dict[int, list[int]]
+        Outgoing block-local neighbors by source node.
+    in_neighbors : dict[int, list[int]]
+        Incoming block-local neighbors by target node.
+    incident_edges : dict[int, list[int]]
+        Incident edge ids by node in the order used by Graphviz's blockpath
+        edge scans.
+    edge_endpoints : list[tuple[int, int]]
+        Directed edge endpoints in original input order.
+    """
+
+    nodes: List[int]
+    out_neighbors: Dict[int, List[int]]
+    in_neighbors: Dict[int, List[int]]
+    incident_edges: Dict[int, List[int]]
+    edge_endpoints: List[Tuple[int, int]]
+
+
 def _graphviz_twopi_leaf_steps(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
     """Compute Graphviz twopi's minimum steps from each node to any leaf.
 
@@ -653,6 +679,51 @@ def _block_induced_adjacency(
     }
 
 
+def _circo_directed_block_graph(
+    edge_index: torch.Tensor,
+    nodes: Sequence[int],
+) -> _CircoDirectedBlockGraph:
+    """Build the directed block edge view used by Graphviz ``blockpath.c``.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
+    nodes : sequence[int]
+        Nodes owned by the current circo block.
+
+    Returns
+    -------
+    _CircoDirectedBlockGraph
+        Directed block-local edge-order metadata.
+    """
+    ordered_nodes = list(nodes)
+    node_set = set(ordered_nodes)
+    out_neighbors: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
+    in_neighbors: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
+    out_edges: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
+    in_edges: Dict[int, List[int]] = {node: [] for node in ordered_nodes}
+    edge_endpoints: List[Tuple[int, int]] = []
+    for source, target in _edge_pairs(edge_index):
+        if source == target or source not in node_set or target not in node_set:
+            continue
+        edge_id = len(edge_endpoints)
+        edge_endpoints.append((source, target))
+        out_neighbors[source].append(target)
+        in_neighbors[target].append(source)
+        out_edges[source].append(edge_id)
+        in_edges[target].append(edge_id)
+
+    incident_edges = {node: out_edges[node] + in_edges[node] for node in ordered_nodes}
+    return _CircoDirectedBlockGraph(
+        nodes=ordered_nodes,
+        out_neighbors=out_neighbors,
+        in_neighbors=in_neighbors,
+        incident_edges=incident_edges,
+        edge_endpoints=edge_endpoints,
+    )
+
+
 def _block_edges_from_adjacency(induced: Dict[int, List[int]]) -> Set[Tuple[int, int]]:
     """Return undirected edge keys from induced adjacency.
 
@@ -991,6 +1062,7 @@ def _longest_tree_path(
 
 def _circo_block_order(
     adjacency: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
     block: _CircoBlock,
 ) -> List[int]:
     """Order one block using Graphviz's path-plus-residual heuristic.
@@ -999,6 +1071,8 @@ def _circo_block_order(
     ----------
     adjacency : sequence[sequence[int]]
         Strict undirected adjacency.
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
     block : _CircoBlock
         Block to order.
 
@@ -1010,35 +1084,185 @@ def _circo_block_order(
     nodes = list(block.nodes)
     if len(nodes) <= 2:
         return nodes
+    directed = _circo_directed_block_graph(edge_index, nodes)
     induced = _block_induced_adjacency(adjacency, nodes)
     skeleton = _circo_block_skeleton(induced, nodes)
     tree, parent = _circo_spanning_tree(skeleton, nodes)
     ordered = _longest_tree_path(tree, parent, nodes)
     ordered_set = set(ordered)
-    for node in nodes:
+    for node in directed.nodes:
         if node in ordered_set:
             continue
-        neighbors = [neighbor for neighbor in induced[node] if neighbor in ordered_set]
+        neighbor_candidates = directed.out_neighbors[node] + directed.in_neighbors[node]
+        neighbor_marks = set(neighbor_candidates)
         placed = False
-        if len(neighbors) >= 2:
+        if len(neighbor_candidates) >= 2:
             for index, candidate in enumerate(ordered):
                 nxt = ordered[(index + 1) % len(ordered)]
-                if candidate in neighbors and nxt in neighbors:
+                if candidate in neighbor_marks and nxt in neighbor_marks:
                     ordered.insert(index + 1, node)
                     placed = True
                     break
-        if not placed and neighbors:
-            anchor = next(candidate for candidate in ordered if candidate in neighbors)
-            ordered.insert(ordered.index(anchor) + 1, node)
-            placed = True
+        if not placed and neighbor_candidates:
+            for index, candidate in enumerate(ordered):
+                if candidate in neighbor_marks:
+                    ordered.insert(index + 1, node)
+                    placed = True
+                    break
         if not placed:
             ordered.append(node)
         ordered_set.add(node)
+    ordered = _circo_reduce_edge_crossings(ordered, directed)
     parent_nodes = {child.parent_node for child in block.children}
     for index, node in enumerate(ordered):
         if node in parent_nodes:
             return ordered[index:] + ordered[:index]
     return ordered
+
+
+def _circo_count_all_crossings(
+    ordered: Sequence[int],
+    directed: _CircoDirectedBlockGraph,
+) -> int:
+    """Count circular edge crossings like Graphviz ``blockpath.c``.
+
+    Parameters
+    ----------
+    ordered : sequence[int]
+        Current circular node list.
+    directed : _CircoDirectedBlockGraph
+        Directed block-local edge-order metadata.
+
+    Returns
+    -------
+    int
+        Crossing count observed by Graphviz's open-edge sweep.
+    """
+    edge_order = [0] * len(directed.edge_endpoints)
+    open_edges: List[int] = []
+    crossings = 0
+    order = 1
+    for node in ordered:
+        for edge_id in directed.incident_edges[node]:
+            if edge_order[edge_id] <= 0:
+                continue
+            source, target = directed.edge_endpoints[edge_id]
+            for open_edge_id in sorted(open_edges):
+                open_source, open_target = directed.edge_endpoints[open_edge_id]
+                if (
+                    edge_order[open_edge_id] > edge_order[edge_id]
+                    and open_source != node
+                    and open_target != node
+                ):
+                    crossings += 1
+            if edge_id in open_edges:
+                open_edges.remove(edge_id)
+
+        for edge_id in directed.incident_edges[node]:
+            if edge_order[edge_id] == 0:
+                edge_order[edge_id] = order
+                open_edges.append(edge_id)
+        order += 1
+    return crossings
+
+
+def _circo_insert_relative(
+    ordered: Sequence[int],
+    current: int,
+    neighbor: int,
+    after: bool,
+) -> List[int]:
+    """Move one node before or after a neighbor in a nodelist copy.
+
+    Parameters
+    ----------
+    ordered : sequence[int]
+        Current circular node list.
+    current : int
+        Node to move.
+    neighbor : int
+        Neighbor used as insertion anchor.
+    after : bool
+        Whether to place ``current`` after ``neighbor``; otherwise before it.
+
+    Returns
+    -------
+    list[int]
+        Reordered node list.
+    """
+    out = [node for node in ordered if node != current]
+    anchor_index = out.index(neighbor)
+    insert_at = anchor_index + 1 if after else anchor_index
+    out.insert(insert_at, current)
+    return out
+
+
+def _circo_reduce_once(
+    ordered: List[int],
+    directed: _CircoDirectedBlockGraph,
+    crossings: int,
+) -> Tuple[List[int], int]:
+    """Run one Graphviz ``reduce`` pass over a block nodelist.
+
+    Parameters
+    ----------
+    ordered : list[int]
+        Current circular node list.
+    directed : _CircoDirectedBlockGraph
+        Directed block-local edge-order metadata.
+    crossings : int
+        Current crossing count.
+
+    Returns
+    -------
+    tuple[list[int], int]
+        Updated circular order and crossing count.
+    """
+    best = list(ordered)
+    best_crossings = int(crossings)
+    for current in directed.nodes:
+        for edge_id in directed.incident_edges[current]:
+            source, target = directed.edge_endpoints[edge_id]
+            neighbor = target if source == current else source
+            for after in (False, True):
+                candidate = _circo_insert_relative(best, current, neighbor, after)
+                new_crossings = _circo_count_all_crossings(candidate, directed)
+                if new_crossings < best_crossings:
+                    best = candidate
+                    best_crossings = new_crossings
+                    if best_crossings == 0:
+                        return best, 0
+    return best, best_crossings
+
+
+def _circo_reduce_edge_crossings(
+    ordered: List[int],
+    directed: _CircoDirectedBlockGraph,
+) -> List[int]:
+    """Apply Graphviz's fixed-iteration block crossing reduction.
+
+    Parameters
+    ----------
+    ordered : list[int]
+        Initial circular node list after residual placement.
+    directed : _CircoDirectedBlockGraph
+        Directed block-local edge-order metadata.
+
+    Returns
+    -------
+    list[int]
+        Best circular node order found by the Graphviz blockpath sweep.
+    """
+    crossings = _circo_count_all_crossings(ordered, directed)
+    if crossings == 0:
+        return ordered
+    best = list(ordered)
+    for _ in range(10):
+        original = crossings
+        best, crossings = _circo_reduce_once(best, directed, crossings)
+        if original == crossings or crossings == 0:
+            return best
+    return best
 
 
 def _is_connected_path(edge_index: torch.Tensor, num_nodes: int) -> bool:
@@ -1600,6 +1824,7 @@ def _circo_position_block_children(
 def _layout_circo_block_tree(
     block: _CircoBlock,
     adjacency: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
     nodesep: float,
     points: Dict[int, Tuple[float, float]],
     node_extents: Optional[Sequence[float]] = None,
@@ -1612,6 +1837,8 @@ def _layout_circo_block_tree(
         Block subtree root.
     adjacency : sequence[sequence[int]]
         Strict undirected adjacency.
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
     nodesep : float
         Minimum separation scale.
     points : dict[int, tuple[float, float]]
@@ -1627,10 +1854,10 @@ def _layout_circo_block_tree(
     """
     child_count = 0
     for child in block.children:
-        _layout_circo_block_tree(child, adjacency, nodesep, points, node_extents)
+        _layout_circo_block_tree(child, adjacency, edge_index, nodesep, points, node_extents)
         child_count += 1
 
-    block.ordered = _circo_block_order(adjacency, block)
+    block.ordered = _circo_block_order(adjacency, edge_index, block)
     count = len(block.ordered)
     if count == 0:
         block.radius = 0.0
@@ -1665,6 +1892,48 @@ def _layout_circo_block_tree(
         block.parent_pos = center_angle
         if block.parent_pos < 0.0:
             block.parent_pos += _TWO_PI
+
+
+def _circo_pack_component_positions(
+    components: List[List[int]],
+    component_positions: List[torch.Tensor],
+    component_edges: List[torch.Tensor],
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Pack disconnected circo components using Graphviz ``pack.c`` geometry.
+
+    Parameters
+    ----------
+    components : list[list[int]]
+        Parent node indices for each connected component.
+    component_positions : list[torch.Tensor]
+        Component-local point coordinates, each with shape ``[C, 2]``.
+    component_edges : list[torch.Tensor]
+        Component-local edge tensors, each with shape ``[2, E_c]``.
+    num_nodes : int
+        Total number of parent graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional parent node sizes with shape ``[N, 2]`` in points.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed point coordinates with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.neato import _pack_component_positions
+
+    point_scale = _DEFAULT_RANKSEP_POINTS
+    positions_in = [local / point_scale for local in component_positions]
+    sizes_in = None if node_sizes is None else node_sizes / point_scale
+    packed_in = _pack_component_positions(
+        components=components,
+        component_positions=positions_in,
+        component_edges=component_edges,
+        num_nodes=num_nodes,
+        node_sizes=sizes_in,
+    )
+    return packed_in * point_scale
 
 
 def circo_positions(
@@ -1718,30 +1987,51 @@ def circo_positions(
         node_extents = [
             float(max(width, height)) * size_scale for width, height in sizes_cpu.tolist()
         ]
-    block_gap = max(float(nodesep) * 8.0, 144.0)
     positions = torch.zeros((num_nodes, 2), dtype=torch.float64, device=device)
     block_orders: List[List[int]] = []
-    component_offset = 0.0
+    component_positions: List[torch.Tensor] = []
+    component_edges: List[torch.Tensor] = []
     for component in components:
         root = _graphviz_owned_block_tree(adjacency, component)
         if root is None:
             continue
         points: Dict[int, Tuple[float, float]] = {}
-        _layout_circo_block_tree(root, adjacency, nodesep, points, node_extents)
-        xs = [point[0] for point in points.values()]
-        min_x = min(xs, default=0.0)
-        max_x = max(xs, default=0.0)
-        for node in component:
+        _layout_circo_block_tree(root, adjacency, edge_index, nodesep, points, node_extents)
+        local = torch.zeros((len(component), 2), dtype=torch.float64, device=device)
+        for local_index, node in enumerate(component):
             x_value, y_value = points.get(node, (0.0, 0.0))
-            positions[node, 0] = x_value - min_x + component_offset
-            positions[node, 1] = y_value
-        component_offset += (max_x - min_x) + block_gap
+            local[local_index, 0] = x_value
+            local[local_index, 1] = y_value
+        component_positions.append(local)
+
+        component_index = {node: index for index, node in enumerate(component)}
+        local_edges = [
+            (component_index[source], component_index[target])
+            for source, target in _edge_pairs(edge_index)
+            if source in component_index and target in component_index
+        ]
+        if local_edges:
+            component_edges.append(torch.tensor(local_edges, dtype=torch.long, device=device).t())
+        else:
+            component_edges.append(torch.empty((2, 0), dtype=torch.long, device=device))
 
         stack = [root]
         while stack:
             block = stack.pop()
             block_orders.append(list(block.ordered))
             stack.extend(reversed(block.children))
+    if len(component_positions) > 1:
+        packed = _circo_pack_component_positions(
+            components=components,
+            component_positions=component_positions,
+            component_edges=component_edges,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+        )
+        positions = packed.to(device=device, dtype=torch.float64)
+    else:
+        for component, local in zip(components, component_positions):
+            positions[component] = local
     return positions, {"blocks": blocks, "block_order": block_orders}
 
 

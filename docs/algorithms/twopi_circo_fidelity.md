@@ -28,14 +28,14 @@ Result: **4/11 similarity-exact**, **4 positional-identical**, **3 divergent**. 
 |---|---:|---:|---:|---:|---:|---|---|
 | single_node | 1 | 0 | 0.000e+00 | 0.000e+00 | 3.800e+01 | bit-exact | none |
 | small_chain | 6 | 5 | 0.000e+00 | 6.536e-17 | 6.825e+02 | bit-exact | none |
-| binary_tree | 11 | 10 | 8.971e-05 | 8.874e-05 | 1.029e+03 | positional-identical | none |
+| binary_tree | 11 | 10 | 8.971e-05 | 8.874e-05 | 1.176e+03 | positional-identical | none |
 | diamond | 4 | 4 | 1.357e-16 | 9.956e-17 | 2.052e+02 | bit-exact | none |
-| grid_5x5 | 25 | 40 | 9.299e-01 | 8.022e-01 | 1.253e+03 | divergent | intra-block circular ordering after block discovery |
+| grid_5x5 | 25 | 40 | 7.272e-01 | 6.670e-01 | 1.265e+03 | divergent | intra-block circular ordering after block discovery |
 | org_chart_small | 16 | 15 | 2.387e-04 | 2.387e-04 | 9.606e+02 | positional-identical | none |
-| long_skip | 5 | 6 | 1.370e-05 | 1.111e-05 | 2.111e+02 | positional-identical | none |
-| disconnected | 5 | 2 | 1.092e+00 | 9.147e-01 | 2.028e+02 | divergent | component packing plus block-tree coordinate placement |
+| long_skip | 5 | 6 | 1.370e-05 | 1.111e-05 | 2.251e+02 | positional-identical | none |
+| disconnected | 5 | 2 | 6.155e-01 | 5.637e-01 | 2.929e+02 | divergent | component packing plus block-tree coordinate placement |
 | cycle_4 | 4 | 4 | 1.344e-16 | 9.778e-17 | 1.998e+02 | bit-exact | none |
-| random_dag_50 | 50 | 90 | 1.126e+00 | 9.247e-01 | 2.663e+03 | divergent | blockpath ordering before block-tree coordinate placement |
+| random_dag_50 | 50 | 90 | 8.873e-01 | 7.936e-01 | 2.747e+03 | divergent | blockpath ordering before block-tree coordinate placement |
 | org_chart_deep | 79 | 78 | 3.392e-05 | 3.217e-05 | 7.527e+03 | positional-identical | none |
 
 ## Residual notes
