@@ -11,6 +11,10 @@ from dagua.layout.ops.pipelines.cose import layout_cose_pipeline
 
 _COMPOUND_CENTER_SPACING_FACTOR = 12.0
 _COMPOUND_LOCAL_SCALE = 0.5
+_COMPOUND_ROTATION_EPSILON = 1.0e-9
+_CYTOSCAPE_LCG_MULTIPLIER = 1664525
+_CYTOSCAPE_LCG_INCREMENT = 1013904223
+_CYTOSCAPE_LCG_MODULUS = 4294967296
 
 
 def _compound_groups(
@@ -82,6 +86,124 @@ def _induced_edge_index(
     return torch.tensor(local_edges, dtype=torch.long).t().contiguous()
 
 
+def _compound_inter_edge_rotation(
+    edge_index: torch.Tensor,
+    group: list[int],
+    group_index: int,
+    group_index_by_node: dict[int, int],
+    centers: list[tuple[float, float]],
+    local: torch.Tensor,
+) -> float:
+    """Return the inter-edge-driven rotation for one compound member pack.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Global edge tensor with shape ``[2, E]``.
+    group : list[int]
+        Global node ids in one compound member group.
+    group_index : int
+        Index of ``group`` in the compound group list.
+    group_index_by_node : dict[int, int]
+        Mapping from global node id to compound group index.
+    centers : list[tuple[float, float]]
+        Compound representative center coordinates.
+    local : torch.Tensor
+        Centered local member coordinates with shape ``[len(group), 2]``.
+
+    Returns
+    -------
+    float
+        Rotation angle in radians.
+    """
+    if edge_index.numel() == 0 or len(group) < 2:
+        return 0.0
+    local_index_by_node = {node: index for index, node in enumerate(group)}
+    center_x, center_y = centers[group_index]
+    cos_sum = 0.0
+    sin_sum = 0.0
+    edges = edge_index.detach().cpu().long()
+    for edge_pos in range(edges.shape[1]):
+        source = int(edges[0, edge_pos].item())
+        target = int(edges[1, edge_pos].item())
+        source_group = group_index_by_node.get(source)
+        target_group = group_index_by_node.get(target)
+        if source_group is None or target_group is None or source_group == target_group:
+            continue
+        if source_group == group_index:
+            local_node = source
+            other_group = target_group
+        elif target_group == group_index:
+            local_node = target
+            other_group = source_group
+        else:
+            continue
+        local_index = local_index_by_node[local_node]
+        local_x = float(local[local_index, 0])
+        local_y = float(local[local_index, 1])
+        local_norm = math.hypot(local_x, local_y)
+        target_x = centers[other_group][0] - center_x
+        target_y = centers[other_group][1] - center_y
+        target_norm = math.hypot(target_x, target_y)
+        if local_norm <= _COMPOUND_ROTATION_EPSILON or target_norm <= _COMPOUND_ROTATION_EPSILON:
+            continue
+        local_x /= local_norm
+        local_y /= local_norm
+        target_x /= target_norm
+        target_y /= target_norm
+        cos_sum += local_x * target_x + local_y * target_y
+        sin_sum += local_x * target_y - local_y * target_x
+    if abs(cos_sum) <= _COMPOUND_ROTATION_EPSILON and abs(sin_sum) <= _COMPOUND_ROTATION_EPSILON:
+        return 0.0
+    return math.atan2(sin_sum, cos_sum)
+
+
+def _next_cytoscape_random(raw_state: int) -> tuple[int, float]:
+    """Advance Cytoscape's seeded random stream by one value.
+
+    Parameters
+    ----------
+    raw_state : int
+        Current unsigned 32-bit LCG state.
+
+    Returns
+    -------
+    tuple[int, float]
+        Updated raw state and the corresponding random value in ``[0, 1)``.
+    """
+    next_state = (
+        _CYTOSCAPE_LCG_MULTIPLIER * int(raw_state) + _CYTOSCAPE_LCG_INCREMENT
+    ) & 0xFFFFFFFF
+    return next_state, next_state / _CYTOSCAPE_LCG_MODULUS
+
+
+def _cytoscape_random_initial_positions(
+    count: int,
+    raw_state: int,
+) -> tuple[torch.Tensor, int]:
+    """Return random CoSE-Bilkent initial positions from one shared RNG stream.
+
+    Parameters
+    ----------
+    count : int
+        Number of local nodes to initialize.
+    raw_state : int
+        Current unsigned 32-bit Cytoscape LCG state.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int]
+        Position tensor with shape ``[count, 2]`` and the updated raw state.
+    """
+    pos = torch.empty((count, 2), dtype=torch.float32)
+    for node_index in range(count):
+        raw_state, random_x = _next_cytoscape_random(raw_state)
+        raw_state, random_y = _next_cytoscape_random(raw_state)
+        pos[node_index, 0] = random_x
+        pos[node_index, 1] = random_y
+    return pos, raw_state
+
+
 def _layout_compound_groups(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -138,23 +260,49 @@ def _layout_compound_groups(
             for index in range(len(groups))
         ]
 
+    group_index_by_node = {
+        node: group_index for group_index, group in enumerate(groups) for node in group
+    }
+    random_state = int(seed) & 0xFFFFFFFF
+    if random_state == 0:
+        random_state = 1
     for group_index, group in enumerate(groups):
         local_node_sizes = node_sizes[group] if node_sizes is not None else None
+        local_initial, random_state = _cytoscape_random_initial_positions(
+            count=len(group),
+            raw_state=random_state,
+        )
         local = layout_cose_pipeline(
             edge_index=_induced_edge_index(edge_index, group),
             num_nodes=len(group),
             node_sizes=local_node_sizes,
             steps=steps,
-            seed=seed + group_index,
-            randomize=True,
+            seed=seed,
+            randomize=False,
             nodeRepulsion=node_repulsion,
             idealEdgeLength=ideal_edge_length,
             edgeElasticity=edge_elasticity,
             gravity=gravity,
             initialTemp=50.0,
             minTemp=0.01,
+            pos=local_initial,
         )
         local = (local - local.mean(dim=0, keepdim=True)) * _COMPOUND_LOCAL_SCALE
+        rotation = _compound_inter_edge_rotation(
+            edge_index=edge_index,
+            group=group,
+            group_index=group_index,
+            group_index_by_node=group_index_by_node,
+            centers=centers,
+            local=local,
+        )
+        if rotation != 0.0:
+            cos_rotation = math.cos(rotation)
+            sin_rotation = math.sin(rotation)
+            rotated = torch.empty_like(local)
+            rotated[:, 0] = local[:, 0] * cos_rotation - local[:, 1] * sin_rotation
+            rotated[:, 1] = local[:, 0] * sin_rotation + local[:, 1] * cos_rotation
+            local = rotated
         center = torch.tensor(centers[group_index], dtype=torch.float32)
         for local_index, node in enumerate(group):
             pos[node] = local[local_index] + center
