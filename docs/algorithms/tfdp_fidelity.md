@@ -18,11 +18,11 @@ ZeroDivisionError: division by zero
 | graph | residual | tier | stress delta | neighborhood delta |
 | --- | ---: | --- | ---: | ---: |
 | single_node | nan | REFERENCE_BLOCKED | nan | nan |
-| small_chain | 0.0226823 | POSITIONAL | 0.0127504 | 0 |
-| diamond | 0.24478 | DISTRIBUTIONAL | 0.115418 | 0 |
-| cycle_4 | 0.65777 | DISTRIBUTIONAL | 0.18055 | 0 |
-| grid_3x3 | 0.479476 | DISTRIBUTIONAL | 0.0380881 | 0 |
-| disconnected | 0.478177 | DISTRIBUTIONAL | 0.0881646 | 0 |
+| small_chain | 4.5993e-07 | BIT/SIMILARITY_EXACT | 1.4869e-06 | 0 |
+| diamond | 2.38796e-05 | POSITIONAL | 1.53594e-06 | 0 |
+| cycle_4 | 2.98772e-06 | POSITIONAL | 4.70942e-06 | 0 |
+| grid_3x3 | 3.23354e-06 | POSITIONAL | 2.83023e-06 | 0 |
+| disconnected | 2.9798e-06 | POSITIONAL | 2.14485e-06 | 0 |
 
 ## FFT mode
 
