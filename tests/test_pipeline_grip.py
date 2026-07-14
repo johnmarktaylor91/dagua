@@ -83,14 +83,14 @@ def test_grip_mis_filtration_pins_seeded_path_order() -> None:
     Returns
     -------
     None
-        The assertion pins the clean-room greedy draw order and exclusion
-        radius behavior for ``V_1``.
+        The assertion pins the C reference degree order and adjusted top
+        filtration prefix for ``V_1``.
     """
     edge_index = _path_edge_index(6)
 
     levels = build_mis_filtration(edge_index=edge_index, num_nodes=6, seed=42)
 
-    assert levels == [[0, 1, 2, 3, 4, 5], [0, 2, 5]]
+    assert levels == [[0, 5, 1, 2, 3, 4], [0, 5, 1, 2]]
 
 
 def test_grip_intelligent_initial_position_uses_circle_solution() -> None:
@@ -124,8 +124,8 @@ def test_grip_three_round_cycle_pins_clean_room_layout() -> None:
     Returns
     -------
     None
-        The assertion pins MIS, intelligent init, local FR, and final scaling
-        together on a small cycle graph.
+        The assertion pins C-style MIS, seeded init, local FR, and final
+        scaling together on a small cycle graph.
     """
     edge_index = _edge_index_from_edges([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)])
 
@@ -139,12 +139,12 @@ def test_grip_three_round_cycle_pins_clean_room_layout() -> None:
 
     expected = torch.tensor(
         [
-            [19.1857, -27.2027],
-            [4.7180, 37.9373],
-            [-50.0000, 17.1431],
-            [13.3697, 28.7831],
-            [5.8586, -11.8528],
-            [6.8680, -44.8081],
+            [22.2222, 44.1176],
+            [-5.2288, 32.3529],
+            [12.4183, -20.5882],
+            [-9.1503, -50.0000],
+            [-20.9150, -14.7059],
+            [0.6536, 8.8235],
         ],
         dtype=torch.float64,
     )
