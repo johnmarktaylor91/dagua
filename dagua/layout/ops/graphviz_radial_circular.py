@@ -18,6 +18,42 @@ _DEFAULT_NODESEP_POINTS = 18.0
 _TWO_PI = 2.0 * math.pi
 
 
+def _graphviz_twopi_leaf_steps(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+    """Compute Graphviz twopi's minimum steps from each node to any leaf.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[int]
+        Minimum undirected edge count from each node to a leaf, using
+        ``num_nodes * num_nodes`` as Graphviz's unreached sentinel.
+    """
+    adjacency = build_undirected_adjacency(edge_index, num_nodes)
+    sentinel = num_nodes * num_nodes
+    steps = [sentinel] * num_nodes
+    queue: deque[int] = deque()
+    for node, neighbors in enumerate(adjacency):
+        distinct_neighbors = {neighbor for neighbor, _ in neighbors if neighbor != node}
+        if len(distinct_neighbors) <= 1:
+            steps[node] = 0
+            queue.append(node)
+
+    while queue:
+        node = queue.popleft()
+        next_steps = steps[node] + 1
+        for neighbor, _ in adjacency[node]:
+            if next_steps < steps[neighbor]:
+                steps[neighbor] = next_steps
+                queue.append(neighbor)
+    return steps
+
+
 def _edge_pairs(edge_index: torch.Tensor) -> List[Tuple[int, int]]:
     """Return edge pairs in CPU input order.
 
@@ -60,17 +96,12 @@ def choose_twopi_root(edge_index: torch.Tensor, num_nodes: int, root: Optional[i
     if root is not None:
         return min(max(int(root), 0), num_nodes - 1)
 
-    adjacency = build_undirected_adjacency(edge_index, num_nodes)
+    steps_to_leaf = _graphviz_twopi_leaf_steps(edge_index, num_nodes)
     best_node = 0
-    best_key: Tuple[int, int, int] = (10**9, 10**9, 0)
-    for node in range(num_nodes):
-        distances = bfs_distances(adjacency, node)
-        reachable = [int(distance) for distance in distances.tolist() if int(distance) >= 0]
-        eccentricity = max(reachable) if reachable else 0
-        reach_gap = num_nodes - len(reachable)
-        key = (reach_gap, eccentricity, node)
-        if key < best_key:
-            best_key = key
+    best_steps = -1
+    for node, steps in enumerate(steps_to_leaf):
+        if steps > best_steps:
+            best_steps = steps
             best_node = node
     return best_node
 

@@ -12,12 +12,12 @@ Result: **4/11 similarity-exact**, **0 close**, **7 divergent** at `d_R < 1e-9`.
 | small_chain | 6 | 5 | 3.050e-17 | 3.050e-17 | 1.610e+02 | bit-exact | none |
 | binary_tree | 11 | 10 | 1.011e-05 | 9.876e-06 | 5.930e+02 | divergent | angular wedge/order after BFS rings |
 | diamond | 4 | 4 | 2.764e-16 | 3.000e-17 | 3.770e+02 | bit-exact | none |
-| grid_5x5 | 25 | 40 | 8.280e-01 | 7.487e-01 | 1.206e+03 | divergent | angular wedge/order after BFS rings |
+| grid_5x5 | 25 | 40 | 1.110e-05 | 1.072e-05 | 1.318e+03 | divergent | angular wedge/order after BFS rings |
 | org_chart_small | 16 | 15 | 1.540e-05 | 1.170e-05 | 4.490e+02 | divergent | angular wedge/order after BFS rings |
 | long_skip | 5 | 6 | 1.174e-05 | 1.173e-05 | 3.288e+02 | divergent | angular wedge/order after BFS rings |
 | disconnected | 5 | 2 | 8.181e-01 | 7.398e-01 | 3.365e+02 | divergent | angular wedge/order after BFS rings |
 | cycle_4 | 4 | 4 | 2.764e-16 | 3.000e-17 | 3.770e+02 | bit-exact | none |
-| random_dag_50 | 50 | 90 | 1.248e+00 | 9.751e-01 | 1.049e+03 | divergent | angular wedge/order after BFS rings |
+| random_dag_50 | 50 | 90 | 6.249e-01 | 5.891e-01 | 1.120e+03 | divergent | angular wedge/order after BFS rings |
 | org_chart_deep | 79 | 78 | 1.097e-05 | 1.096e-05 | 1.094e+03 | divergent | angular wedge/order after BFS rings |
 
 ## circo
