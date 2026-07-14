@@ -276,6 +276,7 @@ _EXPECTED_OP_MODULES = (
     "networkx_simple",
     "neulay",
     "optimize",
+    "openord",
     "ordering",
     "postprocess",
     "preprocess",

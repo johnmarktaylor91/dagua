@@ -25,6 +25,7 @@ from dagua.eval.competitors import (
     networkx_competitor,  # noqa: F401
     neulay_competitor,  # noqa: F401
     ogdf_competitor,  # noqa: F401
+    openord_competitor,  # noqa: F401
     sgd2_competitor,  # noqa: F401
     sgd2_multi_competitor,  # noqa: F401
     smacof_competitor,  # noqa: F401
