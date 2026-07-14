@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+
 import torch
 
-from dagua.layout.ops.d3force import d3force_lcg_values, d3force_phyllotaxis_positions
+from dagua.layout.ops.d3force import (
+    _d3force_quadtree_accumulation_rows,
+    d3force_lcg_values,
+    d3force_phyllotaxis_positions,
+)
 
 
 def test_d3force_lcg_matches_reference_first_20_values() -> None:
@@ -61,3 +68,69 @@ def test_d3force_phyllotaxis_matches_reference_initial_nodes() -> None:
     )
     actual = d3force_phyllotaxis_positions(6)
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_d3force_quadtree_accumulation_matches_d3_quadtree_grid_probe() -> None:
+    """Pin d3-quadtree topology and accumulated charge centroids.
+
+    Returns
+    -------
+    None
+        The local quadtree dump must match upstream d3-quadtree after the
+        forceManyBody accumulation callback on a 25-node probe.
+    """
+    positions = [tuple(row.tolist()) for row in d3force_phyllotaxis_positions(25)]
+    actual = [list(row) for row in _d3force_quadtree_accumulation_rows(positions)]
+    script = f"""
+import {{quadtree}} from "d3-quadtree";
+const positions = {json.dumps(positions)};
+const nodes = positions.map(([x, y], index) => ({{index, x, y}}));
+const strengths = new Array(nodes.length).fill(-30);
+function accumulate(quad) {{
+  let strength = 0, q, c, weight = 0, x, y, i;
+  if (quad.length) {{
+    for (x = y = i = 0; i < 4; ++i) {{
+      if ((q = quad[i]) && (c = Math.abs(q.value))) {{
+        strength += q.value, weight += c, x += c * q.x, y += c * q.y;
+      }}
+    }}
+    quad.x = x / weight;
+    quad.y = y / weight;
+  }} else {{
+    q = quad;
+    q.x = q.data.x;
+    q.y = q.data.y;
+    do strength += strengths[q.data.index];
+    while (q = q.next);
+  }}
+  quad.value = strength;
+}}
+const tree = quadtree(nodes, d => d.x, d => d.y).visitAfter(accumulate);
+const rows = [];
+function collect(node, x0, y0, x1, y1) {{
+  if (node.length) {{
+    rows.push(["internal", -1, node.x, node.y, node.value, x0, y0, x1, y1]);
+    const xm = (x0 + x1) / 2, ym = (y0 + y1) / 2;
+    if (node[0]) collect(node[0], x0, y0, xm, ym);
+    if (node[1]) collect(node[1], xm, y0, x1, ym);
+    if (node[2]) collect(node[2], x0, ym, xm, y1);
+    if (node[3]) collect(node[3], xm, ym, x1, y1);
+  }} else {{
+    let leaf = node;
+    do {{
+      rows.push(["leaf", leaf.data.index, node.x, node.y, node.value, x0, y0, x1, y1]);
+    }} while (leaf = leaf.next);
+  }}
+}}
+const extent = tree.extent();
+collect(tree.root(), extent[0][0], extent[0][1], extent[1][0], extent[1][1]);
+process.stdout.write(JSON.stringify(rows));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    expected = json.loads(result.stdout)
+    assert actual == expected
