@@ -1,8 +1,5761 @@
 {
-  "adapter_capabilities": [],
-  "cells": [],
-  "generated_at": "ISO-8601",
-  "reference_pins": {},
+  "adapter_capabilities": [
+    {
+      "adapter": "gephi",
+      "deterministic": false,
+      "evidence": "gephi_renderer returns None when unavailable; no gating evidence",
+      "fixed_positions": false,
+      "gate_eligible": false,
+      "per_element_styles": false
+    },
+    {
+      "adapter": "mermaid",
+      "deterministic": true,
+      "evidence": "mermaid adapter ignores supplied fixed positions",
+      "fixed_positions": false,
+      "gate_eligible": false,
+      "per_element_styles": false
+    },
+    {
+      "adapter": "graphviz",
+      "deterministic": true,
+      "evidence": "graphviz competitor adapter ignores fixed positions; v2 uses dot layout injection",
+      "fixed_positions": false,
+      "gate_eligible": false,
+      "per_element_styles": true
+    },
+    {
+      "adapter": "cytoscape",
+      "deterministic": true,
+      "evidence": "cytoscape renderer applies first-node and first-edge styles globally",
+      "fixed_positions": true,
+      "gate_eligible": false,
+      "per_element_styles": false
+    },
+    {
+      "adapter": "d3",
+      "deterministic": true,
+      "evidence": "d3 renderer is minimal straight-line/rect/ellipse smoke reference",
+      "fixed_positions": true,
+      "gate_eligible": false,
+      "per_element_styles": false
+    }
+  ],
+  "cells": [
+    {
+      "attribute": "fixed_geometry",
+      "cell_id": "cytoscape.adapter.capability.fixed_geometry",
+      "dagua_field": "",
+      "dagua_value": "",
+      "fixture_ids": [],
+      "geometry_mode": "native",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [],
+      "notes": "Gate eligibility awaits adapter capability proof.",
+      "object": "adapter",
+      "parity_status": "blocked_upstream",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "tool-survey",
+      "support_status": "partial",
+      "target_kind": "tool_native",
+      "tolerance": {},
+      "tool": "cytoscape",
+      "value": "required",
+      "value_group": "adapter_capability",
+      "waiver": null
+    },
+    {
+      "attribute": "fixed_geometry",
+      "cell_id": "d3.adapter.capability.fixed_geometry",
+      "dagua_field": "",
+      "dagua_value": "",
+      "fixture_ids": [],
+      "geometry_mode": "native",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [],
+      "notes": "Gate eligibility awaits adapter capability proof.",
+      "object": "adapter",
+      "parity_status": "blocked_upstream",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "tool-survey",
+      "support_status": "partial",
+      "target_kind": "tool_native",
+      "tolerance": {},
+      "tool": "d3",
+      "value": "required",
+      "value_group": "adapter_capability",
+      "waiver": null
+    },
+    {
+      "attribute": "fixed_geometry",
+      "cell_id": "drawio.adapter.capability.fixed_geometry",
+      "dagua_field": "",
+      "dagua_value": "",
+      "fixture_ids": [],
+      "geometry_mode": "native",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [],
+      "notes": "Gate eligibility awaits adapter capability proof.",
+      "object": "adapter",
+      "parity_status": "blocked_upstream",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "tool-survey",
+      "support_status": "reference_unavailable",
+      "target_kind": "tool_native",
+      "tolerance": {},
+      "tool": "drawio",
+      "value": "required",
+      "value_group": "adapter_capability",
+      "waiver": null
+    },
+    {
+      "attribute": "fixed_geometry",
+      "cell_id": "gephi.adapter.capability.fixed_geometry",
+      "dagua_field": "",
+      "dagua_value": "",
+      "fixture_ids": [],
+      "geometry_mode": "native",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [],
+      "notes": "Gate eligibility awaits adapter capability proof.",
+      "object": "adapter",
+      "parity_status": "blocked_upstream",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "tool-survey",
+      "support_status": "partial",
+      "target_kind": "tool_native",
+      "tolerance": {},
+      "tool": "gephi",
+      "value": "required",
+      "value_group": "adapter_capability",
+      "waiver": null
+    },
+    {
+      "attribute": "color",
+      "cell_id": "graphviz.cluster.color.default",
+      "dagua_field": "ClusterStyle.stroke",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "color_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "cluster",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fillcolor",
+      "cell_id": "graphviz.cluster.fillcolor.default",
+      "dagua_field": "ClusterStyle.fill",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fillcolor_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "cluster",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontcolor",
+      "cell_id": "graphviz.cluster.fontcolor.default",
+      "dagua_field": "ClusterStyle.font_color",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontcolor_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "cluster",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontname",
+      "cell_id": "graphviz.cluster.fontname.default",
+      "dagua_field": "ClusterStyle.font_family",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontname_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "cluster",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontsize",
+      "cell_id": "graphviz.cluster.fontsize.default",
+      "dagua_field": "ClusterStyle.font_size",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontsize_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "cluster",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "penwidth",
+      "cell_id": "graphviz.cluster.penwidth.default",
+      "dagua_field": "ClusterStyle.stroke_width",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "penwidth_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "cluster",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.boxnormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "boxnormal",
+      "fixture_ids": [
+        "arrowhead_atlas_boxnormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "boxnormal",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.crowodot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crowodot",
+      "fixture_ids": [
+        "arrowhead_atlas_crowodot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crowodot",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.crowtee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crowtee",
+      "fixture_ids": [
+        "arrowhead_atlas_crowtee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crowtee",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.diamondnormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "diamondnormal",
+      "fixture_ids": [
+        "arrowhead_atlas_diamondnormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "diamondnormal",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.dotnormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "dotnormal",
+      "fixture_ids": [
+        "arrowhead_atlas_dotnormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "dotnormal",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.lnormalrnormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "lnormalrnormal",
+      "fixture_ids": [
+        "arrowhead_atlas_lnormalrnormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "lnormalrnormal",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.normaldot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "normaldot",
+      "fixture_ids": [
+        "arrowhead_atlas_normaldot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "normaldot",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.normalvee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "normalvee",
+      "fixture_ids": [
+        "arrowhead_atlas_normalvee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "normalvee",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.oboxnormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "oboxnormal",
+      "fixture_ids": [
+        "arrowhead_atlas_oboxnormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "oboxnormal",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.odiamondvee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "odiamondvee",
+      "fixture_ids": [
+        "arrowhead_atlas_odiamondvee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "odiamondvee",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.teecrow",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "teecrow",
+      "fixture_ids": [
+        "arrowhead_atlas_teecrow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "teecrow",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_compound_sample.veenormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "veenormal",
+      "fixture_ids": [
+        "arrowhead_atlas_veenormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "veenormal",
+      "value_group": "arrow_compound_sample",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.box",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "box",
+      "fixture_ids": [
+        "arrowhead_atlas_box"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "box",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.crow",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crow",
+      "fixture_ids": [
+        "arrowhead_atlas_crow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crow",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.curve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "curve",
+      "fixture_ids": [
+        "arrowhead_atlas_curve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "curve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.diamond",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "diamond",
+      "fixture_ids": [
+        "arrowhead_atlas_diamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "diamond",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.dot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "dot",
+      "fixture_ids": [
+        "arrowhead_atlas_dot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "dot",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.icurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "icurve",
+      "fixture_ids": [
+        "arrowhead_atlas_icurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "icurve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.inv",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "inv",
+      "fixture_ids": [
+        "arrowhead_atlas_inv"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "inv",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.lbox",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "lbox",
+      "fixture_ids": [
+        "arrowhead_atlas_lbox"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "lbox",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.lcrow",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "lcrow",
+      "fixture_ids": [
+        "arrowhead_atlas_lcrow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "lcrow",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.lcurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "lcurve",
+      "fixture_ids": [
+        "arrowhead_atlas_lcurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "lcurve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.ldiamond",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "ldiamond",
+      "fixture_ids": [
+        "arrowhead_atlas_ldiamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ldiamond",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.ldot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "ldot",
+      "fixture_ids": [
+        "arrowhead_atlas_ldot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ldot",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.licurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "licurve",
+      "fixture_ids": [
+        "arrowhead_atlas_licurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "licurve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.linv",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "linv",
+      "fixture_ids": [
+        "arrowhead_atlas_linv"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "linv",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.lnormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "lnormal",
+      "fixture_ids": [
+        "arrowhead_atlas_lnormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "lnormal",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.ltee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "ltee",
+      "fixture_ids": [
+        "arrowhead_atlas_ltee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ltee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.lvee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "lvee",
+      "fixture_ids": [
+        "arrowhead_atlas_lvee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "lvee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.none",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "none",
+      "fixture_ids": [
+        "arrowhead_atlas_none"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "none",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.normal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "normal",
+      "fixture_ids": [
+        "arrowhead_atlas_normal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "in_tolerance",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "normal",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.obox",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "obox",
+      "fixture_ids": [
+        "arrowhead_atlas_obox"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "obox",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.ocrow",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "ocrow",
+      "fixture_ids": [
+        "arrowhead_atlas_ocrow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ocrow",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.ocurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "ocurve",
+      "fixture_ids": [
+        "arrowhead_atlas_ocurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ocurve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.odiamond",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "odiamond",
+      "fixture_ids": [
+        "arrowhead_atlas_odiamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "odiamond",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.odot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "odot",
+      "fixture_ids": [
+        "arrowhead_atlas_odot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "odot",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.oicurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "oicurve",
+      "fixture_ids": [
+        "arrowhead_atlas_oicurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "oicurve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.oinv",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "oinv",
+      "fixture_ids": [
+        "arrowhead_atlas_oinv"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "oinv",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.onormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "onormal",
+      "fixture_ids": [
+        "arrowhead_atlas_onormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "onormal",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.open",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "open",
+      "fixture_ids": [
+        "arrowhead_atlas_open"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "open",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.otee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "otee",
+      "fixture_ids": [
+        "arrowhead_atlas_otee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "otee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.ovee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "ovee",
+      "fixture_ids": [
+        "arrowhead_atlas_ovee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ovee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rbox",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rbox",
+      "fixture_ids": [
+        "arrowhead_atlas_rbox"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rbox",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rcrow",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rcrow",
+      "fixture_ids": [
+        "arrowhead_atlas_rcrow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rcrow",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rcurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rcurve",
+      "fixture_ids": [
+        "arrowhead_atlas_rcurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rcurve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rdiamond",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rdiamond",
+      "fixture_ids": [
+        "arrowhead_atlas_rdiamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rdiamond",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rdot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rdot",
+      "fixture_ids": [
+        "arrowhead_atlas_rdot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rdot",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.ricurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "ricurve",
+      "fixture_ids": [
+        "arrowhead_atlas_ricurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ricurve",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rinv",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rinv",
+      "fixture_ids": [
+        "arrowhead_atlas_rinv"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rinv",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rnormal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rnormal",
+      "fixture_ids": [
+        "arrowhead_atlas_rnormal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rnormal",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rtee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rtee",
+      "fixture_ids": [
+        "arrowhead_atlas_rtee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rtee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.rvee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "rvee",
+      "fixture_ids": [
+        "arrowhead_atlas_rvee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rvee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.tee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "tee",
+      "fixture_ids": [
+        "arrowhead_atlas_tee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "tee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.arrow_modifier_expansion.vee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "vee",
+      "fixture_ids": [
+        "arrowhead_atlas_vee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "vee",
+      "value_group": "arrow_modifier_expansion",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.bar",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "bar",
+      "fixture_ids": [
+        "arrowhead_atlas_bar"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "bar",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.box",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "box",
+      "fixture_ids": [
+        "arrowhead_atlas_box"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "box",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.bracket",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "bracket",
+      "fixture_ids": [
+        "arrowhead_atlas_bracket"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "bracket",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.circle",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "circle",
+      "fixture_ids": [
+        "arrowhead_atlas_circle"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "Alias for odot.",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "circle",
+      "value_group": "arrow_alias",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.crow",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crow",
+      "fixture_ids": [
+        "arrowhead_atlas_crow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crow",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.crows_foot_many",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crows_foot_many",
+      "fixture_ids": [
+        "arrowhead_atlas_crows_foot_many"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crows_foot_many",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.crows_foot_many_mandatory",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crows_foot_many_mandatory",
+      "fixture_ids": [
+        "arrowhead_atlas_crows_foot_many_mandatory"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crows_foot_many_mandatory",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.crows_foot_many_optional",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crows_foot_many_optional",
+      "fixture_ids": [
+        "arrowhead_atlas_crows_foot_many_optional"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crows_foot_many_optional",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.crows_foot_one",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crows_foot_one",
+      "fixture_ids": [
+        "arrowhead_atlas_crows_foot_one"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crows_foot_one",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.crows_foot_one_mandatory",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "crows_foot_one_mandatory",
+      "fixture_ids": [
+        "arrowhead_atlas_crows_foot_one_mandatory"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "crows_foot_one_mandatory",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.curve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "curve",
+      "fixture_ids": [
+        "arrowhead_atlas_curve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "curve",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.default",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "arrowhead_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.diamond",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "diamond",
+      "fixture_ids": [
+        "arrowhead_atlas_diamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "diamond",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.dot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "dot",
+      "fixture_ids": [
+        "arrowhead_atlas_dot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "dot",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.fancy",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "fancy",
+      "fixture_ids": [
+        "arrowhead_atlas_fancy"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "fancy",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.icurve",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "icurve",
+      "fixture_ids": [
+        "arrowhead_atlas_icurve"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "icurve",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.inv",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "inv",
+      "fixture_ids": [
+        "arrowhead_atlas_inv"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "inv",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.none",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "none",
+      "fixture_ids": [
+        "arrowhead_atlas_none"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "none",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.normal",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "normal",
+      "fixture_ids": [
+        "arrowhead_atlas_normal"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "in_tolerance",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "normal",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.obox",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "obox",
+      "fixture_ids": [
+        "arrowhead_atlas_obox"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "Alias for obox.",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "obox",
+      "value_group": "arrow_alias",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.odiamond",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "odiamond",
+      "fixture_ids": [
+        "arrowhead_atlas_odiamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "Alias for odiamond.",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "odiamond",
+      "value_group": "arrow_alias",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.odot",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "odot",
+      "fixture_ids": [
+        "arrowhead_atlas_odot"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "Alias for odot.",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "odot",
+      "value_group": "arrow_alias",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.open",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "open",
+      "fixture_ids": [
+        "arrowhead_atlas_open"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "open",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.open",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "open",
+      "fixture_ids": [
+        "arrowhead_atlas_open"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "open",
+      "value_group": "arrow_alias",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.simple",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "simple",
+      "fixture_ids": [
+        "arrowhead_atlas_simple"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "simple",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.tee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "tee",
+      "fixture_ids": [
+        "arrowhead_atlas_tee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "tee",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.triangle_tee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "triangle_tee",
+      "fixture_ids": [
+        "arrowhead_atlas_triangle_tee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "triangle_tee",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.vee",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "vee",
+      "fixture_ids": [
+        "arrowhead_atlas_vee"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "vee",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowhead",
+      "cell_id": "graphviz.edge.arrowhead.wedge",
+      "dagua_field": "EdgeStyle.arrow",
+      "dagua_value": "wedge",
+      "fixture_ids": [
+        "arrowhead_atlas_wedge"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "arrow_polygon_iou",
+        "arrow_len_pct",
+        "arrow_fill_mode"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-arrows",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "wedge",
+      "value_group": "arrow_primitive",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowsize",
+      "cell_id": "graphviz.edge.arrowsize.default",
+      "dagua_field": "EdgeStyle.arrowsize",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "arrowsize_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "arrowtail",
+      "cell_id": "graphviz.edge.arrowtail.default",
+      "dagua_field": "EdgeStyle.tail_arrow",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "arrowtail_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "color",
+      "cell_id": "graphviz.edge.color.default",
+      "dagua_field": "EdgeStyle.color",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "color_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontcolor",
+      "cell_id": "graphviz.edge.fontcolor.default",
+      "dagua_field": "EdgeStyle.label_font_color",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontcolor_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontname",
+      "cell_id": "graphviz.edge.fontname.default",
+      "dagua_field": "EdgeStyle.label_font_family",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontname_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontsize",
+      "cell_id": "graphviz.edge.fontsize.default",
+      "dagua_field": "EdgeStyle.label_font_size",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontsize_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "label",
+      "cell_id": "graphviz.edge.label.default",
+      "dagua_field": "EdgeStyle.label_position",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "label_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "penwidth",
+      "cell_id": "graphviz.edge.penwidth.default",
+      "dagua_field": "EdgeStyle.width",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "penwidth_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "style",
+      "cell_id": "graphviz.edge.style.default",
+      "dagua_field": "EdgeStyle.style",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "style_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "edge",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "bgcolor",
+      "cell_id": "graphviz.graph.bgcolor.default",
+      "dagua_field": "GraphStyle.background_color",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "bgcolor_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "graph",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "label",
+      "cell_id": "graphviz.graph.label.default",
+      "dagua_field": "GraphStyle.title",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "label_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "graph",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "margin",
+      "cell_id": "graphviz.graph.margin.default",
+      "dagua_field": "GraphStyle.margin_inches",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "margin_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "graph",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "color",
+      "cell_id": "graphviz.node.color.default",
+      "dagua_field": "NodeStyle.stroke",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "color_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fillcolor",
+      "cell_id": "graphviz.node.fillcolor.default",
+      "dagua_field": "NodeStyle.fill",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fillcolor_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontcolor",
+      "cell_id": "graphviz.node.fontcolor.default",
+      "dagua_field": "NodeStyle.font_color",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontcolor_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontname",
+      "cell_id": "graphviz.node.fontname.default",
+      "dagua_field": "NodeStyle.font_family",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontname_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fontsize",
+      "cell_id": "graphviz.node.fontsize.default",
+      "dagua_field": "NodeStyle.font_size",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "fontsize_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "penwidth",
+      "cell_id": "graphviz.node.penwidth.default",
+      "dagua_field": "NodeStyle.stroke_width",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "penwidth_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.Mcircle",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "Mcircle",
+      "fixture_ids": [
+        "shape_atlas_Mcircle"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "Mcircle",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.Mdiamond",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "Mdiamond",
+      "fixture_ids": [
+        "shape_atlas_Mdiamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "Mdiamond",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.Msquare",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "Msquare",
+      "fixture_ids": [
+        "shape_atlas_Msquare"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "Msquare",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.assembly",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "assembly",
+      "fixture_ids": [
+        "shape_atlas_assembly"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "assembly",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.box",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "box",
+      "fixture_ids": [
+        "shape_atlas_box"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "box",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.box3d",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "box3d",
+      "fixture_ids": [
+        "shape_atlas_box3d"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "box3d",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.cds",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "cds",
+      "fixture_ids": [
+        "shape_atlas_cds"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "cds",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.circle",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "circle",
+      "fixture_ids": [
+        "shape_atlas_circle"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "circle",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.component",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "component",
+      "fixture_ids": [
+        "shape_atlas_component"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "component",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.cylinder",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "cylinder",
+      "fixture_ids": [
+        "shape_atlas_cylinder"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "cylinder",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.default",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "shape_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.diamond",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "diamond",
+      "fixture_ids": [
+        "shape_atlas_diamond"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "diamond",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.doublecircle",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "doublecircle",
+      "fixture_ids": [
+        "shape_atlas_doublecircle"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "doublecircle",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.doubleoctagon",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "doubleoctagon",
+      "fixture_ids": [
+        "shape_atlas_doubleoctagon"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "doubleoctagon",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.egg",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "egg",
+      "fixture_ids": [
+        "shape_atlas_egg"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "egg",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.ellipse",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "ellipse",
+      "fixture_ids": [
+        "shape_atlas_ellipse"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ellipse",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.fivepoverhang",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "fivepoverhang",
+      "fixture_ids": [
+        "shape_atlas_fivepoverhang"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "fivepoverhang",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.folder",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "folder",
+      "fixture_ids": [
+        "shape_atlas_folder"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "folder",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.hexagon",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "hexagon",
+      "fixture_ids": [
+        "shape_atlas_hexagon"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "hexagon",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.house",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "house",
+      "fixture_ids": [
+        "shape_atlas_house"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "house",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.insulator",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "insulator",
+      "fixture_ids": [
+        "shape_atlas_insulator"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "insulator",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.invhouse",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "invhouse",
+      "fixture_ids": [
+        "shape_atlas_invhouse"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "invhouse",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.invtrapezium",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "invtrapezium",
+      "fixture_ids": [
+        "shape_atlas_invtrapezium"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "invtrapezium",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.invtriangle",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "invtriangle",
+      "fixture_ids": [
+        "shape_atlas_invtriangle"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "invtriangle",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.larrow",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "larrow",
+      "fixture_ids": [
+        "shape_atlas_larrow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "larrow",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.lpromoter",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "lpromoter",
+      "fixture_ids": [
+        "shape_atlas_lpromoter"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "lpromoter",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.none",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "none",
+      "fixture_ids": [
+        "shape_atlas_none"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "none",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.note",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "note",
+      "fixture_ids": [
+        "shape_atlas_note"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "note",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.noverhang",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "noverhang",
+      "fixture_ids": [
+        "shape_atlas_noverhang"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "noverhang",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.octagon",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "octagon",
+      "fixture_ids": [
+        "shape_atlas_octagon"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "octagon",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.oval",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "oval",
+      "fixture_ids": [
+        "shape_atlas_oval"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "oval",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.parallelogram",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "parallelogram",
+      "fixture_ids": [
+        "shape_atlas_parallelogram"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "parallelogram",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.pentagon",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "pentagon",
+      "fixture_ids": [
+        "shape_atlas_pentagon"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "pentagon",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.plain",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "plain",
+      "fixture_ids": [
+        "shape_atlas_plain"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "plain",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.plaintext",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "plaintext",
+      "fixture_ids": [
+        "shape_atlas_plaintext"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "plaintext",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.point",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "point",
+      "fixture_ids": [
+        "shape_atlas_point"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "point",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.polygon",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "polygon",
+      "fixture_ids": [
+        "shape_atlas_polygon"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "polygon",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.primersite",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "primersite",
+      "fixture_ids": [
+        "shape_atlas_primersite"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "primersite",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.promoter",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "promoter",
+      "fixture_ids": [
+        "shape_atlas_promoter"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "promoter",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.proteasesite",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "proteasesite",
+      "fixture_ids": [
+        "shape_atlas_proteasesite"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "proteasesite",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.proteinstab",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "proteinstab",
+      "fixture_ids": [
+        "shape_atlas_proteinstab"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "proteinstab",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.rarrow",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "rarrow",
+      "fixture_ids": [
+        "shape_atlas_rarrow"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rarrow",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.rect",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "rect",
+      "fixture_ids": [
+        "shape_atlas_rect"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rect",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.rectangle",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "rectangle",
+      "fixture_ids": [
+        "shape_atlas_rectangle"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rectangle",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.restrictionsite",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "restrictionsite",
+      "fixture_ids": [
+        "shape_atlas_restrictionsite"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "restrictionsite",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.ribosite",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "ribosite",
+      "fixture_ids": [
+        "shape_atlas_ribosite"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "ribosite",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.rnastab",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "rnastab",
+      "fixture_ids": [
+        "shape_atlas_rnastab"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rnastab",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.rpromoter",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "rpromoter",
+      "fixture_ids": [
+        "shape_atlas_rpromoter"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "rpromoter",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.septagon",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "septagon",
+      "fixture_ids": [
+        "shape_atlas_septagon"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "septagon",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.signature",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "signature",
+      "fixture_ids": [
+        "shape_atlas_signature"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "signature",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.square",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "square",
+      "fixture_ids": [
+        "shape_atlas_square"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "square",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.star",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "star",
+      "fixture_ids": [
+        "shape_atlas_star"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "star",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.tab",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "tab",
+      "fixture_ids": [
+        "shape_atlas_tab"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "tab",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.terminator",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "terminator",
+      "fixture_ids": [
+        "shape_atlas_terminator"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "terminator",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.threepoverhang",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "threepoverhang",
+      "fixture_ids": [
+        "shape_atlas_threepoverhang"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "threepoverhang",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.trapezium",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "trapezium",
+      "fixture_ids": [
+        "shape_atlas_trapezium"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "trapezium",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.triangle",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "triangle",
+      "fixture_ids": [
+        "shape_atlas_triangle"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "triangle",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.tripleoctagon",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "tripleoctagon",
+      "fixture_ids": [
+        "shape_atlas_tripleoctagon"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "tripleoctagon",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.underline",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "underline",
+      "fixture_ids": [
+        "shape_atlas_underline"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "underline",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "shape",
+      "cell_id": "graphviz.node.shape.utr",
+      "dagua_field": "NodeStyle.shape",
+      "dagua_value": "utr",
+      "fixture_ids": [
+        "shape_atlas_utr"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "shape_path_iou",
+        "node_autosize_w_pt",
+        "node_autosize_h_pt"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P1",
+      "residual_class": null,
+      "source": "gv-shapes",
+      "support_status": "missing",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "utr",
+      "value_group": "node_shape",
+      "waiver": null
+    },
+    {
+      "attribute": "style",
+      "cell_id": "graphviz.node.style.default",
+      "dagua_field": "NodeStyle.fill_pattern",
+      "dagua_value": "default",
+      "fixture_ids": [
+        "style_atlas_default"
+      ],
+      "geometry_mode": "injected",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [
+        "declared_svg_match"
+      ],
+      "notes": "",
+      "object": "node",
+      "parity_status": "untested",
+      "priority": "P0",
+      "residual_class": null,
+      "source": "gv-attrs",
+      "support_status": "supported",
+      "target_kind": "svg_declared",
+      "tolerance": {
+        "declared_svg_match_min": 0.98
+      },
+      "tool": "graphviz",
+      "value": "default",
+      "value_group": "cosmetic_attr",
+      "waiver": null
+    },
+    {
+      "attribute": "fixed_geometry",
+      "cell_id": "mermaid.adapter.capability.fixed_geometry",
+      "dagua_field": "",
+      "dagua_value": "",
+      "fixture_ids": [],
+      "geometry_mode": "native",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [],
+      "notes": "Gate eligibility awaits adapter capability proof.",
+      "object": "adapter",
+      "parity_status": "blocked_upstream",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "tool-survey",
+      "support_status": "partial",
+      "target_kind": "tool_native",
+      "tolerance": {},
+      "tool": "mermaid",
+      "value": "required",
+      "value_group": "adapter_capability",
+      "waiver": null
+    },
+    {
+      "attribute": "fixed_geometry",
+      "cell_id": "neo4j.adapter.capability.fixed_geometry",
+      "dagua_field": "",
+      "dagua_value": "",
+      "fixture_ids": [],
+      "geometry_mode": "native",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [],
+      "notes": "Gate eligibility awaits adapter capability proof.",
+      "object": "adapter",
+      "parity_status": "blocked_upstream",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "tool-survey",
+      "support_status": "reference_unavailable",
+      "target_kind": "tool_native",
+      "tolerance": {},
+      "tool": "neo4j",
+      "value": "required",
+      "value_group": "adapter_capability",
+      "waiver": null
+    },
+    {
+      "attribute": "fixed_geometry",
+      "cell_id": "yed.adapter.capability.fixed_geometry",
+      "dagua_field": "",
+      "dagua_value": "",
+      "fixture_ids": [],
+      "geometry_mode": "native",
+      "last_checked_round": null,
+      "lock_test": null,
+      "locked": false,
+      "metric_ids": [],
+      "notes": "Gate eligibility awaits adapter capability proof.",
+      "object": "adapter",
+      "parity_status": "blocked_upstream",
+      "priority": "P2",
+      "residual_class": null,
+      "source": "tool-survey",
+      "support_status": "reference_unavailable",
+      "target_kind": "tool_native",
+      "tolerance": {},
+      "tool": "yed",
+      "value": "required",
+      "value_group": "adapter_capability",
+      "waiver": null
+    }
+  ],
+  "generated_at": "2026-07-14T20:16:26Z",
+  "reference_pins": {
+    "cairosvg": "2.8.2",
+    "cytosnap": "npm error could not determine executable to run",
+    "dot": "dot - graphviz version 7.0.5 (20221231.0122)",
+    "graphviz": "7.0.5",
+    "matplotlib": "3.10.8",
+    "mmdc": "11.14.0",
+    "node": "v24.18.0",
+    "python": "3.11.6"
+  },
   "schema_version": 2,
-  "source_snapshots": []
+  "source_snapshots": [
+    {
+      "cache_path": "reference_specs/gv_attrs.html",
+      "id": "gv-attrs",
+      "retrieved_at": "2026-07-14T20:16:26Z",
+      "source_kind": "official_docs:downloaded",
+      "source_url": "https://graphviz.org/doc/info/attrs.html",
+      "version": "7.0.5"
+    },
+    {
+      "cache_path": "reference_specs/gv_arrows.html",
+      "id": "gv-arrows",
+      "retrieved_at": "2026-07-14T20:16:26Z",
+      "source_kind": "official_docs:downloaded",
+      "source_url": "https://graphviz.org/doc/info/arrows.html",
+      "version": "7.0.5"
+    },
+    {
+      "cache_path": "reference_specs/gv_shapes.html",
+      "id": "gv-shapes",
+      "retrieved_at": "2026-07-14T20:16:26Z",
+      "source_kind": "official_docs:downloaded",
+      "source_url": "https://graphviz.org/doc/info/shapes.html",
+      "version": "7.0.5"
+    },
+    {
+      "cache_path": "reference_specs/gv_colors.html",
+      "id": "gv-colors",
+      "retrieved_at": "2026-07-14T20:16:26Z",
+      "source_kind": "official_docs:downloaded",
+      "source_url": "https://graphviz.org/doc/info/colors.html",
+      "version": "7.0.5"
+    }
+  ]
 }
