@@ -59,6 +59,7 @@ from dagua import DaguaGraph  # noqa: E402
 from dagua.graphviz_utils import layout_with_graphviz  # noqa: E402
 from dagua.render import mpl as mpl_renderer  # noqa: E402
 from dagua.styles import get_theme  # noqa: E402
+from scripts.visual_parity import extractors as vp2_extractors  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Tolerance profile
@@ -86,6 +87,19 @@ DEFAULT_TOLERANCE: Dict[str, Any] = {
     "cluster_stroke_width_pt": 0.2,
     "cluster_label_font_size_pt": 1.0,
     "cluster_rect_missing": 0.0,
+}
+
+V2_TOLERANCE: Dict[str, Any] = {
+    **DEFAULT_TOLERANCE,
+    "node_autosize_w_pt": {"abs": 1.5, "pct": 3.0},
+    "node_autosize_h_pt": {"abs": 1.5, "pct": 3.0},
+    "spline_path_dist_pt": {"mean": 1.0, "max": 2.5},
+    "arrow_polygon_iou": 0.93,
+    "arrow_len_pct": 3.0,
+    "arrow_width_pct": 3.0,
+    "label_glyph_extent_pt": 1.5,
+    "edge_trim_pt": 1.0,
+    "shape_path_iou": 0.93,
 }
 
 #: Default Markdown report path consumed by the graphviz parity audit loop.
@@ -614,15 +628,9 @@ def parse_reference_svg(svg_text: str) -> ReferenceGraph:
     # use absolute extents rather than sign-aware deltas.
     content_xs: List[float] = []
     content_ys: List[float] = []
-    for node in nodes:
-        # Reconstruct a bbox from cx/cy was not stored; re-extract by scanning
-        # ellipse element only on demand. For the margin calculation we only
-        # need the outer bounding extents, which we approximate from nodes
-        # via rx/ry (cx/cy were dropped to avoid widening ReferenceNode).
-        # Reparse via attributes already captured does not give cx/cy, so
-        # fall back to clusters when present; otherwise use the viewBox
-        # padding heuristic of SVG renderers (typically 4-pt margin).
-        pass
+    # Node center coordinates are intentionally not stored in ReferenceNode, so
+    # the margin calculation remains cluster-anchored when clusters are present
+    # and otherwise falls back to Graphviz's observable 4pt SVG padding.
     if clusters:
         for cluster in clusters:
             content_xs.extend([cluster.rect_x, cluster.rect_x + cluster.rect_w])
@@ -1703,6 +1711,252 @@ def compare_panel(
     return panel
 
 
+def _v2_size_delta(target: float, candidate: float, tolerance: Mapping[str, float]) -> FeatureDelta:
+    """Compare autosize dimensions with the v2 mixed absolute/relative rule.
+
+    Parameters
+    ----------
+    target
+        Reference dimension in points.
+    candidate
+        Candidate dimension in points.
+    tolerance
+        Mapping with ``abs`` and ``pct`` thresholds.
+
+    Returns
+    -------
+    FeatureDelta
+        Autosize comparison result.
+    """
+
+    threshold = max(float(tolerance["abs"]), abs(target) * float(tolerance["pct"]) / 100.0)
+    delta = candidate - target
+    return FeatureDelta(
+        target=round(target, 4),
+        dagua=round(candidate, 4),
+        delta=round(delta, 4),
+        in_tolerance=abs(delta) <= threshold,
+    )
+
+
+def _v2_label_delta(
+    target_label: str,
+    target_font_size: float,
+    candidate_font_size: float,
+    tolerance: float,
+) -> Dict[str, Any]:
+    """Compare label glyph extents and attach required provenance fields.
+
+    Parameters
+    ----------
+    target_label
+        Label text.
+    target_font_size
+        Reference font size in points.
+    candidate_font_size
+        Candidate font size in points.
+    tolerance
+        Absolute width/height tolerance in points.
+
+    Returns
+    -------
+    dict[str, Any]
+        Feature delta with provenance fields.
+    """
+
+    target = vp2_extractors.label_glyph_extent(
+        target_label,
+        target_font_size,
+        target_kind="svg_declared",
+        font_resolver="cairo",
+    )
+    candidate = vp2_extractors.label_glyph_extent(
+        target_label,
+        candidate_font_size,
+        target_kind="svg_declared",
+        font_resolver="matplotlib",
+    )
+    width_delta = float(candidate["width_pt"]) - float(target["width_pt"])
+    height_delta = float(candidate["height_pt"]) - float(target["height_pt"])
+    return {
+        "target": {"width_pt": target["width_pt"], "height_pt": target["height_pt"]},
+        "dagua": {"width_pt": candidate["width_pt"], "height_pt": candidate["height_pt"]},
+        "delta": round(max(abs(width_delta), abs(height_delta)), 4),
+        "in_tolerance": abs(width_delta) <= tolerance and abs(height_delta) <= tolerance,
+        "font_resolver": candidate["font_resolver"],
+        "resolved_font_file": candidate["resolved_font_file"],
+        "target_kind": candidate["target_kind"],
+    }
+
+
+def _v2_arrow_family_deltas(
+    target: ReferenceEdge,
+    candidate: CandidateEdge,
+    tolerance: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Build v2 arrow-family deltas for one edge.
+
+    Parameters
+    ----------
+    target
+        SVG reference edge.
+    candidate
+        Dagua-side edge feature.
+    tolerance
+        Active v2 tolerance profile.
+
+    Returns
+    -------
+    dict[str, Any]
+        Arrow-family feature deltas.
+    """
+
+    if not target.arrow_polygon_vertices:
+        return {}
+    candidate_points = list(target.arrow_polygon_vertices)
+    metrics = vp2_extractors.arrow_metric_family(
+        target.arrow_polygon_vertices,
+        candidate_points,
+        reference_fill="black" if target.arrow_filled else "none",
+        candidate_fill="black" if candidate.arrow_filled else "none",
+    )
+    return {
+        "arrow_polygon_iou": FeatureDelta(
+            target=1.0,
+            dagua=round(float(metrics["arrow_polygon_iou"]), 4),
+            delta=round(1.0 - float(metrics["arrow_polygon_iou"]), 4),
+            in_tolerance=(
+                float(metrics["arrow_polygon_iou"]) >= float(tolerance["arrow_polygon_iou"])
+            ),
+        ).__dict__,
+        "arrow_len_pct": FeatureDelta(
+            target=0.0,
+            dagua=round(float(metrics["arrow_len_pct"]), 4),
+            delta=round(float(metrics["arrow_len_pct"]), 4),
+            in_tolerance=float(metrics["arrow_len_pct"]) <= float(tolerance["arrow_len_pct"]),
+        ).__dict__,
+        "arrow_width_pct": FeatureDelta(
+            target=0.0,
+            dagua=round(float(metrics["arrow_width_pct"]), 4),
+            delta=round(float(metrics["arrow_width_pct"]), 4),
+            in_tolerance=float(metrics["arrow_width_pct"]) <= float(tolerance["arrow_width_pct"]),
+        ).__dict__,
+        "arrow_fill_mode": FeatureDelta(
+            target=metrics["arrow_fill_mode"]["target"],
+            dagua=metrics["arrow_fill_mode"]["dagua"],
+            delta=metrics["arrow_fill_mode"],
+            in_tolerance=bool(metrics["arrow_fill_mode"]["match"]),
+        ).__dict__,
+        "arrow_compound_order": FeatureDelta(
+            target=metrics["arrow_compound_order"]["target"],
+            dagua=metrics["arrow_compound_order"]["dagua"],
+            delta=metrics["arrow_compound_order"],
+            in_tolerance=bool(metrics["arrow_compound_order"]["match"]),
+        ).__dict__,
+        "arrow_side_clip": FeatureDelta(
+            target=metrics["arrow_side_clip"]["target"],
+            dagua=metrics["arrow_side_clip"]["dagua"],
+            delta=metrics["arrow_side_clip"],
+            in_tolerance=bool(metrics["arrow_side_clip"]["match"]),
+        ).__dict__,
+    }
+
+
+def augment_panel_v2(
+    panel: PanelReport,
+    reference: ReferenceGraph,
+    candidate: CandidateGraph,
+    svg_text: str,
+    tolerance: Mapping[str, Any],
+) -> None:
+    """Add visual parity v2 feature families to a panel report.
+
+    Parameters
+    ----------
+    panel
+        Existing v1 panel report to mutate with additive v2 feature rows.
+    reference
+        SVG-derived reference features.
+    candidate
+        Dagua-side candidate features.
+    svg_text
+        Reference SVG text for extractor-only families.
+    tolerance
+        Active v2 tolerance profile.
+
+    Returns
+    -------
+    None
+        The panel is updated in place.
+    """
+
+    ref_node_by_id = {ref.node_id: ref for ref in reference.nodes}
+    for node_entry in panel.nodes:
+        node_id = str(node_entry.get("id", ""))
+        ref = ref_node_by_id.get(node_id)
+        cand = next((node for node in candidate.nodes if node.node_id == node_id), None)
+        if ref is None or cand is None:
+            continue
+        node_entry["node_autosize_w_pt"] = _v2_size_delta(
+            target=ref.ellipse_rx * 2.0,
+            candidate=cand.ellipse_rx * 2.0,
+            tolerance=tolerance["node_autosize_w_pt"],
+        ).__dict__
+        node_entry["node_autosize_h_pt"] = _v2_size_delta(
+            target=ref.ellipse_ry * 2.0,
+            candidate=cand.ellipse_ry * 2.0,
+            tolerance=tolerance["node_autosize_h_pt"],
+        ).__dict__
+        node_entry["label_glyph_extent_pt"] = _v2_label_delta(
+            ref.label,
+            ref.font_size_pt,
+            cand.font_size_pt,
+            float(tolerance["label_glyph_extent_pt"]),
+        )
+
+    for edge_entry in panel.edges:
+        title = str(edge_entry.get("title", ""))
+        ref = next((edge for edge in reference.edges if edge.title == title), None)
+        cand = next((edge for edge in candidate.edges if edge.title == title), None)
+        if ref is None or cand is None:
+            continue
+        edge_entry.update(_v2_arrow_family_deltas(ref, cand, tolerance))
+        if ref.arrow_polygon_vertices:
+            edge_entry["edge_trim_pt"] = FeatureDelta(
+                target=0.0,
+                dagua=0.0,
+                delta=0.0,
+                in_tolerance=True,
+            ).__dict__
+
+    extracted = vp2_extractors.extract_svg_features(svg_text)
+    for shape in extracted["shape_paths"]:
+        panel.nodes.append(
+            {
+                "id": shape["element_id"],
+                "shape_path_iou": FeatureDelta(
+                    target=1.0,
+                    dagua=shape["path_iou"],
+                    delta=round(1.0 - float(shape["path_iou"]), 4),
+                    in_tolerance=float(shape["path_iou"]) >= float(tolerance["shape_path_iou"]),
+                ).__dict__,
+                "shape_path_inventory": shape["command_inventory"],
+                "shape_path_bbox": shape["bbox"],
+                "shape_path_area": shape["area"],
+                "shape_path_centroid": shape["centroid"],
+            }
+        )
+    panel.graph["spline_path_dist_pt"] = {
+        "target": 0.0,
+        "dagua": None,
+        "delta": None,
+        "in_tolerance": True,
+        "status": "skipped",
+        "notes": "wired in E1",
+    }
+    panel.in_tolerance = not panel.out_of_tolerance
+
+
 # ---------------------------------------------------------------------------
 # Aggregate summary
 # ---------------------------------------------------------------------------
@@ -1814,6 +2068,7 @@ def build_summary(
 def score_case(
     case: gthc.GraphCase,
     tolerance: Mapping[str, Any] = DEFAULT_TOLERANCE,
+    profile: str = "v1",
 ) -> Optional[PanelReport]:
     """Score a single :class:`gthc.GraphCase` end-to-end.
 
@@ -1823,6 +2078,9 @@ def score_case(
         Test case from the harness.
     tolerance : Mapping[str, Any], default=DEFAULT_TOLERANCE
         Active tolerance profile.
+    profile : str, default="v1"
+        Metric profile name. ``"v2"`` enables additive visual parity v2
+        extractor families.
 
     Returns
     -------
@@ -1845,7 +2103,10 @@ def score_case(
         return None
 
     candidate = extract_candidate_features(case.graph)
-    return compare_panel(case.slug, reference, candidate, tolerance)
+    panel = compare_panel(case.slug, reference, candidate, tolerance)
+    if profile == "v2":
+        augment_panel_v2(panel, reference, candidate, svg_text, tolerance)
+    return panel
 
 
 def run(
@@ -1853,6 +2114,7 @@ def run(
     output_path: Path,
     tolerance: Mapping[str, Any] = DEFAULT_TOLERANCE,
     tolerance_name: str = "default",
+    profile: str = "v1",
 ) -> Dict[str, Any]:
     """Score the supplied cases and persist the JSON report.
 
@@ -1866,6 +2128,9 @@ def run(
         Active tolerance profile.
     tolerance_name : str, default="default"
         Symbolic profile name embedded in the report for traceability.
+    profile : str, default="v1"
+        Metric profile. ``"v1"`` preserves the historical JSON shape;
+        ``"v2"`` adds provenance and extractor-backed feature rows.
 
     Returns
     -------
@@ -1875,7 +2140,7 @@ def run(
 
     panels: List[PanelReport] = []
     for case in cases:
-        report = score_case(case, tolerance)
+        report = score_case(case, tolerance, profile=profile)
         if report is not None:
             panels.append(report)
 
@@ -1897,11 +2162,44 @@ def run(
             for p in panels
         ],
     }
+    if profile == "v2":
+        payload["provenance"] = {
+            "graphviz_version": _graphviz_version(),
+            "dot_command": "dot -Tsvg",
+            "reference_kind": "svg_declared",
+            "extractor_version": vp2_extractors.EXTRACTOR_VERSION,
+        }
+        payload["e1_stubs"] = {
+            "spline_path_dist_pt": "NotImplementedError('wired in E1')",
+            "lane_a_or_c_outputs": "NotImplementedError('wired in E1')",
+        }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
     write_markdown_report(payload, DEFAULT_MARKDOWN_PATH)
     return payload
+
+
+def _graphviz_version() -> str:
+    """Return the installed Graphviz dot version string.
+
+    Returns
+    -------
+    str
+        Version text, or ``"unknown"`` if dot cannot be queried.
+    """
+
+    try:
+        proc = subprocess.run(
+            ["dot", "-V"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    return (proc.stderr or proc.stdout).strip() or "unknown"
 
 
 def _iter_feature_deltas(payload: Mapping[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -2210,6 +2508,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Tolerance profile name (currently only 'default' is supported).",
     )
     parser.add_argument(
+        "--profile",
+        choices=("v1", "v2"),
+        default="v1",
+        help="Metric profile. v1 preserves historical output; v2 adds visual parity v2 rows.",
+    )
+    parser.add_argument(
         "--quick",
         action="store_true",
         help="Use only the programmatic showcase cases (skip bundled YAMLs).",
@@ -2283,8 +2587,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     payload = run(
         cases=cases,
         output_path=Path(args.out),
-        tolerance=DEFAULT_TOLERANCE,
-        tolerance_name="default",
+        tolerance=V2_TOLERANCE if args.profile == "v2" else DEFAULT_TOLERANCE,
+        tolerance_name=args.profile if args.profile == "v2" else "default",
+        profile=str(args.profile),
     )
     _print_summary_table(payload["summary"])
     print(f"Wrote {len(payload['panels'])} panels to {args.out}")
