@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Union
 
 import torch
 
@@ -24,6 +24,698 @@ _DEFAULT_MANY_BODY_STRENGTH = -30.0
 _DEFAULT_LINK_DISTANCE = 30.0
 _DEFAULT_VELOCITY_DECAY_FACTOR = 0.6
 _DEFAULT_THETA = 0.9
+_D3_DISTANCE_MIN2 = 1.0
+_D3_DISTANCE_MAX2 = math.inf
+
+
+@dataclass
+class _D3QuadtreeLeaf:
+    """Leaf node in a d3-quadtree-compatible tree.
+
+    Parameters
+    ----------
+    data : int
+        Node index stored in the leaf.
+    x : float
+        Current x-coordinate for the node.
+    y : float
+        Current y-coordinate for the node.
+    next : _D3QuadtreeLeaf, optional
+        Head-linked coincident leaf inserted by d3-quadtree.
+    value : float, default=0.0
+        Accumulated many-body strength assigned by ``forceManyBody``.
+    centroid_x : float, default=0.0
+        d3 ``quad.x`` value after charge accumulation.
+    centroid_y : float, default=0.0
+        d3 ``quad.y`` value after charge accumulation.
+    """
+
+    data: int
+    x: float
+    y: float
+    next: Optional["_D3QuadtreeLeaf"] = None
+    value: float = 0.0
+    centroid_x: float = 0.0
+    centroid_y: float = 0.0
+
+
+@dataclass
+class _D3QuadtreeInternal:
+    """Internal node in a d3-quadtree-compatible tree.
+
+    Parameters
+    ----------
+    children : list[_D3QuadtreeNode | None]
+        Four child quadrants in d3 order: top-left, top-right, bottom-left,
+        bottom-right.
+    value : float, default=0.0
+        Accumulated many-body strength assigned by ``forceManyBody``.
+    centroid_x : float, default=0.0
+        d3 ``quad.x`` value after charge accumulation.
+    centroid_y : float, default=0.0
+        d3 ``quad.y`` value after charge accumulation.
+    """
+
+    children: list[Optional["_D3QuadtreeNode"]] = field(
+        default_factory=lambda: [None, None, None, None]
+    )
+    value: float = 0.0
+    centroid_x: float = 0.0
+    centroid_y: float = 0.0
+
+
+_D3QuadtreeNode = Union[_D3QuadtreeLeaf, _D3QuadtreeInternal]
+
+
+@dataclass
+class _D3QuadFrame:
+    """Traversal frame matching d3-quadtree's ``Quad`` helper.
+
+    Parameters
+    ----------
+    node : _D3QuadtreeNode
+        Quadtree node for this frame.
+    x0 : float
+        Left bound of the square extent.
+    y0 : float
+        Top bound of the square extent.
+    x1 : float
+        Right bound of the square extent.
+    y1 : float
+        Bottom bound of the square extent.
+    """
+
+    node: _D3QuadtreeNode
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+@dataclass
+class _D3Quadtree:
+    """Small Python port of d3-quadtree's addAll, cover, visit, and visitAfter.
+
+    Parameters
+    ----------
+    x0 : float, default=nan
+        Left extent bound.
+    y0 : float, default=nan
+        Top extent bound.
+    x1 : float, default=nan
+        Right extent bound.
+    y1 : float, default=nan
+        Bottom extent bound.
+    root : _D3QuadtreeNode, optional
+        Root node, or ``None`` for an empty tree.
+    """
+
+    x0: float = math.nan
+    y0: float = math.nan
+    x1: float = math.nan
+    y1: float = math.nan
+    root: Optional[_D3QuadtreeNode] = None
+
+    @classmethod
+    def from_positions(cls, positions: list[tuple[float, float]]) -> "_D3Quadtree":
+        """Build a d3-quadtree from positions in array order.
+
+        Parameters
+        ----------
+        positions : list[tuple[float, float]]
+            Node coordinates in d3 node-array order.
+
+        Returns
+        -------
+        _D3Quadtree
+            Tree with the same topology as ``quadtree(nodes, x, y)``.
+        """
+        tree = cls()
+        tree.add_all(positions)
+        return tree
+
+    def add_all(self, positions: list[tuple[float, float]]) -> "_D3Quadtree":
+        """Add all positions using d3-quadtree's precomputed extent path.
+
+        Parameters
+        ----------
+        positions : list[tuple[float, float]]
+            Node coordinates in d3 node-array order.
+
+        Returns
+        -------
+        _D3Quadtree
+            This tree after insertion.
+        """
+        x_values: list[float] = [math.nan] * len(positions)
+        y_values: list[float] = [math.nan] * len(positions)
+        x0 = math.inf
+        y0 = math.inf
+        x1 = -math.inf
+        y1 = -math.inf
+        for index, (x, y) in enumerate(positions):
+            if math.isnan(x) or math.isnan(y):
+                continue
+            x_values[index] = x
+            y_values[index] = y
+            if x < x0:
+                x0 = x
+            if x > x1:
+                x1 = x
+            if y < y0:
+                y0 = y
+            if y > y1:
+                y1 = y
+        if x0 > x1 or y0 > y1:
+            return self
+        self.cover(x0, y0).cover(x1, y1)
+        for index, x in enumerate(x_values):
+            self._add(x, y_values[index], index)
+        return self
+
+    def cover(self, x: float, y: float) -> "_D3Quadtree":
+        """Expand the tree's square extent to cover one point.
+
+        Parameters
+        ----------
+        x : float
+            X-coordinate to cover.
+        y : float
+            Y-coordinate to cover.
+
+        Returns
+        -------
+        _D3Quadtree
+            This tree after extent expansion.
+        """
+        if math.isnan(x) or math.isnan(y):
+            return self
+        x0 = self.x0
+        y0 = self.y0
+        x1 = self.x1
+        y1 = self.y1
+        if math.isnan(x0):
+            x0 = math.floor(x)
+            y0 = math.floor(y)
+            x1 = x0 + 1.0
+            y1 = y0 + 1.0
+        else:
+            z = x1 - x0 or 1.0
+            node = self.root
+            while x0 > x or x >= x1 or y0 > y or y >= y1:
+                index = (int(y < y0) << 1) | int(x < x0)
+                parent = _D3QuadtreeInternal()
+                parent.children[index] = node
+                node = parent
+                z *= 2.0
+                if index == 0:
+                    x1 = x0 + z
+                    y1 = y0 + z
+                elif index == 1:
+                    x0 = x1 - z
+                    y1 = y0 + z
+                elif index == 2:
+                    x1 = x0 + z
+                    y0 = y1 - z
+                else:
+                    x0 = x1 - z
+                    y0 = y1 - z
+            if isinstance(self.root, _D3QuadtreeInternal):
+                self.root = node
+        self.x0 = x0
+        self.y0 = y0
+        self.x1 = x1
+        self.y1 = y1
+        return self
+
+    def _add(self, x: float, y: float, data: int) -> "_D3Quadtree":
+        """Insert one point with d3-quadtree's quadrant and coincident rules.
+
+        Parameters
+        ----------
+        x : float
+            X-coordinate to insert.
+        y : float
+            Y-coordinate to insert.
+        data : int
+            Node index associated with the point.
+
+        Returns
+        -------
+        _D3Quadtree
+            This tree after insertion.
+        """
+        if math.isnan(x) or math.isnan(y):
+            return self
+        leaf = _D3QuadtreeLeaf(data=data, x=x, y=y)
+        node = self.root
+        if node is None:
+            self.root = leaf
+            return self
+
+        parent: Optional[_D3QuadtreeInternal] = None
+        child_index = 0
+        x0 = self.x0
+        y0 = self.y0
+        x1 = self.x1
+        y1 = self.y1
+        while isinstance(node, _D3QuadtreeInternal):
+            xm = (x0 + x1) / 2.0
+            ym = (y0 + y1) / 2.0
+            right = x >= xm
+            bottom = y >= ym
+            if right:
+                x0 = xm
+            else:
+                x1 = xm
+            if bottom:
+                y0 = ym
+            else:
+                y1 = ym
+            parent = node
+            child_index = (int(bottom) << 1) | int(right)
+            child = node.children[child_index]
+            if child is None:
+                node.children[child_index] = leaf
+                return self
+            node = child
+
+        xp = node.x
+        yp = node.y
+        if x == xp and y == yp:
+            leaf.next = node
+            if parent is None:
+                self.root = leaf
+            else:
+                parent.children[child_index] = leaf
+            return self
+
+        while True:
+            new_parent = _D3QuadtreeInternal()
+            if parent is None:
+                self.root = new_parent
+            else:
+                parent.children[child_index] = new_parent
+            parent = new_parent
+            xm = (x0 + x1) / 2.0
+            ym = (y0 + y1) / 2.0
+            right = x >= xm
+            bottom = y >= ym
+            if right:
+                x0 = xm
+            else:
+                x1 = xm
+            if bottom:
+                y0 = ym
+            else:
+                y1 = ym
+            child_index = (int(bottom) << 1) | int(right)
+            existing_index = (int(yp >= ym) << 1) | int(xp >= xm)
+            if child_index != existing_index:
+                parent.children[existing_index] = node
+                parent.children[child_index] = leaf
+                return self
+
+    def visit_after(self, strengths: list[float]) -> None:
+        """Run d3-quadtree ``visitAfter`` for many-body charge accumulation.
+
+        Parameters
+        ----------
+        strengths : list[float]
+            Per-node many-body strengths indexed by node index.
+
+        Returns
+        -------
+        None
+            Nodes are mutated with ``value`` and weighted centroid fields.
+        """
+        quads: list[_D3QuadFrame] = []
+        next_frames: list[_D3QuadFrame] = []
+        if self.root is not None:
+            quads.append(_D3QuadFrame(self.root, self.x0, self.y0, self.x1, self.y1))
+        while quads:
+            frame = quads.pop()
+            node = frame.node
+            if isinstance(node, _D3QuadtreeInternal):
+                x0 = frame.x0
+                y0 = frame.y0
+                x1 = frame.x1
+                y1 = frame.y1
+                xm = (x0 + x1) / 2.0
+                ym = (y0 + y1) / 2.0
+                child = node.children[0]
+                if child is not None:
+                    quads.append(_D3QuadFrame(child, x0, y0, xm, ym))
+                child = node.children[1]
+                if child is not None:
+                    quads.append(_D3QuadFrame(child, xm, y0, x1, ym))
+                child = node.children[2]
+                if child is not None:
+                    quads.append(_D3QuadFrame(child, x0, ym, xm, y1))
+                child = node.children[3]
+                if child is not None:
+                    quads.append(_D3QuadFrame(child, xm, ym, x1, y1))
+            next_frames.append(frame)
+        while next_frames:
+            self._accumulate(next_frames.pop().node, strengths)
+
+    def _accumulate(self, node: _D3QuadtreeNode, strengths: list[float]) -> None:
+        """Accumulate d3-force many-body charge for one visited node.
+
+        Parameters
+        ----------
+        node : _D3QuadtreeNode
+            Leaf or internal quadtree node to mutate.
+        strengths : list[float]
+            Per-node many-body strengths indexed by node index.
+
+        Returns
+        -------
+        None
+            The node is updated in place.
+        """
+        strength = 0.0
+        if isinstance(node, _D3QuadtreeInternal):
+            x = 0.0
+            y = 0.0
+            weight = 0.0
+            for child in node.children:
+                if child is not None:
+                    child_weight = abs(child.value)
+                    if child_weight:
+                        strength += child.value
+                        weight += child_weight
+                        x += child_weight * child.centroid_x
+                        y += child_weight * child.centroid_y
+            node.centroid_x = x / weight if weight else math.nan
+            node.centroid_y = y / weight if weight else math.nan
+        else:
+            leaf: Optional[_D3QuadtreeLeaf] = node
+            node.centroid_x = node.x
+            node.centroid_y = node.y
+            while leaf is not None:
+                strength += strengths[leaf.data]
+                leaf = leaf.next
+        node.value = strength
+
+
+def _d3force_apply_many_body(
+    tree: _D3Quadtree,
+    positions: list[tuple[float, float]],
+    vx: list[float],
+    vy: list[float],
+    strengths: list[float],
+    alpha: float,
+    theta2: float,
+    rng: D3ForceLCG,
+) -> None:
+    """Apply d3-force Barnes-Hut many-body updates to velocity arrays.
+
+    Parameters
+    ----------
+    tree : _D3Quadtree
+        Quadtree after ``visit_after`` charge accumulation.
+    positions : list[tuple[float, float]]
+        Current node coordinates in d3 node-array order.
+    vx : list[float]
+        Mutable x-velocity array.
+    vy : list[float]
+        Mutable y-velocity array.
+    strengths : list[float]
+        Per-node many-body strengths indexed by node index.
+    alpha : float
+        Current simulation alpha.
+    theta2 : float
+        Squared Barnes-Hut opening angle.
+    rng : D3ForceLCG
+        d3-compatible random source for coincident jiggle.
+
+    Returns
+    -------
+    None
+        Velocities are updated in place.
+    """
+    if tree.root is None:
+        return
+    for node_index, (node_x, node_y) in enumerate(positions):
+        _d3force_apply_many_body_to_node(
+            tree=tree,
+            node_index=node_index,
+            node_x=node_x,
+            node_y=node_y,
+            vx=vx,
+            vy=vy,
+            strengths=strengths,
+            alpha=alpha,
+            theta2=theta2,
+            rng=rng,
+        )
+
+
+def _d3force_apply_many_body_to_node(
+    tree: _D3Quadtree,
+    node_index: int,
+    node_x: float,
+    node_y: float,
+    vx: list[float],
+    vy: list[float],
+    strengths: list[float],
+    alpha: float,
+    theta2: float,
+    rng: D3ForceLCG,
+) -> None:
+    """Apply d3-quadtree ``visit(apply)`` for one simulation node.
+
+    Parameters
+    ----------
+    tree : _D3Quadtree
+        Quadtree after charge accumulation.
+    node_index : int
+        Index of the node receiving force.
+    node_x : float
+        Current x-coordinate of the receiving node.
+    node_y : float
+        Current y-coordinate of the receiving node.
+    vx : list[float]
+        Mutable x-velocity array.
+    vy : list[float]
+        Mutable y-velocity array.
+    strengths : list[float]
+        Per-node many-body strengths indexed by node index.
+    alpha : float
+        Current simulation alpha.
+    theta2 : float
+        Squared Barnes-Hut opening angle.
+    rng : D3ForceLCG
+        d3-compatible random source for coincident jiggle.
+
+    Returns
+    -------
+    None
+        ``vx`` and ``vy`` are updated in place for ``node_index``.
+    """
+    if tree.root is None:
+        return
+    quads = [_D3QuadFrame(tree.root, tree.x0, tree.y0, tree.x1, tree.y1)]
+    while quads:
+        frame = quads.pop()
+        quad = frame.node
+        if not quad.value:
+            continue
+
+        x = quad.centroid_x - node_x
+        y = quad.centroid_y - node_y
+        width = frame.x1 - frame.x0
+        length2 = x * x + y * y
+
+        if width * width / theta2 < length2:
+            if length2 < _D3_DISTANCE_MAX2:
+                x, y, length2 = _d3force_jiggle_and_bound_length(x, y, length2, rng)
+                vx[node_index] += x * quad.value * alpha / length2
+                vy[node_index] += y * quad.value * alpha / length2
+            continue
+
+        if isinstance(quad, _D3QuadtreeInternal):
+            _d3force_push_visit_children(quads, quad, frame)
+            continue
+
+        if length2 >= _D3_DISTANCE_MAX2:
+            continue
+        if quad.data != node_index or quad.next is not None:
+            x, y, length2 = _d3force_jiggle_and_bound_length(x, y, length2, rng)
+        leaf: Optional[_D3QuadtreeLeaf] = quad
+        while leaf is not None:
+            if leaf.data != node_index:
+                scale = strengths[leaf.data] * alpha / length2
+                vx[node_index] += x * scale
+                vy[node_index] += y * scale
+            leaf = leaf.next
+
+
+def _d3force_push_visit_children(
+    quads: list[_D3QuadFrame],
+    quad: _D3QuadtreeInternal,
+    frame: _D3QuadFrame,
+) -> None:
+    """Push child quadrants in d3-quadtree ``visit`` stack order.
+
+    Parameters
+    ----------
+    quads : list[_D3QuadFrame]
+        Mutable traversal stack.
+    quad : _D3QuadtreeInternal
+        Internal node whose children should be visited.
+    frame : _D3QuadFrame
+        Bounds for ``quad``.
+
+    Returns
+    -------
+    None
+        Child frames are appended to ``quads`` in d3's push order.
+    """
+    x0 = frame.x0
+    y0 = frame.y0
+    x1 = frame.x1
+    y1 = frame.y1
+    xm = (x0 + x1) / 2.0
+    ym = (y0 + y1) / 2.0
+    child = quad.children[3]
+    if child is not None:
+        quads.append(_D3QuadFrame(child, xm, ym, x1, y1))
+    child = quad.children[2]
+    if child is not None:
+        quads.append(_D3QuadFrame(child, x0, ym, xm, y1))
+    child = quad.children[1]
+    if child is not None:
+        quads.append(_D3QuadFrame(child, xm, y0, x1, ym))
+    child = quad.children[0]
+    if child is not None:
+        quads.append(_D3QuadFrame(child, x0, y0, xm, ym))
+
+
+def _d3force_jiggle_and_bound_length(
+    x: float,
+    y: float,
+    length2: float,
+    rng: D3ForceLCG,
+) -> tuple[float, float, float]:
+    """Apply d3-force coincident jiggle and minimum-distance bound.
+
+    Parameters
+    ----------
+    x : float
+        X displacement.
+    y : float
+        Y displacement.
+    length2 : float
+        Squared displacement length.
+    rng : D3ForceLCG
+        d3-compatible random source.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Possibly jiggled ``x``, ``y``, and bounded squared-length denominator.
+    """
+    if x == 0.0:
+        x = rng.jiggle()
+        length2 += x * x
+    if y == 0.0:
+        y = rng.jiggle()
+        length2 += y * y
+    if length2 < _D3_DISTANCE_MIN2:
+        length2 = math.sqrt(_D3_DISTANCE_MIN2 * length2)
+    return x, y, length2
+
+
+def _d3force_quadtree_accumulation_rows(
+    positions: list[tuple[float, float]],
+    strength: float = _DEFAULT_MANY_BODY_STRENGTH,
+) -> list[tuple[str, int, float, float, float, float, float, float, float]]:
+    """Return a deterministic dump of d3-force quadtree accumulated cells.
+
+    Parameters
+    ----------
+    positions : list[tuple[float, float]]
+        Node coordinates in d3 node-array order.
+    strength : float, default=-30.0
+        Constant many-body strength to assign to each node.
+
+    Returns
+    -------
+    list[tuple[str, int, float, float, float, float, float, float, float]]
+        Rows containing node kind, leaf data index or ``-1``, centroid x,
+        centroid y, charge value, and frame bounds ``x0, y0, x1, y1``.
+    """
+    tree = _D3Quadtree.from_positions(positions)
+    tree.visit_after([strength] * len(positions))
+    rows: list[tuple[str, int, float, float, float, float, float, float, float]] = []
+    if tree.root is None:
+        return rows
+    _d3force_collect_quadtree_rows(
+        rows=rows,
+        node=tree.root,
+        x0=tree.x0,
+        y0=tree.y0,
+        x1=tree.x1,
+        y1=tree.y1,
+    )
+    return rows
+
+
+def _d3force_collect_quadtree_rows(
+    rows: list[tuple[str, int, float, float, float, float, float, float, float]],
+    node: _D3QuadtreeNode,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> None:
+    """Append pre-order quadtree rows for Node reference comparisons.
+
+    Parameters
+    ----------
+    rows : list[tuple[str, int, float, float, float, float, float, float, float]]
+        Mutable row accumulator.
+    node : _D3QuadtreeNode
+        Current quadtree node.
+    x0 : float
+        Left frame bound.
+    y0 : float
+        Top frame bound.
+    x1 : float
+        Right frame bound.
+    y1 : float
+        Bottom frame bound.
+
+    Returns
+    -------
+    None
+        Rows are appended in place.
+    """
+    if isinstance(node, _D3QuadtreeInternal):
+        rows.append(("internal", -1, node.centroid_x, node.centroid_y, node.value, x0, y0, x1, y1))
+        xm = (x0 + x1) / 2.0
+        ym = (y0 + y1) / 2.0
+        child = node.children[0]
+        if child is not None:
+            _d3force_collect_quadtree_rows(rows, child, x0, y0, xm, ym)
+        child = node.children[1]
+        if child is not None:
+            _d3force_collect_quadtree_rows(rows, child, xm, y0, x1, ym)
+        child = node.children[2]
+        if child is not None:
+            _d3force_collect_quadtree_rows(rows, child, x0, ym, xm, y1)
+        child = node.children[3]
+        if child is not None:
+            _d3force_collect_quadtree_rows(rows, child, xm, ym, x1, y1)
+        return
+    leaf: Optional[_D3QuadtreeLeaf] = node
+    while leaf is not None:
+        rows.append(
+            ("leaf", leaf.data, node.centroid_x, node.centroid_y, node.value, x0, y0, x1, y1)
+        )
+        leaf = leaf.next
 
 
 class D3ForceLCG:
@@ -150,8 +842,8 @@ class D3ForceConfig:
         Internal multiplier used during velocity Verlet integration. This is
         d3's ``1 - simulation.velocityDecay()`` value.
     theta : float, default=0.9
-        Barnes-Hut theta exposed for API parity. The current op uses direct
-        pairwise n-body evaluation and records this as a named fidelity gap.
+        Barnes-Hut theta used by d3-force ``forceManyBody``. d3's default is
+        ``0.9``, so the squared cutoff is ``0.81``.
     center : bool, default=True
         Whether to apply ``forceCenter(0, 0)``.
     """
@@ -337,7 +1029,7 @@ class D3ForceLink(Op):
 
 @register_op
 class D3ForceManyBody(Op):
-    """Apply d3-force-compatible direct many-body velocity updates."""
+    """Apply d3-force ``forceManyBody`` Barnes-Hut velocity updates."""
 
     name = "d3force_many_body"
     category = OpCategory.FORCE
@@ -353,7 +1045,7 @@ class D3ForceManyBody(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Apply n-body repulsion to every ordered node pair.
+        """Apply Barnes-Hut many-body repulsion in d3 traversal order.
 
         Parameters
         ----------
@@ -369,12 +1061,6 @@ class D3ForceManyBody(Op):
         SolveState
             State with updated velocity extras.
 
-        Notes
-        -----
-        d3-force uses a Barnes-Hut quadtree. This direct evaluator matches
-        the leaf force law and RNG discipline, but not internal-cell
-        approximation order. Fidelity reports name this as the residual when
-        full layouts diverge.
         """
         del ctx
         if state.pos is None:
@@ -385,24 +1071,22 @@ class D3ForceManyBody(Op):
         rng: D3ForceLCG = state.extras["d3force_rng"]
         alpha = float(state.extras["d3force_alpha"])
         strength = float(self.config.many_body_strength)
-        for node in range(problem.num_nodes):
-            for other in range(problem.num_nodes):
-                if other == node:
-                    continue
-                x = float(pos[other, 0]) - float(pos[node, 0])
-                y = float(pos[other, 1]) - float(pos[node, 1])
-                length2 = x * x + y * y
-                if x == 0.0:
-                    x = rng.jiggle()
-                    length2 += x * x
-                if y == 0.0:
-                    y = rng.jiggle()
-                    length2 += y * y
-                if length2 < 1.0:
-                    length2 = math.sqrt(length2)
-                scale = strength * alpha / length2
-                vx[node] += x * scale
-                vy[node] += y * scale
+        positions = [
+            (float(pos[node, 0]), float(pos[node, 1])) for node in range(problem.num_nodes)
+        ]
+        strengths = [strength] * problem.num_nodes
+        tree = _D3Quadtree.from_positions(positions)
+        tree.visit_after(strengths)
+        _d3force_apply_many_body(
+            tree=tree,
+            positions=positions,
+            vx=vx,
+            vy=vy,
+            strengths=strengths,
+            alpha=alpha,
+            theta2=float(self.config.theta) * float(self.config.theta),
+            rng=rng,
+        )
         return state
 
 
