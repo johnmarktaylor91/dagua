@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_NODE_WIDTH = 120.0
 _DEFAULT_NODE_HEIGHT = 40.0
+_DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
 _DAGRE_NODE_MODULES = Path("/home/jtaylor/projects/dagua/node_modules")
 
 
@@ -39,11 +40,11 @@ def _node_subprocess_env() -> Dict[str, str]:
         Environment variables for Dagre subprocesses.
     """
     env = dict(os.environ)
-    if _DAGRE_NODE_MODULES.exists():
-        existing = env.get("NODE_PATH", "")
-        paths = [str(_DAGRE_NODE_MODULES)]
-        if existing:
-            paths.append(existing)
+    paths = [str(path) for path in (_DURABLE_NODE_MODULES, _DAGRE_NODE_MODULES) if path.exists()]
+    existing = env.get("NODE_PATH", "")
+    if existing:
+        paths.append(existing)
+    if paths:
         env["NODE_PATH"] = os.pathsep.join(paths)
     return env
 

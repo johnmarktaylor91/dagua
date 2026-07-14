@@ -9,8 +9,8 @@ from typing import Optional
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-SMART_REF_ROOT = Path("/tmp/smartgd-ref")
-DEEP_REF_ROOT = Path("/tmp/deepgd-ref")
+SMART_REF_ROOT = Path.home() / "tools" / "dagua-refs" / "smartgd"
+DEEP_REF_ROOT = Path.home() / "tools" / "dagua-refs" / "deepgd"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

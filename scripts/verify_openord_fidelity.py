@@ -164,7 +164,7 @@ def _write_report(path: Path, rows: list[dict[str, Any]], blocker: str | None) -
         "Implementation: native serial OpenOrd source port using the C++ five-phase schedule, "
         "density energy, and edge-cut loop.",
         "",
-        "Reference runtime: built and run from `/tmp/openord-ref` when available.",
+        "Reference runtime: built and run from `~/tools/dagua-refs/openord` when available.",
         "",
     ]
     if blocker is not None:

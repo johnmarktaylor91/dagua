@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
@@ -17,6 +19,26 @@ if TYPE_CHECKING:
 
 _DEFAULT_NODE_WIDTH = 1.0
 _DEFAULT_NODE_HEIGHT = 1.0
+_DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
+
+
+def _node_subprocess_env() -> Dict[str, str]:
+    """Return a Node environment that can resolve durable d3-dag packages.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables for d3-dag subprocesses.
+    """
+    env = dict(os.environ)
+    paths = [str(_DURABLE_NODE_MODULES)] if _DURABLE_NODE_MODULES.exists() else []
+    existing = env.get("NODE_PATH", "")
+    if existing:
+        paths.append(existing)
+    if paths:
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
+
 
 _D3DAG_SCRIPT = r"""
 const {
@@ -174,6 +196,7 @@ class D3DagCompetitor(CompetitorBase):
             subprocess.run(
                 ["node", "-e", "require('d3-dag');"],
                 check=True,
+                env=_node_subprocess_env(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10.0,
@@ -250,6 +273,7 @@ class D3DagCompetitor(CompetitorBase):
                 input=json.dumps(payload),
                 text=True,
                 capture_output=True,
+                env=_node_subprocess_env(),
                 timeout=timeout,
                 check=False,
             )

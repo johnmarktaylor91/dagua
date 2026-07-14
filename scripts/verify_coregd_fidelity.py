@@ -12,7 +12,7 @@ import torch
 from torch_geometric.data import Data
 
 ROOT = Path(__file__).resolve().parents[1]
-REF_ROOT = Path("/tmp/coregd-ref")
+REF_ROOT = Path.home() / "tools" / "dagua-refs" / "coregd"
 REF_CONFIG = REF_ROOT / "configs" / "config_rome.json"
 REF_CHECKPOINT = REF_ROOT / "checkpoints" / "core_rome.pt"
 
@@ -143,7 +143,7 @@ def main() -> int:
     """
     if not REF_CONFIG.exists() or not REF_CHECKPOINT.exists():
         print("pretrained_available: false")
-        print("error: /tmp/coregd-ref checkpoints/configs are missing")
+        print(f"error: {REF_ROOT} checkpoints/configs are missing")
         return 1
 
     with REF_CONFIG.open("r", encoding="utf-8") as handle:

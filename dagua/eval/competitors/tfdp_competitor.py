@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_SEED = 1
 _DEFAULT_ITERATIONS = 300
-_REFERENCE_ROOT = Path("/tmp/tfdp-ref")
+_REFERENCE_ROOT = Path.home() / "tools" / "dagua-refs" / "tfdp"
 
 _TFDP_REFERENCE_SCRIPT = r"""
 import contextlib
@@ -153,7 +153,7 @@ class TFDPCompetitor(CompetitorBase):
         Returns
         -------
         bool
-            ``True`` when ``/tmp/tfdp-ref/source_code/tfdp.py`` exists.
+            ``True`` when the durable t-FDP checkout contains ``source_code/tfdp.py``.
         """
         return (_REFERENCE_ROOT / "source_code" / "tfdp.py").exists()
 
