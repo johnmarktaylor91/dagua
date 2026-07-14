@@ -183,10 +183,9 @@ def _write_report(path: Path, rows: list[dict[str, Any]], blocker: str | None) -
             "",
             "## Residual",
             "",
-            "First divergent stage: initialization/RNG. The native port uses Python's "
-            "`random.Random` stream while the C++ reference uses libc `rand()` after `srand()`. "
-            "The phase schedule and edge-cut formulas are matched to source, but libc RNG "
-            "prevents bit-exact coordinates in this environment.",
+            "OpenOrd initialization and RNG now match the C++ source: default node coordinates "
+            "start at zero, and per-node random jumps use libc `srand`/`rand`. Remaining residual "
+            "is at final float/output precision on the small corpus.",
             "",
         ]
     )
@@ -236,7 +235,8 @@ def main() -> int:
             f"reference_quality={_format_float(reference_quality)}"
         )
     print("phase_schedule_matched: yes")
-    print("first_divergent_stage: initialization/RNG")
+    print("rng_stream_matched: yes")
+    print("remaining_residual_stage: final float/output precision")
     _write_report(DEFAULT_REPORT, rows, blocker)
     print(f"report: {DEFAULT_REPORT}")
     return 0

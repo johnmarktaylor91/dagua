@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import importlib
 import inspect
 from pathlib import Path
@@ -12,7 +13,12 @@ import dagua
 from dagua.config import LayoutConfig
 from dagua.eval.equivalence_metrics import procrustes_rmsd
 from dagua.graph import DaguaGraph
-from dagua.layout.ops.openord import _OPENORD_PRESETS, _resolve_openord_parameters
+from dagua.layout.ops.drl import OpenOrdLibcRandom
+from dagua.layout.ops.openord import (
+    _OPENORD_PRESETS,
+    _initialize_openord_positions,
+    _resolve_openord_parameters,
+)
 from dagua.layout.ops.pipelines import PIPELINE_REGISTRY, get_pipeline_function
 from dagua.layout.ops.pipelines.openord import build_openord_pipeline, layout_openord_pipeline
 from dagua.layout.ops.taxonomy import get_op_class
@@ -110,6 +116,42 @@ def test_openord_default_phase_schedule_matches_source() -> None:
     assert _OPENORD_PRESETS["final"].simmer.iterations == 25
 
 
+def test_openord_libc_rng_matches_runtime_rand() -> None:
+    """Verify OpenOrd's ported RNG stream against local libc.
+
+    Returns
+    -------
+    None
+        The first draws after ``srand`` must match bit-for-bit.
+    """
+    libc = ctypes.CDLL(None)
+    libc.srand.argtypes = [ctypes.c_uint]
+    libc.srand.restype = None
+    libc.rand.argtypes = []
+    libc.rand.restype = ctypes.c_int
+
+    seed = 7
+    libc.srand(ctypes.c_uint(seed))
+    expected = [int(libc.rand()) for _ in range(20)]
+    actual_rng = OpenOrdLibcRandom(seed)
+    actual = [actual_rng.rand() for _ in range(20)]
+    assert actual == expected
+
+
+def test_openord_initial_positions_match_reference_nodes() -> None:
+    """Pin OpenOrd's no-``.real`` initialization to reference zeros.
+
+    Returns
+    -------
+    None
+        Every default coordinate should start at the C++ ``Node`` constructor
+        value before annealing random jumps are consumed.
+    """
+    positions = _initialize_openord_positions(4)
+    assert positions.dtype == torch.float64
+    assert torch.equal(positions, torch.zeros((4, 2), dtype=torch.float64))
+
+
 def test_openord_is_seed_deterministic() -> None:
     """OpenOrd should return identical positions for identical seeds.
 
@@ -186,10 +228,10 @@ def test_openord_short_schedule_regression_pin() -> None:
     )
     expected = torch.tensor(
         [
-            [-1.1859790087, 3.0966091156],
-            [-0.5091637969, 2.5390951633],
-            [-0.8494190574, 1.6454149485],
-            [0.5963082314, 2.1329045296],
+            [-1.8073111773, -0.0819450617],
+            [-4.1491026878, -0.0302875396],
+            [-1.7132891417, -0.2208751887],
+            [-0.2545138001, -1.2856321335],
         ],
         dtype=torch.float32,
     )

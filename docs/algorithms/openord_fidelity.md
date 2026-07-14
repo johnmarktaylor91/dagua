@@ -8,11 +8,11 @@ Reference runtime: built and run from `/tmp/openord-ref` when available.
 
 | graph | residual | tier | native quality | reference quality |
 | --- | ---: | --- | ---: | ---: |
-| path_4 | 0.304425 | PARTIAL | 50.4868 | 30.3498 |
-| cycle_4 | 0.737644 | PARTIAL | 21.6377 | 31.0744 |
-| diamond | 0.263934 | PARTIAL | 34.8865 | 33.5608 |
-| weighted_square | 0.32438 | PARTIAL | 27.5555 | 28.3498 |
+| path_4 | 5.63763e-05 | POSITIONAL | 30.3487 | 30.3498 |
+| cycle_4 | 3.22374e-06 | BIT/SIMILARITY_EXACT | 31.0744 | 31.0744 |
+| diamond | 3.89962e-05 | POSITIONAL | 33.5611 | 33.5608 |
+| weighted_square | 7.95614e-05 | POSITIONAL | 28.3493 | 28.3498 |
 
 ## Residual
 
-First divergent stage: initialization/RNG. The native port uses Python's `random.Random` stream while the C++ reference uses libc `rand()` after `srand()`. The phase schedule and edge-cut formulas are matched to source, but libc RNG prevents bit-exact coordinates in this environment.
+OpenOrd initialization and RNG now match the C++ source: default node coordinates start at zero, and per-node random jumps use libc `srand`/`rand`. Remaining residual is at final float/output precision on the small corpus.
