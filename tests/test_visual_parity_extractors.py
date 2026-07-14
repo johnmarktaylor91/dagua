@@ -89,8 +89,8 @@ def test_cluster_and_edge_trim_extractors() -> None:
     assert extractors.edge_trim_distance((0.0, 0.0), (10.0, 10.0, 50.0, 40.0)) > 0.0
 
 
-def test_spline_polyline_stub_is_explicit() -> None:
-    """Assert missing E1 spline inputs fail with the required stub message."""
+def test_spline_polyline_empty_inputs_are_numeric() -> None:
+    """Assert E1 spline inputs produce numeric distances even when empty."""
 
-    with pytest.raises(NotImplementedError, match="wired in E1"):
-        extractors.symmetric_mean_point_to_polyline([], [(0.0, 0.0)])
+    assert extractors.symmetric_mean_point_to_polyline([], []) == 0.0
+    assert extractors.symmetric_mean_point_to_polyline([], [(0.0, 0.0)]) == float("inf")

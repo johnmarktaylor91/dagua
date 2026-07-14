@@ -54,7 +54,9 @@ import matplotlib.pyplot as plt
 from dagua import DaguaGraph, render
 from dagua.render.edges.arrowheads import available_arrowheads
 from dagua.styles import ClusterStyle, EdgeStyle, GraphStyle, NodeStyle
+from scripts.visual_parity import compose as vp2_compose
 from scripts.visual_parity.io import read_card_manifest
+from scripts.visual_parity.types import GeometryMode
 
 DEFAULT_OUTPUT_DIR = "eval_output/calibration"
 REF_CACHE_DIRNAME = ".ref_cache"
@@ -1274,11 +1276,6 @@ def _normalize_panel_image(image_path: Path) -> Image.Image:
     return canvas.convert("RGB")
 
 
-# E1: swap to scripts.visual_parity.compose (Lane A's shared two-panel
-# compositor). Lane D keeps this LOCAL temporary two-panel composition path
-# during parallel work per IMPLEMENTATION_PLAN.md's soft dependency note;
-# E1 performs the compositor swap as an integration step. Do not add new
-# composition logic here beyond what this function already does.
 def _compose_comparison(
     reference_image: Path,
     dagua_image: Path,
@@ -1316,29 +1313,18 @@ def _compose_comparison(
         Writes the comparison PNG to ``output_path``.
     """
 
-    panels = [
-        (reference_label, _normalize_panel_image(reference_image)),
-        ("Dagua", _normalize_panel_image(dagua_image)),
-    ]
-    fig, axes = plt.subplots(1, 2, figsize=figsize, dpi=COMPARISON_DPI)
-    fig.patch.set_facecolor(WHITE)
-    for axis, (title, image) in zip(axes, panels):
-        axis.imshow(image)
-        axis.axis("off")
-        axis.set_title(title, fontsize=12, fontweight="bold", pad=14)
-    fig.suptitle(description, fontsize=13, fontweight="bold", y=0.98)
-    fig.text(
-        0.5,
-        0.93,
-        f"Category: {category} | Case: {case_id}",
-        ha="center",
-        va="center",
-        fontsize=9,
-        color="#6B7280",
+    _ = (description, category, figsize)
+    vp2_compose.compose_pair(
+        reference_image,
+        dagua_image,
+        output_path,
+        case_id=case_id,
+        round_id="d000",
+        reference_label=reference_label,
+        geometry_mode=GeometryMode.NATIVE,
+        dpi=float(COMPARISON_DPI),
+        manifest_path=output_path.with_suffix(".alignment.json"),
     )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
-    fig.savefig(output_path, dpi=COMPARISON_DPI, facecolor=WHITE, bbox_inches="tight")
-    plt.close(fig)
 
 
 def _reference_cache_path(output_root: Path, case: CalibrationCase, backend: str) -> Path:
