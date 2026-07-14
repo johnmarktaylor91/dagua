@@ -104,6 +104,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "fr": ("dagua.layout.ops.pipelines.fr", "layout_fr_pipeline"),
     "gem": ("dagua.layout.ops.pipelines.gem", "layout_gem_pipeline"),
     "graphopt": ("dagua.layout.ops.pipelines.graphopt", "layout_graphopt_pipeline"),
+    "grip": ("dagua.layout.ops.pipelines.grip", "layout_grip_pipeline"),
     "hde": ("dagua.layout.ops.pipelines.hde", "layout_hde_pipeline"),
     "kk": ("dagua.layout.ops.pipelines.kk", "layout_kk_pipeline"),
     "lgl": ("dagua.layout.ops.pipelines.lgl", "layout_lgl_pipeline"),
