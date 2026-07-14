@@ -40,12 +40,12 @@ def test_build_case_catalog_covers_expected_categories() -> None:
     for case in cases:
         category_counts[case.category] = category_counts.get(case.category, 0) + 1
 
-    assert len(cases) == 113
+    assert len(cases) == 119
     assert category_counts == {
         "cluster_options": 7,
         "combinations_2way": 5,
         "combinations_3way": 3,
-        "edge_options": 45,
+        "edge_options": 51,
         "extreme_values": 7,
         "node_options": 29,
         "scaling": 4,

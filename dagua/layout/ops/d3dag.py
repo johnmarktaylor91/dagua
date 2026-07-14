@@ -235,6 +235,10 @@ def _simplex_layers(num_nodes: int, edges: Sequence[tuple[int, int]]) -> list[in
     if not result.success:
         raise ValueError(f"could not find a feasible d3-dag simplex layering: {result.message}")
     raw = [float(value) for value in result.x]
+    incident_nodes = {node for edge in edges for node in edge}
+    for node in range(num_nodes):
+        if node not in incident_nodes:
+            raw[node] = min(raw)
     minimum = min(raw)
     return _layers_from_values([value - minimum for value in raw])
 
