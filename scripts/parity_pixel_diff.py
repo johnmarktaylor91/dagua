@@ -405,14 +405,14 @@ def _render_dagua_strict(
 
 
 def _scaled_hires_dpi(dot_source: str, requested_dpi: int) -> int:
-    """Choose a hi-res DPI that keeps native output under the image cap.
+    """Choose a DPI that keeps native output under the image cap.
 
     Parameters
     ----------
     dot_source : str
         DOT document.
     requested_dpi : int
-        Requested hi-res DPI.
+        Requested DPI.
 
     Returns
     -------
@@ -437,7 +437,7 @@ def _scaled_hires_dpi(dot_source: str, requested_dpi: int) -> int:
     if longest <= 0:
         return requested_dpi
     capped = math.floor(MAX_HIRES_SIDE_PX * POINTS_PER_INCH / longest)
-    return max(72, min(requested_dpi, capped))
+    return max(1, min(requested_dpi, capped))
 
 
 def render_pair(
@@ -476,7 +476,7 @@ def render_pair(
     """
 
     dot_source = _dot_source(case.graph)
-    effective_dpi = _scaled_hires_dpi(dot_source, dpi) if cap_longest_side else dpi
+    effective_dpi = _scaled_hires_dpi(dot_source, dpi)
     geometry = graphviz_geometry(
         dot_source,
         case_id=case.slug,
