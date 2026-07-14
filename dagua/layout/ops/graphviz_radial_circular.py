@@ -409,6 +409,149 @@ def biconnected_components(edge_index: torch.Tensor, num_nodes: int) -> List[Lis
     return components
 
 
+def _is_connected_path(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether the undirected simple topology is one connected path.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when all nodes form one non-branching path.
+    """
+    if num_nodes <= 1:
+        return num_nodes == 1
+    adjacency: List[Set[int]] = [set() for _ in range(num_nodes)]
+    for source, target in _edge_pairs(edge_index):
+        if source == target:
+            continue
+        adjacency[source].add(target)
+        adjacency[target].add(source)
+    edge_count = sum(len(neighbors) for neighbors in adjacency) // 2
+    if edge_count != num_nodes - 1:
+        return False
+    degree_counts = sorted(len(neighbors) for neighbors in adjacency)
+    if degree_counts[:2] != [1, 1] or any(degree != 2 for degree in degree_counts[2:]):
+        return False
+    distances = bfs_distances(
+        [[(neighbor, 1.0) for neighbor in sorted(neighbors)] for neighbors in adjacency],
+        0,
+    )
+    return bool((distances >= 0).all())
+
+
+def _connected_path_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    nodesep: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Place one connected path as Graphviz circo's coalesced edge-block chain.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    nodesep : float
+        Horizontal spacing scale in points.
+    device : torch.device
+        Output tensor device.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+    adjacency: List[List[int]] = [[] for _ in range(num_nodes)]
+    for source, target in _edge_pairs(edge_index):
+        if source == target:
+            continue
+        if target not in adjacency[source]:
+            adjacency[source].append(target)
+        if source not in adjacency[target]:
+            adjacency[target].append(source)
+    start = next(node for node, neighbors in enumerate(adjacency) if len(neighbors) <= 1)
+    ordered: List[int] = []
+    previous = -1
+    current = start
+    while current >= 0:
+        ordered.append(current)
+        next_nodes = [neighbor for neighbor in adjacency[current] if neighbor != previous]
+        if not next_nodes:
+            break
+        previous, current = current, next_nodes[0]
+
+    positions = torch.zeros((num_nodes, 2), dtype=torch.float64, device=device)
+    spacing = max(float(nodesep), 1.0)
+    for offset, node in enumerate(ordered):
+        positions[node, 0] = float(offset) * spacing
+    return positions
+
+
+def _cycle_block_order(edge_index: torch.Tensor, block: Sequence[int]) -> Optional[List[int]]:
+    """Return Graphviz-style traversal order for one simple cycle block.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    block : sequence[int]
+        Candidate biconnected block node ids.
+
+    Returns
+    -------
+    list[int] or None
+        DFS cycle order when the induced block is a simple cycle, otherwise
+        ``None``.
+    """
+    block_set = set(block)
+    adjacency: Dict[int, List[int]] = {node: [] for node in block}
+    for source, target in _edge_pairs(edge_index):
+        if source == target or source not in block_set or target not in block_set:
+            continue
+        if target not in adjacency[source]:
+            adjacency[source].append(target)
+        if source not in adjacency[target]:
+            adjacency[target].append(source)
+    if any(len(neighbors) != 2 for neighbors in adjacency.values()):
+        return None
+
+    start = min(block)
+    ordered: List[int] = []
+    visited: Set[int] = set()
+
+    def visit(node: int) -> None:
+        """Visit cycle nodes in input-neighbor order.
+
+        Parameters
+        ----------
+        node : int
+            Current cycle node.
+
+        Returns
+        -------
+        None
+            The function mutates ``ordered`` and ``visited``.
+        """
+        visited.add(node)
+        ordered.append(node)
+        for neighbor in adjacency[node]:
+            if neighbor not in visited:
+                visit(neighbor)
+
+    visit(start)
+    if len(ordered) != len(block):
+        return None
+    return ordered
+
+
 def circo_positions(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -433,6 +576,9 @@ def circo_positions(
     device = layout_device(edge_index)
     if num_nodes <= 0:
         return torch.zeros((0, 2), dtype=torch.float64, device=device), {"blocks": []}
+    if _is_connected_path(edge_index, num_nodes):
+        blocks = biconnected_components(edge_index, num_nodes)
+        return _connected_path_positions(edge_index, num_nodes, nodesep, device), {"blocks": blocks}
     blocks = biconnected_components(edge_index, num_nodes)
     node_blocks: DefaultDict[int, List[int]] = defaultdict(list)
     for block_index, block in enumerate(blocks):
@@ -443,7 +589,7 @@ def circo_positions(
     positions = torch.zeros((num_nodes, 2), dtype=torch.float64, device=device)
     placed: Set[int] = set()
     for block_index, block in enumerate(blocks):
-        ordered = sorted(block)
+        ordered = _cycle_block_order(edge_index, block) or sorted(block)
         count = len(ordered)
         if count == 1:
             radius = 0.0
