@@ -14,6 +14,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "arf": ("dagua.layout.ops.pipelines.arf", "layout_arf_pipeline"),
     "arc": ("dagua.layout.ops.pipelines.arc", "layout_arc_pipeline"),
     "bfs": ("dagua.layout.ops.pipelines.bfs", "layout_bfs_pipeline"),
+    "balloon": ("dagua.layout.ops.pipelines.balloon", "layout_balloon_pipeline"),
     "bipartite": (
         "dagua.layout.ops.pipelines.bipartite",
         "layout_bipartite_pipeline",
@@ -66,6 +67,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "dot": ("dagua.layout.ops.pipelines.dot", "layout_dot_pipeline"),
     "fa2": ("dagua.layout.ops.pipelines.fa2", "layout_fa2_pipeline"),
     "fdp": ("dagua.layout.ops.pipelines.fdp", "layout_fdp_pipeline"),
+    "fpp": ("dagua.layout.ops.pipelines.fpp", "layout_fpp_pipeline"),
     "fmmm": ("dagua.layout.ops.pipelines.fmmm", "layout_fmmm_pipeline"),
     "fcose": ("dagua.layout.ops.pipelines.fcose", "layout_fcose_pipeline"),
     "fr": ("dagua.layout.ops.pipelines.fr", "layout_fr_pipeline"),
@@ -129,6 +131,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "radial_tree": ("dagua.layout.ops.pipelines.radial_tree", "layout_radial_tree_pipeline"),
     "sfdp": ("dagua.layout.ops.pipelines.sfdp", "layout_sfdp_pipeline"),
+    "schnyder": ("dagua.layout.ops.pipelines.schnyder", "layout_schnyder_pipeline"),
     "sgd2_multi": (
         "dagua.layout.ops.pipelines.sgd2_multi",
         "layout_sgd2_multi_pipeline",
