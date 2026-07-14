@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Protocol, Tuple, Union
 
 import numpy as np
 import torch
@@ -27,6 +27,49 @@ _DEFAULT_SHIFT = 1.0e-3
 _DEFAULT_UNIT_EDGE_LENGTH = 1.0
 _DEFAULT_SGD_ITERATIONS = 100
 _DEFAULT_SGD_EPS = 0.1
+_U32_MASK = 0xFFFFFFFF
+_U64_MASK = 0xFFFFFFFFFFFFFFFF
+_CHACHA_CONSTANTS = (0x61707865, 0x3320646E, 0x79622D32, 0x6B206574)
+_PCG32_MULTIPLIER = 6364136223846793005
+_PCG32_INCREMENT = 11634580027462260723
+
+
+class _OmegaRng(Protocol):
+    """Protocol for Omega random streams.
+
+    Implementations provide the subset of sampling operations used by the
+    egraph-rs Omega path.
+    """
+
+    def gen_range_usize(self, upper: int) -> int:
+        """Sample uniformly from ``0..upper``.
+
+        Parameters
+        ----------
+        upper : int
+            Exclusive upper bound.
+
+        Returns
+        -------
+        int
+            Sampled integer.
+        """
+        ...
+
+    def shuffle(self, values: np.ndarray) -> None:
+        """Shuffle an integer array in place.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            One-dimensional integer array.
+
+        Returns
+        -------
+        None
+            ``values`` is shuffled in place.
+        """
+        ...
 
 
 @dataclass(frozen=True)
@@ -90,6 +133,276 @@ class _OmegaPair:
     weight: float
 
 
+def _rotate_left_u32(value: int, amount: int) -> int:
+    """Rotate a 32-bit integer left.
+
+    Parameters
+    ----------
+    value : int
+        Input word.
+    amount : int
+        Rotation amount in bits.
+
+    Returns
+    -------
+    int
+        Rotated 32-bit word.
+    """
+    return ((value << amount) & _U32_MASK) | (value >> (32 - amount))
+
+
+def _chacha_quarter_round(state: List[int], a: int, b: int, c: int, d: int) -> None:
+    """Apply one ChaCha quarter round.
+
+    Parameters
+    ----------
+    state : list[int]
+        Sixteen-word ChaCha state.
+    a : int
+        First state index.
+    b : int
+        Second state index.
+    c : int
+        Third state index.
+    d : int
+        Fourth state index.
+
+    Returns
+    -------
+    None
+        ``state`` is updated in place.
+    """
+    state[a] = (state[a] + state[b]) & _U32_MASK
+    state[d] ^= state[a]
+    state[d] = _rotate_left_u32(state[d], 16)
+    state[c] = (state[c] + state[d]) & _U32_MASK
+    state[b] ^= state[c]
+    state[b] = _rotate_left_u32(state[b], 12)
+    state[a] = (state[a] + state[b]) & _U32_MASK
+    state[d] ^= state[a]
+    state[d] = _rotate_left_u32(state[d], 8)
+    state[c] = (state[c] + state[d]) & _U32_MASK
+    state[b] ^= state[c]
+    state[b] = _rotate_left_u32(state[b], 7)
+
+
+def _pcg32_seed_words(seed: int) -> List[int]:
+    """Expand a u64 seed like ``rand_core::SeedableRng::seed_from_u64``.
+
+    Parameters
+    ----------
+    seed : int
+        Unsigned 64-bit seed value.
+
+    Returns
+    -------
+    list[int]
+        Eight little-endian u32 words for the ChaCha key.
+    """
+    state = int(seed) & _U64_MASK
+    words: List[int] = []
+    for _ in range(8):
+        state = (state * _PCG32_MULTIPLIER + _PCG32_INCREMENT) & _U64_MASK
+        xorshifted = (((state >> 18) ^ state) >> 27) & _U32_MASK
+        rotation = (state >> 59) & 31
+        word = (xorshifted >> rotation) | ((xorshifted << ((-rotation) & 31)) & _U32_MASK)
+        words.append(word & _U32_MASK)
+    return words
+
+
+class _RustStdRng:
+    """Small port of rand 0.8 ``StdRng`` for Omega fidelity.
+
+    The egraph-rs CLI uses ``StdRng`` from ``rand`` 0.8.7, which is ChaCha12
+    with PCG32 seed expansion. Only the operations required by Omega are
+    implemented here.
+    """
+
+    def __init__(self, seed: int) -> None:
+        """Initialize the RNG from a u64 seed.
+
+        Parameters
+        ----------
+        seed : int
+            Seed forwarded to ``StdRng::seed_from_u64``.
+        """
+        self._state = list(_CHACHA_CONSTANTS) + _pcg32_seed_words(seed) + [0, 0, 0, 0]
+        self._buffer: List[int] = []
+
+    def _refill4(self) -> None:
+        """Generate four buffered ChaCha12 blocks.
+
+        Returns
+        -------
+        None
+            The internal u32 buffer is replaced.
+        """
+        words: List[int] = []
+        for _ in range(4):
+            working = self._state.copy()
+            for _round_pair in range(6):
+                _chacha_quarter_round(working, 0, 4, 8, 12)
+                _chacha_quarter_round(working, 1, 5, 9, 13)
+                _chacha_quarter_round(working, 2, 6, 10, 14)
+                _chacha_quarter_round(working, 3, 7, 11, 15)
+                _chacha_quarter_round(working, 0, 5, 10, 15)
+                _chacha_quarter_round(working, 1, 6, 11, 12)
+                _chacha_quarter_round(working, 2, 7, 8, 13)
+                _chacha_quarter_round(working, 3, 4, 9, 14)
+            words.extend((working[index] + self._state[index]) & _U32_MASK for index in range(16))
+            self._state[12] = (self._state[12] + 1) & _U32_MASK
+            if self._state[12] == 0:
+                self._state[13] = (self._state[13] + 1) & _U32_MASK
+        self._buffer = words
+
+    def next_u32(self) -> int:
+        """Return the next u32 from the Rust ``BlockRng`` stream.
+
+        Returns
+        -------
+        int
+            Unsigned 32-bit random word.
+        """
+        if not self._buffer:
+            self._refill4()
+        return self._buffer.pop(0)
+
+    def next_u64(self) -> int:
+        """Return the next u64 from two little-endian u32 words.
+
+        Returns
+        -------
+        int
+            Unsigned 64-bit random word.
+        """
+        low = self.next_u32()
+        high = self.next_u32()
+        return low | (high << 32)
+
+    def skip_f32_ranges(self, count: int) -> None:
+        """Skip ``gen_range(f32..f32)`` draws.
+
+        Parameters
+        ----------
+        count : int
+            Number of f32 range samples to consume.
+
+        Returns
+        -------
+        None
+            The RNG stream is advanced.
+        """
+        for _ in range(max(0, int(count))):
+            self.next_u32()
+
+    def gen_range_f32(self, low: float, high: float) -> np.float32:
+        """Sample a Rust ``f32`` range.
+
+        Parameters
+        ----------
+        low : float
+            Inclusive lower bound.
+        high : float
+            Exclusive upper bound.
+
+        Returns
+        -------
+        numpy.float32
+            Sampled value.
+        """
+        if not low < high:
+            raise ValueError("low must be less than high.")
+        scale = np.float32(high) - np.float32(low)
+        value_0_1 = np.float32(self.next_u32() >> 9) * np.float32(1.0 / (1 << 23))
+        return value_0_1 * scale + np.float32(low)
+
+    def gen_range_usize(self, upper: int) -> int:
+        """Sample uniformly from ``0usize..upper`` using rand 0.8 arithmetic.
+
+        Parameters
+        ----------
+        upper : int
+            Exclusive upper bound.
+
+        Returns
+        -------
+        int
+            Sampled integer.
+        """
+        if upper <= 0:
+            raise ValueError("upper must be positive.")
+        leading_zeros = 64 - int(upper).bit_length()
+        zone = (((int(upper) << leading_zeros) & _U64_MASK) - 1) & _U64_MASK
+        while True:
+            value = self.next_u64()
+            product = value * int(upper)
+            high = (product >> 64) & _U64_MASK
+            low = product & _U64_MASK
+            if low <= zone:
+                return int(high)
+
+    def shuffle(self, values: np.ndarray) -> None:
+        """Shuffle values like Rust ``SliceRandom::shuffle``.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            One-dimensional integer array.
+
+        Returns
+        -------
+        None
+            ``values`` is shuffled in place.
+        """
+        for index in range(len(values) - 1, 0, -1):
+            swap_index = self.gen_range_usize(index + 1)
+            values[index], values[swap_index] = values[swap_index], values[index]
+
+
+class _NumpyOmegaRng:
+    """Adapter preserving existing NumPy-based omega unit tests."""
+
+    def __init__(self, rng: np.random.Generator) -> None:
+        """Store a NumPy generator.
+
+        Parameters
+        ----------
+        rng : numpy.random.Generator
+            Generator used for compatibility tests.
+        """
+        self._rng = rng
+
+    def gen_range_usize(self, upper: int) -> int:
+        """Sample uniformly from ``0..upper``.
+
+        Parameters
+        ----------
+        upper : int
+            Exclusive upper bound.
+
+        Returns
+        -------
+        int
+            Sampled integer.
+        """
+        return int(self._rng.integers(0, upper))
+
+    def shuffle(self, values: np.ndarray) -> None:
+        """Shuffle values with NumPy.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            One-dimensional integer array.
+
+        Returns
+        -------
+        None
+            ``values`` is shuffled in place.
+        """
+        self._rng.shuffle(values)
+
+
 def _undirected_edges(edge_index: torch.Tensor, num_nodes: int) -> List[Tuple[int, int]]:
     """Return valid undirected edges in input order.
 
@@ -149,12 +462,12 @@ def _laplacian(num_nodes: int, edges: List[Tuple[int, int]], unit_edge_length: f
     return lap
 
 
-def _rdmds_embedding(
+def _rdmds_shifted_laplacian(
     num_nodes: int,
     edges: List[Tuple[int, int]],
     config: OmegaConfig,
 ) -> np.ndarray:
-    """Compute the resistance-distance MDS spectral embedding.
+    """Build the f32 ``L + shift * I`` matrix used by Rust RDMDS.
 
     Parameters
     ----------
@@ -168,8 +481,322 @@ def _rdmds_embedding(
     Returns
     -------
     numpy.ndarray
+        Shifted Laplacian matrix with shape ``[N, N]`` and dtype ``float32``.
+    """
+    matrix = np.zeros((num_nodes, num_nodes), dtype=np.float32)
+    weight = np.float32(config.unit_edge_length)
+    for u, v in edges:
+        matrix[u, u] = np.float32(matrix[u, u] + weight)
+        matrix[v, v] = np.float32(matrix[v, v] + weight)
+        matrix[u, v] = np.float32(matrix[u, v] - weight)
+        matrix[v, u] = np.float32(matrix[v, u] - weight)
+    shift = np.float32(config.shift)
+    for index in range(num_nodes):
+        matrix[index, index] = np.float32(matrix[index, index] + shift)
+    return matrix
+
+
+def _incomplete_cholesky(
+    matrix: np.ndarray,
+) -> Tuple[List[List[Tuple[int, np.float32]]], np.ndarray]:
+    """Compute the IC(0) preconditioner used by egraph-rs.
+
+    Parameters
+    ----------
+    matrix : numpy.ndarray
+        Symmetric f32 matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    tuple[list[list[tuple[int, numpy.float32]]], numpy.ndarray]
+        Lower-triangular row entries and diagonal terms.
+    """
+    num_nodes = int(matrix.shape[0])
+    row_entries: List[List[Tuple[int, np.float32]]] = [[] for _ in range(num_nodes)]
+    adjacency: List[dict[int, np.float32]] = [dict() for _ in range(num_nodes)]
+    for i in range(num_nodes):
+        for j in range(i + 1, num_nodes):
+            value = np.float32(matrix[i, j])
+            if value == np.float32(0.0):
+                continue
+            adjacency[i][j] = value
+            adjacency[j][i] = value
+            row_entries[j].append((i, value))
+    diagonal = np.zeros(num_nodes, dtype=np.float32)
+    for i in range(num_nodes):
+        row_entries[i].sort(key=lambda item: item[0])
+    for i in range(num_nodes):
+        sum_value = np.float32(0.0)
+        for _, entry_value in row_entries[i]:
+            sum_value = np.float32(sum_value + entry_value * entry_value)
+        diagonal[i] = np.sqrt(np.maximum(np.float32(matrix[i, i] - sum_value), np.float32(0.0)))
+        if diagonal[i] <= np.float32(0.0):
+            diagonal[i] = np.float32(1.0e-6)
+        for j in sorted(adjacency[i]):
+            if j <= i:
+                continue
+            entry_pos = next(
+                (pos for pos, (col, _) in enumerate(row_entries[j]) if col == i),
+                None,
+            )
+            if entry_pos is None:
+                continue
+            overlap = np.float32(0.0)
+            left = 0
+            right = 0
+            while left < len(row_entries[i]) and right < len(row_entries[j]):
+                left_col, left_value = row_entries[i][left]
+                right_col, right_value = row_entries[j][right]
+                if left_col == right_col and left_col < i:
+                    overlap = np.float32(overlap + left_value * right_value)
+                    left += 1
+                    right += 1
+                elif left_col < right_col:
+                    left += 1
+                else:
+                    right += 1
+            row_entries[j][entry_pos] = (
+                i,
+                np.float32((adjacency[i][j] - overlap) / diagonal[i]),
+            )
+    return row_entries, diagonal
+
+
+def _apply_ic_preconditioner(
+    row_entries: List[List[Tuple[int, np.float32]]],
+    diagonal: np.ndarray,
+    residual: np.ndarray,
+) -> np.ndarray:
+    """Apply the IC(0) preconditioner.
+
+    Parameters
+    ----------
+    row_entries : list[list[tuple[int, numpy.float32]]]
+        Lower-triangular IC entries by row.
+    diagonal : numpy.ndarray
+        IC diagonal vector with shape ``[N]``.
+    residual : numpy.ndarray
+        Residual vector with shape ``[N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Preconditioned residual with shape ``[N]``.
+    """
+    num_nodes = int(residual.shape[0])
+    y_value = np.zeros(num_nodes, dtype=np.float32)
+    for i in range(num_nodes):
+        total = np.float32(0.0)
+        for j, entry_value in row_entries[i]:
+            total = np.float32(total + entry_value * y_value[j])
+        y_value[i] = np.float32((residual[i] - total) / diagonal[i])
+
+    z_value = np.zeros(num_nodes, dtype=np.float32)
+    col_entries: List[List[Tuple[int, np.float32]]] = [[] for _ in range(num_nodes)]
+    for row, entries in enumerate(row_entries):
+        for col, entry_value in entries:
+            col_entries[col].append((row, entry_value))
+    for i in range(num_nodes - 1, -1, -1):
+        total = np.float32(0.0)
+        for j, entry_value in col_entries[i]:
+            total = np.float32(total + entry_value * z_value[j])
+        z_value[i] = np.float32((y_value[i] - total) / diagonal[i])
+    return z_value
+
+
+def _solve_with_conjugate_gradient(
+    matrix: np.ndarray,
+    row_entries: List[List[Tuple[int, np.float32]]],
+    diagonal: np.ndarray,
+    rhs: np.ndarray,
+    cg_max_iterations: int,
+    cg_tolerance: float,
+) -> np.ndarray:
+    """Solve one shifted Laplacian system with preconditioned CG.
+
+    Parameters
+    ----------
+    matrix : numpy.ndarray
+        Shifted Laplacian matrix with shape ``[N, N]``.
+    row_entries : list[list[tuple[int, numpy.float32]]]
+        IC lower-triangular row entries.
+    diagonal : numpy.ndarray
+        IC diagonal vector with shape ``[N]``.
+    rhs : numpy.ndarray
+        Right-hand side vector with shape ``[N]``.
+    cg_max_iterations : int
+        Maximum CG iterations.
+    cg_tolerance : float
+        Residual tolerance.
+
+    Returns
+    -------
+    numpy.ndarray
+        Approximate solution vector with shape ``[N]``.
+    """
+    solution = np.zeros_like(rhs, dtype=np.float32)
+    residual = np.float32(rhs - matrix @ solution)
+    z_value = _apply_ic_preconditioner(row_entries, diagonal, residual)
+    direction = z_value.copy()
+    rsold = np.float32(np.dot(residual, z_value))
+    tolerance_sq = np.float32(cg_tolerance) * np.float32(cg_tolerance)
+    for _ in range(int(cg_max_iterations)):
+        q_value = np.float32(matrix @ direction)
+        alpha = np.float32(rsold / np.float32(np.dot(direction, q_value)))
+        solution = np.float32(solution + alpha * direction)
+        residual = np.float32(residual - alpha * q_value)
+        z_value = _apply_ic_preconditioner(row_entries, diagonal, residual)
+        rsnew = np.float32(np.dot(residual, z_value))
+        if rsnew < tolerance_sq:
+            break
+        beta = np.float32(rsnew / rsold)
+        direction = np.float32(beta * direction + z_value)
+        rsold = rsnew
+    return solution
+
+
+def _gram_schmidt(vector: np.ndarray, known_vectors: np.ndarray) -> np.ndarray:
+    """Orthogonalize a vector against known columns.
+
+    Parameters
+    ----------
+    vector : numpy.ndarray
+        Input vector with shape ``[N]``.
+    known_vectors : numpy.ndarray
+        Matrix whose columns are known vectors.
+
+    Returns
+    -------
+    numpy.ndarray
+        Orthogonalized f32 vector.
+    """
+    result = vector.astype(np.float32, copy=True)
+    for col_index in range(int(known_vectors.shape[1])):
+        column = known_vectors[:, col_index]
+        dot_value = np.float32(np.dot(result, column))
+        result = np.float32(result - column * dot_value)
+    return result
+
+
+def _normalize_vector(vector: np.ndarray) -> np.ndarray:
+    """Normalize a vector with f32 arithmetic.
+
+    Parameters
+    ----------
+    vector : numpy.ndarray
+        Input vector with shape ``[N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Normalized vector.
+    """
+    norm = np.sqrt(np.float32(np.dot(vector, vector)))
+    if norm > np.float32(0.0):
+        return np.float32(vector / norm)
+    return vector.astype(np.float32, copy=True)
+
+
+def _rdmds_embedding_iterative(
+    num_nodes: int,
+    edges: List[Tuple[int, int]],
+    config: OmegaConfig,
+    rng: _RustStdRng,
+) -> np.ndarray:
+    """Compute the Rust-style approximate RDMDS embedding.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    edges : list[tuple[int, int]]
+        Unique undirected graph edges.
+    config : OmegaConfig
+        RDMDS configuration.
+    rng : _RustStdRng
+        Rust-compatible RNG consumed by random initial vectors.
+
+    Returns
+    -------
+    numpy.ndarray
+        Embedding with shape ``[N, d]``.
+    """
+    rank = max(1, int(config.d))
+    if num_nodes == 0:
+        return np.zeros((0, rank), dtype=np.float32)
+    if num_nodes == 1 or not edges:
+        return np.zeros((num_nodes, rank), dtype=np.float32)
+
+    matrix = _rdmds_shifted_laplacian(num_nodes, edges, config)
+    row_entries, diagonal = _incomplete_cholesky(matrix)
+    all_vectors = np.zeros((num_nodes, rank + 1), dtype=np.float32)
+    all_vectors[:, 0] = np.float32(1.0 / math.sqrt(float(num_nodes)))
+    all_values = np.zeros(rank + 1, dtype=np.float32)
+    tolerance = np.float32(1.0e-4)
+    for eigen_index in range(1, rank + 1):
+        x_iter = np.array(
+            [rng.gen_range_f32(-1.0, 1.0) for _ in range(num_nodes)],
+            dtype=np.float32,
+        )
+        x_iter = _normalize_vector(_gram_schmidt(x_iter, all_vectors[:, :eigen_index]))
+        previous = np.float32(0.0)
+        for _ in range(1000):
+            y_value = _solve_with_conjugate_gradient(
+                matrix,
+                row_entries,
+                diagonal,
+                x_iter,
+                cg_max_iterations=100,
+                cg_tolerance=1.0e-4,
+            )
+            x_next = _normalize_vector(_gram_schmidt(y_value, all_vectors[:, :eigen_index]))
+            numerator = np.float32(np.dot(x_next, np.float32(matrix @ x_next)))
+            denominator = np.float32(np.dot(x_next, x_next))
+            estimate = np.float32(numerator / denominator)
+            converged = np.abs(np.float32(estimate - previous)) < tolerance
+            x_iter = x_next
+            previous = estimate
+            if bool(converged):
+                break
+        all_values[eigen_index] = previous
+        all_vectors[:, eigen_index] = x_iter
+
+    coords = np.zeros((num_nodes, rank), dtype=np.float32)
+    shift = np.float32(config.shift)
+    for dim in range(rank):
+        eigenvalue = np.maximum(np.float32(all_values[dim + 1] - shift), np.float32(0.0))
+        if eigenvalue > np.float32(0.0):
+            coords[:, dim] = np.float32(all_vectors[:, dim + 1] / np.sqrt(eigenvalue))
+    return coords
+
+
+def _rdmds_embedding(
+    num_nodes: int,
+    edges: List[Tuple[int, int]],
+    config: OmegaConfig,
+    rng: Optional[_RustStdRng] = None,
+) -> np.ndarray:
+    """Compute the resistance-distance MDS spectral embedding.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    edges : list[tuple[int, int]]
+        Unique undirected graph edges.
+    config : OmegaConfig
+        RDMDS configuration.
+    rng : _RustStdRng, optional
+        Rust-compatible RNG. When provided, the egraph-rs inverse-iteration
+        path is used and consumes the RNG stream.
+
+    Returns
+    -------
+    numpy.ndarray
         Embedding array with shape ``[N, d]``.
     """
+    if rng is not None:
+        return _rdmds_embedding_iterative(num_nodes, edges, config, rng)
     rank = max(1, int(config.d))
     if num_nodes == 0:
         return np.zeros((0, rank), dtype=np.float64)
@@ -215,7 +842,7 @@ def _build_pairs(
     edges: List[Tuple[int, int]],
     embedding: np.ndarray,
     config: OmegaConfig,
-    rng: np.random.Generator,
+    rng: Union[np.random.Generator, _OmegaRng],
 ) -> List[_OmegaPair]:
     """Build edge pairs plus reference-ordered random pairs.
 
@@ -227,7 +854,7 @@ def _build_pairs(
         RDMDS embedding with shape ``[N, d]``.
     config : OmegaConfig
         SparseSGD pair configuration.
-    rng : numpy.random.Generator
+    rng : numpy.random.Generator or _OmegaRng
         Deterministic random generator.
 
     Returns
@@ -238,6 +865,7 @@ def _build_pairs(
     num_nodes = int(embedding.shape[0])
     pairs: List[_OmegaPair] = []
     used: set[Tuple[int, int]] = set()
+    sampler: _OmegaRng = _NumpyOmegaRng(rng) if isinstance(rng, np.random.Generator) else rng
 
     for u, v in edges:
         key = (u, v) if u < v else (v, u)
@@ -249,7 +877,7 @@ def _build_pairs(
 
     for i in range(num_nodes):
         for _ in range(max(0, int(config.k))):
-            j = int(rng.integers(0, num_nodes))
+            j = sampler.gen_range_usize(num_nodes)
             if i == j:
                 continue
             key = (i, j) if i < j else (j, i)
@@ -286,7 +914,7 @@ def _run_sparse_sgd(
     embedding: np.ndarray,
     pairs: List[_OmegaPair],
     config: OmegaConfig,
-    rng: np.random.Generator,
+    rng: Union[np.random.Generator, _OmegaRng],
 ) -> np.ndarray:
     """Run Omega SparseSGD refinement.
 
@@ -298,7 +926,7 @@ def _run_sparse_sgd(
         Sparse stress pairs.
     config : OmegaConfig
         SGD configuration.
-    rng : numpy.random.Generator
+    rng : numpy.random.Generator or _OmegaRng
         Deterministic random generator used for per-iteration shuffles.
 
     Returns
@@ -317,10 +945,11 @@ def _run_sparse_sgd(
     if config.sgd_iterations > 1 and eta_min > 0.0:
         decay = math.log(eta_max / eta_min) / float(config.sgd_iterations - 1)
 
+    sampler: _OmegaRng = _NumpyOmegaRng(rng) if isinstance(rng, np.random.Generator) else rng
     order = np.arange(len(pairs), dtype=np.int64)
     for step in range(config.sgd_iterations):
         eta = eta_max * math.exp(-decay * float(step))
-        rng.shuffle(order)
+        sampler.shuffle(order)
         for pair_idx in order.tolist():
             pair = pairs[pair_idx]
             delta = pos[pair.i] - pos[pair.j]
@@ -392,9 +1021,11 @@ class ComputeOmegaEmbedding(Op):
         """
         del ctx
         edges = _undirected_edges(problem.edge_index, problem.num_nodes)
-        embedding = _rdmds_embedding(problem.num_nodes, edges, self.config)
+        rng = _RustStdRng(self.config.seed)
+        embedding = _rdmds_embedding(problem.num_nodes, edges, self.config, rng)
         state.extras["omega_edges"] = edges
         state.extras["omega_embedding"] = embedding
+        state.extras["omega_rng"] = rng
         return state
 
 
@@ -431,12 +1062,14 @@ class BuildOmegaPairs(Op):
         SolveState
             State with ``omega_pairs`` cached.
         """
-        del problem, ctx
+        del ctx
         embedding = state.extras.get("omega_embedding")
         edges = state.extras.get("omega_edges")
         if not isinstance(embedding, np.ndarray) or not isinstance(edges, list):
             raise RuntimeError("Omega embedding stage must run before pair construction.")
-        rng = np.random.default_rng(self.config.seed)
+        rng = state.extras.get("omega_rng")
+        if not isinstance(rng, _RustStdRng):
+            raise RuntimeError("Omega RDMDS stage did not preserve the Rust RNG stream.")
         state.extras["omega_pairs"] = _build_pairs(edges, embedding, self.config, rng)
         return state
 
@@ -477,9 +1110,11 @@ class RunOmegaSparseSgd(Op):
         del ctx
         embedding = state.extras.get("omega_embedding")
         pairs = state.extras.get("omega_pairs")
+        rng = state.extras.get("omega_rng")
         if not isinstance(embedding, np.ndarray) or not isinstance(pairs, list):
             raise RuntimeError("Omega pair construction must run before SparseSGD.")
-        rng = np.random.default_rng(self.config.seed)
+        if not isinstance(rng, _RustStdRng):
+            raise RuntimeError("Omega pair construction did not preserve the Rust RNG stream.")
         pos = _run_sparse_sgd(embedding, pairs, self.config, rng)
         state.pos = torch.as_tensor(pos, dtype=self.config.dtype, device=problem.edge_index.device)
         return state
