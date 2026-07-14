@@ -239,6 +239,17 @@ class IgraphRT(_IgraphBase):
 
 
 @register
+class IgraphRTCircular(_IgraphBase):
+    """Circular Reingold-Tilford reference adapter."""
+
+    name = "igraph_rt_circular"
+    max_nodes = 10_000
+    layout_algo = "reingold_tilford_circular"
+    layout_kwargs = {"mode": "out"}
+    variant_param_names = frozenset({"mode", "root", "rootlevel"})
+
+
+@register
 class IgraphRTHorizontal(_IgraphBase):
     """Reingold-Tilford reference adapter with horizontal axis orientation."""
 
