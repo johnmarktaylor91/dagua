@@ -11,8 +11,10 @@ restores the placeholder for store-compatibility experiments.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -25,6 +27,25 @@ if TYPE_CHECKING:
 
 _DEFAULT_NODE_WIDTH = 120.0
 _DEFAULT_NODE_HEIGHT = 40.0
+_DAGRE_NODE_MODULES = Path("/home/jtaylor/projects/dagua/node_modules")
+
+
+def _node_subprocess_env() -> Dict[str, str]:
+    """Return a Node environment that can resolve repo-local dagre packages.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables for Dagre subprocesses.
+    """
+    env = dict(os.environ)
+    if _DAGRE_NODE_MODULES.exists():
+        existing = env.get("NODE_PATH", "")
+        paths = [str(_DAGRE_NODE_MODULES)]
+        if existing:
+            paths.append(existing)
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
 
 
 def _node_wh(graph: DaguaGraph, node_index: int) -> Tuple[float, float]:
@@ -283,6 +304,7 @@ class DagreCompetitor(CompetitorBase):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_node_subprocess_env(),
             )
             elapsed = time.perf_counter() - start
 
@@ -317,6 +339,7 @@ class DagreCompetitor(CompetitorBase):
                 ["node", "-e", "require('dagre')"],
                 capture_output=True,
                 timeout=10,
+                env=_node_subprocess_env(),
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):

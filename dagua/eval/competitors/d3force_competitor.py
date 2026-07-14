@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
@@ -16,6 +18,26 @@ if TYPE_CHECKING:
 
 _DEFAULT_TICKS = 300
 _DEFAULT_SEED = 1
+_D3FORCE_NODE_MODULES = Path("/home/jtaylor/projects/dagua/node_modules")
+
+
+def _node_subprocess_env() -> Dict[str, str]:
+    """Return a Node environment that can resolve repo-local d3-force.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables for d3-force subprocesses.
+    """
+    env = dict(os.environ)
+    if _D3FORCE_NODE_MODULES.exists():
+        existing = env.get("NODE_PATH", "")
+        paths = [str(_D3FORCE_NODE_MODULES)]
+        if existing:
+            paths.append(existing)
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
+
 
 _D3FORCE_SCRIPT = r"""
 const d3 = require('d3-force');
@@ -201,6 +223,7 @@ class D3ForceCompetitor(CompetitorBase):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_node_subprocess_env(),
             )
             elapsed = time.perf_counter() - start
             if result.returncode != 0:
@@ -247,6 +270,7 @@ class D3ForceCompetitor(CompetitorBase):
                 ["node", "-e", "require('d3-force')"],
                 capture_output=True,
                 timeout=10,
+                env=_node_subprocess_env(),
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
