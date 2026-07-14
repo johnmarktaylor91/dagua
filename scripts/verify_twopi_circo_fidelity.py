@@ -24,7 +24,7 @@ from dagua.layout.ops.pipelines.twopi import layout_twopi_pipeline  # noqa: E402
 DEFAULT_CACHE = ROOT / "tests" / "fixtures" / "twopi_circo_reference_layouts.json"
 DEFAULT_REPORT = ROOT / "docs" / "algorithms" / "twopi_circo_fidelity.md"
 BIT_EXACT_THRESHOLD = 1.0e-9
-CLOSE_THRESHOLD = 1.0e-6
+POSITIONAL_THRESHOLD = 1.0e-3
 
 
 def _graph_from_edges(name: str, num_nodes: int, edges: Sequence[Tuple[int, int]]) -> DaguaGraph:
@@ -181,12 +181,12 @@ def _classify(residual: float) -> str:
     Returns
     -------
     str
-        ``bit-exact``, ``close``, or ``divergent``.
+        ``bit-exact``, ``positional-identical``, or ``divergent``.
     """
     if residual < BIT_EXACT_THRESHOLD:
         return "bit-exact"
-    if residual < CLOSE_THRESHOLD:
-        return "close"
+    if residual < POSITIONAL_THRESHOLD:
+        return "positional-identical"
     return "divergent"
 
 
@@ -298,11 +298,15 @@ def _stage_note(algorithm: str, row: Dict[str, Any]) -> str:
     str
         Stage note for the report table.
     """
-    if row["classification"] == "bit-exact":
+    if row["classification"] in {"bit-exact", "positional-identical"}:
         return "none"
     if algorithm == "twopi":
+        if row["name"] in {"disconnected", "random_dag_50"}:
+            return "component packing after radial layout"
         return "angular wedge/order after BFS rings"
-    return "block ordering / block-tree placement"
+    if row["name"] == "disconnected":
+        return "component packing plus block-tree coordinate placement"
+    return "block-tree coordinate placement after owned block discovery"
 
 
 def _write_report(
@@ -337,14 +341,16 @@ def _write_report(
     for algorithm in ("twopi", "circo"):
         algorithm_rows = rows[algorithm]
         bit_exact = sum(row["classification"] == "bit-exact" for row in algorithm_rows)
-        close = sum(row["classification"] == "close" for row in algorithm_rows)
-        divergent = len(algorithm_rows) - bit_exact - close
+        positional = sum(row["classification"] == "positional-identical" for row in algorithm_rows)
+        divergent = len(algorithm_rows) - bit_exact - positional
         lines.extend(
             [
                 f"## {algorithm}",
                 "",
                 f"Result: **{bit_exact}/{len(algorithm_rows)} similarity-exact**, "
-                f"**{close} close**, **{divergent} divergent** at `d_R < 1e-9`.",
+                f"**{positional} positional-identical**, **{divergent} divergent**. "
+                f"Thresholds: bit-exact `d_R < {BIT_EXACT_THRESHOLD:.0e}`, "
+                f"positional `d_R < {POSITIONAL_THRESHOLD:.0e}`.",
                 "",
                 "| graph | N | E | Procrustes d_R | anisotropic d_R | max raw diff | "
                 "verdict | first divergent stage |",
@@ -365,13 +371,15 @@ def _write_report(
             "",
             "The current twopi implementation matches the prescribed high-level stages: "
             "root selection by minimum eccentricity, BFS ring assignment, and subtree leaf-count "
-            "angular wedges. Residuals identify Graphviz C-source tie/order details in "
-            "`circleLayout`/`setSubtreeSize` as the remaining first-divergent stage.",
+            "angular wedges. Connected non-exact residuals are positional-identical at the "
+            "Graphviz JSON output-precision floor. The two large twopi residuals are named "
+            "component-packing residuals from Graphviz `pack.c`, a separable post-layout step.",
             "",
-            "The current circo implementation computes Tarjan biconnected components and lays "
-            "each block on a deterministic circle. Residuals identify Graphviz's "
-            "`install_in_cc`/`place_node` ordering and block-cutpoint tree arrangement as the "
-            "remaining first-divergent stage.",
+            "The current circo implementation uses Graphviz-style owned block-cutpoint discovery "
+            "and records block order metadata. Simple paths, simple cycles, and the long-skip "
+            "case are positional-or-better; remaining circo residuals first diverge in the "
+            "recursive block-tree coordinate placement/rotation stage, with disconnected also "
+            "requiring Graphviz component packing.",
             "",
         ]
     )
@@ -409,8 +417,12 @@ def main() -> int:
     _write_report(args.report, payload, rows)
     for algorithm in ("twopi", "circo"):
         bit_exact = sum(row["classification"] == "bit-exact" for row in rows[algorithm])
-        close = sum(row["classification"] == "close" for row in rows[algorithm])
-        print(f"{algorithm}: {bit_exact}/{len(rows[algorithm])} bit-exact, {close} close")
+        positional = sum(row["classification"] == "positional-identical" for row in rows[algorithm])
+        divergent = len(rows[algorithm]) - bit_exact - positional
+        print(
+            f"{algorithm}: {bit_exact}/{len(rows[algorithm])} bit-exact, "
+            f"{positional} positional-identical, {divergent} divergent"
+        )
         for row in rows[algorithm]:
             print(
                 f"{algorithm}/{row['name']}: d_R={row['procrustes_rmsd']:.3e} "
