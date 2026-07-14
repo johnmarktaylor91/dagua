@@ -1,7 +1,7 @@
 """(SGD)^2 multicriteria reference competitor adapter.
 
 Runs the original (SGD)^2 code from github.com/tiga1231/graph-drawing
-(cloned to /tmp/graph-drawing) as a reference implementation.
+(cloned to ~/tools/dagua-refs/graph-drawing) as a reference implementation.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
-_SGD2_REPO = Path("/tmp/graph-drawing")
+_SGD2_REPO = Path.home() / "tools" / "dagua-refs" / "graph-drawing"
 _SGD2_REMOTE_URL = "https://github.com/tiga1231/graph-drawing"
 _SGD2_BRANCH = "sgd"
 _CROSSING_CRITERIA = frozenset({"crossings", "crossing_angle_maximization"})
