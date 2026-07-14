@@ -2,8 +2,7 @@
 
 Each tripwire runs a clean synthetic panel and an injected-defect variant. A
 passing tripwire proves the paired metric stays quiet on clean input and fires
-when its defect is present. The spline tripwire is intentionally skipped until
-Lane E1 wires Lane A's polyline output into the metric layer.
+when its defect is present.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence
 
+from scripts.visual_parity import extractors
 from scripts.visual_parity.types import TargetKind, TripwireResult, TripwireSpec
 
 CANONICAL_STATUS_PATH = Path(
@@ -52,6 +52,8 @@ def _base_panel() -> Panel:
         "node_expected_fill": "#ffffff",
         "cluster_top_shift_px": 0.0,
         "harness_l1": 0.0,
+        "spline_reference_polyline": [(0.0, 0.0), (35.0, 28.0), (70.0, 28.0), (105.0, 0.0)],
+        "spline_dagua_polyline": [(0.0, 0.0), (35.0, 28.0), (70.0, 28.0), (105.0, 0.0)],
     }
 
 
@@ -237,6 +239,26 @@ def metric_scalehide(panel: Panel) -> bool:
     return abs(float(panel["harness_l1"])) > 0.0
 
 
+def metric_spline_path_dist(panel: Panel) -> float:
+    """Measure spline polyline drift between reference and Dagua.
+
+    Parameters
+    ----------
+    panel
+        Panel payload.
+
+    Returns
+    -------
+    float
+        Symmetric mean point-to-polyline distance in points.
+    """
+
+    return extractors.symmetric_mean_point_to_polyline(
+        panel["spline_reference_polyline"],
+        panel["spline_dagua_polyline"],
+    )
+
+
 def _specs() -> List[TripwireSpec]:
     """Return the visual parity v2 tripwire specification table.
 
@@ -345,6 +367,7 @@ def _injectors() -> Dict[str, Mapping[str, Any]]:
         "tw_arroworder": {"arrow_compound_order": ["vee", "normal"]},
         "tw_size": {"node_autosize_w_pt": 120.0},
         "tw_color": {"node_fill": "#f0f0f0"},
+        "tw_spline": {"spline_dagua_polyline": [(0.0, 0.0), (105.0, 0.0)]},
         "tw_cluster": {"cluster_top_shift_px": 4.0},
         "tw_scalehide": {"harness_l1": 1.0},
     }
@@ -368,6 +391,7 @@ def _metric_functions() -> Dict[str, MetricFn]:
         "tw_arroworder": metric_arrow_order,
         "tw_size": metric_node_autosize,
         "tw_color": metric_node_fill,
+        "tw_spline": metric_spline_path_dist,
         "tw_cluster": metric_cluster_rect,
         "tw_scalehide": metric_scalehide,
     }
@@ -399,6 +423,7 @@ def _fires(tripwire_id: str, value: float | str | bool, threshold_scale: float) 
         "tw_trunc": 0.20,
         "tw_kern": 0.05,
         "tw_size": 0.15,
+        "tw_spline": 3.0,
     }
     threshold = thresholds.get(tripwire_id, 0.0) * threshold_scale
     return numeric > threshold
@@ -421,17 +446,6 @@ def run_tripwire(spec: TripwireSpec, threshold_scale: float = 1.0) -> TripwireRe
     """
 
     run_at = datetime.now(timezone.utc).isoformat()
-    if spec.tripwire_id == "tw_spline":
-        return TripwireResult(
-            tripwire_id=spec.tripwire_id,
-            metric_id=spec.metric_id,
-            status="skipped",
-            observed_effect={},
-            min_effect_size=spec.min_effect_size,
-            run_at=run_at,
-            notes="wired in E1",
-        )
-
     clean = _base_panel()
     metric = _metric_functions()[spec.tripwire_id]
     clean_value = metric(clean)
