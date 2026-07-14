@@ -737,27 +737,24 @@ def engine_is_stochastic_for_run(engine_name: str, seed_refs: set[str]) -> bool:
 # plenty; we only need the 100 for algos in the statistical-indistinguishability
 # category." Any engine with even one DISTRIBUTIONAL_EQUIVALENT graph is
 # deliberately EXCLUDED here and keeps the full battery (TOST needs the spread).
+# These are the BASE benchmark engine names (the run schedules base engines, not
+# the ledger's per-config fidelity variant names). Every fidelity variant of each
+# family (maxent_stress: *_default/_alpha2/_entropy/_steps*; pivot_mds: *_10..200;
+# sgd2_multi: *_default/_batch*/_lr*/_stress_only/_with_aspect; stress_maj:
+# *_default/_iter*) is POSITIONAL_IDENTICAL or MODE_B_BIT_EXACT with zero
+# DISTRIBUTIONAL_EQUIVALENT rows in the frozen ledger, so the base engine is
+# per-seed exact. ``sgd2_multi_ref`` is the reference the reimpl matches bit-for-
+# bit per seed, so its quality distribution is identically characterized at 5
+# seeds. Every OTHER stochastic engine (fr/kk/fa2/sfdp/drl/umap/davidson_harel/
+# gem/fmmm/neato/linlog/igraph_*/nx_spring/...) has distributional rows and keeps
+# the full battery.
 BIT_EXACT_STOCHASTIC_ENGINES: frozenset[str] = frozenset(
     {
-        "classic_maxent_stress_alpha2",
-        "classic_maxent_stress_default",
-        "classic_maxent_stress_entropy",
-        "classic_maxent_stress_steps400",
-        "classic_maxent_stress_steps50",
-        "classic_pivot_mds_10",
-        "classic_pivot_mds_100",
-        "classic_pivot_mds_200",
-        "classic_pivot_mds_50",
-        "classic_sgd2_multi_batch128",
-        "classic_sgd2_multi_batch8",
-        "classic_sgd2_multi_default",
-        "classic_sgd2_multi_lr001",
-        "classic_sgd2_multi_lr01",
-        "classic_sgd2_multi_stress_only",
-        "classic_sgd2_multi_with_aspect",
-        "classic_stress_maj_default",
-        "classic_stress_maj_iter50",
-        "classic_stress_maj_iter500",
+        "classic_maxent_stress",
+        "classic_pivot_mds",
+        "classic_sgd2_multi",
+        "classic_stress_maj",
+        "sgd2_multi_ref",
     }
 )
 
