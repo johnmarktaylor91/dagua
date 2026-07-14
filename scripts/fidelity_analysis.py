@@ -2806,6 +2806,7 @@ def finalize_group_row(row: dict[str, Any]) -> None:
 
                 procrustes_0_5x_pass = _procrustes_tost_pass("0_5x")
                 procrustes_1x_pass = _procrustes_tost_pass("1x")
+                procrustes_2x_pass = _procrustes_tost_pass("2x")
                 strong_quality_pass, _, _ = quality_gate_status(
                     row,
                     QUALITY_GATE_STRONG_MAX_REGRESSION_PCT,
@@ -2819,8 +2820,10 @@ def finalize_group_row(row: dict[str, Any]) -> None:
                     row["verdict"] = "strong_equivalent"
                 elif procrustes_1x_pass and weak_quality_pass:
                     row["verdict"] = "weak_equivalent"
-                else:
+                elif procrustes_2x_pass:
                     row["verdict"] = "partial_match"
+                else:
+                    row["verdict"] = "divergent"
         else:
             deterministic_tier = int(row.get("_deterministic_tier", 0) or 0)
             deterministic_verdict = str(row.get("_deterministic_verdict", ""))
