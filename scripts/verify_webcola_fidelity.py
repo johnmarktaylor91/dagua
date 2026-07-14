@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from dagua.layout.ops.pipelines.webcola import (  # noqa: E402
 DEFAULT_REPORT = ROOT / "docs" / "algorithms" / "webcola_fidelity.md"
 DEFAULT_STEPS = 50
 DEFAULT_LINK_DISTANCE = 20.0
+JS_REF_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
 
 
 @dataclass(frozen=True)
@@ -381,11 +383,19 @@ def _webcola_version() -> str:
     str
         Package version or ``unknown``.
     """
+    env = dict(os.environ)
+    paths = [str(JS_REF_MODULES)] if JS_REF_MODULES.exists() else []
+    current_node_path = env.get("NODE_PATH")
+    if current_node_path:
+        paths.append(current_node_path)
+    if paths:
+        env["NODE_PATH"] = os.pathsep.join(paths)
     try:
         result = subprocess.run(
             ["node", "-e", "process.stdout.write(require('webcola/package.json').version)"],
             capture_output=True,
             text=True,
+            env=env,
             check=True,
             timeout=10,
         )

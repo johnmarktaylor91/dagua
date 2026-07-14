@@ -106,7 +106,7 @@ def _omega_case() -> Dict[str, Any]:
         "algorithm": "omega",
         "reference_status": (
             "egraph-rs `cargo build --bin omega` succeeded in "
-            "/tmp/egraph-rs/crates/cli; shipped CLI uses thread_rng, so seeded "
+            "~/tools/dagua-refs/egraph-rs/crates/cli; shipped CLI uses thread_rng, so seeded "
             "runtime reference is unavailable."
         ),
         "rng": (
