@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -33,7 +33,15 @@ if str(REPO_ROOT) not in sys.path:
 import dagua  # noqa: E402
 import scripts.graphviz_theme_comparison as gthc  # noqa: E402
 import scripts.parity_metrics as pmetrics  # noqa: E402
-from dagua.graphviz_utils import layout_with_graphviz  # noqa: E402
+from scripts.visual_parity.compose import compose_pair  # noqa: E402
+from scripts.visual_parity.geometry_injection import (  # noqa: E402
+    apply_graphviz_coordinate_dance,
+    edge_id_for_index,
+    graphviz_geometry,
+    node_positions_tensor,
+    to_bezier_curves,
+)
+from scripts.visual_parity.types import GeometryMode, InjectedGeometry  # noqa: E402
 
 DEFAULT_OUT_DIR = Path("eval_output/parity_pixel_diff")
 STRICT_THEME_NAME = "graphviz_strict"
@@ -44,6 +52,8 @@ WHITE = "#FFFFFF"
 TEXT_COLOR = "#111111"
 LINE_COLOR = "#D7D7D7"
 HEADER_HEIGHT = 34
+ROUND_ID = "quick"
+REFCACHE_DIR = Path("eval_output/visual_parity_v2/refcache")
 
 
 @dataclass(frozen=True)
@@ -52,23 +62,32 @@ class RenderPair:
 
     Parameters
     ----------
-    dot_png : Path
-        Native Graphviz PNG path.
+    reference_png : Path
+        Primary reference PNG path.
     dagua_png : Path
-        Dagua strict PNG path with dimensions normalized to ``dot_png``.
+        Dagua strict PNG path rendered on the same declared canvas.
     dot_svg : str
         SVG payload emitted from the same DOT source used for the PNG.
+    geometry : scripts.visual_parity.types.InjectedGeometry, optional
+        Graphviz geometry parsed from ``-Tdot`` output.
     dimensions : tuple[int, int]
         Image dimensions as ``(width, height)`` in pixels.
     effective_dpi : int
         DPI used for both renderers after any hi-res cap adjustment.
+    reference_kind : str
+        Reference kind used for this pair.
+    alignment_manifest : Mapping[str, Any], optional
+        Two-panel compositor alignment manifest.
     """
 
-    dot_png: Path
+    reference_png: Path
     dagua_png: Path
     dot_svg: str
+    geometry: Optional[InjectedGeometry]
     dimensions: Tuple[int, int]
     effective_dpi: int
+    reference_kind: str
+    alignment_manifest: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +254,32 @@ def _run_dot(dot_source: str, png_path: Path, dpi: int) -> str:
         return svg_path.read_text(encoding="utf-8")
 
 
+def _rasterize_svg(svg_path: Path, png_path: Path, dpi: int) -> None:
+    """Rasterize an SVG reference through CairoSVG.
+
+    Parameters
+    ----------
+    svg_path : pathlib.Path
+        Source SVG path.
+    png_path : pathlib.Path
+        Destination PNG path.
+    dpi : int
+        Raster DPI.
+
+    Returns
+    -------
+    None
+        The PNG is written.
+    """
+
+    try:
+        import cairosvg
+    except ImportError as exc:
+        raise RuntimeError("svg-cairo reference requires cairosvg") from exc
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    cairosvg.svg2png(url=str(svg_path), write_to=str(png_path), dpi=dpi)
+
+
 def _copy_graph_with_strict_theme(graph: Any) -> Any:
     """Clone a graph and bind ``graphviz_strict`` without altering globals.
 
@@ -250,52 +295,6 @@ def _copy_graph_with_strict_theme(graph: Any) -> Any:
     """
 
     return pmetrics._apply_strict_theme(graph)
-
-
-def _graphviz_positions(graph: Any) -> Any:
-    """Return Graphviz positions in Dagua's render coordinate convention.
-
-    Parameters
-    ----------
-    graph : Any
-        Strict-themed graph clone.
-
-    Returns
-    -------
-    torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    """
-
-    positions = layout_with_graphviz(graph, engine="dot")
-    positions[:, 1] = -positions[:, 1]
-    graph.direction = "BT"
-    return positions
-
-
-def _swap_arrowheads_for_graphviz_yup(graph: Any) -> None:
-    """Move head arrows to tail arrows for BT rendering on Graphviz coordinates.
-
-    Parameters
-    ----------
-    graph : Any
-        Strict-themed graph clone to mutate.
-
-    Returns
-    -------
-    None
-        Edge styles are updated in place.
-    """
-
-    from dataclasses import replace as dc_replace
-
-    for edge_index in range(int(graph.edge_index.shape[1])):
-        style = graph.get_style_for_edge(edge_index)
-        if style.arrow != "none" and style.tail_arrow == "none":
-            graph.edge_styles[edge_index] = dc_replace(
-                style,
-                arrow="none",
-                tail_arrow=style.arrow,
-            )
 
 
 def _center_crop_or_pad(image: Image.Image, target_size: Tuple[int, int]) -> Image.Image:
@@ -338,8 +337,12 @@ def _render_dagua_strict(
     output_path: Path,
     target_size: Tuple[int, int],
     dpi: int,
+    geometry: InjectedGeometry,
+    *,
+    inject_splines: bool,
+    bit_equivalent: bool,
 ) -> None:
-    """Render Dagua strict output and normalize it to a reference canvas.
+    """Render Dagua strict output on the Graphviz-declared canvas.
 
     Parameters
     ----------
@@ -351,20 +354,34 @@ def _render_dagua_strict(
         Desired output size in pixels.
     dpi : int
         Raster DPI.
+    geometry : scripts.visual_parity.types.InjectedGeometry
+        Parsed Graphviz geometry.
+    inject_splines : bool
+        Whether to inject Graphviz edge splines as routed curves.
+    bit_equivalent : bool
+        Whether to use Dagua's Cairo-backed PNG path.
 
     Returns
     -------
     None
-        The normalized PNG is written to ``output_path``.
+        The PNG is written to ``output_path``.
     """
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     themed = _copy_graph_with_strict_theme(graph)
     themed.compute_node_sizes()
-    positions = _graphviz_positions(themed)
-    _swap_arrowheads_for_graphviz_yup(themed)
-    fig_w = target_size[0] / float(dpi)
-    fig_h = target_size[1] / float(dpi)
+    themed = apply_graphviz_coordinate_dance(themed)
+    node_ids = [f"n{index}" for index in range(themed.num_nodes)]
+    positions = node_positions_tensor(geometry, node_ids)
+    curves = None
+    if inject_splines:
+        curve_map = to_bezier_curves(geometry.edge_splines)
+        curves = [
+            curve_map[edge_id_for_index(themed, edge_index)]
+            for edge_index in range(int(themed.edge_index.shape[1]))
+        ]
+    fig_w = max(float(geometry.canvas_pt[0]) / POINTS_PER_INCH, target_size[0] / float(dpi))
+    fig_h = max(float(geometry.canvas_pt[1]) / POINTS_PER_INCH, target_size[1] / float(dpi))
     raw_path = output_path.with_name(f"{output_path.stem}.raw.png")
     fig, _ax = dagua.render(
         themed,
@@ -372,6 +389,8 @@ def _render_dagua_strict(
         output=str(raw_path),
         figsize=(fig_w, fig_h),
         dpi=dpi,
+        curves=curves,
+        bit_equivalent=bit_equivalent,
     )
     try:
         import matplotlib.pyplot as plt
@@ -386,14 +405,14 @@ def _render_dagua_strict(
 
 
 def _scaled_hires_dpi(dot_source: str, requested_dpi: int) -> int:
-    """Choose a hi-res DPI that keeps native output under the image cap.
+    """Choose a DPI that keeps native output under the image cap.
 
     Parameters
     ----------
     dot_source : str
         DOT document.
     requested_dpi : int
-        Requested hi-res DPI.
+        Requested DPI.
 
     Returns
     -------
@@ -418,7 +437,7 @@ def _scaled_hires_dpi(dot_source: str, requested_dpi: int) -> int:
     if longest <= 0:
         return requested_dpi
     capped = math.floor(MAX_HIRES_SIDE_PX * POINTS_PER_INCH / longest)
-    return max(72, min(requested_dpi, capped))
+    return max(1, min(requested_dpi, capped))
 
 
 def render_pair(
@@ -426,6 +445,9 @@ def render_pair(
     out_dir: Path,
     dpi: int,
     *,
+    reference_kind: str = "svg-cairo",
+    inject_splines: bool = False,
+    bit_equivalent: bool = True,
     cap_longest_side: bool = False,
 ) -> RenderPair:
     """Render native dot and Dagua strict rasters for one case.
@@ -438,6 +460,12 @@ def render_pair(
         Directory for intermediate image files.
     dpi : int
         Requested DPI.
+    reference_kind : str, default="svg-cairo"
+        Reference raster source, either ``"svg-cairo"`` or ``"dot-png"``.
+    inject_splines : bool, default=False
+        Whether to render Dagua with Graphviz spline centerlines.
+    bit_equivalent : bool, default=True
+        Whether to use Dagua's Cairo-backed PNG output path.
     cap_longest_side : bool, default=False
         Whether to reduce DPI so the longest side stays below 2000 pixels.
 
@@ -448,19 +476,45 @@ def render_pair(
     """
 
     dot_source = _dot_source(case.graph)
-    effective_dpi = _scaled_hires_dpi(dot_source, dpi) if cap_longest_side else dpi
-    dot_path = out_dir / "dot" / f"{case.slug}.png"
+    effective_dpi = _scaled_hires_dpi(dot_source, dpi)
+    geometry = graphviz_geometry(
+        dot_source,
+        case_id=case.slug,
+        refcache_dir=REFCACHE_DIR,
+        dpi=effective_dpi,
+    )
+    attrs = geometry.graph_attrs
+    svg_path = Path(str(attrs["svg_path"]))
+    dot_png_path = Path(str(attrs["png_path"]))
+    reference_path = out_dir / "reference" / reference_kind / f"{case.slug}.png"
+    if reference_kind == "svg-cairo":
+        _rasterize_svg(svg_path, reference_path, effective_dpi)
+    elif reference_kind == "dot-png":
+        reference_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(dot_png_path, reference_path)
+    else:
+        raise ValueError(f"unsupported reference kind: {reference_kind}")
     dagua_path = out_dir / "dagua" / f"{case.slug}.png"
-    svg_text = _run_dot(dot_source, dot_path, effective_dpi)
-    with Image.open(dot_path) as dot_image:
+    svg_text = svg_path.read_text(encoding="utf-8")
+    with Image.open(reference_path) as dot_image:
         target_size = dot_image.size
-    _render_dagua_strict(case.graph, dagua_path, target_size, effective_dpi)
+    _render_dagua_strict(
+        case.graph,
+        dagua_path,
+        target_size,
+        effective_dpi,
+        geometry,
+        inject_splines=inject_splines,
+        bit_equivalent=bit_equivalent,
+    )
     return RenderPair(
-        dot_png=dot_path,
+        reference_png=reference_path,
         dagua_png=dagua_path,
         dot_svg=svg_text,
+        geometry=geometry,
         dimensions=target_size,
         effective_dpi=effective_dpi,
+        reference_kind=reference_kind,
     )
 
 
@@ -847,6 +901,289 @@ def _compute_ssim(left: np.ndarray, right: np.ndarray) -> float:
         return _ssim_fallback(left, right)
 
 
+def _hipass_l1(left_path: Path, right_path: Path) -> float:
+    """Compute DoG high-pass L1 using 1px and 3px Gaussian blurs.
+
+    Parameters
+    ----------
+    left_path : pathlib.Path
+        Reference image path.
+    right_path : pathlib.Path
+        Dagua image path.
+
+    Returns
+    -------
+    float
+        Mean absolute high-pass RGB difference.
+    """
+
+    with Image.open(left_path) as left_image, Image.open(right_path) as right_image:
+        left = left_image.convert("RGB")
+        right = right_image.convert("RGB")
+        left_hp = np.asarray(
+            left.filter(ImageFilter.GaussianBlur(1.0)),
+            dtype=np.int16,
+        ) - np.asarray(left.filter(ImageFilter.GaussianBlur(3.0)), dtype=np.int16)
+        right_hp = np.asarray(
+            right.filter(ImageFilter.GaussianBlur(1.0)), dtype=np.int16
+        ) - np.asarray(right.filter(ImageFilter.GaussianBlur(3.0)), dtype=np.int16)
+    return float(np.abs(left_hp - right_hp).mean())
+
+
+def _signed_l1(left: np.ndarray, right: np.ndarray) -> Dict[str, float]:
+    """Compute directional light/dark pixel deltas.
+
+    Parameters
+    ----------
+    left : numpy.ndarray
+        Reference RGB image, shape ``[H, W, 3]``.
+    right : numpy.ndarray
+        Dagua RGB image, shape ``[H, W, 3]``.
+
+    Returns
+    -------
+    dict[str, float]
+        Mean too-dark and too-light channel differences.
+    """
+
+    delta = right.astype(np.int16) - left.astype(np.int16)
+    return {
+        "too_dark": float(np.clip(-delta, 0, None).mean()),
+        "too_light": float(np.clip(delta, 0, None).mean()),
+    }
+
+
+def _alpha_aware_l1(left_path: Path, right_path: Path) -> float:
+    """Compute alpha-weighted L1 when reference alpha is present.
+
+    Parameters
+    ----------
+    left_path : pathlib.Path
+        Reference image path.
+    right_path : pathlib.Path
+        Dagua image path.
+
+    Returns
+    -------
+    float
+        Alpha-weighted RGB L1.
+    """
+
+    with Image.open(left_path) as left_image, Image.open(right_path) as right_image:
+        left = np.asarray(left_image.convert("RGBA"), dtype=np.float32)
+        right = np.asarray(right_image.convert("RGBA"), dtype=np.float32)
+    alpha = left[:, :, 3:4] / 255.0
+    if float(alpha.sum()) <= 0.0:
+        return 0.0
+    return float((np.abs(left[:, :, :3] - right[:, :, :3]) * alpha).sum() / (alpha.sum() * 3.0))
+
+
+def _graphviz_point_to_pixel(
+    point: Tuple[float, float],
+    geometry: InjectedGeometry,
+    dimensions: Tuple[int, int],
+) -> Tuple[float, float]:
+    """Map a Graphviz point-space coordinate into reference pixels.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Graphviz point-space ``(x, y)``.
+    geometry : scripts.visual_parity.types.InjectedGeometry
+        Geometry snapshot with graph bounding box.
+    dimensions : tuple[int, int]
+        Reference image dimensions.
+
+    Returns
+    -------
+    tuple[float, float]
+        Pixel ``(x, y)``.
+    """
+
+    bb = str(geometry.graph_attrs.get("bb", "0,0,0,0"))
+    values = [float(part) for part in bb.split(",")]
+    if len(values) != 4:
+        values = [0.0, 0.0, geometry.canvas_pt[0], geometry.canvas_pt[1]]
+    x0, y0, x1, y1 = values
+    width = max(x1 - x0, 1e-9)
+    height = max(y1 - y0, 1e-9)
+    return (
+        (point[0] - x0) / width * dimensions[0],
+        (y1 - point[1]) / height * dimensions[1],
+    )
+
+
+def _style_threshold(style: Any) -> float:
+    """Return a corridor-presence threshold from edge style declarations.
+
+    Parameters
+    ----------
+    style : Any
+        Dagua edge style object.
+
+    Returns
+    -------
+    float
+        Minimum expected dark-pixel ratio for the stroke style.
+    """
+
+    base = 0.55
+    if str(getattr(style, "style", "solid")) == "dashed":
+        base *= 0.55
+    elif str(getattr(style, "style", "solid")) == "dotted":
+        base *= 0.35
+    opacity = float(getattr(style, "opacity", 1.0) or 1.0)
+    width = max(float(getattr(style, "width", 1.0) or 1.0), 0.1)
+    return max(0.05, min(base * opacity * min(width / 1.0, 1.5), 0.85))
+
+
+def _draw_corridor_mask(
+    geometry: InjectedGeometry,
+    edge_id: str,
+    dimensions: Tuple[int, int],
+    *,
+    radius_px: int = 6,
+) -> Tuple[np.ndarray, List[Tuple[float, float]]]:
+    """Draw a reference spline corridor mask for one edge.
+
+    Parameters
+    ----------
+    geometry : scripts.visual_parity.types.InjectedGeometry
+        Geometry snapshot with edge splines.
+    edge_id : str
+        Edge id to draw.
+    dimensions : tuple[int, int]
+        Image dimensions.
+    radius_px : int, default=6
+        Corridor radius in pixels.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, list[tuple[float, float]]]
+        Boolean mask and sampled centerline pixels.
+    """
+
+    curves = to_bezier_curves({edge_id: geometry.edge_splines.get(edge_id, [])})
+    curve = curves.get(edge_id)
+    image = Image.new("L", dimensions, 0)
+    if curve is None or curve.waypoints is None:
+        return np.asarray(image) > 0, []
+    points = [_graphviz_point_to_pixel(point, geometry, dimensions) for point in curve.waypoints]
+    draw = ImageDraw.Draw(image)
+    if len(points) >= 2:
+        draw.line(points, fill=255, width=max(radius_px * 2, 1), joint="curve")
+    return np.asarray(image) > 0, points
+
+
+def _dark_mask(image: np.ndarray) -> np.ndarray:
+    """Return a mask of non-background dark pixels.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        RGB image, shape ``[H, W, 3]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean dark-pixel mask.
+    """
+
+    return image.mean(axis=2) < 245.0
+
+
+def _nearest_dark_distance(point: Tuple[float, float], dark_points: np.ndarray) -> float:
+    """Return nearest dark-pixel distance for one point.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Pixel coordinate.
+    dark_points : numpy.ndarray
+        Array of dark pixel coordinates as ``[N, 2]`` in ``(x, y)`` order.
+
+    Returns
+    -------
+    float
+        Nearest Euclidean distance, or infinity when no dark pixels exist.
+    """
+
+    if dark_points.size == 0:
+        return float("inf")
+    delta = dark_points - np.asarray(point, dtype=np.float32)
+    return float(np.sqrt(np.sum(delta * delta, axis=1)).min())
+
+
+def edge_corridor_metrics(
+    graph: Any,
+    geometry: Optional[InjectedGeometry],
+    reference: np.ndarray,
+    dagua_img: np.ndarray,
+    dimensions: Tuple[int, int],
+) -> List[Dict[str, Any]]:
+    """Compute per-edge corridor, centerline, and continuity metrics.
+
+    Parameters
+    ----------
+    graph : Any
+        Source graph whose edge styles declare expected stroke behavior.
+    geometry : scripts.visual_parity.types.InjectedGeometry, optional
+        Parsed Graphviz geometry.
+    reference : numpy.ndarray
+        Reference RGB image, shape ``[H, W, 3]``.
+    dagua_img : numpy.ndarray
+        Dagua RGB image, shape ``[H, W, 3]``.
+    dimensions : tuple[int, int]
+        Image dimensions.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Per-edge metric records.
+    """
+
+    if geometry is None:
+        return []
+    ref_dark = _dark_mask(reference)
+    dagua_dark = _dark_mask(dagua_img)
+    dark_yx = np.argwhere(dagua_dark)
+    dark_xy = dark_yx[:, [1, 0]].astype(np.float32) if dark_yx.size else np.empty((0, 2))
+    records: List[Dict[str, Any]] = []
+    for edge_index in range(int(graph.edge_index.shape[1])):
+        edge_id = edge_id_for_index(graph, edge_index)
+        mask, centerline = _draw_corridor_mask(geometry, edge_id, dimensions)
+        ref_count = int(np.count_nonzero(ref_dark & mask))
+        dagua_count = int(np.count_nonzero(dagua_dark & mask))
+        ratio = float(dagua_count / max(ref_count, 1))
+        distances = [_nearest_dark_distance(point, dark_xy) for point in centerline[::8]]
+        finite_distances = [value for value in distances if math.isfinite(value)]
+        centerline_dist = (
+            float(statistics.fmean(finite_distances)) if finite_distances else float("inf")
+        )
+        continuity = (
+            float(statistics.fmean(1.0 if value <= 6.0 else 0.0 for value in finite_distances))
+            if finite_distances
+            else 0.0
+        )
+        style = graph.get_style_for_edge(edge_index)
+        threshold = _style_threshold(style)
+        records.append(
+            {
+                "edge_id": edge_id,
+                "corridor_ink_ratio": round(ratio, 6),
+                "corridor_threshold": round(threshold, 6),
+                "edge_centerline_dist_px": round(centerline_dist, 6)
+                if math.isfinite(centerline_dist)
+                else None,
+                "connected_component_continuity": round(continuity, 6),
+                "passes_presence": (
+                    ratio >= threshold and centerline_dist <= 6.0 and continuity >= 0.5
+                ),
+            }
+        )
+    return records
+
+
 def write_heatmap(error: np.ndarray, output_path: Path) -> None:
     """Write a transparent red heatmap for a pixel error image.
 
@@ -890,7 +1227,7 @@ def score_pair(case: gthc.GraphCase, pair: RenderPair, out_dir: Path) -> Dict[st
         JSON-serialisable scalar metrics for the panel.
     """
 
-    dot = _load_rgb(pair.dot_png)
+    dot = _load_rgb(pair.reference_png)
     dagua_img = _load_rgb(pair.dagua_png)
     if dot.shape != dagua_img.shape:
         raise RuntimeError(f"{case.slug}: image shapes differ: {dot.shape} vs {dagua_img.shape}")
@@ -898,22 +1235,38 @@ def score_pair(case: gthc.GraphCase, pair: RenderPair, out_dir: Path) -> Dict[st
     masks = build_region_masks(pair.dot_svg, pair.dimensions)
     heatmap_path = out_dir / "heatmaps" / f"{case.slug}.png"
     write_heatmap(error, heatmap_path)
-    composite_path = out_dir / f"{case.slug}.png"
-    compose_comparison(
-        title=case.title,
-        dot_path=pair.dot_png,
-        dagua_path=pair.dagua_png,
-        heatmap_path=heatmap_path,
-        output_path=composite_path,
+    composite_path = out_dir / "pairs" / f"{case.slug}.png"
+    manifest_path = out_dir / "pairs" / f"{case.slug}.alignment.json"
+    manifest = compose_pair(
+        pair.reference_png,
+        pair.dagua_png,
+        composite_path,
+        case_id=case.slug,
+        round_id=ROUND_ID,
+        reference_label=f"graphviz {pair.reference_kind}",
+        geometry_mode=GeometryMode.INJECTED if pair.geometry is not None else GeometryMode.NATIVE,
+        l1=_mean_l1(error),
+        canvas_pt=pair.geometry.canvas_pt if pair.geometry is not None else (0.0, 0.0),
+        dpi=pair.effective_dpi,
+        manifest_path=manifest_path,
     )
+    edge_metrics = edge_corridor_metrics(case.graph, pair.geometry, dot, dagua_img, pair.dimensions)
     metrics: Dict[str, Any] = {
         "slug": case.slug,
         "title": case.title,
+        "reference_kind": pair.reference_kind,
+        "geometry_mode": (
+            GeometryMode.INJECTED.value if pair.geometry is not None else GeometryMode.NATIVE.value
+        ),
         "dpi": pair.effective_dpi,
         "width_px": pair.dimensions[0],
         "height_px": pair.dimensions[1],
         "l1_rgb_per_pixel": round(_mean_l1(error), 4),
         "ssim": round(_compute_ssim(dot, dagua_img), 6),
+        "hipass_l1": round(_hipass_l1(pair.reference_png, pair.dagua_png), 4),
+        "signed_l1": {key: round(value, 4) for key, value in _signed_l1(dot, dagua_img).items()},
+        "alpha_aware_l1": round(_alpha_aware_l1(pair.reference_png, pair.dagua_png), 4),
+        "edges": edge_metrics,
         "regions": {
             "text_l1_rgb_per_pixel": round(_mean_l1(error, masks.text), 4),
             "node_l1_rgb_per_pixel": round(_mean_l1(error, masks.node), 4),
@@ -921,13 +1274,28 @@ def score_pair(case: gthc.GraphCase, pair: RenderPair, out_dir: Path) -> Dict[st
             "edge_arrow_l1_rgb_per_pixel": round(_mean_l1(error, masks.edge), 4),
         },
         "paths": {
-            "dot": str(pair.dot_png),
+            "reference": str(pair.reference_png),
             "dagua": str(pair.dagua_png),
             "heatmap": str(heatmap_path),
             "composite": str(composite_path),
+            "alignment_manifest": str(manifest_path),
+        },
+        "alignment_manifest": {
+            "canvas_pt": list(manifest.canvas_pt),
+            "dpi": manifest.dpi,
+            "pixel_size": list(manifest.pixel_size),
+            "crop_box_px": list(manifest.crop_box_px) if manifest.crop_box_px is not None else None,
+            "crop_reason": manifest.crop_reason,
+            "metric_uses_crop": manifest.metric_uses_crop,
+            "pad_or_crop_applied": manifest.pad_or_crop_applied,
         },
     }
-    (out_dir / f"{case.slug}.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    case_metric_dir = out_dir / "pixel"
+    case_metric_dir.mkdir(parents=True, exist_ok=True)
+    (case_metric_dir / f"{case.slug}.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
     return metrics
 
 
@@ -1208,7 +1576,15 @@ def _select_cases(requested: Sequence[str], quick: bool = False) -> List[gthc.Gr
     return selected
 
 
-def run_diff(cases: Sequence[gthc.GraphCase], out_dir: Path, dpi: int) -> Dict[str, Any]:
+def run_diff(
+    cases: Sequence[gthc.GraphCase],
+    out_dir: Path,
+    dpi: int,
+    *,
+    reference: str = "svg-cairo",
+    inject_splines: bool = False,
+    bit_equivalent: bool = True,
+) -> Dict[str, Any]:
     """Run pixel diff for selected cases.
 
     Parameters
@@ -1219,6 +1595,12 @@ def run_diff(cases: Sequence[gthc.GraphCase], out_dir: Path, dpi: int) -> Dict[s
         Output directory.
     dpi : int
         Raster DPI.
+    reference : str, default="svg-cairo"
+        Reference mode: ``"svg-cairo"``, ``"dot-png"``, or ``"both"``.
+    inject_splines : bool, default=False
+        Whether to inject Graphviz splines into Dagua rendering.
+    bit_equivalent : bool, default=True
+        Whether to use Dagua's Cairo-backed PNG output.
 
     Returns
     -------
@@ -1226,14 +1608,44 @@ def run_diff(cases: Sequence[gthc.GraphCase], out_dir: Path, dpi: int) -> Dict[s
         Aggregate payload.
     """
 
-    metrics: List[Mapping[str, Any]] = []
+    reference_modes = ["svg-cairo", "dot-png"] if reference == "both" else [reference]
+    metrics_by_reference: Dict[str, List[Mapping[str, Any]]] = {
+        mode: [] for mode in reference_modes
+    }
     for case in cases:
         print(f"[render] {case.slug}")
-        pair = render_pair(case, out_dir, dpi)
-        metrics.append(score_pair(case, pair, out_dir))
-    summary = build_summary(metrics)
-    write_summary_files(metrics, summary, out_dir)
-    return {"summary": summary, "panels": metrics}
+        for mode in reference_modes:
+            pair = render_pair(
+                case,
+                out_dir,
+                dpi,
+                reference_kind=mode,
+                inject_splines=inject_splines,
+                bit_equivalent=bit_equivalent,
+            )
+            metrics_by_reference[mode].append(score_pair(case, pair, out_dir / mode))
+    svg_metrics = metrics_by_reference.get("svg-cairo", [])
+    summary = build_summary(svg_metrics) if svg_metrics else {}
+    payload: Dict[str, Any] = {
+        "reference": reference,
+        "summary": summary,
+        "panels": list(svg_metrics),
+    }
+    if svg_metrics:
+        write_summary_files(svg_metrics, summary, out_dir)
+    if "dot-png" in metrics_by_reference:
+        png_summary = build_summary(metrics_by_reference["dot-png"])
+        payload["png_raster"] = {
+            "summary": png_summary,
+            "panels": list(metrics_by_reference["dot-png"]),
+        }
+        png_dir = out_dir / "png_raster_lane"
+        write_summary_files(metrics_by_reference["dot-png"], png_summary, png_dir)
+    else:
+        payload["png_raster"] = None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
 
 
 def run_hires(cases: Sequence[gthc.GraphCase], out_dir: Path, dpi: int) -> None:
@@ -1260,7 +1672,7 @@ def run_hires(cases: Sequence[gthc.GraphCase], out_dir: Path, dpi: int) -> None:
         pair = render_pair(case, case_dir, dpi, cap_longest_side=True)
         final_dot = case_dir / "dot.png"
         final_dagua = case_dir / "dagua.png"
-        pair.dot_png.replace(final_dot)
+        pair.reference_png.replace(final_dot)
         pair.dagua_png.replace(final_dagua)
         metadata = {
             "slug": case.slug,
@@ -1297,6 +1709,24 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--out", default=str(DEFAULT_OUT_DIR), help="Output directory.")
     parser.add_argument("--dpi", type=int, default=200, help="Pixel diff DPI.")
+    parser.add_argument(
+        "--reference",
+        choices=("svg-cairo", "dot-png", "both"),
+        default="svg-cairo",
+        help="Reference raster source. dot-png is reported only in png_raster.",
+    )
+    parser.add_argument(
+        "--bit-equivalent",
+        dest="bit_equivalent",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use Dagua's Cairo-backed PNG path (default: enabled).",
+    )
+    parser.add_argument(
+        "--inject-splines",
+        action="store_true",
+        help="Render Dagua with Graphviz spline waypoints injected.",
+    )
     parser.add_argument(
         "--hires",
         default="",
@@ -1343,15 +1773,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not cases:
         print("[error] no cases selected", file=sys.stderr)
         return 1
-    payload = run_diff(cases, out_dir, int(args.dpi))
+    payload = run_diff(
+        cases,
+        out_dir,
+        int(args.dpi),
+        reference=str(args.reference),
+        inject_splines=bool(args.inject_splines),
+        bit_equivalent=bool(args.bit_equivalent),
+    )
     summary = payload["summary"]
     print()
     print("Pixel parity summary")
     print("--------------------")
-    print(f"  panels:          {summary['total_panels']}")
-    print(f"  mean L1 RGB/px:  {summary['mean_l1_rgb_per_pixel']:.4f}")
-    print(f"  mean SSIM:       {summary['mean_ssim']:.6f}")
-    print(f"  worst SSIM:      {summary['min_ssim']:.6f}")
+    if summary:
+        print(f"  panels:          {summary['total_panels']}")
+        print(f"  mean L1 RGB/px:  {summary['mean_l1_rgb_per_pixel']:.4f}")
+        print(f"  mean SSIM:       {summary['mean_ssim']:.6f}")
+        print(f"  worst SSIM:      {summary['min_ssim']:.6f}")
+    else:
+        png_summary = payload["png_raster"]["summary"]
+        print("  svg_declared:    not run")
+        print(f"  png_raster panels: {png_summary['total_panels']}")
     print(f"Wrote outputs to {out_dir}")
     return 0
 

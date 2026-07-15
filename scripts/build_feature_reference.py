@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import html
 import logging
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -1277,6 +1278,555 @@ def build_feature_reference(
     )
 
 
+# ==============================================================================
+# v2: matrix/manifest/ledger-driven docs/visual_reference/ generator
+# (FINAL_DESIGN.md section 9, Lane D item 5)
+#
+# Unlike the v1 gallery above (which hand-builds DemoScene specimens), v2 is
+# purely a READER: it never renders new images. It reads
+# card_manifest.json + coverage_matrix.json + ledger.json (all
+# schema-version-checked via scripts.visual_parity.io) and fills competitor
+# side-by-side slots from the parity loop's own refcache -- "the loop's
+# cache IS the guide's comparison content, zero extra render cost." Layout
+# rules (Sol, section 9): no marketing hero -- first screen is index/TOC +
+# compact status summary; mobile-first (2-column pairs collapse to stacked
+# Reference/Dagua); simple sections/tables/grids, no nested cards.
+# ==============================================================================
+
+V2_DOMAINS: Tuple[str, ...] = (
+    "shapes",
+    "arrowheads",
+    "edges",
+    "fills",
+    "text",
+    "clusters",
+    "themes",
+    "other",
+)
+
+DEFAULT_V2_CARD_MANIFEST = ".project-context/research/sprint_visual_parity_v2/card_manifest.json"
+DEFAULT_V2_COVERAGE_MATRIX = (
+    ".project-context/research/sprint_visual_parity_v2/coverage_matrix.json"
+)
+DEFAULT_V2_LEDGER = ".project-context/research/sprint_visual_parity_v2/ledger.json"
+DEFAULT_V2_REFCACHE = "eval_output/visual_parity_v2/refcache"
+DEFAULT_V2_OUTPUT_DIR = "docs/visual_reference"
+DEFAULT_V2_MARKDOWN_INDEX = "docs/VISUAL_REFERENCE.md"
+
+
+@dataclass(frozen=True)
+class V2CardEntry:
+    """One resolved card row ready for v2 page rendering.
+
+    Parameters
+    ----------
+    case_id
+        Stable case identifier.
+    category
+        Source category (manifest ``category`` field).
+    description
+        Human-readable description.
+    domain
+        Classified v2 domain page (see ``V2_DOMAINS``).
+    status_badge
+        Short status label derived from the coverage matrix, if a matching
+        cell exists (``"untested"`` otherwise).
+    departure_text
+        Waiver/residual text, if any.
+    competitor_image
+        Relative path (under the output directory) to a copied competitor
+        specimen image, or ``None`` when no refcache entry exists yet.
+    """
+
+    case_id: str
+    category: str
+    description: str
+    domain: str
+    status_badge: str
+    departure_text: str
+    competitor_image: Optional[str]
+
+
+@dataclass(frozen=True)
+class V2BuildResult:
+    """Output metadata for a v2 visual reference guide build.
+
+    Parameters
+    ----------
+    output_dir
+        Guide root directory.
+    index_path
+        Path to the generated ``index.html``.
+    markdown_index_path
+        Path to the generated ``docs/VISUAL_REFERENCE.md``.
+    page_paths
+        Domain slug to generated HTML page path.
+    domain_counts
+        Domain slug to card count.
+    filled_competitor_slots
+        Number of cards with a resolved competitor specimen image.
+    """
+
+    output_dir: str
+    index_path: str
+    markdown_index_path: str
+    page_paths: Dict[str, str]
+    domain_counts: Dict[str, int]
+    filled_competitor_slots: int
+
+
+def _classify_v2_domain(card: Mapping[str, object]) -> str:
+    """Classify a card manifest row into a v2 domain page.
+
+    Parameters
+    ----------
+    card
+        One row from ``card_manifest.json``.
+
+    Returns
+    -------
+    str
+        A member of ``V2_DOMAINS``.
+    """
+
+    category = str(card.get("category", ""))
+    case_id = str(card.get("case_id", ""))
+    kind = card.get("kind")
+
+    if case_id.startswith("arrowhead_") or "arrowhead" in category:
+        return "arrowheads"
+    if category == "node_options" and case_id.startswith("shape_"):
+        return "shapes"
+    if "shape" in category or (kind == "reference" and "shape" in category.lower()):
+        return "shapes"
+    if "fill" in category or "opacity" in category or "color" in category:
+        return "fills"
+    if category == "text_options" or "text" in category or "label" in category:
+        return "text"
+    if category == "cluster_options" or "cluster" in category:
+        return "clusters"
+    if category == "edge_options" or "edge" in category or "spline" in category:
+        return "edges"
+    if "theme" in category:
+        return "themes"
+    return "other"
+
+
+def _status_badge_for_cell(
+    coverage_cell_id: Optional[str],
+    cells_by_id: Mapping[str, Mapping[str, object]],
+) -> str:
+    """Return a short status badge string for a coverage cell.
+
+    Parameters
+    ----------
+    coverage_cell_id
+        Linked coverage cell id, if any.
+    cells_by_id
+        Coverage matrix cells keyed by ``cell_id``.
+
+    Returns
+    -------
+    str
+        A short badge label, e.g. ``"in_tolerance"`` or ``"untested"``.
+    """
+
+    if not coverage_cell_id:
+        return "untested"
+    cell = cells_by_id.get(coverage_cell_id)
+    if cell is None:
+        return "untested"
+    return str(cell.get("parity_status", "untested"))
+
+
+def _departure_text_for_cell(
+    coverage_cell_id: Optional[str],
+    cells_by_id: Mapping[str, Mapping[str, object]],
+) -> str:
+    """Return waiver/residual departure text for a coverage cell, if any.
+
+    Parameters
+    ----------
+    coverage_cell_id
+        Linked coverage cell id, if any.
+    cells_by_id
+        Coverage matrix cells keyed by ``cell_id``.
+
+    Returns
+    -------
+    str
+        Human-readable departure text, or an empty string.
+    """
+
+    if not coverage_cell_id:
+        return ""
+    cell = cells_by_id.get(coverage_cell_id)
+    if cell is None:
+        return ""
+    waiver = cell.get("waiver")
+    if isinstance(waiver, Mapping) and waiver.get("user_visible_impact"):
+        return str(waiver["user_visible_impact"])
+    return ""
+
+
+def _resolve_competitor_image(
+    case_id: str,
+    refcache_root: Path,
+    output_dir: Path,
+) -> Optional[str]:
+    """Copy a refcache competitor specimen into the guide and return its path.
+
+    Parameters
+    ----------
+    case_id
+        Card case id to look up under ``refcache_root/graphviz/{case_id}.png``.
+    refcache_root
+        Root of the parity loop's refcache directory.
+    output_dir
+        Guide output root; images are copied to ``{output_dir}/img/``.
+
+    Returns
+    -------
+    str or None
+        Relative path (from ``output_dir``) to the copied image, or ``None``
+        when no refcache entry exists for this case.
+    """
+
+    source = refcache_root / "graphviz" / f"{case_id}.png"
+    if not source.exists():
+        return None
+    dest_dir = output_dir / "img"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{case_id}.png"
+    shutil.copyfile(source, dest)
+    return f"img/{case_id}.png"
+
+
+def _load_v2_cards(
+    card_manifest_path: Union[str, Path],
+    coverage_matrix_path: Union[str, Path],
+    refcache_root: Union[str, Path],
+    output_dir: Path,
+) -> List[V2CardEntry]:
+    """Load and resolve card manifest rows into v2 page entries.
+
+    Parameters
+    ----------
+    card_manifest_path
+        Path to ``card_manifest.json``.
+    coverage_matrix_path
+        Path to ``coverage_matrix.json``.
+    refcache_root
+        Root of the parity loop's refcache directory.
+    output_dir
+        Guide output root (competitor images are copied here).
+
+    Returns
+    -------
+    list[V2CardEntry]
+        Resolved entries in manifest order.
+    """
+
+    from scripts.visual_parity.io import read_card_manifest, read_coverage_matrix
+
+    manifest = read_card_manifest(card_manifest_path)
+    matrix = read_coverage_matrix(coverage_matrix_path)
+    cells_by_id = {
+        str(cell.get("cell_id")): cell
+        for cell in matrix.get("cells", [])
+        if isinstance(cell, Mapping)
+    }
+    refcache_path = Path(refcache_root)
+
+    entries: List[V2CardEntry] = []
+    for card in manifest.get("cards", []):
+        if not isinstance(card, Mapping):
+            continue
+        case_id = str(card.get("case_id", ""))
+        coverage_cell_id = card.get("coverage_cell_id")
+        entries.append(
+            V2CardEntry(
+                case_id=case_id,
+                category=str(card.get("category", "")),
+                description=str(card.get("description", "")),
+                domain=_classify_v2_domain(card),
+                status_badge=_status_badge_for_cell(coverage_cell_id, cells_by_id),
+                departure_text=_departure_text_for_cell(coverage_cell_id, cells_by_id),
+                competitor_image=_resolve_competitor_image(case_id, refcache_path, output_dir),
+            )
+        )
+    return entries
+
+
+def _write_v2_domain_page(output_dir: Path, domain: str, entries: Sequence[V2CardEntry]) -> Path:
+    """Write one mobile-first HTML page for a v2 domain.
+
+    Parameters
+    ----------
+    output_dir
+        Guide output root.
+    domain
+        Domain slug (member of ``V2_DOMAINS``).
+    entries
+        Cards belonging to this domain.
+
+    Returns
+    -------
+    Path
+        Path to the written HTML page.
+    """
+
+    rows: List[str] = []
+    for entry in entries:
+        if entry.competitor_image:
+            reference_cell = f'<img src="{html.escape(entry.competitor_image)}" alt="reference">'
+        else:
+            reference_cell = '<span class="missing">no reference yet</span>'
+        departure_html = (
+            f'<p class="departure">{html.escape(entry.departure_text)}</p>'
+            if entry.departure_text
+            else ""
+        )
+        rows.append(
+            "\n".join(
+                [
+                    '      <div class="pair">',
+                    f"        <h3>{html.escape(entry.case_id)}</h3>",
+                    f'        <p class="desc">{html.escape(entry.description)}</p>',
+                    f'        <span class="badge">{html.escape(entry.status_badge)}</span>',
+                    '        <div class="cols">',
+                    f'          <div class="col"><h4>Reference</h4>{reference_cell}</div>',
+                    '          <div class="col"><h4>Dagua</h4>'
+                    '<span class="missing">no specimen yet</span></div>',
+                    "        </div>",
+                    departure_html,
+                    "      </div>",
+                ]
+            )
+        )
+
+    page_html = "\n".join(
+        [
+            "<!DOCTYPE html>",
+            '<html lang="en">',
+            "<head>",
+            '  <meta charset="utf-8">',
+            '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+            f"  <title>Dagua Visual Reference -- {html.escape(domain)}</title>",
+            "  <style>",
+            "    :root { color-scheme: light; }",
+            "    body { font-family: system-ui, sans-serif; max-width: 900px; "
+            "margin: 0 auto; padding: 16px; color: #1f2933; }",
+            "    h1 { font-size: 20px; }",
+            "    .pair { border-top: 1px solid #e0e0e0; padding: 12px 0; }",
+            "    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }",
+            "    @media (max-width: 600px) { .cols { grid-template-columns: 1fr; } }",
+            "    .col img { max-width: 100%; }",
+            "    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; "
+            "background: #eef2f6; font-size: 12px; }",
+            "    .missing { color: #9aa5b1; font-size: 13px; }",
+            "    .departure { color: #92400e; font-size: 13px; }",
+            "    a.back { display: inline-block; margin-bottom: 12px; }",
+            "  </style>",
+            "</head>",
+            "<body>",
+            '  <a class="back" href="index.html">&larr; Index</a>',
+            f"  <h1>{html.escape(domain)} ({len(entries)})</h1>",
+            *rows,
+            "</body>",
+            "</html>",
+        ]
+    )
+    page_path = output_dir / f"{domain}.html"
+    page_path.write_text(page_html, encoding="utf-8")
+    return page_path
+
+
+def _write_v2_index_html(
+    output_dir: Path,
+    domain_counts: Mapping[str, int],
+    filled_competitor_slots: int,
+    total_cards: int,
+) -> Path:
+    """Write the v2 guide's index page (TOC + compact status summary, no hero).
+
+    Parameters
+    ----------
+    output_dir
+        Guide output root.
+    domain_counts
+        Domain slug to card count.
+    filled_competitor_slots
+        Number of cards with a resolved competitor specimen image.
+    total_cards
+        Total number of cards across all domains.
+
+    Returns
+    -------
+    Path
+        Path to the written ``index.html``.
+    """
+
+    rows = "\n".join(
+        f'    <li><a href="{html.escape(domain)}.html">{html.escape(domain)}</a> ({count})</li>'
+        for domain, count in domain_counts.items()
+        if count > 0
+    )
+    page_html = "\n".join(
+        [
+            "<!DOCTYPE html>",
+            '<html lang="en">',
+            "<head>",
+            '  <meta charset="utf-8">',
+            '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+            "  <title>Dagua Visual Reference</title>",
+            "  <style>",
+            "    body { font-family: system-ui, sans-serif; max-width: 700px; "
+            "margin: 0 auto; padding: 16px; color: #1f2933; }",
+            "    h1 { font-size: 20px; }",
+            "    ul { padding-left: 20px; }",
+            "    .status { font-size: 13px; color: #5b6670; }",
+            "  </style>",
+            "</head>",
+            "<body>",
+            "  <h1>Dagua Visual Reference</h1>",
+            f'  <p class="status">{total_cards} cards indexed; '
+            f"{filled_competitor_slots} with a filled reference specimen.</p>",
+            "  <ul>",
+            rows,
+            "  </ul>",
+            "</body>",
+            "</html>",
+        ]
+    )
+    index_path = output_dir / INDEX_NAME
+    index_path.write_text(page_html, encoding="utf-8")
+    return index_path
+
+
+def _write_v2_markdown_index(
+    markdown_path: Union[str, Path],
+    output_dir: Path,
+    domain_counts: Mapping[str, int],
+    filled_competitor_slots: int,
+    total_cards: int,
+) -> None:
+    """Write the ``docs/VISUAL_REFERENCE.md`` markdown index.
+
+    Parameters
+    ----------
+    markdown_path
+        Destination markdown path.
+    output_dir
+        Guide HTML output root (linked from the markdown index).
+    domain_counts
+        Domain slug to card count.
+    filled_competitor_slots
+        Number of cards with a resolved competitor specimen image.
+    total_cards
+        Total number of cards across all domains.
+
+    Returns
+    -------
+    None
+        The markdown file is written to disk.
+    """
+
+    markdown_dir = Path(markdown_path).resolve().parent
+    relative_dir = Path(os.path.relpath(Path(output_dir).resolve(), markdown_dir)).as_posix()
+    lines = [
+        "# Dagua Visual Reference",
+        "",
+        f"{total_cards} cards indexed; {filled_competitor_slots} with a filled "
+        "reference specimen from the visual parity v2 refcache.",
+        "",
+        "| domain | cards | page |",
+        "|---|---|---|",
+    ]
+    for domain, count in domain_counts.items():
+        if count == 0:
+            continue
+        lines.append(f"| {domain} | {count} | [{domain}.html]({relative_dir}/{domain}.html) |")
+    lines.append("")
+    lines.append(f"Full browsable index: [{relative_dir}/index.html]({relative_dir}/index.html)")
+    lines.append("")
+    Path(markdown_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_feature_reference_v2(
+    output_dir: Union[str, Path] = DEFAULT_V2_OUTPUT_DIR,
+    card_manifest_path: Union[str, Path] = DEFAULT_V2_CARD_MANIFEST,
+    coverage_matrix_path: Union[str, Path] = DEFAULT_V2_COVERAGE_MATRIX,
+    ledger_path: Union[str, Path] = DEFAULT_V2_LEDGER,
+    refcache_root: Union[str, Path] = DEFAULT_V2_REFCACHE,
+    markdown_index_path: Union[str, Path] = DEFAULT_V2_MARKDOWN_INDEX,
+) -> V2BuildResult:
+    """Build the v2 matrix/manifest/ledger-driven visual reference guide.
+
+    This never renders new images -- it reads card_manifest.json +
+    coverage_matrix.json (+ ledger.json, reserved for future ratchet/lock
+    annotations) and fills competitor slots from the parity loop's refcache.
+
+    Parameters
+    ----------
+    output_dir
+        Guide HTML output root (``docs/visual_reference`` by default).
+    card_manifest_path
+        Path to ``card_manifest.json``.
+    coverage_matrix_path
+        Path to ``coverage_matrix.json``.
+    ledger_path
+        Path to ``ledger.json`` (read for schema validation; not yet used
+        for per-row ratchet/lock annotations -- reserved for a future pass
+        once Lane C's ledger rows are populated).
+    refcache_root
+        Root of the parity loop's refcache directory.
+    markdown_index_path
+        Destination for the ``docs/VISUAL_REFERENCE.md`` markdown index.
+
+    Returns
+    -------
+    V2BuildResult
+        Output paths and per-domain counts.
+    """
+
+    from scripts.visual_parity.io import read_ledger
+
+    read_ledger(ledger_path)  # schema-version validation only, for now.
+
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    entries = _load_v2_cards(card_manifest_path, coverage_matrix_path, refcache_root, output_root)
+    by_domain: Dict[str, List[V2CardEntry]] = {domain: [] for domain in V2_DOMAINS}
+    for entry in entries:
+        by_domain.setdefault(entry.domain, []).append(entry)
+
+    page_paths: Dict[str, str] = {}
+    domain_counts: Dict[str, int] = {}
+    for domain, domain_entries in by_domain.items():
+        domain_counts[domain] = len(domain_entries)
+        if domain_entries:
+            page_paths[domain] = str(_write_v2_domain_page(output_root, domain, domain_entries))
+
+    filled_competitor_slots = sum(1 for entry in entries if entry.competitor_image)
+    index_path = _write_v2_index_html(
+        output_root, domain_counts, filled_competitor_slots, len(entries)
+    )
+    _write_v2_markdown_index(
+        markdown_index_path, output_root, domain_counts, filled_competitor_slots, len(entries)
+    )
+
+    return V2BuildResult(
+        output_dir=str(output_root),
+        index_path=str(index_path),
+        markdown_index_path=str(markdown_index_path),
+        page_paths=page_paths,
+        domain_counts=domain_counts,
+        filled_competitor_slots=filled_competitor_slots,
+    )
+
+
 def main() -> int:
     """Parse CLI arguments and build the gallery.
 
@@ -1288,7 +1838,38 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default="docs/gallery")
+    parser.add_argument(
+        "--v2",
+        action="store_true",
+        help=(
+            "Build the matrix/manifest/ledger-driven docs/visual_reference/ guide "
+            "instead of the v1 hand-built demo-scene gallery."
+        ),
+    )
+    parser.add_argument("--card-manifest", default=DEFAULT_V2_CARD_MANIFEST)
+    parser.add_argument("--coverage-matrix", default=DEFAULT_V2_COVERAGE_MATRIX)
+    parser.add_argument("--ledger", default=DEFAULT_V2_LEDGER)
+    parser.add_argument("--refcache", default=DEFAULT_V2_REFCACHE)
+    parser.add_argument("--markdown-index", default=DEFAULT_V2_MARKDOWN_INDEX)
     args = parser.parse_args()
+
+    if args.v2:
+        v2_output_dir = (
+            args.output_dir if args.output_dir != "docs/gallery" else DEFAULT_V2_OUTPUT_DIR
+        )
+        v2_result = build_feature_reference_v2(
+            output_dir=v2_output_dir,
+            card_manifest_path=args.card_manifest,
+            coverage_matrix_path=args.coverage_matrix,
+            ledger_path=args.ledger,
+            refcache_root=args.refcache,
+            markdown_index_path=args.markdown_index,
+        )
+        print(f"Cards indexed: {sum(v2_result.domain_counts.values())}")
+        print(f"Filled competitor slots: {v2_result.filled_competitor_slots}")
+        print(v2_result.index_path)
+        print(v2_result.markdown_index_path)
+        return 0
 
     result = build_feature_reference(output_dir=args.output_dir)
     section_counts = {section.slug: len(section.items) for section in result.sections}
