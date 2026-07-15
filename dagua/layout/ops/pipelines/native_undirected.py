@@ -1085,6 +1085,143 @@ def _stress_points_candidate(problem: LayoutProblem, seed: int) -> torch.Tensor:
     )
 
 
+def _router_v2_large_mini_contest(
+    baseline_pos: torch.Tensor,
+    problem: LayoutProblem,
+    config: LayoutConfig,
+) -> torch.Tensor:
+    """Score router-v2 candidates against the large-graph sfdp+PRISM holder.
+
+    The large-graph fast path (``_use_large_prism_shortlist``) historically
+    returned sfdp+PRISM without any contest. Router-v2 keeps that candidate
+    as the tie-break holder and lets the structurally-shortlisted geodesic /
+    community candidates challenge it under the same honest referee used by
+    the full contest. Anything failing (non-finite, degenerate, raising)
+    silently leaves the holder in place.
+
+    Parameters
+    ----------
+    baseline_pos : torch.Tensor
+        The guarded sfdp+PRISM positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    config : LayoutConfig
+        Prepared native configuration.
+
+    Returns
+    -------
+    torch.Tensor
+        Winning positions with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
+
+    n = int(problem.num_nodes)
+    shortlist = _undirected_route_shortlist(
+        problem.structure,
+        n,
+        has_edge_weights=problem.edge_weights is not None,
+    )
+    if not shortlist.candidates:
+        _LOGGER.info("Undirected contest candidates=sfdp_prism winner=sfdp_prism")
+        return baseline_pos
+
+    seed = int(problem.seed) if problem.seed is not None else 42
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    aesthetic_profile: Optional["AestheticProfile"] = getattr(
+        config, "_dagua_native_aesthetic_profile", None
+    )
+    positions: Dict[str, torch.Tensor] = {"sfdp_prism": baseline_pos}
+
+    def _admit(name: str, raw_pos: Optional[torch.Tensor]) -> None:
+        if raw_pos is None or not bool(torch.isfinite(raw_pos).all().item()):
+            return
+        repaired = _repair_flung_isolates(raw_pos, problem, node_sep)
+        degenerate, reason = _candidate_is_degenerate(
+            repaired, problem.node_sizes, problem.edge_index
+        )
+        if degenerate:
+            _LOGGER.info("Rejected large mini-contest candidate %s_raw: %s", name, reason)
+        else:
+            positions[f"{name}_raw"] = repaired
+        try:
+            projected = _project_candidate_prism(repaired, problem)
+        except Exception:  # noqa: BLE001 -- one cleanup variant fails closed
+            projected = None
+        if projected is not None:
+            degenerate, reason = _candidate_is_degenerate(
+                projected, problem.node_sizes, problem.edge_index
+            )
+            if not degenerate:
+                positions[f"{name}_prism"] = projected
+
+    if "geodesic_stress" in shortlist.candidates:
+        try:
+            from dagua.layout.ops.pipelines.native_lattice_grid import (
+                layout_geodesic_stress_pipeline,
+            )
+
+            _admit(
+                "geodesic_stress",
+                layout_geodesic_stress_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    seed=seed,
+                    edge_weights=problem.edge_weights,
+                    node_sep=node_sep,
+                ),
+            )
+            if problem.edge_weights is not None:
+                _admit(
+                    "geodesic_stress_unweighted",
+                    layout_geodesic_stress_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        seed=seed,
+                        edge_weights=None,
+                        node_sep=node_sep,
+                    ),
+                )
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("large mini-contest geodesic challenger failed", exc_info=True)
+    if "community_scaffold" in shortlist.candidates:
+        try:
+            from dagua.layout.ops.pipelines.native_community import (
+                layout_native_community_pipeline,
+            )
+
+            _admit(
+                "community_scaffold",
+                layout_native_community_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    config=config,
+                    seed=seed,
+                    edge_weights=problem.edge_weights,
+                ),
+            )
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("large mini-contest community challenger failed", exc_info=True)
+
+    cluster_ids = _build_cluster_ids(problem)
+    scores = {
+        name: _score_undirected_candidate(pos, problem, cluster_ids, aesthetic_profile)
+        for name, pos in positions.items()
+    }
+    best_name = "sfdp_prism"
+    for name, score in scores.items():
+        if name != "sfdp_prism" and score > scores[best_name]:
+            best_name = name
+    _LOGGER.info(
+        "Undirected contest (large mini) candidates=%s winner=%s",
+        ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
+        best_name,
+    )
+    return positions[best_name]
+
+
 def layout_native_undirected_portfolio(
     problem: LayoutProblem,
     state: SolveState,
@@ -1140,8 +1277,19 @@ def layout_native_undirected_portfolio(
             _LOGGER.warning("large undirected shortlist failed", exc_info=True)
             shortlisted_pos = None
         if shortlisted_pos is not None:
-            _LOGGER.info("Undirected contest candidates=sfdp_prism winner=sfdp_prism")
-            return shortlisted_pos
+            # Router-v2 (r2 wave 2): the corpus-backed sfdp+PRISM combination
+            # stays the fast-path holder, but where the structural shortlist
+            # admits geodesic/community candidates they now compete in a
+            # bounded mini-contest instead of being skipped wholesale (the
+            # 250 < n <= 1500 non-mesh band was previously unreachable by
+            # every new candidate family). Ties go to sfdp_prism.
+            winner_pos = _router_v2_large_mini_contest(shortlisted_pos, problem, config)
+            return _never_nan_winner(
+                winner_pos,
+                problem,
+                float(getattr(config, "_dagua_native_node_sep", config.node_sep)),
+                int(problem.seed) if problem.seed is not None else 42,
+            )
     incumbent_pos = _run_incumbent()
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
         return incumbent_pos
@@ -1510,6 +1658,111 @@ def layout_native_undirected_portfolio(
             time.perf_counter() - fr_started,
         )
 
+    # Candidates J/K/L (r2 wave 2, router-v2 shortlist): exact-grid
+    # certificate, geodesic-MDS stress, and community scaffold, admitted by
+    # STRUCTURAL features only (see dagua_native._undirected_route_shortlist;
+    # no graph names, no corpus constants). All three are ordinary contest
+    # candidates: the honest measured-argmax referee and the incumbent
+    # tie-break decide, exactly as for every other challenger family.
+    from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
+
+    shortlist = _undirected_route_shortlist(
+        problem.structure,
+        n,
+        has_edge_weights=problem.edge_weights is not None,
+    )
+    if shortlist.candidates:
+        _LOGGER.info(
+            "Router-v2 shortlist classes=%s candidates=%s",
+            ",".join(shortlist.classes),
+            ",".join(shortlist.candidates),
+        )
+    if "lattice_cert" in shortlist.candidates:
+        try:
+            from dagua.layout.ops.pipelines.native_lattice_grid import (
+                certificate_grid_positions,
+                certify_rect_grid,
+            )
+
+            grid_certificate = certify_rect_grid(problem.edge_index, n)
+            if grid_certificate is not None:
+                cert_pos = certificate_grid_positions(
+                    grid_certificate,
+                    problem.node_sizes,
+                    challenger_node_sep,
+                )
+                eligible, reason = _candidate_is_eligible(
+                    cert_pos, incumbent_pos, problem.node_sizes, problem.edge_index
+                )
+                if eligible:
+                    positions["lattice_cert"] = cert_pos
+                else:
+                    _LOGGER.info("Rejected undirected candidate lattice_cert: %s", reason)
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("lattice certificate candidate failed", exc_info=True)
+    if "geodesic_stress" in shortlist.candidates:
+        geodesic_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_lattice_grid import (
+                layout_geodesic_stress_pipeline,
+            )
+
+            geodesic_pos = layout_geodesic_stress_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                seed=seed,
+                edge_weights=problem.edge_weights,
+                node_sep=challenger_node_sep,
+            )
+            _add_challenger("geodesic_stress", geodesic_pos, include_raw=True)
+            if problem.edge_weights is not None:
+                # Mirror the sfdp_unweighted/neato_unweighted pattern: the
+                # frozen ruler's stress axes measure HOP distances, so a
+                # hop-geodesic variant competes alongside the weighted one
+                # and the referee picks per graph.
+                geodesic_unweighted_pos = layout_geodesic_stress_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    seed=seed,
+                    edge_weights=None,
+                    node_sep=challenger_node_sep,
+                )
+                _add_challenger(
+                    "geodesic_stress_unweighted",
+                    geodesic_unweighted_pos,
+                    include_raw=True,
+                )
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("geodesic stress undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=geodesic_stress seconds=%.3f",
+            time.perf_counter() - geodesic_started,
+        )
+    if "community_scaffold" in shortlist.candidates:
+        community_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_community import (
+                layout_native_community_pipeline,
+            )
+
+            community_pos = layout_native_community_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                config=config,
+                seed=seed,
+                edge_weights=problem.edge_weights,
+            )
+            _add_challenger("community_scaffold", community_pos, include_raw=True)
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("community scaffold undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=community_scaffold seconds=%.3f",
+            time.perf_counter() - community_started,
+        )
+
     # Keep the incumbent plus a deterministic proxy-ranked challenger
     # shortlist. Only these finalists reach the frozen honest ruler.
     proxy_scores = {
@@ -1545,7 +1798,74 @@ def layout_native_undirected_portfolio(
         ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
         best_name,
     )
-    return positions[best_name]
+    return _never_nan_winner(positions[best_name], problem, challenger_node_sep, seed)
+
+
+def _never_nan_winner(
+    winner: torch.Tensor,
+    problem: LayoutProblem,
+    node_sep: float,
+    seed: int,
+) -> torch.Tensor:
+    """Apply the router-v2 fallback-ladder tail rungs to the contest winner.
+
+    The full four-rung ladder (r2 wave 2):
+
+    1. A challenger that raises or produces non-finite output is dropped
+       from the contest (``_add_challenger`` / try-except blocks above).
+    2. All challengers dropped means the incumbent runs alone (the argmax
+       default above).
+    3. THIS rung: a non-finite winner (in practice only possible via the
+       incumbent, which the contest never eligibility-checks) is replaced by
+       the safe core -- geodesic MDS + clamped stress descent, which cannot
+       return non-finite output by construction.
+    4. Terminal guard: any residual non-finite coordinate is replaced by a
+       deterministic finite circle-plus-jitter layout.
+
+    Finite winners pass through UNCHANGED (bit-identical hot path).
+
+    Parameters
+    ----------
+    winner : torch.Tensor
+        Contest-winning positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Prepared layout problem.
+    node_sep : float
+        Node separation in points for fallback spacing.
+    seed : int
+        Deterministic seed shared with the contest.
+
+    Returns
+    -------
+    torch.Tensor
+        Finite positions with shape ``[N, 2]``.
+    """
+    if bool(torch.isfinite(winner).all().item()):
+        return winner
+    _LOGGER.warning("Undirected contest winner is non-finite; engaging fallback ladder")
+    from dagua.layout.ops.pipelines.native_lattice_grid import (
+        _deterministic_fallback_positions,
+        _target_edge_length,
+        layout_geodesic_stress_pipeline,
+    )
+
+    try:  # Rung 3: safe core.
+        safe = layout_geodesic_stress_pipeline(
+            edge_index=problem.edge_index,
+            num_nodes=int(problem.num_nodes),
+            node_sizes=problem.node_sizes,
+            seed=seed,
+            edge_weights=problem.edge_weights,
+            node_sep=node_sep,
+        )
+        if bool(torch.isfinite(safe).all().item()):
+            return safe.to(device=winner.device, dtype=winner.dtype)
+    except Exception:  # noqa: BLE001 -- the terminal rung below cannot fail
+        _LOGGER.warning("fallback-ladder safe core failed", exc_info=True)
+    # Rung 4: terminal guard -- always finite, always deterministic.
+    spacing = _target_edge_length(problem.node_sizes, node_sep)
+    terminal = _deterministic_fallback_positions(int(problem.num_nodes), spacing, seed)
+    return terminal.to(device=winner.device, dtype=winner.dtype)
 
 
 @register_op
