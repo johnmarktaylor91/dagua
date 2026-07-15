@@ -1,0 +1,184 @@
+{
+  "failed_metric_ids": [],
+  "generated_at": "2026-07-14T22:57:26.724223+00:00",
+  "results": [
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "font_size_pt",
+      "min_effect_size": ">0 panels",
+      "notes": "",
+      "observed_effect": {
+        "clean": 0.0,
+        "clean_fired": false,
+        "injected": 2.0,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.723705+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_font"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "corridor_ink_ratio",
+      "min_effect_size": "< style threshold",
+      "notes": "",
+      "observed_effect": {
+        "clean": false,
+        "clean_fired": false,
+        "injected": true,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.723786+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_stem"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "label_glyph_extent_pt",
+      "min_effect_size": "delta > 20%",
+      "notes": "",
+      "observed_effect": {
+        "clean": 0.0,
+        "clean_fired": false,
+        "injected": 0.4,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.723829+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_trunc"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "label_glyph_extent_pt",
+      "min_effect_size": "delta > 5%",
+      "notes": "",
+      "observed_effect": {
+        "clean": 0.0,
+        "clean_fired": false,
+        "injected": 0.060000000000000026,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.723866+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_kern"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "arrow_fill_mode,arrow_polygon_iou",
+      "min_effect_size": "mode mismatch; iou < 0.80",
+      "notes": "",
+      "observed_effect": {
+        "clean": false,
+        "clean_fired": false,
+        "injected": true,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.723902+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_arrowfill"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "arrow_compound_order",
+      "min_effect_size": "mismatch",
+      "notes": "",
+      "observed_effect": {
+        "clean": false,
+        "clean_fired": false,
+        "injected": true,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.723937+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_arroworder"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "node_autosize_w_pt",
+      "min_effect_size": "delta > 15%",
+      "notes": "",
+      "observed_effect": {
+        "clean": 0.0,
+        "clean_fired": false,
+        "injected": 0.2,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.723971+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_size"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "node_fill",
+      "min_effect_size": ">= 1 panel",
+      "notes": "",
+      "observed_effect": {
+        "clean": false,
+        "clean_fired": false,
+        "injected": true,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.724019+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_color"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "spline_path_dist_pt",
+      "min_effect_size": "> 3pt",
+      "notes": "",
+      "observed_effect": {
+        "clean": 0.0,
+        "clean_fired": false,
+        "injected": 7.0,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.724065+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_spline"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "cluster_rect_metric",
+      "min_effect_size": ">= 1 panel",
+      "notes": "",
+      "observed_effect": {
+        "clean": false,
+        "clean_fired": false,
+        "injected": true,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.724152+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_cluster"
+    },
+    {
+      "evidence": [],
+      "failed_metric_ids": [],
+      "metric_id": "harness_l1",
+      "min_effect_size": "any",
+      "notes": "",
+      "observed_effect": {
+        "clean": false,
+        "clean_fired": false,
+        "injected": true,
+        "injected_fired": true
+      },
+      "run_at": "2026-07-14T22:57:26.724188+00:00",
+      "status": "pass",
+      "tripwire_id": "tw_scalehide"
+    }
+  ],
+  "schema_version": 2,
+  "status": "pass"
+}

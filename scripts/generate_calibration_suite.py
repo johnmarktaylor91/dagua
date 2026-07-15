@@ -1,17 +1,26 @@
 #!/usr/bin/env python
 # ruff: noqa: E402
-"""Generate a three-way rendering calibration suite.
+"""Generate a two-panel rendering calibration suite (visual parity v2).
 
-The suite renders matching scenes with three backends:
-1. Dagua's matplotlib renderer
-2. Graphviz's native renderer
-3. A plain matplotlib reference scene built from patches and lines
+The suite renders matching scenes with two backends, reference LEFT, dagua
+RIGHT:
+1. Graphviz's native renderer (reference)
+2. Dagua's real ``dagua.render()`` path
+
+The prior plain-matplotlib third backend (a hand-rolled patch/line drawing
+stack that duplicated dagua's own arrowhead and shape drawing code) has been
+removed by design: it could silently diverge from dagua's real rendering
+code and gave audits a phantom third opinion. See FINAL_DESIGN.md section 2
+("SURGERY") and IMPLEMENTATION_PLAN.md Lane D item 1.
 
 Usage
 -----
 python scripts/generate_calibration_suite.py
 python scripts/generate_calibration_suite.py --category edge_options
 python scripts/generate_calibration_suite.py --refresh-refs
+python scripts/generate_calibration_suite.py --two-panel --manifest \\
+    .project-context/research/sprint_visual_parity_v2/card_manifest.json \\
+    --category edge_options --output-dir /tmp/vp2_cards
 """
 
 from __future__ import annotations
@@ -37,24 +46,17 @@ import matplotlib
 import numpy as np
 import torch
 from matplotlib.colors import to_hex, to_rgba
-from matplotlib.path import Path as MplPath
 from PIL import Image
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import (
-    Arc,
-    Circle,
-    Ellipse,
-    FancyArrowPatch,
-    FancyBboxPatch,
-    Polygon,
-)
 
 from dagua import DaguaGraph, render
 from dagua.render.edges.arrowheads import available_arrowheads
 from dagua.styles import ClusterStyle, EdgeStyle, GraphStyle, NodeStyle
-from dagua.utils import parse_rich_markup
+from scripts.visual_parity import compose as vp2_compose
+from scripts.visual_parity.io import read_card_manifest
+from scripts.visual_parity.types import GeometryMode
 
 DEFAULT_OUTPUT_DIR = "eval_output/calibration"
 REF_CACHE_DIRNAME = ".ref_cache"
@@ -137,7 +139,7 @@ class GraphvizSpec:
 
 @dataclass
 class CalibrationScene:
-    """Concrete scene rendered by all three comparison backends.
+    """Concrete scene rendered by both comparison backends (reference + dagua).
 
     Parameters
     ----------
@@ -150,16 +152,12 @@ class CalibrationScene:
     figsize : tuple[float, float] | None, default=None
         Optional scene size metadata retained for callers that need to track an
         explicit composed size alongside the content-derived raw render size.
-    mpl_renderer : callable, optional
-        Optional custom matplotlib renderer for scenes that need bespoke text
-        or geometry beyond the generic patch-based renderer.
     """
 
     graph: DaguaGraph
     positions: torch.Tensor
     graphviz: GraphvizSpec = field(default_factory=GraphvizSpec)
     figsize: Optional[Tuple[float, float]] = None
-    mpl_renderer: Optional[Callable[[Any, "CalibrationScene"], None]] = None
 
 
 @dataclass
@@ -178,6 +176,23 @@ class CalibrationCase:
         Returns a freshly constructed scene for rendering.
     comparison_figsize : tuple[float, float], default=DEFAULT_COMPARISON_SIZE
         Final composed figure size in inches.
+    reference_tool : str, default="graphviz"
+        Reference tool this case is calibrated against.
+    reference_attr : str, default=""
+        Reference attribute name exercised by this case, if any.
+    reference_value : str, default=""
+        Reference attribute value exercised by this case, if any.
+    coverage_cell_id : str | None, default=None
+        Linked ``scripts.visual_parity.coverage`` cell id, if any.
+    target_kind : str, default="svg_declared"
+        Measurement target lane; mirrors ``types.TargetKind`` values.
+    size_policy : str, default="auto"
+        One of ``auto`` (dagua autosize, no fixture crutch), ``fixed``
+        (reference cell explicitly tests a fixed size), ``density``
+        (legacy density-formula card), or ``stress`` (pathological/combo
+        card). v2 atlas cases should use ``auto`` or ``fixed`` only; the
+        legacy density/stress policies are named so the album-zoo era
+        min_width/min_height crutches are not silently inherited.
     """
 
     case_id: str
@@ -185,6 +200,12 @@ class CalibrationCase:
     description: str
     build_scene: Callable[[], CalibrationScene]
     comparison_figsize: Tuple[float, float] = DEFAULT_COMPARISON_SIZE
+    reference_tool: str = "graphviz"
+    reference_attr: str = ""
+    reference_value: str = ""
+    coverage_cell_id: Optional[str] = None
+    target_kind: str = "svg_declared"
+    size_policy: str = "auto"
 
 
 @dataclass
@@ -434,7 +455,6 @@ def _build_graph(
     node_sizes: Optional[Sequence[Tuple[float, float]]] = None,
     node_font_sizes: Optional[Sequence[float]] = None,
     graphviz: Optional[GraphvizSpec] = None,
-    mpl_renderer: Optional[Callable[[Any, CalibrationScene], None]] = None,
     figsize: Optional[Tuple[float, float]] = None,
 ) -> CalibrationScene:
     """Construct a calibration scene from explicit graph components.
@@ -465,8 +485,6 @@ def _build_graph(
         Explicit effective node font sizes.
     graphviz : GraphvizSpec, optional
         Graphviz render overrides.
-    mpl_renderer : callable, optional
-        Custom matplotlib scene renderer.
     figsize : tuple[float, float], optional
         Optional scene size metadata preserved on the returned scene.
 
@@ -495,7 +513,6 @@ def _build_graph(
         positions=torch.tensor(positions, dtype=torch.float32),
         graphviz=graphviz or GraphvizSpec(),
         figsize=figsize,
-        mpl_renderer=mpl_renderer,
     )
 
 
@@ -725,7 +742,6 @@ def _node_scene(
     figsize: Optional[Tuple[float, float]] = None,
     node_sizes: Optional[Sequence[Tuple[float, float]]] = None,
     node_font_sizes: Optional[Sequence[float]] = None,
-    mpl_renderer: Optional[Callable[[Any, CalibrationScene], None]] = None,
     graphviz: Optional[GraphvizSpec] = None,
 ) -> CalibrationScene:
     """Build a grid of single-node samples.
@@ -742,8 +758,6 @@ def _node_scene(
         Optional explicit node sizes aligned with ``samples``.
     node_font_sizes : sequence[float], optional
         Optional explicit node font sizes aligned with ``samples``.
-    mpl_renderer : callable, optional
-        Custom matplotlib renderer.
     graphviz : GraphvizSpec, optional
         Graphviz render overrides.
 
@@ -766,7 +780,6 @@ def _node_scene(
         node_sizes=node_sizes,
         node_font_sizes=node_font_sizes,
         figsize=raw_figsize,
-        mpl_renderer=mpl_renderer,
         graphviz=graphviz,
     )
 
@@ -1212,1012 +1225,6 @@ def _render_dagua_png(scene: CalibrationScene, output_path: Path) -> None:
     plt.close(fig)
 
 
-def _node_patch(style: NodeStyle, x: float, y: float, width: float, height: float) -> Any:
-    """Build a plain matplotlib patch for one node.
-
-    Parameters
-    ----------
-    style : NodeStyle
-        Node style.
-    x : float
-        Node center x-coordinate.
-    y : float
-        Node center y-coordinate.
-    width : float
-        Node width in data units.
-    height : float
-        Node height in data units.
-
-    Returns
-    -------
-    Any
-        Matplotlib patch.
-    """
-
-    facecolor = to_rgba(style.fill, style.opacity)
-    edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
-    linewidth = style.stroke_width
-    linestyle = {
-        "solid": "-",
-        "dashed": "--",
-        "dotted": ":",
-        "dashdot": "-.",
-    }.get(style.stroke_dash, "-")
-    if style.shape in {"rect", "roundrect"}:
-        return FancyBboxPatch(
-            (x - width / 2.0, y - height / 2.0),
-            width,
-            height,
-            boxstyle=(
-                f"round,pad=0,rounding_size={style.corner_radius}"
-                if style.shape == "roundrect"
-                else "square,pad=0"
-            ),
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "ellipse":
-        return Ellipse(
-            (x, y),
-            width,
-            height,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "circle":
-        return Circle(
-            (x, y),
-            radius=max(width, height) / 2.0,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "diamond":
-        return Polygon(
-            [
-                (x, y + height / 2.0),
-                (x + width / 2.0, y),
-                (x, y - height / 2.0),
-                (x - width / 2.0, y),
-            ],
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "triangle":
-        return Polygon(
-            [
-                (x, y + height / 2.0),
-                (x + width / 2.0, y - height / 2.0),
-                (x - width / 2.0, y - height / 2.0),
-            ],
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "hexagon":
-        return Polygon(
-            _regular_polygon_vertices(6, x, y, width, height),
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "pentagon":
-        return Polygon(
-            _regular_polygon_vertices(5, x, y, width, height),
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "octagon":
-        return Polygon(
-            _regular_polygon_vertices(8, x, y, width, height, rotation=np.pi / 8.0),
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "star":
-        return Polygon(
-            _star_vertices(x, y, width, height),
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-            joinstyle="round",
-        )
-    if style.shape == "parallelogram":
-        skew = width * 0.28
-        return Polygon(
-            [
-                (x - width / 2.0 + skew, y + height / 2.0),
-                (x + width / 2.0, y + height / 2.0),
-                (x + width / 2.0 - skew, y - height / 2.0),
-                (x - width / 2.0, y - height / 2.0),
-            ],
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    if style.shape == "trapezoid":
-        inset = width * 0.28
-        return Polygon(
-            [
-                (x - width / 2.0 + inset, y + height / 2.0),
-                (x + width / 2.0 - inset, y + height / 2.0),
-                (x + width / 2.0, y - height / 2.0),
-                (x - width / 2.0, y - height / 2.0),
-            ],
-            closed=True,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            linewidth=linewidth,
-            linestyle=linestyle,
-        )
-    cap_height = max(height * 0.16, 1.0)
-    path = MplPath(
-        [
-            (x - width / 2.0, y + height / 2.0 - cap_height),
-            (x - width / 2.0, y + height / 2.0),
-            (x + width / 2.0, y + height / 2.0),
-            (x + width / 2.0, y + height / 2.0 - cap_height),
-            (x + width / 2.0, y - height / 2.0 + cap_height),
-            (x + width / 2.0, y - height / 2.0),
-            (x - width / 2.0, y - height / 2.0),
-            (x - width / 2.0, y - height / 2.0 + cap_height),
-            (x - width / 2.0, y + height / 2.0 - cap_height),
-        ],
-        [
-            MplPath.MOVETO,
-            MplPath.CURVE4,
-            MplPath.CURVE4,
-            MplPath.CURVE4,
-            MplPath.LINETO,
-            MplPath.CURVE4,
-            MplPath.CURVE4,
-            MplPath.CURVE4,
-            MplPath.CLOSEPOLY,
-        ],
-    )
-    return matplotlib.patches.PathPatch(
-        path,
-        facecolor=facecolor,
-        edgecolor=edgecolor,
-        linewidth=linewidth,
-        linestyle=linestyle,
-    )
-
-
-def _regular_polygon_vertices(
-    count: int,
-    x: float,
-    y: float,
-    width: float,
-    height: float,
-    rotation: float = np.pi / 2.0,
-) -> np.ndarray:
-    """Return regular-polygon vertices for a node patch.
-
-    Parameters
-    ----------
-    count : int
-        Number of polygon corners.
-    x : float
-        Center x-coordinate.
-    y : float
-        Center y-coordinate.
-    width : float
-        Polygon width.
-    height : float
-        Polygon height.
-    rotation : float, default=pi/2
-        Initial rotation in radians.
-
-    Returns
-    -------
-    numpy.ndarray
-        Vertices with shape ``[count, 2]``.
-    """
-
-    angles = rotation + 2.0 * np.pi * np.arange(count, dtype=np.float64) / count
-    return np.column_stack([x + width / 2.0 * np.cos(angles), y + height / 2.0 * np.sin(angles)])
-
-
-def _star_vertices(x: float, y: float, width: float, height: float) -> np.ndarray:
-    """Return five-point-star vertices for a node patch.
-
-    Parameters
-    ----------
-    x : float
-        Center x-coordinate.
-    y : float
-        Center y-coordinate.
-    width : float
-        Star width.
-    height : float
-        Star height.
-
-    Returns
-    -------
-    numpy.ndarray
-        Vertices with shape ``[10, 2]``.
-    """
-
-    vertices: List[Tuple[float, float]] = []
-    outer_rx = width / 2.0
-    outer_ry = height / 2.0
-    inner_rx = outer_rx * 0.32
-    inner_ry = outer_ry * 0.32
-    for index in range(10):
-        angle = np.pi / 2.0 + index * np.pi / 5.0
-        radius_x = outer_rx if index % 2 == 0 else inner_rx
-        radius_y = outer_ry if index % 2 == 0 else inner_ry
-        vertices.append((x + radius_x * np.cos(angle), y + radius_y * np.sin(angle)))
-    return np.asarray(vertices, dtype=np.float64)
-
-
-def _edge_line_style(style: EdgeStyle) -> str:
-    """Map a Dagua edge style token into a matplotlib line style.
-
-    Parameters
-    ----------
-    style : EdgeStyle
-        Edge style.
-
-    Returns
-    -------
-    str
-        Matplotlib line-style token.
-    """
-
-    return {
-        "solid": "-",
-        "dashed": "--",
-        "dotted": ":",
-        "dashdot": "-.",
-    }.get(style.style, "-")
-
-
-def _arrow_polygon(
-    tip: Tuple[float, float],
-    direction: np.ndarray,
-    length: float,
-    width: float,
-    shape: str,
-) -> np.ndarray:
-    """Return polygon vertices for a manual arrowhead approximation.
-
-    Parameters
-    ----------
-    tip : tuple[float, float]
-        Arrow tip position.
-    direction : numpy.ndarray
-        Unit vector pointing toward the arrow tip.
-    length : float
-        Arrowhead length in data units.
-    width : float
-        Arrowhead width in data units.
-    shape : str
-        Arrowhead name.
-
-    Returns
-    -------
-    numpy.ndarray
-        Polygon vertices.
-    """
-
-    ux, uy = direction
-    px, py = -uy, ux
-    tip_x, tip_y = tip
-    back_x = tip_x - ux * length
-    back_y = tip_y - uy * length
-    half = width / 2.0
-    if shape in {"normal", "simple", "fancy", "wedge"}:
-        return np.asarray(
-            [
-                (tip_x, tip_y),
-                (back_x + px * half, back_y + py * half),
-                (back_x - px * half, back_y - py * half),
-            ],
-            dtype=np.float64,
-        )
-    if shape == "diamond" or shape == "odiamond":
-        mid_x = tip_x - ux * (length / 2.0)
-        mid_y = tip_y - uy * (length / 2.0)
-        return np.asarray(
-            [
-                (tip_x, tip_y),
-                (mid_x + px * half, mid_y + py * half),
-                (back_x, back_y),
-                (mid_x - px * half, mid_y - py * half),
-            ],
-            dtype=np.float64,
-        )
-    if shape in {"box", "obox"}:
-        front_x = tip_x - ux * (length * 0.15)
-        front_y = tip_y - uy * (length * 0.15)
-        box_back_x = front_x - ux * length
-        box_back_y = front_y - uy * length
-        return np.asarray(
-            [
-                (front_x + px * half, front_y + py * half),
-                (front_x - px * half, front_y - py * half),
-                (box_back_x - px * half, box_back_y - py * half),
-                (box_back_x + px * half, box_back_y + py * half),
-            ],
-            dtype=np.float64,
-        )
-    return np.asarray(
-        [
-            (tip_x, tip_y),
-            (back_x + px * half, back_y + py * half),
-            (back_x - px * half, back_y - py * half),
-        ],
-        dtype=np.float64,
-    )
-
-
-def _draw_manual_arrowhead(
-    ax: Any,
-    tip: Tuple[float, float],
-    direction: np.ndarray,
-    style: EdgeStyle,
-    *,
-    length_scale: float = 1.0,
-) -> None:
-    """Draw a manual arrowhead approximation with matplotlib patches.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    tip : tuple[float, float]
-        Arrow tip position.
-    direction : numpy.ndarray
-        Unit vector pointing toward the arrow tip.
-    style : EdgeStyle
-        Edge style controlling marker appearance.
-    length_scale : float, default=1.0
-        Extra scaling factor used by some extreme cases.
-
-    Returns
-    -------
-    None
-        Mutates ``ax`` by adding one or more marker artists.
-    """
-
-    if style.arrow == "none":
-        return
-    color = to_rgba(style.arrow_color or style.color, 1.0)
-    length = float(style.arrow_length) * length_scale
-    width = float(style.arrow_width) * length_scale
-    head = style.arrow
-    tip_x, tip_y = tip
-    ux, uy = direction
-    px, py = -uy, ux
-
-    if head in {"dot", "odot", "circle"}:
-        circle = Circle(
-            (tip_x - ux * length * 0.45, tip_y - uy * length * 0.45),
-            radius=max(width * 0.28, 2.5),
-            facecolor=color if head == "dot" else "none",
-            edgecolor=color,
-            linewidth=max(style.width, 1.0),
-        )
-        ax.add_patch(circle)
-        return
-    if head in {"open", "vee", "curve", "icurve"}:
-        spread = 0.6 if head != "vee" else 0.8
-        back_x = tip_x - ux * length
-        back_y = tip_y - uy * length
-        left = [
-            (tip_x, tip_y),
-            (back_x + px * width * spread / 2.0, back_y + py * width * spread / 2.0),
-        ]
-        right = [
-            (tip_x, tip_y),
-            (back_x - px * width * spread / 2.0, back_y - py * width * spread / 2.0),
-        ]
-        if head in {"curve", "icurve"}:
-            patch_left = FancyArrowPatch(
-                posA=left[1],
-                posB=left[0],
-                arrowstyle="-",
-                connectionstyle=f"arc3,rad={0.25 if head == 'curve' else -0.25}",
-                color=color,
-                linewidth=max(style.width, 1.0),
-            )
-            patch_right = FancyArrowPatch(
-                posA=right[1],
-                posB=right[0],
-                arrowstyle="-",
-                connectionstyle=f"arc3,rad={-0.25 if head == 'curve' else 0.25}",
-                color=color,
-                linewidth=max(style.width, 1.0),
-            )
-            ax.add_patch(patch_left)
-            ax.add_patch(patch_right)
-            return
-        ax.plot(
-            [left[0][0], left[1][0]],
-            [left[0][1], left[1][1]],
-            color=color,
-            linewidth=max(style.width, 1.0),
-        )
-        ax.plot(
-            [right[0][0], right[1][0]],
-            [right[0][1], right[1][1]],
-            color=color,
-            linewidth=max(style.width, 1.0),
-        )
-        return
-    if head in {"tee", "bar"}:
-        bar_center_x = tip_x - ux * length * 0.45
-        bar_center_y = tip_y - uy * length * 0.45
-        ax.plot(
-            [bar_center_x + px * width / 2.0, bar_center_x - px * width / 2.0],
-            [bar_center_y + py * width / 2.0, bar_center_y - py * width / 2.0],
-            color=color,
-            linewidth=max(style.width * 1.2, 1.0),
-        )
-        return
-    if head == "crow":
-        back_x = tip_x - ux * length
-        back_y = tip_y - uy * length
-        for offset in (-0.55, 0.0, 0.55):
-            ax.plot(
-                [tip_x, back_x + px * width * offset],
-                [tip_y, back_y + py * width * offset],
-                color=color,
-                linewidth=max(style.width, 1.0),
-            )
-        return
-    if head == "bracket":
-        back_x = tip_x - ux * length
-        back_y = tip_y - uy * length
-        left_x = back_x + px * width / 2.0
-        left_y = back_y + py * width / 2.0
-        right_x = back_x - px * width / 2.0
-        right_y = back_y - py * width / 2.0
-        ax.plot([left_x, right_x], [left_y, right_y], color=color, linewidth=max(style.width, 1.0))
-        ax.plot([left_x, tip_x], [left_y, tip_y], color=color, linewidth=max(style.width, 1.0))
-        ax.plot([right_x, tip_x], [right_y, tip_y], color=color, linewidth=max(style.width, 1.0))
-        return
-    if head == "inv":
-        polygon = _arrow_polygon(tip, -direction, length, width, "normal")
-        ax.add_patch(
-            Polygon(
-                polygon,
-                closed=True,
-                facecolor=color if style.arrow_fill == "filled" else "none",
-                edgecolor=color,
-                linewidth=max(style.width, 1.0),
-            )
-        )
-        return
-
-    polygon = _arrow_polygon(tip, direction, length, width, head)
-    ax.add_patch(
-        Polygon(
-            polygon,
-            closed=True,
-            facecolor=color
-            if head not in {"open", "obox", "odiamond"} and style.arrow_fill == "filled"
-            else "none",
-            edgecolor=color,
-            linewidth=max(style.width, 1.0),
-            joinstyle="round",
-        )
-    )
-
-
-def _edge_midpoint(points: Sequence[Tuple[float, float]]) -> Tuple[float, float]:
-    """Return the midpoint of a polyline.
-
-    Parameters
-    ----------
-    points : sequence[tuple[float, float]]
-        Polyline control points.
-
-    Returns
-    -------
-    tuple[float, float]
-        Midpoint of the longest segment or the center segment.
-    """
-
-    if len(points) == 2:
-        return ((points[0][0] + points[1][0]) / 2.0, (points[0][1] + points[1][1]) / 2.0)
-    segment_lengths = [
-        math.hypot(points[index + 1][0] - points[index][0], points[index + 1][1] - points[index][1])
-        for index in range(len(points) - 1)
-    ]
-    longest = int(np.argmax(segment_lengths))
-    start = points[longest]
-    end = points[longest + 1]
-    return ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
-
-
-def _draw_generic_scene(ax: Any, scene: CalibrationScene, *, draw_node_labels: bool = True) -> None:
-    """Draw a calibration scene with plain matplotlib primitives.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    scene : CalibrationScene
-        Scene to render.
-    draw_node_labels : bool, default=True
-        Whether node labels should be drawn.
-
-    Returns
-    -------
-    None
-        Mutates ``ax`` in place.
-    """
-
-    graph = scene.graph
-    graph.compute_node_sizes()
-    positions = scene.positions.detach().cpu().numpy()
-    sizes = graph.node_sizes.detach().cpu().numpy()
-
-    ax.set_facecolor(WHITE)
-    ax.axis("off")
-    ax.set_aspect("equal")
-
-    x_min, y_min, x_max, y_max = _scene_content_bounds(scene)
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-
-    _draw_generic_clusters(ax, scene, positions, sizes)
-    _draw_generic_edges(ax, scene, positions, sizes)
-    _draw_generic_nodes(ax, scene, positions, sizes, draw_node_labels=draw_node_labels)
-
-
-def _draw_generic_clusters(
-    ax: Any,
-    scene: CalibrationScene,
-    positions: np.ndarray,
-    sizes: np.ndarray,
-) -> None:
-    """Draw cluster boxes for the generic matplotlib renderer.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    scene : CalibrationScene
-        Scene to render.
-    positions : numpy.ndarray
-        Node positions with shape ``[N, 2]``.
-    sizes : numpy.ndarray
-        Node sizes with shape ``[N, 2]``.
-
-    Returns
-    -------
-    None
-        Mutates ``ax`` in place.
-    """
-
-    graph = scene.graph
-    if not graph.clusters:
-        return
-    names = sorted(graph.clusters, key=lambda name: graph.cluster_depth(name))
-    for name in names:
-        members = graph.clusters[name]
-        member_positions = positions[list(members)]
-        member_sizes = sizes[list(members)]
-        style = graph.cluster_styles.get(name, _base_cluster_style())
-        padding = float(style.padding)
-        x_min = float((member_positions[:, 0] - member_sizes[:, 0] / 2.0).min() - padding)
-        x_max = float((member_positions[:, 0] + member_sizes[:, 0] / 2.0).max() + padding)
-        y_min = float((member_positions[:, 1] - member_sizes[:, 1] / 2.0).min() - padding)
-        y_max = float((member_positions[:, 1] + member_sizes[:, 1] / 2.0).max() + padding)
-        patch = FancyBboxPatch(
-            (x_min, y_min),
-            x_max - x_min,
-            y_max - y_min,
-            boxstyle=f"round,pad=0,rounding_size={style.corner_radius}",
-            facecolor=to_rgba(style.fill, style.opacity),
-            edgecolor=to_rgba(style.stroke, style.opacity),
-            linewidth=style.stroke_width,
-            linestyle={"solid": "-", "dashed": "--", "dotted": ":"}.get(style.stroke_dash, "-"),
-            zorder=0.8,
-        )
-        ax.add_patch(patch)
-        label_x = x_min + style.label_offset[0]
-        if style.label_position == "top-center":
-            label_x = (x_min + x_max) / 2.0
-        elif style.label_position == "top-right":
-            label_x = x_max - style.label_offset[0]
-        ha = (
-            "left"
-            if style.label_position == "top-left"
-            else "center"
-            if style.label_position == "top-center"
-            else "right"
-        )
-        ax.text(
-            label_x,
-            y_max - style.label_offset[1],
-            graph.cluster_labels.get(name, name),
-            fontsize=style.font_size,
-            fontweight=style.font_weight,
-            color=style.font_color,
-            ha=ha,
-            va="center",
-            zorder=0.9,
-        )
-
-
-def _draw_generic_edges(
-    ax: Any,
-    scene: CalibrationScene,
-    positions: np.ndarray,
-    sizes: np.ndarray,
-) -> None:
-    """Draw edges for the generic matplotlib renderer.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    scene : CalibrationScene
-        Scene to render.
-    positions : numpy.ndarray
-        Node positions with shape ``[N, 2]``.
-    sizes : numpy.ndarray
-        Node sizes with shape ``[N, 2]``.
-
-    Returns
-    -------
-    None
-        Mutates ``ax`` in place.
-    """
-
-    graph = scene.graph
-    group_counts: Dict[Tuple[int, int], List[int]] = {}
-    for edge_index in range(int(graph.edge_index.shape[1])):
-        source = int(graph.edge_index[0, edge_index].item())
-        target = int(graph.edge_index[1, edge_index].item())
-        group_counts.setdefault((source, target), []).append(edge_index)
-
-    for edge_index in range(int(graph.edge_index.shape[1])):
-        style = graph.get_style_for_edge(edge_index)
-        source = int(graph.edge_index[0, edge_index].item())
-        target = int(graph.edge_index[1, edge_index].item())
-        source_pos = positions[source]
-        target_pos = positions[target]
-        label = graph.edge_labels[edge_index]
-        siblings = group_counts[(source, target)]
-        sibling_rank = siblings.index(edge_index)
-        group_offset = sibling_rank - (len(siblings) - 1) / 2.0
-        color = to_rgba(style.color, style.opacity)
-        linewidth = max(style.width, 0.25)
-        linestyle = _edge_line_style(style)
-
-        if source == target:
-            radius = max(float(sizes[source, 0]), float(sizes[source, 1])) * 0.55 + 18.0 * (
-                abs(group_offset) + 1.0
-            )
-            if graph.direction == "BT":
-                center_x = float(source_pos[0])
-                center_y = float(source_pos[1] - radius * 0.72)
-                loop = Arc(
-                    (center_x, center_y),
-                    width=radius * 1.35,
-                    height=radius * 1.2,
-                    theta1=210,
-                    theta2=510,
-                    color=color,
-                    linewidth=linewidth,
-                    linestyle=linestyle,
-                    zorder=1.2,
-                )
-                tip = (center_x - radius * 0.05, center_y + radius * 0.58)
-                direction = np.array([-0.15, 1.0], dtype=np.float64)
-                label_x = center_x
-                label_y = center_y - radius * 0.92
-            elif graph.direction == "LR":
-                center_x = float(source_pos[0] - radius * 0.72)
-                center_y = float(source_pos[1])
-                loop = Arc(
-                    (center_x, center_y),
-                    width=radius * 1.2,
-                    height=radius * 1.35,
-                    theta1=120,
-                    theta2=420,
-                    color=color,
-                    linewidth=linewidth,
-                    linestyle=linestyle,
-                    zorder=1.2,
-                )
-                tip = (center_x + radius * 0.58, center_y - radius * 0.05)
-                direction = np.array([1.0, -0.15], dtype=np.float64)
-                label_x = center_x - radius * 0.92
-                label_y = center_y
-            elif graph.direction == "RL":
-                center_x = float(source_pos[0] + radius * 0.72)
-                center_y = float(source_pos[1])
-                loop = Arc(
-                    (center_x, center_y),
-                    width=radius * 1.2,
-                    height=radius * 1.35,
-                    theta1=300,
-                    theta2=600,
-                    color=color,
-                    linewidth=linewidth,
-                    linestyle=linestyle,
-                    zorder=1.2,
-                )
-                tip = (center_x - radius * 0.58, center_y - radius * 0.05)
-                direction = np.array([-1.0, -0.15], dtype=np.float64)
-                label_x = center_x + radius * 0.92
-                label_y = center_y
-            else:
-                center_x = float(source_pos[0])
-                center_y = float(source_pos[1] + radius * 0.72)
-                loop = Arc(
-                    (center_x, center_y),
-                    width=radius * 1.35,
-                    height=radius * 1.2,
-                    theta1=30,
-                    theta2=330,
-                    color=color,
-                    linewidth=linewidth,
-                    linestyle=linestyle,
-                    zorder=1.2,
-                )
-                tip = (center_x + radius * 0.05, center_y - radius * 0.58)
-                direction = np.array([0.15, -1.0], dtype=np.float64)
-                label_x = center_x
-                label_y = center_y + radius * 0.92
-            ax.add_patch(loop)
-            direction /= np.linalg.norm(direction)
-            _draw_manual_arrowhead(ax, tip, direction, style)
-            if label:
-                ax.text(
-                    label_x,
-                    label_y,
-                    label,
-                    fontsize=style.label_font_size,
-                    color=style.label_font_color,
-                    ha="center",
-                    va="center",
-                    bbox={"facecolor": style.label_background, "edgecolor": "none", "pad": 1.4},
-                    zorder=1.3,
-                )
-            continue
-
-        delta = target_pos - source_pos
-        norm = np.linalg.norm(delta)
-        if norm <= 1e-9:
-            continue
-        direction = delta / norm
-        start = source_pos + direction * (sizes[source, 1] / 2.4)
-        end = target_pos - direction * (sizes[target, 1] / 2.4)
-
-        points: List[Tuple[float, float]]
-        if style.routing == "ortho":
-            mid_y = (float(start[1]) + float(end[1])) / 2.0
-            points = [
-                (float(start[0]), float(start[1])),
-                (float(start[0]), mid_y),
-                (float(end[0]), mid_y),
-                (float(end[0]), float(end[1])),
-            ]
-            ax.plot(
-                [point[0] for point in points],
-                [point[1] for point in points],
-                color=color,
-                linewidth=linewidth,
-                linestyle=linestyle,
-                zorder=1.1,
-            )
-            arrow_direction = np.array(
-                [points[-1][0] - points[-2][0], points[-1][1] - points[-2][1]], dtype=np.float64
-            )
-            arrow_direction /= np.linalg.norm(arrow_direction)
-            _draw_manual_arrowhead(ax, points[-1], arrow_direction, style)
-        else:
-            rad = 0.0 if style.routing == "straight" else max(float(style.curvature), 0.15)
-            if group_offset != 0.0:
-                rad = (
-                    rad + 0.18 * group_offset
-                    if style.routing != "straight"
-                    else 0.22 * group_offset
-                )
-            patch = FancyArrowPatch(
-                posA=(float(start[0]), float(start[1])),
-                posB=(float(end[0]), float(end[1])),
-                arrowstyle="-",
-                linewidth=linewidth,
-                linestyle=linestyle,
-                color=color,
-                connectionstyle=f"arc3,rad={rad}",
-                zorder=1.1,
-            )
-            ax.add_patch(patch)
-            tangent = np.array(
-                [float(end[0] - start[0]), float(end[1] - start[1])], dtype=np.float64
-            )
-            tangent /= np.linalg.norm(tangent)
-            _draw_manual_arrowhead(ax, (float(end[0]), float(end[1])), tangent, style)
-            points = [(float(start[0]), float(start[1])), (float(end[0]), float(end[1]))]
-
-        if label:
-            label_x, label_y = _edge_midpoint(points)
-            ax.text(
-                label_x,
-                label_y + style.label_offset,
-                label,
-                fontsize=style.label_font_size,
-                color=style.label_font_color,
-                ha="center",
-                va="center",
-                bbox={"facecolor": style.label_background, "edgecolor": "none", "pad": 1.4},
-                zorder=1.3,
-            )
-
-
-def _draw_generic_nodes(
-    ax: Any,
-    scene: CalibrationScene,
-    positions: np.ndarray,
-    sizes: np.ndarray,
-    *,
-    draw_node_labels: bool,
-) -> None:
-    """Draw nodes and plain-text labels for the generic renderer.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    scene : CalibrationScene
-        Scene to render.
-    positions : numpy.ndarray
-        Node positions with shape ``[N, 2]``.
-    sizes : numpy.ndarray
-        Node sizes with shape ``[N, 2]``.
-    draw_node_labels : bool
-        Whether labels should be drawn.
-
-    Returns
-    -------
-    None
-        Mutates ``ax`` in place.
-    """
-
-    graph = scene.graph
-    for index in range(graph.num_nodes):
-        style = graph.get_style_for_node(index)
-        x = float(positions[index, 0])
-        y = float(positions[index, 1])
-        width = float(sizes[index, 0])
-        height = float(sizes[index, 1])
-        patch = _node_patch(style, x, y, width, height)
-        patch.set_zorder(2.0)
-        ax.add_patch(patch)
-        if style.shape == "cylinder":
-            cap_height = max(height * 0.16, 1.0)
-            rim = Ellipse(
-                (x, y + height / 2.0 - cap_height),
-                width,
-                cap_height * 2.0,
-                facecolor="none",
-                edgecolor=to_rgba(style.stroke, style.opacity),
-                linewidth=style.stroke_width,
-                zorder=2.05,
-            )
-            ax.add_patch(rim)
-        if not draw_node_labels:
-            continue
-        if not graph.node_labels[index]:
-            continue
-        fontsize = (
-            float(graph.node_font_sizes[index].item())
-            if graph.node_font_sizes is not None
-            else float(style.font_size)
-        )
-        ax.text(
-            x,
-            y,
-            graph.node_labels[index],
-            fontsize=fontsize,
-            fontweight=style.font_weight,
-            fontstyle=style.font_style,
-            color=style.font_color,
-            ha=style.text_align,
-            va=style.text_valign,
-            zorder=2.2,
-            clip_on=False,
-            multialignment=style.text_align,
-        )
-
-
-def _rich_text_mpl_renderer(ax: Any, scene: CalibrationScene) -> None:
-    """Render the rich-text case with plain matplotlib text runs.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    scene : CalibrationScene
-        Scene to render.
-
-    Returns
-    -------
-    None
-        Mutates ``ax`` in place.
-    """
-
-    _draw_generic_scene(ax, scene, draw_node_labels=False)
-    x = float(scene.positions[0, 0].item())
-    y = float(scene.positions[0, 1].item())
-    style = scene.graph.get_style_for_node(0)
-    segments = parse_rich_markup(scene.graph.node_labels[0])
-    widths = [max(len(text), 1) * style.font_size * 0.55 for text, _ in segments]
-    total_width = sum(widths)
-    cursor = x - total_width / 2.0
-    for (text, flags), width in zip(segments, widths):
-        ax.text(
-            cursor,
-            y,
-            text,
-            fontsize=style.font_size,
-            fontweight="bold" if flags["bold"] else "regular",
-            fontstyle="italic" if flags["italic"] else "normal",
-            color=flags["color"] or style.font_color,
-            ha="left",
-            va="center",
-            zorder=2.3,
-        )
-        cursor += width
-
-
-def _render_matplotlib_png(scene: CalibrationScene, output_path: Path) -> None:
-    """Render the plain-matplotlib reference panel for one scene.
-
-    Parameters
-    ----------
-    scene : CalibrationScene
-        Scene to render.
-    output_path : Path
-        Destination PNG path.
-
-    Returns
-    -------
-    None
-        Writes the PNG to ``output_path``.
-    """
-
-    fig, ax = plt.subplots(figsize=_resolved_scene_figsize(scene), dpi=RAW_RENDER_DPI)
-    fig.patch.set_facecolor(WHITE)
-    renderer = scene.mpl_renderer or _draw_generic_scene
-    renderer(ax, scene)
-    fig.savefig(
-        output_path, dpi=RAW_RENDER_DPI, facecolor=WHITE, bbox_inches="tight", pad_inches=0.05
-    )
-    plt.close(fig)
-
-
 def _content_crop_box(image: Image.Image) -> Optional[Tuple[int, int, int, int]]:
     """Return a padded crop box around visible content.
 
@@ -2270,25 +1277,23 @@ def _normalize_panel_image(image_path: Path) -> Image.Image:
 
 
 def _compose_comparison(
+    reference_image: Path,
     dagua_image: Path,
-    graphviz_image: Path,
-    mpl_image: Path,
     output_path: Path,
     description: str,
     category: str,
     case_id: str,
     figsize: Tuple[float, float],
+    reference_label: str = "Graphviz",
 ) -> None:
-    """Compose the final three-panel comparison figure.
+    """Compose the final two-panel comparison figure (reference LEFT, dagua RIGHT).
 
     Parameters
     ----------
+    reference_image : Path
+        Raw reference-tool panel image (LEFT column).
     dagua_image : Path
-        Raw Dagua panel image.
-    graphviz_image : Path
-        Raw Graphviz panel image.
-    mpl_image : Path
-        Raw matplotlib panel image.
+        Raw Dagua panel image (RIGHT column).
     output_path : Path
         Destination composed image.
     description : str
@@ -2299,6 +1304,8 @@ def _compose_comparison(
         Stable case identifier.
     figsize : tuple[float, float]
         Final figure size in inches.
+    reference_label : str, default="Graphviz"
+        Column title for the reference panel.
 
     Returns
     -------
@@ -2306,30 +1313,18 @@ def _compose_comparison(
         Writes the comparison PNG to ``output_path``.
     """
 
-    panels = [
-        ("Dagua", _normalize_panel_image(dagua_image)),
-        ("Graphviz", _normalize_panel_image(graphviz_image)),
-        ("matplotlib", _normalize_panel_image(mpl_image)),
-    ]
-    fig, axes = plt.subplots(1, 3, figsize=figsize, dpi=COMPARISON_DPI)
-    fig.patch.set_facecolor(WHITE)
-    for axis, (title, image) in zip(axes, panels):
-        axis.imshow(image)
-        axis.axis("off")
-        axis.set_title(title, fontsize=12, fontweight="bold", pad=14)
-    fig.suptitle(description, fontsize=13, fontweight="bold", y=0.98)
-    fig.text(
-        0.5,
-        0.93,
-        f"Category: {category} | Case: {case_id}",
-        ha="center",
-        va="center",
-        fontsize=9,
-        color="#6B7280",
+    _ = (description, category, figsize)
+    vp2_compose.compose_pair(
+        reference_image,
+        dagua_image,
+        output_path,
+        case_id=case_id,
+        round_id="d000",
+        reference_label=reference_label,
+        geometry_mode=GeometryMode.NATIVE,
+        dpi=float(COMPARISON_DPI),
+        manifest_path=output_path.with_suffix(".alignment.json"),
     )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
-    fig.savefig(output_path, dpi=COMPARISON_DPI, facecolor=WHITE, bbox_inches="tight")
-    plt.close(fig)
 
 
 def _reference_cache_path(output_root: Path, case: CalibrationCase, backend: str) -> Path:
@@ -2342,7 +1337,7 @@ def _reference_cache_path(output_root: Path, case: CalibrationCase, backend: str
     case : CalibrationCase
         Case being rendered.
     backend : str
-        Backend name such as ``"graphviz"`` or ``"matplotlib"``.
+        Backend name, normally ``"graphviz"``.
 
     Returns
     -------
@@ -2358,7 +1353,7 @@ def _render_case(
     output_root: Path,
     refresh_refs: bool,
 ) -> Dict[str, Any]:
-    """Render one calibration case and return its manifest row.
+    """Render one calibration case as a two-panel comparison and return its manifest row.
 
     Parameters
     ----------
@@ -2367,7 +1362,7 @@ def _render_case(
     output_root : Path
         Suite root directory.
     refresh_refs : bool
-        Whether cached Graphviz/matplotlib references should be regenerated.
+        Whether the cached Graphviz reference should be regenerated.
 
     Returns
     -------
@@ -2379,9 +1374,7 @@ def _render_case(
     output_path = output_root / case.category / f"{case.case_id}.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     graphviz_cache = _reference_cache_path(output_root, case, "graphviz")
-    mpl_cache = _reference_cache_path(output_root, case, "matplotlib")
     graphviz_cache.parent.mkdir(parents=True, exist_ok=True)
-    mpl_cache.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="dagua_calibration_") as temp_dir:
         temp_root = Path(temp_dir)
@@ -2393,15 +1386,9 @@ def _render_case(
             _render_graphviz_png(_build_graphviz_dot(scene), graphviz_cache, scene.graphviz.engine)
             graphviz_rendered = True
 
-        mpl_rendered = False
-        if refresh_refs or not mpl_cache.exists():
-            _render_matplotlib_png(scene, mpl_cache)
-            mpl_rendered = True
-
         _compose_comparison(
+            reference_image=graphviz_cache,
             dagua_image=dagua_raw,
-            graphviz_image=graphviz_cache,
-            mpl_image=mpl_cache,
             output_path=output_path,
             description=case.description,
             category=case.category,
@@ -2415,9 +1402,13 @@ def _render_case(
         "description": case.description,
         "output_path": str(output_path),
         "graphviz_cache": str(graphviz_cache),
-        "matplotlib_cache": str(mpl_cache),
         "graphviz_rendered": graphviz_rendered,
-        "matplotlib_rendered": mpl_rendered,
+        "reference_tool": case.reference_tool,
+        "reference_attr": case.reference_attr,
+        "reference_value": case.reference_value,
+        "coverage_cell_id": case.coverage_cell_id,
+        "target_kind": case.target_kind,
+        "size_policy": case.size_policy,
     }
 
 
@@ -2789,7 +1780,6 @@ def _rich_text_scene() -> CalibrationScene:
     scene = _node_scene(
         [(rich_label, _base_node_style(label_format="rich", min_width=240.0, min_height=64.0))],
         columns=1,
-        mpl_renderer=_rich_text_mpl_renderer,
         graphviz=GraphvizSpec(
             node_attrs={
                 0: {
@@ -3424,49 +2414,7 @@ def _scaling_scene() -> CalibrationScene:
             node_attrs={offset + 2: {"label": '<<B>Bold</B> <FONT COLOR="#D55E00">Color</FONT>>'}},
         ),
     )
-    scene.mpl_renderer = _scaling_mpl_renderer
     return scene
-
-
-def _scaling_mpl_renderer(ax: Any, scene: CalibrationScene) -> None:
-    """Render the scaling scene with custom rich text on the right component.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    scene : CalibrationScene
-        Scene to render.
-
-    Returns
-    -------
-    None
-        Mutates ``ax`` in place.
-    """
-
-    _draw_generic_scene(ax, scene, draw_node_labels=False)
-    positions = scene.positions.detach().cpu().numpy()
-    for index in range(scene.graph.num_nodes):
-        style = scene.graph.get_style_for_node(index)
-        label = scene.graph.node_labels[index]
-        if label == "**Bold** *Color*":
-            rich_scene = _rich_text_scene()
-            rich_scene.positions[0, 0] = float(positions[index, 0])
-            rich_scene.positions[0, 1] = float(positions[index, 1])
-            _rich_text_mpl_renderer(ax, rich_scene)
-            continue
-        ax.text(
-            float(positions[index, 0]),
-            float(positions[index, 1]),
-            label,
-            fontsize=style.font_size,
-            fontweight=style.font_weight,
-            fontstyle=style.font_style,
-            color=style.font_color,
-            ha=style.text_align,
-            va=style.text_valign,
-            zorder=2.3,
-        )
 
 
 def build_case_catalog() -> List[CalibrationCase]:
@@ -3522,11 +2470,46 @@ def _select_cases(
     return selected
 
 
+def _case_ids_from_card_manifest(
+    manifest_path: str | Path,
+    categories: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Return case ids listed in a ``card_manifest.json`` store.
+
+    Parameters
+    ----------
+    manifest_path : str or Path
+        Path to a schema-version-checked card manifest (see
+        ``scripts.visual_parity.cards``).
+    categories : sequence[str], optional
+        Optional category filters applied to the manifest's own ``category``
+        field before returning case ids.
+
+    Returns
+    -------
+    list[str]
+        Case ids in manifest order, ready to pass to ``--case-id`` selection.
+    """
+
+    manifest = read_card_manifest(manifest_path)
+    allowed = set(categories) if categories is not None else None
+    case_ids: List[str] = []
+    for card in manifest.get("cards", []):
+        card_case_id = card.get("case_id")
+        if not card_case_id:
+            continue
+        if allowed is not None and card.get("category") not in allowed:
+            continue
+        case_ids.append(card_case_id)
+    return case_ids
+
+
 def build_calibration_suite(
     output_dir: str = DEFAULT_OUTPUT_DIR,
     categories: Optional[Sequence[str]] = None,
     case_ids: Optional[Sequence[str]] = None,
     refresh_refs: bool = False,
+    manifest_path: Optional[str | Path] = None,
 ) -> CalibrationSuiteResult:
     """Render the calibration suite and emit a manifest.
 
@@ -3539,7 +2522,11 @@ def build_calibration_suite(
     case_ids : sequence[str], optional
         Optional exact case-id filters.
     refresh_refs : bool, default=False
-        Whether cached Graphviz and matplotlib references should be regenerated.
+        Whether the cached Graphviz reference should be regenerated.
+    manifest_path : str or Path, optional
+        When given, restrict rendering to the case ids listed in this
+        ``card_manifest.json`` (v2 manifest-driven mode; ``--manifest``).
+        Combined with ``categories``, both filters apply.
 
     Returns
     -------
@@ -3553,7 +2540,15 @@ def build_calibration_suite(
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     catalog = build_case_catalog()
-    selected_cases = _select_cases(catalog, categories=categories, case_ids=case_ids)
+    effective_case_ids: Optional[List[str]] = list(case_ids) if case_ids is not None else None
+    if manifest_path is not None:
+        manifest_case_ids = _case_ids_from_card_manifest(manifest_path, categories=categories)
+        if effective_case_ids is not None:
+            allowed = set(manifest_case_ids)
+            effective_case_ids = [cid for cid in effective_case_ids if cid in allowed]
+        else:
+            effective_case_ids = manifest_case_ids
+    selected_cases = _select_cases(catalog, categories=categories, case_ids=effective_case_ids)
     if not selected_cases:
         raise ValueError("No calibration cases matched the requested filters.")
 
@@ -3576,11 +2571,11 @@ def build_calibration_suite(
         "category_counts": category_counts,
         "cases": manifest_rows,
     }
-    manifest_path = root / "manifest.json"
-    manifest_path.write_text(f"{json.dumps(manifest, indent=2)}\n", encoding="utf-8")
+    output_manifest_path = root / "manifest.json"
+    output_manifest_path.write_text(f"{json.dumps(manifest, indent=2)}\n", encoding="utf-8")
     return CalibrationSuiteResult(
         output_dir=str(root),
-        manifest_path=str(manifest_path),
+        manifest_path=str(output_manifest_path),
         image_paths=image_paths,
     )
 
@@ -3613,7 +2608,26 @@ def main() -> int:
     parser.add_argument(
         "--refresh-refs",
         action="store_true",
-        help="Regenerate cached Graphviz and matplotlib reference panels.",
+        help="Regenerate the cached Graphviz reference panel.",
+    )
+    parser.add_argument(
+        "--two-panel",
+        action="store_true",
+        help=(
+            "Explicit v2 two-panel mode (reference LEFT, dagua RIGHT). This is the "
+            "only rendering mode since the plain-matplotlib third backend was "
+            "removed; the flag exists for command-line clarity and forward "
+            "compatibility with the visual parity v2 runbook."
+        ),
+    )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Path to a card_manifest.json (schema-version-checked, see "
+            "scripts.visual_parity.cards). Restricts rendering to the case ids "
+            "listed there; combine with --category to filter further."
+        ),
     )
     args = parser.parse_args()
 
@@ -3622,6 +2636,7 @@ def main() -> int:
         categories=args.categories,
         case_ids=args.case_ids,
         refresh_refs=bool(args.refresh_refs),
+        manifest_path=args.manifest,
     )
     print(f"Generated {len(result.image_paths)} calibration images in {result.output_dir}")
     print(f"Manifest: {result.manifest_path}")
