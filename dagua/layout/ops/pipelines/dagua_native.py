@@ -1262,6 +1262,202 @@ def _flat_stress_route_suppressed_by_hybrid_v2(
     )
 
 
+# ---------------------------------------------------------------------------
+# Router-v2 (native-sprint r2 wave 2): certificate -> features -> per-class
+# candidate shortlist -> the EXISTING honest budgeted contest -> never-NaN
+# fallback ladder. The router never selects a winner itself -- it only decides
+# WHICH candidates enter the measured-argmax contest, so a routing mistake
+# costs runtime, never quality (ties go to the incumbent).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RouterV2Config:
+    """Frozen router-v2 thresholds.
+
+    Every threshold is structural with a documented justification; none is a
+    graph name, corpus id, or per-graph constant. Changes to these values
+    must pass the rotating family-stratified fold protocol documented in
+    ``dagua.eval.router_validation``.
+    """
+
+    # Lattice interiors have constant degree (square 4, triangular 6,
+    # honeycomb 3); boundaries and sparse mesh diagonals add slack.
+    mesh_max_degree: int = 8
+    # stddev/mean of degree: mesh interiors are near-constant-degree. ER /
+    # scale-free graphs sit well above 0.35 at benchmark densities.
+    mesh_degree_uniformity_max: float = 0.35
+    # Fraction of edges incident to the top-5%-degree nodes. Degree-regular
+    # meshes sit near ~0.1; scale-free tails concentrate 0.5+.
+    mesh_hub_edge_fraction_max: float = 0.45
+    # 2D meshes have diameter ~ 2*sqrt(N); small-world/SBM diameters scale
+    # like log N. Requiring diameter >= factor * sqrt(N) separates them.
+    mesh_diameter_sqrt_factor: float = 1.2
+    # Standard "meaningful community structure" bar for modularity of a
+    # label-propagation partition.
+    community_modularity_min: float = 0.30
+    # More communities than half the nodes means the partition is noise.
+    community_max_fraction: float = 0.5
+    # Below this size the exact APSP + MDS + descent candidate costs ~a
+    # second, so it joins EVERY undirected contest (argmax stays honest;
+    # small symmetric graphs are exactly where stress engines win).
+    small_full_contest_nodes: int = 600
+    # Above the contest cap no shortlist applies (incumbent runs alone).
+    geodesic_gate_nodes: int = 1500
+
+
+ROUTER_V2 = RouterV2Config()
+
+
+@dataclass(frozen=True)
+class NativeShortlist:
+    """Structure classes and extra contest candidates chosen by router-v2.
+
+    Attributes
+    ----------
+    classes : tuple[str, ...]
+        Matched structure classes (``"mesh"``, ``"community"``, ``"small"``).
+    candidates : tuple[str, ...]
+        Candidate-family names the undirected contest should add.
+    """
+
+    classes: tuple[str, ...] = ()
+    candidates: tuple[str, ...] = ()
+
+
+def _mesh_features_strong(structure: Optional[GraphStructure], num_nodes: int) -> bool:
+    """Return whether router-v2 mesh/lattice features all fire.
+
+    Conservative by construction: unmeasured features (size-gated zero
+    defaults, ``None`` structure, unknown node count) keep the gate closed,
+    preserving pre-router behavior.
+
+    Parameters
+    ----------
+    structure : GraphStructure, optional
+        Classified graph topology.
+    num_nodes : int
+        Number of nodes (``<= 0`` means unknown).
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph presents as a 2D mesh/lattice patch.
+    """
+    if structure is None or num_nodes <= 2:
+        return False
+    diameter = int(getattr(structure, "diameter_estimate", 0))
+    if diameter <= 0:
+        return False
+    return (
+        int(getattr(structure, "max_degree", 0)) <= ROUTER_V2.mesh_max_degree
+        and float(getattr(structure, "degree_uniformity", 1.0))
+        <= ROUTER_V2.mesh_degree_uniformity_max
+        and float(getattr(structure, "hub_edge_fraction", 1.0))
+        <= ROUTER_V2.mesh_hub_edge_fraction_max
+        and float(diameter) >= ROUTER_V2.mesh_diameter_sqrt_factor * math.sqrt(float(num_nodes))
+    )
+
+
+def _router_features_measured(structure: Optional[GraphStructure]) -> bool:
+    """Return whether the router-v2 feature block was actually computed.
+
+    The classifier measures diameter/community features only inside its size
+    gates (``ROUTER_FEATURE_MAX_NODES``/``_EDGES``); a zero diameter on a
+    non-trivial graph means "not measured", and router-v2 consumers must then
+    preserve pre-router behavior.
+
+    Parameters
+    ----------
+    structure : GraphStructure, optional
+        Classified graph topology.
+
+    Returns
+    -------
+    bool
+        ``True`` when the router-v2 feature block was measured.
+    """
+    return structure is not None and int(getattr(structure, "diameter_estimate", 0)) > 0
+
+
+def _community_features_strong(structure: Optional[GraphStructure], num_nodes: int) -> bool:
+    """Return whether router-v2 community features all fire.
+
+    Parameters
+    ----------
+    structure : GraphStructure, optional
+        Classified graph topology.
+    num_nodes : int
+        Number of nodes (``<= 0`` means unknown).
+
+    Returns
+    -------
+    bool
+        ``True`` when label propagation found meaningful mesoscale blocks.
+    """
+    if structure is None or num_nodes <= 3:
+        return False
+    num_communities = int(getattr(structure, "num_communities", 0))
+    return (
+        float(getattr(structure, "community_score", 0.0)) >= ROUTER_V2.community_modularity_min
+        and 2 <= num_communities <= ROUTER_V2.community_max_fraction * num_nodes
+    )
+
+
+def _undirected_route_shortlist(
+    structure: Optional[GraphStructure],
+    num_nodes: int,
+    has_edge_weights: bool,
+) -> NativeShortlist:
+    """Return the per-class extra-candidate shortlist for one contest.
+
+    Candidate families (all enter the EXISTING honest contest; the
+    measured-argmax referee and the incumbent tie-break stay in charge):
+
+    - ``lattice_cert``: exact rectangular-grid certificate layout. Attempted
+      whenever degrees allow a grid (the certificate itself is
+      verify-then-emit, so a failed attempt costs a few BFS and abstains).
+    - ``geodesic_stress``: geodesic-MDS + SMACOF stress descent. Joins every
+      small contest and every mesh-class contest up to the contest cap.
+    - ``community_scaffold``: two-level label-propagation scaffold. Joins
+      when modularity says the graph has real mesoscale blocks.
+
+    Parameters
+    ----------
+    structure : GraphStructure, optional
+        Classified graph topology (``None`` degrades to size-only gates).
+    num_nodes : int
+        Number of nodes in the contest problem.
+    has_edge_weights : bool
+        Whether the problem carries edge weights.
+
+    Returns
+    -------
+    NativeShortlist
+        Matched classes and candidate families.
+    """
+    del has_edge_weights  # Weighted candidates are managed by the contest.
+    if num_nodes <= 0 or num_nodes > ROUTER_V2.geodesic_gate_nodes:
+        return NativeShortlist()
+    classes: list[str] = []
+    candidates: list[str] = []
+    is_mesh = _mesh_features_strong(structure, num_nodes)
+    is_small = num_nodes <= ROUTER_V2.small_full_contest_nodes
+    if is_mesh:
+        classes.append("mesh")
+    if is_small:
+        classes.append("small")
+    if is_mesh or is_small:
+        max_degree = int(getattr(structure, "max_degree", 4)) if structure is not None else 4
+        if max_degree <= 4:
+            candidates.append("lattice_cert")
+        candidates.append("geodesic_stress")
+    if _community_features_strong(structure, num_nodes):
+        classes.append("community")
+        candidates.append("community_scaffold")
+    return NativeShortlist(classes=tuple(classes), candidates=tuple(candidates))
+
+
 def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutConfig) -> str:
     """Choose a native sub-pipeline for one prepared problem.
 
@@ -1353,16 +1549,33 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     # the layered geometric signal used by the native polish path. The
     # undirected contest can pick an undirected-composite winner that loses
     # the directed polish gate, so these stay on the baseline route.
+    #
+    # Router-v2 (r2 wave 2) OVERRIDE: once the structural feature block is
+    # MEASURED (diameter/degree profile, size-gated -- see
+    # _router_features_measured), a declared-undirected lattice-tagged DAG
+    # re-enters the undirected contest after all. Both measured outcomes
+    # argue for the contest: sqrt-N diameter plus uniform degrees means a
+    # REAL mesh, exactly where stress/MDS candidates win under the common
+    # table; a small diameter CONTRADICTS the lattice tag (the tag is a
+    # layer-geometry heuristic -- e.g. Petersen carries it with diameter 2),
+    # so protecting the layered route on the tag's authority is unfounded.
+    # Monotone-safe either way: the contest's candidate A IS the baseline
+    # route this exclusion used to protect (including its full polish
+    # battery), ties go to the incumbent, and the referee is the same frozen
+    # common table the benchmark scores these declared-undirected graphs
+    # with. The exclusion still holds when features are unmeasured (very
+    # large graphs), preserving pre-router behavior there.
     is_lattice_like_dag = bool(getattr(structure, "is_directed_acyclic", False)) and (
         "lattice_like" in tuple(getattr(structure, "topology_tags", ()))
     )
+    mesh_contest_override = _router_features_measured(structure) and num_nodes > 0
     if (
         getattr(structure, "is_semantically_directed", True) is False
         and (
             bool(getattr(structure, "direction_is_declared", False))
             or float(getattr(structure, "reciprocal_edge_ratio", 0.0)) > 0.3
         )
-        and not is_lattice_like_dag
+        and not (is_lattice_like_dag and not mesh_contest_override)
         and not suppress_portfolio
         and not (
             bool(getattr(config, "try_planar_first", False))
@@ -5560,12 +5773,19 @@ def layout_dagua_native_pipeline(
 
 
 __all__ = [
+    "NativeShortlist",
+    "ROUTER_V2",
+    "RouterV2Config",
     "_DotClusterSkeleton",
     "_DotFlatMetadata",
     "_DotFlatPreprocessResult",
     "_apply_dot_cluster_fidelity_layout",
     "_build_dot_cluster_skeletons",
     "_choose_native_pipeline",
+    "_community_features_strong",
+    "_mesh_features_strong",
+    "_router_features_measured",
+    "_undirected_route_shortlist",
     "_dot_flat_adjacency_mask",
     "_dot_flat_preprocess_edges",
     "_dot_rank_assignment",
