@@ -11,11 +11,30 @@ import pytest
 import torch
 
 from dagua.metrics import (
+    cluster_separation,
     count_crossings,
     count_overlaps_detailed,
     quick,
     sampled_crossing_rate,
 )
+
+
+def test_cluster_pair_sampling_is_deterministic_and_rng_isolated() -> None:
+    """Large-cluster referee sampling repeats without changing global NumPy RNG."""
+    import numpy as np
+
+    pos = torch.arange(440, dtype=torch.float32).unsqueeze(1).repeat(1, 2)
+    cluster_ids = torch.arange(220).repeat_interleave(2)
+    np.random.seed(7)
+    expected_next = np.random.random()
+    np.random.seed(7)
+
+    first = cluster_separation(pos, cluster_ids)
+    second = cluster_separation(pos, cluster_ids)
+    actual_next = np.random.random()
+
+    assert first == second
+    assert actual_next == expected_next
 
 
 @pytest.fixture

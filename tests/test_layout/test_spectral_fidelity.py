@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import numpy as np
 import pytest
@@ -13,6 +14,8 @@ from dagua.eval.competitors.classic_competitor import ClassicSpectral
 from dagua.eval.competitors.networkx_competitor import (
     NetworkXSpectral,
     _graph_to_nx,
+    _networkx_laplacian_spectral_array,
+    _networkx_random_walk_arpack_start,
     _nx_pos_to_tensor,
 )
 from dagua.eval.variants import get_variant
@@ -57,6 +60,35 @@ def _path_edge_index(num_nodes: int) -> torch.Tensor:
         [[index for index in range(num_nodes - 1)], [index + 1 for index in range(num_nodes - 1)]],
         dtype=torch.long,
     )
+
+
+def _multi_component_path_laplacian(component_size: int, component_count: int) -> sparse.csr_matrix:
+    """Build an unnormalized Laplacian for equal-size path components.
+
+    Parameters
+    ----------
+    component_size : int
+        Number of nodes in each path component.
+    component_count : int
+        Number of disconnected path components.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Unnormalized Laplacian with shape ``[N, N]``.
+    """
+    adjacency_blocks = []
+    for _ in range(component_count):
+        adjacency = sparse.diags(
+            [np.ones(component_size - 1), np.ones(component_size - 1)],
+            offsets=[-1, 1],
+            shape=(component_size, component_size),
+            format="csr",
+        )
+        adjacency_blocks.append(adjacency)
+    adjacency = sparse.block_diag(adjacency_blocks, format="csr")
+    degrees = np.asarray(adjacency.sum(axis=1)).reshape(-1)
+    return (sparse.diags(degrees, offsets=0, format="csr") - adjacency).tocsr()
 
 
 def _weighted_duplicate_graph() -> DaguaGraph:
@@ -276,6 +308,132 @@ def test_networkx_spectral_adapter_uses_raw_algorithm_scale() -> None:
     assert torch.equal(tensor, torch.tensor([[1.0, -2.0]]))
 
 
+def test_networkx_spectral_reference_delegates_to_networkx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The NetworkX oracle must call the real NetworkX spectral implementation."""
+    import networkx as nx
+
+    graph = DaguaGraph()
+    graph.add_edge(0, 1)
+    graph.add_node(2)
+    graph.compute_node_sizes()
+    called = {"spectral_layout": False}
+
+    def _spectral_layout(graph_nx: nx.Graph, **kwargs: object) -> dict[int, np.ndarray]:
+        """Record the oracle call and return fixed reference coordinates.
+
+        Parameters
+        ----------
+        graph_nx : networkx.Graph
+            Disconnected NetworkX graph supplied by the adapter.
+        **kwargs : object
+            Spectral layout parameters supplied by the adapter.
+
+        Returns
+        -------
+        dict[int, numpy.ndarray]
+            Fixed two-dimensional positions keyed by node ID.
+        """
+        called["spectral_layout"] = True
+        assert nx.number_weakly_connected_components(graph_nx) == 2
+        assert kwargs == {"dim": 2}
+        return {
+            0: np.array([0.0, 1.0]),
+            1: np.array([1.0, 0.0]),
+            2: np.array([-1.0, -1.0]),
+        }
+
+    monkeypatch.setattr(nx, "spectral_layout", _spectral_layout)
+
+    result = NetworkXSpectral().layout(graph)
+
+    assert result.error is None
+    assert called["spectral_layout"] is True
+    assert torch.equal(
+        result.pos,
+        torch.tensor([[0.0, 1.0], [1.0, 0.0], [-1.0, -1.0]]),
+    )
+
+
+def test_networkx_reference_has_no_dagua_layout_runtime_import() -> None:
+    """The independent reference adapter must not import Dagua layout code."""
+    import dagua.eval.competitors.networkx_competitor as networkx_competitor
+
+    source = inspect.getsource(networkx_competitor)
+
+    assert "from dagua.layout" not in source
+    assert "import dagua.layout" not in source
+
+
+def test_random_walk_arpack_start_matches_independent_reference() -> None:
+    """Dagua and the independent oracle should stabilize repeated eigenspaces equally."""
+    np.testing.assert_array_equal(
+        embed_ops._deterministic_arpack_start(500),
+        _networkx_random_walk_arpack_start(500),
+    )
+
+
+def test_random_walk_reference_passes_stable_arpack_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The independent sparse reference should explicitly stabilize ARPACK's basis."""
+    captured: dict[str, object] = {}
+
+    def _eigs(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+        v0: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Capture the reference adapter's sparse eigensolver call.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.csr_matrix
+            Random-walk Laplacian with shape ``[N, N]``.
+        k : int
+            Requested eigenpair count.
+        which : str
+            ARPACK eigenvalue selector.
+        ncv : int
+            Requested Arnoldi vector count.
+        v0 : numpy.ndarray
+            Explicit process-stable start vector with shape ``[N]``.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            Synthetic eigenpairs for the adapter selection step.
+        """
+        captured.update(
+            {
+                "shape": matrix.shape,
+                "k": k,
+                "which": which,
+                "ncv": ncv,
+                "v0": v0,
+            }
+        )
+        return np.arange(k, dtype=np.float64), np.eye(matrix.shape[0], k, dtype=np.float64)
+
+    monkeypatch.setattr(sparse.linalg, "eigs", _eigs)
+
+    coordinates = _networkx_laplacian_spectral_array(
+        sparse.identity(500, format="csr", dtype=np.float64),
+        dim=2,
+        normalization="random_walk",
+    )
+
+    assert captured["shape"] == (500, 500)
+    assert captured["k"] == 3
+    assert captured["which"] == "SR"
+    assert captured["ncv"] == 22
+    np.testing.assert_array_equal(captured["v0"], _networkx_random_walk_arpack_start(500))
+    np.testing.assert_array_equal(coordinates, np.eye(500, 3)[:, 1:3])
+
+
 def test_networkx_fidelity_dense_branch_uses_generic_eig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -351,7 +509,6 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
             ARPACK eigenvalue selector.
         ncv : int
             Requested Lanczos vector count.
-
         Returns
         -------
         tuple[numpy.ndarray, numpy.ndarray]
@@ -370,3 +527,112 @@ def test_networkx_fidelity_sparse_branch_matches_reference_k_and_ncv(
     )
 
     assert captured == {"k": 3, "which": "SM", "ncv": 22}
+
+
+def test_networkx_fidelity_disconnected_sparse_uses_reference_arpack_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disconnected fidelity layouts should preserve NetworkX's ARPACK semantics."""
+    laplacian = _multi_component_path_laplacian(component_size=125, component_count=4)
+    captured: dict[str, object] = {}
+
+    def _eigsh(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Capture the exact sparse call used for a disconnected Laplacian.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.csr_matrix
+            Sparse Laplacian matrix with shape ``[N, N]``.
+        k : int
+            Requested eigenpair count.
+        which : str
+            ARPACK eigenvalue selector.
+        ncv : int
+            Requested Lanczos vector count.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            Synthetic eigenpairs spanning three zero modes.
+        """
+        captured.update({"shape": matrix.shape, "k": k, "which": which, "ncv": ncv})
+        return np.zeros(k, dtype=np.float64), np.eye(matrix.shape[0], k, dtype=np.float64)
+
+    monkeypatch.setattr(embed_ops.sparse_linalg, "eigsh", _eigsh)
+
+    coordinates = _sparse_spectral_embedding(
+        laplacian=laplacian,
+        dim=2,
+        symmetric=True,
+        networkx_fidelity=True,
+    )
+
+    assert captured == {"shape": (500, 500), "k": 3, "which": "SM", "ncv": 22}
+    np.testing.assert_array_equal(coordinates, np.eye(500, 3)[:, 1:3])
+
+
+def test_networkx_fidelity_random_walk_sparse_matches_reference_eigs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sparse random-walk fidelity should match the reference's right eigenvectors."""
+    laplacian = sparse.identity(500, format="csr", dtype=np.float64)
+    captured: dict[str, object] = {}
+
+    def _eigs(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+        v0: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Capture the nonsymmetric reference eigensolver call.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.csr_matrix
+            Sparse matrix with shape ``[N, N]``.
+        k : int
+            Requested eigenpair count.
+        which : str
+            ARPACK eigenvalue selector.
+        ncv : int
+            Requested Lanczos vector count.
+        v0 : numpy.ndarray
+            Deterministic ARPACK start vector with shape ``[N]``.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            Synthetic right eigenvectors.
+        """
+        captured.update(
+            {
+                "shape": matrix.shape,
+                "k": k,
+                "which": which,
+                "ncv": ncv,
+                "v0": v0,
+            }
+        )
+        return np.arange(k, dtype=np.float64), np.eye(500, k, dtype=np.float64)
+
+    monkeypatch.setattr(embed_ops.sparse_linalg, "eigs", _eigs)
+
+    coordinates = _sparse_spectral_embedding(
+        laplacian=laplacian,
+        dim=2,
+        symmetric=False,
+        networkx_fidelity=True,
+    )
+
+    assert captured["shape"] == (500, 500)
+    assert captured["k"] == 3
+    assert captured["which"] == "SR"
+    assert captured["ncv"] == 22
+    np.testing.assert_array_equal(captured["v0"], embed_ops._deterministic_arpack_start(500))
+    np.testing.assert_array_equal(coordinates, np.eye(500, 3)[:, 1:3])

@@ -19,7 +19,11 @@ import torch
 from scipy import stats
 
 from dagua.eval import distributional_fidelity as df
-from dagua.eval.equivalence_metrics import compute_equivalence_metrics
+from dagua.eval.equivalence_metrics import (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    compute_equivalence_metrics,
+    reference_is_canonical,
+)
 from dagua.eval.graphs import get_test_graphs
 from dagua.eval.variants import get_variant, original_variant_name
 
@@ -46,9 +50,21 @@ SIZE_BINS = (
     ("201-1000", 201, 1000),
     (">1000", 1001, None),
 )
-PASSING_RUNGS = {"0", "1", "2", "2'", "3", "3Q"}
+PASSING_RUNGS = {"0", "1", "2", "2'", "2'w", "3", "3Q"}
 MODE_A_PASS_RUNGS = {"0", "1", "2"}
-MODE_B_PASS_RUNGS = {"0", "2'"}
+MODE_B_PASS_RUNGS = {"0", "2'", "2'w"}
+NO_CANONICAL_REFERENCE_RUNG = "NO_CANONICAL_REFERENCE"
+NO_CANONICAL_REFERENCE_BUCKET = "NO_CANONICAL_REFERENCE"
+QUALITY_BATTERY_FINAL_TIER = "final_3q"
+QUALITY_BATTERY_EXPLORATORY_TIER = "exploratory_noncanonical_reference"
+QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION = (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+)
+NO_CANONICAL_REFERENCE_VARIANTS = {
+    "classic_sfdp_theta04",
+    "classic_sfdp_theta08",
+    "classic_sfdp_steps200",
+}
 TIMEOUT_RE = re.compile("timeout", re.IGNORECASE)
 HIERARCHY_ENGINE_PREFIXES = (
     "classic_sugiyama",
@@ -428,12 +444,14 @@ def finalize_rows(
         dict(row) for row in rows if include_controls or row.get("control_kind") in (None, "")
     ]
     for row in eligible:
+        apply_no_canonical_reference_flag(row)
         row.setdefault("q_track", None)
         row.setdefault("q_tost", None)
         row.setdefault("q_battery", None)
-    apply_bh_family(eligible, "p_track", "q_track")
-    apply_bh_family(eligible, "stress_p_tost", "q_tost")
-    apply_bh_family(eligible, "battery_p_iut", "q_battery")
+    canonical_rows = [row for row in eligible if not bool(row.get("no_canonical_reference"))]
+    apply_bh_family(canonical_rows, "p_track", "q_track")
+    apply_bh_family(canonical_rows, "stress_p_tost", "q_tost")
+    apply_bh_family(canonical_rows, "battery_p_iut", "q_battery")
     typ_count = 0
     typ_raw_fail = 0
     for row in eligible:
@@ -441,11 +459,21 @@ def finalize_rows(
             row["final_rung"] = "INSUFFICIENT_DATA"
             row["final_annotations"] = ["spec_version_mismatch"]
             continue
+        if bool(row.get("no_canonical_reference")) and not bool(row.get("insufficient_data")):
+            row["quality_identical_raw"] = False
+            row["quality_identical"] = False
+            row["q_track"] = None
+            row["q_tost"] = None
+            row["q_battery"] = None
+            row["final_rung"] = NO_CANONICAL_REFERENCE_RUNG
+            row["final_annotations"] = ["no_canonical_reference"]
+            continue
         p_typ = as_float(row.get("p_typ"))
         if p_typ is not None:
             typ_count += 1
             typ_raw_fail += int(p_typ <= 0.05)
             row["not_typical_raw"] = bool(p_typ <= 0.05)
+        apply_quality_battery_prescreen(row)
         row["quality_identical"] = bool(row.get("quality_identical_raw", False))
         rung, annotations = df.assign_rung(row)
         row["final_rung"] = rung
@@ -456,6 +484,144 @@ def finalize_rows(
         row["typicality_raw_fail_count"] = typ_raw_fail
         row["expected_false_atypicality"] = expected_false
     return sorted(eligible, key=lambda item: str(item.get("combo_id", "")))
+
+
+def apply_no_canonical_reference_flag(row: dict[str, Any]) -> None:
+    """Populate the persisted no-canonical-reference report flag.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Mutable per-combo row.
+
+    Returns
+    -------
+    None
+        The row is updated in place.
+    """
+    if "no_canonical_reference" in row:
+        row["no_canonical_reference"] = bool(row.get("no_canonical_reference"))
+        return
+    engine = str(row.get("engine", ""))
+    if engine in NO_CANONICAL_REFERENCE_VARIANTS:
+        row["no_canonical_reference"] = True
+        return
+    variant = get_variant(engine)
+    row["no_canonical_reference"] = bool(
+        variant is not None and not getattr(variant, "reference_expressible", True)
+    )
+
+
+def apply_quality_battery_prescreen(row: dict[str, Any]) -> None:
+    """Apply the reference-canonical gate before final 3Q assignment.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Mutable per-combo row being finalized.
+
+    Returns
+    -------
+    None
+        The row is updated in place.
+    """
+    if not row_has_quality_battery(row):
+        return
+    eligible = quality_battery_eligible(row)
+    row["quality_battery_eligible"] = eligible
+    row["quality_battery_tier"] = (
+        QUALITY_BATTERY_FINAL_TIER if eligible else QUALITY_BATTERY_EXPLORATORY_TIER
+    )
+    row.setdefault(
+        "quality_reference_canonical_threshold",
+        QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    )
+    metric_identical = bool(row.get("quality_identical_raw", False)) or q_lt(
+        row.get("q_battery"), 0.05
+    )
+    if eligible:
+        row["quality_identical_raw"] = metric_identical
+        return
+    row["quality_identical_exploratory"] = bool(
+        row.get("quality_identical_exploratory", False) or metric_identical
+    )
+    row["quality_identical_raw"] = False
+    row["quality_identical"] = False
+    row["q_battery"] = None
+
+
+def row_has_quality_battery(row: dict[str, Any]) -> bool:
+    """Return whether a row carries 3Q battery fields.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Candidate per-combo row.
+
+    Returns
+    -------
+    bool
+        ``True`` when any quality-battery decision or metric field is present.
+    """
+    return any(
+        key in row
+        for key in (
+            "quality_identical_raw",
+            "quality_identical_exploratory",
+            "battery_p_iut",
+            "battery_stress_D_mean",
+            "cross_D_mean",
+            "np_D_mean",
+        )
+    )
+
+
+def quality_battery_eligible(row: dict[str, Any]) -> bool:
+    """Return whether a row may enter final 3Q.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Candidate per-combo row.
+
+    Returns
+    -------
+    bool
+        ``True`` for deterministic references or Mode A rows whose plain
+        reference self-dispersion is below the audited canonical threshold.
+    """
+    explicit = row.get("quality_battery_eligible")
+    if explicit is not None:
+        return bool(explicit)
+    mode = str(row.get("mode", ""))
+    if mode in {"B", "deterministic"}:
+        return True
+    plain_mean_w_r = as_float(row.get("quality_reference_plain_mean_W_R"))
+    if plain_mean_w_r is None:
+        plain_mean_w_r = as_float(row.get("plain_mean_W_R"))
+    return reference_is_canonical(
+        plain_mean_w_r,
+        QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    )
+
+
+def q_lt(value: Any, threshold: float) -> bool:
+    """Return whether a possibly-missing p/q value is below a threshold.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate numeric value.
+    threshold : float
+        Strict upper threshold.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``value`` is finite and less than ``threshold``.
+    """
+    numeric = as_float(value)
+    return numeric is not None and numeric < threshold
 
 
 def apply_bh_family(rows: list[dict[str, Any]], p_key: str, q_key: str) -> None:
@@ -936,6 +1102,16 @@ def build_accounting(
                 if engine in triage.categories.get("DETERMINISTIC_DIFFERENT", [])
                 else row_by_combo.get(combo_id)
             )
+            if (
+                row
+                and bool(row.get("no_canonical_reference"))
+                and not bool(row.get("insufficient_data"))
+            ):
+                bucket = NO_CANONICAL_REFERENCE_BUCKET
+                reason = (
+                    "dagua extension parameters; Graphviz 7.0.5 SFDP cannot express "
+                    "the requested theta/maxiter settings"
+                )
             final_rung = final_rung_for_bucket(bucket, row)
             annotations = list(row.get("final_annotations", [])) if row else []
             if combo_id in reverify_by_combo and not bool(
@@ -1116,6 +1292,8 @@ def final_rung_for_bucket(bucket: str, row: Optional[dict[str, Any]]) -> Optiona
     """
     if bucket == "RUNG_0":
         return "0"
+    if bucket == NO_CANONICAL_REFERENCE_BUCKET:
+        return None
     if bucket != "ESCALATION":
         return None
     if row is None:
@@ -1167,12 +1345,16 @@ def deterministic_quality_identical(row: dict[str, Any]) -> bool:
         the strict battery margins.
     """
     stress_rel = as_float(row.get("stress_rel_delta"))
+    np_d = as_float(row.get("np_D_mean"))
+    np_r = as_float(row.get("np_R_mean"))
     np_delta = as_float(row.get("neighborhood_preservation_delta"))
     crossings_delta = as_float(row.get("crossings_delta"))
     cross_r = as_float(row.get("cross_R_mean"))
     if stress_rel is None or np_delta is None or crossings_delta is None or cross_r is None:
         return False
     cross_margin = max(0.02 * cross_r, 0.5)
+    if np_d is not None and np_r is not None:
+        np_delta = max(np_r - np_d, 0.0)
     return stress_rel < 0.02 and np_delta < 0.02 and crossings_delta <= cross_margin
 
 
@@ -1194,6 +1376,8 @@ def is_informative(row: Optional[dict[str, Any]], final_rung: Optional[str]) -> 
     if final_rung == "0":
         return True
     if row is None:
+        return False
+    if final_rung is None or final_rung == NO_CANONICAL_REFERENCE_RUNG:
         return False
     if row.get("mode") != "B":
         return False
@@ -1427,7 +1611,8 @@ def assign_headlines(
             entry
             for entry in entries
             if entry.on_domain
-            and entry.final_rung in {"0", "1", "2", "2'", "3", "3Q", "4", "INVARIANCE_EQUIVALENT"}
+            and entry.final_rung
+            in {"0", "1", "2", "2'", "2'w", "3", "3Q", "4", "INVARIANCE_EQUIVALENT"}
         ]
         escalation_entries = [
             entry for entry in entries if entry.bucket == "ESCALATION" and entry.on_domain
@@ -2205,6 +2390,9 @@ def evaluate_controls(
         "gate_5_quality_identical_laundering": evaluate_gate_quality_identical_laundering(
             finalized
         ),
+        "gate_6_reference_self_split_positive": evaluate_gate_reference_self_split_positive(
+            finalized
+        ),
     }
     all_passed = all(gate["passed"] for gate in gates.values())
     payload = {"all_passed": all_passed, "gates": gates, "summary": {"all_passed": all_passed}}
@@ -2279,7 +2467,7 @@ def evaluate_gate_positive_mode_b(finalized: dict[str, list[dict[str, Any]]]) ->
     """
     rows = [row for row in control_rows(finalized, ("modeb", "mode-b")) if row.get("mode") == "B"]
     informative = [row for row in rows if not bool(row.get("typicality_uninformative", False))]
-    pass_count = sum(1 for row in informative if str(row.get("final_rung")) in {"2'", "0"})
+    pass_count = sum(1 for row in informative if str(row.get("final_rung")) in {"2'", "2'w", "0"})
     rate = safe_percent(pass_count, len(informative))
     passed = len(informative) >= 30 and rate >= 95.0
     return {
@@ -2373,15 +2561,46 @@ def evaluate_gate_quality_identical_laundering(
         if as_float(row.get("battery_p_iut")) is None and row.get("quality_identical_raw") is None
     )
     three_q = sum(1 for row in scored if str(row.get("final_rung")) == "3Q")
+    leaked = [str(row.get("combo_id", "")) for row in scored if str(row.get("final_rung")) == "3Q"]
     rate = safe_percent(three_q, len(scored))
-    passed = bool(scored) and missing_battery == 0 and rate <= 5.0
+    passed = bool(scored) and missing_battery == 0 and three_q == 0
     return {
         "passed": passed,
         "scored": len(scored),
         "missing_battery_count": missing_battery,
         "three_q_count": three_q,
         "three_q_percent": rate,
-        "limit_percent": 5.0,
+        "limit_percent": 0.0,
+        "leaked_combo_ids": leaked,
+    }
+
+
+def evaluate_gate_reference_self_split_positive(
+    finalized: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Evaluate the reference-self-split positive-control gate.
+
+    Parameters
+    ----------
+    finalized : dict[str, list[dict[str, Any]]]
+        Finalized control rows by kind.
+
+    Returns
+    -------
+    dict[str, Any]
+        PASS/FAIL and measured quality-battery count for the known-equivalent
+        self split.
+    """
+    rows = control_rows(finalized, ("reference-self-split", "self_split"))
+    scored = [row for row in rows if row.get("final_rung") != "INSUFFICIENT_DATA"]
+    quality_identical = sum(1 for row in scored if bool(row.get("quality_identical", False)))
+    three_q = sum(1 for row in scored if str(row.get("final_rung")) == "3Q")
+    passed = bool(scored) and quality_identical == len(scored)
+    return {
+        "passed": passed,
+        "scored": len(scored),
+        "quality_identical_count": quality_identical,
+        "three_q_count": three_q,
     }
 
 
@@ -2444,9 +2663,9 @@ def render_report(state: dict[str, Any]) -> str:
         ),
         "- Stress margins: max(5% of reference stress, 1e-6).",
         (
-            "- 3Q quality-identical battery: normalized stress at 2%, edge crossings at "
-            "2%/0.5 floor, and k-NN neighborhood preservation at 0.02 absolute; the "
-            "battery p-value is the IUT max-p conjunction."
+            "- 3Q quality-identical battery: normalized stress, edge crossings, and "
+            "k-NN preservation use max(current strict margin, reference self-spread); "
+            "only canonical references with plain self-dispersion <= 1.0 enter final 3Q."
         ),
         (
             "- Mode B design: REF_TYPICAL is a non-refutation against a single "
@@ -2475,12 +2694,18 @@ def render_report(state: dict[str, Any]) -> str:
         "## Rung 3 And 3Q Definitions",
         "- Rung 3: stress-only-equivalent, loose 5% fallback.",
         (
-            "- Rung 3Q: quality-identical, strict battery across stress, crossings, "
-            "and k-NN preservation."
+            "- Rung 3Q: quality-identical variance-tied battery across stress, crossings, "
+            "and k-NN preservation for canonical references only."
         ),
         "",
         "## Quality-Identical Breakdown",
         render_quality_identical_breakdown(rows),
+        "",
+        "## No Canonical Reference",
+        render_no_canonical_reference_section(rows),
+        "",
+        "## Quality-Superior But Distinct",
+        render_quality_superior_distinct_section(rows),
         "",
         "## Degradation Curves",
         render_degradation_curves(aggregation["size_curves"]),
@@ -2574,10 +2799,16 @@ def render_tiers(state: dict[str, Any]) -> str:
         "  placement, free-aspect scaling). Exact equality up to symmetry; basically faithful.",
         "  (JMT decision 2026-06-12; previously reported as a Tier-3 sub-rung.)",
         "- Tier 2: TIMEOUT only.",
-        "- Tier 3: rungs 1, 2, 2' plus rung 3 stress-only-equivalent loose 5% fallback.",
-        "- Tier 3Q: quality-identical strict battery, statistically different but drawing-quality",
-        "  indistinguishable by normalized stress, edge crossings, and k-NN preservation.",
+        "- Tier 3: rungs 1, 2, 2', 2'w plus rung 3 stress-only-equivalent loose 5% fallback.",
+        "  (2'w = mode-B typicality-only: weak, non-primary; ~10% wrong-algorithm",
+        "  false-benign measured on gate-3 negatives, so it never counts as primary.)",
+        "- Tier 3Q: quality-identical variance-tied battery on canonical references,",
+        "  statistically different but drawing-quality indistinguishable.",
         "- Tier 4: rung 4 DIFFERENT.",
+        (
+            "- NO_CANONICAL_REFERENCE: dagua extension parameters whose original-side "
+            "reference cannot express the requested settings; excluded from fidelity accounting."
+        ),
         "- NO_DATA: ERROR_NO_DATA, REF_NO_DATA, and INSUFFICIENT_DATA.",
         "",
         "## All 118 Variants",
@@ -2585,6 +2816,9 @@ def render_tiers(state: dict[str, Any]) -> str:
         "",
         "## Per-Combo Tables",
         render_combo_table(accounting),
+        "",
+        "## No Canonical Reference",
+        render_no_canonical_reference_section(state["rows"]),
         "",
         "## Deterministic Sub-Verdicts",
         render_deterministic_rows(accounting),
@@ -2771,6 +3005,86 @@ def render_quality_identical_breakdown(rows: list[dict[str, Any]]) -> str:
             f"{quality_metric_pass_percent(family_rows, 'cross'):.2f} | "
             f"{quality_metric_pass_percent(family_rows, 'np'):.2f} |"
         )
+    return "\n".join(lines)
+
+
+def render_no_canonical_reference_section(rows: list[dict[str, Any]]) -> str:
+    """Render rows excluded because the reference cannot express the variant.
+
+    Parameters
+    ----------
+    rows : list[dict[str, Any]]
+        Finalized per-combo rows.
+
+    Returns
+    -------
+    str
+        Markdown section body with per-variant counts.
+    """
+    no_canonical = [row for row in rows if bool(row.get("no_canonical_reference"))]
+    no_canonical = [
+        row for row in no_canonical if row.get("final_rung") == NO_CANONICAL_REFERENCE_RUNG
+    ]
+    if not no_canonical:
+        return "No rows."
+    by_engine = Counter(str(row.get("engine")) for row in no_canonical)
+    lines = [
+        (
+            "NO CANONICAL REFERENCE (dagua extension parameters -- reference cannot "
+            "express these settings; excluded from fidelity accounting)"
+        ),
+        "",
+        (
+            "Graphviz 7.0.5 SFDP initializes the Barnes-Hut value as the "
+            "`spring_electrical.c` constant `bh = 0.6` and keeps `maxiter` internal; "
+            "the r75 probe found the reference positions bit-identical across the "
+            "ignored `theta` and `maxiter` settings (RMS approximately 4e-16). "
+            "These Dagua variants are legitimate extension knobs, but fidelity to a "
+            "non-expressible reference is not coherent."
+        ),
+        "",
+        "| Variant | Count |",
+        "|---|---:|",
+    ]
+    for engine, count in sorted(by_engine.items()):
+        lines.append(f"| `{engine}` | {count} |")
+    lines.append(f"| **Total** | {len(no_canonical)} |")
+    return "\n".join(lines)
+
+
+def render_quality_superior_distinct_section(rows: list[dict[str, Any]]) -> str:
+    """Render the quality-superior distinct informational overlay.
+
+    Parameters
+    ----------
+    rows : list[dict[str, Any]]
+        Finalized per-combo rows.
+
+    Returns
+    -------
+    str
+        Markdown section body with total and per-engine counts.
+    """
+    superior = [row for row in rows if bool(row.get("quality_superior_distinct"))]
+    if not superior:
+        return "No rows."
+    by_engine = Counter(str(row.get("engine")) for row in superior)
+    lines = [
+        (
+            "QUALITY-SUPERIOR BUT DISTINCT (dagua measurably better on every failing "
+            "quality leg -- these layouts are DIFFERENT from the reference, not equivalent)"
+        ),
+        "",
+        (
+            f"Total: {len(superior)}. This is an informational overlay only: these rows "
+            "remain counted as divergent/non-identical in fidelity accounting."
+        ),
+        "",
+        "| Engine | Count |",
+        "|---|---:|",
+    ]
+    for engine, count in sorted(by_engine.items()):
+        lines.append(f"| `{engine}` | {count} |")
     return "\n".join(lines)
 
 

@@ -1,9 +1,14 @@
 {
   "dependencies": {
-    "cytoscape": "^3.33.1",
+    "cytoscape": "^3.34.0",
+    "cytoscape-avsdf": "^1.0.0",
+    "cytoscape-cise": "^2.0.1",
+    "cytoscape-cose-bilkent": "^4.1.0",
     "cytoscape-fcose": "^2.2.0",
+    "d3-dag": "^1.2.2",
     "dagre": "^0.8.5",
-    "elkjs": "^0.11.1"
+    "elkjs": "^0.11.1",
+    "webcola": "^3.4.0"
   },
   "devDependencies": {
     "canvas": "^3.2.3",

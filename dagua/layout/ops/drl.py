@@ -15,7 +15,7 @@ from typing import ClassVar, Mapping, Optional, Protocol, Tuple, Union, cast
 import numpy as np
 import torch
 
-from dagua.layout.ops._igraph_rng import IgraphPCG32, make_igraph_default_rng
+from dagua.layout.ops._igraph_rng import make_igraph_default_rng
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -138,12 +138,104 @@ class OptionObject(Protocol):
 
 
 DrLOptions = Union[str, Mapping[str, object], OptionObject]
-RandomLike = Union[random.Random, IgraphPCG32]
+
+
+class RandomLike(Protocol):
+    """Minimal random stream interface used by DrL node perturbations."""
+
+    def random(self) -> float:
+        """Return the next pseudo-random float in ``[0.0, 1.0)``.
+
+        Returns
+        -------
+        float
+            Next normalized pseudo-random value.
+        """
+
 
 _IGRAPH_OUTPUT_SCALE = 50.0
 _DENSITY_BOUNDARY_CELLS = 10
 _DENSITY_EDGE_PENALTY = 10_000.0
 _FINE_DENSITY_EPSILON = 1.0e-50
+_LIBC_RAND_MAX = 2_147_483_647
+_LIBC_RANDOM_WARMUP = 344
+
+
+class OpenOrdLibcRandom:
+    """Stateful glibc ``srand``/``rand`` stream used by OpenOrd.
+
+    Parameters
+    ----------
+    seed : int
+        Seed passed to C ``srand``. On glibc, ``rand`` shares the TYPE_3
+        additive-feedback generator used by ``random``.
+    """
+
+    def __init__(self, seed: int) -> None:
+        """Initialize the glibc-compatible RNG state.
+
+        Parameters
+        ----------
+        seed : int
+            Seed forwarded to the emulated ``srand`` routine.
+        """
+        self._state = self._initialize_state(seed=seed)
+
+    @staticmethod
+    def _initialize_state(seed: int) -> list[int]:
+        """Build the warmed glibc TYPE_3 additive-feedback state.
+
+        Parameters
+        ----------
+        seed : int
+            Unsigned seed value supplied to ``srand``.
+
+        Returns
+        -------
+        list[int]
+            Last 31 warmed state words needed by the recurrence.
+        """
+        normalized_seed = int(seed) & 0xFFFFFFFF
+        if normalized_seed == 0:
+            normalized_seed = 1
+
+        values = [0 for _ in range(_LIBC_RANDOM_WARMUP)]
+        values[0] = normalized_seed
+        for index in range(1, 31):
+            previous = values[index - 1]
+            if previous >= 2**31:
+                previous -= 2**32
+            values[index] = (16807 * previous) % _LIBC_RAND_MAX
+
+        values[31] = values[0]
+        values[32] = values[1]
+        values[33] = values[2]
+        for index in range(34, _LIBC_RANDOM_WARMUP):
+            values[index] = (values[index - 31] + values[index - 3]) & 0xFFFFFFFF
+        return values[-31:]
+
+    def rand(self) -> int:
+        """Return the next glibc ``rand`` integer.
+
+        Returns
+        -------
+        int
+            Pseudo-random integer in ``[0, RAND_MAX]``.
+        """
+        next_value = (self._state[0] + self._state[28]) & 0xFFFFFFFF
+        del self._state[0]
+        self._state.append(next_value)
+        return next_value >> 1
+
+    def random(self) -> float:
+        """Return OpenOrd's ``rand() / (float) RAND_MAX`` draw.
+
+        Returns
+        -------
+        float
+            Next normalized random value as consumed by C++ OpenOrd.
+        """
+        return self.rand() / float(_LIBC_RAND_MAX)
 
 
 @dataclass(frozen=True)
@@ -508,8 +600,12 @@ class _DensityGrid:
         tuple[int, int]
             Unclamped integer cell coordinates.
         """
-        cell_x = int((x_value + self.half_view + 0.5) * self.view_to_grid)
-        cell_y = int((y_value + self.half_view + 0.5) * self.view_to_grid)
+        # HALF_VIEW is an integer macro in igraph, so C++ evaluates the first
+        # addition in float before the double literals promote the expression.
+        shifted_x = _as_float32(x_value + self.half_view)
+        shifted_y = _as_float32(y_value + self.half_view)
+        cell_x = int((shifted_x + 0.5) * self.view_to_grid)
+        cell_y = int((shifted_y + 0.5) * self.view_to_grid)
         return cell_x, cell_y
 
     def _apply_kernel(self, cell_x: int, cell_y: int, sign: float) -> None:
@@ -1317,6 +1413,7 @@ def _run_reference_drl(
     params: _DrlParameters,
     seed: int,
     density_config: DRLDensityGridConfig,
+    rng_kind: str = "python",
 ) -> torch.Tensor:
     """Run igraph's single-process DrL state machine without delegation.
 
@@ -1332,6 +1429,9 @@ def _run_reference_drl(
         Seed for igraph's Python RNG hook used by the benchmark adapter.
     density_config : DRLDensityGridConfig
         Density-grid constants.
+    rng_kind : {"python", "libc"}, default="python"
+        Random stream used for per-node jump candidates. OpenOrd uses libc
+        ``srand``/``rand`` while the native DrL adapter keeps Python's stream.
 
     Returns
     -------
@@ -1341,7 +1441,12 @@ def _run_reference_drl(
     nodes = _positions_to_nodes(initial_positions)
     energies = [_as_float32(0.0) for _ in nodes]
     density_grid = _DensityGrid(config=density_config)
-    rng = random.Random(seed)
+    if rng_kind == "python":
+        rng: RandomLike = random.Random(seed)
+    elif rng_kind == "libc":
+        rng = OpenOrdLibcRandom(seed)
+    else:
+        raise ValueError("rng_kind must be 'python' or 'libc'.")
 
     stage = 0
     iterations = int(params.init.iterations)

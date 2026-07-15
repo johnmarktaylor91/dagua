@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Optional
 import torch
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.layout.ops.pipelines.planar import check_planarity
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -102,6 +103,23 @@ def _is_connected_graph(graph: DaguaGraph) -> bool:
     return all(visited)
 
 
+def _is_planar_graph(graph: DaguaGraph) -> bool:
+    """Return whether the graph is planar under the local Python gate.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to test before invoking planar OGDF runners.
+
+    Returns
+    -------
+    bool
+        ``True`` when the local planarity checker accepts the graph.
+    """
+    is_planar, _embedding = check_planarity(graph.edge_index, graph.num_nodes)
+    return bool(is_planar)
+
+
 def _run_ogdf(
     graph: DaguaGraph,
     algorithm: str,
@@ -189,6 +207,7 @@ class _OGDFBase(CompetitorBase):
     """Base class for OGDF subprocess-backed adapters."""
 
     algorithm: str = ""
+    requires_planar: bool = False
 
     def layout(
         self,
@@ -222,6 +241,14 @@ class _OGDFBase(CompetitorBase):
                     pos=None,
                     runtime_seconds=elapsed,
                     error="requires connected graph",
+                )
+            if self.requires_planar and not _is_planar_graph(graph):
+                elapsed = time.perf_counter() - start
+                return CompetitorResult(
+                    name=self.name,
+                    pos=None,
+                    runtime_seconds=elapsed,
+                    error="requires planar graph",
                 )
             pos = _run_ogdf(graph, self.algorithm, timeout, seed=seed)
             elapsed = time.perf_counter() - start
@@ -312,6 +339,14 @@ class _OGDFBase(CompetitorBase):
                     runtime_seconds=elapsed,
                     error="requires connected graph",
                 )
+            if self.requires_planar and not _is_planar_graph(graph):
+                elapsed = time.perf_counter() - start
+                return CompetitorResult(
+                    name=self.name,
+                    pos=None,
+                    runtime_seconds=elapsed,
+                    error="requires planar graph",
+                )
             pos = _run_ogdf(
                 graph=graph,
                 algorithm=self.algorithm,
@@ -396,6 +431,44 @@ class OGDFSugiyama(_OGDFBase):
     name = "ogdf_sugiyama"
     algorithm = "sugiyama"
     max_nodes = 20_000
+
+
+@register
+class OGDFBalloon(_OGDFBase):
+    """Competitor adapter for OGDF's Balloon layout."""
+
+    name = "ogdf_balloon"
+    algorithm = "balloon"
+    max_nodes = 100_000
+
+
+@register
+class OGDFBertault(_OGDFBase):
+    """Competitor adapter for OGDF's Bertault layout."""
+
+    name = "ogdf_bertault"
+    algorithm = "bertault"
+    max_nodes = 10_000
+
+
+@register
+class OGDFFpp(_OGDFBase):
+    """Competitor adapter for OGDF's FPP planar layout."""
+
+    name = "ogdf_fpp"
+    algorithm = "fpp"
+    max_nodes = 100_000
+    requires_planar = True
+
+
+@register
+class OGDFSchnyder(_OGDFBase):
+    """Competitor adapter for OGDF's Schnyder planar layout."""
+
+    name = "ogdf_schnyder"
+    algorithm = "schnyder"
+    max_nodes = 100_000
+    requires_planar = True
 
 
 # OGDFLinLog removed: OGDF has no LinLog implementation. The class was a

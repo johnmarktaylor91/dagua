@@ -10,7 +10,9 @@ import torch
 from dagua.layout.classic.sfdp import layout_sfdp
 from dagua.layout.ops.pipelines.sfdp import (
     _decompose_graphviz_supervariables,
+    _finalize_graphviz_sfdp_component_positions,
     _graphviz_sfdp_coarsen,
+    _pack_graphviz_sfdp_component_positions,
     build_sfdp_pipeline,
     layout_sfdp_pipeline,
 )
@@ -20,6 +22,9 @@ from dagua.layout.ops.sfdp import (
     GraphData,
     GraphvizRandom,
     SFDPHierarchyConfig,
+    _average_edge_length,
+    _build_graph,
+    _principal_component_rotate,
 )
 from dagua.layout.ops.state import (
     ExecutionPlan,
@@ -271,6 +276,31 @@ class TestSFDPPipelineFidelity:
 
         assert groups == [[0, 1], [2, 3], [4, 5], [6, 7]]
 
+    def test_graphviz_supervariable_workspace_grows_for_sbm_trigger(self) -> None:
+        """Supervariable refinement should survive creation IDs above node count."""
+        from dagua.eval.graphs import _make_r79_undirected_sbm
+
+        test_graph = _make_r79_undirected_sbm(
+            "r79_undirected_sbm_high_mix_3x30",
+            [30, 30, 30],
+            0.18,
+            0.08,
+            81,
+        )
+        graph = test_graph.graph
+        edge_index = torch.tensor(
+            [
+                [edge.source.index for edge in graph.edges],
+                [edge.target.index for edge in graph.edges],
+            ],
+            dtype=torch.long,
+        )
+        sfdp_graph = _build_graph(edge_index, 90)
+
+        groups = _decompose_graphviz_supervariables(sfdp_graph)
+
+        assert sorted(node for group in groups for node in group) == list(range(90))
+
     def test_graphviz_matrix_coarsening_matches_reference_complete_multipartite(
         self,
     ) -> None:
@@ -320,6 +350,24 @@ class TestSFDPPipelineFidelity:
         assert [level.num_nodes for level in graphs] == [8, 4]
         assert mappings[0].tolist() == [0, 0, 1, 1, 2, 2, 3, 3]
 
+    def test_graphviz_order_matches_csr_symmetrization_neighbor_order(self) -> None:
+        """Graphviz fidelity graph rows should match 7.0.5 matrix row order."""
+        edge_index = _edge_index_from_edges(
+            [
+                (0, 7),
+                (0, 1),
+                (10, 11),
+                (7, 11),
+                (0, 11),
+                (11, 12),
+            ]
+        )
+
+        graph = _build_graph(edge_index=edge_index, num_nodes=13, graphviz_order=True)
+
+        assert graph.adjacency[0] == [(1, 1.0), (7, 1.0), (11, 1.0)]
+        assert graph.adjacency[11] == [(12, 1.0), (0, 1.0), (7, 1.0), (10, 1.0)]
+
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
         [(0, 123), (1, 123), (2, 123), (5, 123), (5, 99), (20, 123), (50, 7)],
@@ -364,6 +412,36 @@ class TestSFDPPipelineFidelity:
 
         _assert_exact_match(classic, pipeline)
 
+    def test_graphviz_fidelity_ignores_edge_weights_from_dot_reference(self) -> None:
+        """Verify Graphviz-fidelity SFDP ignores in-memory edge weights.
+
+        Returns
+        -------
+        None
+            The assertion fails if weighted and unweighted fidelity-mode layouts
+            differ.
+        """
+        edge_index = _path_edge_index(8)
+        edge_weights = torch.linspace(1.0, 4.0, edge_index.shape[1], dtype=torch.float64)
+
+        weighted = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=8,
+            steps=25,
+            seed=100,
+            edge_weights=edge_weights,
+            fidelity_mode="graphviz",
+        )
+        unweighted = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=8,
+            steps=25,
+            seed=100,
+            fidelity_mode="graphviz",
+        )
+
+        _assert_exact_match(weighted, unweighted)
+
     def test_layout_sfdp_pipeline_matches_classic_on_disconnected_graph(self) -> None:
         """Disconnected components and isolated nodes should match exactly."""
         edge_index = _disconnected_edge_index()
@@ -372,6 +450,63 @@ class TestSFDPPipelineFidelity:
         pipeline = layout_sfdp_pipeline(edge_index=edge_index, num_nodes=7, steps=500, seed=99)
 
         _assert_exact_match(classic, pipeline)
+
+    def test_graphviz_sfdp_component_pack_uses_point_units(self) -> None:
+        """SFDP disconnected packing should not rescale point positions as inches."""
+        components = [[0, 1], [2]]
+        component_positions = [
+            torch.tensor([[0.0, 0.0], [100.0, 0.0]], dtype=torch.float32),
+            torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        ]
+        component_edges = [
+            torch.tensor([[0], [1]], dtype=torch.long),
+            torch.empty((2, 0), dtype=torch.long),
+        ]
+        node_sizes = torch.tensor(
+            [[54.0, 36.0], [54.0, 36.0], [54.0, 36.0]],
+            dtype=torch.float32,
+        )
+
+        packed = _pack_graphviz_sfdp_component_positions(
+            components=components,
+            component_positions=component_positions,
+            component_edges=component_edges,
+            num_nodes=3,
+            node_sizes=node_sizes,
+        )
+
+        assert torch.isfinite(packed).all()
+        assert float(torch.abs(packed).max().item()) < 500.0
+
+    def test_graphviz_sfdp_component_finalize_matches_prism0_edge_scale(self) -> None:
+        """Disconnected finalization should port Graphviz's ``prism0`` scale."""
+        edge_index = _edge_index_from_edges([(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)])
+        graph = _build_graph(edge_index=edge_index, num_nodes=4, graphviz_order=True)
+        raw_positions = torch.tensor(
+            [[0.1, 0.8], [0.9, 0.2], [0.7, 0.95], [0.25, 0.15]],
+            dtype=torch.float64,
+        )
+        node_sizes = torch.tensor(
+            [[54.0, 36.0], [72.0, 36.0], [54.0, 54.0], [90.0, 36.0]],
+            dtype=torch.float32,
+        )
+        problem = LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=4,
+            node_sizes=node_sizes,
+        )
+        state = SolveState(pos=raw_positions, extras={_GRAPH_KEY: [graph]})
+
+        finalized = _finalize_graphviz_sfdp_component_positions(problem=problem, state=state)
+
+        rotated = _principal_component_rotate(raw_positions)
+        raw_average = _average_edge_length(graph=graph, positions=rotated)
+        mean_half_size_inches = (
+            float(((node_sizes[:, 0] + node_sizes[:, 1]) * 0.5).mean().item()) / 72.0
+        )
+        expected_scale = (4.0 * (mean_half_size_inches + 8.0 / 72.0)) / raw_average
+        expected = (rotated * expected_scale * 72.0).to(dtype=torch.float32)
+        assert torch.equal(finalized, expected)
 
     def test_build_sfdp_pipeline_matches_classic_on_complete_graph(self) -> None:
         """The raw pipeline object should match classic SFDP on a dense graph."""

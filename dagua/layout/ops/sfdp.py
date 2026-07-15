@@ -187,6 +187,21 @@ class GraphvizRandom:
         self._state.append(next_value)
         return next_value >> 1
 
+    def reseed(self, seed: int) -> None:
+        """Reset the stream to Graphviz ``srand(seed)`` state.
+
+        Parameters
+        ----------
+        seed : int
+            Seed supplied to Graphviz's ``srand``.
+
+        Returns
+        -------
+        None
+            The generator state is replaced in place.
+        """
+        self._state = self._initialize_state(seed=seed)
+
     def drand(self) -> float:
         """Return Graphviz ``drand`` as ``rand() / RAND_MAX``.
 
@@ -559,7 +574,7 @@ def _build_graph(
 
     edge_weights_by_pair: dict[tuple[int, int], float] = {}
     outgoing_order: list[list[int]] = [[] for _ in range(num_nodes)]
-    incoming_order: list[list[int]] = [[] for _ in range(num_nodes)]
+    incoming_sources: list[set[int]] = [set() for _ in range(num_nodes)]
     adjacency_weights: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() > 0:
         edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
@@ -582,8 +597,7 @@ def _build_graph(
 
             if target not in adjacency_weights[source]:
                 outgoing_order[source].append(target)
-            if source not in adjacency_weights[target]:
-                incoming_order[target].append(source)
+            incoming_sources[target].add(source)
             adjacency_weights[source][target] = adjacency_weights[source].get(target, 0.0) + weight
             adjacency_weights[target][source] = adjacency_weights[target].get(source, 0.0) + weight
 
@@ -594,7 +608,9 @@ def _build_graph(
         edge_pairs.append((source, target))
         edge_weight_values.append(weight)
     for source in range(num_nodes):
-        ordered_neighbors = outgoing_order[source] + incoming_order[source]
+        # Graphviz compacts coordinate rows before symmetrizing, yielding
+        # target-sorted outedges followed by transpose entries in source order.
+        ordered_neighbors = sorted(outgoing_order[source]) + sorted(incoming_sources[source])
         adjacency_lists[source] = [
             (target, adjacency_weights[source][target]) for target in ordered_neighbors
         ]
