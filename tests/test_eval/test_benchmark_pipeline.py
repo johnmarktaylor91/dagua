@@ -10,6 +10,8 @@ from dagua.eval.benchmark import (
     BenchmarkResult,
     _build_results_payload,
     _competitor_signature,
+    _declares_hierarchy,
+    _metric_payload,
     benchmark_run_status,
     get_rare_suite_graphs,
     get_standard_suite_graphs,
@@ -19,9 +21,35 @@ from dagua.eval.benchmark import (
 )
 from dagua.eval.competitors import get_available_competitors
 from dagua.eval.competitors.dagua_competitor import DaguaCompetitor
-from dagua.eval.graphs import TestGraph
+from dagua.eval.graphs import TestGraph, get_test_graphs
 from dagua.eval.report import generate_benchmark_markdown, generate_report
 from dagua.graph import DaguaGraph
+from dagua.metrics import composite_auto
+from dagua.utils import longest_path_layering
+
+
+def test_production_random_dag_routes_to_directed_ruler() -> None:
+    """Corpus DAG metadata reaches the directed composite without an override."""
+    test_graph = next(graph for graph in get_test_graphs() if graph.name == "random_dag_200")
+    graph = test_graph.graph
+    graph.compute_node_sizes()
+    ranks = torch.tensor(
+        longest_path_layering(graph.edge_index, graph.num_nodes), dtype=torch.float32
+    )
+    pos = torch.stack((torch.arange(graph.num_nodes, dtype=torch.float32), ranks), dim=1)
+
+    assert _declares_hierarchy(test_graph)
+    assert graph.is_semantically_directed is True
+    metrics, score, _, _ = _metric_payload(
+        graph,
+        pos,
+        "quick",
+        declared_hierarchical=_declares_hierarchy(test_graph),
+        semantically_directed=True,
+    )
+
+    assert metrics["declared_hierarchical"] is True
+    assert score == pytest.approx(composite_auto(metrics, True))
 
 
 @pytest.mark.smoke

@@ -22,6 +22,7 @@ from dagua.layout.ops.sugiyama import (
     _graphviz_contain_cluster_ordering,
     _graphviz_layer_assignments,
     _graphviz_preserves_plain_exact_tree_x,
+    _graphviz_reverse_equal_cluster_twins,
     _graphviz_skeleton_cluster_ordering,
     _graphviz_x_coordinate_assignment,
     _GraphvizXEdgeKind,
@@ -560,6 +561,38 @@ def test_sugiyama_graphviz_fidelity_uses_dot_x_assignment() -> None:
         ]
     )
     assert torch.allclose(positions, expected, atol=1e-4)
+
+
+def test_graphviz_leaf_cluster_tie_reverses_structural_twins() -> None:
+    """Match dot's local reverse-median tie for equal cluster alternatives."""
+    layers = [[0], [1], [2, 3], [4]]
+    edge_index = torch.tensor([[0, 1, 1, 2, 3], [1, 2, 3, 4, 4]], dtype=torch.long)
+
+    ordered = _graphviz_reverse_equal_cluster_twins(
+        layers=layers,
+        edge_index=edge_index,
+        cluster_members={"twins": (2, 3)},
+    )
+
+    assert ordered[2] == [3, 2]
+
+
+def test_graphviz_x_assignment_can_preserve_point_units() -> None:
+    """The corrected typed simplex should not normalize x to rank separation."""
+    positions = _graphviz_x_coordinate_assignment(
+        layers=[[0, 1]],
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_weights=None,
+        node_sizes=torch.full((2, 2), 44.0),
+        num_nodes=2,
+        num_original_nodes=2,
+        rank_sep=72.0,
+        node_sep=18.0,
+        output_device=torch.device("cpu"),
+        preserve_point_units=True,
+    )
+
+    assert abs(float(positions[1, 0] - positions[0, 0])) == 62.0
 
 
 def test_sugiyama_graphviz_edge_labels_double_rank_minlen() -> None:

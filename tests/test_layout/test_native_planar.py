@@ -156,16 +156,15 @@ def test_native_planar_hexagonal_lattice_zero_crossings_and_beats_baseline() -> 
     graph = _make_hexagonal_lattice_graph(rows=6, cols=7)
     graph.compute_node_sizes()
 
-    baseline_score, _ = _composite_score(
-        graph,
-        LayoutConfig(
-            seed=42,
-            steps=0,
-            brandes_koepf_refine=False,
-            try_planar_first=False,
-            edge_equalize_polish=False,
-        ),
+    baseline_config = LayoutConfig(
+        seed=42,
+        steps=0,
+        brandes_koepf_refine=False,
+        try_planar_first=False,
+        edge_equalize_polish=False,
     )
+    baseline_config._dagua_native_suppress_portfolio = True
+    baseline_score, _ = _composite_score(graph, baseline_config)
     planar_score, planar_crossings = _composite_score(
         graph,
         LayoutConfig(
@@ -195,29 +194,27 @@ def test_auto_dispatch_selects_planar_for_planar_targets_and_layered_for_random_
     for graph in (hex_graph, sierpinski_graph, planar_graph):
         structure = classify_graph(graph.edge_index, graph.num_nodes)
         assert structure.is_planar
-        # r80: only high-confidence undirected graphs route to the portfolio
-        # by default (explicit declaration or reciprocal storage). Lattice-like
-        # DAGs keep the layered path because their one-way lattice orientation
-        # drives native polish quality even when the graph is semantically
-        # undirected.
-        high_confidence_undirected = structure.direction_is_declared or (
-            structure.reciprocal_edge_ratio > 0.3
-        )
-        expected_default = (
-            "undirected_portfolio"
-            if structure.is_semantically_directed is False
-            and high_confidence_undirected
-            and "lattice_like" not in structure.topology_tags
-            else "layered_dag"
-        )
+        # r83: graphs inferred directed route to the directed portfolio
+        # contest; high-confidence undirected graphs (reciprocal storage)
+        # route to the undirected portfolio -- except lattice-like DAGs,
+        # whose one-way lattice orientation drives native polish quality
+        # even when the graph is semantically undirected.
+        if structure.is_semantically_directed is True:
+            expected_default = "directed_portfolio"
+        elif (
+            structure.reciprocal_edge_ratio > 0.3 and "lattice_like" not in structure.topology_tags
+        ):
+            expected_default = "undirected_portfolio"
+        else:
+            expected_default = "layered_dag"
         assert _choose_native_pipeline(structure, default_config) == expected_default
         # Explicit opt-in wins over the portfolio: planar selected.
         assert _choose_native_pipeline(structure, planar_config) == "planar"
 
     random_structure = classify_graph(random_graph.edge_index, random_graph.num_nodes)
     assert not random_structure.is_planar
-    assert _choose_native_pipeline(random_structure, default_config) == "layered_dag"
-    assert _choose_native_pipeline(random_structure, planar_config) == "layered_dag"
+    assert _choose_native_pipeline(random_structure, default_config) == "directed_portfolio"
+    assert _choose_native_pipeline(random_structure, planar_config) == "directed_portfolio"
 
 
 def test_non_planar_graphs_fall_back_or_fail_only_when_forced() -> None:

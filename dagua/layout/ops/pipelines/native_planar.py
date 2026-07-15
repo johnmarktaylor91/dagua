@@ -696,8 +696,29 @@ def layout_native_planar_pipeline(
         seed=seed,
         edge_weights=edge_weights,
     )
-    result_score = dagua_native_legacy._score_native_result(result, edge_index, node_sizes)
-    fallback_score = dagua_native_legacy._score_native_result(fallback, edge_index, node_sizes)
+    contest_structure = graph_structure or classify_graph(edge_index, num_nodes)
+    is_semantically_directed = bool(getattr(contest_structure, "is_semantically_directed", True))
+    declared_hierarchical = is_semantically_directed and bool(
+        getattr(
+            contest_structure,
+            "is_directed_acyclic",
+            getattr(contest_structure, "is_acyclic", True),
+        )
+    )
+    result_score = dagua_native_legacy._score_native_result(
+        result,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+    )
+    fallback_score = dagua_native_legacy._score_native_result(
+        fallback,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+    )
     fallback_crossings = _count_crossings_if_small(fallback, edge_index)
     result_crossings = _count_crossings_if_small(result, edge_index)
     if fallback_crossings <= result_crossings and fallback_score > result_score:
