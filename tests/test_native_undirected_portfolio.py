@@ -14,11 +14,13 @@ from dagua.layout.ops.pipelines.dagua_native import (
 )
 from dagua.layout.ops.pipelines.native_undirected import (
     BALANCED_LARGE_REFINEMENT_STEPS,
+    BALANCED_SMALL_REFINEMENT_STEPS,
     DEGENERACY_MAX_ISOLATED_SPREAD_RATIO,
     FULL_REFINEMENT_STEPS,
     LARGE_CONTEST_NODE_THRESHOLD,
     MAX_CONTEST_NODES,
     NEATO_QUALITY_THRESHOLD,
+    TSNET_PERPLEXITIES,
     _candidate_is_degenerate,
     _candidate_is_eligible,
     _candidate_refinement_steps,
@@ -75,8 +77,8 @@ def test_declared_undirected_routes_to_portfolio() -> None:
     assert _choose_native_pipeline(structure=structure, config=config) == "undirected_portfolio"
 
 
-def test_directed_graph_does_not_route_to_portfolio() -> None:
-    """A directed DAG keeps its baseline route."""
+def test_directed_graph_routes_to_directed_portfolio() -> None:
+    """A directed DAG selects the honest directed-table contest."""
     edges = [(i, i + 1) for i in range(9)] + [(0, 5), (2, 7)]
     graph = DaguaGraph.from_edge_list(edges, num_nodes=10)
     graph.compute_node_sizes()
@@ -86,19 +88,21 @@ def test_directed_graph_does_not_route_to_portfolio() -> None:
     selected = _choose_native_pipeline(structure=structure, config=config)
 
     assert structure.is_semantically_directed is True
-    assert selected != "undirected_portfolio"
+    assert selected == "directed_portfolio"
 
 
-def test_baseline_helper_matches_prior_routing_for_directed() -> None:
-    """The factored baseline helper returns the same route the full chooser picks."""
+def test_suppressed_directed_portfolio_reproduces_baseline_route() -> None:
+    """Suppressed re-entry selects the exact pre-contest incumbent route."""
     edges = [(i, i + 1) for i in range(9)] + [(0, 5), (2, 7)]
     graph = DaguaGraph.from_edge_list(edges, num_nodes=10)
     structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
     config = LayoutConfig(seed=42, device="cpu")
 
-    assert _choose_native_pipeline(
-        structure=structure, config=config
-    ) == _choose_native_pipeline_baseline(structure=structure, config=config)
+    config._dagua_native_suppress_portfolio = True
+
+    assert _choose_native_pipeline(structure=structure, config=config) == (
+        _choose_native_pipeline_baseline(structure=structure, config=config)
+    )
 
 
 def test_forced_pipeline_beats_portfolio_branch() -> None:
@@ -365,6 +369,7 @@ def test_candidate_refinement_schedule_preserves_high_quality() -> None:
     high = LayoutConfig(seed=42, quality="high")
 
     assert _candidate_refinement_steps(balanced, 150) == FULL_REFINEMENT_STEPS
+    assert BALANCED_SMALL_REFINEMENT_STEPS == 75
     assert _candidate_refinement_steps(balanced, 500) == BALANCED_LARGE_REFINEMENT_STEPS
     assert BALANCED_LARGE_REFINEMENT_STEPS == 10
     assert _candidate_refinement_steps(high, 500) == FULL_REFINEMENT_STEPS
@@ -915,3 +920,8 @@ def test_unshear_orthogonalizes_sheared_grid_edge_families() -> None:
         torch.linalg.vector_norm(horizontal) * torch.linalg.vector_norm(diagonal)
     )
     assert float(torch.abs(cosine).item()) < 1e-5
+
+
+def test_tsnet_flavors_include_uniform_perplexity_five_candidate() -> None:
+    """The standard tsNET family includes default and perplexity-five runs."""
+    assert TSNET_PERPLEXITIES == (30.0, 5.0)

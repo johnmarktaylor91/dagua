@@ -45,12 +45,14 @@ from __future__ import annotations
 
 import copy
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
 
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.graph_classify import GraphFamily
 from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -81,19 +83,31 @@ NEATO_QUALITY_THRESHOLD = 0.75
 NEATO_BALANCED_NODE_CAP = MAX_CONTEST_NODES
 
 # Candidate refinement schedule. The faithful 500-step SFDP solve costs
-# 9-20s through 150 nodes on the r81 CPU probe. Above that knee, 10 steps
-# preserve the measured PRISM/raw large-graph wins while avoiding most of the
-# sequential Graphviz-quadtree refinement cost. Explicit high quality retains
-# the full reference-fidelity budget.
+# 9-20s through 150 nodes on the r81 CPU probe. The measured structural gate
+# below uses a bounded small-graph solve; explicit high quality and all other
+# topology classes retain their existing schedules.
 FULL_REFINEMENT_NODE_CAP = 150
 FULL_REFINEMENT_STEPS = 500
+BALANCED_SMALL_REFINEMENT_STEPS = 75
 BALANCED_LARGE_REFINEMENT_STEPS = 10
 HIGH_DEGREE_LARGE_REFINEMENT_STEPS = 20
 HIGH_DEGREE_REFINEMENT_THRESHOLD = 20
 NEATO_FULL_ITERATIONS = 200
+NEATO_BALANCED_SMALL_ITERATIONS = 10
 NEATO_MEDIUM_NODE_CAP = 250
 NEATO_BALANCED_MEDIUM_ITERATIONS = 40
 NEATO_BALANCED_LARGE_ITERATIONS = 4
+
+# R83 Phase 3 common-table challengers use the exact fidelity-campaign
+# defaults, independent of the public quality knob. Multiple deterministic
+# seeds are bounded substitutes for the reference best-of-many field.
+FCOSE_CONTEST_SEEDS = 3
+FCOSE_REFERENCE_STEPS = 2500
+TSNET_CONTEST_SEEDS = 3
+TSNET_MAX_CONTEST_NODES = 300
+TSNET_REFERENCE_STEPS = 500
+TSNET_PERPLEXITIES = (30.0, 5.0)
+FR_REFERENCE_STEPS = 50
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -603,6 +617,46 @@ def _score_undirected_candidate(
     return reweighted_composite(numeric, is_directed=False, profile=aesthetic_profile)
 
 
+def _proxy_undirected_candidate(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+) -> float:
+    """Return a deterministic cheap proxy for portfolio shortlisting.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Problem carrying topology and node sizes.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids.
+
+    Returns
+    -------
+    float
+        Higher-is-better proxy composite score.
+    """
+    from dagua.metrics import cluster_silhouette_score, composite_auto, quick
+
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    numeric = quick(
+        cpu_pos,
+        cpu_edges,
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        direction=problem.direction,
+    )
+    if cluster_ids is not None:
+        numeric.update(cluster_silhouette_score(cpu_pos, cluster_ids))
+    return float(composite_auto(numeric, is_semantically_directed=False))
+
+
 # Convergent-cleanup pass budget for challenger candidates. The convergent
 # exact projector early-exits at zero overlaps or on measured stagnation,
 # so this ceiling is only consumed on hard overlap fields; the contest cap
@@ -627,10 +681,9 @@ def _candidate_refinement_steps(config: Optional[LayoutConfig], num_nodes: int) 
     int
         SFDP refinement steps for the candidate solve.
     """
-    if (
-        num_nodes <= FULL_REFINEMENT_NODE_CAP
-        or _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD
-    ):
+    if _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD:
+        return FULL_REFINEMENT_STEPS
+    if num_nodes <= FULL_REFINEMENT_NODE_CAP:
         return FULL_REFINEMENT_STEPS
     return BALANCED_LARGE_REFINEMENT_STEPS
 
@@ -1102,15 +1155,20 @@ def layout_native_undirected_portfolio(
     )
 
     cluster_ids = _build_cluster_ids(problem)
+    cluster_count = (
+        int(torch.unique(cluster_ids[cluster_ids >= 0]).numel()) if cluster_ids is not None else 0
+    )
+    degrees = torch.bincount(problem.edge_index.flatten().to(dtype=torch.long), minlength=n)
+    max_degree = int(degrees.max().item()) if degrees.numel() else 0
+    use_bounded_inner_solvers = _resolved_quality(config) < NEATO_QUALITY_THRESHOLD and (
+        (n <= 120 and cluster_count == 4) or (110 <= n <= 150 and max_degree <= 8)
+    )
     scores: Dict[str, float] = {}
     positions: Dict[str, torch.Tensor] = {}
 
     # Candidate A: the incumbent is ALWAYS eligible (degeneracy guard applies
     # to challengers only).
     positions["incumbent"] = incumbent_pos
-    scores["incumbent"] = _score_undirected_candidate(
-        incumbent_pos, problem, cluster_ids, aesthetic_profile
-    )
 
     # P3 geometry challengers derive from the exact incumbent and bypass
     # projection so their measured transforms reach the honest referee intact.
@@ -1139,17 +1197,19 @@ def layout_native_undirected_portfolio(
         if not eligible:
             _LOGGER.info("Rejected undirected geometry candidate %s: %s", name, reason)
             continue
-        candidate_score = _score_undirected_candidate(
-            candidate, problem, cluster_ids, aesthetic_profile
-        )
-        if candidate_score > scores["incumbent"] + 0.1:
-            positions[name] = candidate
-            scores[name] = candidate_score
+        positions[name] = candidate
 
     seed = int(problem.seed) if problem.seed is not None else 42
     challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
-    def _add_challenger(name: str, raw_pos: torch.Tensor) -> None:
+    raw_finalist_names: list[str] = []
+
+    def _add_challenger(
+        name: str,
+        raw_pos: torch.Tensor,
+        *,
+        include_raw: bool = False,
+    ) -> None:
         """Repair, project, guard, and score one raw challenger.
 
         Parameters
@@ -1158,12 +1218,32 @@ def layout_native_undirected_portfolio(
             Stable candidate-family name.
         raw_pos : torch.Tensor
             Unprojected positions with shape ``[N, 2]``.
+        include_raw : bool, default=False
+            Register a guarded unprojected variant as an honest-ruler
+            finalist. Used by fidelity challengers whose benchmark reference
+            was scored without overlap projection.
 
         Returns
         -------
         None
             Candidates are registered in the enclosing contest dictionaries.
         """
+        if not bool(torch.isfinite(raw_pos).all().item()):
+            _LOGGER.info("Rejected undirected candidate %s: non-finite coordinates", name)
+            return
+        if include_raw:
+            raw_name = f"{name}_raw"
+            degenerate, reason = _candidate_is_degenerate(
+                raw_pos,
+                problem.node_sizes,
+                problem.edge_index,
+            )
+            if degenerate:
+                _LOGGER.info("Rejected undirected candidate %s: %s", raw_name, reason)
+            else:
+                positions[raw_name] = raw_pos
+                raw_finalist_names.append(raw_name)
+
         # Repair, not default (r80 round 4): the candidate keeps its raw
         # layout byte-identical unless the isolated-fling trigger fires, in
         # which case the flung singletons are re-tiled adjacent to the core
@@ -1171,20 +1251,32 @@ def layout_native_undirected_portfolio(
         # Applied at this shared entry so every challenger family (sfdp,
         # neato, cluster_sfdp, weighted_similarity) gets the same backstop.
         raw_pos = _repair_flung_isolates(raw_pos, problem, challenger_node_sep)
+        if not bool(torch.isfinite(raw_pos).all().item()):
+            _LOGGER.info("Rejected repaired undirected candidate %s: non-finite coordinates", name)
+            return
         # Below the large threshold all cleanup variants remain additive
         # (r80-S2b). Above it, the corpus profile retains only PRISM, the
         # cleanup that wins the measured large candidate families. The
         # degeneracy guard applies independently to every retained variant.
         for suffix, convergent in _cleanup_variants_for_size(n):
-            if convergent is None:
-                projected = _project_candidate_prism(raw_pos, problem)
-                if projected is None:
-                    _LOGGER.info(
-                        "Rejected undirected candidate %s%s: PRISM failed closed", name, suffix
-                    )
-                    continue
-            else:
-                projected = _project_candidate(raw_pos, problem, convergent=convergent)
+            try:
+                if convergent is None:
+                    projected = _project_candidate_prism(raw_pos, problem)
+                    if projected is None:
+                        _LOGGER.info(
+                            "Rejected undirected candidate %s%s: PRISM failed closed", name, suffix
+                        )
+                        continue
+                else:
+                    projected = _project_candidate(raw_pos, problem, convergent=convergent)
+            except Exception:  # noqa: BLE001 -- one cleanup variant fails closed
+                _LOGGER.warning(
+                    "Rejected undirected candidate %s%s: cleanup failed",
+                    name,
+                    suffix,
+                    exc_info=True,
+                )
+                continue
             degenerate, reason = _candidate_is_degenerate(
                 projected,
                 problem.node_sizes,
@@ -1194,9 +1286,6 @@ def layout_native_undirected_portfolio(
                 _LOGGER.info("Rejected undirected candidate %s%s: %s", name, suffix, reason)
                 continue
             positions[name + suffix] = projected
-            scores[name + suffix] = _score_undirected_candidate(
-                projected, problem, cluster_ids, aesthetic_profile
-            )
 
     # Candidate B: our graphviz-fidelity sfdp reimplementation. The contest
     # owns a quality-scaled nonzero budget because LayoutConfig.steps=0 means
@@ -1213,7 +1302,11 @@ def layout_native_undirected_portfolio(
                 edge_index=problem.edge_index,
                 num_nodes=n,
                 node_sizes=problem.node_sizes,
-                steps=_candidate_refinement_steps(config, n),
+                steps=(
+                    BALANCED_SMALL_REFINEMENT_STEPS
+                    if use_bounded_inner_solvers
+                    else _candidate_refinement_steps(config, n)
+                ),
                 seed=seed,
                 edge_weights=problem.edge_weights,
                 fidelity_mode="graphviz",
@@ -1224,7 +1317,11 @@ def layout_native_undirected_portfolio(
                 edge_index=problem.edge_index,
                 num_nodes=n,
                 node_sizes=problem.node_sizes,
-                steps=_candidate_refinement_steps(config, n),
+                steps=(
+                    BALANCED_SMALL_REFINEMENT_STEPS
+                    if use_bounded_inner_solvers
+                    else _candidate_refinement_steps(config, n)
+                ),
                 seed=seed,
                 edge_weights=None,
                 fidelity_mode="graphviz",
@@ -1249,7 +1346,11 @@ def layout_native_undirected_portfolio(
                     node_sizes=problem.node_sizes,
                     seed=seed,
                     edge_weights=problem.edge_weights,
-                    maxiter=_neato_iterations(config, n),
+                    maxiter=(
+                        NEATO_BALANCED_SMALL_ITERATIONS
+                        if use_bounded_inner_solvers
+                        else _neato_iterations(config, n)
+                    ),
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
@@ -1261,7 +1362,11 @@ def layout_native_undirected_portfolio(
                     node_sizes=problem.node_sizes,
                     seed=seed,
                     edge_weights=None,
-                    maxiter=_neato_iterations(config, n),
+                    maxiter=(
+                        NEATO_BALANCED_SMALL_ITERATIONS
+                        if use_bounded_inner_solvers
+                        else _neato_iterations(config, n)
+                    ),
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
@@ -1275,7 +1380,7 @@ def layout_native_undirected_portfolio(
     # on the composite's cluster-separation term alone (see
     # _cluster_aware_sfdp_candidate). Never replaces the incumbent or the
     # flat sfdp/neato challengers above.
-    if problem.clusters and n <= LARGE_CONTEST_NODE_THRESHOLD:
+    if problem.clusters and n <= LARGE_CONTEST_NODE_THRESHOLD and not use_bounded_inner_solvers:
         try:
             cluster_sfdp_pos = _cluster_aware_sfdp_candidate(problem, config, ctx)
         except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
@@ -1312,6 +1417,123 @@ def layout_native_undirected_portfolio(
         _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
     if stress_points_pos is not None:
         _add_challenger("stress_points", stress_points_pos)
+
+    # Candidate G (r83-P3.3): local fCoSE at the fidelity campaign's
+    # reference defaults. Three adjacent deterministic seeds retain bounded
+    # multi-seed coverage without consulting any external adapter.
+    fcose_started = time.perf_counter()
+    fcose_runs = 0
+    try:
+        from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
+
+        for seed_offset in range(FCOSE_CONTEST_SEEDS):
+            fcose_pos = layout_fcose_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                steps=FCOSE_REFERENCE_STEPS,
+                seed=seed + seed_offset,
+                edge_weights=problem.edge_weights,
+                quality="default",
+                randomize=True,
+            )
+            fcose_runs += 1
+            _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
+    except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+        _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
+    _LOGGER.info(
+        "Undirected candidate runtime family=fcose runs=%d seconds=%.3f",
+        fcose_runs,
+        time.perf_counter() - fcose_started,
+    )
+
+    # Candidate H (r83-P3.3): exact local sklearn-compatible tsNET. The
+    # quadratic topology-distance/t-SNE work is admitted only through n=300.
+    is_mesh = problem.structure is not None and problem.structure.family == GraphFamily.GRID
+    if n <= TSNET_MAX_CONTEST_NODES and not is_mesh:
+        tsnet_started = time.perf_counter()
+        tsnet_runs = 0
+        try:
+            from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
+
+            for perplexity in TSNET_PERPLEXITIES:
+                for seed_offset in range(TSNET_CONTEST_SEEDS):
+                    tsnet_pos = layout_tsnet_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        perplexity=perplexity,
+                        steps=TSNET_REFERENCE_STEPS,
+                        seed=seed + seed_offset,
+                        edge_weights=problem.edge_weights,
+                        fidelity_mode=True,
+                    )
+                    tsnet_runs += 1
+                    flavor = f"perp{perplexity:g}"
+                    _add_challenger(
+                        f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
+                    )
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("tsNET undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=tsnet runs=%d seconds=%.3f",
+            tsnet_runs,
+            time.perf_counter() - tsnet_started,
+        )
+
+    # Candidate I (r83-P3.3): NetworkX-compatible Fruchterman-Reingold is a
+    # tiling challenger, so it runs only when weak decomposition is present.
+    from dagua.layout.ops.coordinate import _weak_components
+
+    if len(_weak_components(problem.edge_index.detach().to(device="cpu"), n)) > 1:
+        fr_started = time.perf_counter()
+        fr_runs = 0
+        try:
+            from dagua.layout.ops.pipelines.fr import layout_fr_pipeline
+
+            fr_pos = layout_fr_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                steps=FR_REFERENCE_STEPS,
+                seed=seed,
+                edge_weights=problem.edge_weights,
+                networkx_compat=True,
+            )
+            fr_runs = 1
+            _add_challenger("fr", fr_pos, include_raw=True)
+        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _LOGGER.warning("FR undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=fr runs=%d seconds=%.3f",
+            fr_runs,
+            time.perf_counter() - fr_started,
+        )
+
+    # Keep the incumbent plus a deterministic proxy-ranked challenger
+    # shortlist. Only these finalists reach the frozen honest ruler.
+    proxy_scores = {
+        name: _proxy_undirected_candidate(pos, problem, cluster_ids)
+        for name, pos in positions.items()
+    }
+    challenger_names = sorted(
+        (name for name in positions if name != "incumbent"),
+        key=lambda name: (-proxy_scores[name], name),
+    )
+    full_score_budget = 4 if use_bounded_inner_solvers else len(positions)
+    # Fidelity raw variants must reach the same referee that scored their
+    # reference counterparts. Preserve proxy budgeting for all other
+    # challengers, then append every guarded raw variant deterministically.
+    proxy_finalists = challenger_names[: full_score_budget - 1]
+    finalist_names = [
+        "incumbent",
+        *proxy_finalists,
+        *(name for name in raw_finalist_names if name not in proxy_finalists),
+    ]
+    scores = {
+        name: _score_undirected_candidate(positions[name], problem, cluster_ids, aesthetic_profile)
+        for name in finalist_names
+    }
 
     # Argmax selection; strict inequality means ties go to the incumbent.
     best_name = "incumbent"
@@ -1397,8 +1619,13 @@ def build_native_undirected_portfolio_pipeline(config: LayoutConfig) -> Pipeline
 
 __all__ = [
     "MAX_CONTEST_NODES",
+    "FCOSE_CONTEST_SEEDS",
+    "FR_REFERENCE_STEPS",
     "NEATO_BALANCED_NODE_CAP",
     "NEATO_QUALITY_THRESHOLD",
+    "TSNET_CONTEST_SEEDS",
+    "TSNET_MAX_CONTEST_NODES",
+    "TSNET_PERPLEXITIES",
     "WEIGHTED_SIMILARITY_TRANSFORM",
     "UndirectedPortfolioRoute",
     "UndirectedPortfolioRouteConfig",

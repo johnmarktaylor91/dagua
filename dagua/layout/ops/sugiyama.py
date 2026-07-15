@@ -270,6 +270,9 @@ class _BarycenterOrderingConfig:
         If ``True``, enable the A12 rank-leader cluster mincross prototype.
         The default stays disabled until its x-stage interaction passes the
         rendered no-regression gate.
+    use_graphviz_cluster_tie_break : bool, default=False
+        If ``True``, reverse structurally equal alternatives during the
+        leaf-cluster tie pass.
     """
 
     barycenter_passes: int = 24
@@ -281,6 +284,7 @@ class _BarycenterOrderingConfig:
     use_graphviz_mincross: bool = False
     use_graphviz_node_order: bool = False
     use_graphviz_cluster_skeleton: bool = False
+    use_graphviz_cluster_tie_break: bool = False
 
 
 @dataclass(frozen=True)
@@ -2661,6 +2665,7 @@ def _barycenter_ordering(
     center_coordinates: bool,
     use_graphviz_mincross: bool,
     use_graphviz_node_order: bool,
+    use_graphviz_cluster_tie_break: bool,
 ) -> Tuple[List[List[int]], List[torch.Tensor]]:
     """Minimize crossings via repeated barycenter sweeps.
 
@@ -2722,6 +2727,9 @@ def _barycenter_ordering(
     use_graphviz_node_order : bool
         Whether to use ``graphviz_node_order`` for Graphviz ``build_ranks``
         seed scans.
+    use_graphviz_cluster_tie_break : bool
+        Whether to apply dot's reverse tie rule to structurally equal nodes
+        inside the same leaf cluster.
 
     Returns
     -------
@@ -2760,6 +2768,12 @@ def _barycenter_ordering(
                 iterations=num_passes,
                 edge_penalties=mincross_edge_penalties,
                 node_order=graphviz_seed_order,
+            )
+        if use_graphviz_cluster_tie_break and graphviz_cluster_members:
+            ordered_layers = _graphviz_reverse_equal_cluster_twins(
+                layers=ordered_layers,
+                edge_index=edge_cpu,
+                cluster_members=graphviz_cluster_members,
             )
         if trace_every > 0:
             traces.append(
@@ -2835,6 +2849,71 @@ def _barycenter_ordering(
             break
 
     return ordered_layers, traces
+
+
+def _graphviz_reverse_equal_cluster_twins(
+    layers: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    cluster_members: Mapping[str, Sequence[int]],
+) -> List[List[int]]:
+    """Reverse dot-local ties between structurally identical cluster nodes.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Expanded mincross ranks in their current left-to-right order.
+    edge_index : torch.Tensor
+        Expanded adjacent-rank edge tensor with shape ``[2, E]``.
+    cluster_members : Mapping[str, sequence[int]]
+        Expanded cluster memberships.
+
+    Returns
+    -------
+    list[list[int]]
+        Ranks with consecutive, structurally equal cluster twins reversed.
+
+    Notes
+    -----
+    Dot runs leaf-cluster mincross before installing each cluster into the
+    root ranks. Its reverse median pass therefore reverses equal alternatives
+    that the root-only pass leaves in input order. Requiring identical
+    predecessor and successor sets keeps this correction topology-driven.
+    """
+    out = [list(rank) for rank in layers]
+    if edge_index.numel() == 0:
+        return out
+    node_count = max((node for rank in out for node in rank), default=-1) + 1
+    incoming: List[Set[int]] = [set() for _ in range(node_count)]
+    outgoing: List[Set[int]] = [set() for _ in range(node_count)]
+    for tail, head in edge_index.t().tolist():
+        tail_id = int(tail)
+        head_id = int(head)
+        outgoing[tail_id].add(head_id)
+        incoming[head_id].add(tail_id)
+    memberships: Dict[int, Set[str]] = {}
+    for name, members in cluster_members.items():
+        for node in members:
+            memberships.setdefault(int(node), set()).add(str(name))
+
+    for rank in out:
+        left = 0
+        while left + 1 < len(rank):
+            first = rank[left]
+            right = left + 1
+            while right < len(rank):
+                node = rank[right]
+                if (
+                    memberships.get(node) != memberships.get(first)
+                    or not memberships.get(first)
+                    or incoming[node] != incoming[first]
+                    or outgoing[node] != outgoing[first]
+                ):
+                    break
+                right += 1
+            if right - left > 1:
+                rank[left:right] = reversed(rank[left:right])
+            left = max(right, left + 1)
+    return out
 
 
 def _graphviz_contain_cluster_ordering(
@@ -5756,6 +5835,7 @@ def _graphviz_x_coordinate_assignment(
     ] = None,
     use_typed_inventory: bool = True,
     use_dot_packing_node_sep: bool = False,
+    preserve_point_units: bool = False,
 ) -> torch.Tensor:
     """Assign Graphviz dot x coordinates with an auxiliary network simplex.
 
@@ -5811,6 +5891,9 @@ def _graphviz_x_coordinate_assignment(
         Whether plain typed LR constraints use dot's DOT-input ``GD_nodesep``
         (``node_sep`` inches in points). Disconnected inputs pack components
         through binding LR chains, so the true nodesep must be used there.
+    preserve_point_units : bool, default=False
+        Whether x auxiliary ranks already use Graphviz point units and must
+        not be normalized to the requested vertical rank separation.
 
     Returns
     -------
@@ -5936,14 +6019,18 @@ def _graphviz_x_coordinate_assignment(
     x_positions = [
         float(x_ranks.get(node, 0)) / float(_GRAPHVIZ_X_AUX_RESOLUTION) for node in range(num_nodes)
     ]
-    output_scale = _graphviz_x_output_scale(
-        layers=layers,
-        node_sizes=node_sizes,
-        num_original_nodes=num_original_nodes,
-        node_sep=graphviz_node_sep,
-        rank_sep=rank_sep,
-        graphviz_left_widths=graphviz_left_widths,
-        graphviz_right_widths=graphviz_right_widths,
+    output_scale = (
+        1.0
+        if preserve_point_units
+        else _graphviz_x_output_scale(
+            layers=layers,
+            node_sizes=node_sizes,
+            num_original_nodes=num_original_nodes,
+            node_sep=graphviz_node_sep,
+            rank_sep=rank_sep,
+            graphviz_left_widths=graphviz_left_widths,
+            graphviz_right_widths=graphviz_right_widths,
+        )
     )
     x_positions = [value * output_scale for value in x_positions]
     if center_coordinates:
@@ -9398,6 +9485,7 @@ class _ExpandDummyNodes(Op):
         self,
         use_igraph_edge_order: bool = False,
         use_graphviz_cluster_skeleton: bool = False,
+        include_graphviz_cluster_members: bool = False,
     ) -> None:
         """Initialize dummy-expansion ordering options.
 
@@ -9409,6 +9497,9 @@ class _ExpandDummyNodes(Op):
         use_graphviz_cluster_skeleton : bool, default=False
             Enable expanded cluster membership for the A12 skeleton mincross
             prototype.
+        include_graphviz_cluster_members : bool, default=False
+            Retain expanded cluster membership for a downstream local tie-break
+            without enabling the skeleton prototype.
 
         Returns
         -------
@@ -9417,6 +9508,7 @@ class _ExpandDummyNodes(Op):
         """
         self.use_igraph_edge_order = use_igraph_edge_order
         self.use_graphviz_cluster_skeleton = use_graphviz_cluster_skeleton
+        self.include_graphviz_cluster_members = include_graphviz_cluster_members
 
     def apply(
         self,
@@ -9540,13 +9632,23 @@ class _ExpandDummyNodes(Op):
             igraph_edge_order_targets=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY),
             igraph_edge_order_ids=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_EDGE_IDS_KEY),
             graphviz_virtual_node_sep=graphviz_virtual_node_sep,
-            clusters=problem.clusters
-            if use_graphviz_edge_order
-            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
-            else None,
+            clusters=(
+                problem.clusters
+                if use_graphviz_edge_order
+                and (
+                    self.use_graphviz_cluster_skeleton
+                    or dot_input_cluster_x
+                    or self.include_graphviz_cluster_members
+                )
+                else None
+            ),
             cluster_parents=problem.cluster_parents
             if use_graphviz_edge_order
-            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
+            and (
+                self.use_graphviz_cluster_skeleton
+                or dot_input_cluster_x
+                or self.include_graphviz_cluster_members
+            )
             else None,
             graphviz_cluster_label_widths=state.extras.get(
                 _SUGIYAMA_GRAPHVIZ_CLUSTER_LABEL_WIDTHS_KEY
@@ -9671,6 +9773,7 @@ class _BarycenterOrdering(Op):
         use_graphviz_mincross: bool = False,
         use_graphviz_node_order: bool = False,
         use_graphviz_cluster_skeleton: bool = False,
+        use_graphviz_cluster_tie_break: bool = False,
         *,
         config: Optional[_BarycenterOrderingConfig] = None,
     ) -> None:
@@ -9700,6 +9803,9 @@ class _BarycenterOrdering(Op):
             scans.
         use_graphviz_cluster_skeleton : bool, default=False
             Enable the inactive A12 rank-leader cluster ordering prototype.
+        use_graphviz_cluster_tie_break : bool, default=False
+            Reverse structurally equal leaf-cluster alternatives like dot's
+            local median pass.
         config : _BarycenterOrderingConfig | None, optional
             Optional configuration. When provided, it takes precedence over
             the scalar arguments.
@@ -9719,6 +9825,7 @@ class _BarycenterOrdering(Op):
             use_graphviz_mincross=use_graphviz_mincross,
             use_graphviz_node_order=use_graphviz_node_order,
             use_graphviz_cluster_skeleton=use_graphviz_cluster_skeleton,
+            use_graphviz_cluster_tie_break=use_graphviz_cluster_tie_break,
         )
 
     def apply(
@@ -9760,7 +9867,10 @@ class _BarycenterOrdering(Op):
             graphviz_node_order=expanded_graph.graphviz_node_order,
             mincross_edge_penalties=expanded_graph.mincross_edge_penalties,
             graphviz_cluster_members=expanded_graph.graphviz_cluster_members
-            if self.config.use_graphviz_cluster_skeleton
+            if (
+                self.config.use_graphviz_cluster_skeleton
+                or self.config.use_graphviz_cluster_tie_break
+            )
             else None,
             graphviz_cluster_parents=expanded_graph.graphviz_cluster_parents
             if self.config.use_graphviz_cluster_skeleton
@@ -9783,6 +9893,7 @@ class _BarycenterOrdering(Op):
             center_coordinates=self.config.center_coordinates,
             use_graphviz_mincross=self.config.use_graphviz_mincross,
             use_graphviz_node_order=self.config.use_graphviz_node_order,
+            use_graphviz_cluster_tie_break=self.config.use_graphviz_cluster_tie_break,
         )
         state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY] = ordered_layers
         state.extras[_SUGIYAMA_TRACES_KEY] = traces
@@ -9893,6 +10004,8 @@ class _CoordinateAssignment(Op):
         use_graphviz_xcoord: bool = False,
         use_igraph_conflicts: bool = False,
         use_graphviz_cluster_skeleton: bool = False,
+        use_graphviz_corrected_dot_x: bool = False,
+        preserve_graphviz_point_units: bool = False,
     ) -> None:
         """Store coordinate-frame options.
 
@@ -9910,6 +10023,12 @@ class _CoordinateAssignment(Op):
         use_graphviz_cluster_skeleton : bool, default=False
             Whether clustered Graphviz runs build containment into the x
             auxiliary inventory instead of applying the legacy postpass.
+        use_graphviz_corrected_dot_x : bool, default=False
+            Apply the corrected recursive cluster tie-break. The directed
+            contest's standard projector enforces final box separation.
+        preserve_graphviz_point_units : bool, default=False
+            Preserve point-unit x-simplex output on the bounded exact-fidelity
+            path instead of normalizing x to ``rank_sep``.
         Returns
         -------
         None
@@ -9919,6 +10038,8 @@ class _CoordinateAssignment(Op):
         self.use_graphviz_xcoord = use_graphviz_xcoord
         self.use_igraph_conflicts = use_igraph_conflicts
         self.use_graphviz_cluster_skeleton = use_graphviz_cluster_skeleton
+        self.use_graphviz_corrected_dot_x = use_graphviz_corrected_dot_x
+        self.preserve_graphviz_point_units = preserve_graphviz_point_units
 
     def apply(
         self,
@@ -9960,12 +10081,17 @@ class _CoordinateAssignment(Op):
                 self.use_graphviz_cluster_skeleton or dot_input_cluster_x
             ) and _SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY in state.extras
             use_typed_inventory = certified_cluster_inventory or (
-                not problem.clusters
+                (not problem.clusters or self.preserve_graphviz_point_units)
                 and not _graphviz_preserves_plain_exact_tree_x(
                     edge_index=problem.edge_index,
                     num_nodes=problem.num_nodes,
                 )
-                and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+                and problem.num_nodes
+                <= (
+                    100
+                    if self.preserve_graphviz_point_units
+                    else _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES
+                )
                 and int(problem.edge_index.shape[1])
                 <= _GRAPHVIZ_TYPED_X_MAX_EDGE_DENSITY * problem.num_nodes
             )
@@ -9977,9 +10103,15 @@ class _CoordinateAssignment(Op):
                     num_nodes=problem.num_nodes,
                 )
             )
-            graphviz_left_widths = expanded_graph.graphviz_left_widths if problem.clusters else None
+            graphviz_left_widths = (
+                expanded_graph.graphviz_left_widths
+                if problem.clusters and not self.preserve_graphviz_point_units
+                else None
+            )
             graphviz_right_widths = (
-                expanded_graph.graphviz_right_widths if problem.clusters else None
+                expanded_graph.graphviz_right_widths
+                if problem.clusters and not self.preserve_graphviz_point_units
+                else None
             )
             expanded_positions = _graphviz_x_coordinate_assignment(
                 layers=state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY],
@@ -10015,6 +10147,7 @@ class _CoordinateAssignment(Op):
                 ),
                 use_typed_inventory=use_typed_inventory,
                 use_dot_packing_node_sep=use_dot_packing_node_sep,
+                preserve_point_units=self.preserve_graphviz_point_units,
             )
         else:
             expanded_positions = _coordinate_assignment(
@@ -10050,9 +10183,6 @@ class _CoordinateAssignment(Op):
                 node_sep=node_sep,
                 center_coordinates=self.center_coordinates,
             )
-            expanded_positions = expanded_positions.clone()
-            expanded_positions[: problem.num_nodes] = state.pos
-            state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY] = expanded_positions
         return state
 
 

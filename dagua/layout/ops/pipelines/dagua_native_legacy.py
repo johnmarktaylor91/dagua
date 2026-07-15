@@ -15,6 +15,7 @@ import copy
 import math
 from typing import Any, Optional, cast
 
+import numpy as np
 import torch
 
 from dagua.config import LayoutConfig
@@ -1088,6 +1089,10 @@ def _score_native_result(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
+    *,
+    is_semantically_directed: bool,
+    declared_hierarchical: bool,
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> float:
     """Return the composite metric score for one native layout candidate.
 
@@ -1099,6 +1104,12 @@ def _score_native_result(
         Graph connectivity with shape ``[2, E]``.
     node_sizes : torch.Tensor
         Node sizes with shape ``[N, 2]``.
+    is_semantically_directed : bool
+        Whether edge direction has domain meaning.
+    declared_hierarchical : bool
+        Whether the graph is both semantically directed and acyclic.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
 
     Returns
     -------
@@ -1114,10 +1125,17 @@ def _score_native_result(
     ``test_multi_start_k_three_scores_at_least_single`` regression for the
     motivating case.
     """
-    from dagua.metrics import composite, full
+    from dagua.metrics import composite_auto, full
 
     torch.manual_seed(0)
-    return float(composite(full(pos, edge_index, node_sizes=node_sizes)))
+    numeric = full(
+        pos,
+        edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=all_pairs_dist,
+    )
+    numeric["declared_hierarchical"] = declared_hierarchical
+    return float(composite_auto(numeric, is_semantically_directed))
 
 
 def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
@@ -1539,6 +1557,17 @@ def layout_dagua_native_pipeline(
 
     multi_start_k = int(getattr(effective_config, "multi_start_k", 1))
     if multi_start_k > 1:
+        contest_structure = graph_structure or classify_graph(edge_index, num_nodes)
+        is_semantically_directed = bool(
+            getattr(contest_structure, "is_semantically_directed", True)
+        )
+        declared_hierarchical = is_semantically_directed and bool(
+            getattr(
+                contest_structure,
+                "is_directed_acyclic",
+                getattr(contest_structure, "is_acyclic", True),
+            )
+        )
         seed_base = seed if seed is not None else effective_config.seed
         if seed_base is None:
             seed_base = 42
@@ -1571,6 +1600,8 @@ def layout_dagua_native_pipeline(
                 pos=candidate_pos,
                 edge_index=edge_index,
                 node_sizes=node_sizes,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
             )
             if candidate_score > best_score:
                 best_score = candidate_score

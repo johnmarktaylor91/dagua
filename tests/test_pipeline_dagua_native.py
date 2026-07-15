@@ -41,9 +41,50 @@ def test_directed_polish_rejects_degenerate_geometry_candidate(monkeypatch) -> N
 
     monkeypatch.setattr(native, "_POLISH_SETTINGS", ())
     monkeypatch.setattr(native, "_collinear_dodge", lambda *args, **kwargs: torch.zeros_like(pos))
-    polished = _best_of_polish(pos, edge_index, node_sizes)
+    polished = _best_of_polish(
+        pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+    )
 
     assert torch.equal(polished, pos)
+
+
+def test_polish_scores_cyclic_digraph_with_common_ruler(monkeypatch) -> None:
+    """Cyclic directed polish candidates use the benchmark's common table."""
+    import dagua.metrics as metrics
+
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 2.0)
+    observed: list[tuple[bool, bool]] = []
+
+    def fake_full(*args: object, **kwargs: object) -> dict[str, float]:
+        """Return minimal numeric metrics for selector-routing inspection."""
+        del args, kwargs
+        return {"neighborhood_preservation_score": 1.0}
+
+    def fake_composite_auto(numeric: dict[str, float], directed: bool) -> float:
+        """Record the semantic and hierarchy flags passed by the selector."""
+        observed.append((directed, bool(numeric["declared_hierarchical"])))
+        return 50.0
+
+    monkeypatch.setattr(metrics, "full", fake_full)
+    monkeypatch.setattr(metrics, "composite_auto", fake_composite_auto)
+
+    _best_of_polish(
+        pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=False,
+        polish_battery="default",
+    )
+
+    assert observed
+    assert set(observed) == {(True, False)}
 
 
 def test_dense_collinear_dodge_is_skipped_before_blocker_scan() -> None:
