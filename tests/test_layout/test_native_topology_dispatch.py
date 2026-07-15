@@ -134,16 +134,27 @@ def test_force_pipeline_planar_runs_planar_pipeline_not_layered_fallback() -> No
     assert not torch.equal(planar_pos, layered_pos)
 
 
-def test_declared_undirected_hexagonal_lattice_keeps_layered_polish_route() -> None:
-    """Declared-undirected lattice DAGs should keep the layered polish route.
+def test_declared_undirected_mesh_lattice_enters_common_contest() -> None:
+    """Mesh-strong declared-undirected lattice DAGs enter the common contest.
+
+    Router-v2 (native-sprint r2 wave 2) supersedes the r80-era exclusion that
+    kept every lattice-tagged declared-undirected DAG on the layered baseline
+    route: when the structural mesh features fire (near-constant degree, no
+    hub tail, sqrt-N diameter), the graph re-enters the undirected portfolio
+    contest. This is monotone-safe because the contest's candidate A IS the
+    layered baseline route (including its polish battery) and ties go to the
+    incumbent -- the property the old exclusion protected is preserved by
+    construction, while stress-family candidates get a chance to win where
+    the frozen common-table ruler says they are better.
 
     Returns
     -------
     None
-        This test asserts that semantic-undirected metadata does not route a
-        lattice-like DAG into the undirected portfolio contest.
+        This test asserts the mesh-strong lattice DAG routes to the
+        undirected portfolio while the incumbent guarantee holds.
     """
     from dagua.eval.graphs import get_test_graphs
+    from dagua.layout.ops.pipelines.dagua_native import _mesh_features_strong
 
     graph = next(t.graph for t in get_test_graphs() if t.name == "hexagonal_lattice_42")
     structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
@@ -153,7 +164,13 @@ def test_declared_undirected_hexagonal_lattice_keeps_layered_polish_route() -> N
     assert structure.is_semantically_directed is False
     assert structure.direction_is_declared is True
     assert "lattice_like" in structure.topology_tags
-    assert _choose_native_pipeline(structure, config) == "layered_dag"
+    assert _mesh_features_strong(structure, graph.num_nodes)
+    assert _choose_native_pipeline(structure, config) == "undirected_portfolio"
+
+    # The old exclusion still protects lattice-tagged DAGs whose mesh
+    # features do NOT fire (unknown node count keeps the gate closed).
+    weak_config = LayoutConfig(seed=42)
+    assert _choose_native_pipeline(structure, weak_config) == "layered_dag"
 
 
 def test_native_default_hexagonal_lattice_polish_score_stays_high() -> None:
