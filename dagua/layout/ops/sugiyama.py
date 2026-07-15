@@ -2811,7 +2811,7 @@ def _barycenter_ordering(
                 use_igraph_sort=use_incidence_barycenters,
             )
             changed = changed or ordered_layers[layer_idx] != previous_order
-            order_index = _node_order_map(ordered_layers)
+            _update_layer_order_map(order_index=order_index, layer_nodes=ordered_layers[layer_idx])
 
         for layer_idx in range(len(ordered_layers) - 2, -1, -1):
             barycenters = _neighbor_barycenters(
@@ -2828,7 +2828,7 @@ def _barycenter_ordering(
                 use_igraph_sort=use_incidence_barycenters,
             )
             changed = changed or ordered_layers[layer_idx] != previous_order
-            order_index = _node_order_map(ordered_layers)
+            _update_layer_order_map(order_index=order_index, layer_nodes=ordered_layers[layer_idx])
 
         if trace_every > 0 and (pass_num + 1) % trace_every == 0:
             traces.append(
@@ -5730,6 +5730,25 @@ def _node_order_map(layers: Sequence[Sequence[int]]) -> Dict[int, float]:
         for index, node in enumerate(layer_nodes):
             order_index[node] = float(index)
     return order_index
+
+
+def _update_layer_order_map(order_index: Dict[int, float], layer_nodes: Sequence[int]) -> None:
+    """Refresh order entries for one reordered layer in place.
+
+    Parameters
+    ----------
+    order_index : dict[int, float]
+        Mutable node-to-order map for the current layered ordering.
+    layer_nodes : sequence[int]
+        Nodes in the single layer whose order changed.
+
+    Returns
+    -------
+    None
+        ``order_index`` is updated in place for ``layer_nodes`` only.
+    """
+    for index, node in enumerate(layer_nodes):
+        order_index[node] = float(index)
 
 
 def _coordinate_assignment(

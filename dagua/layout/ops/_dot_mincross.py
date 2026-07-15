@@ -825,6 +825,12 @@ def _transpose_numba(
         for node, neighbors in neighbors_by_node.items():
             neighbor_nodes.append(node)
             neighbor_nodes.extend(neighbor for neighbor, _penalty in neighbors)
+    if any(node < 0 for node in [*flat_nodes, *neighbor_nodes]):
+        # Cluster-skeleton scopes use negative sentinel ids. The numba kernel
+        # indexes by node id directly, so keep those sparse signed scopes on
+        # the exact Python implementation instead of remapping ids.
+        _transpose_python(ranks=ranks, incoming=incoming, outgoing=outgoing, reverse=reverse)
+        return
     max_node = max([*flat_nodes, *neighbor_nodes])
     num_nodes = max_node + 1
     rank_offsets = np.zeros(len(ranks) + 1, dtype=np.int64)
