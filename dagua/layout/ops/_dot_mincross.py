@@ -7,11 +7,118 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
 
+try:
+    import numpy as np
+    from numba import njit
+
+    _NUMBA_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only in minimal environments.
+    np = None  # type: ignore[assignment]
+    njit = None  # type: ignore[assignment]
+    _NUMBA_AVAILABLE = False
+
 _CONVERGENCE_RATIO = 0.995
 _MAX_INITIAL_PASSES = 2
 _MAX_INITIAL_PASS_ITERATIONS = 4
 _MC_SCALE = 256
 _MIN_QUIT = 8
+
+
+if _NUMBA_AVAILABLE:
+
+    @njit(cache=True)
+    def _transpose_njit(  # type: ignore[misc]
+        rank_offsets: "np.ndarray",
+        rank_nodes: "np.ndarray",
+        node_order: "np.ndarray",
+        in_offsets: "np.ndarray",
+        in_neighbors: "np.ndarray",
+        in_penalties: "np.ndarray",
+        out_offsets: "np.ndarray",
+        out_neighbors: "np.ndarray",
+        out_penalties: "np.ndarray",
+        reverse: bool,
+    ) -> None:
+        """Run Graphviz transposition over CSR arrays in numba.
+
+        Parameters
+        ----------
+        rank_offsets : np.ndarray
+            Rank start offsets into ``rank_nodes``.
+        rank_nodes : np.ndarray
+            Flat node ids in current rank order, mutated in place.
+        node_order : np.ndarray
+            Current in-rank order by node id, mutated in place.
+        in_offsets : np.ndarray
+            CSR offsets for incoming neighbors.
+        in_neighbors : np.ndarray
+            Incoming neighbor node ids.
+        in_penalties : np.ndarray
+            Incoming edge penalties.
+        out_offsets : np.ndarray
+            CSR offsets for outgoing neighbors.
+        out_neighbors : np.ndarray
+            Outgoing neighbor node ids.
+        out_penalties : np.ndarray
+            Outgoing edge penalties.
+        reverse : bool
+            Whether equal crossing counts should be swapped.
+
+        Returns
+        -------
+        None
+            ``rank_nodes`` and ``node_order`` are mutated in place.
+        """
+        num_ranks = rank_offsets.shape[0] - 1
+        candidates = np.ones(num_ranks, dtype=np.bool_)
+        while True:
+            delta = 0
+            for rank_index in range(num_ranks):
+                if not candidates[rank_index]:
+                    continue
+                candidates[rank_index] = False
+                start = rank_offsets[rank_index]
+                stop = rank_offsets[rank_index + 1]
+                for position in range(start, stop - 1):
+                    left = rank_nodes[position]
+                    right = rank_nodes[position + 1]
+                    before = 0
+                    after = 0
+                    if rank_index > 0:
+                        for right_index in range(in_offsets[right], in_offsets[right + 1]):
+                            right_order = node_order[in_neighbors[right_index]]
+                            right_penalty = in_penalties[right_index]
+                            for left_index in range(in_offsets[left], in_offsets[left + 1]):
+                                left_order = node_order[in_neighbors[left_index]]
+                                left_penalty = in_penalties[left_index]
+                                if left_order > right_order:
+                                    before += left_penalty * right_penalty
+                                if left_order < right_order:
+                                    after += left_penalty * right_penalty
+                    if rank_index < num_ranks - 1:
+                        for right_index in range(out_offsets[right], out_offsets[right + 1]):
+                            right_order = node_order[out_neighbors[right_index]]
+                            right_penalty = out_penalties[right_index]
+                            for left_index in range(out_offsets[left], out_offsets[left + 1]):
+                                left_order = node_order[out_neighbors[left_index]]
+                                left_penalty = out_penalties[left_index]
+                                if left_order > right_order:
+                                    before += left_penalty * right_penalty
+                                if left_order < right_order:
+                                    after += left_penalty * right_penalty
+                    if after < before or (before > 0 and reverse and after == before):
+                        rank_nodes[position] = right
+                        rank_nodes[position + 1] = left
+                        node_order[left] = position + 1 - start
+                        node_order[right] = position - start
+                        delta += before - after
+                        candidates[rank_index] = True
+                        if rank_index > 0:
+                            candidates[rank_index - 1] = True
+                        if rank_index < num_ranks - 1:
+                            candidates[rank_index + 1] = True
+            if delta < 1:
+                break
 
 
 @dataclass(frozen=True)
@@ -655,6 +762,146 @@ def _transpose(
     reverse: bool,
 ) -> None:
     """Run Graphviz's adjacent transposition refinement to convergence.
+
+    Parameters
+    ----------
+    ranks : list of list of int
+        Mutable ordered ranks.
+    incoming : dict[int, list[tuple[int, int]]]
+        Incoming neighbor lists from preceding ranks.
+    outgoing : dict[int, list[tuple[int, int]]]
+        Outgoing neighbor lists to following ranks.
+    reverse : bool
+        Whether equal crossing counts should be swapped when the current local
+        crossing count is positive.
+
+    Returns
+    -------
+    None
+        ``ranks`` is updated in place.
+    """
+    if _NUMBA_AVAILABLE:
+        _transpose_numba(ranks=ranks, incoming=incoming, outgoing=outgoing, reverse=reverse)
+        return
+    _transpose_python(ranks=ranks, incoming=incoming, outgoing=outgoing, reverse=reverse)
+
+
+def _transpose_numba(
+    ranks: List[List[int]],
+    incoming: Dict[int, List[Tuple[int, int]]],
+    outgoing: Dict[int, List[Tuple[int, int]]],
+    reverse: bool,
+) -> None:
+    """Run Graphviz adjacent transposition with the optional numba kernel.
+
+    Parameters
+    ----------
+    ranks : list of list of int
+        Mutable ordered ranks.
+    incoming : dict[int, list[tuple[int, int]]]
+        Incoming neighbor lists from preceding ranks.
+    outgoing : dict[int, list[tuple[int, int]]]
+        Outgoing neighbor lists to following ranks.
+    reverse : bool
+        Whether equal crossing counts should be swapped when the current local
+        crossing count is positive.
+
+    Returns
+    -------
+    None
+        ``ranks`` is updated in place. If numba is unavailable, this delegates
+        to the pure-Python implementation.
+    """
+    if not _NUMBA_AVAILABLE:
+        _transpose_python(ranks=ranks, incoming=incoming, outgoing=outgoing, reverse=reverse)
+        return
+
+    assert np is not None
+    flat_nodes = [node for rank in ranks for node in rank]
+    if not flat_nodes:
+        return
+    neighbor_nodes: list[int] = []
+    for neighbors_by_node in (incoming, outgoing):
+        for node, neighbors in neighbors_by_node.items():
+            neighbor_nodes.append(node)
+            neighbor_nodes.extend(neighbor for neighbor, _penalty in neighbors)
+    max_node = max([*flat_nodes, *neighbor_nodes])
+    num_nodes = max_node + 1
+    rank_offsets = np.zeros(len(ranks) + 1, dtype=np.int64)
+    for rank_index, rank in enumerate(ranks):
+        rank_offsets[rank_index + 1] = rank_offsets[rank_index] + len(rank)
+    rank_nodes = np.asarray(flat_nodes, dtype=np.int64)
+    node_order = np.zeros(num_nodes, dtype=np.int64)
+    for rank in ranks:
+        for order, node in enumerate(rank):
+            node_order[node] = order
+
+    in_offsets, in_neighbors, in_penalties = _neighbor_dict_to_csr(
+        neighbors_by_node=incoming,
+        num_nodes=num_nodes,
+    )
+    out_offsets, out_neighbors, out_penalties = _neighbor_dict_to_csr(
+        neighbors_by_node=outgoing,
+        num_nodes=num_nodes,
+    )
+    _transpose_njit(
+        rank_offsets,
+        rank_nodes,
+        node_order,
+        in_offsets,
+        in_neighbors,
+        in_penalties,
+        out_offsets,
+        out_neighbors,
+        out_penalties,
+        bool(reverse),
+    )
+    for rank_index, rank in enumerate(ranks):
+        start = rank_offsets[rank_index]
+        stop = rank_offsets[rank_index + 1]
+        rank[:] = rank_nodes[start:stop].tolist()
+
+
+def _neighbor_dict_to_csr(
+    neighbors_by_node: Dict[int, List[Tuple[int, int]]],
+    num_nodes: int,
+) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+    """Convert mincross neighbor lists to CSR arrays for numba.
+
+    Parameters
+    ----------
+    neighbors_by_node : dict[int, list[tuple[int, int]]]
+        Neighbor lists keyed by node id.
+    num_nodes : int
+        Length of the node-id address space.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        ``(offsets, neighbors, penalties)`` arrays. Empty neighbor lists are
+        represented by equal consecutive offsets.
+    """
+    assert np is not None
+    offsets = np.zeros(num_nodes + 1, dtype=np.int64)
+    for node in range(num_nodes):
+        offsets[node + 1] = offsets[node] + len(neighbors_by_node.get(node, ()))
+    neighbors = np.zeros(offsets[-1], dtype=np.int64)
+    penalties = np.zeros(offsets[-1], dtype=np.int64)
+    for node in range(num_nodes):
+        start = offsets[node]
+        for offset, (neighbor, penalty) in enumerate(neighbors_by_node.get(node, ())):
+            neighbors[start + offset] = neighbor
+            penalties[start + offset] = penalty
+    return offsets, neighbors, penalties
+
+
+def _transpose_python(
+    ranks: List[List[int]],
+    incoming: Dict[int, List[Tuple[int, int]]],
+    outgoing: Dict[int, List[Tuple[int, int]]],
+    reverse: bool,
+) -> None:
+    """Run Graphviz adjacent transposition in pure Python.
 
     Parameters
     ----------

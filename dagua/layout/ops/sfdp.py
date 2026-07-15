@@ -118,6 +118,9 @@ _SFDP_FORCE_NORM_KEY = "sfdp_force_norm"
 
 _GRAPHVIZ_RAND_MAX = 2_147_483_647
 _GRAPHVIZ_RANDOM_WARMUP = 344
+_TILED_EXACT_PAIR_MEMORY_BUDGET_BYTES = 256 * 1024 * 1024
+_TILED_EXACT_MAX_NODES = 20_000
+_CELL_FMM_PAIR_MEMORY_BUDGET_BYTES = 128 * 1024 * 1024
 
 
 class GraphvizRandom:
@@ -907,12 +910,199 @@ def _exact_repulsive_forces(
     delta = positions[:, None, :] - positions[None, :, :]
     distance_sq = torch.sum(delta * delta, dim=-1).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
     distance = torch.sqrt(distance_sq)
-    diagonal = torch.eye(positions.shape[0], dtype=torch.bool)
+    diagonal = torch.eye(positions.shape[0], dtype=torch.bool, device=positions.device)
     distance = distance.masked_fill(diagonal, float("inf"))
     denominator = distance.pow(1.0 - repulsive_exponent).unsqueeze(-1)
     pairwise_force = repulsive_scale * delta / denominator
     pairwise_force = pairwise_force.masked_fill(diagonal.unsqueeze(-1), 0.0)
     return pairwise_force.sum(dim=1)
+
+
+def _repulsion_chunk_size(
+    num_targets: int,
+    dtype: torch.dtype,
+    memory_budget_bytes: int,
+) -> int:
+    """Return a target chunk size that keeps pair tensors within budget.
+
+    Parameters
+    ----------
+    num_targets : int
+        Number of source nodes each chunk interacts with.
+    dtype : torch.dtype
+        Position tensor dtype.
+    memory_budget_bytes : int
+        Approximate peak memory budget for pairwise work buffers.
+
+    Returns
+    -------
+    int
+        Positive chunk size for vectorized repulsion.
+    """
+    element_size = torch.empty((), dtype=dtype).element_size()
+    bytes_per_pair = 5 * element_size
+    return max(1, int(memory_budget_bytes // max(num_targets * bytes_per_pair, 1)))
+
+
+def _tiled_exact_repulsive_forces(
+    positions: torch.Tensor,
+    repulsive_scale: float,
+    repulsive_exponent: float,
+    chunk_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Compute exact repulsion in memory-bounded node chunks.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    repulsive_scale : float
+        Global repulsion multiplier.
+    repulsive_exponent : float
+        SFDP repulsion exponent ``p``.
+    chunk_size : int, optional
+        Number of query nodes per chunk. When omitted, a size is derived from
+        a conservative memory budget.
+
+    Returns
+    -------
+    torch.Tensor
+        Exact repulsive force tensor with shape ``[N, 2]``.
+    """
+    num_nodes = positions.shape[0]
+    if num_nodes <= 1:
+        return torch.zeros_like(positions)
+
+    chunk = (
+        _repulsion_chunk_size(
+            num_targets=num_nodes,
+            dtype=positions.dtype,
+            memory_budget_bytes=_TILED_EXACT_PAIR_MEMORY_BUDGET_BYTES,
+        )
+        if chunk_size is None
+        else max(1, int(chunk_size))
+    )
+    force = torch.zeros_like(positions)
+    for start in range(0, num_nodes, chunk):
+        stop = min(start + chunk, num_nodes)
+        delta = positions[start:stop, None, :] - positions[None, :, :]
+        distance = torch.linalg.vector_norm(delta, dim=2).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
+        weights = distance.pow(-(1.0 - repulsive_exponent))
+        row_indices = torch.arange(start, stop, device=positions.device)
+        weights[row_indices - start, row_indices] = 0.0
+        force[start:stop] = repulsive_scale * (delta * weights.unsqueeze(2)).sum(dim=1)
+    return force
+
+
+def _cell_fmm_repulsive_forces(
+    positions: torch.Tensor,
+    repulsive_scale: float,
+    repulsive_exponent: float,
+    grid_dim: Optional[int] = None,
+) -> torch.Tensor:
+    """Approximate repulsion with vectorized uniform-cell far fields.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    repulsive_scale : float
+        Global repulsion multiplier.
+    repulsive_exponent : float
+        SFDP repulsion exponent ``p``.
+    grid_dim : int, optional
+        Number of cells per axis. When omitted, use roughly four nodes per
+        cell, matching the measured prototype.
+
+    Returns
+    -------
+    torch.Tensor
+        Approximate repulsive force tensor with shape ``[N, 2]``.
+    """
+    num_nodes = positions.shape[0]
+    if num_nodes <= 1:
+        return torch.zeros_like(positions)
+
+    device = positions.device
+    dtype = positions.dtype
+    grid = max(4, int((num_nodes / 4.0) ** 0.5)) if grid_dim is None else max(1, int(grid_dim))
+    minimum = torch.amin(positions, dim=0)
+    maximum = torch.amax(positions, dim=0)
+    span = (maximum - minimum).clamp_min(_SFDP_ALGORITHM_CONFIG.min_span)
+    cell_xy = ((positions - minimum) / span * grid).long().clamp_(0, grid - 1)
+    cell_id = cell_xy[:, 1] * grid + cell_xy[:, 0]
+    num_cells = grid * grid
+
+    mass = torch.zeros(num_cells, dtype=dtype, device=device)
+    mass.scatter_add_(0, cell_id, torch.ones(num_nodes, dtype=dtype, device=device))
+    centroid = torch.zeros(num_cells, 2, dtype=dtype, device=device)
+    centroid.scatter_add_(0, cell_id.unsqueeze(1).expand(-1, 2), positions)
+    centroid = centroid / mass.clamp_min(1.0).unsqueeze(1)
+
+    cell_x = cell_id % grid
+    cell_y = cell_id // grid
+    all_cell_x = torch.arange(num_cells, device=device) % grid
+    all_cell_y = torch.arange(num_cells, device=device) // grid
+    force = torch.zeros_like(positions)
+    far_chunk = _repulsion_chunk_size(
+        num_targets=num_cells,
+        dtype=dtype,
+        memory_budget_bytes=_CELL_FMM_PAIR_MEMORY_BUDGET_BYTES,
+    )
+    for start in range(0, num_nodes, far_chunk):
+        stop = min(start + far_chunk, num_nodes)
+        delta = positions[start:stop, None, :] - centroid[None, :, :]
+        distance = torch.linalg.vector_norm(delta, dim=2).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
+        weights = mass[None, :] * distance.pow(-(1.0 - repulsive_exponent))
+        near_mask = (torch.abs(all_cell_x[None, :] - cell_x[start:stop, None]) <= 1) & (
+            torch.abs(all_cell_y[None, :] - cell_y[start:stop, None]) <= 1
+        )
+        weights = weights.masked_fill(near_mask, 0.0)
+        force[start:stop] = repulsive_scale * (delta * weights.unsqueeze(2)).sum(dim=1)
+
+    order = torch.argsort(cell_id)
+    sorted_ids = cell_id[order]
+    cell_range = torch.arange(num_cells, device=device)
+    starts = torch.searchsorted(sorted_ids, cell_range)
+    ends = torch.searchsorted(sorted_ids, cell_range, right=True)
+    counts = ends - starts
+    max_occupancy = int(counts.max().item()) if num_nodes else 0
+    if max_occupancy == 0:
+        return force
+
+    padded_indices = torch.full((num_cells, max_occupancy), -1, dtype=torch.long, device=device)
+    occupancy_range = torch.arange(max_occupancy, device=device)
+    valid = occupancy_range[None, :] < counts[:, None]
+    padded_indices[valid] = order[(starts[:, None] + occupancy_range[None, :])[valid]]
+    self_indices = torch.arange(num_nodes, device=device)
+    near_chunk = _repulsion_chunk_size(
+        num_targets=max_occupancy,
+        dtype=dtype,
+        memory_budget_bytes=_CELL_FMM_PAIR_MEMORY_BUDGET_BYTES,
+    )
+
+    for delta_y in (-1, 0, 1):
+        for delta_x in (-1, 0, 1):
+            neighbor_x = cell_x + delta_x
+            neighbor_y = cell_y + delta_y
+            valid_neighbor = (
+                (neighbor_x >= 0) & (neighbor_x < grid) & (neighbor_y >= 0) & (neighbor_y < grid)
+            )
+            neighbor_id = (neighbor_y * grid + neighbor_x).clamp(0, num_cells - 1)
+            candidates = padded_indices[neighbor_id]
+            for start in range(0, num_nodes, near_chunk):
+                stop = min(start + near_chunk, num_nodes)
+                candidate_chunk = candidates[start:stop]
+                candidate_ok = valid_neighbor[start:stop, None] & (candidate_chunk >= 0)
+                candidate_ok &= candidate_chunk != self_indices[start:stop, None]
+                safe_candidates = candidate_chunk.clamp_min(0)
+                delta = positions[start:stop, None, :] - positions[safe_candidates]
+                distance = torch.linalg.vector_norm(delta, dim=2).clamp_min(
+                    _SFDP_ALGORITHM_CONFIG.epsilon
+                )
+                weights = distance.pow(-(1.0 - repulsive_exponent)) * candidate_ok.to(dtype)
+                force[start:stop] += repulsive_scale * (delta * weights.unsqueeze(2)).sum(dim=1)
+    return force
 
 
 def _build_quadtree(positions: torch.Tensor) -> Optional[QuadTreeNode]:
@@ -1183,11 +1373,16 @@ def _repulsive_forces(
             repulsive_scale=repulsive_scale,
             repulsive_exponent=repulsive_exponent,
         )
-    return _barnes_hut_repulsive_forces(
+    if positions.shape[0] <= _TILED_EXACT_MAX_NODES:
+        return _tiled_exact_repulsive_forces(
+            positions=positions,
+            repulsive_scale=repulsive_scale,
+            repulsive_exponent=repulsive_exponent,
+        )
+    return _cell_fmm_repulsive_forces(
         positions=positions,
         repulsive_scale=repulsive_scale,
         repulsive_exponent=repulsive_exponent,
-        theta=theta,
     )
 
 
