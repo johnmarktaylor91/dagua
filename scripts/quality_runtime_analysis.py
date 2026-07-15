@@ -23,6 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
+# Pre-load numba/llvmlite FIRST. A transitive ``dagua.eval`` import below clobbers
+# llvmlite's lazy ``libllvmlite.so`` load path (import-order bug: numba then fails
+# with "Could not find/load shared object file"). Loading it here caches the lib
+# before the breaker runs. Keep this above all heavy imports.
+import llvmlite.binding  # noqa: F401
+import numba  # noqa: F401
 import numpy as np
 import pandas as pd
 
