@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -14,6 +14,7 @@ from dagua.layout.ops.state import (
     SolveState,
 )
 from dagua.layout.ops.sugiyama import (
+    _SUGIYAMA_EXPANDED_POSITIONS_KEY,
     _AssignLayers,
     _BarycenterOrdering,
     _BuildEdgeRoutes,
@@ -43,6 +44,7 @@ def build_sugiyama_pipeline(
     fidelity_mode: Optional[str] = None,
     fidelity_dtype: torch.dtype = torch.float32,
     center_coordinates: bool = True,
+    graphviz_enable_cluster_skeleton: bool = False,
 ) -> Pipeline:
     """Build a Sugiyama layered graph-drawing pipeline.
 
@@ -85,6 +87,8 @@ def build_sugiyama_pipeline(
         stable-order early stop and incidence-average barycenters.
     center_coordinates : bool, default=True
         Whether to translate the final horizontal span to be centered at zero.
+    graphviz_enable_cluster_skeleton : bool, default=False
+        Enable the inactive A12 cluster rank/mincross prototype.
 
     Returns
     -------
@@ -102,14 +106,22 @@ def build_sugiyama_pipeline(
     use_igraph_fidelity = fidelity_mode == "igraph"
     use_graphviz_mincross = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
     use_graphviz_rank = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
+    use_graphviz_xcoord = fidelity_mode == "graphviz"
+    use_graphviz_node_order = fidelity_mode == "graphviz"
 
     ops: list[Op] = [
         _ValidateInputs(),
         _StoreSpacingParams(rank_sep=rank_sep, node_sep=node_sep),
         _ResolveNodeSizes(),
         _PrepareAcyclicEdges(),
-        _AssignLayers(fidelity_mode="graphviz" if use_graphviz_rank else fidelity_mode),
-        _ExpandDummyNodes(),
+        _AssignLayers(
+            fidelity_mode=fidelity_mode if use_graphviz_rank else fidelity_mode,
+            use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
+        ),
+        _ExpandDummyNodes(
+            use_igraph_edge_order=use_igraph_fidelity,
+            use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
+        ),
         _BuildNeighborStructures(),
         _BarycenterOrdering(
             barycenter_passes=barycenter_passes,
@@ -119,8 +131,15 @@ def build_sugiyama_pipeline(
             use_incidence_barycenters=use_igraph_fidelity,
             center_coordinates=center_coordinates,
             use_graphviz_mincross=use_graphviz_mincross,
+            use_graphviz_node_order=use_graphviz_node_order,
+            use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
         ),
-        _CoordinateAssignment(center_coordinates=center_coordinates),
+        _CoordinateAssignment(
+            center_coordinates=center_coordinates,
+            use_graphviz_xcoord=use_graphviz_xcoord,
+            use_igraph_conflicts=use_igraph_fidelity,
+            use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
+        ),
     ]
     if return_edge_routes:
         ops.append(_BuildEdgeRoutes())
@@ -143,6 +162,21 @@ def layout_sugiyama_pipeline(
     fidelity_dtype: torch.dtype = torch.float32,
     use_node_sizes_for_spacing: Optional[bool] = None,
     center_coordinates: Optional[bool] = None,
+    graphviz_node_sizes: Optional[torch.Tensor] = None,
+    graphviz_typed_node_sizes: Optional[torch.Tensor] = None,
+    graphviz_edge_label_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Dict[str, Any]] = None,
+    cluster_parents: Optional[Dict[str, Optional[str]]] = None,
+    graphviz_cluster_label_widths: Optional[Dict[str, float]] = None,
+    graphviz_apply_cluster_constraints: bool = False,
+    graphviz_enable_cluster_skeleton: bool = False,
+    graphviz_expected_x_inventory: Optional[
+        Union[
+            Tuple[int, Tuple[Tuple[int, int, int], ...]],
+            Tuple[int, Tuple[Tuple[int, int, int], ...], str],
+            Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
+        ]
+    ] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -160,13 +194,13 @@ def layout_sugiyama_pipeline(
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]``.
     rank_sep : float, optional
-        Vertical center-to-center spacing between layers. Defaults to a
-        Graphviz-dot-compatible point spacing for direct calls, or
+        Vertical center-to-center spacing between layers. Defaults to the
+        classic compatibility spacing of ``1.0`` for direct calls, or
         ``config.rank_sep`` when invoked through ``LayoutConfig``.
     node_sep : float, optional
-        Horizontal gap between node bounding boxes. Defaults to Graphviz dot's
-        point-unit ``nodesep`` for direct calls, or ``config.node_sep`` when
-        invoked through ``LayoutConfig``.
+        Horizontal gap between node bounding boxes. Defaults to the classic
+        compatibility spacing of ``1.0`` for direct calls, or
+        ``config.node_sep`` when invoked through ``LayoutConfig``.
     layer_sep : float, optional
         Alias for ``rank_sep``. Overrides ``rank_sep`` when provided.
     seed : int
@@ -191,6 +225,35 @@ def layout_sugiyama_pipeline(
         Whether to center final horizontal coordinates. Defaults to ``False``
         in igraph fidelity mode to match igraph's left-anchored coordinate
         frame, and ``True`` otherwise.
+    graphviz_node_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT node boxes with shape ``[N, 2]``. Only exact
+        ``fidelity_mode="graphviz"`` consumes this override during the
+        x-coordinate auxiliary solve.
+    graphviz_typed_node_sizes : torch.Tensor, optional
+        Source-exact point-unit boxes reserved for the guarded typed cluster path.
+    graphviz_edge_label_sizes : torch.Tensor, optional
+        Point-unit Graphviz DOT edge-label boxes with shape ``[E, 2]``. Only
+        exact ``fidelity_mode="graphviz"`` consumes this override when
+        materializing dot's label virtual nodes.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata from ``DaguaGraph.clusters``. Only exact
+        ``fidelity_mode="graphviz"`` consumes this for Graphviz-dot cluster
+        x-boundary machinery.
+    cluster_parents : dict[str, str | None], optional
+        Cluster hierarchy metadata from ``DaguaGraph.cluster_parents``.
+    graphviz_cluster_label_widths : dict[str, float], optional
+        Padded Graphviz cluster-label widths in point units.
+    graphviz_apply_cluster_constraints : bool, default=False
+        Whether Graphviz-dot cluster x-boundary machinery is allowed to consume
+        ``clusters``. The benchmark wrapper enables this only for cluster-only
+        DOT inputs; mixed cluster plus edge-label DOT inputs must remain on the
+        pre-A9 path until the combined Graphviz machinery is ported.
+    graphviz_enable_cluster_skeleton : bool, default=False
+        Enable the inactive A12 cluster rank/mincross prototype. It remains
+        opt-in because the x-stage integration is not benchmark-safe yet.
+    graphviz_expected_x_inventory : tuple, optional
+        Instrumented Graphviz node count and exact ``(minlen, weight)``
+        multiset required before the typed cluster solve can run.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -226,9 +289,9 @@ def layout_sugiyama_pipeline(
         if node_sep is None:
             node_sep = config.node_sep
     if rank_sep is None:
-        rank_sep = _DOT_DEFAULT_RANK_CENTER_SEP
+        rank_sep = 1.0
     if node_sep is None:
-        node_sep = _DOT_DEFAULT_NODE_SEP
+        node_sep = 1.0
     if layer_sep is not None:
         rank_sep = layer_sep
 
@@ -262,10 +325,37 @@ def layout_sugiyama_pipeline(
         edge_index=edge_index,
         num_nodes=num_nodes,
         node_sizes=problem_node_sizes,
+        clusters=clusters
+        if fidelity_mode == "graphviz" and graphviz_apply_cluster_constraints
+        else None,
+        cluster_parents=cluster_parents
+        if fidelity_mode == "graphviz" and graphviz_apply_cluster_constraints
+        else None,
         edge_weights=edge_weights,
         seed=seed,
     )
     state = SolveState()
+    if graphviz_node_sizes is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_node_sizes"] = graphviz_node_sizes.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
+    if graphviz_typed_node_sizes is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_typed_node_sizes"] = graphviz_typed_node_sizes.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
+    if graphviz_edge_label_sizes is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_edge_label_sizes"] = graphviz_edge_label_sizes.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
+    if graphviz_cluster_label_widths is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_cluster_label_widths"] = {
+            str(name): float(width) for name, width in graphviz_cluster_label_widths.items()
+        }
+    if graphviz_expected_x_inventory is not None and fidelity_mode == "graphviz":
+        state.extras["sugiyama_graphviz_expected_x_inventory"] = graphviz_expected_x_inventory
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
 
     pipeline = build_sugiyama_pipeline(
@@ -278,6 +368,7 @@ def layout_sugiyama_pipeline(
         fidelity_mode=fidelity_mode,
         fidelity_dtype=fidelity_dtype,
         center_coordinates=center_coordinates,
+        graphviz_enable_cluster_skeleton=graphviz_enable_cluster_skeleton,
     )
     final_state = pipeline.apply(problem, state, ctx)
 
@@ -428,33 +519,104 @@ def _layout_igraph_packed_components(
             component=component,
         )
         component_sizes = node_sizes[component] if node_sizes is not None else None
-        component_pos = cast(
-            torch.Tensor,
-            layout_sugiyama_pipeline(
-                edge_index=component_edges.to(device=edge_index.device),
-                num_nodes=len(component),
-                node_sizes=component_sizes,
-                rank_sep=rank_sep,
-                node_sep=node_sep,
-                seed=seed,
-                barycenter_passes=barycenter_passes,
-                edge_weights=(
-                    None
-                    if component_weights is None
-                    else component_weights.to(device=edge_index.device)
-                ),
-                fidelity_mode="igraph",
-                use_node_sizes_for_spacing=use_node_sizes_for_spacing,
-                center_coordinates=center_coordinates,
-                config=config,
+        component_pos, component_max_x = _layout_igraph_component_for_packing(
+            edge_index=component_edges.to(device=edge_index.device),
+            num_nodes=len(component),
+            node_sizes=component_sizes,
+            rank_sep=rank_sep,
+            node_sep=node_sep,
+            seed=seed,
+            barycenter_passes=barycenter_passes,
+            edge_weights=(
+                None
+                if component_weights is None
+                else component_weights.to(device=edge_index.device)
             ),
-        ).to(device=output_device, dtype=torch.float32)
+            use_node_sizes_for_spacing=use_node_sizes_for_spacing,
+            center_coordinates=center_coordinates,
+        )
+        component_pos = component_pos.to(device=output_device, dtype=torch.float32)
         if component_pos.numel() > 0:
-            component_pos[:, 0] -= float(component_pos[:, 0].min().item())
             component_pos[:, 0] += dx
-            dx += float(component_pos[:, 0].max().item()) - dx + node_sep
+            dx += component_max_x + node_sep
         packed[component] = component_pos
     return packed
+
+
+def _layout_igraph_component_for_packing(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    rank_sep: float,
+    node_sep: float,
+    seed: int,
+    barycenter_passes: int,
+    edge_weights: Optional[torch.Tensor],
+    use_node_sizes_for_spacing: bool,
+    center_coordinates: bool,
+) -> Tuple[torch.Tensor, float]:
+    """Lay out one igraph component and return its expanded right margin.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Component-local graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of original nodes ``N`` in the component.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``.
+    rank_sep : float
+        Vertical center-to-center spacing between layers.
+    node_sep : float
+        Horizontal gap between nodes and packed components.
+    seed : int
+        Seed retained for API compatibility.
+    barycenter_passes : int
+        Maximum number of crossing-minimization sweeps.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight vector with shape ``[E]``.
+    use_node_sizes_for_spacing : bool
+        Whether component layouts should include node widths.
+    center_coordinates : bool
+        Whether the component pipeline should center horizontal coordinates.
+
+    Returns
+    -------
+    tuple of torch.Tensor and float
+        Original-node positions with shape ``[N, 2]`` and the maximum local
+        X coordinate over real plus dummy vertices.
+    """
+    problem_node_sizes = node_sizes if use_node_sizes_for_spacing else None
+    output_device = edge_index.device
+    if problem_node_sizes is not None:
+        output_device = problem_node_sizes.device
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=problem_node_sizes,
+        edge_weights=edge_weights,
+        seed=seed,
+    )
+    state = SolveState()
+    ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
+    pipeline = build_sugiyama_pipeline(
+        rank_sep=rank_sep,
+        node_sep=node_sep,
+        barycenter_passes=barycenter_passes,
+        seed=seed,
+        fidelity_mode="igraph",
+        center_coordinates=center_coordinates,
+    )
+    final_state = pipeline.apply(problem, state, ctx)
+    if final_state.pos is None:
+        raise RuntimeError("Sugiyama component pipeline did not produce final positions.")
+
+    expanded_positions = final_state.extras.get(_SUGIYAMA_EXPANDED_POSITIONS_KEY)
+    if not isinstance(expanded_positions, torch.Tensor) or expanded_positions.numel() == 0:
+        component_max_x = 0.0
+    else:
+        component_max_x = float(expanded_positions[:, 0].max().item())
+    return final_state.pos, component_max_x
 
 
 def _slice_component_edges(

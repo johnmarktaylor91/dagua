@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Iterable, Optional
 
 import pytest
@@ -9,10 +11,13 @@ import torch
 
 from dagua.layout.classic.classical_mds import layout_classical_mds
 from dagua.layout.ops.pipelines.classical_mds import (
+    _IgraphMergeGrid,
     build_classical_mds_pipeline,
     layout_classical_mds_pipeline,
 )
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -103,6 +108,48 @@ def _assert_exact_match(classic: torch.Tensor, pipeline: torch.Tensor) -> None:
     assert torch.equal(classic, pipeline)
 
 
+def _brute_force_grid_get_sphere(
+    grid: _IgraphMergeGrid,
+    x_coord: float,
+    y_coord: float,
+    radius: float,
+) -> int:
+    """Find a merge-grid collision by scanning all occupied cells.
+
+    Parameters
+    ----------
+    grid : _IgraphMergeGrid
+        Grid populated with already placed component spheres.
+    x_coord : float
+        Candidate center x coordinate.
+    y_coord : float
+        Candidate center y coordinate.
+    radius : float
+        Candidate sphere radius.
+
+    Returns
+    -------
+    int
+        Component id of the first colliding occupied cell, or ``-1``.
+    """
+    if (
+        x_coord - radius <= grid.minx
+        or x_coord + radius >= grid.maxx
+        or y_coord - radius <= grid.miny
+        or y_coord + radius >= grid.maxy
+    ):
+        return -1
+    radius_squared = radius * radius
+    for x_index, y_index in zip(grid.occupied_x, grid.occupied_y):
+        cell_x = grid.minx + float(x_index) * grid.deltax
+        cell_y = grid.miny + float(y_index) * grid.deltay
+        delta_x = x_coord - cell_x
+        delta_y = y_coord - cell_y
+        if delta_x * delta_x + delta_y * delta_y < radius_squared:
+            return grid._get_mat(int(x_index), int(y_index)) - 1
+    return -1
+
+
 def _run_pipeline_direct(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -135,6 +182,26 @@ def _run_pipeline_direct(
     final_state = build_classical_mds_pipeline().apply(problem, state, ctx)
     assert final_state.pos is not None
     return final_state.pos
+
+
+def test_layout_runtime_modules_do_not_import_igraph() -> None:
+    """Guard against runtime delegation to python-igraph from layout modules."""
+    offenders: list[str] = []
+    for path in sorted((_PROJECT_ROOT / "dagua" / "layout").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(
+                    alias.name == "igraph" or alias.name.startswith("igraph.")
+                    for alias in node.names
+                ):
+                    offenders.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+            elif isinstance(node, ast.ImportFrom) and (
+                node.module == "igraph" or (node.module or "").startswith("igraph.")
+            ):
+                offenders.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+
+    assert offenders == []
 
 
 class TestClassicalMDSPipelineFidelity:
@@ -181,14 +248,105 @@ class TestClassicalMDSPipelineFidelity:
 
         _assert_exact_match(classic, pipeline)
 
-    def test_layout_classical_mds_pipeline_matches_classic_on_disconnected_graph(self) -> None:
-        """Disconnected components and isolated nodes should match exactly."""
+    def test_layout_classical_mds_pipeline_uses_seeded_dla_on_disconnected_graph(self) -> None:
+        """Disconnected igraph-compatible layouts should use seeded DLA."""
         edge_index = _disconnected_edge_index()
 
-        classic = layout_classical_mds(edge_index=edge_index, num_nodes=9, seed=99)
-        pipeline = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=99)
+        first = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=99)
+        repeated = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=99)
+        different_seed = layout_classical_mds_pipeline(edge_index=edge_index, num_nodes=9, seed=101)
+        legacy = layout_classical_mds(edge_index=edge_index, num_nodes=9, seed=99)
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(first, repeated)
+        assert not torch.equal(first, different_seed)
+        assert not torch.equal(first, legacy)
+
+    def test_igraph_merge_grid_lookup_matches_full_occupied_scan(self) -> None:
+        """Optimized DLA collision lookup should preserve full-scan decisions."""
+        grid = _IgraphMergeGrid(
+            minx=-10.0,
+            maxx=10.0,
+            stepsx=40,
+            miny=-10.0,
+            maxy=10.0,
+            stepsy=40,
+        )
+        grid.place_sphere(0.0, 0.0, 1.8, 3)
+        grid.place_sphere(3.4, -2.2, 1.2, 7)
+        grid.place_sphere(-4.5, 4.0, 2.0, 11)
+
+        candidates = [
+            (-9.5, 0.0, 0.75),
+            (-4.0, 3.6, 0.8),
+            (0.9, 0.9, 1.0),
+            (2.8, -1.8, 0.65),
+            (7.5, 7.5, 0.5),
+            (9.8, 0.0, 0.4),
+        ]
+        for x_coord, y_coord, radius in candidates:
+            assert grid.get_sphere(x_coord, y_coord, radius) == _brute_force_grid_get_sphere(
+                grid,
+                x_coord,
+                y_coord,
+                radius,
+            )
+
+    def test_connected_igraph_fidelity_path_matches_frozen_expectation(self) -> None:
+        """Connected graphs should keep the aligned igraph-binding path."""
+        edge_index = _edge_index_from_edges([(0, 1), (1, 2), (2, 3), (1, 4), (4, 5), (2, 6)])
+        expected = torch.tensor(
+            [
+                [18.665543833577367, -81.42865150765743],
+                [11.472505840196021, -12.528514990915745],
+                [-41.22107151432031, 8.209953129678556],
+                [-81.19011179594563, 18.892882956107357],
+                [61.6452504242114, 11.810977488588032],
+                [111.81799500822676, 36.150469968091826],
+                [-81.19011179594563, 18.892882956107417],
+            ],
+            dtype=torch.float64,
+        )
+
+        positions = layout_classical_mds_pipeline(
+            edge_index=edge_index,
+            num_nodes=7,
+            seed=123,
+            igraph_fidelity=True,
+            fidelity_dtype=torch.float64,
+        )
+
+        assert torch.equal(positions, expected)
+
+    def test_igraph_fidelity_survives_degenerate_top_eigenspace(self) -> None:
+        """A 1-50-1 layered graph must not collapse to an all-zeros layout.
+
+        The double-centered Gram matrix of this graph has a top eigenvalue of
+        multiplicity 50. LAPACK ``dsyevr`` with ``range='I'`` can silently
+        return zero eigenpairs (``m = 0`` with ``info == 0``) on that spectrum
+        depending on workspace size, and SciPy's ``eigh`` surfaces that as
+        empty arrays without raising. Regression guard for the r78
+        ``wide_single_layer_1_50_1`` all-zeros bug.
+        """
+        hub_edges = [(0, mid) for mid in range(1, 51)] + [(mid, 51) for mid in range(1, 51)]
+        edge_index = _edge_index_from_edges(hub_edges)
+
+        positions = layout_classical_mds_pipeline(
+            edge_index=edge_index,
+            num_nodes=52,
+            seed=100,
+            igraph_fidelity=True,
+            fidelity_dtype=torch.float64,
+        )
+
+        assert positions.shape == (52, 2)
+        assert torch.isfinite(positions).all()
+        norm = torch.linalg.norm(positions)
+        # igraph scaling normalizes the raw embedding: two sqrt(2)-length
+        # columns give Frobenius norm 2, scaled by 50 -> 100.
+        assert torch.isclose(norm, torch.tensor(100.0, dtype=torch.float64))
+        # Rank-2: both output columns must be non-degenerate.
+        assert torch.linalg.norm(positions[:, 0]) > 1.0
+        assert torch.linalg.norm(positions[:, 1]) > 1.0
 
     def test_build_classical_mds_pipeline_matches_classic_on_complete_graph(self) -> None:
         """The raw pipeline object should match classic classical MDS on a dense graph."""

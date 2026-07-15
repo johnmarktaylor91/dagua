@@ -53,7 +53,10 @@ class ClusterTree:
         Parameters
         ----------
         clusters : Mapping[str, Sequence[int]]
-            Mapping from cluster name to all descendant leaf node indices.
+            Mapping from cluster name to member node indices. Existing graph
+            builders may store either direct members or all descendants; child
+            membership is unioned into each parent so both conventions produce
+            a flat descendant lookup.
         cluster_parents : Mapping[str, Optional[str]]
             Mapping from cluster name to parent cluster name. Missing entries
             and parents outside ``clusters`` are treated as root membership.
@@ -65,7 +68,7 @@ class ClusterTree:
             membership lookup tables.
         """
         cluster_names = tuple(clusters.keys())
-        descendants = {
+        declared_members = {
             name: frozenset(int(index) for index in members) for name, members in clusters.items()
         }
         parents = {
@@ -82,12 +85,37 @@ class ClusterTree:
             name: tuple(child for child in cluster_names if child in children_lists[name])
             for name in cluster_names
         }
+        expanded_descendants: dict[str, frozenset[int]] = {}
+
+        def expand_descendants(name: str) -> frozenset[int]:
+            """Return declared members plus all child descendants.
+
+            Parameters
+            ----------
+            name : str
+                Cluster name to expand.
+
+            Returns
+            -------
+            frozenset[int]
+                Full descendant node set for ``name``.
+            """
+            if name in expanded_descendants:
+                return expanded_descendants[name]
+            merged = set(declared_members[name])
+            for child_name in children[name]:
+                merged.update(expand_descendants(child_name))
+            expanded = frozenset(merged)
+            expanded_descendants[name] = expanded
+            return expanded
+
+        descendants = {name: expand_descendants(name) for name in cluster_names}
         leaves: dict[str, frozenset[int]] = {}
         for name in cluster_names:
             child_descendants: set[int] = set()
             for child_name in children[name]:
                 child_descendants.update(descendants[child_name])
-            leaves[name] = frozenset(descendants[name].difference(child_descendants))
+            leaves[name] = frozenset(declared_members[name].difference(child_descendants))
 
         roots = tuple(name for name in cluster_names if parents[name] is None)
         return cls(
@@ -107,26 +135,15 @@ class ClusterTree:
             Cluster names ordered so every child appears before its parent.
         """
         ordered: list[str] = []
-
-        def visit(name: str) -> None:
-            """Append ``name`` after all children have been visited.
-
-            Parameters
-            ----------
-            name : str
-                Cluster name to traverse.
-
-            Returns
-            -------
-            None
-                The traversal appends into ``ordered``.
-            """
-            for child_name in self.children_per_cluster[name]:
-                visit(child_name)
-            ordered.append(name)
-
-        for root_name in self.roots:
-            visit(root_name)
+        stack: list[tuple[str, bool]] = [(root_name, False) for root_name in reversed(self.roots)]
+        while stack:
+            name, children_done = stack.pop()
+            if children_done:
+                ordered.append(name)
+                continue
+            stack.append((name, True))
+            for child_name in reversed(self.children_per_cluster[name]):
+                stack.append((child_name, False))
         return tuple(ordered)
 
     def top_down_order(self) -> Tuple[str, ...]:
@@ -138,26 +155,12 @@ class ClusterTree:
             Cluster names ordered so every parent appears before descendants.
         """
         ordered: list[str] = []
-
-        def visit(name: str) -> None:
-            """Append ``name`` before all children are visited.
-
-            Parameters
-            ----------
-            name : str
-                Cluster name to traverse.
-
-            Returns
-            -------
-            None
-                The traversal appends into ``ordered``.
-            """
+        stack = list(reversed(self.roots))
+        while stack:
+            name = stack.pop()
             ordered.append(name)
-            for child_name in self.children_per_cluster[name]:
-                visit(child_name)
-
-        for root_name in self.roots:
-            visit(root_name)
+            for child_name in reversed(self.children_per_cluster[name]):
+                stack.append(child_name)
         return tuple(ordered)
 
 
@@ -341,7 +344,11 @@ def cluster_subtree(tree: ClusterTree, name: str) -> Tuple[str, ...]:
     tuple[str, ...]
         Cluster names in preorder, including ``name``.
     """
-    ordered = [name]
-    for child_name in tree.children_per_cluster[name]:
-        ordered.extend(cluster_subtree(tree, child_name))
+    ordered: list[str] = []
+    stack = [name]
+    while stack:
+        current = stack.pop()
+        ordered.append(current)
+        for child_name in reversed(tree.children_per_cluster[current]):
+            stack.append(child_name)
     return tuple(ordered)

@@ -11,6 +11,7 @@ from dagua.layout.ops.gem import (
     _ogdf_runner_initial_positions,
     _ogdf_uniform_int,
     _OgdfMinStdRand,
+    _resolve_ogdf_gem_update_budget,
 )
 
 
@@ -59,6 +60,25 @@ def test_ogdf_minstd_permutation_matches_cpp_fixture() -> None:
     rng = _OgdfMinStdRand(_ogdf_gem_rng_seed(42))
 
     assert _ogdf_permutation(5, rng) == [3, 4, 1, 0, 2]
+
+
+def test_ogdf_update_budget_is_node_update_count() -> None:
+    """Verify OGDF ``numberOfRounds`` is not multiplied by graph size.
+
+    Returns
+    -------
+    None
+        The assertion guards the fidelity path against over-running OGDF's
+        scalar update loop on connected graphs.
+    """
+    assert (
+        _resolve_ogdf_gem_update_budget(
+            requested_rounds=20,
+            num_nodes=25,
+            max_rounds=30_000,
+        )
+        == 20
+    )
 
 
 def test_ogdf_zero_disturbance_consumes_rng() -> None:

@@ -1199,6 +1199,30 @@ def _select_embedding_columns(
     return coordinates
 
 
+def _deterministic_arpack_start(num_nodes: int) -> np.ndarray:
+    """Build a process-stable ARPACK start vector.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of rows in the eigensolver input matrix.
+
+    Returns
+    -------
+    numpy.ndarray
+        Unit-norm start vector with shape ``[N]``.
+    """
+    if num_nodes <= 0:
+        return np.empty((0,), dtype=np.float64)
+    start = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+    start -= float(start.mean())
+    norm = float(np.linalg.norm(start))
+    if norm <= _EPSILON:
+        start = np.ones(num_nodes, dtype=np.float64)
+        norm = float(np.linalg.norm(start))
+    return start / norm
+
+
 def _dense_spectral_embedding(
     laplacian: sparse.csr_matrix,
     dim: int,
@@ -1298,12 +1322,25 @@ def _sparse_spectral_embedding(
             max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING),
             num_nodes,
         )
-    if symmetric:
+    if symmetric and networkx_fidelity:
+        # NetworkX leaves ``v0``, ``sigma``, and the SciPy RNG unspecified.
+        # This matters on disconnected graphs: ARPACK then returns an arbitrary
+        # basis from the repeated zero eigenspace. Supplying Dagua's stable
+        # start vector or replacing the result with component indicators would
+        # implement a different algorithm and can collapse whole components.
         eigenvalues, eigenvectors = sparse_linalg.eigsh(
             laplacian,
             k=eigen_count,
             which="SM",
             ncv=ncv,
+        )
+    elif symmetric:
+        eigenvalues, eigenvectors = sparse_linalg.eigsh(
+            laplacian,
+            k=eigen_count,
+            which="SM",
+            ncv=ncv,
+            v0=_deterministic_arpack_start(num_nodes),
         )
     else:
         eigenvalues, eigenvectors = sparse_linalg.eigs(
@@ -1311,6 +1348,7 @@ def _sparse_spectral_embedding(
             k=eigen_count,
             which="SR",
             ncv=ncv,
+            v0=_deterministic_arpack_start(num_nodes),
         )
     return _select_embedding_columns(
         eigenvalues=eigenvalues,

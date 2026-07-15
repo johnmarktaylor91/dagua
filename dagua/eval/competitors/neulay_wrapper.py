@@ -1,6 +1,6 @@
 """Recovered NeuLay reference wrapper.
 
-The original ``/tmp/graph-drawing/NeuLay-2.py`` script is not present in the
+The original ``~/tools/dagua-refs/graph-drawing/NeuLay-2.py`` script is not present in the
 available clone. This wrapper exposes the side-effect-free monolithic port that
 was previously factored from that script into ``dagua.layout._archive``.
 """

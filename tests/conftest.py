@@ -13,7 +13,7 @@ try:
     from torchlens import unwrap_torch
 
     _HAS_TORCHLENS = True
-except ImportError:
+except Exception:  # pragma: no cover - torchlens is optional and may be a broken checkout
     _HAS_TORCHLENS = False
 
 

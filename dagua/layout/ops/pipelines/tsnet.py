@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from numbers import Integral
 from typing import Optional, Union
 
@@ -33,6 +34,9 @@ _SKLEARN_EARLY_EXAGGERATION = 12.0
 _SKLEARN_MIN_GRAD_NORM = 1.0e-7
 _SKLEARN_N_ITER_WITHOUT_PROGRESS = 300
 _SKLEARN_MACHINE_EPSILON = np.finfo(np.double).eps
+_PERPLEXITY_BINARY_SEARCH_STEPS = 100
+_PERPLEXITY_TOLERANCE = 1.0e-5
+_PERPLEXITY_ZERO_SUM_EPSILON = float(np.float32(1.0e-8))
 
 
 def _uses_sklearn_exact_fidelity(fidelity_mode: Union[bool, str]) -> bool:
@@ -92,6 +96,111 @@ def _check_random_state(seed: Union[int, np.random.RandomState, None]) -> np.ran
     if isinstance(seed, np.random.RandomState):
         return seed
     raise ValueError(f"{seed!r} cannot be used to seed a numpy.random.RandomState instance.")
+
+
+def _binary_search_conditional_probabilities(
+    squared_distances: np.ndarray,
+    desired_perplexity: float,
+) -> np.ndarray:
+    """Compute conditional Gaussian affinities at a target perplexity.
+
+    Parameters
+    ----------
+    squared_distances : numpy.ndarray
+        Dense squared-distance matrix with shape ``[N, N]``. Values are
+        interpreted as ``float32`` to match the classic t-SNE calculation.
+    desired_perplexity : float
+        Target perplexity for every row's conditional distribution.
+
+    Returns
+    -------
+    numpy.ndarray
+        Conditional probability matrix with shape ``[N, N]`` and dtype
+        ``float64``. Its diagonal is zero and each non-degenerate row sums to
+        one.
+
+    Notes
+    -----
+    Each row searches the Gaussian precision ``beta`` until its Shannon
+    entropy reaches ``log(desired_perplexity)``. Scalar loops intentionally
+    preserve the float32-distance/float64-accumulator arithmetic of the
+    classic implementation.
+    """
+    distances = np.asarray(squared_distances, dtype=np.float32)
+    num_nodes = int(distances.shape[0])
+    probabilities = np.zeros((num_nodes, num_nodes), dtype=np.float64)
+    desired_entropy = math.log(desired_perplexity)
+
+    for node in range(num_nodes):
+        beta_min = -np.inf
+        beta_max = np.inf
+        beta = 1.0
+
+        for _ in range(_PERPLEXITY_BINARY_SEARCH_STEPS):
+            probability_sum = 0.0
+            for neighbor in range(num_nodes):
+                if neighbor != node:
+                    probability = math.exp(-float(distances[node, neighbor]) * beta)
+                    probabilities[node, neighbor] = probability
+                    probability_sum += probability
+
+            if probability_sum == 0.0:
+                probability_sum = _PERPLEXITY_ZERO_SUM_EPSILON
+
+            weighted_distance_sum = 0.0
+            for neighbor in range(num_nodes):
+                probabilities[node, neighbor] /= probability_sum
+                weighted_distance_sum += (
+                    float(distances[node, neighbor]) * probabilities[node, neighbor]
+                )
+
+            entropy = math.log(probability_sum) + beta * weighted_distance_sum
+            entropy_difference = entropy - desired_entropy
+            if abs(entropy_difference) <= _PERPLEXITY_TOLERANCE:
+                break
+
+            if entropy_difference > 0.0:
+                beta_min = beta
+                beta = beta * 2.0 if math.isinf(beta_max) else (beta + beta_max) / 2.0
+            else:
+                beta_max = beta
+                beta = beta / 2.0 if math.isinf(beta_min) else (beta + beta_min) / 2.0
+
+    return probabilities
+
+
+def _joint_probabilities(distances: np.ndarray, desired_perplexity: float) -> np.ndarray:
+    """Compute condensed symmetric t-SNE joint probabilities natively.
+
+    Parameters
+    ----------
+    distances : numpy.ndarray
+        Dense squared-distance matrix with shape ``[N, N]``.
+    desired_perplexity : float
+        Target perplexity for the conditional Gaussian affinities.
+
+    Returns
+    -------
+    numpy.ndarray
+        Condensed joint-probability vector with shape ``[N * (N - 1) / 2]``
+        and dtype ``float64``.
+
+    Notes
+    -----
+    Conditional rows each sum to one, so symmetrizing and normalizing by the
+    matrix sum implements ``(P + P.T) / (2N)`` while retaining the classic
+    implementation's floating-point normalization behavior.
+    """
+    from scipy.spatial.distance import squareform
+
+    conditional_probabilities = _binary_search_conditional_probabilities(
+        distances,
+        desired_perplexity,
+    )
+    symmetric_probabilities = conditional_probabilities + conditional_probabilities.T
+    probability_sum = max(float(np.sum(symmetric_probabilities)), _SKLEARN_MACHINE_EPSILON)
+    condensed = squareform(symmetric_probabilities, checks=False) / probability_sum
+    return np.maximum(condensed, _SKLEARN_MACHINE_EPSILON)
 
 
 def _kl_divergence_exact(
@@ -273,20 +382,18 @@ def _fit_tsnet_exact_condensed(
 
     Notes
     -----
-    sklearn math primitive used: ``sklearn.manifold._t_sne._joint_probabilities``.
-    This deterministic helper converts the fixed precomputed distance matrix and
-    perplexity into the condensed joint-probability vector ``P``. It carries no
-    t-SNE optimizer state and does not run embedding updates.
+    The vendored deterministic affinity calculation converts the fixed
+    precomputed distance matrix and perplexity into the condensed
+    joint-probability vector ``P``. It carries no optimizer state and does not
+    run embedding updates.
     """
-    from sklearn.manifold._t_sne import _joint_probabilities
-
     num_nodes = int(distances.shape[0])
     n_components = 2
     max_iter = max(int(steps), _SKLEARN_EXPLORATION_MAX_ITER)
     learning_rate = max(num_nodes / _SKLEARN_EARLY_EXAGGERATION / 4.0, 50.0)
 
     distances **= 2
-    probabilities = _joint_probabilities(distances, perplexity, 0)
+    probabilities = _joint_probabilities(distances, perplexity)
     random_state = _check_random_state(seed)
     embedded = 1.0e-4 * random_state.standard_normal(size=(num_nodes, n_components)).astype(
         np.float32

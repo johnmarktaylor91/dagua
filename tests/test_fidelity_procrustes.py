@@ -14,6 +14,7 @@ from scipy.stats import mannwhitneyu
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from fidelity_analysis import (  # noqa: E402
+    ALL_QUALITY_METRICS,
     MIN_STOCHASTIC_SEEDS,
     QUALITY_METRICS,
     LayoutRecord,
@@ -151,10 +152,12 @@ def test_procrustes_known_good_equivalent() -> None:
     assert pvalue < 0.05
 
     row = _base_stochastic_row()
+    row["procrustes_tost_pvalue_0_5x_bh"] = 0.01
     row["procrustes_tost_pvalue_1x_bh"] = 0.01
     row["procrustes_tost_pvalue_2x_bh"] = 0.01
-    for metric_name in QUALITY_METRICS:
+    for metric_name in ALL_QUALITY_METRICS:
         row[f"{metric_name}_tost_pvalue_1x_bh"] = 0.01
+        row[f"{metric_name}_regression_pct"] = 0.0
     finalize_group_row(row)
     assert row["verdict"] == "strong_equivalent"
 

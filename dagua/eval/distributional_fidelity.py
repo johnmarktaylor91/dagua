@@ -364,7 +364,11 @@ def assign_rung(record: dict[str, Any]) -> tuple[str, list[str]]:
         record.get("quality_identical", False) or _q_lt(record.get("q_battery"), 0.05)
     )
     if mode == "A":
-        tracking = bool(record.get("seed_tracking", False)) or (
+        # Tracking must be earned from measured statistics. A bare boolean
+        # "seed_tracking" field has no producer in this codebase and acted as
+        # a silent benign-rung bypass in hand-compacted control files
+        # (r78 gate_3_negative audit); it is deliberately ignored.
+        tracking = (
             _q_lt(record.get("q_track"), 0.05) and float(record.get("track_ratio", math.inf)) <= 0.5
         )
         dist_equiv = bool(record.get("dist_equivalent", False))
@@ -400,12 +404,20 @@ def assign_rung(record: dict[str, Any]) -> tuple[str, list[str]]:
                     else (("3", annotations) if quality else ("4", annotations))
                 )
             )
+        # Typicality on a dispersed reimplementation cloud is a WEAK verdict:
+        # sensitivity is high (39/39 on the gate_2 positive controls) but a
+        # wrong-algorithm reference passes ~10% of the time (gate_3 negative
+        # controls, r78 audit F4), because with high seed-variance any
+        # sensible layout of the same graph scores "typical". It therefore
+        # earns the distinct weak rung "2'w", which is never counted as a
+        # primary/benign rung; the strong "2'" above requires the
+        # near-deterministic positional d_R gate.
         informative = not bool(record.get("typicality_uninformative", False))
         ref_typical = bool(record.get("ref_typical", False)) or (
             informative and float(record.get("p_typ", 0.0)) > 0.05
         )
         if informative and ref_typical:
-            return "2'", annotations
+            return "2'w", annotations
         if quality_identical:
             return "3Q", annotations
         return ("3", annotations) if quality else ("4", annotations)

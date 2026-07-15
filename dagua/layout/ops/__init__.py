@@ -26,7 +26,11 @@ from dagua.layout.ops.base import (
     Pipeline,
     Repeat,
 )
-from dagua.layout.ops.cluster_driver import ClusterAwareDriver, ClusterPlacement
+from dagua.layout.ops.cluster_driver import (
+    ClusterAwareDriver,
+    ClusterPlacement,
+    NativeClusterLevelLayout,
+)
 from dagua.layout.ops.edge_route import (
     BezierControlPointOpt,
     BezierControlPointOptConfig,
@@ -38,6 +42,10 @@ from dagua.layout.ops.gem import (
     GEMConvergenceCheck,
     GEMSequentialStep,
     GEMUpdateTemperatures,
+)
+from dagua.layout.ops.graphviz_radial_circular import (
+    CircoAssignCircularCoordinates,
+    TwopiAssignRadialCoordinates,
 )
 from dagua.layout.ops.init import (
     CircularInit,
@@ -77,6 +85,7 @@ from dagua.layout.ops.loss_classic import (
     UMAPCrossEntropyLoss,
     UMAPCrossEntropyLossConfig,
 )
+from dagua.layout.ops.networkx_simple import NetworkXSimpleLayout
 from dagua.layout.ops.postprocess import (
     CenterPositions,
     DirectionTransform,
@@ -172,6 +181,7 @@ __all__ = [
     # Composition patterns
     "ClusterAwareDriver",
     "ClusterPlacement",
+    "NativeClusterLevelLayout",
     "Pipeline",
     "Repeat",
     "Conditional",
@@ -182,6 +192,9 @@ __all__ = [
     "GEMComputeImpulse",
     "GEMSequentialStep",
     "GEMUpdateTemperatures",
+    "CircoAssignCircularCoordinates",
+    "TwopiAssignRadialCoordinates",
+    "NetworkXSimpleLayout",
     # Taxonomy
     "OpCategory",
     "register_op",
@@ -226,6 +239,7 @@ __all__ = [
 _EXPECTED_OP_MODULES = (
     "anneal",
     "barycenter",
+    "brandes_koepf",
     "cluster_arrange",
     "cluster_driver",
     "coarsen",
@@ -233,24 +247,37 @@ _EXPECTED_OP_MODULES = (
     "converge",
     "coordinate",
     "crossing_swap",
+    "cytoscape",
+    "d3dag",
+    "d3force",
+    "d3tree",
     "davidson_harel",
+    "dagre",
     "distance",
     "drl",
+    "elk",
     "edge_route",
+    "elk_secondary",
     "embed",
     "fcose",
     "fmmm",
     "force",
     "force_2d_init",
     "gem",
+    "graphviz_radial_circular",
+    "hde",
     "init",
     "layering",
+    "largevis",
     "lgl",
     "loss_classic",
     "loss_engine",
     "maxent_stress",
+    "native_stress",
+    "networkx_simple",
     "neulay",
     "optimize",
+    "openord",
     "ordering",
     "postprocess",
     "preprocess",
@@ -260,13 +287,17 @@ _EXPECTED_OP_MODULES = (
     "sfdp",
     "sgd2_multi",
     "spatial_hash",
+    "scc",
     "stress",
     "stress_sgd",
     "sugiyama",
+    "tfdp",
     "tsnet",
+    "tutte",
     "umap",
     "utility",
     "vcycle",
+    "webcola",
     "yifanhu",
 )
 

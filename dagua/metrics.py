@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import time as _time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -143,21 +143,41 @@ def _sampled_knn_preservation(pos_a: torch.Tensor, pos_b: torch.Tensor, k: int) 
     return float(np.mean(jaccard_scores)) if jaccard_scores else 1.0
 
 
-def segments_intersect(p1, p2, p3, p4):
+def segments_intersect(
+    p1: torch.Tensor,
+    p2: torch.Tensor,
+    p3: torch.Tensor,
+    p4: torch.Tensor,
+) -> torch.Tensor:
     """Vectorized segment intersection test.  All inputs ``[N, 2]``.
 
-    Returns an ``[N]`` bool tensor. Counts both standard transversal
-    crossings and *collinear-overlap* crossings (two parallel segments
-    on the same infinite line whose 1D projections overlap, e.g. two
-    vertical edges that share part of a column). The collinear case
-    matters because a layout that collapses every node to one column
-    produces edges that all live on the same vertical line; without
-    counting collinear overlap as crossing, every such pair scores
-    zero crossings and the composite metric awards a degenerate
-    layout free points.
+    Parameters
+    ----------
+    p1 : torch.Tensor
+        First endpoints for the first segment set with shape ``[N, 2]``.
+    p2 : torch.Tensor
+        Second endpoints for the first segment set with shape ``[N, 2]``.
+    p3 : torch.Tensor
+        First endpoints for the second segment set with shape ``[N, 2]``.
+    p4 : torch.Tensor
+        Second endpoints for the second segment set with shape ``[N, 2]``.
 
-    Excludes endpoint-touch cases (segments that share only a vertex)
-    via a small ``EPS`` boundary on the parametric coordinates.
+    Returns
+    -------
+    torch.Tensor
+        Boolean tensor with shape ``[N]``. Counts both standard transversal
+        crossings and *collinear-overlap* crossings (two parallel segments on
+        the same infinite line whose 1D projections overlap, e.g. two vertical
+        edges that share part of a column). Excludes endpoint-touch cases
+        (segments that share only a vertex) via a small ``EPS`` boundary on the
+        parametric coordinates.
+
+    Notes
+    -----
+    Collinear overlap is treated as a crossing because a layout that collapses
+    every node to one column produces edges that all live on the same vertical
+    line; without this case, a degenerate collapsed layout receives free
+    crossing points.
     """
     EPS = 1e-6
     d1 = p2 - p1  # [N, 2]
@@ -750,7 +770,10 @@ def sampled_crossing_rate(
     Returns
     -------
     Dict[str, float]
-        Estimated crossing statistics for the sampled edge pairs.
+        Estimated crossing statistics for the sampled edge pairs. The
+        ``crossing_estimated_total`` and ``crossing_se`` fields are in crossing
+        count units over eligible non-adjacent edge pairs, while
+        ``crossing_rate`` is conditional on eligible sampled pairs.
 
     Notes
     -----
@@ -762,6 +785,7 @@ def sampled_crossing_rate(
             "crossing_se": 0.0,
             "crossing_estimated_total": 0,
             "crossing_n_samples": 0,
+            "crossing_eligible_pairs": 0.0,
         }
 
     E = edge_index.shape[1]
@@ -779,6 +803,7 @@ def sampled_crossing_rate(
         ii, jj = torch.triu_indices(E, E, offset=1)
         idx1 = ii
         idx2 = jj
+        pair_space_exhausted = True
     else:
         # Without-replacement sample of unordered pairs (i, j), i < j.
         # Encode pair as p = i * E + j; sample without replacement from the
@@ -791,6 +816,7 @@ def sampled_crossing_rate(
             ii, jj = torch.triu_indices(E, E, offset=1)
             idx1 = ii[perm]
             idx2 = jj[perm]
+            pair_space_exhausted = False
         else:
             idx1 = torch.randint(0, E, (n_samples,), generator=gen)
             idx2 = torch.randint(0, E, (n_samples,), generator=gen)
@@ -799,6 +825,7 @@ def sampled_crossing_rate(
             lo = torch.minimum(idx1, idx2)
             hi = torch.maximum(idx1, idx2)
             idx1, idx2 = lo, hi
+            pair_space_exhausted = False
 
     # Exclude pairs sharing a node
     e1s, e1t = src[idx1], tgt[idx1]
@@ -813,6 +840,7 @@ def sampled_crossing_rate(
             "crossing_se": 0.0,
             "crossing_estimated_total": 0,
             "crossing_n_samples": 0,
+            "crossing_eligible_pairs": 0.0,
         }
 
     p1 = pos[e1s[valid]]
@@ -823,13 +851,21 @@ def sampled_crossing_rate(
     crossings = segments_intersect(p1, p2, p3, p4)
     n_valid = int(valid.sum().item())
     rate = crossings.float().mean().item()
-    se = (rate * (1 - rate) / n_valid) ** 0.5 if n_valid > 0 else 0.0
+    if pair_space_exhausted:
+        eligible_pairs = float(n_valid)
+        estimated_total = int(crossings.sum().item())
+        se = 0.0
+    else:
+        eligible_pairs = float(total_pairs) * (float(n_valid) / float(valid.numel()))
+        estimated_total = int(rate * eligible_pairs)
+        se = eligible_pairs * (rate * (1 - rate) / n_valid) ** 0.5 if n_valid > 0 else 0.0
 
     return {
         "crossing_rate": rate,
         "crossing_se": se,
-        "crossing_estimated_total": int(rate * E * (E - 1) / 2),
+        "crossing_estimated_total": estimated_total,
         "crossing_n_samples": n_valid,
+        "crossing_eligible_pairs": eligible_pairs,
     }
 
 
@@ -1027,10 +1063,12 @@ def cluster_separation(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Dict[str
     # Sample cluster pairs if too many
     cluster_list = list(centroids.keys())
     if n_clusters > 200:
-        # Random sample of pairs
+        # A local generator keeps referee sampling deterministic without
+        # perturbing NumPy's process-global RNG state.
         n_pairs = min(20000, n_clusters * (n_clusters - 1) // 2)
-        i_idx = np.random.randint(0, n_clusters, n_pairs)
-        j_idx = np.random.randint(0, n_clusters, n_pairs)
+        rng = np.random.default_rng(42)
+        i_idx = rng.integers(0, n_clusters, n_pairs)
+        j_idx = rng.integers(0, n_clusters, n_pairs)
         pairs = [(cluster_list[i], cluster_list[j]) for i, j in zip(i_idx, j_idx) if i < j]
     else:
         pairs = [
@@ -1355,6 +1393,52 @@ def within_layer_compactness(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+# r80-P6 degeneracy guard threshold: below this ratio of mean edge length to
+# mean node bounding-box diagonal, a layout is considered "point-collapsed"
+# rather than merely compact. See `_is_degenerate_scale` for the exploit this
+# closes (S1 HIGH-3: a fully collapsed layout trivially aces edge-length
+# uniformity and crossing-rate, scoring HIGHER than a normal random layout).
+DEGENERATE_SCALE_RATIO = 0.25
+
+
+def _is_degenerate_scale(metrics: Dict[str, float]) -> bool:
+    """Detect a point-collapsed layout from its metric summary.
+
+    When nodes have collapsed onto (near) the same point, every edge length
+    trivially converges to the same tiny value. That vacuously maximizes
+    ``edge_length_cv`` (coefficient of variation of an all-equal
+    distribution is 0, i.e. full length-uniformity credit) and
+    ``crossing_rate`` (zero-length segments never register as crossing
+    under the segment-intersection test), even though the layout is a
+    fully overlapping unreadable mess. Only the binary overlap term
+    correctly zeroes out on its own; this guard closes the other two.
+
+    Degenerate scale is defined as: mean edge length < 0.25 * mean node
+    bounding-box diagonal. Both quantities must be present in ``metrics``
+    (``edge_length_mean`` from ``edge_length_cv()``, ``node_diag_mean`` from
+    ``quick()``/``full()`` when node sizes were supplied) for the guard to
+    fire; metrics computed without node sizes, or predating this field,
+    conservatively report "not degenerate" (unchanged prior behavior).
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping.
+
+    Returns
+    -------
+    bool
+        ``True`` when the layout is at a degenerate (point-collapsed) scale.
+    """
+    edge_length_mean = metrics.get("edge_length_mean")
+    node_diag_mean = metrics.get("node_diag_mean")
+    if edge_length_mean is None or node_diag_mean is None:
+        return False
+    if float(node_diag_mean) <= 1e-8:
+        return False
+    return float(edge_length_mean) < DEGENERATE_SCALE_RATIO * float(node_diag_mean)
+
+
 def composite(metrics: Dict[str, float]) -> float:
     """Compute the directed 100-point composite quality score.
 
@@ -1380,14 +1464,22 @@ def composite(metrics: Dict[str, float]) -> float:
     - Stress (inverted sampled_stress): 10
     - Angular resolution: 5
     - Cluster separation: 6
+
+    Degeneracy guard (r80-P6): when the layout is at a point-collapsed
+    scale (see ``_is_degenerate_scale``), the edge length uniformity (18)
+    and crossing density (9) terms score 0 instead of their vacuous maxima.
     """
     score = 0.0
+    degenerate = _is_degenerate_scale(metrics)
 
     # DAG consistency (22) - most critical for directed graph readability.
     score += 22 * metrics.get("dag_consistency", 0.0)
 
-    # Edge length uniformity (18) - invert CV, cap at 1.0.
-    score += 18 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
+    # Edge length uniformity (18) - invert CV, cap at 1.0. Guarded: a
+    # point-collapsed layout trivially minimizes CV without being uniform
+    # in any meaningful sense.
+    if not degenerate:
+        score += 18 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
 
     # Depth correlation (13)
     score += 13 * max(0.0, metrics.get("depth_spearman_rho", 0.0))
@@ -1399,9 +1491,11 @@ def composite(metrics: Dict[str, float]) -> float:
     straight_deg = metrics.get("edge_straightness_mean_deg", 45.0)
     score += 9 * max(0.0, 1.0 - straight_deg / 45.0)
 
-    # Crossing density (9) - lower is better.
-    crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
-    score += 9 * crossing_score
+    # Crossing density (9) - lower is better. Guarded: zero-length segments
+    # never register as crossing, so a collapsed layout trivially aces this.
+    if not degenerate:
+        crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
+        score += 9 * crossing_score
 
     # Sampled stress (10) - lower graph-theoretic stress is better.
     stress_score = max(0.0, 1.0 - metrics.get("sampled_stress", 1.0))
@@ -1438,6 +1532,11 @@ def composite_undirected(metrics: Dict[str, float]) -> float:
     same clamping). See composite() for the per-metric formulas and clamp
     ranges.
 
+    Degeneracy guard (r80-P6): when the layout is at a point-collapsed
+    scale (see ``_is_degenerate_scale``), the edge length uniformity (40)
+    and crossing density (20) terms score 0 instead of their vacuous
+    maxima. See ``composite()`` for the full rationale.
+
     Parameters
     ----------
     metrics : Dict[str, float]
@@ -1449,16 +1548,19 @@ def composite_undirected(metrics: Dict[str, float]) -> float:
         Weighted undirected composite score where higher is better.
     """
     score = 0.0
+    degenerate = _is_degenerate_scale(metrics)
 
-    # Edge length uniformity (40) - invert CV, cap at 1.0
-    score += 40 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
+    # Edge length uniformity (40) - invert CV, cap at 1.0. Guarded.
+    if not degenerate:
+        score += 40 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
 
     # No overlaps (20) - binary
     score += 20 * (1.0 if metrics.get("overlap_count", 1) == 0 else 0.0)
 
-    # Crossing density (20) - lower is better
-    crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
-    score += 20 * crossing_score
+    # Crossing density (20) - lower is better. Guarded.
+    if not degenerate:
+        crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
+        score += 20 * crossing_score
 
     # Angular resolution (10)
     angle_score = min(1.0, metrics.get("angular_res_mean_deg", 20.0) / 40.0)
@@ -1565,6 +1667,100 @@ def composite_large(metrics: Dict[str, float]) -> float:
     return score
 
 
+# Quick-mode fields retained by composite_large_undirected (direction-
+# sensitive fields dag_consistency/depth_spearman_rho/edge_straightness_mean_deg
+# are dropped, mirroring composite_undirected -- but unlike composite_undirected,
+# crossing_rate/angular_res_mean_deg/cluster_mean_sep_ratio are ALSO unavailable
+# at quick-tier, so only 2 of composite_undirected's 5 retained terms survive).
+_QUICK_AVAILABLE_FIELDS_UNDIRECTED = frozenset({"edge_length_cv", "overlap_count"})
+
+
+def composite_large_undirected(metrics: Dict[str, float]) -> float:
+    """Composite score for undirected graphs where only quick() is available.
+
+    r80-P6 (S1 MEDIUM-1): ``composite_large`` hardcoded the DIRECTED weight
+    scheme with no undirected counterpart -- any undirected N>2000 graph
+    scored through the large-tier path would have 30/100 points determined
+    by ``dag_consistency``, a metric that is meaningless for it. This
+    mirrors ``composite_undirected``'s term structure at the large-graph
+    tier.
+
+    Of ``composite_undirected``'s 5 retained terms (edge_length_cv,
+    overlap_count, crossing_rate, angular_resolution, cluster_separation),
+    only ``edge_length_cv`` and ``overlap_count`` are quick-tier available;
+    ``crossing_rate``, ``angular_res_mean_deg``, and cluster separation are
+    Tier-2/3 fields that ``quick()`` never computes (same reason
+    ``composite_large`` itself excludes them). This is NOT a proportional
+    rescale of composite_undirected's 40/20 weights (which would be a
+    non-round 66.67/33.33); it uses round numbers preserving the same
+    ~2:1 emphasis, matching composite_large's own hand-picked-round-numbers
+    convention rather than a strict rescale.
+
+    Weights (sum = 100):
+    - Edge length uniformity (1 - CV): 65
+    - No overlaps (binary): 35
+
+    No degeneracy guard is applied here (see ``composite()``'s guard docs);
+    the r80-P6 batch scopes that guard to ``composite``/``composite_undirected``/
+    ``composite_auto`` only.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping from ``quick()`` or equivalent.
+
+    Returns
+    -------
+    float
+        Weighted undirected large-tier composite score where higher is
+        better.
+
+    Raises
+    ------
+    ValueError
+        If a required quick-mode field is missing.
+    """
+    missing = [f for f in _QUICK_AVAILABLE_FIELDS_UNDIRECTED if f not in metrics]
+    if missing:
+        raise ValueError(
+            f"composite_large_undirected: missing required quick-mode fields: "
+            f"{missing}. Did you call quick() before scoring?"
+        )
+
+    score = 0.0
+    score += 65 * max(0.0, 1.0 - metrics["edge_length_cv"])
+    score += 35 * (1.0 if metrics["overlap_count"] == 0 else 0.0)
+    return score
+
+
+def composite_large_auto(
+    metrics: Dict[str, float], is_semantically_directed: Optional[bool] = None
+) -> float:
+    """Pick composite_large or composite_large_undirected by direction flag.
+
+    Mirrors ``composite_auto`` at the large-graph (quick-tier-only) profile.
+    When ``is_semantically_directed`` is True (or None, conservative
+    default), returns ``composite_large(metrics)``. When False, returns
+    ``composite_large_undirected(metrics)``.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping from ``quick()`` or equivalent.
+    is_semantically_directed : Optional[bool], optional
+        Whether the graph has a meaningful direction. ``None`` is treated as
+        directed to preserve the existing conservative behavior.
+
+    Returns
+    -------
+    float
+        Directed or undirected large-tier composite score.
+    """
+    if is_semantically_directed is None or is_semantically_directed:
+        return composite_large(metrics)
+    return composite_large_undirected(metrics)
+
+
 def composite_strict(metrics: Dict[str, float]) -> float:
     """Strict variant of ``composite()`` that refuses silent defaults.
 
@@ -1658,6 +1854,13 @@ def quick(
     if node_sizes is not None:
         ns = _ensure_cpu(node_sizes)
         result.update(count_overlaps_detailed(pos, ns, seed=seed))
+        # Mean node bounding-box diagonal (r80-P6): used by the composite
+        # degeneracy guard to detect point-collapsed layouts, where edge
+        # length has collapsed to near-zero relative to node size. Depends
+        # only on node_sizes (label geometry), never on pos, so it is
+        # reproducible without re-running any layout.
+        diag = torch.sqrt(ns[:, 0] ** 2 + ns[:, 1] ** 2)
+        result["node_diag_mean"] = diag.mean().item() if diag.numel() > 0 else 0.0
 
     # Aspect ratio
     ns_arg = _ensure_cpu(node_sizes) if node_sizes is not None else None
@@ -2066,15 +2269,20 @@ def count_crossings(
     src, tgt = ei[0], ei[1]
 
     if E <= 500:
-        crossings = 0
-        pos_np = pos.numpy()
-        for i in range(E):
-            for j in range(i + 1, E):
-                a, b = pos_np[src[i]], pos_np[tgt[i]]
-                c, d = pos_np[src[j]], pos_np[tgt[j]]
-                if _segments_intersect_scalar(a, b, c, d):
-                    crossings += 1
-        return crossings
+        ii, jj = torch.triu_indices(E, E, offset=1)
+        e1s, e1t = src[ii], tgt[ii]
+        e2s, e2t = src[jj], tgt[jj]
+        shares_node = (e1s == e2s) | (e1s == e2t) | (e1t == e2s) | (e1t == e2t)
+        valid = ~shares_node
+        if not bool(valid.any().item()):
+            return 0
+        crossings = segments_intersect(
+            pos[e1s[valid]],
+            pos[e1t[valid]],
+            pos[e2s[valid]],
+            pos[e2t[valid]],
+        )
+        return int(crossings.sum().item())
     else:
         result = sampled_crossing_rate(pos, ei, n_samples=125000, seed=seed)
         return int(result["crossing_estimated_total"])
@@ -2170,3 +2378,441 @@ def compute_min_node_gap(pos: torch.Tensor, node_sizes: torch.Tensor) -> float:
                 gap = max(gap_x, 0) + max(gap_y, 0)
                 min_gap = min(min_gap, gap)
     return min_gap
+
+
+# ---------------------------------------------------------------------------
+# Full-drawing metrics (r80-S6) -- routed-path crossings, bends, and the
+# drawing composite. Strictly ADDITIVE: nothing above this banner may change,
+# and none of the placement composites reference anything below it.
+# ---------------------------------------------------------------------------
+
+
+def _bezier_is_straight(
+    p0: Tuple[float, float],
+    cp1: Tuple[float, float],
+    cp2: Tuple[float, float],
+    p1: Tuple[float, float],
+    rel_tol: float = 1e-9,
+) -> bool:
+    """Report whether a cubic bezier degenerates to its chord segment.
+
+    True when both control points are collinear with the chord AND their
+    projections fall inside ``[0, 1]`` along it (an out-of-range collinear
+    control point makes the curve overshoot the chord, so it is not the
+    plain segment even though it lives on the same line).
+
+    Parameters
+    ----------
+    p0, cp1, cp2, p1 : tuple[float, float]
+        Cubic bezier control polygon.
+    rel_tol : float, default=1e-9
+        Collinearity tolerance relative to the chord length.
+
+    Returns
+    -------
+    bool
+        ``True`` when sampling the curve is equivalent to the chord.
+    """
+    dx = p1[0] - p0[0]
+    dy = p1[1] - p0[1]
+    chord_sq = dx * dx + dy * dy
+    if chord_sq < 1e-18:
+        # Degenerate chord: straight only if the control points coincide too.
+        return (
+            abs(cp1[0] - p0[0]) < 1e-9
+            and abs(cp1[1] - p0[1]) < 1e-9
+            and abs(cp2[0] - p0[0]) < 1e-9
+            and abs(cp2[1] - p0[1]) < 1e-9
+        )
+    tol = rel_tol * math.sqrt(chord_sq)
+    for cx, cy in (cp1, cp2):
+        rx = cx - p0[0]
+        ry = cy - p0[1]
+        cross = dx * ry - dy * rx
+        if abs(cross) > tol * math.sqrt(chord_sq):
+            return False
+        t = (rx * dx + ry * dy) / chord_sq
+        if t < -rel_tol or t > 1.0 + rel_tol:
+            return False
+    return True
+
+
+def _curve_polyline(curve: Any, samples_per_edge: int = 8) -> List[Tuple[float, float]]:
+    """Convert one routed curve into a polyline for intersection tests.
+
+    Waypoint routes (ortho/taxi/external polylines) use their exact vertices,
+    preserving hard bends. Degenerate-straight beziers shortcut to the chord
+    ``[p0, p1]`` so results match straight-segment metrics exactly. Genuinely
+    curved beziers are sampled uniformly in ``t``.
+
+    Parameters
+    ----------
+    curve : Any
+        ``dagua.edges.BezierCurve``-compatible object.
+    samples_per_edge : int, default=8
+        Number of sample points for genuinely curved beziers (>= 2).
+
+    Returns
+    -------
+    List[Tuple[float, float]]
+        Polyline vertices in draw order.
+    """
+    from dagua.edges import evaluate_bezier
+
+    waypoints = getattr(curve, "waypoints", None)
+    if waypoints is not None:
+        return [(float(x), float(y)) for x, y in waypoints]
+    p0, cp1, cp2, p1 = curve.p0, curve.cp1, curve.cp2, curve.p1
+    if _bezier_is_straight(p0, cp1, cp2, p1):
+        return [(float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1]))]
+    n = max(2, int(samples_per_edge))
+    return [evaluate_bezier(curve, k / (n - 1)) for k in range(n)]
+
+
+def routed_crossing_rate(
+    curves: Sequence[Any],
+    edge_index: torch.Tensor,
+    n_samples: int = 1_000_000,
+    *,
+    seed: Optional[int] = None,
+    samples_per_edge: int = 8,
+) -> Dict[str, float]:
+    """Estimate edge-crossing rate along the ACTUAL routed paths.
+
+    Same edge-pair sampling discipline as :func:`sampled_crossing_rate`
+    (identical seed -> identical sampled pairs), but each edge is represented
+    by its routed polyline instead of the straight node-center segment. A
+    sampled pair counts as crossing when ANY segment of one polyline
+    intersects ANY segment of the other. When every curve degenerates to the
+    straight node-center segment, the result is bit-identical to
+    ``sampled_crossing_rate`` on the same seed.
+
+    Parameters
+    ----------
+    curves : Sequence[Any]
+        One ``BezierCurve``-compatible route per edge, aligned to
+        ``edge_index`` columns.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : int, optional
+        Maximum number of edge pairs to sample.
+    seed : Optional[int], optional
+        Seed for edge-pair sampling; ``None`` uses the global RNG state.
+    samples_per_edge : int, default=8
+        Polyline sample count for genuinely curved beziers. Waypoint routes
+        use their exact vertices; straight routes shortcut to 2 points.
+
+    Returns
+    -------
+    Dict[str, float]
+        ``routed_crossing_rate`` plus SE/total/sample-count fields mirroring
+        :func:`sampled_crossing_rate`.
+
+    Notes
+    -----
+    Padding note: polylines are padded to a common length by repeating their
+    last vertex; degenerate padded segments cannot produce transversal or
+    collinear-overlap intersections, so padding never adds crossings.
+    Complexity is ``O(n_samples * samples_per_edge^2)``.
+    """
+    empty = {
+        "routed_crossing_rate": 0.0,
+        "routed_crossing_se": 0.0,
+        "routed_crossing_estimated_total": 0,
+        "routed_crossing_n_samples": 0,
+        "routed_crossing_eligible_pairs": 0.0,
+    }
+    if edge_index.numel() == 0 or edge_index.shape[1] < 2 or not curves:
+        return empty
+
+    E = edge_index.shape[1]
+    if len(curves) != E:
+        raise ValueError(
+            f"routed_crossing_rate: got {len(curves)} curves for {E} edges; "
+            f"curves must align 1:1 with edge_index columns."
+        )
+    src, tgt = edge_index[0], edge_index[1]
+    total_pairs = E * (E - 1) // 2
+    gen = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
+
+    # Pair sampling: replicated verbatim from sampled_crossing_rate so a
+    # shared seed selects the SAME eligible pair population. (Deliberate
+    # duplication -- refactoring the frozen placement metric is out of scope
+    # for the additive drawing-metrics stream.)
+    if total_pairs <= n_samples:
+        ii, jj = torch.triu_indices(E, E, offset=1)
+        idx1 = ii
+        idx2 = jj
+        pair_space_exhausted = True
+    else:
+        if total_pairs <= 10_000_000:
+            perm = torch.randperm(total_pairs, generator=gen)[:n_samples]
+            ii, jj = torch.triu_indices(E, E, offset=1)
+            idx1 = ii[perm]
+            idx2 = jj[perm]
+            pair_space_exhausted = False
+        else:
+            idx1 = torch.randint(0, E, (n_samples,), generator=gen)
+            idx2 = torch.randint(0, E, (n_samples,), generator=gen)
+            lo = torch.minimum(idx1, idx2)
+            hi = torch.maximum(idx1, idx2)
+            idx1, idx2 = lo, hi
+            pair_space_exhausted = False
+
+    e1s, e1t = src[idx1], tgt[idx1]
+    e2s, e2t = src[idx2], tgt[idx2]
+    shares_node = (e1s == e2s) | (e1s == e2t) | (e1t == e2s) | (e1t == e2t)
+    same_edge = idx1 == idx2
+    valid = ~shares_node & ~same_edge
+    if valid.sum() == 0:
+        return empty
+
+    # Build padded polyline tensor [E, S, 2]; pad by repeating the last
+    # vertex (degenerate segments never register as crossings -- see Notes).
+    polylines = [_curve_polyline(curve, samples_per_edge) for curve in curves]
+    S = max(len(p) for p in polylines)
+    poly = torch.empty((E, S, 2), dtype=torch.float32)
+    for e, pts in enumerate(polylines):
+        for k in range(S):
+            x, y = pts[k] if k < len(pts) else pts[-1]
+            poly[e, k, 0] = float(x)
+            poly[e, k, 1] = float(y)
+
+    idx1v = idx1[valid]
+    idx2v = idx2[valid]
+    K = int(idx1v.numel())
+    n_seg = S - 1
+
+    crossing_any = torch.zeros(K, dtype=torch.bool)
+    # Chunk so each segments_intersect batch stays under ~2M rows.
+    rows_per_pair = n_seg * n_seg
+    chunk = max(1, 2_000_000 // max(1, rows_per_pair))
+    for start in range(0, K, chunk):
+        stop = min(start + chunk, K)
+        a = poly[idx1v[start:stop]]  # [k, S, 2]
+        b = poly[idx2v[start:stop]]
+        k = a.shape[0]
+        a1 = a[:, :-1, :].unsqueeze(2).expand(k, n_seg, n_seg, 2).reshape(-1, 2)
+        a2 = a[:, 1:, :].unsqueeze(2).expand(k, n_seg, n_seg, 2).reshape(-1, 2)
+        b1 = b[:, :-1, :].unsqueeze(1).expand(k, n_seg, n_seg, 2).reshape(-1, 2)
+        b2 = b[:, 1:, :].unsqueeze(1).expand(k, n_seg, n_seg, 2).reshape(-1, 2)
+        hits = segments_intersect(a1, a2, b1, b2).reshape(k, rows_per_pair)
+        crossing_any[start:stop] = hits.any(dim=1)
+
+    n_valid = K
+    rate = crossing_any.float().mean().item()
+    if pair_space_exhausted:
+        eligible_pairs = float(n_valid)
+        estimated_total = int(crossing_any.sum().item())
+        se = 0.0
+    else:
+        eligible_pairs = float(total_pairs) * (float(n_valid) / float(valid.numel()))
+        estimated_total = int(rate * eligible_pairs)
+        se = eligible_pairs * (rate * (1 - rate) / n_valid) ** 0.5 if n_valid > 0 else 0.0
+
+    return {
+        "routed_crossing_rate": rate,
+        "routed_crossing_se": se,
+        "routed_crossing_estimated_total": estimated_total,
+        "routed_crossing_n_samples": n_valid,
+        "routed_crossing_eligible_pairs": eligible_pairs,
+    }
+
+
+def bend_count(
+    curves: Sequence[Any],
+    angle_threshold_deg: float = 15.0,
+    samples_per_edge: int = 16,
+) -> Dict[str, float]:
+    """Count hard direction changes along routed edges.
+
+    Intended for ortho/taxi (waypoint) routings, where every elbow is a
+    real bend; smooth beziers sampled at ``samples_per_edge`` points spread
+    their turning over many small inter-segment angles that stay below the
+    threshold unless the curve genuinely kinks.
+
+    Parameters
+    ----------
+    curves : Sequence[Any]
+        Routed curves, one per edge.
+    angle_threshold_deg : float, default=15.0
+        Minimum absolute direction change (degrees) at an interior vertex to
+        count as a bend.
+    samples_per_edge : int, default=16
+        Sample count for non-waypoint curves.
+
+    Returns
+    -------
+    Dict[str, float]
+        ``bend_total`` (int), ``bend_mean_per_edge``, and
+        ``bend_edges_with_bends`` (count of edges with >= 1 bend).
+    """
+    if not curves:
+        return {"bend_total": 0, "bend_mean_per_edge": 0.0, "bend_edges_with_bends": 0}
+
+    threshold_rad = math.radians(angle_threshold_deg)
+    total = 0
+    edges_with_bends = 0
+    for curve in curves:
+        pts = _curve_polyline(curve, samples_per_edge)
+        bends = 0
+        for i in range(1, len(pts) - 1):
+            v1x = pts[i][0] - pts[i - 1][0]
+            v1y = pts[i][1] - pts[i - 1][1]
+            v2x = pts[i + 1][0] - pts[i][0]
+            v2y = pts[i + 1][1] - pts[i][1]
+            if (v1x * v1x + v1y * v1y) < 1e-18 or (v2x * v2x + v2y * v2y) < 1e-18:
+                continue
+            angle = abs(math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y))
+            if angle > threshold_rad:
+                bends += 1
+        total += bends
+        if bends > 0:
+            edges_with_bends += 1
+
+    return {
+        "bend_total": total,
+        "bend_mean_per_edge": total / len(curves),
+        "bend_edges_with_bends": edges_with_bends,
+    }
+
+
+def composite_drawing(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    curves: Sequence[Any],
+    label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
+    edge_labels: Optional[list] = None,
+    *,
+    seed: Optional[int] = 0,
+    crossing_samples: int = 100_000,
+    samples_per_edge: int = 8,
+) -> Dict[str, Any]:
+    """Score the FULL DRAWING (routed edges + labels) on a 0-100 scale.
+
+    This is a NEW composite, parallel to (and never touching) the placement
+    composites. It is computable from ``(positions, sizes, curves,
+    label_positions)`` alone -- no live layout run -- and is deterministic
+    for a fixed ``seed``.
+
+    Weights (sum = 100) and rationale:
+    - Routed crossings: 30. Edge-edge crossings measured on the paths the
+      reader actually sees are the dominant legibility defect in a finished
+      drawing (Purchase 1997 ranks crossings first among aesthetics).
+    - Edge-node crossings: 20. Edges plowing through unrelated node boxes
+      destroy node readability and imply false adjacency.
+    - Label overlaps: 15 (7.5 label-vs-node + 7.5 label-vs-label). Occluded
+      text is unreadable text; neutral half-credit when the graph has no
+      edge labels (same convention as composite()'s cluster term).
+    - Port angular resolution: 12. Edges leaving a node at indistinguishable
+      angles cannot be traced; measured at the true routed tangents.
+    - Node overlap sanity: 10. Binary, mirroring composite(): overlapping
+      nodes mean the drawing failed upstream of routing.
+    - Curvature consistency: 8. Uniform curvature reads as a deliberate
+      style; wildly mixed straight/hooked edges read as noise.
+    - Bend economy: 5. Ortho/taxi elbows are fine in moderation; >= 4 bends
+      per edge on average makes paths untraceable.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node bbox sizes ``[N, 2]``.
+    curves : Sequence[Any]
+        Routed curves aligned to ``edge_index`` columns.
+    label_positions : list[tuple[float, float] | None] | None, optional
+        Edge-label anchor positions (None entries = unlabeled edge).
+    edge_labels : list | None, optional
+        Edge label strings aligned with ``label_positions``.
+    seed : int | None, default=0
+        Seed for the routed crossing sampler. The default is a FIXED seed so
+        the composite is deterministic out of the box.
+    crossing_samples : int, default=100_000
+        Edge-pair sample budget for the crossing term.
+    samples_per_edge : int, default=8
+        Polyline resolution for curved beziers.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``composite_drawing`` (0-100) plus every component value and term.
+    """
+    pos = _ensure_cpu(pos)
+    ei = _ensure_cpu(edge_index)
+    sizes = _ensure_cpu(node_sizes)
+
+    rc = routed_crossing_rate(
+        curves, ei, crossing_samples, seed=seed, samples_per_edge=samples_per_edge
+    )
+    enc = edge_node_crossing_count(curves, pos, sizes, ei)
+    par = port_angular_resolution(curves, ei)
+    ecc = edge_curvature_consistency(curves)
+    bends = bend_count(curves)
+    overlaps = count_overlaps(pos, sizes)
+
+    has_labels = bool(
+        label_positions is not None
+        and edge_labels is not None
+        and any(lbl for lbl in edge_labels)
+        and any(lp is not None for lp in label_positions)
+    )
+    if has_labels:
+        lo = label_overlap_count(label_positions, edge_labels, pos, sizes)
+        label_overlaps = int(lo["label_overlaps"])
+        label_node_overlaps = int(lo["label_node_overlaps"])
+        term_label_node = 1.0 / (1.0 + label_node_overlaps)
+        term_label_label = 1.0 / (1.0 + label_overlaps)
+    else:
+        label_overlaps = 0
+        label_node_overlaps = 0
+        # Neutral half-credit when the graph has no edge labels, mirroring
+        # composite()'s treatment of the cluster term on cluster-free graphs.
+        term_label_node = 0.5
+        term_label_label = 0.5
+
+    # Same clamp conventions as the placement composites where a direct
+    # analog exists (crossing x10 clamp, angular /40 clamp, binary overlap).
+    term_crossing = max(0.0, 1.0 - rc["routed_crossing_rate"] * 10.0)
+    term_edge_node = max(0.0, 1.0 - float(enc["edge_node_crossing_rate"]) * 10.0)
+    term_port = min(1.0, par["port_angular_res_mean_deg"] / 40.0)
+    term_overlap = 1.0 if overlaps == 0 else 0.0
+    term_curvature = max(0.0, 1.0 - min(1.0, ecc["edge_curvature_cv"]))
+    term_bend = max(0.0, 1.0 - bends["bend_mean_per_edge"] / 4.0)
+
+    score = 0.0
+    score += 30.0 * term_crossing
+    score += 20.0 * term_edge_node
+    score += 7.5 * term_label_node
+    score += 7.5 * term_label_label
+    score += 12.0 * term_port
+    score += 10.0 * term_overlap
+    score += 8.0 * term_curvature
+    score += 5.0 * term_bend
+
+    return {
+        "composite_drawing": score,
+        "drawing_crossing_rate": rc["routed_crossing_rate"],
+        "drawing_crossing_estimated_total": rc["routed_crossing_estimated_total"],
+        "drawing_edge_node_crossings": enc["edge_node_crossings"],
+        "drawing_edge_node_crossing_rate": enc["edge_node_crossing_rate"],
+        "drawing_port_angular_deg": par["port_angular_res_mean_deg"],
+        "drawing_curvature_cv": ecc["edge_curvature_cv"],
+        "drawing_bend_mean_per_edge": bends["bend_mean_per_edge"],
+        "drawing_bend_total": bends["bend_total"],
+        "drawing_label_overlaps": label_overlaps,
+        "drawing_label_node_overlaps": label_node_overlaps,
+        "drawing_node_overlaps": overlaps,
+        "drawing_has_labels": has_labels,
+        "drawing_term_crossing": term_crossing,
+        "drawing_term_edge_node": term_edge_node,
+        "drawing_term_label_node": term_label_node,
+        "drawing_term_label_label": term_label_label,
+        "drawing_term_port": term_port,
+        "drawing_term_overlap": term_overlap,
+        "drawing_term_curvature": term_curvature,
+        "drawing_term_bend": term_bend,
+    }

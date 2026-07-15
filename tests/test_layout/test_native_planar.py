@@ -195,9 +195,23 @@ def test_auto_dispatch_selects_planar_for_planar_targets_and_layered_for_random_
     for graph in (hex_graph, sierpinski_graph, planar_graph):
         structure = classify_graph(graph.edge_index, graph.num_nodes)
         assert structure.is_planar
-        # Default: opt-out, so planar candidates take the layered path.
-        assert _choose_native_pipeline(structure, default_config) == "layered_dag"
-        # Explicit opt-in: planar selected.
+        # r80: only high-confidence undirected graphs route to the portfolio
+        # by default (explicit declaration or reciprocal storage). Lattice-like
+        # DAGs keep the layered path because their one-way lattice orientation
+        # drives native polish quality even when the graph is semantically
+        # undirected.
+        high_confidence_undirected = structure.direction_is_declared or (
+            structure.reciprocal_edge_ratio > 0.3
+        )
+        expected_default = (
+            "undirected_portfolio"
+            if structure.is_semantically_directed is False
+            and high_confidence_undirected
+            and "lattice_like" not in structure.topology_tags
+            else "layered_dag"
+        )
+        assert _choose_native_pipeline(structure, default_config) == expected_default
+        # Explicit opt-in wins over the portfolio: planar selected.
         assert _choose_native_pipeline(structure, planar_config) == "planar"
 
     random_structure = classify_graph(random_graph.edge_index, random_graph.num_nodes)

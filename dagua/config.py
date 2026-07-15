@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 
@@ -31,12 +31,24 @@ class LayoutConfig:
 
     Parameters
     ----------
+    quality : float or str, default="balanced"
+        Public time-vs-quality knob. Names map to normalized floats:
+        ``draft=0.25``, ``balanced=0.5``, ``high=0.75``, and ``max=1.0``.
+        Numeric values must be in ``[0, 1]``. Existing explicit budget
+        fields still override budgets derived from this knob.
+    time_budget_s : float, optional
+        Optional wall-clock cap in seconds for the native gradient core. When
+        exceeded, the current step completes and cheap final projection/aspect
+        polish still runs.
     fidelity_dtype : torch.dtype, optional
         Internal dtype used only by fidelity-mode engine adapters. ``None``
         lets fidelity-mode pipelines default to ``torch.float64`` while
         non-fidelity paths remain ``torch.float32``. Public layout outputs
         remain ``float32``.
     """
+
+    quality: Union[float, str] = "balanced"
+    time_budget_s: Optional[float] = None
 
     # Spacing
     # Bumped 28 -> 60, 50 -> 80 after holdout sweep
@@ -92,7 +104,16 @@ class LayoutConfig:
     # accepted as kill switches, but auto dispatch should be controlled
     # through this single selector.
     force_pipeline: Optional[
-        Literal["tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"]
+        Literal[
+            "tree",
+            "layered_dag",
+            "force_directed",
+            "hybrid",
+            "hybrid_v2",
+            "planar",
+            "stress",
+            "legacy_monolith",
+        ]
     ] = None
     # Best-of-polish edge-equalize after the native pipeline
     # converges. The gradient pipeline saturates on edge_length_variance
@@ -204,6 +225,13 @@ class LayoutConfig:
     # Conservative DAG gate keeps this out of cyclic, flat, tree, chain, and
     # multi-component cases unless there is only one isolated tail node.
     brandes_koepf_refine: bool = True
+    # Default-on R79 P2C layered polish. Row snapping removes gradient-created
+    # micro-ranks after ordering, and cluster compaction adds cluster interval
+    # gaps after BK only for clustered layered graphs.
+    layered_rank_row_snap: bool = True
+    cluster_aware_x_compaction: bool = True
+    tiny_multiedge_rank_sep_cap: bool = True
+    tiny_multiedge_rank_sep_max: float = 240.0
     # Split long-span DAG edges into dummy-node chains inside
     # dagua_native. This public kill switch lets benchmarks isolate routing
     # regressions without reverting the whole feature.
@@ -212,6 +240,7 @@ class LayoutConfig:
     # default dagua_native pipeline. Each weak component is solved
     # independently and tiled unless a conservative safety gate disables it.
     decompose_components: bool = True
+    component_tiling_crossing_risk: bool = True
 
     # Multilevel coarsening (default: N > 20K)
     multilevel_threshold: int = 20000
@@ -351,6 +380,56 @@ class LayoutConfig:
     algorithm: Optional[str] = None
     algorithm_params: dict[str, Any] = field(default_factory=dict)
 
+    # r80-S8 aesthetic-priority knob (PROVISIONAL API -- pending JMT sign-off,
+    # see .project-context/research/r79_native/P15_AESTHETIC_KNOB.md). Steers
+    # BOTH the native undirected-portfolio candidate-selection composite and
+    # the differentiable loss weights toward a user's aesthetic priorities.
+    # Default None/None is the true identity path: unset means dagua's
+    # candidate contest and loss weights behave exactly as before this knob
+    # existed (see dagua.layout.aesthetics.resolve_aesthetic_profile).
+    # ``prioritize`` selects a named preset ("crossings", "uniform_edges",
+    # "compactness", "readability"); ``aesthetic_weights`` is an explicit
+    # {term: multiplier} dict that overrides the preset per-key when both
+    # are set. Validated lazily at layout time (not at construction) by
+    # dagua.layout.aesthetics.resolve_aesthetic_profile.
+    prioritize: Optional[str] = None
+    aesthetic_weights: Optional[Dict[str, float]] = None
+
+    def __post_init__(self) -> None:
+        """Normalize public quality/time fields after dataclass construction.
+
+        Parameters
+        ----------
+        None
+            Dataclass hook; all inputs are read from instance attributes.
+
+        Returns
+        -------
+        None
+            The method mutates ``quality`` to its normalized float value.
+        """
+        aliases = {
+            "draft": 0.25,
+            "balanced": 0.5,
+            "high": 0.75,
+            "max": 1.0,
+        }
+        raw_quality = self.quality
+        if isinstance(raw_quality, str):
+            key = raw_quality.lower()
+            if key not in aliases:
+                names = ", ".join(sorted(aliases))
+                raise ValueError(f"quality must be a float in [0, 1] or one of: {names}.")
+            normalized = aliases[key]
+        else:
+            normalized = float(raw_quality)
+        if normalized < 0.0 or normalized > 1.0:
+            raise ValueError("quality must be in [0, 1].")
+        self.quality = normalized
+
+        if self.time_budget_s is not None and self.time_budget_s <= 0.0:
+            raise ValueError("time_budget_s must be positive when provided.")
+
 
 # Registry of all tunable parameters with metadata
 PARAM_REGISTRY: List[TunableParam] = [
@@ -379,7 +458,7 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Vertical Edge Preference",
         description="Extra weight on horizontal attraction (makes edges more vertical).",
         visual_effect="Increasing: straighter vertical edges. Decreasing: more diagonal.",
-        default=2.4,
+        default=1.0,
         sweep_range=(1.0, 16.0),
         sweep_values=[1.0, 2.0, 2.4, 4.0, 8.0, 16.0],
         category="forces",
@@ -389,7 +468,7 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Node Repulsion",
         description="How strongly all nodes push apart from each other.",
         visual_effect="Increasing: more spacing. Decreasing: denser graph.",
-        default=0.1,
+        default=0.2,
         sweep_range=(0.01, 1.0),
         sweep_values=[0.01, 0.05, 0.1, 0.5, 1.0],
         category="forces",
@@ -421,7 +500,7 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Edge Straightness",
         description="Penalizes horizontal displacement between connected nodes.",
         visual_effect="Increasing: straighter vertical edges. Decreasing: more flexible.",
-        default=2.2,
+        default=0.5,
         sweep_range=(0.5, 5.0),
         sweep_values=[0.5, 1.0, 2.2, 3.0, 5.0],
         category="aesthetics",
@@ -431,7 +510,7 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Edge Length Uniformity",
         description="Penalizes variance in edge lengths (prefer uniform over minimum).",
         visual_effect="Increasing: more uniform edge lengths. Decreasing: variable lengths OK.",
-        default=0.7,
+        default=8.0,
         sweep_range=(0.1, 2.0),
         sweep_values=[0.1, 0.3, 0.7, 1.0, 2.0],
         category="aesthetics",
@@ -441,7 +520,7 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Node Separation",
         description="Minimum horizontal gap between nodes (pixels).",
         visual_effect="Increasing: more horizontal breathing room.",
-        default=28.0,
+        default=70.0,
         sweep_range=(10.0, 60.0),
         sweep_values=[10.0, 15.0, 28.0, 40.0, 60.0],
         category="spacing",
@@ -451,7 +530,7 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Rank Separation",
         description="Minimum vertical gap between layers (pixels).",
         visual_effect="Increasing: more vertical breathing room.",
-        default=50.0,
+        default=240.0,
         sweep_range=(25.0, 100.0),
         sweep_values=[25.0, 35.0, 50.0, 60.0, 100.0],
         category="spacing",
