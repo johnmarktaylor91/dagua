@@ -6,7 +6,7 @@ Three-tier system designed for computational feasibility at 50M+ nodes:
 - Tier 3: DAG/hierarchy-specific, O(N) given metadata
 
 API:
-- quick(pos, edge_index, ...) -> dict   — Tier-1 only, runs in seconds at any scale
+- quick(pos, edge_index, ...) -> dict   — Tier 1 plus sampled ruler presets for N>2000
 - full(pos, edge_index, ...) -> dict    — All tiers including sampled metrics
 - compare(pos_a, pos_b) -> dict         — Procrustes comparison of two layouts
 - composite(metrics) -> float           — Single scalar 0-100
@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import time as _time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -179,46 +179,62 @@ def segments_intersect(
     line; without this case, a degenerate collapsed layout receives free
     crossing points.
     """
-    EPS = 1e-6
-    d1 = p2 - p1  # [N, 2]
-    d2 = p4 - p3
-    cross = d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]  # [N]
-
-    parallel = cross.abs() < 1e-10
+    eps = 1e-6
+    p1_np = _ensure_cpu(p1).numpy()
+    p2_np = _ensure_cpu(p2).numpy()
+    p3_np = _ensure_cpu(p3).numpy()
+    p4_np = _ensure_cpu(p4).numpy()
+    d1 = p2_np - p1_np
+    d2 = p4_np - p3_np
+    cross = d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]
+    parallel = np.abs(cross) < 1e-10
 
     # Sign-preserving division: clamp(min=1e-10) would flip the sign of
     # negative-cross orientations, silently turning valid intersections
     # into false negatives. Replace only the near-zero (parallel) cases
     # with 1 to avoid div-by-zero.
-    safe_cross = torch.where(parallel, torch.ones_like(cross), cross)
+    safe_cross = np.where(parallel, np.ones_like(cross), cross)
 
-    d3 = p3 - p1
+    d3 = p3_np - p1_np
     t = (d3[:, 0] * d2[:, 1] - d3[:, 1] * d2[:, 0]) / safe_cross
     u = (d3[:, 0] * d1[:, 1] - d3[:, 1] * d1[:, 0]) / safe_cross
 
     # Standard transversal: strict-interior intersection on both segments.
-    proper = (~parallel) & (t > EPS) & (t < 1 - EPS) & (u > EPS) & (u < 1 - EPS)
+    proper = (~parallel) & (t > eps) & (t < 1 - eps) & (u > eps) & (u < 1 - eps)
 
     # Collinear-overlap: parallel + p3 lies on the line through p1-p2 +
     # the projections of (p3, p4) onto p1-p2's line direction overlap
     # the open interval (EPS, 1 - EPS).
-    collinear = parallel & ((d1[:, 0] * d3[:, 1] - d1[:, 1] * d3[:, 0]).abs() < 1e-8)
-    collinear_overlap = torch.zeros_like(parallel)
-    if bool(collinear.any().item()):
-        d1_norm_sq = d1[:, 0].pow(2) + d1[:, 1].pow(2)
-        d1_norm_sq_safe = torch.where(
+    collinear = parallel & (np.abs(d1[:, 0] * d3[:, 1] - d1[:, 1] * d3[:, 0]) < 1e-8)
+    collinear_overlap = np.zeros_like(parallel)
+    if bool(collinear.any()):
+        d1_norm_sq = d1[:, 0] ** 2 + d1[:, 1] ** 2
+        d1_norm_sq_safe = np.where(
             d1_norm_sq < 1e-10,
-            torch.ones_like(d1_norm_sq),
+            np.ones_like(d1_norm_sq),
             d1_norm_sq,
         )
         t3 = (d3[:, 0] * d1[:, 0] + d3[:, 1] * d1[:, 1]) / d1_norm_sq_safe
-        d4 = p4 - p1
+        d4 = p4_np - p1_np
         t4 = (d4[:, 0] * d1[:, 0] + d4[:, 1] * d1[:, 1]) / d1_norm_sq_safe
-        a = torch.minimum(t3, t4)
-        b = torch.maximum(t3, t4)
-        collinear_overlap = collinear & (a < 1 - EPS) & (b > EPS)
+        a = np.minimum(t3, t4)
+        b = np.maximum(t3, t4)
+        collinear_overlap = collinear & (a < 1 - eps) & (b > eps)
 
-    return proper | collinear_overlap
+    return torch.from_numpy(proper | collinear_overlap)
+
+
+class _CrossingGeometry(NamedTuple):
+    """Batched geometry and sampling metadata for one edge-pair set."""
+
+    p1: torch.Tensor
+    p2: torch.Tensor
+    p3: torch.Tensor
+    p4: torch.Tensor
+    crossing: torch.Tensor
+    total_pairs: int
+    candidate_pairs: int
+    pair_space_exhausted: bool
 
 
 def _build_csr(edge_index: torch.Tensor, num_nodes: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -473,19 +489,46 @@ def dag_consistency(
     return result
 
 
-def depth_position_correlation(pos: torch.Tensor, topo_depth: torch.Tensor) -> Dict[str, float]:
-    """Spearman rank correlation between topological depth and y-coordinate.
+def depth_position_correlation(
+    pos: torch.Tensor,
+    topo_depth: torch.Tensor,
+    direction: str = "TB",
+) -> Dict[str, Optional[float]]:
+    """Correlate topological depth with the declared flow-axis projection.
 
-    Complexity: O(N log N) for the sort.
-    Target: > 0.95 good, > 0.99 excellent.
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Pre-layout topological ranks with shape ``[N]``.
+    direction : str, optional
+        Declared flow direction, one of ``TB``, ``BT``, ``LR``, or ``RL``.
+
+    Returns
+    -------
+    Dict[str, Optional[float]]
+        Spearman correlation and p-value. Both are ``None`` when either
+        input is constant, making depth order inapplicable.
     """
     from scipy.stats import spearmanr
 
     depth_np = (
         topo_depth.cpu().numpy() if isinstance(topo_depth, torch.Tensor) else np.array(topo_depth)
     )
-    y_np = pos[:, 1].cpu().numpy()
-    rho, pval = spearmanr(depth_np, y_np)
+    axis, sign = (
+        (0, 1.0)
+        if direction == "LR"
+        else (0, -1.0)
+        if direction == "RL"
+        else ((1, -1.0) if direction == "BT" else (1, 1.0))
+    )
+    projection_np = (sign * pos[:, axis]).cpu().numpy()
+    if np.unique(depth_np).size < 2 or np.unique(projection_np).size < 2:
+        return {"depth_spearman_rho": None, "depth_spearman_pval": None}
+    rho, pval = spearmanr(depth_np, projection_np)
+    if not math.isfinite(float(rho)):
+        return {"depth_spearman_rho": None, "depth_spearman_pval": None}
     return {"depth_spearman_rho": float(rho), "depth_spearman_pval": float(pval)}
 
 
@@ -651,6 +694,243 @@ def edge_direction_straightness(
 # Tier 2: Sampled metrics
 # ---------------------------------------------------------------------------
 
+_COMMON_WEIGHTS: Dict[str, float] = {
+    "ksm_score": 25.0,
+    "edge_crossing_score": 20.0,
+    "node_occlusion_score": 13.0,
+    "neighborhood_preservation_score": 12.0,
+    "edge_length_deviation_score": 7.0,
+    "gabriel_score": 5.0,
+    "crossing_angle_score": 5.0,
+    "angular_resolution_score": 4.0,
+    "path_continuity_score": 4.0,
+    "cluster_silhouette_score": 5.0,
+}
+_DIRECTED_WEIGHTS: Dict[str, float] = {"directed_flow_score": 16.0, "depth_order_score": 9.0}
+_CROSSING_ANGLE_KNEE_RADIANS = math.radians(70.0)
+
+
+def _pav_fitted_values(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Fit a non-decreasing sequence to observations using weighted PAV.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        One-dimensional predictor values.
+    y : numpy.ndarray
+        One-dimensional response values aligned with ``x``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Isotonic fitted response in the original observation order.
+    """
+    order = np.argsort(x, kind="stable")
+    sorted_x = x[order]
+    sorted_y = y[order]
+    unique_x, inverse = np.unique(sorted_x, return_inverse=True)
+    del unique_x
+    counts = np.bincount(inverse).astype(np.float64)
+    sums = np.bincount(inverse, weights=sorted_y)
+    means = sums / counts
+
+    block_values: List[float] = []
+    block_weights: List[float] = []
+    block_starts: List[int] = []
+    block_ends: List[int] = []
+    for index, (value, weight) in enumerate(zip(means, counts)):
+        block_values.append(float(value))
+        block_weights.append(float(weight))
+        block_starts.append(index)
+        block_ends.append(index + 1)
+        while len(block_values) >= 2 and block_values[-2] > block_values[-1]:
+            merged_weight = block_weights[-2] + block_weights[-1]
+            merged_value = (
+                block_values[-2] * block_weights[-2] + block_values[-1] * block_weights[-1]
+            ) / merged_weight
+            block_values[-2:] = [merged_value]
+            block_weights[-2:] = [merged_weight]
+            block_ends[-2:] = [block_ends[-1]]
+            block_starts.pop()
+
+    fitted_groups = np.empty(len(means), dtype=np.float64)
+    for value, start, end in zip(block_values, block_starts, block_ends):
+        fitted_groups[start:end] = value
+    fitted_sorted = fitted_groups[inverse]
+    fitted = np.empty_like(fitted_sorted)
+    fitted[order] = fitted_sorted
+    return fitted
+
+
+def _stratified_graph_pairs(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    n_sources: int,
+    n_targets: int,
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Select deterministic within-component pairs stratified by graph distance.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    n_sources : int
+        Maximum number of deterministic BFS source rows.
+    n_targets : int
+        Maximum number of targets retained per source.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Precomputed unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+        Source indices, target indices, and positive graph distances.
+    """
+    if num_nodes < 2 or edge_index.numel() == 0:
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty, empty
+    offsets, targets = _build_csr(_ensure_cpu(edge_index), num_nodes)
+    unseen = set(range(num_nodes))
+    components: List[np.ndarray] = []
+    while unseen:
+        root = min(unseen)
+        stack = [root]
+        component: List[int] = []
+        unseen.remove(root)
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for offset in range(offsets[node], offsets[node + 1]):
+                neighbor = int(targets[offset])
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    stack.append(neighbor)
+        components.append(np.asarray(sorted(component), dtype=np.int64))
+
+    # At least one row per nontrivial component prevents a small component
+    # from disappearing under a global evenly-spaced sample.
+    nontrivial = [component for component in components if len(component) > 1]
+    source_budget = max(n_sources, len(nontrivial))
+    source_parts: List[np.ndarray] = []
+    remaining = source_budget
+    remaining_nodes = sum(len(component) for component in nontrivial)
+    for component_index, component in enumerate(nontrivial):
+        components_left = len(nontrivial) - component_index
+        proportional = round(remaining * len(component) / max(remaining_nodes, 1))
+        allocation = max(1, min(len(component), proportional, remaining - components_left + 1))
+        selected = _deterministic_sample_indices(len(component), allocation)
+        source_parts.append(component[selected])
+        remaining -= allocation
+        remaining_nodes -= len(component)
+    sources = np.concatenate(source_parts) if source_parts else np.empty(0, dtype=np.int64)
+    pair_sources: List[int] = []
+    pair_targets: List[int] = []
+    pair_distances: List[int] = []
+    for source in sources:
+        distances = (
+            _bfs_distances(offsets, targets, int(source), max_dist=num_nodes)
+            if all_pairs_dist is None
+            else all_pairs_dist[int(source)]
+        )
+        reachable = np.flatnonzero(distances > 0)
+        if reachable.size == 0:
+            continue
+        strata = np.unique(distances[reachable])
+        target_budget = max(n_targets, len(strata))
+        base = target_budget // len(strata)
+        remainder = target_budget % len(strata)
+        for stratum_index, distance in enumerate(strata):
+            candidates = reachable[distances[reachable] == distance]
+            budget = base + (1 if stratum_index < remainder else 0)
+            if target_budget >= reachable.size:
+                selected = candidates
+            else:
+                selected = candidates[_deterministic_sample_indices(len(candidates), budget)]
+            pair_sources.extend([int(source)] * len(selected))
+            pair_targets.extend(int(target) for target in selected)
+            pair_distances.extend([int(distance)] * len(selected))
+    return (
+        np.asarray(pair_sources, dtype=np.int64),
+        np.asarray(pair_targets, dtype=np.int64),
+        np.asarray(pair_distances, dtype=np.int64),
+    )
+
+
+def isotonic_stress(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: Optional[int] = None,
+    n_sources: int = 200,
+    n_targets: int = 1000,
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Compute aspect-preserving isotonic Kruskal stress on raw coordinates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Raw node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : Optional[int], optional
+        Node count. Defaults to the first dimension of ``pos``.
+    n_sources : int, optional
+        Deterministic BFS source-row budget.
+    n_targets : int, optional
+        Per-source target budget, stratified over every observed distance.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Precomputed unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    Dict[str, float]
+        ``ksm_score`` in ``[0, 1]`` and deterministic sample counts.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64).numpy()
+    n = int(pos.shape[0]) if num_nodes is None else int(num_nodes)
+    sources, targets, graph_distances = _stratified_graph_pairs(
+        edge_index, n, n_sources, n_targets, all_pairs_dist=all_pairs_dist
+    )
+    if sources.size == 0:
+        return {"ksm_score": 0.0, "ksm_se": 0.0, "ksm_n_pairs": 0, "ksm_n_sources": 0}
+    geometric = np.linalg.norm(positions[sources] - positions[targets], axis=1)
+    denominator = float(np.dot(geometric, geometric))
+    if denominator <= 1e-24:
+        return {
+            "ksm_score": 0.0,
+            "ksm_se": 0.0,
+            "ksm_n_pairs": int(sources.size),
+            "ksm_n_sources": int(np.unique(sources).size),
+        }
+    fitted = _pav_fitted_values(graph_distances.astype(np.float64), geometric)
+    residual = geometric - fitted
+    squared_residual = residual**2
+    squared_geometric = geometric**2
+    mean_residual = float(squared_residual.mean())
+    mean_geometric = float(squared_geometric.mean())
+    stress = math.sqrt(mean_residual / mean_geometric)
+    if len(residual) > 1 and stress > 1e-12:
+        covariance = np.cov(squared_residual, squared_geometric, ddof=1)
+        gradient = np.asarray(
+            [
+                -0.5 / (stress * mean_geometric),
+                0.5 * stress / mean_geometric,
+            ]
+        )
+        variance = float(gradient @ covariance @ gradient) / len(residual)
+        standard_error = math.sqrt(max(0.0, variance))
+    else:
+        standard_error = 0.0
+    return {
+        "ksm_score": max(0.0, min(1.0, 1.0 - stress)),
+        "ksm_se": standard_error,
+        "ksm_n_pairs": int(sources.size),
+        "ksm_n_sources": int(np.unique(sources).size),
+    }
+
 
 def sampled_stress(
     pos: torch.Tensor,
@@ -752,6 +1032,7 @@ def sampled_crossing_rate(
     n_samples: int = 1_000_000,
     *,
     seed: Optional[int] = None,
+    _geometry: Optional[_CrossingGeometry] = None,
 ) -> Dict[str, float]:
     """Estimate crossing rate via random edge-pair sampling.
 
@@ -766,6 +1047,9 @@ def sampled_crossing_rate(
     seed : Optional[int], optional
         Seed for edge-pair sampling. ``None`` preserves the existing stochastic
         behavior by using the global RNG state.
+    _geometry : Optional[_CrossingGeometry], optional
+        Precomputed internal geometry used to share one frozen pair set in
+        :func:`full`.
 
     Returns
     -------
@@ -779,6 +1063,8 @@ def sampled_crossing_rate(
     -----
     Complexity is ``O(n_samples)``.
     """
+    if _geometry is not None:
+        return _crossing_rate_from_geometry(_geometry)
     if edge_index.numel() == 0 or edge_index.shape[1] < 2:
         return {
             "crossing_rate": 0.0,
@@ -869,7 +1155,50 @@ def sampled_crossing_rate(
     }
 
 
-def neighborhood_preservation(
+def _crossing_rate_from_geometry(geometry: _CrossingGeometry) -> Dict[str, float]:
+    """Compute frozen crossing statistics from precomputed batched geometry.
+
+    Parameters
+    ----------
+    geometry : _CrossingGeometry
+        Eligible pair geometry and candidate-pair sampling metadata.
+
+    Returns
+    -------
+    Dict[str, float]
+        Crossing-rate fields matching :func:`sampled_crossing_rate`.
+    """
+    crossings = geometry.crossing
+    n_valid = int(crossings.numel())
+    if n_valid == 0:
+        return {
+            "crossing_rate": 0.0,
+            "crossing_se": 0.0,
+            "crossing_estimated_total": 0,
+            "crossing_n_samples": 0,
+            "crossing_eligible_pairs": 0.0,
+        }
+    rate = crossings.float().mean().item()
+    if geometry.pair_space_exhausted:
+        eligible_pairs = float(n_valid)
+        estimated_total = int(crossings.sum().item())
+        se = 0.0
+    else:
+        eligible_pairs = float(geometry.total_pairs) * (
+            float(n_valid) / float(geometry.candidate_pairs)
+        )
+        estimated_total = int(rate * eligible_pairs)
+        se = eligible_pairs * (rate * (1 - rate) / n_valid) ** 0.5
+    return {
+        "crossing_rate": rate,
+        "crossing_se": se,
+        "crossing_estimated_total": estimated_total,
+        "crossing_n_samples": n_valid,
+        "crossing_eligible_pairs": eligible_pairs,
+    }
+
+
+def _legacy_neighborhood_preservation(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -952,6 +1281,105 @@ def neighborhood_preservation(
     }
 
 
+def neighborhood_preservation(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: Optional[int] = None,
+    n_samples: int = 5000,
+    k: Optional[int] = None,
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Measure adjacency versus layout-neighborhood Jaccard preservation.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : Optional[int], optional
+        Node count. Defaults to ``pos.shape[0]``.
+    n_samples : int, optional
+        Maximum number of frozen, evenly spaced query rows.
+    k : Optional[int], optional
+        Layout-neighborhood size. Defaults to ``max(1, floor(2m/n))``.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Unused compatibility argument retained for callers of the old metric.
+
+    Returns
+    -------
+    Dict[str, float]
+        Pooled fractional-tie Jaccard score and sampling metadata.
+    """
+    del all_pairs_dist
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    n = int(positions.shape[0]) if num_nodes is None else int(num_nodes)
+    m = int(edges.shape[1]) if edges.numel() else 0
+    effective_k = max(1, math.floor(2 * m / n)) if k is None and n > 0 else int(k or 1)
+    effective_k = min(effective_k, max(0, n - 1))
+    if n < 2 or effective_k == 0:
+        return {
+            "neighborhood_preservation_score": 0.0,
+            "neighborhood_mean": 0.0,
+            "neighborhood_se": 0.0,
+            "neighborhood_n_rows": 0,
+            "neighborhood_k": effective_k,
+        }
+
+    adjacency: List[set[int]] = [set() for _ in range(n)]
+    for source, target in edges.t().tolist() if edges.numel() else []:
+        if source != target:
+            adjacency[int(source)].add(int(target))
+            adjacency[int(target)].add(int(source))
+
+    rows_np = _deterministic_sample_indices(n, min(n, n_samples))
+    rows = torch.from_numpy(rows_np).to(dtype=torch.long)
+    distances = torch.cdist(positions[rows], positions)
+    distances[torch.arange(len(rows)), rows] = float("inf")
+    intersection_total = 0.0
+    union_total = 0.0
+    row_scores: List[float] = []
+    for row_offset, node in enumerate(rows_np.tolist()):
+        row = distances[row_offset]
+        boundary = float(torch.kthvalue(row, effective_k).values.item())
+        strictly_closer = row < boundary
+        boundary_tensor = torch.tensor(boundary, dtype=row.dtype)
+        tied = torch.isclose(row, boundary_tensor, rtol=1e-12, atol=1e-12)
+        remaining = effective_k - int(strictly_closer.sum().item())
+        tie_count = int(tied.sum().item())
+        tie_weight = remaining / tie_count if tie_count else 0.0
+        adjacent_indices = sorted(adjacency[node])
+        if adjacent_indices:
+            adjacent_distances = row[adjacent_indices]
+            adjacent_ties = torch.isclose(
+                adjacent_distances, boundary_tensor, rtol=1e-12, atol=1e-12
+            )
+            intersection = float((adjacent_distances < boundary).sum().item())
+            intersection += tie_weight * float(adjacent_ties.sum().item())
+        else:
+            intersection = 0.0
+        # Both memberships have known mass (degree and k), so pooled Jaccard
+        # needs no dense per-row membership allocation.
+        union = len(adjacent_indices) + effective_k - intersection
+        intersection_total += intersection
+        union_total += union
+        row_scores.append(intersection / union if union > 0.0 else 0.0)
+
+    score = intersection_total / union_total if union_total > 0.0 else 0.0
+    return {
+        "neighborhood_preservation_score": max(0.0, min(1.0, score)),
+        "neighborhood_mean": float(np.mean(row_scores)) if row_scores else 0.0,
+        "neighborhood_se": (
+            float(np.std(row_scores, ddof=1) / math.sqrt(len(row_scores)))
+            if len(row_scores) > 1
+            else 0.0
+        ),
+        "neighborhood_n_rows": int(len(rows_np)),
+        "neighborhood_k": effective_k,
+    }
+
+
 def angular_resolution(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -1029,6 +1457,581 @@ def angular_resolution(
         "angular_res_median_deg": deg.median().item(),
         "angular_res_below_10deg": (deg < 10).float().mean().item(),
     }
+
+
+def node_occlusion_score(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    *,
+    seed: Optional[int] = 0,
+) -> Dict[str, float]:
+    """Score node bbox occlusion with the frozen saturating transform.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node bbox sizes with shape ``[N, 2]``.
+    seed : Optional[int], optional
+        Frozen seed for the large-graph overlap counter.
+
+    Returns
+    -------
+    Dict[str, float]
+        Overlap count and ``node_occlusion_score`` in ``[0, 1]``.
+    """
+    n = int(pos.shape[0])
+    overlaps = count_overlaps_detailed(_ensure_cpu(pos), _ensure_cpu(node_sizes), seed=seed)[
+        "overlap_count"
+    ]
+    score = 0.0 if n == 0 else 1.0 / (1.0 + 2.0 * overlaps / n)
+    return {"overlap_count": overlaps, "node_occlusion_score": score}
+
+
+def _degree_corrected_crossing_max(edge_index: torch.Tensor, num_nodes: int) -> int:
+    """Return the degree-corrected maximum number of eligible edge pairs.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    int
+        ``C(m,2) - sum_v C(deg_v,2)``, clamped at zero.
+    """
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    m = int(edges.shape[1]) if edges.numel() else 0
+    degree = torch.zeros(num_nodes, dtype=torch.long)
+    if edges.numel():
+        degree.scatter_add_(0, edges[0], torch.ones(m, dtype=torch.long))
+        degree.scatter_add_(0, edges[1], torch.ones(m, dtype=torch.long))
+    adjacent_pairs = int((degree * (degree - 1) // 2).sum().item())
+    return max(0, m * (m - 1) // 2 - adjacent_pairs)
+
+
+def edge_crossing_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: int = 1_000_000,
+    *,
+    seed: Optional[int] = 0,
+    _geometry: Optional[_CrossingGeometry] = None,
+) -> Dict[str, float]:
+    """Score straight-edge crossings with square-root range restoration.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : int, optional
+        Frozen edge-pair sampling budget.
+    seed : Optional[int], optional
+        Sampling seed.
+    _geometry : Optional[_CrossingGeometry], optional
+        Precomputed internal geometry used by :func:`full`.
+
+    Returns
+    -------
+    Dict[str, float]
+        Crossing count estimate, degree-corrected maximum, and score.
+    """
+    c_max = _degree_corrected_crossing_max(edge_index, int(pos.shape[0]))
+    sampled = sampled_crossing_rate(
+        _ensure_cpu(pos),
+        _ensure_cpu(edge_index),
+        n_samples=n_samples,
+        seed=seed,
+        _geometry=_geometry,
+    )
+    crossings = int(sampled["crossing_estimated_total"])
+    score = 1.0 if c_max <= 0 else 1.0 - math.sqrt(min(1.0, crossings / c_max))
+    if c_max > 0 and 0 < crossings < c_max:
+        score_se = float(sampled["crossing_se"]) / (2.0 * math.sqrt(crossings * c_max))
+    else:
+        score_se = 0.0
+    return {
+        **sampled,
+        "crossing_count": crossings,
+        "crossing_c_max": c_max,
+        "edge_crossing_score": max(0.0, min(1.0, score)),
+        "edge_crossing_score_se": score_se,
+    }
+
+
+def _crossing_pair_geometry(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: Optional[int] = None,
+    seed: Optional[int] = 0,
+) -> _CrossingGeometry:
+    """Enumerate eligible edge-pair endpoints and their intersection mask.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : Optional[int], optional
+        Maximum number of edge pairs. ``None`` enumerates the full pair space.
+    seed : int, optional
+        Frozen seed used when pair sampling is required.
+
+    Returns
+    -------
+    _CrossingGeometry
+        Four endpoint tensors, crossing mask, and sampling metadata.
+    """
+    positions = _ensure_cpu(pos)
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    m = int(edges.shape[1]) if edges.numel() else 0
+    if m < 2:
+        empty = torch.empty((0, 2), dtype=positions.dtype)
+        return _CrossingGeometry(
+            empty, empty, empty, empty, torch.empty(0, dtype=torch.bool), 0, 0, True
+        )
+    total_pairs = m * (m - 1) // 2
+    if n_samples is None or total_pairs <= n_samples:
+        first, second = torch.triu_indices(m, m, offset=1)
+    elif total_pairs <= 10_000_000:
+        generator = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
+        selected = torch.randperm(total_pairs, generator=generator)[:n_samples]
+        all_first, all_second = torch.triu_indices(m, m, offset=1)
+        first, second = all_first[selected], all_second[selected]
+    else:
+        generator = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
+        first = torch.randint(0, m, (n_samples,), generator=generator)
+        second = torch.randint(0, m, (n_samples,), generator=generator)
+        first, second = torch.minimum(first, second), torch.maximum(first, second)
+    a, b = edges[0, first], edges[1, first]
+    c, d = edges[0, second], edges[1, second]
+    eligible = (a != c) & (a != d) & (b != c) & (b != d)
+    p1, p2 = positions[a[eligible]], positions[b[eligible]]
+    p3, p4 = positions[c[eligible]], positions[d[eligible]]
+    return _CrossingGeometry(
+        p1,
+        p2,
+        p3,
+        p4,
+        segments_intersect(p1, p2, p3, p4),
+        total_pairs,
+        int(first.numel()),
+        n_samples is None or total_pairs <= n_samples,
+    )
+
+
+def crossing_angle_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: int = 1_000_000,
+    *,
+    seed: int = 0,
+    _geometry: Optional[_CrossingGeometry] = None,
+) -> Dict[str, float]:
+    """Score acute crossing angles with the frozen 70-degree plateau.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : int, optional
+        Deterministic edge-pair budget. Small pair spaces remain exact.
+    seed : int, optional
+        Frozen sampling seed.
+    _geometry : Optional[_CrossingGeometry], optional
+        Precomputed internal geometry used by :func:`full`.
+
+    Returns
+    -------
+    Dict[str, float]
+        Mean plateaued crossing-angle score and counted crossings.
+    """
+    geometry = _geometry or _crossing_pair_geometry(pos, edge_index, n_samples=n_samples, seed=seed)
+    p1, p2, p3, p4, crossing = geometry[:5]
+    if not bool(crossing.any().item()):
+        return {
+            "crossing_angle_score": 1.0,
+            "crossing_angle_count": 0,
+            "crossing_angle_n_pairs": int(crossing.numel()),
+        }
+    first = p2[crossing] - p1[crossing]
+    second = p4[crossing] - p3[crossing]
+    norms = torch.linalg.vector_norm(first, dim=1) * torch.linalg.vector_norm(second, dim=1)
+    cosine = torch.where(
+        norms > 1e-12,
+        (first * second).sum(dim=1).abs() / norms.clamp(min=1e-12),
+        torch.ones_like(norms),
+    ).clamp(0.0, 1.0)
+    angles = torch.acos(cosine)
+    score = torch.clamp(angles / _CROSSING_ANGLE_KNEE_RADIANS, max=1.0).mean().item()
+    return {
+        "crossing_angle_score": float(score),
+        "crossing_angle_count": int(crossing.sum()),
+        "crossing_angle_n_pairs": int(crossing.numel()),
+    }
+
+
+def gabriel_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: Optional[int] = None,
+    node_samples: Optional[int] = None,
+) -> Dict[str, float]:
+    """Score node intrusions into non-incident edge Gabriel disks.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : Optional[int], optional
+        Maximum deterministic edge sample. ``None`` evaluates every edge.
+    node_samples : Optional[int], optional
+        Maximum deterministic node sample per selected edge. ``None`` checks
+        every nonincident node.
+
+    Returns
+    -------
+    Dict[str, float]
+        Gabriel intrusion count, maximum, and square-root score.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    n = int(positions.shape[0])
+    m = int(edges.shape[1]) if edges.numel() else 0
+    g_max = m * max(0, n - 2)
+    if g_max <= 0:
+        return {"gabriel_score": 1.0, "gabriel_intrusions": 0, "gabriel_g_max": g_max}
+    sample_count = m if n_samples is None else min(m, n_samples)
+    sampled_edges = edges[:, _deterministic_sample_indices(m, sample_count)]
+    sampled_intrusions = 0
+    node_ids = torch.arange(n)
+    if node_samples is not None:
+        node_ids = node_ids[_deterministic_sample_indices(n, min(n, node_samples))]
+    # Bound the temporary [edges, nodes, 2] tensor while replacing the Python
+    # edge loop. Float64 operation order is unchanged from the scalar version.
+    edge_batch_size = max(1, min(sample_count, 1_000_000 // max(1, int(node_ids.numel()))))
+    sampled_positions = positions[node_ids]
+    for start in range(0, sample_count, edge_batch_size):
+        edge_batch = sampled_edges[:, start : start + edge_batch_size].t()
+        sources = edge_batch[:, 0]
+        targets = edge_batch[:, 1]
+        midpoints = (positions[sources] + positions[targets]) / 2.0
+        radii_sq = ((positions[sources] - positions[targets]) ** 2).sum(dim=1) / 4.0
+        nonincident = (node_ids.unsqueeze(0) != sources.unsqueeze(1)) & (
+            node_ids.unsqueeze(0) != targets.unsqueeze(1)
+        )
+        distances_sq = ((sampled_positions.unsqueeze(0) - midpoints.unsqueeze(1)) ** 2).sum(dim=2)
+        observed = ((distances_sq < radii_sq.unsqueeze(1) - 1e-12) & nonincident).sum(dim=1)
+        nonincident_counts = nonincident.sum(dim=1)
+        for observed_count, nonincident_count in zip(
+            observed.tolist(), nonincident_counts.tolist()
+        ):
+            sampled_intrusions += round(
+                int(observed_count) * max(0, n - 2) / max(1, int(nonincident_count))
+            )
+    intrusions = round(sampled_intrusions * m / sample_count) if sample_count else 0
+    score = 1.0 - math.sqrt(min(1.0, intrusions / g_max))
+    return {
+        "gabriel_score": max(0.0, min(1.0, score)),
+        "gabriel_intrusions": intrusions,
+        "gabriel_g_max": g_max,
+        "gabriel_n_edges": sample_count,
+        "gabriel_n_nodes_per_edge": int(node_ids.numel()),
+    }
+
+
+def gabriel_ksm_correlation(records: Sequence[Dict[str, float]]) -> Dict[str, float]:
+    """Compute the engine-blind Gate-E correlation diagnostic.
+
+    Parameters
+    ----------
+    records : Sequence[Dict[str, float]]
+        Label-stripped corpus records containing ``gabriel_score`` and
+        ``ksm_score``.
+
+    Returns
+    -------
+    Dict[str, float]
+        Pearson correlation, usable record count, and tripwire indicator.
+    """
+    pairs = [
+        (float(record["gabriel_score"]), float(record["ksm_score"]))
+        for record in records
+        if "gabriel_score" in record and "ksm_score" in record
+    ]
+    if len(pairs) < 2:
+        return {"gabriel_ksm_correlation": float("nan"), "gate_e_tripwire": 0.0, "n": len(pairs)}
+    values = np.asarray(pairs, dtype=np.float64)
+    correlation = float(np.corrcoef(values[:, 0], values[:, 1])[0, 1])
+    return {
+        "gabriel_ksm_correlation": correlation,
+        "gate_e_tripwire": float(np.isfinite(correlation) and correlation > 0.9),
+        "n": len(pairs),
+    }
+
+
+def path_continuity_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Score straight-through continuity at undirected degree-two vertices.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : Optional[int], optional
+        Maximum deterministic degree-two vertex sample.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Score in ``[0, 1]`` or ``None`` when no degree-two vertex applies.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    neighbors: List[set[int]] = [set() for _ in range(int(positions.shape[0]))]
+    for source, target in edges.t().tolist() if edges.numel() else []:
+        if source != target:
+            neighbors[source].add(target)
+            neighbors[target].add(source)
+    candidates = [vertex for vertex, adjacent in enumerate(neighbors) if len(adjacent) == 2]
+    if n_samples is not None:
+        sampled = _deterministic_sample_indices(len(candidates), min(len(candidates), n_samples))
+        candidates = [candidates[index] for index in sampled]
+    scores: List[float] = []
+    for vertex in candidates:
+        adjacent = neighbors[vertex]
+        first_index, second_index = sorted(adjacent)
+        first = positions[first_index] - positions[vertex]
+        second = positions[second_index] - positions[vertex]
+        norm_product = float(torch.linalg.vector_norm(first) * torch.linalg.vector_norm(second))
+        if norm_product <= 1e-12:
+            scores.append(0.0)
+            continue
+        cosine = float(torch.dot(first, second) / norm_product)
+        scores.append(math.acos(max(-1.0, min(1.0, cosine))) / math.pi)
+    return {
+        "path_continuity_score": float(np.mean(scores)) if scores else None,
+        "path_continuity_n_vertices": len(scores),
+    }
+
+
+def edge_length_deviation_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    declared_targets: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
+    """Score reciprocal mean absolute edge-length deviation.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    declared_targets : Optional[torch.Tensor], optional
+        Positive target lengths with shape ``[E]``. A least-squares common
+        scale is fitted before measuring deviation.
+
+    Returns
+    -------
+    Dict[str, float]
+        Reciprocal deviation score, mean deviation, and fitted scale.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    if edges.numel() == 0:
+        return {
+            "edge_length_deviation_score": 0.0,
+            "edge_length_relative_deviation": 0.0,
+            "edge_length_target_scale": 1.0,
+        }
+    lengths = torch.linalg.vector_norm(positions[edges[0]] - positions[edges[1]], dim=1)
+    mean_length = float(lengths.mean().item())
+    if mean_length <= 1e-12:
+        return {
+            "edge_length_deviation_score": 0.0,
+            "edge_length_relative_deviation": float("inf"),
+            "edge_length_target_scale": 0.0,
+        }
+    if declared_targets is None:
+        reference = torch.full_like(lengths, mean_length)
+        alpha = 1.0
+    else:
+        targets = _ensure_cpu(declared_targets).to(dtype=torch.float64)
+        if targets.shape != lengths.shape or bool((targets <= 0).any().item()):
+            raise ValueError("declared_targets must be positive with shape [E]")
+        denominator = float(torch.dot(targets, targets).item())
+        alpha = float(torch.dot(lengths, targets).item()) / denominator
+        reference = alpha * targets
+    reference_mean = float(reference.mean().item())
+    relative = float(torch.abs(lengths - reference).mean().item()) / max(reference_mean, 1e-12)
+    return {
+        "edge_length_deviation_score": 1.0 / (1.0 + relative),
+        "edge_length_relative_deviation": relative,
+        "edge_length_target_scale": alpha,
+    }
+
+
+def angular_resolution_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Score minimum incident angles relative to each vertex's ideal angle.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : Optional[int], optional
+        Maximum deterministic sample of vertices with degree at least two.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Frozen angular-resolution score or ``None`` when no vertex applies.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    neighbors: List[set[int]] = [set() for _ in range(int(positions.shape[0]))]
+    for source, target in edges.t().tolist() if edges.numel() else []:
+        if source != target:
+            neighbors[source].add(target)
+            neighbors[target].add(source)
+    candidates = [vertex for vertex, adjacent in enumerate(neighbors) if len(adjacent) >= 2]
+    if n_samples is not None:
+        sampled = _deterministic_sample_indices(len(candidates), min(len(candidates), n_samples))
+        candidates = [candidates[index] for index in sampled]
+    penalties: List[float] = []
+    for vertex in candidates:
+        adjacent = neighbors[vertex]
+        degree = len(adjacent)
+        vectors = positions[sorted(adjacent)] - positions[vertex]
+        if bool((torch.linalg.vector_norm(vectors, dim=1) <= 1e-12).any().item()):
+            penalties.append(1.0)
+            continue
+        angles = torch.sort(torch.atan2(vectors[:, 1], vectors[:, 0])).values
+        gaps = torch.cat(
+            (angles[1:] - angles[:-1], (2 * torch.pi - angles[-1] + angles[0]).view(1))
+        )
+        minimum = float(gaps.min().item())
+        ideal = 2.0 * math.pi / degree
+        penalties.append((ideal - min(minimum, ideal)) / ideal)
+    return {
+        "angular_resolution_score": 1.0 - float(np.mean(penalties)) if penalties else None,
+        "angular_resolution_n_vertices": len(penalties),
+    }
+
+
+def cluster_silhouette_score(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Dict[str, Any]:
+    """Score silhouette separation using declared ground-truth labels only.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    cluster_ids : torch.Tensor
+        Ground-truth cluster labels with shape ``[N]``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Shifted silhouette score or ``None`` when fewer than two labels apply.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    labels = _ensure_cpu(cluster_ids).reshape(-1)
+    unique = torch.unique(labels)
+    if len(labels) != len(positions):
+        raise ValueError("cluster_ids must have shape [N]")
+    if unique.numel() < 2 or len(labels) < 3:
+        return {"cluster_silhouette_score": None, "cluster_silhouette": None}
+    if float(torch.pdist(positions).pow(2).sum().item()) <= 1e-24:
+        return {"cluster_silhouette_score": 0.0, "cluster_silhouette": -1.0}
+    distances = torch.cdist(positions, positions)
+    silhouettes: List[float] = []
+    for index in range(len(labels)):
+        same = labels == labels[index]
+        same[index] = False
+        if not bool(same.any().item()):
+            silhouettes.append(0.0)
+            continue
+        a = float(distances[index, same].mean().item())
+        b = min(
+            float(distances[index, labels == other].mean().item())
+            for other in unique
+            if bool((other != labels[index]).item())
+        )
+        scale = max(a, b)
+        silhouettes.append((b - a) / scale if scale > 1e-12 else -1.0)
+    silhouette = float(np.mean(silhouettes))
+    return {
+        "cluster_silhouette_score": max(0.0, min(1.0, (silhouette + 1.0) / 2.0)),
+        "cluster_silhouette": silhouette,
+    }
+
+
+def directed_flow_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    direction: str = "TB",
+    back_edge_mask: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
+    """Score signed directed flow along a declared layout axis.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    direction : str, optional
+        Declared flow direction: ``TB``, ``BT``, ``LR``, or ``RL``.
+    back_edge_mask : Optional[torch.Tensor], optional
+        Pre-declared feedback edges excluded from the score.
+
+    Returns
+    -------
+    Dict[str, float]
+        Signed tolerance-band directed-flow score.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    if back_edge_mask is not None:
+        edges = edges[:, ~_ensure_cpu(back_edge_mask).to(dtype=torch.bool)]
+    if edges.numel() == 0:
+        return {"directed_flow_score": 0.0}
+    vectors = positions[edges[1]] - positions[edges[0]]
+    norms = torch.linalg.vector_norm(vectors, dim=1)
+    axis = {
+        "TB": torch.tensor([0.0, 1.0], dtype=torch.float64),
+        "BT": torch.tensor([0.0, -1.0], dtype=torch.float64),
+        "LR": torch.tensor([1.0, 0.0], dtype=torch.float64),
+        "RL": torch.tensor([-1.0, 0.0], dtype=torch.float64),
+    }.get(direction, torch.tensor([0.0, 1.0], dtype=torch.float64))
+    projection = torch.where(
+        norms > 1e-12, (vectors @ axis) / norms.clamp(min=1e-12), -torch.ones_like(norms)
+    )
+    tolerance = math.sin(math.radians(15.0))
+    score = torch.clamp((projection + tolerance) / (2.0 * tolerance), 0.0, 1.0).mean()
+    return {"directed_flow_score": float(score.item())}
 
 
 # ---------------------------------------------------------------------------
@@ -1293,17 +2296,18 @@ def edge_curvature_consistency(curves) -> Dict[str, float]:
 
 
 def port_angular_resolution(
-    curves,
+    curves: Sequence[Any],
     edge_index: torch.Tensor,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Minimum angle between incident edge tangents at actual ports.
 
-    Tier 2 metric.
+    The score uses the same degree-relative normalization as the common
+    ruler's angular-resolution term.
     """
     from dagua.edges import bezier_tangent
 
     if not curves or edge_index.numel() == 0:
-        return {"port_angular_res_mean_deg": 360.0}
+        return {"port_angular_res_mean_deg": 360.0, "port_angular_resolution_score": None}
 
     ei = _ensure_cpu(edge_index)
     src_list = ei[0].tolist()
@@ -1323,11 +2327,17 @@ def port_angular_resolution(
 
         # Target tangent: B'(1)
         tdx, tdy = bezier_tangent(curve, 1.0)
-        node_tangents.setdefault(t, []).append((tdx, tdy))
+        node_tangents.setdefault(t, []).append((-tdx, -tdy))
 
     min_angles = []
-    for node, tangents in node_tangents.items():
+    scores = []
+    for tangents in node_tangents.values():
         if len(tangents) < 2:
+            continue
+
+        if any(math.hypot(dx, dy) <= 1e-12 for dx, dy in tangents):
+            min_angles.append(0.0)
+            scores.append(0.0)
             continue
 
         # Compute angles
@@ -1339,13 +2349,19 @@ def port_angular_resolution(
         # Min angle between adjacent
         diffs = [angles[i + 1] - angles[i] for i in range(len(angles) - 1)]
         diffs.append(2 * math.pi - (angles[-1] - angles[0]))
-        min_angles.append(min(diffs))
+        minimum = min(diffs)
+        ideal = 2.0 * math.pi / len(tangents)
+        min_angles.append(minimum)
+        scores.append(1.0 - (ideal - min(minimum, ideal)) / ideal)
 
     if not min_angles:
-        return {"port_angular_res_mean_deg": 360.0}
+        return {"port_angular_res_mean_deg": 360.0, "port_angular_resolution_score": None}
 
     mean_deg = sum(a * 180 / math.pi for a in min_angles) / len(min_angles)
-    return {"port_angular_res_mean_deg": mean_deg}
+    return {
+        "port_angular_res_mean_deg": mean_deg,
+        "port_angular_resolution_score": float(np.mean(scores)),
+    }
 
 
 def within_layer_compactness(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
@@ -1439,340 +2455,219 @@ def _is_degenerate_scale(metrics: Dict[str, float]) -> bool:
     return float(edge_length_mean) < DEGENERATE_SCALE_RATIO * float(node_diag_mean)
 
 
-def composite(metrics: Dict[str, float]) -> float:
-    """Compute the directed 100-point composite quality score.
+def _has_declared_hierarchy(metrics: Dict[str, Any]) -> bool:
+    """Report whether metric metadata explicitly declares a hierarchy.
 
     Parameters
     ----------
-    metrics : Dict[str, float]
-        Metric name to scalar value mapping from ``full()`` or equivalent.
+    metrics : Dict[str, Any]
+        Metric values and semantic metadata.
+
+    Returns
+    -------
+    bool
+        True only for explicit DAG or pre-layout rank metadata.
+    """
+    return bool(
+        metrics.get("declared_hierarchical", False)
+        or metrics.get("has_dag_metadata", False)
+        or metrics.get("has_rank_metadata", False)
+    )
+
+
+def _renormalized_score(metrics: Dict[str, Any], weights: Dict[str, float]) -> float:
+    """Combine applicable score terms and renormalize their frozen weights.
+
+    Parameters
+    ----------
+    metrics : Dict[str, Any]
+        Metric values. Missing and ``None`` terms are inapplicable.
+    weights : Dict[str, float]
+        Frozen term weights.
 
     Returns
     -------
     float
-        Weighted composite score where higher is better.
-
-    Notes
-    -----
-    Weights sum to 100:
-    - DAG consistency: 22
-    - Edge length uniformity (1 - CV): 18
-    - Depth correlation: 13
-    - No overlaps (binary): 8
-    - Edge straightness: 9
-    - Crossings (inverted): 9
-    - Stress (inverted sampled_stress): 10
-    - Angular resolution: 5
-    - Cluster separation: 6
-
-    Degeneracy guard (r80-P6): when the layout is at a point-collapsed
-    scale (see ``_is_degenerate_scale``), the edge length uniformity (18)
-    and crossing density (9) terms score 0 instead of their vacuous maxima.
+        Renormalized score on a 0--100 scale.
     """
-    score = 0.0
-    degenerate = _is_degenerate_scale(metrics)
-
-    # DAG consistency (22) - most critical for directed graph readability.
-    score += 22 * metrics.get("dag_consistency", 0.0)
-
-    # Edge length uniformity (18) - invert CV, cap at 1.0. Guarded: a
-    # point-collapsed layout trivially minimizes CV without being uniform
-    # in any meaningful sense.
-    if not degenerate:
-        score += 18 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
-
-    # Depth correlation (13)
-    score += 13 * max(0.0, metrics.get("depth_spearman_rho", 0.0))
-
-    # No overlaps (8) - binary.
-    score += 8 * (1.0 if metrics.get("overlap_count", 1) == 0 else 0.0)
-
-    # Edge straightness (9) - lower deviation = better.
-    straight_deg = metrics.get("edge_straightness_mean_deg", 45.0)
-    score += 9 * max(0.0, 1.0 - straight_deg / 45.0)
-
-    # Crossing density (9) - lower is better. Guarded: zero-length segments
-    # never register as crossing, so a collapsed layout trivially aces this.
-    if not degenerate:
-        crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
-        score += 9 * crossing_score
-
-    # Sampled stress (10) - lower graph-theoretic stress is better.
-    stress_score = max(0.0, 1.0 - metrics.get("sampled_stress", 1.0))
-    score += 10 * stress_score
-
-    # Angular resolution (5)
-    angle_score = min(1.0, metrics.get("angular_res_mean_deg", 20.0) / 40.0)
-    score += 5 * angle_score
-
-    # Cluster separation (6)
-    if "cluster_mean_sep_ratio" in metrics:
-        sep_score = min(1.0, metrics["cluster_mean_sep_ratio"] / 5.0)
-        score += 6 * sep_score
-    else:
-        score += 6 * 0.5  # neutral if no clusters
-
-    return score
+    applicable = [
+        (weight, float(metrics[name]))
+        for name, weight in weights.items()
+        if name in metrics and metrics[name] is not None and math.isfinite(float(metrics[name]))
+    ]
+    total_weight = sum(weight for weight, _ in applicable)
+    if total_weight <= 0.0:
+        return 0.0
+    weighted = sum(weight * max(0.0, min(1.0, value)) for weight, value in applicable)
+    return 100.0 * weighted / total_weight
 
 
-def composite_undirected(metrics: Dict[str, float]) -> float:
-    """Composite for undirected graphs: drops direction-sensitive metrics.
-
-    Dropped (50 pts total): dag_consistency (25), depth_spearman (15),
-    edge_straightness (10). Remaining 50 pts are rescaled to 100.
-
-    Retained metrics and rescaled weights (sum=100):
-      edge_length_cv:        20 -> 40
-      overlap_count:         10 -> 20
-      crossing_rate:         10 -> 20
-      angular_resolution:     5 -> 10
-      cluster_separation:     5 -> 10
-
-    Same rule per metric as `composite()` (lower-better terms inverted,
-    same clamping). See composite() for the per-metric formulas and clamp
-    ranges.
-
-    Degeneracy guard (r80-P6): when the layout is at a point-collapsed
-    scale (see ``_is_degenerate_scale``), the edge length uniformity (40)
-    and crossing density (20) terms score 0 instead of their vacuous
-    maxima. See ``composite()`` for the full rationale.
+def composite_undirected(metrics: Dict[str, Any]) -> float:
+    """Compute the frozen ten-term common ruler with applicability renormalization.
 
     Parameters
     ----------
-    metrics : Dict[str, float]
-        Metric name to scalar value mapping from ``full()`` or equivalent.
+    metrics : Dict[str, Any]
+        Honest-ruler metric scores and applicability markers.
 
     Returns
     -------
     float
-        Weighted undirected composite score where higher is better.
+        Common composite score on a 0--100 scale.
     """
-    score = 0.0
-    degenerate = _is_degenerate_scale(metrics)
+    scoring_metrics = dict(metrics)
+    if _is_degenerate_scale(metrics):
+        # Geometry-free maxima (no crossings, no Gabriel intrusions, no
+        # crossing angles) are vacuous on a point collapse.
+        for name in (
+            "ksm_score",
+            "edge_crossing_score",
+            "neighborhood_preservation_score",
+            "edge_length_deviation_score",
+            "gabriel_score",
+            "crossing_angle_score",
+            "angular_resolution_score",
+            "path_continuity_score",
+            "cluster_silhouette_score",
+        ):
+            if name in scoring_metrics and scoring_metrics[name] is not None:
+                scoring_metrics[name] = 0.0
+    return _renormalized_score(scoring_metrics, _COMMON_WEIGHTS)
 
-    # Edge length uniformity (40) - invert CV, cap at 1.0. Guarded.
-    if not degenerate:
-        score += 40 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
 
-    # No overlaps (20) - binary
-    score += 20 * (1.0 if metrics.get("overlap_count", 1) == 0 else 0.0)
+def composite(metrics: Dict[str, Any]) -> float:
+    """Compute the hierarchy-gated directed ruler.
 
-    # Crossing density (20) - lower is better. Guarded.
-    if not degenerate:
-        crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
-        score += 20 * crossing_score
+    Parameters
+    ----------
+    metrics : Dict[str, Any]
+        Honest-ruler metric scores plus explicit hierarchy metadata.
 
-    # Angular resolution (10)
-    angle_score = min(1.0, metrics.get("angular_res_mean_deg", 20.0) / 40.0)
-    score += 10 * angle_score
-
-    # Cluster separation (10)
-    if "cluster_mean_sep_ratio" in metrics:
-        sep_score = min(1.0, metrics["cluster_mean_sep_ratio"] / 5.0)
-        score += 10 * sep_score
-    elif "cluster_sep" in metrics:
-        sep_score = min(1.0, metrics["cluster_sep"])
-        score += 10 * sep_score
-    else:
-        score += 10 * 0.5  # neutral if no clusters
-
-    return score
+    Returns
+    -------
+    float
+        Directed score for declared hierarchies, otherwise the common score.
+    """
+    if not _has_declared_hierarchy(metrics):
+        return composite_undirected(metrics)
+    common_applicable = {
+        name: value
+        for name, value in metrics.items()
+        if name in _COMMON_WEIGHTS and value is not None
+    }
+    if _is_degenerate_scale(metrics):
+        common_applicable = {name: 0.0 for name in common_applicable}
+    directed_applicable = {
+        name: value
+        for name, value in metrics.items()
+        if name in _DIRECTED_WEIGHTS and value is not None
+    }
+    combined_weights = {
+        **{name: 0.75 * weight for name, weight in _COMMON_WEIGHTS.items()},
+        **_DIRECTED_WEIGHTS,
+    }
+    return _renormalized_score({**common_applicable, **directed_applicable}, combined_weights)
 
 
 def composite_auto(
-    metrics: Dict[str, float], is_semantically_directed: Optional[bool] = None
+    metrics: Dict[str, Any], is_semantically_directed: Optional[bool] = None
 ) -> float:
-    """Pick composite or composite_undirected based on direction flag.
-
-    When ``is_semantically_directed`` is True (or None, conservative
-    default), returns ``composite(metrics)``. When False, returns
-    ``composite_undirected(metrics)``.
+    """Route only declared hierarchical digraphs to the directed ruler.
 
     Parameters
     ----------
-    metrics : Dict[str, float]
-        Metric name to scalar value mapping from ``full()`` or equivalent.
+    metrics : Dict[str, Any]
+        Honest-ruler metrics and semantic metadata.
     is_semantically_directed : Optional[bool], optional
-        Whether the graph has a meaningful direction. ``None`` is treated as
-        directed to preserve the existing conservative behavior.
+        Whether edge direction has domain meaning.
 
     Returns
     -------
     float
-        Directed or undirected composite score.
+        Directed score only when both semantic direction and hierarchy are declared.
     """
-    if is_semantically_directed is None or is_semantically_directed:
+    if is_semantically_directed is True and _has_declared_hierarchy(metrics):
         return composite(metrics)
     return composite_undirected(metrics)
 
 
-# Quick-mode fields (available from `quick()`). Used by composite_large to
-# avoid silent defaults for fields that only exist in full().
-_QUICK_AVAILABLE_FIELDS = frozenset(
-    {
-        "dag_consistency",
-        "edge_length_cv",
-        "depth_spearman_rho",
-        "overlap_count",
-        "edge_straightness_mean_deg",
-    }
-)
-
-# Fields that composite() expects but quick() does not provide. Required for
-# composite_small (the full profile). Missing any of these at N<=2000 is a bug.
-_FULL_ONLY_FIELDS = frozenset(
-    {
-        "crossing_rate",
-        "sampled_stress",
-        "angular_res_mean_deg",
-    }
-)
-
-
-def composite_large(metrics: Dict[str, float]) -> float:
-    """Composite score for graphs where only ``quick()`` metrics are available.
-
-    At N>2000 the benchmark switches to ``quick()``, which does not compute
-    crossing_rate, angular_res_mean_deg, cluster_mean_sep_ratio, or
-    edge_node_crossing_rate. ``composite()`` would silently default those
-    fields and produce a score that is NOT comparable to small-graph scores.
-
-    ``composite_large`` uses ONLY quick-available fields and renormalizes to
-    0-100. It IS the correct score to use for N>2000 iteration/held-out
-    comparisons. It is NOT comparable to ``composite()`` scores computed on
-    full metrics at smaller N; see the "profile split" protocol in
-    ``.project-context/plans/native_placement_algo/04_evaluation_rubric.md``.
-
-    Weights (sum = 100):
-    - DAG consistency: 30
-    - Edge length uniformity (1 - CV): 25
-    - Depth correlation: 20
-    - No overlaps (binary): 15
-    - Edge straightness: 10
-    """
-    missing = [f for f in _QUICK_AVAILABLE_FIELDS if f not in metrics]
-    if missing:
-        raise ValueError(
-            f"composite_large: missing required quick-mode fields: {missing}. "
-            f"Did you call quick() before scoring? If the graph is empty or "
-            f"trivial, the caller must still populate the expected fields."
-        )
-
-    score = 0.0
-    score += 30 * metrics["dag_consistency"]
-    score += 25 * max(0.0, 1.0 - metrics["edge_length_cv"])
-    score += 20 * max(0.0, metrics["depth_spearman_rho"])
-    score += 15 * (1.0 if metrics["overlap_count"] == 0 else 0.0)
-    score += 10 * max(0.0, 1.0 - metrics["edge_straightness_mean_deg"] / 45.0)
-    return score
-
-
-# Quick-mode fields retained by composite_large_undirected (direction-
-# sensitive fields dag_consistency/depth_spearman_rho/edge_straightness_mean_deg
-# are dropped, mirroring composite_undirected -- but unlike composite_undirected,
-# crossing_rate/angular_res_mean_deg/cluster_mean_sep_ratio are ALSO unavailable
-# at quick-tier, so only 2 of composite_undirected's 5 retained terms survive).
-_QUICK_AVAILABLE_FIELDS_UNDIRECTED = frozenset({"edge_length_cv", "overlap_count"})
-
-
-def composite_large_undirected(metrics: Dict[str, float]) -> float:
-    """Composite score for undirected graphs where only quick() is available.
-
-    r80-P6 (S1 MEDIUM-1): ``composite_large`` hardcoded the DIRECTED weight
-    scheme with no undirected counterpart -- any undirected N>2000 graph
-    scored through the large-tier path would have 30/100 points determined
-    by ``dag_consistency``, a metric that is meaningless for it. This
-    mirrors ``composite_undirected``'s term structure at the large-graph
-    tier.
-
-    Of ``composite_undirected``'s 5 retained terms (edge_length_cv,
-    overlap_count, crossing_rate, angular_resolution, cluster_separation),
-    only ``edge_length_cv`` and ``overlap_count`` are quick-tier available;
-    ``crossing_rate``, ``angular_res_mean_deg``, and cluster separation are
-    Tier-2/3 fields that ``quick()`` never computes (same reason
-    ``composite_large`` itself excludes them). This is NOT a proportional
-    rescale of composite_undirected's 40/20 weights (which would be a
-    non-round 66.67/33.33); it uses round numbers preserving the same
-    ~2:1 emphasis, matching composite_large's own hand-picked-round-numbers
-    convention rather than a strict rescale.
-
-    Weights (sum = 100):
-    - Edge length uniformity (1 - CV): 65
-    - No overlaps (binary): 35
-
-    No degeneracy guard is applied here (see ``composite()``'s guard docs);
-    the r80-P6 batch scopes that guard to ``composite``/``composite_undirected``/
-    ``composite_auto`` only.
+def composite_large(metrics: Dict[str, Any]) -> float:
+    """Compatibility wrapper using the same hierarchy-gated ruler at scale.
 
     Parameters
     ----------
-    metrics : Dict[str, float]
-        Metric name to scalar value mapping from ``quick()`` or equivalent.
+    metrics : Dict[str, Any]
+        Sampled honest-ruler metric scores.
 
     Returns
     -------
     float
-        Weighted undirected large-tier composite score where higher is
-        better.
+        Shared composite score with unavailable terms renormalized away.
+    """
+    return composite(metrics)
+
+
+def composite_large_undirected(metrics: Dict[str, Any]) -> float:
+    """Compatibility wrapper using the common ruler on sampled metrics.
+
+    Parameters
+    ----------
+    metrics : Dict[str, Any]
+        Sampled honest-ruler metric scores.
+
+    Returns
+    -------
+    float
+        Shared common composite score.
+    """
+    return composite_undirected(metrics)
+
+
+def composite_large_auto(
+    metrics: Dict[str, Any], is_semantically_directed: Optional[bool] = None
+) -> float:
+    """Compatibility wrapper for semantic routing at large scale.
+
+    Parameters
+    ----------
+    metrics : Dict[str, Any]
+        Sampled honest-ruler metric scores and metadata.
+    is_semantically_directed : Optional[bool], optional
+        Whether edge direction has domain meaning.
+
+    Returns
+    -------
+    float
+        Shared automatically routed score.
+    """
+    return composite_auto(metrics, is_semantically_directed)
+
+
+def composite_strict(metrics: Dict[str, Any]) -> float:
+    """Compute the new ruler while rejecting absent required profile fields.
+
+    Parameters
+    ----------
+    metrics : Dict[str, Any]
+        Complete honest-ruler metric profile. Applicable-empty terms must be
+        represented explicitly as ``None``.
+
+    Returns
+    -------
+    float
+        Strict directed or common score.
 
     Raises
     ------
     ValueError
-        If a required quick-mode field is missing.
+        If any common term key, or a required directed term, is absent.
     """
-    missing = [f for f in _QUICK_AVAILABLE_FIELDS_UNDIRECTED if f not in metrics]
+    required = set(_COMMON_WEIGHTS)
+    if _has_declared_hierarchy(metrics):
+        required.update(_DIRECTED_WEIGHTS)
+    missing = sorted(required.difference(metrics))
     if missing:
-        raise ValueError(
-            f"composite_large_undirected: missing required quick-mode fields: "
-            f"{missing}. Did you call quick() before scoring?"
-        )
-
-    score = 0.0
-    score += 65 * max(0.0, 1.0 - metrics["edge_length_cv"])
-    score += 35 * (1.0 if metrics["overlap_count"] == 0 else 0.0)
-    return score
-
-
-def composite_large_auto(
-    metrics: Dict[str, float], is_semantically_directed: Optional[bool] = None
-) -> float:
-    """Pick composite_large or composite_large_undirected by direction flag.
-
-    Mirrors ``composite_auto`` at the large-graph (quick-tier-only) profile.
-    When ``is_semantically_directed`` is True (or None, conservative
-    default), returns ``composite_large(metrics)``. When False, returns
-    ``composite_large_undirected(metrics)``.
-
-    Parameters
-    ----------
-    metrics : Dict[str, float]
-        Metric name to scalar value mapping from ``quick()`` or equivalent.
-    is_semantically_directed : Optional[bool], optional
-        Whether the graph has a meaningful direction. ``None`` is treated as
-        directed to preserve the existing conservative behavior.
-
-    Returns
-    -------
-    float
-        Directed or undirected large-tier composite score.
-    """
-    if is_semantically_directed is None or is_semantically_directed:
-        return composite_large(metrics)
-    return composite_large_undirected(metrics)
-
-
-def composite_strict(metrics: Dict[str, float]) -> float:
-    """Strict variant of ``composite()`` that refuses silent defaults.
-
-    Raises ValueError if any required full-profile field is absent.
-    Use at N<=2000 where ``full()`` has run; use ``composite_large`` at N>2000.
-    """
-    missing = [f for f in _FULL_ONLY_FIELDS | _QUICK_AVAILABLE_FIELDS if f not in metrics]
-    if missing:
-        raise ValueError(
-            f"composite_strict: missing required full-profile fields: {missing}. "
-            f"At N>2000 use composite_large() instead."
-        )
+        raise ValueError(f"composite_strict: missing required fields: {missing}")
     return composite(metrics)
 
 
@@ -1790,6 +2685,7 @@ def quick(
     back_edge_mask: Optional[torch.Tensor] = None,
     *,
     seed: Optional[int] = None,
+    declared_hierarchical: bool = False,
 ) -> Dict[str, Any]:
     """Compute the Tier-1 metric bundle.
 
@@ -1812,6 +2708,8 @@ def quick(
     seed : Optional[int], optional
         Seed forwarded to stochastic Tier-1 metrics. ``None`` preserves the
         existing stochastic behavior.
+    declared_hierarchical : bool, optional
+        Explicit declaration that DAG or pre-layout rank semantics apply.
 
     Returns
     -------
@@ -1831,13 +2729,16 @@ def quick(
     result: Dict[str, Any] = {
         "_graph_n_nodes": N,
         "_graph_n_edges": E,
+        "declared_hierarchical": declared_hierarchical,
     }
 
     # Edge length CV
     result.update(edge_length_cv(pos, ei))
+    result.update(edge_length_deviation_score(pos, ei))
 
     # DAG consistency
     result.update(dag_consistency(pos, ei, direction=direction, back_edge_mask=bem))
+    result.update(directed_flow_score(pos, ei, direction=direction, back_edge_mask=bem))
 
     # Depth-position correlation
     if topo_depth is None and ei.numel() > 0:
@@ -1848,12 +2749,16 @@ def quick(
     if topo_depth is not None:
         if not isinstance(topo_depth, torch.Tensor):
             topo_depth = torch.tensor(topo_depth, dtype=torch.long)
-        result.update(depth_position_correlation(pos, topo_depth))
+        result.update(depth_position_correlation(pos, topo_depth, direction=direction))
+        depth_rho = result["depth_spearman_rho"]
+        result["depth_order_score"] = (
+            None if depth_rho is None else max(0.0, min(1.0, float(depth_rho)))
+        )
 
     # Overlap count
     if node_sizes is not None:
         ns = _ensure_cpu(node_sizes)
-        result.update(count_overlaps_detailed(pos, ns, seed=seed))
+        result.update(node_occlusion_score(pos, ns, seed=seed))
         # Mean node bounding-box diagonal (r80-P6): used by the composite
         # degeneracy guard to detect point-collapsed layouts, where edge
         # length has collapsed to near-zero relative to node size. Depends
@@ -1861,6 +2766,8 @@ def quick(
         # reproducible without re-running any layout.
         diag = torch.sqrt(ns[:, 0] ** 2 + ns[:, 1] ** 2)
         result["node_diag_mean"] = diag.mean().item() if diag.numel() > 0 else 0.0
+    else:
+        result["node_occlusion_score"] = None
 
     # Aspect ratio
     ns_arg = _ensure_cpu(node_sizes) if node_sizes is not None else None
@@ -1868,6 +2775,47 @@ def quick(
 
     # Edge straightness
     result.update(edge_direction_straightness(pos, ei, direction=direction))
+
+    if N > 2_000:
+        # Large graphs keep the frozen ten-term identity; only deterministic
+        # sample budgets shrink with scale. Terms without applicable metadata
+        # remain ``None`` and are renormalized by the shared table.
+        source_budget = max(16, min(64, math.ceil(100_000 / N)))
+        target_budget = max(64, min(256, math.ceil(500_000 / N)))
+        neighborhood_budget = max(128, min(512, math.ceil(1_000_000 / N)))
+        pair_budget = max(50_000, min(250_000, 50 * E))
+        if N <= 100_000:
+            result.update(
+                isotonic_stress(
+                    pos,
+                    ei,
+                    N,
+                    n_sources=source_budget,
+                    n_targets=target_budget,
+                )
+            )
+            result.update(neighborhood_preservation(pos, ei, N, n_samples=neighborhood_budget))
+            result.update(angular_resolution_score(pos, ei, n_samples=512))
+            result.update(path_continuity_score(pos, ei, n_samples=512))
+        else:
+            # Dense row-to-all-node distance blocks and Python adjacency sets
+            # are genuinely infeasible at rare-suite scale, so applicability
+            # renormalization drops these terms explicitly.
+            result["ksm_score"] = None
+            result["neighborhood_preservation_score"] = None
+            result["angular_resolution_score"] = None
+            result["path_continuity_score"] = None
+        result.update(edge_crossing_score(pos, ei, n_samples=pair_budget, seed=0))
+        result.update(gabriel_score(pos, ei, n_samples=min(E, 256), node_samples=min(N, 512)))
+        result.update(crossing_angle_score(pos, ei, n_samples=pair_budget, seed=0))
+        result["cluster_silhouette_score"] = None
+        result["_sample_sizes"] = {
+            "stress_sources": source_budget,
+            "stress_targets": target_budget,
+            "crossing_samples": pair_budget,
+            "neighborhood_samples": neighborhood_budget,
+            "gabriel_edges": min(E, 256),
+        }
 
     result["_compute_time_seconds"] = _time.perf_counter() - t0
     return result
@@ -1888,6 +2836,9 @@ def full(
     label_positions: Optional[Any] = None,
     edge_labels: Optional[Any] = None,
     back_edge_mask: Optional[torch.Tensor] = None,
+    declared_hierarchical: bool = False,
+    edge_length_targets: Optional[torch.Tensor] = None,
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """All metrics including sampled Tier-2 and DAG-specific Tier-3.
 
@@ -1922,6 +2873,12 @@ def full(
     back_edge_mask : Optional[torch.Tensor], optional
         Boolean mask with shape ``[E]`` for back edges excluded from
         ``dag_consistency``.
+    declared_hierarchical : bool, optional
+        Explicit declaration that DAG or pre-layout rank semantics apply.
+    edge_length_targets : Optional[torch.Tensor], optional
+        Declared target edge lengths with shape ``[E]``.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Precomputed unweighted shortest paths with shape ``[N, N]``.
 
     Returns
     -------
@@ -1949,17 +2906,16 @@ def full(
         node_sizes=node_sizes,
         direction=direction,
         back_edge_mask=back_edge_mask,
+        declared_hierarchical=declared_hierarchical,
     )
 
-    # Tier 2: Sampled metrics. Stress and neighborhood preservation both need
-    # graph distances, so full() computes them once per metric evaluation.
-    all_pairs_dist = None
-    if ei.numel() > 0 and N >= 2:
-        csr_off, csr_tgt = _build_csr(ei, N)
-        all_pairs_dist = _all_pairs_unweighted(csr_off, csr_tgt, N, max_dist=20)
+    if edge_length_targets is not None:
+        result.update(edge_length_deviation_score(pos, ei, edge_length_targets))
 
+    # The ruler samples graph-distance strata without a distance cap and freezes
+    # both source rows and edge-pair RNG state.
     result.update(
-        sampled_stress(
+        isotonic_stress(
             pos,
             ei,
             N,
@@ -1968,22 +2924,37 @@ def full(
             all_pairs_dist=all_pairs_dist,
         )
     )
-    # Pass an explicit seed so composite scoring is deterministic
-    # for the same positions. measurement found per-call composite
-    # spreads up to 6.9 (std 2.6) on small graphs because sampled_crossing_rate
-    # was reading from the global torch RNG. Polish pickers had to torch.manual_seed
-    # before each candidate; this makes the metric self-deterministic.
-    result.update(sampled_crossing_rate(pos, ei, n_samples=crossing_samples, seed=0))
+    crossing_geometry = _crossing_pair_geometry(pos, ei, n_samples=crossing_samples, seed=0)
+    result.update(
+        edge_crossing_score(
+            pos,
+            ei,
+            n_samples=crossing_samples,
+            seed=0,
+            _geometry=crossing_geometry,
+        )
+    )
     result.update(
         neighborhood_preservation(
             pos,
             ei,
             N,
             n_samples=neighborhood_samples,
-            all_pairs_dist=all_pairs_dist,
         )
     )
     result.update(angular_resolution(pos, ei))
+    result.update(angular_resolution_score(pos, ei))
+    result.update(gabriel_score(pos, ei))
+    result.update(
+        crossing_angle_score(
+            pos,
+            ei,
+            n_samples=crossing_samples,
+            seed=0,
+            _geometry=crossing_geometry,
+        )
+    )
+    result.update(path_continuity_score(pos, ei))
 
     # Edge-aware metrics (when curves are provided)
     if curves is not None:
@@ -2000,6 +2971,10 @@ def full(
     if cluster_ids is not None:
         cluster_ids = _ensure_cpu(cluster_ids)
         result.update(cluster_separation(pos, cluster_ids))
+        result.update(cluster_silhouette_score(pos, cluster_ids))
+    else:
+        result["cluster_silhouette_score"] = None
+        result["cluster_silhouette"] = None
 
     if topo_depth is not None:
         result.update(layer_uniformity(pos, topo_depth))
@@ -2696,23 +3671,11 @@ def composite_drawing(
     label_positions)`` alone -- no live layout run -- and is deterministic
     for a fixed ``seed``.
 
-    Weights (sum = 100) and rationale:
-    - Routed crossings: 30. Edge-edge crossings measured on the paths the
-      reader actually sees are the dominant legibility defect in a finished
-      drawing (Purchase 1997 ranks crossings first among aesthetics).
-    - Edge-node crossings: 20. Edges plowing through unrelated node boxes
-      destroy node readability and imply false adjacency.
-    - Label overlaps: 15 (7.5 label-vs-node + 7.5 label-vs-label). Occluded
-      text is unreadable text; neutral half-credit when the graph has no
-      edge labels (same convention as composite()'s cluster term).
-    - Port angular resolution: 12. Edges leaving a node at indistinguishable
-      angles cannot be traced; measured at the true routed tangents.
-    - Node overlap sanity: 10. Binary, mirroring composite(): overlapping
-      nodes mean the drawing failed upstream of routing.
-    - Curvature consistency: 8. Uniform curvature reads as a deliberate
-      style; wildly mixed straight/hooked edges read as noise.
-    - Bend economy: 5. Ortho/taxi elbows are fine in moderation; >= 4 bends
-      per edge on average makes paths untraceable.
+    Shared common-ruler terms retain their frozen weights and formulas: KSM
+    25, routed EC 20, saturating NO 13, and routed-port AR 4. Drawing-only
+    terms divide the remaining 38 points in their established proportions.
+    Inapplicable label terms are dropped and all remaining weights are
+    renormalized; they never receive neutral half-credit.
 
     Parameters
     ----------
@@ -2753,6 +3716,7 @@ def composite_drawing(
     ecc = edge_curvature_consistency(curves)
     bends = bend_count(curves)
     overlaps = count_overlaps(pos, sizes)
+    ksm = isotonic_stress(pos, ei)
 
     has_labels = bool(
         label_positions is not None
@@ -2769,34 +3733,44 @@ def composite_drawing(
     else:
         label_overlaps = 0
         label_node_overlaps = 0
-        # Neutral half-credit when the graph has no edge labels, mirroring
-        # composite()'s treatment of the cluster term on cluster-free graphs.
-        term_label_node = 0.5
-        term_label_label = 0.5
+        term_label_node = None
+        term_label_label = None
 
-    # Same clamp conventions as the placement composites where a direct
-    # analog exists (crossing x10 clamp, angular /40 clamp, binary overlap).
-    term_crossing = max(0.0, 1.0 - rc["routed_crossing_rate"] * 10.0)
+    c_max = _degree_corrected_crossing_max(ei, int(pos.shape[0]))
+    crossing_count = int(rc["routed_crossing_estimated_total"])
+    term_crossing = 1.0 if c_max <= 0 else 1.0 - math.sqrt(min(1.0, crossing_count / c_max))
     term_edge_node = max(0.0, 1.0 - float(enc["edge_node_crossing_rate"]) * 10.0)
-    term_port = min(1.0, par["port_angular_res_mean_deg"] / 40.0)
-    term_overlap = 1.0 if overlaps == 0 else 0.0
+    term_port = par["port_angular_resolution_score"]
+    term_overlap = 1.0 / (1.0 + 2.0 * overlaps / max(int(pos.shape[0]), 1))
+    term_stress = ksm["ksm_score"]
     term_curvature = max(0.0, 1.0 - min(1.0, ecc["edge_curvature_cv"]))
     term_bend = max(0.0, 1.0 - bends["bend_mean_per_edge"] / 4.0)
 
-    score = 0.0
-    score += 30.0 * term_crossing
-    score += 20.0 * term_edge_node
-    score += 7.5 * term_label_node
-    score += 7.5 * term_label_label
-    score += 12.0 * term_port
-    score += 10.0 * term_overlap
-    score += 8.0 * term_curvature
-    score += 5.0 * term_bend
+    drawing_terms = {
+        "stress": (25.0, term_stress),
+        "crossing": (20.0, term_crossing),
+        "overlap": (13.0, term_overlap),
+        "port": (4.0, term_port),
+        "edge_node": (95.0 / 6.0, term_edge_node),
+        "label_node": (95.0 / 16.0, term_label_node),
+        "label_label": (95.0 / 16.0, term_label_label),
+        "curvature": (19.0 / 3.0, term_curvature),
+        "bend": (95.0 / 24.0, term_bend),
+    }
+    applicable_weight = sum(weight for weight, value in drawing_terms.values() if value is not None)
+    score = (
+        100.0
+        * sum(
+            weight * float(value) for weight, value in drawing_terms.values() if value is not None
+        )
+        / applicable_weight
+    )
 
     return {
         "composite_drawing": score,
         "drawing_crossing_rate": rc["routed_crossing_rate"],
         "drawing_crossing_estimated_total": rc["routed_crossing_estimated_total"],
+        "drawing_crossing_c_max": c_max,
         "drawing_edge_node_crossings": enc["edge_node_crossings"],
         "drawing_edge_node_crossing_rate": enc["edge_node_crossing_rate"],
         "drawing_port_angular_deg": par["port_angular_res_mean_deg"],
@@ -2807,6 +3781,7 @@ def composite_drawing(
         "drawing_label_node_overlaps": label_node_overlaps,
         "drawing_node_overlaps": overlaps,
         "drawing_has_labels": has_labels,
+        "drawing_term_stress": term_stress,
         "drawing_term_crossing": term_crossing,
         "drawing_term_edge_node": term_edge_node,
         "drawing_term_label_node": term_label_node,

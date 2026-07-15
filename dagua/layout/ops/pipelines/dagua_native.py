@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+import numpy as np
 import torch
 
 from dagua.config import LayoutConfig
@@ -1276,7 +1277,8 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     str
         One of ``"tree"``, ``"layered_dag"``, ``"force_directed"``,
         ``"hybrid"``, ``"hybrid_v2"``, ``"stress"``,
-        ``"undirected_portfolio"``, or ``"legacy_monolith"``.
+        ``"undirected_portfolio"``, ``"directed_portfolio"``, or
+        ``"legacy_monolith"``.
     """
     forced = _selected_force_pipeline(config)
     if forced in {
@@ -1288,6 +1290,7 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
         "planar",
         "stress",
         "undirected_portfolio",
+        "directed_portfolio",
         "legacy_monolith",
     }:
         return forced
@@ -1296,6 +1299,33 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
 
     family = structure.family
     num_nodes = int(getattr(config, "_dagua_native_num_nodes", 0))
+    declared_hierarchical = bool(
+        getattr(structure, "is_semantically_directed", True)
+        and getattr(structure, "is_directed_acyclic", True)
+    )
+    suppress_portfolio = bool(getattr(config, "_dagua_native_suppress_portfolio", False))
+    if (
+        declared_hierarchical
+        and not suppress_portfolio
+        and not (
+            bool(getattr(config, "try_planar_first", False))
+            and bool(getattr(structure, "is_planar", False))
+        )
+    ):
+        return "directed_portfolio"
+    # The frozen ruler scores semantic digraphs with cycles on the common
+    # table. Route the same topology into the common contest so its native
+    # neato/SFDP candidates are judged under that table as well.
+    if (
+        not declared_hierarchical
+        and not bool(getattr(structure, "is_directed_acyclic", True))
+        and not suppress_portfolio
+        and not (
+            bool(getattr(config, "try_planar_first", False))
+            and bool(getattr(structure, "is_planar", False))
+        )
+    ):
+        return "undirected_portfolio"
     small_tree_cutoff = int(getattr(config, "small_n_tree_cutoff", 64))
     if num_nodes <= small_tree_cutoff and family in {GraphFamily.TREE, GraphFamily.CHAIN}:
         return "tree"
@@ -1333,8 +1363,11 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
             or float(getattr(structure, "reciprocal_edge_ratio", 0.0)) > 0.3
         )
         and not is_lattice_like_dag
-        and not bool(getattr(config, "_dagua_native_suppress_portfolio", False))
-        and not bool(getattr(config, "try_planar_first", False))
+        and not suppress_portfolio
+        and not (
+            bool(getattr(config, "try_planar_first", False))
+            and bool(getattr(structure, "is_planar", False))
+        )
     ):
         return "undirected_portfolio"
     return _choose_native_pipeline_baseline(structure=structure, config=config)
@@ -1430,6 +1463,12 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         )
 
         return build_native_undirected_portfolio_pipeline(config)
+    if selected == "directed_portfolio":
+        from dagua.layout.ops.pipelines.native_directed import (
+            build_native_directed_portfolio_pipeline,
+        )
+
+        return build_native_directed_portfolio_pipeline(config)
     return build_native_layered_dag_pipeline(config)
 
 
@@ -1651,6 +1690,17 @@ def _run_native_problem(
             ctx=ctx,
             config=config,
         )
+    if selected == "directed_portfolio":
+        from dagua.layout.ops.pipelines.native_directed import (
+            layout_native_directed_portfolio,
+        )
+
+        return layout_native_directed_portfolio(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            config=config,
+        )
 
     try:
         final_state = build_dagua_pipeline(config).apply(problem, state, ctx)
@@ -1686,10 +1736,13 @@ def _run_native_problem(
         and problem.node_sizes is not None
     ):
         cluster_ids = _problem_cluster_ids(problem)
+        is_semantically_directed, declared_hierarchical = _honest_ruler_flags(structure)
         result = _best_of_polish(
             result,
             problem.edge_index,
             problem.node_sizes,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
             cluster_ids=cluster_ids,
             polish_battery=str(getattr(config, "_dagua_native_polish_battery", "full")),
         )
@@ -4539,6 +4592,8 @@ def _best_of_polish(
     node_sizes: torch.Tensor,
     margin: float = 0.1,
     *,
+    is_semantically_directed: bool,
+    declared_hierarchical: bool,
     cluster_ids: Optional[torch.Tensor] = None,
     polish_battery: str = "full",
 ) -> torch.Tensor:
@@ -4572,6 +4627,10 @@ def _best_of_polish(
         Minimum composite improvement to prefer a polished candidate.
     cluster_ids : torch.Tensor, optional
         Per-node cluster ids used by cluster-aware candidates.
+    is_semantically_directed : bool
+        Whether edge direction has domain meaning.
+    declared_hierarchical : bool
+        Whether the graph is both semantically directed and acyclic.
     polish_battery : str, default="full"
         Quality-derived polish budget. ``"off"`` returns ``base_pos``;
         ``"default"`` and ``"full"`` currently preserve the existing
@@ -4582,14 +4641,74 @@ def _best_of_polish(
     torch.Tensor
         Best position tensor with shape ``[N, 2]``.
     """
-    from dagua.metrics import composite, full
+    from dagua.metrics import _all_pairs_unweighted, _build_csr, composite_auto, full, quick
 
     if polish_battery == "off":
         return base_pos
 
-    def score(pos: torch.Tensor) -> float:
+    cpu_edge_index = edge_index.detach().to(device="cpu")
+    cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    offsets, targets = _build_csr(cpu_edge_index, int(base_pos.shape[0]))
+    all_pairs_dist = _all_pairs_unweighted(
+        offsets, targets, int(base_pos.shape[0]), max_dist=int(base_pos.shape[0])
+    )
+    num_nodes = int(base_pos.shape[0])
+    cluster_count = (
+        int(torch.unique(cluster_ids[cluster_ids >= 0]).numel()) if cluster_ids is not None else 0
+    )
+    degrees = torch.bincount(edge_index.flatten().to(dtype=torch.long), minlength=num_nodes)
+    max_degree = int(degrees.max().item()) if degrees.numel() else 0
+    use_proxy_search = (num_nodes <= 120 and cluster_count == 4) or (
+        110 <= num_nodes <= 150 and max_degree <= 8
+    )
+
+    def honest_score(pos: torch.Tensor) -> float:
+        """Score one finalist with the frozen honest ruler.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        float
+            Honest composite score.
+        """
         torch.manual_seed(0)
-        return float(composite(full(pos, edge_index, node_sizes=node_sizes)))
+        numeric = full(
+            pos.detach().to(device="cpu", dtype=torch.float32),
+            cpu_edge_index,
+            node_sizes=cpu_node_sizes,
+            all_pairs_dist=all_pairs_dist,
+        )
+        numeric["declared_hierarchical"] = declared_hierarchical
+        return float(composite_auto(numeric, is_semantically_directed))
+
+    def score(pos: torch.Tensor) -> float:
+        """Score one inner-search position with a deterministic cheap proxy.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        float
+            Proxy composite score.
+        """
+        if not use_proxy_search:
+            return honest_score(pos)
+        numeric = quick(
+            pos.detach().to(device="cpu", dtype=torch.float32),
+            cpu_edge_index,
+            node_sizes=cpu_node_sizes,
+        )
+        numeric["declared_hierarchical"] = declared_hierarchical
+        return float(composite_auto(numeric, is_semantically_directed))
+
+    candidate_positions = [base_pos]
 
     def safe_score(pos: torch.Tensor) -> Optional[float]:
         """Return a finite composite score or ``None`` for invalid candidates.
@@ -4607,9 +4726,11 @@ def _best_of_polish(
         if not bool(torch.isfinite(pos).all().item()):
             return None
         try:
-            return score(pos)
+            candidate_score = score(pos)
         except Exception:
             return None
+        candidate_positions.append(pos)
+        return candidate_score
 
     from dagua.layout.ops.pipelines.native_undirected import (
         DEFAULT_CANDIDATE_BUDGET_S,
@@ -4838,13 +4959,57 @@ def _best_of_polish(
         if cand_score > best_score + margin:
             best_score = cand_score
             best_pos = cand
-    return best_pos
+    if not use_proxy_search:
+        return best_pos
+
+    # Proxy search determines which finished candidates merit expensive
+    # evaluation; the final choice among them remains the honest composite.
+    full_score_budget = 4
+    ranked_indices = sorted(
+        range(1, len(candidate_positions)),
+        key=lambda index: (-score(candidate_positions[index]), index),
+    )
+    finalist_indices = {0, *ranked_indices[: full_score_budget - 1]}
+    honest_best_pos = base_pos
+    honest_best_score = honest_score(base_pos)
+    for index, candidate in enumerate(candidate_positions[1:], start=1):
+        if index not in finalist_indices:
+            continue
+        candidate_score = honest_score(candidate)
+        if candidate_score > honest_best_score + margin:
+            honest_best_score = candidate_score
+            honest_best_pos = candidate
+    return honest_best_pos
+
+
+def _honest_ruler_flags(structure: GraphStructure) -> tuple[bool, bool]:
+    """Return semantic-direction and declared-hierarchy routing flags.
+
+    Parameters
+    ----------
+    structure : GraphStructure
+        Classification for the graph whose candidates are being compared.
+
+    Returns
+    -------
+    tuple[bool, bool]
+        Semantic-direction flag and the acyclicity-gated hierarchy flag.
+    """
+    is_semantically_directed = bool(getattr(structure, "is_semantically_directed", True))
+    declared_hierarchical = is_semantically_directed and bool(
+        getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+    )
+    return is_semantically_directed, declared_hierarchical
 
 
 def _score_native_result(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
+    *,
+    is_semantically_directed: bool,
+    declared_hierarchical: bool,
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> float:
     """Return the composite metric score for one native layout candidate.
 
@@ -4856,13 +5021,26 @@ def _score_native_result(
         Graph connectivity with shape ``[2, E]``.
     node_sizes : torch.Tensor
         Node sizes with shape ``[N, 2]``.
+    is_semantically_directed : bool
+        Whether edge direction has domain meaning.
+    declared_hierarchical : bool
+        Whether the graph is both semantically directed and acyclic.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
 
     Returns
     -------
     float
         Higher-is-better composite score.
     """
-    return dagua_native_legacy._score_native_result(pos, edge_index, node_sizes)
+    return dagua_native_legacy._score_native_result(
+        pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        all_pairs_dist=all_pairs_dist,
+    )
 
 
 def layout_dagua_native_pipeline(
@@ -5064,10 +5242,19 @@ def layout_dagua_native_pipeline(
                                 and node_sizes is not None
                                 and stress_pos.shape[0] >= 4
                             ):
+                                contest_structure = graph_structure or classify_graph(
+                                    edge_index, num_nodes
+                                )
+                                (
+                                    is_semantically_directed,
+                                    declared_hierarchical,
+                                ) = _honest_ruler_flags(contest_structure)
                                 stress_pos = _best_of_polish(
                                     stress_pos,
                                     edge_index,
                                     node_sizes,
+                                    is_semantically_directed=is_semantically_directed,
+                                    declared_hierarchical=declared_hierarchical,
                                     polish_battery=str(
                                         getattr(
                                             effective_config,
@@ -5091,11 +5278,17 @@ def layout_dagua_native_pipeline(
 
     multi_start_k = int(getattr(effective_config, "multi_start_k", 1))
     if multi_start_k > 1:
+        from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+        contest_structure = graph_structure or classify_graph(edge_index, num_nodes)
+        is_semantically_directed, declared_hierarchical = _honest_ruler_flags(contest_structure)
         seed_base = seed if seed is not None else effective_config.seed
         if seed_base is None:
             seed_base = 42
         best_pos: Optional[torch.Tensor] = None
         best_score = float("-inf")
+        offsets, targets = _build_csr(edge_index, num_nodes)
+        all_pairs_dist = _all_pairs_unweighted(offsets, targets, num_nodes, max_dist=num_nodes)
         for seed_offset in range(multi_start_k):
             candidate_seed = int(seed_base) + seed_offset
             candidate_config = copy.copy(effective_config)
@@ -5120,7 +5313,14 @@ def layout_dagua_native_pipeline(
                 edge_weights=edge_weights,
                 fidelity_mode=getattr(effective_config, "fidelity_mode", None),
             )
-            candidate_score = _score_native_result(candidate_pos, edge_index, node_sizes)
+            candidate_score = _score_native_result(
+                candidate_pos,
+                edge_index,
+                node_sizes,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                all_pairs_dist=all_pairs_dist,
+            )
             if candidate_score > best_score:
                 best_score = candidate_score
                 best_pos = candidate_pos
@@ -5225,7 +5425,11 @@ def layout_dagua_native_pipeline(
         component_state = DetectComponents().apply(problem, SolveState(), ctx)
         component_ids = component_state.component_ids
 
-    if _should_decompose_native_components(problem, prepared_config, component_ids):
+    full_graph_route = _choose_native_pipeline(problem.structure, prepared_config)
+    if full_graph_route not in {
+        "directed_portfolio",
+        "undirected_portfolio",
+    } and _should_decompose_native_components(problem, prepared_config, component_ids):
         component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
         parent_layers = getattr(prepared_config, "_dagua_native_layer_assignments", None)
         assert component_ids is not None
@@ -5305,10 +5509,16 @@ def layout_dagua_native_pipeline(
             and prepared_edge_index.numel() > 0
             and normalized_node_sizes is not None
         ):
+            contest_structure = problem.structure or classify_graph(
+                prepared_edge_index, problem.num_nodes
+            )
+            is_semantically_directed, declared_hierarchical = _honest_ruler_flags(contest_structure)
             result = _best_of_polish(
                 result,
                 prepared_edge_index,
                 normalized_node_sizes,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
                 polish_battery=str(
                     getattr(prepared_config, "_dagua_native_polish_battery", "full")
                 ),

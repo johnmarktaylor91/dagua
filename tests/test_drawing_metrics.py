@@ -181,12 +181,12 @@ class TestCompositeDrawing:
         ):
             assert key in result
 
-    def test_no_labels_uses_neutral_terms(self) -> None:
+    def test_no_labels_drops_inapplicable_terms(self) -> None:
         pos, ei, sizes, curves = self._setup()
         result = composite_drawing(pos, ei, sizes, curves, seed=0)
         assert result["drawing_has_labels"] is False
-        assert result["drawing_term_label_node"] == 0.5
-        assert result["drawing_term_label_label"] == 0.5
+        assert result["drawing_term_label_node"] is None
+        assert result["drawing_term_label_label"] is None
 
     def test_labels_scored_when_present(self) -> None:
         pos, ei, sizes, curves = self._setup()

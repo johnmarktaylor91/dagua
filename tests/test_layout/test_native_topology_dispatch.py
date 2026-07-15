@@ -44,17 +44,8 @@ def test_classifier_exposes_dispatch_fields_for_cyclic_graph() -> None:
     assert result.has_dominant_component
 
 
-def test_dispatch_routes_force_directed_family_to_force_pipeline() -> None:
-    """FORCE_DIRECTED + high cyclicity should select the force sub-pipeline.
-
-    Sprint-20g tightened the auto-route gate from ``cyclicity_ratio > 0.3``
-    to ``cyclicity_ratio > 0.5`` after benchmarking found force_directed
-    losing to layered_dag/hybrid on every cyclic candidate at the lower
-    threshold (recurrent_feedback_cell, kitchen_sink_*, parallel_cycles).
-    The strict gate keeps the force_directed branch reachable by its
-    intended target (densely-cyclic non-hierarchical graphs) while
-    excluding mostly-DAG graphs with sparse back-edges.
-    """
+def test_dispatch_routes_force_directed_family_to_common_contest() -> None:
+    """A densely cyclic digraph follows the ruler into the common contest."""
     structure = GraphStructure(
         family=GraphFamily.FORCE_DIRECTED,
         num_components=1,
@@ -68,11 +59,11 @@ def test_dispatch_routes_force_directed_family_to_force_pipeline() -> None:
 
     selected = _choose_native_pipeline(structure, LayoutConfig())
 
-    assert selected == "force_directed"
+    assert selected == "undirected_portfolio"
 
 
-def test_dispatch_routes_karate_like_feedback_to_hybrid() -> None:
-    """Low-feedback cyclic directed graphs should select the hybrid path."""
+def test_dispatch_routes_karate_like_feedback_to_common_contest() -> None:
+    """A sparse-feedback digraph follows the ruler into the common contest."""
     structure = GraphStructure(
         family=GraphFamily.HYBRID,
         num_components=1,
@@ -86,7 +77,7 @@ def test_dispatch_routes_karate_like_feedback_to_hybrid() -> None:
 
     selected = _choose_native_pipeline(structure, LayoutConfig())
 
-    assert selected == "hybrid"
+    assert selected == "undirected_portfolio"
 
 
 def test_force_pipeline_legacy_monolith_matches_legacy_module() -> None:

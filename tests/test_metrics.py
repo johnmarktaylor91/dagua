@@ -186,8 +186,8 @@ class TestComputeAllMetrics:
         assert q_good > q_bad
 
 
-def test_composite_includes_sampled_stress_weight() -> None:
-    """Directed composite should apply the 10-point sampled-stress term.
+def test_composite_includes_isotonic_stress_weight() -> None:
+    """Directed composite should apply the frozen common KSM weight.
 
     Returns
     -------
@@ -195,30 +195,16 @@ def test_composite_includes_sampled_stress_weight() -> None:
         This test asserts the weighted composite formula with non-trivial
         normalized component values.
     """
-    metric_values = {
-        "dag_consistency": 0.5,
-        "edge_length_cv": 0.25,
-        "depth_spearman_rho": 0.5,
-        "overlap_count": 0,
-        "edge_straightness_mean_deg": 15.0,
-        "crossing_rate": 0.05,
-        "sampled_stress": 0.2,
-        "angular_res_mean_deg": 20.0,
-        "cluster_mean_sep_ratio": 2.5,
-    }
-
-    expected = (
-        22 * 0.5
-        + 18 * 0.75
-        + 13 * 0.5
-        + 8
-        + 9 * (1.0 - 15.0 / 45.0)
-        + 9 * (1.0 - 0.05 * 10)
-        + 10 * (1.0 - 0.2)
-        + 5 * (20.0 / 40.0)
-        + 6 * (2.5 / 5.0)
+    metric_values = {name: 0.5 for name in metrics_module._COMMON_WEIGHTS}
+    metric_values.update(
+        {
+            "ksm_score": 0.8,
+            "directed_flow_score": 0.5,
+            "depth_order_score": 0.5,
+            "declared_hierarchical": True,
+        }
     )
-
+    expected = 0.75 * (25 * 0.8 + 75 * 0.5) + 16 * 0.5 + 9 * 0.5
     assert composite(metric_values) == pytest.approx(expected)
 
 
@@ -447,4 +433,4 @@ class TestLayoutSimilarityAndEvaluate:
             neighborhood_samples=4,
         )
 
-        assert calls == 1
+        assert calls == 0
