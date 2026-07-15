@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dagua.metrics import composite, composite_auto, composite_undirected
+from dagua.metrics import _COMMON_WEIGHTS, composite, composite_auto, composite_undirected
 
 
 def _sample_metrics() -> dict[str, float]:
@@ -15,28 +15,20 @@ def _sample_metrics() -> dict[str, float]:
     dict[str, float]
         Metrics with all keys used by directed and undirected composites.
     """
-    return {
-        "dag_consistency": 0.8,
-        "edge_length_cv": 0.2,
-        "depth_spearman_rho": 0.5,
-        "overlap_count": 0,
-        "edge_straightness_mean_deg": 10.0,
-        "crossing_rate": 0.02,
-        "sampled_stress": 0.3,
-        "angular_res_mean_deg": 30.0,
-        "cluster_mean_sep_ratio": 3.0,
-    }
+    metrics = {name: 0.6 for name in _COMMON_WEIGHTS}
+    metrics.update(
+        {
+            "declared_hierarchical": True,
+            "directed_flow_score": 0.8,
+            "depth_order_score": 0.7,
+        }
+    )
+    return metrics
 
 
 def test_composite_undirected_rescales_retained_metrics() -> None:
     """Composite undirected returns 100 for perfect retained metrics."""
-    metrics = {
-        "edge_length_cv": 0.0,
-        "overlap_count": 0,
-        "crossing_rate": 0.0,
-        "angular_res_mean_deg": 180.0,
-        "cluster_sep": 1.0,
-    }
+    metrics = {name: 1.0 for name in _COMMON_WEIGHTS}
 
     assert composite_undirected(metrics) == pytest.approx(100.0)
 
@@ -59,10 +51,10 @@ def test_composite_auto_undirected_matches_composite_undirected() -> None:
     )
 
 
-def test_composite_auto_none_matches_composite() -> None:
-    """Composite auto defaults to the directed score conservatively."""
+def test_composite_auto_none_matches_common() -> None:
+    """Absent semantic direction routes to the common ruler."""
     metrics = _sample_metrics()
 
     assert composite_auto(metrics, is_semantically_directed=None) == pytest.approx(
-        composite(metrics)
+        composite_undirected(metrics)
     )

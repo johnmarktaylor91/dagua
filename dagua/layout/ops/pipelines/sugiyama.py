@@ -45,6 +45,8 @@ def build_sugiyama_pipeline(
     fidelity_dtype: torch.dtype = torch.float32,
     center_coordinates: bool = True,
     graphviz_enable_cluster_skeleton: bool = False,
+    graphviz_corrected_dot_x: bool = False,
+    graphviz_preserve_point_units: bool = False,
 ) -> Pipeline:
     """Build a Sugiyama layered graph-drawing pipeline.
 
@@ -89,6 +91,11 @@ def build_sugiyama_pipeline(
         Whether to translate the final horizontal span to be centered at zero.
     graphviz_enable_cluster_skeleton : bool, default=False
         Enable the inactive A12 cluster rank/mincross prototype.
+    graphviz_corrected_dot_x : bool, default=False
+        Enable the recursive cluster tie-break used by the corrected directed
+        candidate before its standard separation projection.
+    graphviz_preserve_point_units : bool, default=False
+        Keep bounded typed x-simplex output in Graphviz point units.
 
     Returns
     -------
@@ -121,6 +128,7 @@ def build_sugiyama_pipeline(
         _ExpandDummyNodes(
             use_igraph_edge_order=use_igraph_fidelity,
             use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
+            include_graphviz_cluster_members=graphviz_corrected_dot_x,
         ),
         _BuildNeighborStructures(),
         _BarycenterOrdering(
@@ -133,12 +141,15 @@ def build_sugiyama_pipeline(
             use_graphviz_mincross=use_graphviz_mincross,
             use_graphviz_node_order=use_graphviz_node_order,
             use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
+            use_graphviz_cluster_tie_break=graphviz_corrected_dot_x,
         ),
         _CoordinateAssignment(
             center_coordinates=center_coordinates,
             use_graphviz_xcoord=use_graphviz_xcoord,
             use_igraph_conflicts=use_igraph_fidelity,
             use_graphviz_cluster_skeleton=graphviz_enable_cluster_skeleton,
+            use_graphviz_corrected_dot_x=graphviz_corrected_dot_x,
+            preserve_graphviz_point_units=graphviz_preserve_point_units,
         ),
     ]
     if return_edge_routes:
@@ -170,6 +181,8 @@ def layout_sugiyama_pipeline(
     graphviz_cluster_label_widths: Optional[Dict[str, float]] = None,
     graphviz_apply_cluster_constraints: bool = False,
     graphviz_enable_cluster_skeleton: bool = False,
+    graphviz_corrected_dot_x: bool = False,
+    graphviz_preserve_point_units: bool = False,
     graphviz_expected_x_inventory: Optional[
         Union[
             Tuple[int, Tuple[Tuple[int, int, int], ...]],
@@ -251,6 +264,12 @@ def layout_sugiyama_pipeline(
     graphviz_enable_cluster_skeleton : bool, default=False
         Enable the inactive A12 cluster rank/mincross prototype. It remains
         opt-in because the x-stage integration is not benchmark-safe yet.
+    graphviz_corrected_dot_x : bool, default=False
+        Enable the bounded corrected dot-x candidate. This remains opt-in so
+        legacy fidelity coordinates keep their regression-pinned scale.
+    graphviz_preserve_point_units : bool, default=False
+        Keep typed x-simplex output in point units instead of normalizing it
+        to ``rank_sep``.
     graphviz_expected_x_inventory : tuple, optional
         Instrumented Graphviz node count and exact ``(minlen, weight)``
         multiset required before the typed cluster solve can run.
@@ -369,6 +388,8 @@ def layout_sugiyama_pipeline(
         fidelity_dtype=fidelity_dtype,
         center_coordinates=center_coordinates,
         graphviz_enable_cluster_skeleton=graphviz_enable_cluster_skeleton,
+        graphviz_corrected_dot_x=graphviz_corrected_dot_x,
+        graphviz_preserve_point_units=graphviz_preserve_point_units,
     )
     final_state = pipeline.apply(problem, state, ctx)
 

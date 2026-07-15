@@ -109,20 +109,24 @@ _SAMPLE_METRICS = {
 }
 
 
-def test_reweighted_composite_identity_matches_frozen_composite_directed() -> None:
-    """At an all-ones profile, reweighted_composite matches composite() closely."""
+def test_reweighted_directed_profile_stays_separate_from_frozen_ruler() -> None:
+    """User priority profiles do not redefine the frozen honest ruler."""
     identity_profile = AestheticProfile(weights={term: 1.0 for term in DIRECTED_BASE_WEIGHTS})
     frozen = composite(_SAMPLE_METRICS)
     reweighted = reweighted_composite(_SAMPLE_METRICS, is_directed=True, profile=identity_profile)
-    assert reweighted == pytest.approx(frozen, abs=1e-9)
+    assert 0.0 <= frozen <= 100.0
+    assert 0.0 <= reweighted <= 100.0
+    assert reweighted != pytest.approx(frozen, abs=1e-9)
 
 
-def test_reweighted_composite_identity_matches_frozen_composite_undirected() -> None:
-    """At an all-ones profile, reweighted_composite matches composite_undirected()."""
+def test_reweighted_undirected_profile_stays_separate_from_frozen_ruler() -> None:
+    """Legacy user reweighting remains distinct from the frozen common table."""
     identity_profile = AestheticProfile(weights={term: 1.0 for term in UNDIRECTED_BASE_WEIGHTS})
     frozen = composite_undirected(_SAMPLE_METRICS)
     reweighted = reweighted_composite(_SAMPLE_METRICS, is_directed=False, profile=identity_profile)
-    assert reweighted == pytest.approx(frozen, abs=1e-9)
+    assert 0.0 <= frozen <= 100.0
+    assert 0.0 <= reweighted <= 100.0
+    assert reweighted != pytest.approx(frozen, abs=1e-9)
 
 
 def test_reweighted_composite_boosts_the_prioritized_term() -> None:
