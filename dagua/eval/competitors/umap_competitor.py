@@ -173,9 +173,11 @@ class UMAPGraph(CompetitorBase):
                 elapsed = time.perf_counter() - start
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
-            if num_nodes <= 3:
-                # UMAP's spectral init uses sparse eigensolver which fails
-                # when k >= N. Fall back to random placement for tiny graphs.
+            if num_nodes <= 2:
+                # umap-learn requires n_neighbors > 1, which is impossible
+                # for N <= 2. N == 3 runs real UMAP: init is already "random"
+                # below 10 nodes, so the spectral eigsh limitation (k >= N)
+                # cannot trigger there.
                 generator = torch.Generator(device="cpu")
                 generator.manual_seed(42 if seed is None else seed)
                 pos = torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32)

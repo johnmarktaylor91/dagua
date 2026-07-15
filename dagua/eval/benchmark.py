@@ -93,6 +93,8 @@ DEFAULT_COMPETITOR_ORDER = [
     "linlog",
     "cytoscape_fcose",
     "gephi_yifanhu",
+    "mulment_reference",
+    "nnpnet_reference",
     # OGDF family
     "ogdf_gem",
     "ogdf_fmmm",
@@ -108,6 +110,7 @@ DEFAULT_COMPETITOR_ORDER = [
     "classic_fa2",
     "classic_stress_sgd",
     "classic_sgd2_multi",
+    "dot",
     "classic_sugiyama",
     "classic_spectral",
     "classic_classical_mds",
@@ -123,11 +126,14 @@ DEFAULT_COMPETITOR_ORDER = [
     "classic_neulay",
     "classic_maxent_stress",
     "classic_davidson_harel",
+    "fdp",
     "classic_fmmm",
     "classic_sfdp",
     "classic_drl",
     "classic_lgl",
     "classic_fcose",
+    "mulment_reimpl",
+    "nnpnet_reimpl",
 ]
 VISUAL_MAX_NODES = 2_000
 CRITIC_MAX_NODES = 500
@@ -648,7 +654,7 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         "umap_graph": "umap",
         "tsne_graph": "sklearn",
     }
-    if name.startswith("classic_"):
+    if name.startswith("classic_") or name in {"dot", "fdp"}:
         # Classic adapters are Dagua-owned implementations, so their cache key
         # should track our source changes instead of an external package.
         return f"{name}:{_dagua_source_signature()}"
@@ -767,14 +773,106 @@ def _reuse_cached_result(
     reused = copy.deepcopy(cached_result)
     reused_path = _copy_cached_positions(latest_run_dir, cached_result, run_dir)
     reused["positions_path"] = reused_path
+    # Carry the optional routes blob along on reuse (r80-S6). Old cached
+    # rows without a routes_path stay untouched.
+    cached_routes = cached_result.get("routes_path")
+    if cached_routes:
+        src = latest_run_dir / cached_routes
+        if src.exists():
+            dst = run_dir / cached_routes
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            reused["routes_path"] = cached_routes
+        else:
+            reused["routes_path"] = None
     reused["reused_from"] = str(cached_payload.get("run_id"))
     return reused
+
+
+_DRAWING_SEED = 42
+
+
+def _drawing_metrics(
+    graph,
+    pos: torch.Tensor,
+    dagua_curves: List[Any],
+    dagua_label_positions: List[Any],
+    native_routes: Optional[List[Any]] = None,
+    native_edge_label_positions: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """Compute full-drawing composites for one benchmark row (r80-S6).
+
+    Always computes the "dagua_routed" variant (this engine's positions with
+    DAGUA's router and label placement applied -- the deployment-relevant
+    combined-system score for engines with no native routing). When the
+    adapter captured native geometry, also computes the "native" variant on
+    the engine's own curves, using its own label anchors when available and
+    a neutral label term otherwise. Records which fields were native.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph under test.
+    pos : torch.Tensor
+        Node positions ``[N, 2]``.
+    dagua_curves : List[Any]
+        Curves from dagua's ``route_edges`` on these positions.
+    dagua_label_positions : List[Any]
+        Label anchors from dagua's ``place_edge_labels``.
+    native_routes : List[Any] | None, optional
+        Adapter-captured per-edge polylines, or ``None``.
+    native_edge_label_positions : List[Any] | None, optional
+        Adapter-captured per-edge label anchors, or ``None``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        New ``*_dagua_routed`` (and optionally ``*_native``) metric keys.
+    """
+    from dagua.eval.drawing import native_route_coverage, routes_to_curves
+    from dagua.metrics import composite_drawing
+
+    edge_index = graph.edge_index
+    node_sizes = graph.node_sizes
+    out: Dict[str, Any] = {}
+
+    dagua_routed = composite_drawing(
+        pos,
+        edge_index,
+        node_sizes,
+        dagua_curves,
+        label_positions=dagua_label_positions,
+        edge_labels=graph.edge_labels,
+        seed=_DRAWING_SEED,
+    )
+    out.update({f"{key}_dagua_routed": value for key, value in dagua_routed.items()})
+
+    num_edges = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    out["drawing_native_routes"] = native_routes is not None
+    out["drawing_native_labels"] = native_edge_label_positions is not None
+    out["drawing_native_route_coverage"] = native_route_coverage(native_routes, num_edges)
+
+    native_curves = routes_to_curves(native_routes, pos, edge_index)
+    if native_curves is not None:
+        native = composite_drawing(
+            pos,
+            edge_index,
+            node_sizes,
+            native_curves,
+            label_positions=native_edge_label_positions,
+            edge_labels=graph.edge_labels if native_edge_label_positions is not None else None,
+            seed=_DRAWING_SEED,
+        )
+        out.update({f"{key}_native": value for key, value in native.items()})
+    return out
 
 
 def _metric_payload(
     graph,
     pos: torch.Tensor,
     compute_level: str,
+    native_routes: Optional[List[Any]] = None,
+    native_edge_label_positions: Optional[List[Any]] = None,
 ) -> Tuple[Dict[str, Any], float, List[str], List[str]]:
     edge_index = graph.edge_index
     topo_depth = (
@@ -810,6 +908,18 @@ def _metric_payload(
                 graph.node_sizes,
                 clusters=graph.clusters,
                 direction=graph.direction,
+            )
+        )
+        # Full-drawing composites (r80-S6, ADDITIVE): new keys only; nothing
+        # here feeds composite()/composite_auto() or the W/T/L pipeline.
+        metrics.update(
+            _drawing_metrics(
+                graph,
+                pos,
+                curves,
+                label_positions,
+                native_routes=native_routes,
+                native_edge_label_positions=native_edge_label_positions,
             )
         )
         computed.extend(["tier2", "tier3"])
@@ -1050,9 +1160,31 @@ def _run_one_competitor(
         }
 
     compute_level = _compute_level_for_graph(n_nodes)
-    metrics, comp_score, computed, skipped = _metric_payload(graph, result.pos, compute_level)
+    metrics, comp_score, computed, skipped = _metric_payload(
+        graph,
+        result.pos,
+        compute_level,
+        native_routes=result.routes,
+        native_edge_label_positions=result.edge_label_positions,
+    )
     rel_positions = Path("positions") / f"{bg.test_graph.name}__{competitor.name}.pt"
     torch.save(result.pos.detach().cpu(), run_dir / rel_positions)
+
+    # OPTIONAL routes blob (r80-S6): parallel to positions/*.pt; absence of
+    # the key or file means "no native geometry" and is fully backward
+    # compatible with pre-r80 stores.
+    rel_routes: Optional[str] = None
+    if result.routes is not None or result.edge_label_positions is not None:
+        rel_routes_path = Path("routes") / f"{bg.test_graph.name}__{competitor.name}.pt"
+        (run_dir / rel_routes_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "routes": result.routes,
+                "edge_label_positions": result.edge_label_positions,
+            },
+            run_dir / rel_routes_path,
+        )
+        rel_routes = str(rel_routes_path)
 
     return {
         "status": "OK",
@@ -1062,6 +1194,7 @@ def _run_one_competitor(
         "metrics_computed": computed,
         "metrics_skipped": skipped,
         "positions_path": str(rel_positions),
+        "routes_path": rel_routes,
     }
 
 

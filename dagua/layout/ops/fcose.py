@@ -19,7 +19,6 @@ from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency,
     normalize_positions,
-    shortest_path_distances,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -36,6 +35,9 @@ _DEFAULT_COOLING = 0.99
 _PROOF_COOLING = 0.995
 _MAX_EXACT_REPULSION_NODES = 512
 _MAX_EXACT_INIT_NODES = 2000
+_FCOSE_SPECTRAL_SAMPLE_SIZE = 25
+_FCOSE_POWER_ITERATION_TOLERANCE = 1.0e-7
+_FCOSE_POWER_ITERATION_LIMIT = 1_000
 _QUADTREE_MAX_DEPTH = 24
 _QUADTREE_LEAF_SIZE = 1
 _FCOSE_SPRING_EDGES_KEY = "fcose_spring_edges"
@@ -71,6 +73,40 @@ class _FCoSEQuadTreeNode:
     mass: float = 0.0
     center_of_mass: Optional[torch.Tensor] = None
     children: list["_FCoSEQuadTreeNode"] = field(default_factory=list)
+
+
+@dataclass
+class _FCoSESeededRandom:
+    """Reproduce the seeded JavaScript RNG used by the Cytoscape adapter.
+
+    Parameters
+    ----------
+    seed : int
+        Benchmark seed converted to an unsigned 32-bit integer.
+    """
+
+    seed: int
+
+    def __post_init__(self) -> None:
+        """Normalize the initial state like the adapter's ``seededRandom``.
+
+        Returns
+        -------
+        None
+            The state is normalized in place.
+        """
+        self.seed = (int(self.seed) & 0xFFFFFFFF) or 1
+
+    def random(self) -> float:
+        """Return the next value from the adapter's linear congruential RNG.
+
+        Returns
+        -------
+        float
+            Uniform variate in the half-open interval ``[0, 1)``.
+        """
+        self.seed = (1_664_525 * self.seed + 1_013_904_223) & 0xFFFFFFFF
+        return self.seed / 4_294_967_296.0
 
 
 @dataclass(frozen=True)
@@ -225,10 +261,10 @@ class FCoSEInitialPlacement(Op):
             return state
 
         if problem.num_nodes <= self.config.max_exact_nodes:
-            positions = _distance_embedding(
+            positions = _spectral_distance_embedding(
                 edge_index=problem.edge_index,
                 num_nodes=problem.num_nodes,
-                edge_weights=problem.edge_weights,
+                seed=problem.seed,
                 node_separation=self.config.node_separation,
             )
         else:
@@ -607,13 +643,13 @@ def _require_positions(state: SolveState) -> torch.Tensor:
     return state.pos
 
 
-def _distance_embedding(
+def _spectral_distance_embedding(
     edge_index: torch.Tensor,
     num_nodes: int,
-    edge_weights: Optional[torch.Tensor],
+    seed: int,
     node_separation: float,
 ) -> torch.Tensor:
-    """Embed graph shortest-path distances into two dimensions.
+    """Apply Cytoscape fCoSE's seeded sampled-distance spectral placement.
 
     Parameters
     ----------
@@ -621,8 +657,8 @@ def _distance_embedding(
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
-    edge_weights : torch.Tensor | None
-        Optional edge weights with shape ``[E]``.
+    seed : int
+        Benchmark seed used for pivot selection and power iteration starts.
     node_separation : float
         Coordinate distance multiplier.
 
@@ -631,27 +667,229 @@ def _distance_embedding(
     torch.Tensor
         Initial positions with shape ``[N, 2]``.
     """
-    distances = shortest_path_distances(edge_index, num_nodes, edge_weights=edge_weights)
-    distances = distances * float(node_separation)
-    squared = distances * distances
-    centering = np.eye(num_nodes, dtype=np.float64) - (np.ones((num_nodes, num_nodes)) / num_nodes)
-    gram = -0.5 * centering @ squared @ centering
-    eigenvalues, eigenvectors = np.linalg.eigh(gram)
-    order = np.argsort(eigenvalues)[::-1]
-    coordinates = np.zeros((num_nodes, 2), dtype=np.float64)
-    for out_dim, eigen_index in enumerate(order[:2]):
-        value = max(float(eigenvalues[eigen_index]), 0.0)
-        if value <= 0.0:
-            continue
-        coordinates[:, out_dim] = eigenvectors[:, eigen_index] * math.sqrt(value)
+    adjacency = build_undirected_adjacency(edge_index=edge_index, num_nodes=num_nodes)
+    augmented_adjacency = _connect_spectral_components(adjacency)
+    node_count = len(augmented_adjacency)
+    if node_count <= 2:
+        coordinates = np.zeros((node_count, 2), dtype=np.float64)
+        if node_count == 2:
+            coordinates[1, 0] = float(node_separation)
+        return torch.tensor(coordinates[:num_nodes], dtype=torch.float32)
+
+    rng = _FCoSESeededRandom(seed)
+    sample_count = min(node_count, _FCOSE_SPECTRAL_SAMPLE_SIZE)
+    pivots, distances = _sample_spectral_distances(
+        adjacency=augmented_adjacency,
+        sample_count=sample_count,
+        rng=rng,
+    )
+    squared_distances = np.square(distances * float(node_separation))
+    intersection = squared_distances[np.asarray(pivots, dtype=np.int64), :].T
+    inverse = _regularized_spectral_inverse(intersection)
+
+    centering = np.eye(node_count, dtype=np.float64) - np.full(
+        (node_count, node_count),
+        1.0 / node_count,
+        dtype=np.float64,
+    )
+    operator = centering @ (-0.5 * squared_distances @ inverse @ squared_distances.T) @ centering
+    first = np.asarray([rng.random() for _ in range(node_count)], dtype=np.float64)
+    second = np.asarray([rng.random() for _ in range(node_count)], dtype=np.float64)
+    first_vector, first_value = _spectral_power_iteration(operator=operator, initial=first)
+    second_vector, second_value = _spectral_power_iteration(
+        operator=operator,
+        initial=second,
+        orthogonal_to=first_vector,
+    )
+    coordinates = np.column_stack(
+        (
+            first_vector * math.sqrt(abs(first_value)),
+            second_vector * math.sqrt(abs(second_value)),
+        )
+    )
     if not np.isfinite(coordinates).all() or float(np.abs(coordinates).max()) <= _MIN_DISTANCE:
-        coordinates[:, 0] = np.linspace(
-            -node_separation,
-            node_separation,
-            num_nodes,
+        # A random fallback preserves the public randomize=True contract even
+        # for singular sampled-distance systems.
+        coordinates = np.asarray(
+            [[rng.random() - 0.5, rng.random() - 0.5] for _ in range(node_count)],
             dtype=np.float64,
         )
-    return torch.tensor(coordinates, dtype=torch.float32)
+        coordinates *= float(node_separation)
+    else:
+        # CoSE relies on randomized starts to break coincident spectral
+        # coordinates; exact coincidences otherwise remain inseparable because
+        # their pairwise repulsion direction is the zero vector.
+        jitter_scale = float(node_separation) * 1.0e-3
+        jitter = np.asarray(
+            [[rng.random() - 0.5, rng.random() - 0.5] for _ in range(node_count)],
+            dtype=np.float64,
+        )
+        coordinates += jitter * jitter_scale
+    return torch.tensor(coordinates[:num_nodes], dtype=torch.float32)
+
+
+def _connect_spectral_components(
+    adjacency: list[list[tuple[int, float]]],
+) -> list[list[tuple[int, float]]]:
+    """Connect graph components through the dummy node used by fCoSE spectral layout.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list for the real graph nodes.
+
+    Returns
+    -------
+    list[list[tuple[int, float]]]
+        Copied adjacency list, with one dummy node when multiple components exist.
+    """
+    augmented = [list(neighbors) for neighbors in adjacency]
+    component_ids = _component_ids(adjacency)
+    component_count = max(component_ids, default=-1) + 1
+    if component_count <= 1:
+        return augmented
+
+    representatives: list[int] = []
+    for component in range(component_count):
+        members = [index for index, value in enumerate(component_ids) if value == component]
+        representative = min(members, key=lambda index: (len(adjacency[index]), index))
+        representatives.append(representative)
+    dummy_index = len(augmented)
+    augmented.append([])
+    for representative in representatives:
+        augmented[representative].append((dummy_index, 1.0))
+        augmented[dummy_index].append((representative, 1.0))
+    return augmented
+
+
+def _sample_spectral_distances(
+    adjacency: list[list[tuple[int, float]]],
+    sample_count: int,
+    rng: _FCoSESeededRandom,
+) -> tuple[list[int], np.ndarray]:
+    """Select greedy fCoSE pivots and return their unweighted BFS distances.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Connected adjacency list, including any spectral dummy node.
+    sample_count : int
+        Number of pivot columns to sample.
+    rng : _FCoSESeededRandom
+        Seeded RNG matching the Cytoscape benchmark adapter.
+
+    Returns
+    -------
+    tuple[list[int], numpy.ndarray]
+        Pivot indices and distance matrix with shape ``[N, sample_count]``.
+    """
+    node_count = len(adjacency)
+    pivot = min(int(rng.random() * node_count), node_count - 1)
+    pivots: list[int] = []
+    columns = np.empty((node_count, sample_count), dtype=np.float64)
+    minimum_distances = np.full(node_count, np.inf, dtype=np.float64)
+    for column in range(sample_count):
+        pivots.append(pivot)
+        distances = _unweighted_bfs_distances(adjacency=adjacency, pivot=pivot)
+        columns[:, column] = distances
+        minimum_distances = np.minimum(minimum_distances, distances)
+        pivot = int(np.argmax(minimum_distances))
+    return pivots, columns
+
+
+def _unweighted_bfs_distances(
+    adjacency: list[list[tuple[int, float]]],
+    pivot: int,
+) -> np.ndarray:
+    """Return unweighted shortest-path distances from one spectral pivot.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Connected undirected adjacency list.
+    pivot : int
+        Source node index.
+
+    Returns
+    -------
+    numpy.ndarray
+        Distance vector with shape ``[N]``.
+    """
+    distances = np.full(len(adjacency), np.inf, dtype=np.float64)
+    distances[pivot] = 0.0
+    frontier: deque[int] = deque([pivot])
+    while frontier:
+        node = frontier.popleft()
+        for neighbor, _ in adjacency[node]:
+            if np.isfinite(distances[neighbor]):
+                continue
+            distances[neighbor] = distances[node] + 1.0
+            frontier.append(neighbor)
+    return distances
+
+
+def _regularized_spectral_inverse(intersection: np.ndarray) -> np.ndarray:
+    """Compute fCoSE's regularized pseudoinverse of the sampled intersection.
+
+    Parameters
+    ----------
+    intersection : numpy.ndarray
+        Sampled row/column intersection matrix with shape ``[S, S]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Regularized inverse matrix with shape ``[S, S]``.
+    """
+    left, singular_values, right_transpose = np.linalg.svd(intersection, full_matrices=True)
+    maximum_cube = float(singular_values[0] ** 3) if singular_values.size else 0.0
+    regularized = np.zeros_like(singular_values)
+    nonzero = singular_values > np.finfo(np.float64).eps
+    values = singular_values[nonzero]
+    regularized[nonzero] = values / (values * values + maximum_cube / (values * values))
+    return right_transpose.T @ np.diag(regularized) @ left.T
+
+
+def _spectral_power_iteration(
+    operator: np.ndarray,
+    initial: np.ndarray,
+    orthogonal_to: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, float]:
+    """Run fCoSE's seeded power iteration for one embedding dimension.
+
+    Parameters
+    ----------
+    operator : numpy.ndarray
+        Centered sampled-distance Gram approximation with shape ``[N, N]``.
+    initial : numpy.ndarray
+        Seed-dependent starting vector with shape ``[N]``.
+    orthogonal_to : numpy.ndarray | None, optional
+        First eigenvector to remove when solving the second dimension.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, float]
+        Unit eigenvector and associated Rayleigh estimate.
+    """
+    vector = initial / max(float(np.linalg.norm(initial)), _MIN_DISTANCE)
+    previous = _MIN_DISTANCE
+    eigenvalue = 0.0
+    for _ in range(_FCOSE_POWER_ITERATION_LIMIT):
+        candidate = vector.copy()
+        if orthogonal_to is not None:
+            candidate -= orthogonal_to * float(np.dot(orthogonal_to, candidate))
+        product = operator @ candidate
+        eigenvalue = float(np.dot(candidate, product))
+        norm = float(np.linalg.norm(product))
+        if norm <= _MIN_DISTANCE:
+            break
+        vector = product / norm
+        current = float(np.dot(candidate, vector))
+        ratio = abs(current / previous)
+        if abs(ratio - 1.0) <= _FCOSE_POWER_ITERATION_TOLERANCE:
+            break
+        previous = current
+    return vector, eigenvalue
 
 
 def _large_graph_seeded_components(

@@ -7,23 +7,40 @@ uniformly.
 
 # Import all competitor modules to trigger registration
 from dagua.eval.competitors import (
+    backbone_competitor,  # noqa: F401
     classic_competitor,  # noqa: F401
+    coregd_competitor,  # noqa: F401
+    cytoscape_competitor,  # noqa: F401
     cytoscape_fcose_competitor,  # noqa: F401
+    d3force_competitor,  # noqa: F401
+    d3hierarchy_competitor,  # noqa: F401
     dagre_competitor,  # noqa: F401
     dagua_competitor,  # noqa: F401
+    drgraph_largevis_competitor,  # noqa: F401
     elk_competitor,  # noqa: F401
     fa2_competitor,  # noqa: F401
     gephi_competitor,  # noqa: F401
     graphviz_competitor,  # noqa: F401
     igraph_competitor,  # noqa: F401
+    isom_competitor,  # noqa: F401
     linlog_competitor,  # noqa: F401
+    mulment_nnpnet_competitor,  # noqa: F401
+    native_reference_competitor,  # noqa: F401
     networkx_competitor,  # noqa: F401
     neulay_competitor,  # noqa: F401
+    neural_reference_competitor,  # noqa: F401
     ogdf_competitor,  # noqa: F401
+    openord_competitor,  # noqa: F401
+    pacmap_competitor,  # noqa: F401
+    pipeline_reimpl_competitor,  # noqa: F401
     sgd2_competitor,  # noqa: F401
     sgd2_multi_competitor,  # noqa: F401
+    smacof_competitor,  # noqa: F401
+    sparse_stress_competitor,  # noqa: F401
+    tfdp_competitor,  # noqa: F401
     tsne_competitor,  # noqa: F401
     umap_competitor,  # noqa: F401
+    word2vecgd_competitor,  # noqa: F401
 )
 from dagua.eval.competitors.base import (
     _COMPETITORS,

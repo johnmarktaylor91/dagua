@@ -1,4 +1,12 @@
-"""NetworkX competitor adapters for selected graph layouts."""
+"""NetworkX competitor adapters for selected graph layouts.
+
+Size policy (r80-P6): NetworkX's layout algorithms (spring, etc.) do not
+accept per-node size hints, so these adapters are SIZE-BLIND regardless of
+``dagua.eval.size_policy.size_aware_externals()``. Their positions are
+still scored against dagua's real label-measured ``node_sizes`` (like every
+other engine), so their overlap term simply reflects that they were never
+told how big the nodes actually are.
+"""
 
 from __future__ import annotations
 
@@ -140,6 +148,36 @@ def _networkx_center(dim: int) -> Any:
     return np.zeros(dim, dtype=float)
 
 
+def _networkx_random_walk_arpack_start(num_nodes: int) -> Any:
+    """Build a process-stable start vector for the random-walk oracle.
+
+    NetworkX does not expose a random-walk spectral-layout variant.  The
+    independent adapter therefore fixes the otherwise implicit SciPy ARPACK
+    start vector so repeated eigenspaces have reproducible reference bases.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of rows in the random-walk Laplacian.
+
+    Returns
+    -------
+    Any
+        NumPy unit vector with shape ``[N]``.
+    """
+    import numpy as np
+
+    if num_nodes <= 0:
+        return np.empty((0,), dtype=np.float64)
+    start = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+    start -= float(start.mean())
+    norm = float(np.linalg.norm(start))
+    if norm <= np.finfo(np.float64).eps:
+        start = np.ones(num_nodes, dtype=np.float64)
+        norm = float(np.linalg.norm(start))
+    return start / norm
+
+
 def _networkx_spectral_edge_case_positions(G: Any, dim: int) -> Optional[dict[int, Any]]:
     """Return NetworkX spectral special-case positions when applicable.
 
@@ -240,7 +278,13 @@ def _networkx_laplacian_spectral_array(A: Any, dim: int, normalization: str) -> 
         if symmetric:
             eigenvalues, eigenvectors = sp.sparse.linalg.eigsh(laplacian, k, which="SM", ncv=ncv)
         else:
-            eigenvalues, eigenvectors = sp.sparse.linalg.eigs(laplacian, k, which="SR", ncv=ncv)
+            eigenvalues, eigenvectors = sp.sparse.linalg.eigs(
+                laplacian,
+                k,
+                which="SR",
+                ncv=ncv,
+                v0=_networkx_random_walk_arpack_start(num_nodes),
+            )
     index = np.argsort(np.real(eigenvalues))[1 : dim + 1]
     return np.real(eigenvectors[:, index])
 
@@ -374,6 +418,232 @@ class NetworkXSpectral(_NetworkXBase):
     variant_param_names = frozenset({"dim", "scale"})
     output_scale = 1.0
     duplicate_policy = "last"
+
+
+@register
+class NetworkXCircular(_NetworkXBase):
+    """Competitor adapter for NetworkX's circular layout."""
+
+    name = "nx_circular"
+    max_nodes = 100_000
+    layout_func = "circular_layout"
+    layout_kwargs = {"scale": 1.0}
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset({"scale", "output_dtype", "output_scale"})
+
+
+@register
+class NetworkXShell(_NetworkXBase):
+    """Competitor adapter for NetworkX's shell layout."""
+
+    name = "nx_shell"
+    max_nodes = 100_000
+    layout_func = "shell_layout"
+    layout_kwargs = {"scale": 1.0}
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset({"nlist", "rotate", "scale", "output_dtype", "output_scale"})
+
+
+@register
+class NetworkXSpiral(_NetworkXBase):
+    """Competitor adapter for NetworkX's spiral layout."""
+
+    name = "nx_spiral"
+    max_nodes = 100_000
+    layout_func = "spiral_layout"
+    layout_kwargs = {"scale": 1.0, "resolution": 0.35, "equidistant": False}
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset(
+        {"scale", "resolution", "equidistant", "output_dtype", "output_scale"}
+    )
+
+
+@register
+class NetworkXPlanar(_NetworkXBase):
+    """Competitor adapter for NetworkX's planar layout reference."""
+
+    name = "nx_planar"
+    max_nodes = 100_000
+    layout_func = "planar_layout"
+    layout_kwargs = {"scale": 1.0}
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset({"scale", "output_dtype", "output_scale"})
+
+
+@register
+class NetworkXBipartite(_NetworkXBase):
+    """Competitor adapter for NetworkX's bipartite layout."""
+
+    name = "nx_bipartite"
+    max_nodes = 100_000
+    layout_kwargs = {"align": "vertical", "scale": 1.0, "aspect_ratio": 4.0 / 3.0}
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset(
+        {"nodes", "align", "scale", "aspect_ratio", "output_dtype", "output_scale"}
+    )
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run NetworkX bipartite layout with a pinned node set.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility timeout parameter.
+        seed : int | None, default=None
+            Unused deterministic-layout seed.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional parameter overrides.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        del timeout, seed
+
+        import networkx as nx
+
+        from dagua.layout.ops.networkx_simple import nx_bipartite_node_set
+
+        G = _graph_to_nx(graph, duplicate_policy=self.duplicate_policy)
+        start = time.perf_counter()
+        try:
+            layout_kwargs = dict(self.layout_kwargs)
+            if variant_params is not None:
+                layout_kwargs.update(dict(variant_params))
+            output_scale = float(layout_kwargs.pop("output_scale", self.output_scale))
+            output_dtype = _normalize_output_dtype(
+                layout_kwargs.pop("output_dtype", self.output_dtype)
+            )
+            nodes = layout_kwargs.pop("nodes", None)
+            if nodes is None:
+                nodes = nx_bipartite_node_set(graph.edge_index, graph.num_nodes)
+            nx_pos = nx.bipartite_layout(G, nodes=nodes, **layout_kwargs)
+            elapsed = time.perf_counter() - start
+            pos = _nx_pos_to_tensor(nx_pos, graph.num_nodes, output_scale, output_dtype)
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except Exception as e:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
+
+
+@register
+class NetworkXMultipartite(_NetworkXBase):
+    """Competitor adapter for NetworkX's multipartite layout."""
+
+    name = "nx_multipartite"
+    max_nodes = 100_000
+    layout_kwargs = {"align": "vertical", "scale": 1.0, "start": 0}
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset(
+        {"layers", "start", "align", "scale", "output_dtype", "output_scale"}
+    )
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run NetworkX multipartite layout with pinned BFS layers.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility timeout parameter.
+        seed : int | None, default=None
+            Unused deterministic-layout seed.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional parameter overrides.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        del timeout, seed
+
+        import networkx as nx
+
+        from dagua.layout.ops.networkx_simple import nx_bfs_layers
+
+        G = _graph_to_nx(graph, duplicate_policy=self.duplicate_policy)
+        start_time = time.perf_counter()
+        try:
+            layout_kwargs = dict(self.layout_kwargs)
+            if variant_params is not None:
+                layout_kwargs.update(dict(variant_params))
+            output_scale = float(layout_kwargs.pop("output_scale", self.output_scale))
+            output_dtype = _normalize_output_dtype(
+                layout_kwargs.pop("output_dtype", self.output_dtype)
+            )
+            start_node = int(layout_kwargs.pop("start", 0))
+            layers = layout_kwargs.pop("layers", None)
+            if layers is None:
+                layers = nx_bfs_layers(graph.edge_index, graph.num_nodes, start=start_node)
+            nx_pos = nx.multipartite_layout(G, subset_key=layers, **layout_kwargs)
+            elapsed = time.perf_counter() - start_time
+            pos = _nx_pos_to_tensor(nx_pos, graph.num_nodes, output_scale, output_dtype)
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except Exception as e:
+            elapsed = time.perf_counter() - start_time
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
+
+
+@register
+class NetworkXBFS(NetworkXMultipartite):
+    """Competitor adapter for NetworkX's BFS layout source path."""
+
+    name = "nx_bfs"
+    layout_kwargs = {"align": "vertical", "scale": 1.0, "start": 0}
+
+
+@register
+class NetworkXARF(_NetworkXBase):
+    """Competitor adapter for NetworkX's ARF layout."""
+
+    name = "nx_arf"
+    max_nodes = 10_000
+    layout_func = "arf_layout"
+    layout_kwargs = {
+        "scaling": 1.0,
+        "a": 1.1,
+        "etol": 1.0e-6,
+        "dt": 1.0e-3,
+        "max_iter": 1000,
+        "seed": 42,
+    }
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset(
+        {
+            "scaling",
+            "a",
+            "etol",
+            "dt",
+            "max_iter",
+            "seed",
+            "output_dtype",
+            "output_scale",
+        }
+    )
 
 
 @register

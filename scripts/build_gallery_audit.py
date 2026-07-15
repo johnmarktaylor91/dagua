@@ -77,6 +77,7 @@ ELLIPSIS_DEMO_LABEL = "A long label for truncation"
 PANEL_HALF_WIDTH = 800
 PANEL_HEIGHT = 600
 RENDER_DPI = 100
+POSITION_BBOX_MARGIN_FRACTION = 0.05
 CARD_DPI = 200
 CARD_SIZE: Tuple[int, int] = (1600, 1200)
 PANEL_SIZE: Tuple[int, int] = (PANEL_HALF_WIDTH, PANEL_HEIGHT)
@@ -2461,16 +2462,9 @@ def _render_dagua_png(
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
     if not fit_to_canvas and graph.node_sizes is not None and graph.num_nodes:
-        pos = positions.detach().cpu()
-        sizes = graph.node_sizes.detach().cpu()
-        x_min = float((pos[:, 0] - sizes[:, 0] / 2.0).min())
-        x_max = float((pos[:, 0] + sizes[:, 0] / 2.0).max())
-        y_min = float((pos[:, 1] - sizes[:, 1] / 2.0).min())
-        y_max = float((pos[:, 1] + sizes[:, 1] / 2.0).max())
-        x_center = (x_min + x_max) / 2.0
-        y_center = (y_min + y_max) / 2.0
-        ax.set_xlim(x_center - size_px[0] / 2.0, x_center + size_px[0] / 2.0)
-        ax.set_ylim(y_center - size_px[1] / 2.0, y_center + size_px[1] / 2.0)
+        x_min, x_max, y_min, y_max = _position_bounds_with_margin(graph, positions)
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
     fig.savefig(
         output_path,
         dpi=RENDER_DPI,
@@ -2481,6 +2475,46 @@ def _render_dagua_png(
         transparent=False,
     )
     plt.close(fig)
+
+
+def _position_bounds_with_margin(
+    graph: DaguaGraph,
+    positions: torch.Tensor,
+    margin_fraction: float = POSITION_BBOX_MARGIN_FRACTION,
+) -> Tuple[float, float, float, float]:
+    """Return node-aware position bounds with proportional outer margin.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph whose computed node sizes define the rendered extents.
+    positions : torch.Tensor
+        Fixed node-center positions with shape ``[N, 2]``.
+    margin_fraction : float, default=POSITION_BBOX_MARGIN_FRACTION
+        Fraction of each node-aware axis span to add on both sides.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Left, right, bottom, and top data-coordinate limits.
+
+    Raises
+    ------
+    ValueError
+        If node sizes have not been computed or the graph has no nodes.
+    """
+
+    if graph.node_sizes is None or not graph.num_nodes:
+        raise ValueError("position bounds require at least one node with computed sizes")
+    pos = positions.detach().cpu()
+    sizes = graph.node_sizes.detach().cpu()
+    x_min = float((pos[:, 0] - sizes[:, 0] / 2.0).min())
+    x_max = float((pos[:, 0] + sizes[:, 0] / 2.0).max())
+    y_min = float((pos[:, 1] - sizes[:, 1] / 2.0).min())
+    y_max = float((pos[:, 1] + sizes[:, 1] / 2.0).max())
+    x_margin = (x_max - x_min) * margin_fraction
+    y_margin = (y_max - y_min) * margin_fraction
+    return x_min - x_margin, x_max + x_margin, y_min - y_margin, y_max + y_margin
 
 
 def _content_size(
