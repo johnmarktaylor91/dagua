@@ -60,6 +60,29 @@ class GraphStructure:
     # composite points under directed scoring).
     direction_is_declared: bool = False
     reciprocal_edge_ratio: float = 0.0
+    # Router-v2 (native-sprint r2) features. All are STRUCTURAL -- computed
+    # from topology only, never from graph names or corpus identity -- and
+    # size-gated so the classifier stays cheap on large graphs (defaults of
+    # zero mean "not measured"; consumers treat that as "gate closed").
+    #
+    # degree_uniformity: stddev/mean of undirected degree. Lattice/mesh
+    # interiors have near-constant degree (low values); hubs raise it.
+    degree_uniformity: float = 0.0
+    # hub_edge_fraction: fraction of edges incident to the top-5%-degree
+    # nodes. In a degree-regular mesh this sits near ~0.1; scale-free tails
+    # concentrate 0.5+ of all edges on their hubs.
+    hub_edge_fraction: float = 0.0
+    # diameter_estimate: double-sweep BFS lower bound on the diameter.
+    # 2D meshes have diameter ~ 2*sqrt(N); small-world/SBM sit at ~ log N.
+    # One of the sharpest lattice-vs-community separators at two-BFS cost.
+    diameter_estimate: int = 0
+    # community_score: undirected Newman modularity of a deterministic
+    # label-propagation partition; num_communities: its community count.
+    community_score: float = 0.0
+    num_communities: int = 0
+    # has_edge_weights: whether the source graph object carried edge weights
+    # (populated only when a graph object is provided to classify_graph).
+    has_edge_weights: bool = False
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -567,6 +590,300 @@ def _adjacent_layer_edge_fraction(
     return float((layer_span == 1).to(dtype=torch.float32).mean().item())
 
 
+# Router-v2 feature gates. Features above these sizes report their "not
+# measured" defaults; the native contest cap (1500) sits far below both, so
+# routing consumers never see unmeasured features in their active range.
+ROUTER_FEATURE_MAX_NODES = 5_000
+ROUTER_FEATURE_MAX_EDGES = 100_000
+_LABEL_PROPAGATION_ROUNDS = 10
+_HUB_DEGREE_TOP_FRACTION = 0.05
+
+
+def _dedup_undirected_edges(edge_index: torch.Tensor) -> torch.Tensor:
+    """Return deduplicated undirected edges as a ``[2, M]`` CPU tensor.
+
+    Self-loops are dropped and each undirected pair is kept once with
+    ``source < target``.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Canonical undirected edge tensor shaped ``[2, M]``.
+    """
+    if edge_index.numel() == 0:
+        return torch.zeros((2, 0), dtype=torch.long)
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    lo = torch.minimum(edges[0], edges[1])
+    hi = torch.maximum(edges[0], edges[1])
+    keep = lo != hi
+    lo, hi = lo[keep], hi[keep]
+    if lo.numel() == 0:
+        return torch.zeros((2, 0), dtype=torch.long)
+    keys = torch.unique(lo * (int(hi.max().item()) + 1) + hi)
+    stride = int(hi.max().item()) + 1
+    return torch.stack([torch.div(keys, stride, rounding_mode="floor"), keys % stride])
+
+
+def label_propagation_communities(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    rounds: int = _LABEL_PROPAGATION_ROUNDS,
+) -> torch.Tensor:
+    """Return a deterministic label-propagation community partition.
+
+    Synchronous label propagation with min-label tie-breaking: every node
+    adopts the most frequent label among its (undirected) neighbors each
+    round, ties resolved to the smallest label id. Deterministic by
+    construction (no RNG), so the classifier and the community route see the
+    same partition on every call. Bounded to ``rounds`` iterations because
+    synchronous updates can oscillate on bipartite-like structures.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]`` (direction ignored).
+    num_nodes : int
+        Number of nodes.
+    rounds : int, default=10
+        Maximum propagation rounds.
+
+    Returns
+    -------
+    torch.Tensor
+        Community ids shaped ``[N]`` relabeled densely to ``0..K-1``.
+    """
+    if num_nodes <= 0:
+        return torch.zeros((0,), dtype=torch.long)
+    labels = torch.arange(num_nodes, dtype=torch.long)
+    if edge_index.numel() == 0:
+        return labels
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    keep = edges[0] != edges[1]
+    edges = edges[:, keep]
+    if edges.numel() == 0:
+        return labels
+    src = torch.cat([edges[0], edges[1]])
+    dst = torch.cat([edges[1], edges[0]])
+    for _round in range(max(int(rounds), 1)):
+        neighbor_labels = labels[src]
+        keys = dst * num_nodes + neighbor_labels
+        unique_keys, counts = torch.unique(keys, return_counts=True)
+        nodes = torch.div(unique_keys, num_nodes, rounding_mode="floor")
+        node_labels = unique_keys % num_nodes
+        # unique() output is sorted by (node asc, label asc); a stable sort
+        # by count desc followed by a stable sort by node keeps, per node,
+        # the max-count label with the smallest id first.
+        by_count = torch.argsort(counts, descending=True, stable=True)
+        nodes_by_count = nodes[by_count]
+        labels_by_count = node_labels[by_count]
+        by_node = torch.argsort(nodes_by_count, stable=True)
+        grouped_nodes = nodes_by_count[by_node]
+        grouped_labels = labels_by_count[by_node]
+        first_in_group = torch.ones_like(grouped_nodes, dtype=torch.bool)
+        first_in_group[1:] = grouped_nodes[1:] != grouped_nodes[:-1]
+        new_labels = labels.clone()
+        new_labels[grouped_nodes[first_in_group]] = grouped_labels[first_in_group]
+        if torch.equal(new_labels, labels):
+            break
+        labels = new_labels
+    _, dense = torch.unique(labels, return_inverse=True)
+    return dense
+
+
+def undirected_modularity(
+    edge_index: torch.Tensor,
+    labels: torch.Tensor,
+    num_nodes: int,
+) -> float:
+    """Return the Newman modularity of a partition on the undirected graph.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]`` (direction ignored, dedup applied).
+    labels : torch.Tensor
+        Community ids shaped ``[N]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    float
+        Modularity ``Q = sum_c (e_c/m - (d_c/2m)^2)`` in ``[-0.5, 1)``.
+    """
+    if num_nodes <= 0:
+        return 0.0
+    undirected = _dedup_undirected_edges(edge_index)
+    edge_count = int(undirected.shape[1])
+    if edge_count == 0:
+        return 0.0
+    labels = labels.detach().to(device="cpu", dtype=torch.long)
+    num_labels = int(labels.max().item()) + 1
+    degrees = torch.zeros(num_nodes, dtype=torch.float64)
+    ones = torch.ones(edge_count, dtype=torch.float64)
+    degrees.scatter_add_(0, undirected[0], ones)
+    degrees.scatter_add_(0, undirected[1], ones)
+    intra = labels[undirected[0]] == labels[undirected[1]]
+    intra_per_label = torch.bincount(
+        labels[undirected[0]][intra],
+        minlength=num_labels,
+    ).to(dtype=torch.float64)
+    degree_per_label = torch.zeros(num_labels, dtype=torch.float64)
+    degree_per_label.scatter_add_(0, labels, degrees)
+    m = float(edge_count)
+    quality = intra_per_label / m - (degree_per_label / (2.0 * m)) ** 2
+    return float(quality.sum().item())
+
+
+def _build_undirected_adjacency_lists(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> list[list[int]]:
+    """Return simple undirected adjacency lists for BFS helpers.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Neighbor lists (deduplicated, no self-loops).
+    """
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    undirected = _dedup_undirected_edges(edge_index)
+    for source, target in zip(undirected[0].tolist(), undirected[1].tolist()):
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+    return adjacency
+
+
+def _bfs_farthest(adjacency: list[list[int]], start: int) -> tuple[int, int]:
+    """Return ``(farthest_node, distance)`` from a BFS sweep.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected neighbor lists.
+    start : int
+        BFS source node.
+
+    Returns
+    -------
+    tuple[int, int]
+        Farthest reached node and its distance from ``start``.
+    """
+    num_nodes = len(adjacency)
+    distance = [-1] * num_nodes
+    distance[start] = 0
+    frontier = [start]
+    farthest_node, farthest_distance = start, 0
+    while frontier:
+        next_frontier: list[int] = []
+        for node in frontier:
+            for neighbor in adjacency[node]:
+                if distance[neighbor] < 0:
+                    distance[neighbor] = distance[node] + 1
+                    next_frontier.append(neighbor)
+                    if distance[neighbor] > farthest_distance:
+                        farthest_distance = distance[neighbor]
+                        farthest_node = neighbor
+        frontier = next_frontier
+    return farthest_node, farthest_distance
+
+
+def _double_sweep_diameter(edge_index: torch.Tensor, num_nodes: int) -> int:
+    """Return a double-sweep BFS diameter lower bound.
+
+    BFS from node 0, then BFS from the farthest node found. Exact on trees,
+    a tight lower bound on general graphs -- sufficient for the router's
+    "mesh-scale vs log-scale" separation.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    int
+        Estimated diameter of the largest reachable region from node 0.
+    """
+    if num_nodes <= 1 or edge_index.numel() == 0:
+        return 0
+    adjacency = _build_undirected_adjacency_lists(edge_index, num_nodes)
+    far_node, _ = _bfs_farthest(adjacency, 0)
+    _, diameter = _bfs_farthest(adjacency, far_node)
+    return int(diameter)
+
+
+def _router_v2_features(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    degree: torch.Tensor,
+) -> tuple[float, float, int, float, int]:
+    """Return the router-v2 structural feature tuple.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    degree : torch.Tensor
+        Undirected degrees shaped ``[N]``.
+
+    Returns
+    -------
+    tuple[float, float, int, float, int]
+        ``(degree_uniformity, hub_edge_fraction, diameter_estimate,
+        community_score, num_communities)``. Size-gated features report
+        zero defaults above the router gates.
+    """
+    num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    if num_nodes <= 0 or num_edges == 0:
+        return 0.0, 0.0, 0, 0.0, 0
+
+    degree_float = degree.to(dtype=torch.float32)
+    mean_degree = float(degree_float.mean().item())
+    degree_uniformity = (
+        float(degree_float.std(unbiased=False).item()) / mean_degree if mean_degree > 0 else 0.0
+    )
+
+    top_count = max(int(num_nodes * _HUB_DEGREE_TOP_FRACTION), 1)
+    hub_nodes = torch.topk(degree_float, k=min(top_count, num_nodes)).indices
+    hub_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    hub_mask[hub_nodes] = True
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    incident = hub_mask[cpu_edges[0]] | hub_mask[cpu_edges[1]]
+    hub_edge_fraction = float(incident.to(dtype=torch.float32).mean().item())
+
+    if num_nodes > ROUTER_FEATURE_MAX_NODES or num_edges > ROUTER_FEATURE_MAX_EDGES:
+        return degree_uniformity, hub_edge_fraction, 0, 0.0, 0
+
+    diameter_estimate = _double_sweep_diameter(edge_index, num_nodes)
+    community_labels = label_propagation_communities(edge_index, num_nodes)
+    num_communities = int(community_labels.max().item()) + 1 if community_labels.numel() else 0
+    community_score = undirected_modularity(edge_index, community_labels, num_nodes)
+    return (
+        degree_uniformity,
+        hub_edge_fraction,
+        diameter_estimate,
+        community_score,
+        num_communities,
+    )
+
+
 def _derive_topology_tags(
     family: GraphFamily,
     num_nodes: int,
@@ -843,6 +1160,13 @@ def classify_graph(
     is_planar, planar_embedding = _check_exact_planarity(
         edge_index, num_nodes, is_planar_hint=is_planar_hint
     )
+    (
+        degree_uniformity,
+        hub_edge_fraction,
+        diameter_estimate,
+        community_score,
+        num_communities,
+    ) = _router_v2_features(edge_index, num_nodes, degree)
     return GraphStructure(
         family=family,
         num_components=num_components,
@@ -864,6 +1188,12 @@ def classify_graph(
         planar_embedding=planar_embedding,
         direction_is_declared=explicit_direction is not None,
         reciprocal_edge_ratio=(_reciprocal_edge_ratio(edge_index) if num_nodes <= 100_000 else 0.0),
+        degree_uniformity=degree_uniformity,
+        hub_edge_fraction=hub_edge_fraction,
+        diameter_estimate=diameter_estimate,
+        community_score=community_score,
+        num_communities=num_communities,
+        has_edge_weights=(graph is not None and getattr(graph, "edge_weights", None) is not None),
     )
 
 
