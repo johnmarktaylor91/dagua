@@ -2267,8 +2267,9 @@ def _detour_polyline(
     )
     corners = [(cr[0], cr[1]), (cr[2], cr[1]), (cr[2], cr[3]), (cr[0], cr[3])]
     corners.sort(
-        key=lambda c: math.hypot(c[0] - p0[0], c[1] - p0[1])
-        + math.hypot(p1[0] - c[0], p1[1] - c[1])
+        key=lambda c: (
+            math.hypot(c[0] - p0[0], c[1] - p0[1]) + math.hypot(p1[0] - c[0], p1[1] - c[1])
+        )
     )
     for corner in corners:
         if _segment_hits_rect(p0, corner, inner) or _segment_hits_rect(corner, p1, inner):
