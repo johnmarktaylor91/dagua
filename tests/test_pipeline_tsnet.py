@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -9,7 +11,11 @@ import pytest
 import torch
 
 from dagua.layout.classic.tsnet import layout_tsnet
-from dagua.layout.ops.pipelines.tsnet import build_tsnet_pipeline, layout_tsnet_pipeline
+from dagua.layout.ops.pipelines.tsnet import (
+    _joint_probabilities,
+    build_tsnet_pipeline,
+    layout_tsnet_pipeline,
+)
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.tsnet import (
     TsnetGradientStep,
@@ -262,6 +268,51 @@ def _tsnet_gradient_state(initial_pos: torch.Tensor, probabilities: torch.Tensor
     )
 
 
+def test_vendored_joint_probabilities_match_classic_reference_math() -> None:
+    """Vendored affinities should be bit-exact with the reference primitive."""
+    sklearn_tsne = pytest.importorskip("sklearn.manifold._t_sne")
+    distances = np.array(
+        [
+            [0.0, 1.0, 4.0, 9.0, 16.0],
+            [1.0, 0.0, 1.0, 4.0, 9.0],
+            [4.0, 1.0, 0.0, 1.0, 4.0],
+            [9.0, 4.0, 1.0, 0.0, 1.0],
+            [16.0, 9.0, 4.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    expected = sklearn_tsne._joint_probabilities(distances, 3.0, 0)
+    actual = _joint_probabilities(distances, 3.0)
+
+    assert np.array_equal(actual, expected)
+    assert actual.shape == (10,)
+    assert actual.dtype == np.float64
+
+
+def test_tsnet_production_pipeline_has_no_sklearn_import() -> None:
+    """The classic tsNET production pipeline must not delegate to sklearn."""
+    project_root = Path(__file__).resolve().parents[1]
+    production_files = (
+        project_root / "dagua" / "layout" / "ops" / "pipelines" / "tsnet.py",
+        project_root / "dagua" / "layout" / "ops" / "tsnet.py",
+    )
+    offenders: list[str] = []
+    for path in production_files:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == "sklearn" or alias.name.startswith("sklearn.") for alias in node.names
+            ):
+                offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+            elif isinstance(node, ast.ImportFrom) and (
+                node.module == "sklearn" or (node.module or "").startswith("sklearn.")
+            ):
+                offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+
+    assert offenders == []
+
+
 class TestTsnetPipelineFidelity:
     """Bit-exact regression coverage for the tsNET pipeline."""
 
@@ -339,7 +390,7 @@ class TestTsnetPipelineFidelity:
         _assert_exact_match(classic, pipeline)
 
     def test_layout_tsnet_fidelity_mode_matches_sklearn_exact_reference(self) -> None:
-        """Fidelity mode should call the sklearn exact t-SNE reference path."""
+        """Fidelity mode should match the sklearn exact t-SNE reference path."""
         sklearn_manifold = pytest.importorskip("sklearn.manifold")
         scipy_csgraph = pytest.importorskip("scipy.sparse.csgraph")
         scipy_sparse = pytest.importorskip("scipy.sparse")

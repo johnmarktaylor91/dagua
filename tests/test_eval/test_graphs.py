@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import json
+import os
+import subprocess
+import sys
 from collections import Counter, defaultdict, deque
 from typing import Callable
 
@@ -34,6 +38,91 @@ from dagua.eval.graphs import (
     make_wide_single_layer,
 )
 from dagua.graph import DaguaGraph
+
+
+def _graph_catalog_snapshot_script() -> str:
+    """Return Python code that serializes benchmark graph identity fields.
+
+    Returns
+    -------
+    str
+        Subprocess script that emits one stable JSON object containing each
+        graph's node count, edge tensor, node labels, and edge labels.
+    """
+    return r"""
+import json
+
+from dagua.eval.graphs import get_test_graphs
+
+payload = {}
+for test_graph in get_test_graphs():
+    graph = test_graph.graph
+    payload[test_graph.name] = {
+        "num_nodes": graph.num_nodes,
+        "edge_index": graph.edge_index.cpu().tolist(),
+        "node_labels": list(graph.node_labels),
+        "edge_labels": list(graph.edge_labels),
+    }
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+"""
+
+
+def _build_graph_catalog_snapshot(hash_seed: str) -> bytes:
+    """Build the benchmark graph catalog in a subprocess.
+
+    Parameters
+    ----------
+    hash_seed : str
+        Value assigned to ``PYTHONHASHSEED`` for the subprocess.
+
+    Returns
+    -------
+    bytes
+        JSON bytes emitted by the subprocess.
+    """
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = hash_seed
+    env["PYTHONPATH"] = os.getcwd()
+    env["MPLCONFIGDIR"] = env.get("MPLCONFIGDIR", "/tmp/mpl")
+    completed = subprocess.run(
+        [sys.executable, "-c", _graph_catalog_snapshot_script()],
+        check=True,
+        cwd=os.getcwd(),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return completed.stdout
+
+
+def _changed_snapshot_names(left: bytes, right: bytes) -> list[str]:
+    """Return graph names whose serialized identity differs between snapshots.
+
+    Parameters
+    ----------
+    left : bytes
+        JSON snapshot from the first subprocess.
+    right : bytes
+        JSON snapshot from the second subprocess.
+
+    Returns
+    -------
+    list[str]
+        Sorted benchmark graph names with differing serialized identity.
+    """
+    left_payload = json.loads(left)
+    right_payload = json.loads(right)
+    names = sorted(set(left_payload) | set(right_payload))
+    return [name for name in names if left_payload.get(name) != right_payload.get(name)]
+
+
+def test_benchmark_graphs_are_hash_seed_deterministic() -> None:
+    """Every benchmark graph should serialize identically across hash seeds."""
+    seed_zero_snapshot = _build_graph_catalog_snapshot("0")
+    seed_one_snapshot = _build_graph_catalog_snapshot("1")
+
+    changed_names = _changed_snapshot_names(seed_zero_snapshot, seed_one_snapshot)
+    assert seed_zero_snapshot == seed_one_snapshot, changed_names
 
 
 def _component_count(edge_index, num_nodes: int) -> int:
@@ -181,7 +270,7 @@ def test_synthetic_graphs_include_final_structural_additions() -> None:
         petersen.edge_index.reshape(-1),
         minlength=petersen.num_nodes,
     )
-    assert graphs["petersen_10"].tags == {"regular", "famous", "small"}
+    assert graphs["petersen_10"].tags == {"regular", "famous", "small", "undirected"}
     assert petersen.num_nodes == 10
     assert petersen_degree.tolist() == [3] * 10
 

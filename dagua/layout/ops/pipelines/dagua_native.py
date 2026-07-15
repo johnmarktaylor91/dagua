@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -12,6 +13,10 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.ops.base import Pipeline
+from dagua.layout.ops.coordinate import (
+    ComponentTilingCrossingRisk,
+    ComponentTilingCrossingRiskConfig,
+)
 from dagua.layout.ops.pipelines import dagua_native_legacy
 from dagua.layout.ops.pipelines._native_shared import (
     _prepare_native_config,
@@ -27,14 +32,21 @@ from dagua.layout.ops.pipelines.native_force_directed import (
     layout_native_force_directed_pipeline,
 )
 from dagua.layout.ops.pipelines.native_hybrid import build_native_hybrid_pipeline
+from dagua.layout.ops.pipelines.native_hybrid_v2 import build_native_hybrid_v2_pipeline
 from dagua.layout.ops.pipelines.native_layered_dag import build_native_layered_dag_pipeline
 from dagua.layout.ops.pipelines.native_planar import (
     PlanarityFailure,
     build_native_planar_pipeline,
 )
+from dagua.layout.ops.pipelines.native_stress import build_native_stress_pipeline
 from dagua.layout.ops.pipelines.native_tree import build_native_tree_pipeline
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
 from dagua.layout.ops.preprocess import DetectComponents
+from dagua.layout.ops.scc import (
+    SCCPredicateStats,
+    compute_scc_predicate_stats,
+    hybrid_v2_predicate_matches,
+)
 from dagua.layout.ops.state import (
     ExecutionPlan,
     FlexConstraints,
@@ -42,7 +54,11 @@ from dagua.layout.ops.state import (
     RuntimeContext,
     SolveState,
 )
-from dagua.layout.resolve import build_flex_constraints, normalize_node_sizes
+from dagua.layout.resolve import (
+    build_flex_constraints,
+    normalize_node_sizes,
+    resolve_quality_budgets,
+)
 
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
 _DOT_DEFAULT_RANK_CENTER_SEP = 72.0
@@ -1169,6 +1185,82 @@ def _selected_force_pipeline(config: LayoutConfig) -> Optional[str]:
     return str(value).lower()
 
 
+def _should_route_hybrid_v2(
+    structure: GraphStructure,
+    stats: Optional[SCCPredicateStats],
+    cyclicity_ratio: float,
+) -> bool:
+    """Return whether the SCC-condensation route should handle a graph.
+
+    Parameters
+    ----------
+    structure : GraphStructure
+        Classified graph topology.
+    stats : SCCPredicateStats, optional
+        SCC coverage summary computed for the original directed graph.
+    cyclicity_ratio : float
+        Existing feedback-arc cyclicity ratio.
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph is directed, meaningfully cyclic, and has a
+        dominant nontrivial SCC footprint.
+    """
+    if stats is None:
+        return False
+    if bool(getattr(structure, "is_directed_acyclic", True)):
+        return False
+    if cyclicity_ratio <= 0.0:
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+    return hybrid_v2_predicate_matches(stats)
+
+
+def _flat_stress_route_suppressed_by_hybrid_v2(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    graph_structure: Optional[GraphStructure],
+    config: LayoutConfig,
+) -> bool:
+    """Return whether hybrid-v2 should take precedence over flat stress.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed graph connectivity with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    graph_structure : GraphStructure, optional
+        Optional pre-classified graph metadata.
+    config : LayoutConfig
+        Effective layout configuration that can cache SCC stats.
+
+    Returns
+    -------
+    bool
+        ``True`` when the SCC-condensation predicate matches.
+    """
+    if not bool(getattr(config, "_dagua_native_enable_hybrid_v2_auto", False)):
+        return False
+
+    structure = graph_structure
+    if structure is None:
+        structure = classify_graph(edge_index, num_nodes)
+    if bool(getattr(structure, "is_directed_acyclic", True)):
+        return False
+    stats = getattr(config, "_dagua_native_scc_stats", None)
+    if stats is None:
+        stats = compute_scc_predicate_stats(edge_index, num_nodes)
+        setattr(config, "_dagua_native_scc_stats", stats)
+    return _should_route_hybrid_v2(
+        structure=structure,
+        stats=stats,
+        cyclicity_ratio=float(getattr(structure, "cyclicity_ratio", 0.0)),
+    )
+
+
 def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutConfig) -> str:
     """Choose a native sub-pipeline for one prepared problem.
 
@@ -1183,10 +1275,21 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     -------
     str
         One of ``"tree"``, ``"layered_dag"``, ``"force_directed"``,
-        ``"hybrid"``, or ``"legacy_monolith"``.
+        ``"hybrid"``, ``"hybrid_v2"``, ``"stress"``,
+        ``"undirected_portfolio"``, or ``"legacy_monolith"``.
     """
     forced = _selected_force_pipeline(config)
-    if forced in {"tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"}:
+    if forced in {
+        "tree",
+        "layered_dag",
+        "force_directed",
+        "hybrid",
+        "hybrid_v2",
+        "planar",
+        "stress",
+        "undirected_portfolio",
+        "legacy_monolith",
+    }:
         return forced
     if structure is None:
         return "layered_dag"
@@ -1196,6 +1299,69 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     small_tree_cutoff = int(getattr(config, "small_n_tree_cutoff", 64))
     if num_nodes <= small_tree_cutoff and family in {GraphFamily.TREE, GraphFamily.CHAIN}:
         return "tree"
+    # r80-S4: semantically-undirected graphs (declared by the user or
+    # inferred) route to the portfolio contest, which runs the incumbent
+    # selection below as candidate A plus dagua's own sfdp/neato
+    # reimplementations as challengers, picking the honest-composite argmax.
+    # Trees/chains keep their fast path above this branch, and the explicit
+    # try_planar_first opt-in (checked inside the baseline helper) also
+    # wins: a user who asked for planar gets planar.
+    # _dagua_native_suppress_portfolio is set by the contest itself when it
+    # re-enters this router to run its incumbent candidate: force_pipeline
+    # cannot be used for that because several polish stages are gated on
+    # force_pipeline being None, and the incumbent must reproduce today's
+    # default output exactly.
+    # r80 fix: fire ONLY on high-confidence undirectedness -- an explicit
+    # declaration, or reciprocal edge storage (>0.3 means the graph stores
+    # both directions, the unambiguous undirected format). The deep-layering
+    # INFERENCE alone is not sufficient: it mislabeled outerplanar_dag_20
+    # and recurrent_feedback_cell as undirected, and the contest then
+    # optimized the wrong composite flavor (-20 pts under directed scoring).
+    #
+    # Lattice-like DAGs are a second special case: corpus fixtures may be
+    # semantically undirected, but their one-way lattice orientation carries
+    # the layered geometric signal used by the native polish path. The
+    # undirected contest can pick an undirected-composite winner that loses
+    # the directed polish gate, so these stay on the baseline route.
+    is_lattice_like_dag = bool(getattr(structure, "is_directed_acyclic", False)) and (
+        "lattice_like" in tuple(getattr(structure, "topology_tags", ()))
+    )
+    if (
+        getattr(structure, "is_semantically_directed", True) is False
+        and (
+            bool(getattr(structure, "direction_is_declared", False))
+            or float(getattr(structure, "reciprocal_edge_ratio", 0.0)) > 0.3
+        )
+        and not is_lattice_like_dag
+        and not bool(getattr(config, "_dagua_native_suppress_portfolio", False))
+        and not bool(getattr(config, "try_planar_first", False))
+    ):
+        return "undirected_portfolio"
+    return _choose_native_pipeline_baseline(structure=structure, config=config)
+
+
+def _choose_native_pipeline_baseline(structure: GraphStructure, config: LayoutConfig) -> str:
+    """Choose the pre-portfolio (baseline) sub-pipeline for one problem.
+
+    This is the remainder of the routing logic that ran before the
+    undirected-portfolio branch existed. The portfolio route calls it to
+    compute its incumbent candidate, guaranteeing the contest can never
+    select something worse than what the router would have picked today.
+
+    Parameters
+    ----------
+    structure : GraphStructure
+        Classified graph topology (non-None; callers handle the None case).
+    config : LayoutConfig
+        Prepared layout configuration.
+
+    Returns
+    -------
+    str
+        One of ``"planar"``, ``"hybrid_v2"``, ``"force_directed"``,
+        ``"hybrid"``, or ``"layered_dag"``.
+    """
+    family = structure.family
     # Planar dispatch when the classifier confirms exact
     # planarity AND the user has explicitly opted in via try_planar_first.
     # Default is False because the current Schnyder-init + flat-stress
@@ -1205,6 +1371,15 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     if getattr(config, "try_planar_first", False) and bool(getattr(structure, "is_planar", False)):
         return "planar"
     cyclicity_ratio = float(getattr(structure, "cyclicity_ratio", 0.0))
+    scc_stats = getattr(config, "_dagua_native_scc_stats", None)
+    if bool(
+        getattr(config, "_dagua_native_enable_hybrid_v2_auto", False)
+    ) and _should_route_hybrid_v2(
+        structure=structure,
+        stats=scc_stats,
+        cyclicity_ratio=cyclicity_ratio,
+    ):
+        return "hybrid_v2"
     # Removed auto-route to force_directed. Empirically the
     # PivotMDS+Stress force pipeline loses to layered_dag/hybrid on every
     # cyclic benchmark candidate today (2026-04-24 measurement). Users can
@@ -1243,8 +1418,18 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         return build_native_planar_pipeline(config)
     if selected == "force_directed":
         return build_native_force_directed_pipeline(config)
+    if selected == "stress":
+        return build_native_stress_pipeline(config)
     if selected == "hybrid":
         return build_native_hybrid_pipeline(config)
+    if selected == "hybrid_v2":
+        return build_native_hybrid_v2_pipeline(config)
+    if selected == "undirected_portfolio":
+        from dagua.layout.ops.pipelines.native_undirected import (
+            build_native_undirected_portfolio_pipeline,
+        )
+
+        return build_native_undirected_portfolio_pipeline(config)
     return build_native_layered_dag_pipeline(config)
 
 
@@ -1428,6 +1613,16 @@ def _run_native_problem(
     if structure is None:
         structure = classify_graph(problem.edge_index, problem.num_nodes)
         problem.structure = structure
+    if (
+        bool(getattr(config, "_dagua_native_enable_hybrid_v2_auto", False))
+        and not bool(getattr(structure, "is_directed_acyclic", True))
+        and getattr(config, "_dagua_native_scc_stats", None) is None
+    ):
+        setattr(
+            config,
+            "_dagua_native_scc_stats",
+            compute_scc_predicate_stats(problem.edge_index, problem.num_nodes),
+        )
 
     selected = _choose_native_pipeline(structure=structure, config=config)
     if selected == "legacy_monolith":
@@ -1440,6 +1635,21 @@ def _run_native_problem(
             config=config,
             seed=problem.seed,
             edge_weights=problem.edge_weights,
+        )
+    if selected == "undirected_portfolio":
+        # Early return like force_directed: the incumbent candidate runs the
+        # full baseline path (including its own polish battery) inside the
+        # contest, and challenger candidates must stay exactly as probed
+        # (pipeline + overlap projection, no extra post-polish).
+        from dagua.layout.ops.pipelines.native_undirected import (
+            layout_native_undirected_portfolio,
+        )
+
+        return layout_native_undirected_portfolio(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            config=config,
         )
 
     try:
@@ -1469,6 +1679,7 @@ def _run_native_problem(
     if (
         getattr(config, "edge_equalize_polish", True)
         and _selected_force_pipeline(config) is None
+        and getattr(config, "time_budget_s", None) is None
         and selected in {"layered_dag", "tree", "hybrid", "force_directed"}
         and result.shape[0] >= 4
         and problem.edge_index.numel() > 0
@@ -1480,6 +1691,7 @@ def _run_native_problem(
             problem.edge_index,
             problem.node_sizes,
             cluster_ids=cluster_ids,
+            polish_battery=str(getattr(config, "_dagua_native_polish_battery", "full")),
         )
     return result
 
@@ -4188,6 +4400,139 @@ def _multi_component_row_major_repack(
     return out
 
 
+def _collinear_dodge(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    delta: float = 0.10,
+) -> Optional[torch.Tensor]:
+    """Shift nodes that block non-incident straight edge segments.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    delta : float, default=0.10
+        Perpendicular displacement as a fraction of median edge length.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Dodged positions, or ``None`` when no blocked edge is detected.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import MAX_COLLINEAR_WORK
+
+    if (
+        edge_index.numel() == 0
+        or pos.shape[0] < 3
+        or int(pos.shape[0]) * int(edge_index.shape[1]) > MAX_COLLINEAR_WORK
+    ):
+        return None
+    vectors = pos[edge_index[1]] - pos[edge_index[0]]
+    lengths = torch.linalg.vector_norm(vectors, dim=1)
+    median_length = float(lengths.median().item())
+    if median_length < 1e-9:
+        return None
+
+    tolerance = 0.05 * median_length
+    source = edge_index[0]
+    target = edge_index[1]
+    candidate = pos.detach().clone()
+    moved: set[int] = set()
+    for edge_id in range(int(edge_index.shape[1])):
+        u = int(source[edge_id].item())
+        w = int(target[edge_id].item())
+        segment = pos[w] - pos[u]
+        squared_length = float(torch.dot(segment, segment).item())
+        if squared_length < 1e-12:
+            continue
+        projection = ((pos - pos[u]) @ segment) / squared_length
+        closest = pos[u] + projection.unsqueeze(1) * segment
+        distances = torch.linalg.vector_norm(pos - closest, dim=1)
+        blockers = (projection > 1e-6) & (projection < 1.0 - 1e-6) & (distances < tolerance)
+        blockers[u] = False
+        blockers[w] = False
+        if not bool(blockers.any().item()):
+            continue
+        perpendicular = torch.stack((-segment[1], segment[0])) / torch.sqrt(
+            torch.dot(segment, segment)
+        )
+        shift = perpendicular * (delta * median_length)
+        for blocker in torch.nonzero(blockers, as_tuple=False).flatten().tolist():
+            if blocker not in moved:
+                candidate[blocker] = candidate[blocker] + shift
+                moved.add(blocker)
+    return candidate if moved else None
+
+
+def _unshear_bimodal_edges(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    """Orthogonalize two edge-direction families in a sheared grid layout.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Orthogonalized positions, or ``None`` without two usable families.
+    """
+    if edge_index.shape[1] < 4:
+        return None
+    vectors = pos[edge_index[1]] - pos[edge_index[0]]
+    nonzero = torch.linalg.vector_norm(vectors, dim=1) > 1e-9
+    vectors = vectors[nonzero]
+    if vectors.shape[0] < 4:
+        return None
+    angles = torch.remainder(torch.atan2(vectors[:, 1], vectors[:, 0]), torch.pi)
+    median_angle = torch.quantile(angles, 0.5)
+    first_mask = angles < median_angle
+    if int(first_mask.sum().item()) < 2 or int((~first_mask).sum().item()) < 2:
+        return None
+    family_angles = (angles[first_mask], angles[~first_mask])
+    family_means: list[torch.Tensor] = []
+    for members in family_angles:
+        mean_angle = (
+            torch.atan2(
+                torch.sin(2.0 * members).mean(),
+                torch.cos(2.0 * members).mean(),
+            )
+            / 2.0
+        )
+        mean_angle = torch.remainder(mean_angle, torch.pi)
+        deviations = torch.abs(
+            torch.remainder(members - mean_angle + torch.pi / 2.0, torch.pi) - torch.pi / 2.0
+        )
+        # A grid family is a narrow directional mode; broad force-layout
+        # histograms are not evidence of shear even if a median splits them.
+        if float(deviations.mean().item()) > float(torch.deg2rad(torch.tensor(10.0)).item()):
+            return None
+        family_means.append(mean_angle)
+    separation = torch.abs(family_means[0] - family_means[1])
+    separation = torch.minimum(separation, torch.pi - separation)
+    separation_degrees = float(torch.rad2deg(separation).item())
+    if separation_degrees < 20.0 or separation_degrees > 75.0:
+        return None
+    first = vectors[first_mask].mean(dim=0)
+    second = vectors[~first_mask].mean(dim=0)
+    basis = torch.stack((first, second), dim=1)
+    determinant = torch.linalg.det(basis)
+    if float(torch.abs(determinant).item()) < 1e-9:
+        return None
+    target = torch.diag(
+        torch.stack((torch.linalg.vector_norm(first), torch.linalg.vector_norm(second)))
+    )
+    transform = target @ torch.linalg.inv(basis)
+    return pos @ transform.T
+
+
 def _best_of_polish(
     base_pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -4195,6 +4540,7 @@ def _best_of_polish(
     margin: float = 0.1,
     *,
     cluster_ids: Optional[torch.Tensor] = None,
+    polish_battery: str = "full",
 ) -> torch.Tensor:
     """Try named polish candidates; return the best by composite.
 
@@ -4202,8 +4548,8 @@ def _best_of_polish(
     layered_dag and tree pipelines, so a direct constraint projection
     can escape the local minimum. Edge-equalize variants are tried first;
     projection primitives are then scored as named candidates.
-    The un-polished baseline is preserved unless a candidate beats it by at
-    least ``margin`` composite points.
+    The un-polished baseline is preserved unless a finite, non-degenerate,
+    overlap-monotone candidate beats it by at least ``margin`` composite points.
 
     Margin lowered from 0.5 to 0.1. made
     composite() deterministic for fixed positions, so the larger gate
@@ -4224,6 +4570,12 @@ def _best_of_polish(
         Node-size tensor with shape ``[N, 2]``.
     margin : float, default=0.1
         Minimum composite improvement to prefer a polished candidate.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids used by cluster-aware candidates.
+    polish_battery : str, default="full"
+        Quality-derived polish budget. ``"off"`` returns ``base_pos``;
+        ``"default"`` and ``"full"`` currently preserve the existing
+        class-gated candidate set.
 
     Returns
     -------
@@ -4231,6 +4583,9 @@ def _best_of_polish(
         Best position tensor with shape ``[N, 2]``.
     """
     from dagua.metrics import composite, full
+
+    if polish_battery == "off":
+        return base_pos
 
     def score(pos: torch.Tensor) -> float:
         torch.manual_seed(0)
@@ -4256,6 +4611,11 @@ def _best_of_polish(
         except Exception:
             return None
 
+    from dagua.layout.ops.pipelines.native_undirected import (
+        DEFAULT_CANDIDATE_BUDGET_S,
+        _candidate_is_eligible,
+    )
+
     best_pos = base_pos
     best_score = score(base_pos)
 
@@ -4278,7 +4638,10 @@ def _best_of_polish(
     best_edge_score = best_score
     edge_seed_positions: list[tuple[str, torch.Tensor]] = []
     for edge_name, make_candidate in edge_equalize_candidates:
+        started = time.monotonic()
         cand = make_candidate(base_pos, edge_index, node_sizes)
+        if time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+            continue
         cand_score = safe_score(cand)
         if cand_score is None:
             continue
@@ -4291,8 +4654,22 @@ def _best_of_polish(
             best_pos = cand
 
     polish_candidates: list[
-        tuple[str, Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]]
+        tuple[
+            str,
+            Callable[
+                [torch.Tensor, torch.Tensor, torch.Tensor],
+                Optional[torch.Tensor],
+            ],
+        ]
     ] = [
+        (
+            "collinear_dodge_0.10",
+            lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.10),
+        ),
+        (
+            "collinear_dodge_0.15",
+            lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.15),
+        ),
         (
             "y_layer_snap",
             lambda pos, edges, sizes: _y_layer_snap(best_edge_pos, edges, sizes),
@@ -4442,8 +4819,19 @@ def _best_of_polish(
                 ),
             ]
         )
-    for _, make_candidate in polish_candidates:
-        cand = make_candidate(best_pos, edge_index, node_sizes)
+    for candidate_name, make_polish_candidate in polish_candidates:
+        started = time.monotonic()
+        cand = make_polish_candidate(best_pos, edge_index, node_sizes)
+        if cand is None or time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+            continue
+        candidate_input = (
+            base_pos
+            if candidate_name.startswith("collinear_dodge") or candidate_name == "unshear"
+            else best_pos
+        )
+        eligible, _reason = _candidate_is_eligible(cand, candidate_input, node_sizes, edge_index)
+        if not eligible:
+            continue
         cand_score = safe_score(cand)
         if cand_score is None:
             continue
@@ -4546,6 +4934,18 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    quality_budgets = resolve_quality_budgets(
+        float(getattr(effective_config, "quality", 0.5)),
+        num_nodes=num_nodes,
+    )
+    if (
+        int(getattr(effective_config, "multi_start_k", 1)) == 1
+        and not bool(getattr(effective_config, "_dagua_native_multi_start_resolved", False))
+        and getattr(effective_config, "time_budget_s", None) is None
+    ):
+        effective_config.multi_start_k = quality_budgets.multi_start_k
+        setattr(effective_config, "_dagua_native_multi_start_resolved", True)
+    setattr(effective_config, "_dagua_native_has_clusters", bool(clusters))
     if fidelity_mode is not None:
         setattr(effective_config, "fidelity_mode", fidelity_mode)
     effective_config.fidelity_dtype = fidelity_dtype
@@ -4591,6 +4991,11 @@ def layout_dagua_native_pipeline(
     # closing the -8.51 gap to igraph_sugiyama).
     if (
         _selected_force_pipeline(effective_config) is None
+        and not (
+            graph_structure is not None
+            and getattr(graph_structure, "is_semantically_directed", True) is False
+            and bool(getattr(graph_structure, "direction_is_declared", False))
+        )
         and not _is_graphviz_dot_flat_fidelity_mode(
             getattr(effective_config, "fidelity_mode", None)
         )
@@ -4599,6 +5004,12 @@ def layout_dagua_native_pipeline(
         and num_nodes >= 20
         and edge_index is not None
         and edge_index.numel() > 0
+        and not _flat_stress_route_suppressed_by_hybrid_v2(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            graph_structure=graph_structure,
+            config=effective_config,
+        )
     ):
         try:
             from dagua.layout.cycle import detect_back_edges, make_acyclic_robust
@@ -4649,6 +5060,7 @@ def layout_dagua_native_pipeline(
                             # The picker margin gate handles regression risk.
                             if (
                                 getattr(effective_config, "edge_equalize_polish", True)
+                                and getattr(effective_config, "time_budget_s", None) is None
                                 and node_sizes is not None
                                 and stress_pos.shape[0] >= 4
                             ):
@@ -4656,6 +5068,13 @@ def layout_dagua_native_pipeline(
                                     stress_pos,
                                     edge_index,
                                     node_sizes,
+                                    polish_battery=str(
+                                        getattr(
+                                            effective_config,
+                                            "_dagua_native_polish_battery",
+                                            "full",
+                                        )
+                                    ),
                                 )
                             if dot_cluster_fidelity:
                                 stress_pos = _apply_dot_cluster_fidelity_layout(
@@ -4682,6 +5101,7 @@ def layout_dagua_native_pipeline(
             candidate_config = copy.copy(effective_config)
             candidate_config.seed = candidate_seed
             candidate_config.multi_start_k = 1
+            setattr(candidate_config, "_dagua_native_multi_start_resolved", True)
             candidate_pos = layout_dagua_native_pipeline(
                 edge_index=edge_index,
                 num_nodes=num_nodes,
@@ -4880,11 +5300,33 @@ def layout_dagua_native_pipeline(
         if (
             getattr(effective_config, "edge_equalize_polish", True)
             and _selected_force_pipeline(effective_config) is None
+            and getattr(effective_config, "time_budget_s", None) is None
             and result.shape[0] >= 4
             and prepared_edge_index.numel() > 0
             and normalized_node_sizes is not None
         ):
-            result = _best_of_polish(result, prepared_edge_index, normalized_node_sizes)
+            result = _best_of_polish(
+                result,
+                prepared_edge_index,
+                normalized_node_sizes,
+                polish_battery=str(
+                    getattr(prepared_config, "_dagua_native_polish_battery", "full")
+                ),
+            )
+        risk_state = ComponentTilingCrossingRisk(
+            ComponentTilingCrossingRiskConfig(
+                enabled=bool(getattr(prepared_config, "component_tiling_crossing_risk", True))
+            )
+        ).apply(
+            problem,
+            SolveState(
+                pos=result,
+                layers=getattr(prepared_config, "_dagua_native_layer_assignments", None),
+            ),
+            ctx,
+        )
+        if risk_state.pos is not None:
+            result = risk_state.pos.detach()
         if dot_cluster_fidelity:
             result = _apply_dot_cluster_fidelity_layout(
                 result,

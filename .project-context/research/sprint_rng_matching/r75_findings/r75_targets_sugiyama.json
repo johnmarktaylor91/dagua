@@ -1,0 +1,3743 @@
+[
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "binary_tree",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "binary_tree::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19700074743578236,
+   "R": 0.150893955650856,
+   "margin": 0.00301787911301712,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "asymmetric_hourglass_hub",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "asymmetric_hourglass_hub::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.37524637942725575,
+   "R": 0.2217728689651502,
+   "margin": 0.004435457379303004,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7928571428571429,
+   "R": 0.8928571428571433,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "bipartite_4_3_4",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "bipartite_4_3_4::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3242658731571135,
+   "R": 0.178773684069281,
+   "margin": 0.0035754736813856203,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 36.0,
+   "R": 36.0,
+   "margin": 0.72,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "center_port_backedge_hub",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "center_port_backedge_hub::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.29048348667767715,
+   "R": 0.15872425127893036,
+   "margin": 0.0031744850255786073,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "braided_feedback_tails",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "braided_feedback_tails::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5217427126786577,
+   "R": 0.087226455115588,
+   "margin": 0.00174452910231176,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 2.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.9,
+   "R": 0.9916666666666669,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "broken_symmetry_residual_pair",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "broken_symmetry_residual_pair::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.34263003794559743,
+   "R": 0.1655570682838559,
+   "margin": 0.0033111413656771184,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 2.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.9083333333333333,
+   "R": 0.9249999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "cluster_member_style_stress",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "cluster_member_style_stress::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.47380451479626695,
+   "R": 0.18951503089571092,
+   "margin": 0.0037903006179142184,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "clustered_longlabel_handoffs",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "clustered_longlabel_handoffs::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5538747993052565,
+   "R": 0.14597889547635046,
+   "margin": 0.0029195779095270093,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "densenet_block",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "densenet_block::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.16049056770243628,
+   "R": 0.21559990837159376,
+   "margin": 0.004311998167431876,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 27.0,
+   "R": 23.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "densenet_block",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "densenet_block::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4535041205840797,
+   "R": 0.14970993284260856,
+   "margin": 0.002994198656852171,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 23.0,
+   "R": 27.0,
+   "margin": 0.54,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "densenet_block",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "densenet_block::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.16049056770243628,
+   "R": 0.20692298162064673,
+   "margin": 0.004138459632412935,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 27.0,
+   "R": 23.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "densenet_block",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "densenet_block::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.16049056770243628,
+   "R": 0.21559990837159376,
+   "margin": 0.004311998167431876,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 27.0,
+   "R": 23.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "densenet_block",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "densenet_block::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.16049056770243628,
+   "R": 0.21559990837159376,
+   "margin": 0.004311998167431876,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 27.0,
+   "R": 23.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "densenet_block",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "densenet_block::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.16049056770243628,
+   "R": 0.21559990837159376,
+   "margin": 0.004311998167431876,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 27.0,
+   "R": 23.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "disconnected_encoder_residual",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "disconnected_encoder_residual::classic_sugiyama_graphviz_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5402262611598833,
+   "R": 0.15050290116281853,
+   "margin": 0.0030100580232563707,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.6018518518518519,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "disconnected_label_cycle_collage",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "disconnected_label_cycle_collage::classic_sugiyama_graphviz_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.49366279176017397,
+   "R": 0.07616587284747171,
+   "margin": 0.0015233174569494344,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "edge_label_braid",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "edge_label_braid::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3606101892779327,
+   "R": 0.12853849418341834,
+   "margin": 0.002570769883668367,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 2.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "extreme_mixed_width_transformer",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "extreme_mixed_width_transformer::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3936517797361548,
+   "R": 0.20493236511575236,
+   "margin": 0.0040986473023150475,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "grid_rect_6x8",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "grid_rect_6x8::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.2381263275739893,
+   "R": 0.045500002735515174,
+   "margin": 0.0009100000547103035,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.5645833333333332,
+   "R": 0.8020833333333335,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "heavy_tail_weights_50",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "heavy_tail_weights_50::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.34094722248638415,
+   "R": 0.3705154022897579,
+   "margin": 0.007410308045795158,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 162.0,
+   "R": 149.0,
+   "margin": 2.98,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.2839999999999999,
+   "R": 0.3099999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "heavy_tail_weights_50",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "heavy_tail_weights_50::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3736036653129214,
+   "R": 0.2913848098396425,
+   "margin": 0.00582769619679285,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 70.0,
+   "R": 67.0,
+   "margin": 1.34,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.4220000000000001,
+   "R": 0.4140000000000001,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "heavy_tail_weights_50",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "heavy_tail_weights_50::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3167536394873706,
+   "R": 0.39828008383497177,
+   "margin": 0.007965601676699435,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 139.0,
+   "R": 148.0,
+   "margin": 2.96,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.31599999999999995,
+   "R": 0.30600000000000005,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "heavy_tail_weights_50",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "heavy_tail_weights_50::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.34094722248638415,
+   "R": 0.3705154022897579,
+   "margin": 0.007410308045795158,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 162.0,
+   "R": 149.0,
+   "margin": 2.98,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.2839999999999999,
+   "R": 0.3099999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "heavy_tail_weights_50",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "heavy_tail_weights_50::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.34094722248638415,
+   "R": 0.3705154022897579,
+   "margin": 0.007410308045795158,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 162.0,
+   "R": 149.0,
+   "margin": 2.98,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.2839999999999999,
+   "R": 0.3099999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "hexagonal_lattice_42",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "hexagonal_lattice_42::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1544136557681342,
+   "R": 0.16678366751290816,
+   "margin": 0.003335673350258163,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 7.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7023809523809522,
+   "R": 0.6857142857142856,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "hexagonal_lattice_42",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "hexagonal_lattice_42::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.13667101675602775,
+   "R": 0.0674041007017875,
+   "margin": 0.00134808201403575,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7166666666666668,
+   "R": 0.7642857142857142,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "hierarchical_residual_stage",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "hierarchical_residual_stage::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.47663385792861146,
+   "R": 0.1395001708854836,
+   "margin": 0.002790003417709672,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "hexagonal_lattice_42",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "hexagonal_lattice_42::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1544136557681342,
+   "R": 0.16678366751290816,
+   "margin": 0.003335673350258163,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 7.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7023809523809522,
+   "R": 0.6857142857142856,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "hexagonal_lattice_42",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "hexagonal_lattice_42::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1544136557681342,
+   "R": 0.16678366751290816,
+   "margin": 0.003335673350258163,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 7.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7023809523809522,
+   "R": 0.6857142857142856,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "hub_fanout_label_skew",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "hub_fanout_label_skew::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3152112941645094,
+   "R": 0.2550856489339402,
+   "margin": 0.005101712978678804,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "hexagonal_lattice_42",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "hexagonal_lattice_42::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1544136557681342,
+   "R": 0.16678366751290816,
+   "margin": 0.003335673350258163,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 7.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7023809523809522,
+   "R": 0.6857142857142856,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "hexagonal_lattice_42",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "hexagonal_lattice_42::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1544136557681342,
+   "R": 0.16678366751290816,
+   "margin": 0.003335673350258163,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 7.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7023809523809522,
+   "R": 0.6857142857142856,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "hub_skip_superfan",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "hub_skip_superfan::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.2095027451011736,
+   "R": 0.2327825009761971,
+   "margin": 0.004655650019523942,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8615384615384617,
+   "R": 0.8769230769230771,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "hub_skip_superfan",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "hub_skip_superfan::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3981211891136131,
+   "R": 0.19284140949632847,
+   "margin": 0.0038568281899265693,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8461538461538465,
+   "R": 0.8692307692307695,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "hub_skip_superfan",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "hub_skip_superfan::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.2095027451011736,
+   "R": 0.2327825009761971,
+   "margin": 0.004655650019523942,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8615384615384617,
+   "R": 0.8769230769230771,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "hub_skip_superfan",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "hub_skip_superfan::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.2095027451011736,
+   "R": 0.2327825009761971,
+   "margin": 0.004655650019523942,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8615384615384617,
+   "R": 0.8769230769230771,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "hub_skip_superfan",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "hub_skip_superfan::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.2095027451011736,
+   "R": 0.2327825009761971,
+   "margin": 0.004655650019523942,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8615384615384617,
+   "R": 0.8769230769230771,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "interleaved_cluster_crosstalk",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "interleaved_cluster_crosstalk::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19344838577854576,
+   "R": 0.20288166206058855,
+   "margin": 0.004057633241211771,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 4.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9583333333333338,
+   "R": 0.9583333333333338,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "interleaved_cluster_crosstalk",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "interleaved_cluster_crosstalk::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.34611210949597687,
+   "R": 0.22651083508877418,
+   "margin": 0.004530216701775483,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 5.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9,
+   "R": 0.9,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "interleaved_cluster_crosstalk",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "interleaved_cluster_crosstalk::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19344838577854576,
+   "R": 0.20288166206058855,
+   "margin": 0.004057633241211771,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 4.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9583333333333338,
+   "R": 0.9583333333333338,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "interleaved_cluster_crosstalk",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "interleaved_cluster_crosstalk::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19344838577854576,
+   "R": 0.20288166206058855,
+   "margin": 0.004057633241211771,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 4.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9583333333333338,
+   "R": 0.9583333333333338,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "interleaved_cluster_crosstalk",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "interleaved_cluster_crosstalk::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19344838577854576,
+   "R": 0.20288166206058855,
+   "margin": 0.004057633241211771,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 4.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9583333333333338,
+   "R": 0.9583333333333338,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "interleaved_cluster_crosstalk",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "interleaved_cluster_crosstalk::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19344838577854576,
+   "R": 0.20288166206058855,
+   "margin": 0.004057633241211771,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 4.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9583333333333338,
+   "R": 0.9583333333333338,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "kitchen_sink_hybrid_net",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "kitchen_sink_hybrid_net::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4103513980744668,
+   "R": 0.34195710867282364,
+   "margin": 0.006839142173456473,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 4.0,
+   "R": 7.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.6263157894736843,
+   "R": 0.6263157894736843,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "kitchen_sink_platform_graph::classic_sugiyama_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.10764031331050536,
+   "R": 0.11844445126587108,
+   "margin": 0.0023688890253174217,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7444444444444447,
+   "R": 0.8555555555555557,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "kitchen_sink_platform_graph::classic_sugiyama_passes4",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.10764031331050536,
+   "R": 0.11844445126587108,
+   "margin": 0.0023688890253174217,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7444444444444447,
+   "R": 0.8555555555555557,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "kitchen_sink_platform_graph::classic_sugiyama_graphviz_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.467651691309619,
+   "R": 0.08578931512898605,
+   "margin": 0.001715786302579721,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7277777777777776,
+   "R": 0.8666666666666669,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "kitchen_sink_platform_graph::classic_sugiyama_passes48",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.10764031331050536,
+   "R": 0.11844445126587108,
+   "margin": 0.0023688890253174217,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7444444444444447,
+   "R": 0.8555555555555557,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "kitchen_sink_platform_graph::classic_sugiyama_tight",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.10764031331050536,
+   "R": 0.11844445126587108,
+   "margin": 0.0023688890253174217,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7444444444444447,
+   "R": 0.8555555555555557,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "kitchen_sink_platform_graph::classic_sugiyama_wide",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.10764031331050536,
+   "R": 0.11844445126587108,
+   "margin": 0.0023688890253174217,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7444444444444447,
+   "R": 0.8555555555555557,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "mixed_width_labels",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "mixed_width_labels::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5311394142992959,
+   "R": 0.12635645169258197,
+   "margin": 0.0025271290338516393,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "moe_router_sparse",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "moe_router_sparse::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.09044176001939588,
+   "R": 0.07963654629143987,
+   "margin": 0.0015927309258287976,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "moe_router_sparse",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "moe_router_sparse::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.37120690149637847,
+   "R": 0.09232355121299426,
+   "margin": 0.0018464710242598853,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "moe_router_sparse",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "moe_router_sparse::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.09044176001939588,
+   "R": 0.07963654629143987,
+   "margin": 0.0015927309258287976,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "moe_router_sparse",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "moe_router_sparse::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.09044176001939588,
+   "R": 0.07963654629143987,
+   "margin": 0.0015927309258287976,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "moe_router_sparse",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "moe_router_sparse::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.09044176001939588,
+   "R": 0.07963654629143987,
+   "margin": 0.0015927309258287976,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "moe_router_sparse",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "moe_router_sparse::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.09044176001939588,
+   "R": 0.07963654629143987,
+   "margin": 0.0015927309258287976,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "long_range_residual_ladder",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "long_range_residual_ladder::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5529320060825046,
+   "R": 0.1889708502959969,
+   "margin": 0.003779417005919938,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.5578947368421053,
+   "R": 0.671052631578947,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "long_skip_only_24",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "long_skip_only_24::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.37037477518745143,
+   "R": 0.0879648425700167,
+   "margin": 0.0017592968514003342,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 14.0,
+   "R": 14.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.46666666666666656,
+   "R": 0.7583333333333333,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "dense_pair_50",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "dense_pair_50::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.47431943594589526,
+   "R": 0.07844399622199169,
+   "margin": 0.001568879924439834,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 391.0,
+   "R": 331.0,
+   "margin": 6.62,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.2800000000000001,
+   "R": 0.6700000000000002,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "dense_pair_50",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "dense_pair_50::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4759868304137599,
+   "R": 0.45925921512172174,
+   "margin": 0.009185184302434436,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 485.0,
+   "R": 494.0,
+   "margin": 9.88,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.5600000000000002,
+   "R": 0.598,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "multiscale_skip_cascade",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "multiscale_skip_cascade::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.163277307781288,
+   "R": 0.16098271503914494,
+   "margin": 0.0032196543007828988,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 9.0,
+   "R": 8.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8400000000000002,
+   "R": 0.8400000000000002,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "multiscale_skip_cascade",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "multiscale_skip_cascade::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.41869327461456624,
+   "R": 0.28202136689826696,
+   "margin": 0.005640427337965339,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 5.0,
+   "R": 12.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7533333333333332,
+   "R": 0.7800000000000001,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "multiscale_skip_cascade",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "multiscale_skip_cascade::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.163277307781288,
+   "R": 0.16098271503914494,
+   "margin": 0.0032196543007828988,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 9.0,
+   "R": 8.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8400000000000002,
+   "R": 0.8400000000000002,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "multiscale_skip_cascade",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "multiscale_skip_cascade::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.163277307781288,
+   "R": 0.16098271503914494,
+   "margin": 0.0032196543007828988,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 9.0,
+   "R": 8.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8400000000000002,
+   "R": 0.8400000000000002,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "multiscale_skip_cascade",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "multiscale_skip_cascade::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.163277307781288,
+   "R": 0.16098271503914494,
+   "margin": 0.0032196543007828988,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 9.0,
+   "R": 8.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8400000000000002,
+   "R": 0.8400000000000002,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "multiscale_skip_cascade",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "multiscale_skip_cascade::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.163277307781288,
+   "R": 0.16098271503914494,
+   "margin": 0.0032196543007828988,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 9.0,
+   "R": 8.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8400000000000002,
+   "R": 0.8400000000000002,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "nested_cluster_label_stack",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "nested_cluster_label_stack::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.6867985645139767,
+   "R": 0.049893542103808586,
+   "margin": 0.0009978708420761717,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "org_chart_1_5_4_8",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "org_chart_1_5_4_8::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.38856547285360243,
+   "R": 0.2261922461523067,
+   "margin": 0.004523844923046134,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.661111111111111,
+   "R": 0.7055555555555556,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "outerplanar_dag_20",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "outerplanar_dag_20::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3758388879919579,
+   "R": 0.30443427844320703,
+   "margin": 0.006088685568864141,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.535,
+   "R": 0.5799999999999998,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "multi_component_80",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "multi_component_80::classic_sugiyama_graphviz_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.8940684288578343,
+   "R": 0.2432616544770325,
+   "margin": 0.00486523308954065,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7039886039886041,
+   "R": 0.6208689458689459,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "parallel_cycles_4x5",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "parallel_cycles_4x5::classic_sugiyama_graphviz_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.37963033010289443,
+   "R": 0.253358296385895,
+   "margin": 0.0050671659277179,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.75,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "petersen_10",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "petersen_10::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3602606959038793,
+   "R": 0.16487944473000862,
+   "margin": 0.0032975888946001723,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 7.0,
+   "R": 6.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "planar_60",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "planar_60::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1666004521536437,
+   "R": 0.1933734421079313,
+   "margin": 0.0038674688421586265,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 192.0,
+   "R": 185.0,
+   "margin": 3.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5600000000000002,
+   "R": 0.48333333333333334,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "planar_60",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "planar_60::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.17475810662727376,
+   "R": 0.2830803329694536,
+   "margin": 0.0056616066593890724,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 231.0,
+   "R": 366.0,
+   "margin": 7.32,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5033333333333334,
+   "R": 0.3799999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "planar_60",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "planar_60::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.2685671848277527,
+   "R": 0.18972708122996465,
+   "margin": 0.003794541624599293,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 160.0,
+   "R": 151.0,
+   "margin": 3.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.42833333333333345,
+   "R": 0.45000000000000007,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "planar_60",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "planar_60::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.29441837264192827,
+   "R": 0.317634774597091,
+   "margin": 0.00635269549194182,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 350.0,
+   "R": 423.0,
+   "margin": 8.46,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.40333333333333327,
+   "R": 0.2983333333333333,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "ragged_feature_pyramid",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "ragged_feature_pyramid::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.33614117847653524,
+   "R": 0.18996448488638915,
+   "margin": 0.003799289697727783,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.9166666666666666,
+   "R": 0.9333333333333332,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "planar_60",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "planar_60::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1666004521536437,
+   "R": 0.1933734421079313,
+   "margin": 0.0038674688421586265,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 192.0,
+   "R": 185.0,
+   "margin": 3.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5600000000000002,
+   "R": 0.48333333333333334,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "planar_60",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "planar_60::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1666004521536437,
+   "R": 0.1933734421079313,
+   "margin": 0.0038674688421586265,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 192.0,
+   "R": 185.0,
+   "margin": 3.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5600000000000002,
+   "R": 0.48333333333333334,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "random_bipartite_60",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "random_bipartite_60::classic_sugiyama_graphviz_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.33156132075358336,
+   "R": 0.31925372604524827,
+   "margin": 0.006385074520904965,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 653.0,
+   "R": 609.0,
+   "margin": 12.18,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.3543859649122807,
+   "R": 0.43157894736842106,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "random_dag_200",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "random_dag_200::classic_sugiyama_passes48",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.47957744649294537,
+   "R": 0.46713291804537965,
+   "margin": 0.009342658360907594,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 8514.0,
+   "R": 8144.0,
+   "margin": 162.88,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.05355191256830601,
+   "R": 0.051912568306010924,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "random_dag_200",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "random_dag_200::classic_sugiyama_wide",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4688417578072253,
+   "R": 0.47306643283921407,
+   "margin": 0.009461328656784281,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 9380.0,
+   "R": 8372.0,
+   "margin": 167.44,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.052459016393442616,
+   "R": 0.05683060109289616,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "random_dag_50",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "random_dag_50::classic_sugiyama_wide",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.44051421315346795,
+   "R": 0.4445821160384681,
+   "margin": 0.008891642320769362,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 335.0,
+   "R": 435.0,
+   "margin": 8.700000000000001,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.2297872340425531,
+   "R": 0.18510638297872342,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "random_dag_50",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "random_dag_50::classic_sugiyama_graphviz_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5097128294358335,
+   "R": 0.41952985721694314,
+   "margin": 0.008390597144338863,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 502.0,
+   "R": 444.0,
+   "margin": 8.88,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.21702127659574463,
+   "R": 0.18723404255319145,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "real_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "real_karate_34::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3097655865697792,
+   "R": 0.3546481527827345,
+   "margin": 0.00709296305565469,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 361.0,
+   "R": 385.0,
+   "margin": 7.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.33823529411764724,
+   "R": 0.323529411764706,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "real_karate_34",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "real_karate_34::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35232779516587487,
+   "R": 0.3307213665803143,
+   "margin": 0.006614427331606287,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 101.0,
+   "R": 108.0,
+   "margin": 2.16,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.4588235294117647,
+   "R": 0.3823529411764707,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "real_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "real_karate_34::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35411414733515717,
+   "R": 0.3410245022983009,
+   "margin": 0.006820490045966018,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 374.0,
+   "R": 335.0,
+   "margin": 6.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.3205882352941176,
+   "R": 0.34411764705882353,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "real_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "real_karate_34::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3097655865697792,
+   "R": 0.3546481527827345,
+   "margin": 0.00709296305565469,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 361.0,
+   "R": 385.0,
+   "margin": 7.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.33823529411764724,
+   "R": 0.323529411764706,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "real_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "real_karate_34::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3097655865697792,
+   "R": 0.3546481527827345,
+   "margin": 0.00709296305565469,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 361.0,
+   "R": 385.0,
+   "margin": 7.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.33823529411764724,
+   "R": 0.323529411764706,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "real_lesmis_77",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "real_lesmis_77::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.38937997450557926,
+   "R": 0.32877581191616023,
+   "margin": 0.006575516238323205,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1523.0,
+   "R": 1501.0,
+   "margin": 30.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.28961038961038954,
+   "R": 0.2831168831168831,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "real_lesmis_77",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "real_lesmis_77::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 99,
+  "battery_stress": {
+   "D": 0.3568657699289154,
+   "R": 0.2956972754446158,
+   "margin": 0.005913945508892317,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 992.0,
+   "R": 962.0,
+   "margin": 19.240000000000002,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.38051948051948065,
+   "R": 0.4766233766233766,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "recurrent_feedback_cell",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "recurrent_feedback_cell::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.37053601545927284,
+   "R": 0.16720797252178302,
+   "margin": 0.0033441594504356603,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "regular_3_30",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "regular_3_30::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.38640702600904964,
+   "R": 0.2100282621354748,
+   "margin": 0.004200565242709496,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 61.0,
+   "R": 30.0,
+   "margin": 0.6,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5499999999999999,
+   "R": 0.6133333333333331,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "regular_3_30",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "regular_3_30::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3820138640107417,
+   "R": 0.39817395452126897,
+   "margin": 0.00796347909042538,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 81.0,
+   "R": 110.0,
+   "margin": 2.2,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.4400000000000001,
+   "R": 0.42666666666666675,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "residual_block",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "residual_block::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4613475098308213,
+   "R": 0.2059947323522719,
+   "margin": 0.004119894647045438,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "regular_4_40",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "regular_4_40::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35228003768187666,
+   "R": 0.3592524687148975,
+   "margin": 0.007185049374297951,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 415.0,
+   "R": 387.0,
+   "margin": 7.74,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.35500000000000004,
+   "R": 0.35500000000000004,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "regular_4_40",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "regular_4_40::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.33616958314243434,
+   "R": 0.31342156511534547,
+   "margin": 0.006268431302306909,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 257.0,
+   "R": 231.0,
+   "margin": 4.62,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.39499999999999996,
+   "R": 0.425,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "regular_4_40",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "regular_4_40::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.373037190186954,
+   "R": 0.38336368339436117,
+   "margin": 0.0076672736678872234,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 398.0,
+   "R": 425.0,
+   "margin": 8.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.3649999999999999,
+   "R": 0.32750000000000007,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "shape_and_routing_matrix",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "shape_and_routing_matrix::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4376484807726967,
+   "R": 0.017781764369892553,
+   "margin": 0.00035563528739785105,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "regular_4_40",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "regular_4_40::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35228003768187666,
+   "R": 0.3592524687148975,
+   "margin": 0.007185049374297951,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 415.0,
+   "R": 387.0,
+   "margin": 7.74,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.35500000000000004,
+   "R": 0.35500000000000004,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "resnet_stack_4x16",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "resnet_stack_4x16::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.46430832240034586,
+   "R": 0.1702517184106394,
+   "margin": 0.0034050343682127883,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.5466666666666667,
+   "R": 0.8166666666666662,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "regular_4_40",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "regular_4_40::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35228003768187666,
+   "R": 0.3592524687148975,
+   "margin": 0.007185049374297951,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 415.0,
+   "R": 387.0,
+   "margin": 7.74,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.35500000000000004,
+   "R": 0.35500000000000004,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "small_label_storm",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "small_label_storm::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4278399233792348,
+   "R": 0.015039836936165838,
+   "margin": 0.00030079673872331677,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "real_lesmis_77",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "real_lesmis_77::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.39006860690613127,
+   "R": 0.32418870608991046,
+   "margin": 0.006483774121798209,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1589.0,
+   "R": 1741.0,
+   "margin": 34.82,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.36883116883116873,
+   "R": 0.35584415584415596,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "sierpinski_42",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "sierpinski_42::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.23074930919915923,
+   "R": 0.06654637278199502,
+   "margin": 0.0013309274556399004,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.5595238095238094,
+   "R": 0.807142857142857,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "real_lesmis_77",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "real_lesmis_77::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.38937997450557926,
+   "R": 0.32877581191616023,
+   "margin": 0.006575516238323205,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1523.0,
+   "R": 1501.0,
+   "margin": 30.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.28961038961038954,
+   "R": 0.2831168831168831,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "sparse_pair_50",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "sparse_pair_50::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.355482581622638,
+   "R": 0.03834805416728253,
+   "margin": 0.0007669610833456506,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.522,
+   "R": 0.9299999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "tl_resnet_2block",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "tl_resnet_2block::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.44246074239089006,
+   "R": 0.20712921816745816,
+   "margin": 0.004142584363349164,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.6250000000000001,
+   "R": 0.8100000000000004,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "tl_transformer_1layer",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "tl_transformer_1layer::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5850354170070534,
+   "R": 0.4394790156432848,
+   "margin": 0.008789580312865695,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 2.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5947368421052631,
+   "R": 0.8026315789473684,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "transformer_full_4h_2l",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "transformer_full_4h_2l::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5405541374070999,
+   "R": 0.15826950033300025,
+   "margin": 0.003165390006660005,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 4.0,
+   "R": 4.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.5153846153846154,
+   "R": 0.753846153846154,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "transformer_layer",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "transformer_layer::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5888666830660674,
+   "R": 0.15309657984939318,
+   "margin": 0.0030619315969878636,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7000000000000003,
+   "R": 0.875,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "unet_small",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "unet_small::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.2103631151310494,
+   "R": 0.21881409455169534,
+   "margin": 0.004376281891033907,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "real_lesmis_77",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "real_lesmis_77::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.38937997450557926,
+   "R": 0.32877581191616023,
+   "margin": 0.006575516238323205,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1523.0,
+   "R": 1501.0,
+   "margin": 30.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.28961038961038954,
+   "R": 0.2831168831168831,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "triangular_lattice_36",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "triangular_lattice_36::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.13255643936156317,
+   "R": 0.02198604556037332,
+   "margin": 0.0004397209112074664,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7944444444444444,
+   "R": 0.8499999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "weighted_clusters_3x10",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "weighted_clusters_3x10::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3184459705495825,
+   "R": 0.16153444923221452,
+   "margin": 0.0032306889846442904,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 106.0,
+   "R": 122.0,
+   "margin": 2.44,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7466666666666669,
+   "R": 0.78,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "weighted_clusters_3x10",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "weighted_clusters_3x10::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.22665970893937556,
+   "R": 0.2819734682352683,
+   "margin": 0.005639469364705366,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 153.0,
+   "R": 197.0,
+   "margin": 3.94,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.6333333333333333,
+   "R": 0.6033333333333333,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "weighted_clusters_3x10",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "weighted_clusters_3x10::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.426025143848545,
+   "R": 0.31566191432781354,
+   "margin": 0.0063132382865562706,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 222.0,
+   "R": 213.0,
+   "margin": 4.26,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5266666666666666,
+   "R": 0.5533333333333332,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "weighted_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "weighted_karate_34::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3097655865697792,
+   "R": 0.3546481527827345,
+   "margin": 0.00709296305565469,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 361.0,
+   "R": 385.0,
+   "margin": 7.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.33823529411764724,
+   "R": 0.323529411764706,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "weighted_karate_34",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "weighted_karate_34::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.33529539002830827,
+   "R": 0.3307213665803143,
+   "margin": 0.006614427331606287,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "cross": {
+   "D": 111.0,
+   "R": 108.0,
+   "margin": 2.16,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.39999999999999986,
+   "R": 0.3823529411764707,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_default",
+  "graph": "width_skew_late_merge",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_default",
+  "combo_id": "width_skew_late_merge::classic_sugiyama_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.188641517653012,
+   "R": 0.2698588799944087,
+   "margin": 0.005397177599888174,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 3.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7411764705882354,
+   "R": 0.7117647058823529,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_graphviz_fidelity",
+  "graph": "width_skew_late_merge",
+  "reference": "graphviz_dot__for__classic_sugiyama_graphviz_fidelity",
+  "combo_id": "width_skew_late_merge::classic_sugiyama_graphviz_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.36523377500155263,
+   "R": 0.1799057698417884,
+   "margin": 0.003598115396835768,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.6882352941176471,
+   "R": 0.7411764705882354,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "width_skew_late_merge",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "width_skew_late_merge::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.188641517653012,
+   "R": 0.2698588799944087,
+   "margin": 0.005397177599888174,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 3.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7411764705882354,
+   "R": 0.7117647058823529,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes48",
+  "graph": "width_skew_late_merge",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes48",
+  "combo_id": "width_skew_late_merge::classic_sugiyama_passes48",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.188641517653012,
+   "R": 0.2698588799944087,
+   "margin": 0.005397177599888174,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 3.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7411764705882354,
+   "R": 0.7117647058823529,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "width_skew_late_merge",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "width_skew_late_merge::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.188641517653012,
+   "R": 0.2698588799944087,
+   "margin": 0.005397177599888174,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 3.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7411764705882354,
+   "R": 0.7117647058823529,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "width_skew_late_merge",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "width_skew_late_merge::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.188641517653012,
+   "R": 0.2698588799944087,
+   "margin": 0.005397177599888174,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 3.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7411764705882354,
+   "R": 0.7117647058823529,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_passes4",
+  "graph": "weighted_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_passes4",
+  "combo_id": "weighted_karate_34::classic_sugiyama_passes4",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35411414733515717,
+   "R": 0.3410245022983009,
+   "margin": 0.006820490045966018,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 374.0,
+   "R": 335.0,
+   "margin": 6.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.3205882352941176,
+   "R": 0.34411764705882353,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_sugiyama_tight",
+  "graph": "weighted_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_tight",
+  "combo_id": "weighted_karate_34::classic_sugiyama_tight",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3097655865697792,
+   "R": 0.3546481527827345,
+   "margin": 0.00709296305565469,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 361.0,
+   "R": 385.0,
+   "margin": 7.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.33823529411764724,
+   "R": 0.323529411764706,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_sugiyama_wide",
+  "graph": "weighted_karate_34",
+  "reference": "igraph_sugiyama__for__classic_sugiyama_wide",
+  "combo_id": "weighted_karate_34::classic_sugiyama_wide",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.3097655865697792,
+   "R": 0.3546481527827345,
+   "margin": 0.00709296305565469,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 361.0,
+   "R": 385.0,
+   "margin": 7.7,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.33823529411764724,
+   "R": 0.323529411764706,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ }
+]

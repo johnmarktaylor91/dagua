@@ -1,7 +1,7 @@
 """(SGD)^2 multicriteria reference competitor adapter.
 
 Runs the original (SGD)^2 code from github.com/tiga1231/graph-drawing
-(cloned to /tmp/graph-drawing) as a reference implementation.
+(cloned to ~/tools/dagua-refs/graph-drawing) as a reference implementation.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional, Sequence
 
 import torch
 
@@ -22,9 +22,11 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
-_SGD2_REPO = Path("/tmp/graph-drawing")
+_SGD2_REPO = Path.home() / "tools" / "dagua-refs" / "graph-drawing"
 _SGD2_REMOTE_URL = "https://github.com/tiga1231/graph-drawing"
 _SGD2_BRANCH = "sgd"
+_CROSSING_CRITERIA = frozenset({"crossings", "crossing_angle_maximization"})
+_CROSSING_CPU_THREADS = 1
 # Round 31 tracking: the upstream repository is optional and may be absent.
 # Missing files must remain explicit adapter errors, not silent zero-pair rows.
 
@@ -88,6 +90,36 @@ def _run_sgd2_source_command(args: Sequence[str], cwd: Path) -> tuple[bool, str]
         return False, str(exc)
     output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
     return completed.returncode == 0, output
+
+
+@contextmanager
+def _crossing_cpu_thread_guard(enabled: bool) -> Iterator[None]:
+    """Temporarily run upstream crossing-detector kernels single-threaded.
+
+    Parameters
+    ----------
+    enabled : bool
+        Whether the current upstream GD2 run has a crossing-based criterion.
+
+    Yields
+    ------
+    Iterator[None]
+        Context around the upstream optimization call.
+    """
+    if not enabled:
+        yield
+        return
+
+    previous_threads = torch.get_num_threads()
+    if previous_threads <= _CROSSING_CPU_THREADS:
+        yield
+        return
+
+    torch.set_num_threads(_CROSSING_CPU_THREADS)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(previous_threads)
 
 
 def _ensure_sgd2_multi_sources() -> list[str]:
@@ -522,7 +554,12 @@ class SGD2MultiRef(CompetitorBase):
                     sample_sizes = {"stress": 128}
                 optimize_kwargs["criteria_weights"] = criteria_weights
                 optimize_kwargs["sample_sizes"] = sample_sizes
-            with _compat_reduce_lr_on_plateau(), _compat_criteria_patches():
+            crossing_thread_guard = bool(_CROSSING_CRITERIA & set(criteria_weights))
+            with (
+                _crossing_cpu_thread_guard(crossing_thread_guard),
+                _compat_reduce_lr_on_plateau(),
+                _compat_criteria_patches(),
+            ):
                 gd2.optimize(**optimize_kwargs)
             if torch.isnan(gd2.pos).any():
                 return CompetitorResult(

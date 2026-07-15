@@ -167,7 +167,7 @@ def _test_graph() -> DaguaGraph:
 
 def test_all_variants_have_valid_base_engine() -> None:
     """Every registry entry should point at a usable or planned base engine."""
-    assert len(VARIANT_REGISTRY) == 120
+    assert len(VARIANT_REGISTRY) == 159
     for variant in VARIANT_REGISTRY:
         assert (
             variant.base_engine in _CLASSIC_LAYOUT_SPECS
@@ -325,6 +325,15 @@ def test_classic_embedding_variant_registry_matches_reference_defaults() -> None
     assert "gcn_steps" not in neulay_no_gcn.original_params
 
 
+def test_classic_sfdp_p_neg2_uses_positive_graphviz_repulsiveforce() -> None:
+    """The Graphviz p=-2 reference should request internal exponent ``p=-2``."""
+    sfdp_p_neg2 = get_variant("classic_sfdp_p_neg2")
+
+    assert sfdp_p_neg2 is not None
+    assert sfdp_p_neg2.reimpl_params["repulsive_exponent"] == -2.0
+    assert sfdp_p_neg2.original_params["repulsiveforce"] == 2.0
+
+
 def test_stochastic_flag_consistency() -> None:
     """Variant stochastic flags should match runner classification."""
     for variant in VARIANT_REGISTRY:
@@ -388,6 +397,7 @@ def test_skip_after_timeout_serial(monkeypatch: Any, tmp_path: Path) -> None:
             timeout_seconds=1.0,
             output_dir=str(tmp_path),
             save_positions=False,
+            git_sha="testsha",
         )
         for seed in (42, 43, 44, 45)
     ]
@@ -406,6 +416,7 @@ def test_skip_after_timeout_serial(monkeypatch: Any, tmp_path: Path) -> None:
         skip_reason=None,
         original_for=[],
         reimpl_of=[],
+        git_sha="testsha",
     )
 
     call_count = {"count": 0}

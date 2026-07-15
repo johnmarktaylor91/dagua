@@ -9,11 +9,13 @@ import pytest
 import torch
 
 from dagua.layout.ops.drl import (
+    DRLDensityGridConfig,
     DRLEnergyConfig,
     DRLNodeUpdate,
     DRLPhaseDynamicsConfig,
     DRLPhaseStep,
     _build_undirected_adjacency,
+    _DensityGrid,
     _initialize_positions,
     _maybe_cut_long_edge,
     _PhaseParameters,
@@ -381,6 +383,14 @@ class TestDRLPipelineFidelity:
             dtype=torch.float64,
         )
         torch.testing.assert_close(positions, expected, rtol=0.0, atol=0.0)
+
+    def test_drl_density_grid_bins_after_cpp_float_shift(self) -> None:
+        """DrL grid binning should round the float-plus-integer subexpression."""
+        grid = _DensityGrid(DRLDensityGridConfig())
+
+        # The unrounded Python-double formula lands in cell 499, while the
+        # C++ expression rounds x + HALF_VIEW up before adding 0.5.
+        assert grid._cell_index_xy(-0.50005, 0.0) == (500, 500)
 
     def test_drl_random_jump_uses_igraph_rng_sign(self) -> None:
         """DRL random jumps should use igraph's ``0.5 - RNG_UNIF01`` sign."""

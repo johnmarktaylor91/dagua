@@ -52,6 +52,7 @@ EXPECTED_CLASSIC_NAMES = {
     "classic_umap",
     "classic_neulay",
     "classic_sgd2_multi",
+    "classic_fcose",
     "classic_fr_kk",
     "classic_kk_fr",
 }
@@ -166,7 +167,8 @@ def _install_classic_layout_spy(
         torch.Tensor
             Zero coordinates shaped ``[N, 2]``.
         """
-        del edge_index, node_sizes, seed
+        del edge_index, seed
+        seen["node_sizes"] = None if node_sizes is None else node_sizes.detach().clone()
         seen["kwargs"] = dict(kwargs)
         return torch.zeros((num_nodes, 2), dtype=torch.float32)
 
@@ -280,8 +282,8 @@ def test_classic_neulay_uses_full_two_phase_defaults(
 
     assert result is not None
     assert observed["name"] == "classic_neulay"
-    assert observed["import_path"] == "dagua.layout.classic.neulay"
-    assert observed["fn_name"] == "layout_neulay"
+    assert observed["import_path"] == "dagua.layout.ops.pipelines.neulay"
+    assert observed["fn_name"] == "layout_neulay_pipeline"
     assert observed["seed"] == 23
     assert observed["extra_kwargs"] == {
         "steps": 20_000,
@@ -294,10 +296,12 @@ def test_classic_neulay_uses_full_two_phase_defaults(
 
 def test_classic_embedding_variant_param_names_match_registry_contract() -> None:
     """Classic embedding adapters should declare their supported override names."""
-    assert ClassicTsNET.variant_param_names == frozenset({"perplexity", "steps"})
-    assert ClassicUMAP.variant_param_names == frozenset({"n_neighbors", "min_dist", "spread"})
+    assert ClassicTsNET.variant_param_names == frozenset({"perplexity", "steps", "fidelity_mode"})
+    assert ClassicUMAP.variant_param_names == frozenset(
+        {"n_neighbors", "min_dist", "spread", "fidelity_mode"}
+    )
     assert ClassicNeuLay.variant_param_names == frozenset(
-        {"steps", "gcn_steps", "use_gcn", "lr", "radius"}
+        {"steps", "gcn_steps", "use_gcn", "lr", "radius", "fidelity_mode"}
     )
 
 
@@ -327,6 +331,316 @@ def test_classic_layout_with_variant_warns_on_unrecognized_params(
         result = ClassicUMAP().layout_with_variant(graph, seed=19, variant_params={"bogus": 1.0})
 
     assert result is not None
+
+
+def test_classic_sfdp_graphviz_fidelity_forwards_dot_node_boxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity SFDP should pack with DOT label-sized node boxes."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("short", "a substantially wider label"),
+            ("isolated wide component", "tail"),
+        ]
+    )
+    graph.compute_node_sizes()
+    original_sizes = None if graph.node_sizes is None else graph.node_sizes.detach().clone()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sfdp",
+        fn_name="layout_sfdp_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSFDP().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz", "steps": 500},
+    )
+
+    assert result.pos is not None
+    assert seen["kwargs"]["fidelity_mode"] == "graphviz"
+    forwarded_sizes = seen["node_sizes"]
+    assert isinstance(forwarded_sizes, torch.Tensor)
+    assert forwarded_sizes.shape == (graph.num_nodes, 2)
+    if original_sizes is not None:
+        assert not torch.equal(forwarded_sizes, original_sizes)
+    assert float(forwarded_sizes[:, 0].max().item()) > 54.0
+
+
+def test_classic_sfdp_graphviz_fidelity_preserves_small_modest_label_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Small modest-label SFDP graphs should keep the C4d default pack boxes."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("enc_in", "enc_conv"),
+            ("enc_conv", "enc_relu"),
+            ("enc_relu", "enc_out"),
+            ("res_in", "res_conv1"),
+            ("res_conv1", "res_conv2"),
+            ("res_in", "res_add"),
+            ("res_conv2", "res_add"),
+            ("res_add", "res_out"),
+        ]
+    )
+    graph.compute_node_sizes()
+    original_sizes = None if graph.node_sizes is None else graph.node_sizes.detach().clone()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sfdp",
+        fn_name="layout_sfdp_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSFDP().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz", "steps": 500},
+    )
+
+    assert result.pos is not None
+    forwarded_sizes = seen["node_sizes"]
+    assert isinstance(forwarded_sizes, torch.Tensor)
+    assert original_sizes is not None
+    assert torch.equal(forwarded_sizes, original_sizes)
+
+
+def test_classic_sfdp_graphviz_fidelity_preserves_connected_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connected Graphviz-fidelity SFDP should not use disconnected-pack boxes."""
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("source", "VeryLongConnectedLabelThatWouldOtherwiseTriggerThePackGate"),
+            ("VeryLongConnectedLabelThatWouldOtherwiseTriggerThePackGate", "sink"),
+        ]
+    )
+    graph.compute_node_sizes()
+    original_sizes = None if graph.node_sizes is None else graph.node_sizes.detach().clone()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sfdp",
+        fn_name="layout_sfdp_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSFDP().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz", "steps": 500},
+    )
+
+    assert result.pos is not None
+    forwarded_sizes = seen["node_sizes"]
+    assert isinstance(forwarded_sizes, torch.Tensor)
+    assert original_sizes is not None
+    assert torch.equal(forwarded_sizes, original_sizes)
+
+
+def test_classic_sugiyama_graphviz_fidelity_forwards_label_only_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity Sugiyama should pass edge-label boxes for label-only DOT."""
+    graph = DaguaGraph()
+    graph.add_edge("source", "target", label="handoff label")
+    graph.compute_node_sizes()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sugiyama",
+        fn_name="layout_sugiyama_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSugiyama().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz"},
+    )
+
+    assert result.pos is not None
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert graph.node_sizes is not None
+    assert torch.equal(kwargs["graphviz_node_sizes"], graph.node_sizes)
+    assert isinstance(kwargs["graphviz_edge_label_sizes"], torch.Tensor)
+    assert kwargs["graphviz_edge_label_sizes"].shape == (1, 2)
+    assert "clusters" not in kwargs
+    assert "cluster_parents" not in kwargs
+    assert "graphviz_apply_cluster_constraints" not in kwargs
+
+
+def test_classic_sugiyama_graphviz_fidelity_forwards_cluster_only_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity Sugiyama should opt into clusters for cluster-only DOT."""
+    graph = _make_clustered_graph()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sugiyama",
+        fn_name="layout_sugiyama_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSugiyama().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz"},
+    )
+
+    assert result.pos is not None
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert isinstance(kwargs["graphviz_typed_node_sizes"], torch.Tensor)
+    assert kwargs["clusters"] is graph.clusters
+    assert kwargs["cluster_parents"] is graph.cluster_parents
+    assert kwargs["graphviz_apply_cluster_constraints"] is True
+    assert "graphviz_edge_label_sizes" not in kwargs
+
+
+def test_classic_sugiyama_typed_boxes_use_dot_fallback_linespacing() -> None:
+    """Match Graphviz fallback label height when fitting typed ellipse boxes."""
+    width, height = classic_competitor._graphviz_dot_node_box(
+        label="encoder.stage_1_attention_projection",
+        font_size=12.0,
+        shape="ellipse",
+        text_height_factor=1.2,
+    )
+
+    assert width / 2.0 == pytest.approx(138.48179404552744)
+    assert height == 36.0
+
+
+def test_classic_sugiyama_uses_times_metrics_for_dot_cluster_labels() -> None:
+    """Match DOT's default Times-Roman widths for cluster labels."""
+    graph = DaguaGraph.from_edge_list([("source", "target")])
+    graph.add_cluster("encoder", ["source", "target"], label="Encoder")
+    graph.add_cluster("cross", ["source"], label="Cross Attention", parent="encoder")
+
+    widths = classic_competitor._graphviz_dot_cluster_label_widths(graph)
+
+    assert widths["encoder"] == 62
+    assert round(widths["cross"]) == 104
+
+
+def test_classic_sugiyama_enables_only_certified_cluster_inventory() -> None:
+    """Enable the typed cluster path only for an instrumented exact oracle."""
+    edges = [
+        ("input", "embed"),
+        ("embed", "router"),
+        ("router", "expert_0"),
+        ("router", "expert_3"),
+        ("embed", "expert_1"),
+        ("embed", "expert_2"),
+        ("expert_0", "combine"),
+        ("expert_1", "combine"),
+        ("expert_2", "combine"),
+        ("expert_3", "combine"),
+        ("combine", "output"),
+    ]
+    graph = DaguaGraph.from_edge_list(edges)
+    node_by_label = {label: index for index, label in enumerate(graph.node_labels)}
+    graph.add_cluster(
+        "experts",
+        [node_by_label[f"expert_{index}"] for index in range(4)],
+        label="Experts",
+    )
+    kwargs: dict[str, Any] = {}
+
+    classic_competitor._apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=kwargs)
+
+    assert kwargs["graphviz_enable_cluster_skeleton"] is True
+    assert kwargs["graphviz_expected_x_inventory"][0] == 28
+    assert sum(record[2] for record in kwargs["graphviz_expected_x_inventory"][1]) == 36
+
+
+def test_classic_sugiyama_cluster_handoff_requires_endpoint_digest() -> None:
+    """Gate the clustered handoff row on its exact endpoint/order digest."""
+    edges = [
+        ("input", "preprocess.tokenize"),
+        ("preprocess.tokenize", "encoder.stage_1_attention_projection"),
+        ("encoder.stage_1_attention_projection", "encoder.stage_1_feedforward"),
+        ("encoder.stage_1_feedforward", "handoff"),
+        ("input", "handoff"),
+        ("handoff", "decoder.cross_attention_query"),
+        ("handoff", "decoder.cross_attention_key_value"),
+        ("decoder.cross_attention_query", "decoder.merge"),
+        ("decoder.cross_attention_key_value", "decoder.merge"),
+        ("decoder.merge", "LongOutputProjectionLayerWithAuxiliaryCalibration"),
+        ("LongOutputProjectionLayerWithAuxiliaryCalibration", "output"),
+    ]
+    graph = DaguaGraph.from_edge_list(edges)
+    graph.add_edge("handoff", "decoder.cross_attention_key_value")
+    node_by_label = {label: index for index, label in enumerate(graph.node_labels)}
+    graph.add_cluster(
+        "encoder",
+        [
+            node_by_label["encoder.stage_1_attention_projection"],
+            node_by_label["encoder.stage_1_feedforward"],
+        ],
+        label="Encoder",
+    )
+    graph.add_cluster(
+        "decoder",
+        [
+            node_by_label["decoder.cross_attention_query"],
+            node_by_label["decoder.cross_attention_key_value"],
+            node_by_label["decoder.merge"],
+        ],
+        label="Decoder",
+    )
+    graph.add_cluster(
+        "decoder.cross_attention",
+        [
+            node_by_label["decoder.cross_attention_query"],
+            node_by_label["decoder.cross_attention_key_value"],
+        ],
+        label="Cross Attention",
+        parent="decoder",
+    )
+
+    oracle = classic_competitor._graphviz_typed_cluster_inventory_oracle(graph)
+
+    assert oracle is not None
+    assert len(oracle) == 3
+    assert oracle[0] == 35
+    assert len(oracle[2]) == 64
+
+
+def test_classic_sugiyama_graphviz_fidelity_guards_mixed_label_cluster_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz-fidelity Sugiyama should leave mixed label+cluster DOT unaugmented."""
+    graph = DaguaGraph()
+    graph.add_edge("source", "target", label="handoff label")
+    graph.add_cluster("group", ["source", "target"])
+    graph.compute_node_sizes()
+    seen: dict[str, Any] = {}
+    _install_classic_layout_spy(
+        monkeypatch=monkeypatch,
+        module_name="dagua.layout.ops.pipelines.sugiyama",
+        fn_name="layout_sugiyama_pipeline",
+        seen=seen,
+    )
+
+    result = classic_competitor.ClassicSugiyama().layout_with_variant(
+        graph,
+        seed=100,
+        variant_params={"fidelity_mode": "graphviz"},
+    )
+
+    assert result.pos is not None
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs["graphviz_node_sizes"], torch.Tensor)
+    assert "graphviz_edge_label_sizes" not in kwargs
+    assert "clusters" not in kwargs
+    assert "cluster_parents" not in kwargs
+    assert "graphviz_apply_cluster_constraints" not in kwargs
 
 
 def test_classic_sgd2_multi_enables_multiple_criteria(
@@ -516,38 +830,47 @@ def test_graphviz_base_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None
     None
         The assertion validates timeout propagation.
     """
-    import dagua.graphviz_utils as graphviz_utils
+    from dagua.eval.competitors import graphviz_competitor
     from dagua.eval.competitors.graphviz_competitor import GraphvizSfdp
 
     graph = _make_small_graph()
     observed: dict[str, float | str] = {}
 
     def _fake_layout_with_graphviz(
-        input_graph: DaguaGraph,
+        graph: DaguaGraph,
         engine: str = "dot",
         timeout: float = 300.0,
+        seed: Optional[int] = None,
+        graph_attributes: Optional[Any] = None,
     ) -> torch.Tensor:
         """Capture Graphviz utility arguments for the regression test.
 
         Parameters
         ----------
-        input_graph : DaguaGraph
+        graph : DaguaGraph
             Graph passed through the competitor.
         engine : str, default="dot"
             Requested Graphviz engine.
         timeout : float, default=300.0
             Requested timeout in seconds.
+        seed : int | None, default=None
+            Optional Graphviz seed.
+        graph_attributes : Mapping[str, object] | None, default=None
+            Optional Graphviz graph-attribute overrides; ignored by this fake.
 
         Returns
         -------
         torch.Tensor
             Dummy position tensor with shape ``[N, 2]``.
         """
+        del seed, graph_attributes
         observed["engine"] = engine
         observed["timeout"] = timeout
-        return torch.zeros((input_graph.num_nodes, 2))
+        return torch.zeros((graph.num_nodes, 2))
 
-    monkeypatch.setattr(graphviz_utils, "layout_with_graphviz", _fake_layout_with_graphviz)
+    monkeypatch.setattr(
+        graphviz_competitor, "_layout_with_graphviz_engine", _fake_layout_with_graphviz
+    )
 
     result = GraphvizSfdp().layout(graph, timeout=123.0)
 
@@ -557,36 +880,44 @@ def test_graphviz_base_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_graphviz_base_classifies_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Graphviz base competitors should normalize subprocess timeouts."""
-    import dagua.graphviz_utils as graphviz_utils
+    from dagua.eval.competitors import graphviz_competitor
     from dagua.eval.competitors.graphviz_competitor import GraphvizSfdp
 
     graph = _make_small_graph()
 
     def _fake_layout_with_graphviz(
-        input_graph: DaguaGraph,
+        graph: DaguaGraph,
         engine: str = "dot",
         timeout: float = 300.0,
+        seed: Optional[int] = None,
+        graph_attributes: Optional[Any] = None,
     ) -> torch.Tensor:
         """Raise a timeout to validate adapter error normalization.
 
         Parameters
         ----------
-        input_graph : DaguaGraph
+        graph : DaguaGraph
             Graph passed through the competitor.
         engine : str, default="dot"
             Requested Graphviz engine.
         timeout : float, default=300.0
             Requested timeout in seconds.
+        seed : int | None, default=None
+            Optional Graphviz seed.
+        graph_attributes : Mapping[str, object] | None, default=None
+            Optional Graphviz graph-attribute overrides; ignored by this fake.
 
         Returns
         -------
         torch.Tensor
             This helper never returns because it always raises.
         """
-        del input_graph, engine
+        del graph, engine, seed, graph_attributes
         raise subprocess.TimeoutExpired(cmd="sfdp", timeout=timeout)
 
-    monkeypatch.setattr(graphviz_utils, "layout_with_graphviz", _fake_layout_with_graphviz)
+    monkeypatch.setattr(
+        graphviz_competitor, "_layout_with_graphviz_engine", _fake_layout_with_graphviz
+    )
 
     result = GraphvizSfdp().layout(graph, timeout=7.0)
 

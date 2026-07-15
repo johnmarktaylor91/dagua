@@ -77,6 +77,7 @@ def test_position_recovery_uses_seed_reference_override(tmp_path: Any) -> None:
         seed_count=1,
         seed_start=5,
         seed_refs={"graphviz_sfdp"},
+        git_sha="test-sha",
     )
 
     assert sorted(recovered) == ["tiny::graphviz_sfdp::seed5"]

@@ -1,18 +1,77 @@
-"""Dagre competitor adapter — dagre via Node.js subprocess."""
+"""Dagre competitor adapter — dagre via Node.js subprocess.
+
+Size policy (r80-P6): dagre natively accepts per-node width/height in its
+graph payload, in the same point units dagua uses. When size-aware
+externals are enabled (the default; see ``dagua.eval.size_policy``), real
+per-node sizes from ``graph.node_sizes`` are submitted per node instead of
+the old hardcoded 120x40 placeholder box. ``--size-blind-externals``
+restores the placeholder for store-compatibility experiments.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.size_policy import size_aware_externals
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
+
+_DEFAULT_NODE_WIDTH = 120.0
+_DEFAULT_NODE_HEIGHT = 40.0
+_DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
+_DAGRE_NODE_MODULES = Path("/home/jtaylor/projects/dagua/node_modules")
+
+
+def _node_subprocess_env() -> Dict[str, str]:
+    """Return a Node environment that can resolve repo-local dagre packages.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables for Dagre subprocesses.
+    """
+    env = dict(os.environ)
+    paths = [str(path) for path in (_DURABLE_NODE_MODULES, _DAGRE_NODE_MODULES) if path.exists()]
+    existing = env.get("NODE_PATH", "")
+    if existing:
+        paths.append(existing)
+    if paths:
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
+
+
+def _node_wh(graph: DaguaGraph, node_index: int) -> Tuple[float, float]:
+    """Return the width/height dagre should use for one node.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    node_index : int
+        Node index.
+
+    Returns
+    -------
+    Tuple[float, float]
+        ``(width, height)`` in point units: the real label-measured size
+        when ``graph.node_sizes`` is populated and size-aware externals are
+        enabled, otherwise the historical 120x40 placeholder.
+    """
+    if graph.node_sizes is not None and size_aware_externals():
+        return (
+            float(graph.node_sizes[node_index, 0].item()),
+            float(graph.node_sizes[node_index, 1].item()),
+        )
+    return (_DEFAULT_NODE_WIDTH, _DEFAULT_NODE_HEIGHT)
 
 
 _DAGRE_SCRIPT = r"""
@@ -29,7 +88,7 @@ process.stdin.on('end', () => {
         g.setNode(cluster.id, { label: cluster.label });
     }
     for (const node of data.nodes) {
-        g.setNode(node.id, { width: 120, height: 40 });
+        g.setNode(node.id, { width: node.width || 120, height: node.height || 40 });
     }
     for (const parent of data.parents) {
         g.setParent(parent.child, parent.parent);
@@ -171,7 +230,10 @@ def _build_dagre_input(graph: DaguaGraph) -> Dict[str, object]:
     dict[str, object]
         JSON-serializable Dagre input payload.
     """
-    nodes = [{"id": str(index)} for index in range(graph.num_nodes)]
+    nodes = []
+    for index in range(graph.num_nodes):
+        node_w, node_h = _node_wh(graph, index)
+        nodes.append({"id": str(index), "width": node_w, "height": node_h})
     edges: List[Dict[str, str]] = []
     if graph.edge_index.numel() > 0:
         for edge_index in range(graph.edge_index.shape[1]):
@@ -243,6 +305,7 @@ class DagreCompetitor(CompetitorBase):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_node_subprocess_env(),
             )
             elapsed = time.perf_counter() - start
 
@@ -277,6 +340,7 @@ class DagreCompetitor(CompetitorBase):
                 ["node", "-e", "require('dagre')"],
                 capture_output=True,
                 timeout=10,
+                env=_node_subprocess_env(),
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):

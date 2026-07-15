@@ -362,7 +362,7 @@ def test_hierarchy_checkpoint_rejects_bad_manifest_count(tmp_path: Path):
     assert bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3) is None
 
 
-def test_hierarchy_checkpoint_rejects_incomplete_manifest(tmp_path: Path):
+def test_hierarchy_checkpoint_accepts_incomplete_manifest(tmp_path: Path):
     checkpoint_dir = tmp_path / "bench_ckpt"
     paths = bench_large._checkpoint_paths(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -378,7 +378,11 @@ def test_hierarchy_checkpoint_rejects_incomplete_manifest(tmp_path: Path):
     )
     bench_large._save_hierarchy_checkpoint(paths, [level], complete=False)
 
-    assert bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3) is None
+    restored = bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3)
+
+    assert restored is not None
+    assert len(restored) == 1
+    assert restored[0].num_nodes == 4
 
 
 def test_positions_checkpoint_rejects_stale_layout_signature(tmp_path: Path):

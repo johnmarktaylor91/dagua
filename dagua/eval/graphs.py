@@ -53,6 +53,7 @@ def get_test_graphs(
         List of TestGraph objects.
     """
     all_graphs = _build_all_test_graphs()
+    _declare_semantic_direction(all_graphs)
 
     if tags:
         all_graphs = [g for g in all_graphs if g.tags & tags]
@@ -60,6 +61,39 @@ def get_test_graphs(
         all_graphs = [g for g in all_graphs if g.graph.num_nodes <= max_nodes]
 
     return all_graphs
+
+
+def _declare_semantic_direction(graphs: List[TestGraph]) -> None:
+    """Set ``graph.is_semantically_directed`` from corpus tags, in one place.
+
+    A real user with a known-undirected graph would declare it via
+    ``DaguaGraph.is_semantically_directed = False`` so layout routing can see
+    it (rather than relying on heuristic inference). The corpus mirrors that:
+    single source of truth is ``is_semantically_directed()`` -- the same
+    oracle the benchmark harness uses for scoring -- so declaration and
+    scoring never disagree. Directed graphs are left with the default
+    ``None`` (heuristic inference decides).
+    """
+    for test_graph in graphs:
+        if not is_semantically_directed(test_graph):
+            test_graph.graph.is_semantically_directed = False
+
+
+def is_semantically_directed(test_graph: TestGraph) -> bool:
+    """Return whether edge direction should affect directed layout scoring.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Graph metadata and topology.
+
+    Returns
+    -------
+    bool
+        ``False`` for graphs tagged ``"undirected"`` because their stored edge
+        orientation is an implementation artifact rather than graph semantics.
+    """
+    return "undirected" not in test_graph.tags
 
 
 def _build_all_test_graphs() -> List[TestGraph]:
@@ -73,6 +107,7 @@ def _build_all_test_graphs() -> List[TestGraph]:
     graphs = []
     graphs.extend(_synthetic_graphs())
     graphs.extend(_torchlens_graphs())
+    graphs.extend(_r79_extension_graphs())
     graphs.append(_make_weighted_chain())
     graphs.append(_make_weighted_clusters())
     graphs.append(make_weighted_karate_graph())
@@ -296,7 +331,7 @@ def make_real_karate_graph() -> TestGraph:
     return TestGraph(
         name="real_karate_34",
         graph=graph,
-        tags={"social", "community", "real-world"},
+        tags={"social", "community", "real-world", "undirected"},
         description="Zachary's Karate Club social network oriented into a DAG",
         source="networkx",
         expected_challenges="Community separation with hub-heavy social structure",
@@ -385,7 +420,7 @@ def _make_weighted_clusters(
     return TestGraph(
         name=f"weighted_clusters_{n_clusters}x{cluster_size}",
         graph=_finalize_generated_graph(graph),
-        tags={"weighted", "community", "synthetic"},
+        tags={"weighted", "community", "synthetic", "undirected"},
         description="3 clusters of 10 with heavy intra / light inter edges",
         source="synthetic",
         expected_challenges="Cluster separation proportional to weight ratio",
@@ -412,11 +447,541 @@ def make_weighted_karate_graph() -> TestGraph:
     return TestGraph(
         name="weighted_karate_34",
         graph=graph,
-        tags={"weighted", "social", "community", "real-world"},
+        tags={"weighted", "social", "community", "real-world", "undirected"},
         description="Zachary's Karate Club with degree-based interaction weights",
         source="networkx",
         expected_challenges="Weight-aware community separation with hub structure",
     )
+
+
+def _make_r79_weighted_community_graph(seed: int = 79) -> TestGraph:
+    """Build a weighted planted-community graph for the r79 baseline.
+
+    Parameters
+    ----------
+    seed : int, default=79
+        Random seed for deterministic edge sampling.
+
+    Returns
+    -------
+    TestGraph
+        Four-community weighted graph with heavy intra-block and light bridge
+        edges.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    community_count = 4
+    community_size = 18
+    for node_idx in range(community_count * community_size):
+        graph.add_node(node_idx, label=f"wc_{node_idx}")
+
+    for community_idx in range(community_count):
+        base = community_idx * community_size
+        for left in range(community_size):
+            for right in range(left + 1, community_size):
+                if rng.random() < 0.32:
+                    graph.add_edge(base + left, base + right, weight=rng.uniform(4.0, 8.0))
+
+    for source_community in range(community_count):
+        for target_community in range(source_community + 1, community_count):
+            for _ in range(3):
+                source = source_community * community_size + rng.randrange(community_size)
+                target = target_community * community_size + rng.randrange(community_size)
+                graph.add_edge(source, target, weight=rng.uniform(0.15, 0.45))
+
+    return TestGraph(
+        name="r79_weighted_community_4x18",
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "weighted", "community", "clustered", "synthetic", "undirected"},
+        description="R79 weighted planted-community graph with light inter-block bridges",
+        source="synthetic",
+        expected_challenges="Separating communities while honoring strong weighted ties",
+    )
+
+
+def _make_r79_weighted_mesh_graph(rows: int = 10, cols: int = 12, seed: int = 79) -> TestGraph:
+    """Build a weighted rectangular mesh for the r79 baseline.
+
+    Parameters
+    ----------
+    rows : int, default=10
+        Number of mesh rows.
+    cols : int, default=12
+        Number of mesh columns.
+    seed : int, default=79
+        Random seed for deterministic diagonal shortcuts.
+
+    Returns
+    -------
+    TestGraph
+        Weighted grid with local mesh edges and a few heavier diagonals.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    for row_idx in range(rows):
+        for col_idx in range(cols):
+            node_idx = row_idx * cols + col_idx
+            graph.add_node(node_idx, label=f"wm_{row_idx}_{col_idx}")
+
+    for row_idx in range(rows):
+        for col_idx in range(cols):
+            node_idx = row_idx * cols + col_idx
+            if col_idx + 1 < cols:
+                graph.add_edge(node_idx, node_idx + 1, weight=2.0)
+            if row_idx + 1 < rows:
+                graph.add_edge(node_idx, node_idx + cols, weight=3.0)
+            if row_idx + 1 < rows and col_idx + 1 < cols and rng.random() < 0.18:
+                graph.add_edge(node_idx, node_idx + cols + 1, weight=5.0)
+
+    return TestGraph(
+        name="r79_weighted_mesh_10x12",
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "weighted", "grid", "mesh", "synthetic", "undirected"},
+        description="R79 weighted 10x12 mesh with deterministic diagonal shortcuts",
+        source="synthetic",
+        expected_challenges="Maintaining mesh regularity with anisotropic edge weights",
+    )
+
+
+def _make_r79_weighted_skew_dag(num_layers: int = 6, width: int = 10) -> TestGraph:
+    """Build a weighted DAG whose weights span more than two orders of magnitude.
+
+    Parameters
+    ----------
+    num_layers : int, default=6
+        Number of topological layers.
+    width : int, default=10
+        Nodes per layer.
+
+    Returns
+    -------
+    TestGraph
+        Layered weighted DAG with weights from ``0.01`` through ``100.0``.
+    """
+    graph = DaguaGraph()
+    total_nodes = num_layers * width
+    for node_idx in range(total_nodes):
+        graph.add_node(node_idx, label=f"ws_{node_idx}")
+
+    weight_cycle = [0.01, 0.05, 0.2, 1.0, 8.0, 100.0]
+    for layer_idx in range(num_layers - 1):
+        layer_base = layer_idx * width
+        next_base = (layer_idx + 1) * width
+        for offset in range(width):
+            graph.add_edge(
+                layer_base + offset,
+                next_base + offset,
+                weight=weight_cycle[(layer_idx + offset) % len(weight_cycle)],
+            )
+            graph.add_edge(
+                layer_base + offset,
+                next_base + ((offset + 3) % width),
+                weight=weight_cycle[(layer_idx * 2 + offset + 1) % len(weight_cycle)],
+            )
+
+    return TestGraph(
+        name="r79_weighted_skew_dag_6x10",
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "weighted", "skip-heavy", "wide-parallel", "synthetic"},
+        description="R79 layered weighted DAG with 0.01 to 100.0 edge weights",
+        source="synthetic",
+        expected_challenges="Strongly skewed weighted constraints across a wide DAG",
+    )
+
+
+def _make_r79_weighted_hub_spoke(hub_count: int = 4, spokes_per_hub: int = 18) -> TestGraph:
+    """Build a weighted hub-and-spoke graph for the r79 baseline.
+
+    Parameters
+    ----------
+    hub_count : int, default=4
+        Number of hub nodes.
+    spokes_per_hub : int, default=18
+        Number of spokes attached to each hub.
+
+    Returns
+    -------
+    TestGraph
+        Weighted graph with strong hub-spoke links and weaker cross-spoke ties.
+    """
+    graph = DaguaGraph()
+    sink = "sink"
+    graph.add_node(sink, label=sink)
+    for hub_idx in range(hub_count):
+        hub = f"hub_{hub_idx}"
+        graph.add_node(hub, label=hub)
+        graph.add_edge(hub, sink, weight=12.0)
+        for spoke_idx in range(spokes_per_hub):
+            spoke = f"h{hub_idx}_spoke_{spoke_idx}"
+            graph.add_node(spoke, label=spoke)
+            graph.add_edge(hub, spoke, weight=7.0)
+            graph.add_edge(spoke, sink, weight=1.0)
+            if spoke_idx > 0 and spoke_idx % 6 == 0:
+                graph.add_edge(f"h{hub_idx}_spoke_{spoke_idx - 1}", spoke, weight=0.25)
+
+    return TestGraph(
+        name="r79_weighted_hub_spoke_4x18",
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "weighted", "hub-spoke", "wide-parallel", "synthetic"},
+        description="R79 weighted multi-hub spoke graph with weak spoke chains",
+        source="synthetic",
+        expected_challenges="Balancing dominant hubs without collapsing weak spoke structure",
+    )
+
+
+def _make_r79_weighted_small_world(n: int = 120, seed: int = 79) -> TestGraph:
+    """Build a weighted directed small-world graph for the r79 baseline.
+
+    Parameters
+    ----------
+    n : int, default=120
+        Number of nodes.
+    seed : int, default=79
+        Random seed for Watts-Strogatz rewiring and weights.
+
+    Returns
+    -------
+    TestGraph
+        Weighted cyclic small-world graph with local heavy edges and weak
+        shortcuts.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    for node_idx in range(n):
+        graph.add_node(node_idx, label=f"ww_{node_idx}")
+
+    edge_set: set[tuple[int, int]] = set()
+    for source in range(n):
+        for offset in (1, 2, 3):
+            target = (source + offset) % n
+            if rng.random() < 0.12:
+                target = rng.randrange(n)
+            if source == target or (source, target) in edge_set:
+                continue
+            edge_set.add((source, target))
+            is_shortcut = (target - source) % n not in {1, 2, 3}
+            graph.add_edge(source, target, weight=0.4 if is_shortcut else rng.uniform(2.0, 6.0))
+
+    return TestGraph(
+        name="r79_weighted_small_world_120",
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "weighted", "small-world", "cyclic", "synthetic", "undirected"},
+        description="R79 weighted small-world ring with weak rewired shortcuts",
+        source="synthetic",
+        expected_challenges="Short-path cyclic structure with mixed edge strengths",
+    )
+
+
+def _make_r79_weighted_ladder(rungs: int = 40) -> TestGraph:
+    """Build a weighted ladder graph with asymmetric rails.
+
+    Parameters
+    ----------
+    rungs : int, default=40
+        Number of ladder rungs.
+
+    Returns
+    -------
+    TestGraph
+        Two-rail weighted graph with strong upper rail, weak lower rail, and
+        medium rungs.
+    """
+    graph = DaguaGraph()
+    for rung_idx in range(rungs):
+        graph.add_node(f"top_{rung_idx}", label=f"top_{rung_idx}")
+        graph.add_node(f"bot_{rung_idx}", label=f"bot_{rung_idx}")
+    for rung_idx in range(rungs - 1):
+        graph.add_edge(f"top_{rung_idx}", f"top_{rung_idx + 1}", weight=9.0)
+        graph.add_edge(f"bot_{rung_idx}", f"bot_{rung_idx + 1}", weight=0.8)
+        graph.add_edge(f"top_{rung_idx}", f"bot_{rung_idx}", weight=3.0)
+    graph.add_edge(f"top_{rungs - 1}", f"bot_{rungs - 1}", weight=3.0)
+
+    return TestGraph(
+        name="r79_weighted_ladder_40",
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "weighted", "linear", "synthetic", "undirected"},
+        description="R79 weighted ladder with asymmetric rail strengths",
+        source="synthetic",
+        expected_challenges="Preserving parallel rails under strongly unequal weights",
+    )
+
+
+def _make_r79_weighted_bipartite(seed: int = 79) -> TestGraph:
+    """Build a weighted bipartite graph for the r79 baseline.
+
+    Parameters
+    ----------
+    seed : int, default=79
+        Random seed for deterministic edge sampling.
+
+    Returns
+    -------
+    TestGraph
+        Weighted three-level bipartite graph with dominant and weak cross edges.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    left_count = 16
+    right_count = 24
+    for left_idx in range(left_count):
+        graph.add_node(f"left_{left_idx}", label=f"left_{left_idx}")
+    for right_idx in range(right_count):
+        graph.add_node(f"right_{right_idx}", label=f"right_{right_idx}")
+    for left_idx in range(left_count):
+        targets = rng.sample(range(right_count), 6)
+        for order, right_idx in enumerate(targets):
+            weight = 10.0 if order == 0 else rng.uniform(0.5, 3.0)
+            graph.add_edge(f"left_{left_idx}", f"right_{right_idx}", weight=weight)
+
+    return TestGraph(
+        name="r79_weighted_bipartite_16x24",
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "weighted", "bipartite", "wide-parallel", "synthetic", "undirected"},
+        description="R79 weighted bipartite graph with one dominant target per source",
+        source="synthetic",
+        expected_challenges="Crossing pressure under uneven weighted bipartite links",
+    )
+
+
+def _make_r79_nested_cluster_graph(
+    name: str,
+    top_count: int,
+    sub_count: int,
+    nodes_per_subcluster: int,
+    seed: int,
+) -> TestGraph:
+    """Build a nested-cluster r79 graph with deterministic cross-cluster edges.
+
+    Parameters
+    ----------
+    name : str
+        Benchmark graph name.
+    top_count : int
+        Number of top-level clusters.
+    sub_count : int
+        Number of subclusters in each top-level cluster.
+    nodes_per_subcluster : int
+        Number of nodes in each subcluster.
+    seed : int
+        Random seed for intra-subcluster shortcuts and cross-cluster bridges.
+
+    Returns
+    -------
+    TestGraph
+        Nested-cluster graph with two or three hierarchy levels.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    node_groups: list[list[list[str]]] = []
+    for top_idx in range(top_count):
+        top_groups: list[list[str]] = []
+        for sub_idx in range(sub_count):
+            members = [
+                f"c{top_idx}.s{sub_idx}.n{node_idx}" for node_idx in range(nodes_per_subcluster)
+            ]
+            top_groups.append(members)
+            for node_id in members:
+                graph.add_node(node_id, label=node_id)
+            for node_idx in range(nodes_per_subcluster - 1):
+                graph.add_edge(members[node_idx], members[node_idx + 1])
+                if node_idx + 2 < nodes_per_subcluster and rng.random() < 0.35:
+                    graph.add_edge(members[node_idx], members[node_idx + 2])
+        node_groups.append(top_groups)
+
+    for top_idx in range(top_count):
+        for sub_idx in range(sub_count - 1):
+            graph.add_edge(node_groups[top_idx][sub_idx][-1], node_groups[top_idx][sub_idx + 1][0])
+    for top_idx in range(top_count - 1):
+        for _ in range(3):
+            source_sub = rng.randrange(sub_count)
+            target_sub = rng.randrange(sub_count)
+            source = rng.choice(node_groups[top_idx][source_sub])
+            target = rng.choice(node_groups[top_idx + 1][target_sub])
+            graph.add_edge(source, target)
+
+    for top_idx, top_groups in enumerate(node_groups):
+        top_name = f"{name}_top_{top_idx}"
+        top_members = [node_id for sub_group in top_groups for node_id in sub_group]
+        graph.add_cluster(top_name, top_members, label=f"R79 Top {top_idx}")
+        for sub_idx, members in enumerate(top_groups):
+            sub_name = f"{name}_top_{top_idx}_sub_{sub_idx}"
+            graph.add_cluster(
+                sub_name,
+                members,
+                label=f"R79 Top {top_idx} / Sub {sub_idx}",
+                parent=top_name,
+            )
+            if nodes_per_subcluster >= 8:
+                inner_name = f"{sub_name}_inner"
+                graph.add_cluster(
+                    inner_name,
+                    members[: max(3, nodes_per_subcluster // 2)],
+                    label=f"R79 Inner {top_idx}.{sub_idx}",
+                    parent=sub_name,
+                )
+
+    return TestGraph(
+        name=name,
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "clustered", "nested-deep", "synthetic"},
+        description="R79 nested cluster graph with top clusters, subclusters, and bridges",
+        source="synthetic",
+        expected_challenges="Nested containment and routing across cluster hierarchy levels",
+    )
+
+
+def _make_r79_undirected_sbm(
+    name: str,
+    sizes: Sequence[int],
+    p_in: float,
+    p_out: float,
+    seed: int,
+) -> TestGraph:
+    """Build an undirected community graph and keep symmetric directed edges.
+
+    Parameters
+    ----------
+    name : str
+        Benchmark graph name.
+    sizes : Sequence[int]
+        Community sizes for the stochastic block model.
+    p_in : float
+        Intra-community edge probability.
+    p_out : float
+        Inter-community edge probability.
+    seed : int
+        Random seed for deterministic sampling.
+
+    Returns
+    -------
+    TestGraph
+        Symmetric directed representation of an undirected SBM graph.
+    """
+    nx = _import_networkx()
+    block_count = len(sizes)
+    probability_matrix = [
+        [p_in if row_idx == col_idx else p_out for col_idx in range(block_count)]
+        for row_idx in range(block_count)
+    ]
+    nx_graph = nx.stochastic_block_model(list(sizes), probability_matrix, seed=seed)
+    graph = DaguaGraph()
+    for node_idx in range(sum(sizes)):
+        graph.add_node(node_idx, label=f"sbm_{node_idx}")
+    for source, target in sorted(nx_graph.edges()):
+        graph.add_edge(int(source), int(target))
+        graph.add_edge(int(target), int(source))
+
+    offset = 0
+    for block_idx, size in enumerate(sizes):
+        members = list(range(offset, offset + size))
+        graph.add_cluster(f"{name}_block_{block_idx}", members, label=f"Block {block_idx}")
+        offset += size
+
+    return TestGraph(
+        name=name,
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "community", "clustered", "undirected", "random"},
+        description=f"R79 symmetric SBM with p_in={p_in} and p_out={p_out}",
+        source="networkx",
+        expected_challenges="Undirected community structure at a controlled mixing ratio",
+    )
+
+
+def _make_r79_directed_scc_graph(
+    name: str,
+    num_nodes: int,
+    scc_sizes: Sequence[int],
+    seed: int,
+) -> TestGraph:
+    """Build a directed graph with large SCCs plus DAG-like tails.
+
+    Parameters
+    ----------
+    name : str
+        Benchmark graph name.
+    num_nodes : int
+        Total number of nodes.
+    scc_sizes : Sequence[int]
+        Sizes of the strongly connected core components.
+    seed : int
+        Random seed for deterministic extra edges.
+
+    Returns
+    -------
+    TestGraph
+        Directed graph with 30-40 percent of nodes in two or three SCCs and
+        the remaining nodes arranged as DAG-like feeders and exits.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    for node_idx in range(num_nodes):
+        graph.add_node(node_idx, label=f"scc_{node_idx}")
+
+    offset = 0
+    scc_ranges: list[list[int]] = []
+    for scc_idx, size in enumerate(scc_sizes):
+        members = list(range(offset, offset + size))
+        scc_ranges.append(members)
+        for member_idx, source in enumerate(members):
+            graph.add_edge(source, members[(member_idx + 1) % size])
+            if size > 5 and member_idx % 3 == 0:
+                graph.add_edge(source, members[(member_idx + 3) % size])
+        graph.add_cluster(f"{name}_scc_{scc_idx}", members, label=f"SCC {scc_idx}")
+        offset += size
+
+    for scc_idx in range(len(scc_ranges) - 1):
+        graph.add_edge(scc_ranges[scc_idx][-1], scc_ranges[scc_idx + 1][0])
+
+    remaining = list(range(offset, num_nodes))
+    for node_idx in remaining:
+        if node_idx % 5 == 0 and scc_ranges:
+            graph.add_edge(rng.choice(scc_ranges[0]), node_idx)
+        if node_idx + 1 < num_nodes:
+            graph.add_edge(node_idx, node_idx + 1)
+        if node_idx + 4 < num_nodes and rng.random() < 0.3:
+            graph.add_edge(node_idx, node_idx + 4)
+        if scc_ranges and rng.random() < 0.2:
+            graph.add_edge(node_idx, rng.choice(scc_ranges[-1]))
+
+    return TestGraph(
+        name=name,
+        graph=_finalize_generated_graph(graph),
+        tags={"r79_ext", "directed", "cyclic", "clustered", "synthetic"},
+        description="R79 directed graph with large SCC cores and DAG-like tails",
+        source="synthetic",
+        expected_challenges="Cycle handling when large SCCs interact with acyclic tails",
+    )
+
+
+def _r79_extension_graphs() -> List[TestGraph]:
+    """Build all graph-corpus additions for the r79 native-layout sprint.
+
+    Returns
+    -------
+    List[TestGraph]
+        Deterministic r79 extension graphs, each tagged with ``r79_ext``.
+    """
+    return [
+        _make_r79_weighted_community_graph(),
+        _make_r79_weighted_mesh_graph(),
+        _make_r79_weighted_skew_dag(),
+        _make_r79_weighted_hub_spoke(),
+        _make_r79_weighted_small_world(),
+        _make_r79_weighted_ladder(),
+        _make_r79_weighted_bipartite(),
+        _make_r79_nested_cluster_graph("r79_nested_clusters_3x2x10", 3, 2, 10, 79),
+        _make_r79_nested_cluster_graph("r79_nested_clusters_2x3x12", 2, 3, 12, 80),
+        _make_r79_nested_cluster_graph("r79_nested_clusters_4x2x8", 4, 2, 8, 81),
+        _make_r79_undirected_sbm(
+            "r79_undirected_sbm_low_mix_4x25", [25, 25, 25, 25], 0.24, 0.01, 79
+        ),
+        _make_r79_undirected_sbm(
+            "r79_undirected_sbm_mid_mix_5x20", [20, 20, 20, 20, 20], 0.20, 0.04, 80
+        ),
+        _make_r79_undirected_sbm("r79_undirected_sbm_high_mix_3x30", [30, 30, 30], 0.18, 0.08, 81),
+        _make_r79_directed_scc_graph("r79_directed_scc_90_3cores", 90, [12, 10, 8], 79),
+        _make_r79_directed_scc_graph("r79_directed_scc_120_2cores", 120, [24, 18], 80),
+    ]
 
 
 def make_real_lesmis_graph() -> TestGraph:
@@ -442,7 +1007,7 @@ def make_real_lesmis_graph() -> TestGraph:
     return TestGraph(
         name=name,
         graph=graph,
-        tags={"social", "community", "real-world", "weighted"},
+        tags={"social", "community", "real-world", "weighted", "undirected"},
         description=description,
         source="networkx",
         expected_challenges="Dense local communities and a nontrivial social core",
@@ -483,7 +1048,7 @@ def make_real_football_graph(seed: int = 42) -> TestGraph:
     return TestGraph(
         name="real_football_115",
         graph=graph,
-        tags={"social", "community", "real-world"},
+        tags={"social", "community", "real-world", "undirected"},
         description=description,
         source=source,
         expected_challenges="Strong communities with enough inter-group edges to stress separation",
@@ -513,7 +1078,7 @@ def make_erdos_renyi(n: int, p: float = 0.02, seed: int = 42) -> TestGraph:
     return TestGraph(
         name=f"er_{n}",
         graph=graph,
-        tags={"erdos-renyi", "random"},
+        tags={"erdos-renyi", "random", "undirected"},
         description=f"Erdos-Renyi random graph with {n} nodes and p={p}",
         source="networkx",
         expected_challenges="Unstructured connectivity with weak layering cues",
@@ -543,7 +1108,7 @@ def make_random_geometric(n: int, radius: float = 0.15, seed: int = 42) -> TestG
     return TestGraph(
         name=f"rgg_{n}",
         graph=graph,
-        tags={"geometric", "spatial", "random"},
+        tags={"geometric", "spatial", "random", "undirected"},
         description=f"Random geometric graph with {n} nodes and radius {radius}",
         source="networkx",
         expected_challenges="Spatial locality, clustered neighborhoods, and irregular density",
@@ -586,7 +1151,7 @@ def make_sbm(
     return TestGraph(
         name=f"sbm_{n_communities}x{community_size}",
         graph=graph,
-        tags={"community", "clustered", "random"},
+        tags={"community", "clustered", "random", "undirected"},
         description=(
             f"Stochastic block model with {n_communities} communities of {community_size} nodes"
         ),
@@ -906,7 +1471,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="grid_5x5",
             graph=g,
-            tags={"diamond", "large-dense"},
+            tags={"diamond", "large-dense", "undirected"},
             description="5x5 grid DAG with horizontal and vertical edges",
             expected_challenges="Grid regularity, many crossing opportunities",
         )
@@ -2030,7 +2595,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="planar_60",
             graph=_make_planar_nested_cycles_graph(rings=5, nodes_per_ring=12),
-            tags={"planar", "dense"},
+            tags={"planar", "dense", "undirected"},
             description=(
                 "Planar 60-node graph built from concentric cycles with triangulated spokes"
             ),
@@ -2043,7 +2608,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="regular_3_30",
             graph=_make_regular_graph(degree=3, num_nodes=30, seed=42),
-            tags={"regular", "sparse"},
+            tags={"regular", "sparse", "undirected"},
             description="Deterministic random 3-regular graph on 30 nodes",
             expected_challenges="Uniform local degree without obvious hierarchy or hubs",
         )
@@ -2054,7 +2619,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="regular_4_40",
             graph=_make_regular_graph(degree=4, num_nodes=40, seed=42),
-            tags={"regular"},
+            tags={"regular", "undirected"},
             description="Deterministic random 4-regular graph on 40 nodes",
             expected_challenges="Degree-uniform structure with moderate density and few landmarks",
         )
@@ -2065,7 +2630,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="triangular_lattice_36",
             graph=_make_triangular_lattice_graph(rows=6, cols=6),
-            tags={"grid", "lattice", "planar"},
+            tags={"grid", "lattice", "planar", "undirected"},
             description="6x6 triangular lattice patch with right/down/down-right links",
             expected_challenges="Maintaining regular spacing across a high-degree planar mesh",
         )
@@ -2076,7 +2641,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="hexagonal_lattice_42",
             graph=_make_hexagonal_lattice_graph(rows=6, cols=7),
-            tags={"grid", "lattice", "planar", "sparse"},
+            tags={"grid", "lattice", "planar", "sparse", "undirected"},
             description="6x7 honeycomb lattice patch with degree-3 interior structure",
             expected_challenges="Showing the hexagonal rhythm instead of collapsing rows together",
         )
@@ -2087,7 +2652,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="protein_ppi_200",
             graph=_make_protein_ppi_graph(seed=42),
-            tags={"scale-free", "clustered", "biological"},
+            tags={"scale-free", "clustered", "biological", "undirected"},
             description=(
                 "Protein-protein interaction graph with a scale-free core and dense modules"
             ),
@@ -2113,7 +2678,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="sierpinski_42",
             graph=_make_sierpinski_graph(depth=3),
-            tags={"fractal", "planar", "sparse"},
+            tags={"fractal", "planar", "sparse", "undirected"},
             description="Depth-3 Sierpinski triangle graph",
             expected_challenges="Recursive self-similarity across multiple scales",
         )
@@ -2124,7 +2689,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="chung_lu_150",
             graph=_make_chung_lu_graph(num_nodes=150, seed=42),
-            tags={"scale-free", "clustered", "random"},
+            tags={"scale-free", "clustered", "random", "undirected"},
             description="Chung-Lu style random graph with heavy-tailed expected degrees",
             expected_challenges="Hub dominance combined with locally clustered neighborhoods",
         )
@@ -2135,7 +2700,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="multi_component_80",
             graph=_make_multi_component_graph(),
-            tags={"disconnected", "multi-component"},
+            tags={"disconnected", "multi-component", "undirected"},
             description="Disconnected graph with components sized 40, 20, 10, 5, 3, and 2",
             expected_challenges=(
                 "Packing very uneven connected components without losing small ones"
@@ -2148,7 +2713,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="random_bipartite_60",
             graph=_make_random_bipartite_graph(left_size=30, right_size=30, num_edges=90, seed=42),
-            tags={"bipartite", "random"},
+            tags={"bipartite", "random", "undirected"},
             description="Random 30x30 bipartite graph with ninety cross-partition edges",
             expected_challenges="Crossing minimization under dense two-layer connectivity",
         )
@@ -2159,7 +2724,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="heavy_tail_weights_50",
             graph=_make_heavy_tail_weight_graph(num_nodes=50, seed=42),
-            tags={"weighted", "random"},
+            tags={"weighted", "random", "undirected"},
             description="Connected random graph with heavy-tailed log-normal edge weights",
             expected_challenges=(
                 "Respecting a few dominant weighted links without collapsing the graph"
@@ -2172,7 +2737,7 @@ def _synthetic_graphs() -> List[TestGraph]:
         TestGraph(
             name="petersen_10",
             graph=_make_petersen_graph(),
-            tags={"regular", "famous", "small"},
+            tags={"regular", "famous", "small", "undirected"},
             description="Classic Petersen graph with deterministic acyclic orientation",
             expected_challenges="Symmetry breaking on a famous small non-planar regular graph",
         )
@@ -2184,7 +2749,23 @@ def _synthetic_graphs() -> List[TestGraph]:
 
 
 def _random_dag(n_nodes: int, n_edges: int, seed: int = 42) -> DaguaGraph:
-    """Generate a random DAG by sampling edges that respect topological order."""
+    """Generate a random DAG by sampling edges that respect topological order.
+
+    Parameters
+    ----------
+    n_nodes : int
+        Number of named nodes to materialize.
+    n_edges : int
+        Target number of sampled forward edges.
+    seed : int, default=42
+        Random seed for reproducible edge sampling.
+
+    Returns
+    -------
+    DaguaGraph
+        Random DAG with node IDs ``n0`` through ``n{n_nodes - 1}`` and edges
+        emitted in sorted string-key order.
+    """
     import random
 
     rng = random.Random(seed)
@@ -2198,7 +2779,7 @@ def _random_dag(n_nodes: int, n_edges: int, seed: int = 42) -> DaguaGraph:
         edges.add((node_names[i], node_names[j]))
         attempts += 1
 
-    return DaguaGraph.from_edge_list(list(edges), num_nodes=n_nodes)
+    return _build_named_graph(node_names, sorted(edges))
 
 
 # ─── TorchLens Graph Extractors ──────────────────────────────────────────────
@@ -2281,9 +2862,38 @@ def _trace_torchlens_graph(name: str, model: Any, inputs: Any, torchlens_module:
     return _cached_torchlens_graph(
         name,
         lambda: DaguaGraph.from_torchlens(
-            torchlens_module.log_forward_pass(model, inputs, vis_mode="none")
+            _trace_torchlens_history(model, inputs, torchlens_module)
         ),
     )
+
+
+def _trace_torchlens_history(model: Any, inputs: Any, torchlens_module: Any) -> Any:
+    """Run a TorchLens trace across legacy and current public APIs.
+
+    Parameters
+    ----------
+    model : Any
+        PyTorch module to trace.
+    inputs : Any
+        Input batch forwarded to the model trace.
+    torchlens_module : Any
+        Imported TorchLens module exposing either ``log_forward_pass`` or
+        ``trace``.
+
+    Returns
+    -------
+    Any
+        TorchLens model-history object accepted by ``DaguaGraph.from_torchlens``.
+    """
+    trace_fn = getattr(torchlens_module, "log_forward_pass", None)
+    if trace_fn is not None:
+        try:
+            return trace_fn(model, inputs, vis_mode="none")
+        except TypeError as exc:
+            if "vis_mode" not in str(exc):
+                raise
+
+    return torchlens_module.trace(model, inputs)
 
 
 def _torchlens_graphs() -> List[TestGraph]:
@@ -2294,7 +2904,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     try:
         import torch.nn as nn
         import torchlens as tl
-    except ImportError:
+    except Exception:
+        # torchlens is optional; a broken checkout (e.g. mid-merge SyntaxError)
+        # must not take down the whole graph corpus.
         return []
 
     graphs = []
@@ -2422,8 +3034,9 @@ def _torchlens_graphs() -> List[TestGraph]:
         simple_branching_cls: Any = SimpleBranching
         diamond_loop_cls: Any = DiamondLoop
         long_loop_cls: Any = LongLoop
-    except ImportError:
-        # Fall back: mark unavailable if TorchLens test models not importable.
+    except Exception:
+        # Fall back: mark unavailable if TorchLens test models not importable
+        # (including a broken torchlens checkout raising SyntaxError).
         nested_modules_cls = None
         simple_branching_cls = None
         diamond_loop_cls = None
@@ -2594,7 +3207,21 @@ def _torchlens_graphs() -> List[TestGraph]:
 
 
 def make_chain(n: int, seed: int = 42) -> TestGraph:
-    """Linear chain: 0→1→2→...→n-1."""
+    """Build a linear chain graph.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes in the chain.
+    seed : int, default=42
+        Unused seed parameter retained for scale-suite API consistency.
+
+    Returns
+    -------
+    TestGraph
+        Linear chain ``0 -> 1 -> ... -> n - 1``.
+    """
+    del seed
     src = list(range(n - 1))
     tgt = list(range(1, n))
     edge_index = torch.tensor([src, tgt], dtype=torch.long)
@@ -2608,7 +3235,22 @@ def make_chain(n: int, seed: int = 42) -> TestGraph:
 
 
 def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
-    """Layered DAG with fixed width per layer."""
+    """Build a layered DAG with fixed width per layer.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes to materialize.
+    width : int, default=0
+        Desired layer width. A non-positive value derives width from ``n``.
+    seed : int, default=42
+        Random seed for cross-layer target sampling.
+
+    Returns
+    -------
+    TestGraph
+        Layered scale graph with deterministic sorted edge order.
+    """
     import random
 
     rng = random.Random(seed)
@@ -2627,7 +3269,7 @@ def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
     if node_idx < n:
         layers[-1].extend(range(node_idx, n))
 
-    edges_set: set = set()
+    edges_set: set[tuple[int, int]] = set()
     for i in range(len(layers) - 1):
         for node in layers[i]:
             k = min(rng.randint(1, 3), len(layers[i + 1]))
@@ -2637,7 +3279,7 @@ def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
 
     g = DaguaGraph.from_edge_index(torch.zeros(2, 0, dtype=torch.long), num_nodes=n)
     if edges_set:
-        el = list(edges_set)
+        el = sorted(edges_set)
         g.edge_index = torch.tensor([[e[0] for e in el], [e[1] for e in el]], dtype=torch.long)
         g.edge_labels = [None] * len(el)
         g.edge_types = ["normal"] * len(el)
@@ -2652,14 +3294,29 @@ def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
 
 
 def make_random_dag(n: int, density: float = 1.5, seed: int = 42) -> TestGraph:
-    """Random DAG with ~n*density edges."""
+    """Build a random DAG with roughly ``n * density`` edges.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes to materialize.
+    density : float, default=1.5
+        Edge multiplier used to choose the target edge count.
+    seed : int, default=42
+        Random seed for reproducible edge sampling.
+
+    Returns
+    -------
+    TestGraph
+        Random scale DAG with deterministic sorted edge order.
+    """
     import random
 
     rng = random.Random(seed)
     n_edges = int(n * density)
 
     g = DaguaGraph.from_edge_index(torch.zeros(2, 0, dtype=torch.long), num_nodes=n)
-    edges_set: set = set()
+    edges_set: set[tuple[int, int]] = set()
     attempts = 0
     while len(edges_set) < n_edges and attempts < n_edges * 20:
         i = rng.randint(0, n - 2)
@@ -2668,7 +3325,7 @@ def make_random_dag(n: int, density: float = 1.5, seed: int = 42) -> TestGraph:
         attempts += 1
 
     if edges_set:
-        el = list(edges_set)
+        el = sorted(edges_set)
         g.edge_index = torch.tensor([[e[0] for e in el], [e[1] for e in el]], dtype=torch.long)
         g.edge_labels = [None] * len(el)
         g.edge_types = ["normal"] * len(el)
@@ -4185,21 +4842,21 @@ def _expanded_structural_graphs() -> List[TestGraph]:
         TestGraph(
             name="scale_free_ba_120",
             graph=make_scale_free(n=120, m=3, seed=42),
-            tags={"scale-free", "large-sparse"},
+            tags={"scale-free", "large-sparse", "undirected"},
             description="Barabasi-Albert style preferential-attachment DAG",
             expected_challenges="High-degree hubs, edge bundling, and hub dominance",
         ),
         TestGraph(
             name="grid_rect_6x8",
             graph=make_grid(6, 8, seed=42),
-            tags={"grid", "diamond"},
+            tags={"grid", "diamond", "undirected"},
             description="Rectangular 6x8 grid DAG with right/down edges",
             expected_challenges="Regular spacing, local ordering, and dense local crossings",
         ),
         TestGraph(
             name="complete_bipartite_8x12",
             graph=make_complete_bipartite(8, 12, seed=42),
-            tags={"bipartite", "wide-parallel"},
+            tags={"bipartite", "wide-parallel", "undirected"},
             description="Complete bipartite K(8,12) layered DAG",
             expected_challenges="Crossing minimization between two dense layers",
         ),
@@ -4290,7 +4947,7 @@ def _expanded_structural_graphs() -> List[TestGraph]:
         TestGraph(
             name="small_world_100",
             graph=make_small_world(100, 4, 0.1, seed=42),
-            tags={"small-world", "cyclic"},
+            tags={"small-world", "cyclic", "undirected"},
             description="Directed Watts-Strogatz small-world graph",
             expected_challenges="Short paths, cycles, and non-layered global geometry",
         ),
@@ -4329,21 +4986,21 @@ def _expanded_structural_graphs() -> List[TestGraph]:
             TestGraph(
                 name="ba_500",
                 graph=make_scale_free(n=500, m=3, seed=42),
-                tags={"scale-free", "large-sparse"},
+                tags={"scale-free", "large-sparse", "undirected"},
                 description="Barabasi-Albert style preferential-attachment DAG at 500 nodes",
                 expected_challenges="High-degree hubs at medium sparse scale",
             ),
             TestGraph(
                 name="ba_2000",
                 graph=make_scale_free(n=2000, m=3, seed=42),
-                tags={"scale-free", "large-sparse"},
+                tags={"scale-free", "large-sparse", "undirected"},
                 description="Barabasi-Albert style preferential-attachment DAG at 2,000 nodes",
                 expected_challenges="Hub dominance and long sparse spokes at larger scale",
             ),
             TestGraph(
                 name="ba_5000",
                 graph=make_scale_free(n=5000, m=4, seed=42),
-                tags={"scale-free", "large-sparse"},
+                tags={"scale-free", "large-sparse", "undirected"},
                 description="Barabasi-Albert style preferential-attachment DAG at 5,000 nodes",
                 expected_challenges="Extremely dominant hubs and bundled fan-in at scale",
             ),
@@ -4359,14 +5016,14 @@ def _expanded_structural_graphs() -> List[TestGraph]:
             TestGraph(
                 name="grid_20x20",
                 graph=make_grid(20, 20, seed=42),
-                tags={"grid", "mesh", "large-dense"},
+                tags={"grid", "mesh", "large-dense", "undirected"},
                 description="20x20 mesh-like grid DAG",
                 expected_challenges="Regular spacing over a moderately large mesh",
             ),
             TestGraph(
                 name="grid_50x50",
                 graph=make_grid(50, 50, seed=42),
-                tags={"grid", "mesh", "large-dense"},
+                tags={"grid", "mesh", "large-dense", "undirected"},
                 description="50x50 mesh-like grid DAG",
                 expected_challenges="Large regular mesh with dense local edge pressure",
             ),
@@ -4408,14 +5065,14 @@ def _expanded_structural_graphs() -> List[TestGraph]:
             TestGraph(
                 name="small_world_500",
                 graph=make_small_world(500, 6, 0.1, seed=42),
-                tags={"small-world", "cyclic"},
+                tags={"small-world", "cyclic", "undirected"},
                 description="Directed Watts-Strogatz small-world graph at 500 nodes",
                 expected_challenges="Short paths and cycles at medium scale",
             ),
             TestGraph(
                 name="small_world_2000",
                 graph=make_small_world(2000, 4, 0.05, seed=42),
-                tags={"small-world", "cyclic"},
+                tags={"small-world", "cyclic", "undirected"},
                 description="Directed Watts-Strogatz small-world graph at 2,000 nodes",
                 expected_challenges="Sparse cyclic structure with weak global layering cues",
             ),

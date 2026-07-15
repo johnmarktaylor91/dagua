@@ -79,6 +79,120 @@ def _build_cluster_data_for_edge_opt(graph, positions, node_sizes):
     return bboxes, node_mask
 
 
+_HIGH_QUALITY_THRESHOLD = 0.75
+
+
+class _ForcedQualityEdgeConfig:
+    """Config wrapper that forces the full loss-term weights for the r80-S7#3
+    high-quality edge-refinement pass.
+
+    ``LayoutConfig``'s own ``w_edge_*`` defaults are tuned conservatively for
+    the always-on Sprint 6 adaptive-skip path (``w_edge_angular_res=0.0``,
+    ``w_edge_curvature_consistency=0.0`` -- disabled). The orphaned
+    :class:`~dagua.layout.ops.edge_route.BezierControlPointOpt` op ships a
+    different, fuller default set via ``BezierControlPointOptConfig``. This
+    wrapper reproduces that fuller set (crossing/node-crossing/angular-
+    resolution/curvature-consistency/curvature-penalty/cluster-crossing) for
+    the forced high/max-quality path only, without touching the global
+    defaults every other draw() call still uses.
+    """
+
+    _OVERRIDES = {
+        "w_edge_crossing": 5.0,
+        "w_edge_node_crossing": 10.0,
+        "w_edge_angular_res": 2.0,
+        "w_edge_curvature_consistency": 1.0,
+        "w_edge_curvature_penalty": 0.5,
+        "w_edge_cluster_crossing": 8.0,
+    }
+
+    def __init__(self, base: object) -> None:
+        self._base = base
+
+    def __getattr__(self, name: str) -> object:
+        try:
+            return self._OVERRIDES[name]
+        except KeyError:
+            return getattr(self._base, name)
+
+
+def maybe_refine_routes(
+    curves: List[BezierCurve],
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    config: object,
+    graph: Optional[object] = None,
+    trace: Optional[object] = None,
+) -> List[BezierCurve]:
+    """Quality-gated differentiable route refinement (r80-S7#3).
+
+    Wires the orphaned :class:`BezierControlPointOpt` optimizer's underlying
+    mechanism (:func:`optimize_edges`, the exact function that op delegates
+    to) as an opt-in high-quality refinement pass over heuristic routes:
+    OFF at draft/balanced quality (< 0.75, the existing Sprint 6 adaptive-
+    skip behavior is preserved unchanged), forced ON at high/max quality
+    (>= 0.75), bypassing the adaptive-skip heuristic since the caller
+    explicitly asked for maximum quality. Positions are a read-only input
+    throughout -- this function never mutates ``positions``.
+
+    Parameters
+    ----------
+    curves : list[BezierCurve]
+        Heuristic routes from :func:`dagua.edges.route_edges` (already
+        including node-avoidance and port-spread deflection).
+    positions : torch.Tensor
+        Node centers with shape ``[N, 2]``. Read-only.
+    edge_index : torch.Tensor
+        Edge pairs with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node widths and heights with shape ``[N, 2]``.
+    config : Any
+        LayoutConfig-like object with ``edge_routing``, ``edge_opt_steps``,
+        ``quality``, and (optionally) ``w_edge_*`` fields.
+    graph : object or None, default=None
+        Optional DaguaGraph used for cluster-aware losses.
+    trace : Any, default=None
+        Optional trace recorder forwarded to :func:`optimize_edges`.
+
+    Returns
+    -------
+    list[BezierCurve]
+        Refined curves, or ``curves`` unchanged when the pass is skipped.
+    """
+    if not curves:
+        return curves
+    if getattr(config, "edge_routing", "differentiable") != "differentiable":
+        return curves
+    if getattr(config, "edge_opt_steps", 0) < 0:
+        return curves
+
+    quality = float(getattr(config, "quality", 0.5))
+    force_high_quality = quality >= _HIGH_QUALITY_THRESHOLD
+
+    if force_high_quality:
+        forced_config = _ForcedQualityEdgeConfig(config)
+        return optimize_edges(
+            curves, positions, edge_index, node_sizes, forced_config, graph, trace
+        )
+
+    # draft/balanced: unchanged Sprint 6 adaptive-skip behavior -- only run
+    # the optimizer when the heuristic router still leaves meaningful
+    # crossings, or for rectilinear routing modes that need CP refinement
+    # regardless of crossing count.
+    from dagua.metrics import edge_node_crossing_count
+
+    heur_crossings = edge_node_crossing_count(curves, positions, node_sizes, edge_index)[
+        "edge_node_crossings"
+    ]
+    threshold = getattr(config, "edge_routing_auto_skip_threshold", 5)
+    has_rectilinear_routes = any(_curve_routing(curve) in ("ortho", "taxi") for curve in curves)
+    if heur_crossings < threshold and not has_rectilinear_routes:
+        return curves
+
+    return optimize_edges(curves, positions, edge_index, node_sizes, config, graph, trace)
+
+
 def optimize_edges(
     curves: List[BezierCurve],
     positions: torch.Tensor,

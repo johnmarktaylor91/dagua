@@ -143,6 +143,28 @@ def test_force_pipeline_planar_runs_planar_pipeline_not_layered_fallback() -> No
     assert not torch.equal(planar_pos, layered_pos)
 
 
+def test_declared_undirected_hexagonal_lattice_keeps_layered_polish_route() -> None:
+    """Declared-undirected lattice DAGs should keep the layered polish route.
+
+    Returns
+    -------
+    None
+        This test asserts that semantic-undirected metadata does not route a
+        lattice-like DAG into the undirected portfolio contest.
+    """
+    from dagua.eval.graphs import get_test_graphs
+
+    graph = next(t.graph for t in get_test_graphs() if t.name == "hexagonal_lattice_42")
+    structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
+    config = LayoutConfig(seed=42)
+    setattr(config, "_dagua_native_num_nodes", graph.num_nodes)
+
+    assert structure.is_semantically_directed is False
+    assert structure.direction_is_declared is True
+    assert "lattice_like" in structure.topology_tags
+    assert _choose_native_pipeline(structure, config) == "layered_dag"
+
+
 def test_native_default_hexagonal_lattice_polish_score_stays_high() -> None:
     """Sprint-21a polish candidates should keep hex lattice out of the loss band.
 

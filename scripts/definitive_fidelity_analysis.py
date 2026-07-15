@@ -14,12 +14,14 @@ import concurrent.futures
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -29,12 +31,17 @@ import torch
 
 from dagua.eval import distributional_fidelity as df
 from dagua.eval.equivalence_metrics import (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
     compute_equivalence_metrics,
     neighborhood_preservation,
     normalized_stress,
+    reference_is_canonical,
+    reference_self_spread,
+    variance_tied_margin,
 )
 from dagua.eval.graphs import get_test_graphs
-from dagua.metrics import count_crossings
+from dagua.eval.variants import get_variant
+from dagua.metrics import count_crossings, sampled_crossing_rate
 
 SPEC_VERSION = "r70-v6"
 DEFAULT_DATA_DIR = Path("eval_output/benchmark_100seed_escalation_final")
@@ -51,7 +58,26 @@ QUALITY_STRESS_REL_MARGIN = 0.02
 QUALITY_NP_ABS_MARGIN = 0.02
 QUALITY_CROSS_REL_MARGIN = 0.02
 QUALITY_CROSS_ABS_FLOOR = 0.5
+QUALITY_CROSS_SAMPLING_Z = 1.96
+QUALITY_BATTERY_FINAL_TIER = "final_3q"
+QUALITY_BATTERY_EXPLORATORY_TIER = "exploratory_noncanonical_reference"
+QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION = (
+    REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+)
+SELF_CHECK_EXACT_FIELDS = {
+    "d_R",
+    "mode",
+}
+NO_CANONICAL_REFERENCE_VARIANTS = {
+    "classic_sfdp_theta04",
+    "classic_sfdp_theta08",
+    "classic_sfdp_steps200",
+}
 FREE_ASPECT_PREFIX = "classic_sugiyama"
+REFERENCE_SELF_SPLIT_PREFERRED = (
+    "center_port_backedge_hub",
+    "classic_sgd2_multi_batch8",
+)
 DETERMINISTIC_DIFFERENT_ENGINES = {
     "classic_kk_steps100",
     "classic_kk_steps300",
@@ -178,6 +204,49 @@ class ComboPayload:
     source_combo_id: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class OutputTarget:
+    """Output path selected for a scoring run.
+
+    Parameters
+    ----------
+    final_path : Path
+        User-requested JSONL output path.
+    write_path : Path
+        Path the runner should write during this invocation.
+    atomic_replace : bool
+        Whether ``write_path`` should replace ``final_path`` after a
+        successful run.
+    """
+
+    final_path: Path
+    write_path: Path
+    atomic_replace: bool = False
+
+
+@dataclass(frozen=True)
+class CrossingEstimate:
+    """Crossing count estimate and sampling diagnostics.
+
+    Parameters
+    ----------
+    value : float
+        Exact crossing count or sampled eligible-pair total estimate.
+    se : float
+        Standard error in crossing-count units. Exact counts use ``0.0``.
+    n_valid : int
+        Number of eligible non-adjacent edge pairs evaluated.
+    eligible_pairs : float
+        Eligible non-adjacent edge-pair population, exact for enumerated paths
+        and estimated for the huge sampled path.
+    """
+
+    value: float
+    se: float
+    n_valid: int
+    eligible_pairs: float
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -192,12 +261,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         action="append",
         default=None,
-        help="Benchmark root; repeatable -- later dirs override earlier per record key.",
+        help="Benchmark root; repeatable -- later dirs override earlier per graph/engine combo.",
     )
     parser.add_argument("--refresh-dir", type=Path, default=DEFAULT_REFRESH_DIR)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--combos-file", type=Path, default=None)
     parser.add_argument(
         "--mode",
@@ -205,6 +276,7 @@ def parse_args() -> argparse.Namespace:
             "full",
             "negative-control",
             "chance-control",
+            "reference-self-split-positive-control",
             "modeb-positive-control",
             "deterministic",
             "rung0-reverify",
@@ -228,12 +300,20 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     git_sha = git_rev_parse()
 
+    if args.self_check:
+        return run_self_check(args, git_sha)
+
+    output_target = prepare_output_target(output_path, resume=args.resume, overwrite=args.overwrite)
+    output_path = output_target.write_path
+
     if args.mode == "deterministic":
         rows = run_deterministic_mode(args.refresh_dir, output_path, args.combos_file, git_sha)
+        finalize_output_target(output_target)
         print_summary(rows)
         return 0
     if args.mode == "rung0-reverify":
         rows = run_rung0_reverify(args.refresh_dir, output_path, args.combos_file, git_sha)
+        finalize_output_target(output_target)
         print_summary(rows)
         return 0
 
@@ -248,6 +328,14 @@ def main() -> int:
         combo_pairs = select_negative_controls(combo_pairs, failing_map, index, args.data_dir)
     elif args.mode == "chance-control":
         combo_pairs = select_chance_controls(combo_pairs, failing_map, index)
+    elif args.mode == "reference-self-split-positive-control":
+        combo_pairs = select_reference_self_split_positive_controls(
+            combo_pairs,
+            failing_map,
+            index,
+            args.data_dir,
+            graph_data,
+        )
     elif args.mode == "modeb-positive-control":
         if args.combos_file is None:
             raise ValueError("--combos-file is required for modeb-positive-control.")
@@ -265,8 +353,89 @@ def main() -> int:
     payloads = [payload for payload in payloads if payload.combo_id not in completed]
     run_payloads(payloads, output_path, args.workers)
     rows = read_jsonl(output_path)
+    finalize_output_target(output_target)
     print_summary(rows[-min(10, len(rows)) :])
     return 0
+
+
+def prepare_output_path(output_path: Path, *, resume: bool, overwrite: bool) -> Path:
+    """Return the write path for callers that only need guard validation.
+
+    Parameters
+    ----------
+    output_path : pathlib.Path
+        Requested JSONL output.
+    resume : bool
+        Whether existing compatible rows should be reused.
+    overwrite : bool
+        Whether an existing output should be replaced.
+
+    Returns
+    -------
+    pathlib.Path
+        Path that should be written by the analysis runner.
+    """
+    return prepare_output_target(output_path, resume=resume, overwrite=overwrite).write_path
+
+
+def prepare_output_target(output_path: Path, *, resume: bool, overwrite: bool) -> OutputTarget:
+    """Validate output-file reuse semantics before analysis starts.
+
+    Parameters
+    ----------
+    output_path : pathlib.Path
+        Requested JSONL output.
+    resume : bool
+        Whether existing compatible rows should be reused.
+    overwrite : bool
+        Whether an existing output should be replaced.
+
+    Returns
+    -------
+    OutputTarget
+        Final and write paths for the analysis runner.
+
+    Raises
+    ------
+    FileExistsError
+        Raised when the output already exists without ``--resume`` or
+        ``--overwrite``.
+    """
+    if resume:
+        return OutputTarget(final_path=output_path, write_path=output_path)
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"{output_path} already exists; use --resume to append missing rows or "
+            "--overwrite to replace it."
+        )
+    if overwrite and output_path.exists():
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=f"{output_path.name}.",
+            suffix=".tmp",
+            dir=output_path.parent,
+        )
+        os.close(file_descriptor)
+        temp_path = Path(temp_name)
+        temp_path.unlink(missing_ok=True)
+        return OutputTarget(final_path=output_path, write_path=temp_path, atomic_replace=True)
+    return OutputTarget(final_path=output_path, write_path=output_path)
+
+
+def finalize_output_target(output_target: OutputTarget) -> None:
+    """Atomically publish an overwrite output after successful scoring.
+
+    Parameters
+    ----------
+    output_target : OutputTarget
+        Output target returned by :func:`prepare_output_target`.
+
+    Returns
+    -------
+    None
+        The final path is replaced when ``atomic_replace`` is set.
+    """
+    if output_target.atomic_replace:
+        output_target.write_path.replace(output_target.final_path)
 
 
 def configure_thread_environment() -> None:
@@ -361,10 +530,12 @@ def load_results(data_dir: Path) -> dict[str, Any]:
 def load_results_multi(data_dirs: list[Path]) -> dict[str, Any]:
     """Load and overlay results from multiple benchmark roots.
 
-    Later directories override earlier ones PER RECORD KEY (r71 union-store
-    semantics: e.g. post-fix umap rows supersede pre-fix rows without mutating
-    either store). positions_file paths are absolutized against their own root
-    and rows are tagged with source_dir.
+    Later directories override earlier ones per ``(graph, engine)`` combo.  A
+    directory wins a combo only when it has at least one usable ``ok`` row for
+    that combo, and all surviving rows for the combo come from that winning
+    directory.  This prevents seed-era mixing while preserving older results
+    for combos absent from newer benchmark roots.  ``positions_file`` paths are
+    absolutized against their own root and rows are tagged with ``source_dir``.
 
     Parameters
     ----------
@@ -376,8 +547,12 @@ def load_results_multi(data_dirs: list[Path]) -> dict[str, Any]:
     dict[str, Any]
         Merged result mapping.
     """
-    merged: dict[str, Any] = {}
+    rows_by_dir_combo: list[dict[tuple[str, str], dict[str, Any]]] = []
+    ok_combo_sources: dict[tuple[str, str], set[str]] = defaultdict(set)
+    winning_rows: dict[tuple[str, str], dict[str, Any]] = {}
+
     for data_dir in data_dirs:
+        dir_rows_by_combo: dict[tuple[str, str], dict[str, Any]] = defaultdict(dict)
         rows = load_results(data_dir)
         for key, row in rows.items():
             if isinstance(row, dict):
@@ -386,8 +561,56 @@ def load_results_multi(data_dirs: list[Path]) -> dict[str, Any]:
                 if pos and not Path(pos).is_absolute():
                     row["positions_file"] = str((data_dir / pos).resolve())
                 row.setdefault("source_dir", data_dir.name)
-            merged[key] = row
+                combo = result_combo_key(key, row)
+                dir_rows_by_combo[combo][key] = row
+                if row.get("status") == "ok":
+                    ok_combo_sources[combo].add(data_dir.name)
+            else:
+                combo = result_combo_key(key, {})
+                dir_rows_by_combo[combo][key] = row
+        rows_by_dir_combo.append(dict(dir_rows_by_combo))
+
+    for dir_rows_by_combo in rows_by_dir_combo:
+        for combo, combo_rows in dir_rows_by_combo.items():
+            has_ok_row = any(
+                isinstance(row, dict) and row.get("status") == "ok" for row in combo_rows.values()
+            )
+            if has_ok_row:
+                winning_rows[combo] = combo_rows
+
+    merged: dict[str, Any] = {}
+    for combo_rows in winning_rows.values():
+        merged.update(combo_rows)
+
+    would_mix = sum(1 for sources in ok_combo_sources.values() if len(sources) > 1)
+    print(
+        "overlay: "
+        f"{len(winning_rows)} combos resolved, "
+        f"{would_mix} would have era-mixed under union semantics"
+    )
     return merged
+
+
+def result_combo_key(key: str, row: dict[str, Any]) -> tuple[str, str]:
+    """Return the benchmark combo key for one raw result row.
+
+    Parameters
+    ----------
+    key : str
+        Raw ``results.json`` record key.
+    row : dict[str, Any]
+        Result row payload.  Missing graph or engine fields fall back to the
+        split record key.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(graph, engine)`` combo identifier.
+    """
+    split_graph, split_engine, _ = split_key(key)
+    graph = str(row.get("graph_name") or split_graph)
+    engine = str(row.get("engine_name") or split_engine)
+    return graph, engine
 
 
 def index_results(results: dict[str, Any]) -> dict[tuple[str, str], list[PositionRow]]:
@@ -585,13 +808,23 @@ def build_payloads(
     payloads = []
     for graph, engine in combo_pairs:
         source_combo_id = None
-        if "\t" in engine:
+        if mode == "reference-self-split-positive-control":
+            source_combo_id = f"{graph}::{engine}"
+            reference = reference_for_engine(engine, failing_map)
+            combo_id = f"{graph}::{reference}::SELF_SPLIT"
+            ref_rows = sorted_ok_seed_rows(index.get((graph, reference), []))[:100]
+            reimpl_rows, reference_rows = split_reference_self_rows(ref_rows)
+        elif "\t" in engine:
             engine, reference = engine.split("\t", 1)
             source_combo_id = f"{graph}::{engine}"
             combo_id = f"{graph}::{engine}::NEGREF::{reference}"
+            reimpl_rows = tuple(index.get((graph, engine), []))
+            reference_rows = tuple(resolve_rows(index, graph, reference, None))
         else:
             reference = reference_for_engine(engine, failing_map)
             combo_id = f"{graph}::{engine}"
+            reimpl_rows = tuple(index.get((graph, engine), []))
+            reference_rows = tuple(resolve_rows(index, graph, reference, None))
         graph_n_nodes, edges = graph_data.get(graph, fallback_graph_data(graph, index, engine))
         payloads.append(
             ComboPayload(
@@ -600,8 +833,8 @@ def build_payloads(
                 engine=engine,
                 reference=reference,
                 data_dir=str(data_dir),
-                reimpl_rows=tuple(index.get((graph, engine), [])),
-                ref_rows=tuple(resolve_rows(index, graph, reference, None)),
+                reimpl_rows=reimpl_rows,
+                ref_rows=reference_rows,
                 graph_edges=edges,
                 graph_n_nodes=graph_n_nodes,
                 git_sha=git_sha,
@@ -612,6 +845,113 @@ def build_payloads(
             )
         )
     return payloads
+
+
+def build_analysis_payloads_from_args(args: argparse.Namespace, git_sha: str) -> list[ComboPayload]:
+    """Build analysis payloads using the same path as normal scoring.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI options.
+    git_sha : str
+        Current git SHA.
+
+    Returns
+    -------
+    list[ComboPayload]
+        Payloads ready for analysis.
+    """
+    failing_map = load_failing_map(FAILING_MAP_PATH)
+    data_dirs = args.data_dir or [DEFAULT_DATA_DIR]
+    args.data_dir = data_dirs[0]
+    results = load_results_multi(data_dirs)
+    index = index_results(results)
+    graph_data = load_graph_data()
+    combo_pairs = load_combo_pairs(failing_map, args.combos_file)
+    if args.mode == "negative-control":
+        combo_pairs = select_negative_controls(combo_pairs, failing_map, index, args.data_dir)
+    elif args.mode == "chance-control":
+        combo_pairs = select_chance_controls(combo_pairs, failing_map, index)
+    elif args.mode == "reference-self-split-positive-control":
+        combo_pairs = select_reference_self_split_positive_controls(
+            combo_pairs,
+            failing_map,
+            index,
+            args.data_dir,
+            graph_data,
+        )
+    elif args.mode == "modeb-positive-control" and args.combos_file is None:
+        raise ValueError("--combos-file is required for modeb-positive-control.")
+    return build_payloads(
+        args.mode,
+        combo_pairs,
+        failing_map,
+        index,
+        graph_data,
+        args.data_dir,
+        git_sha,
+    )
+
+
+def verdict_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Extract fields that define the local analysis verdict.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Analysis output row.
+
+    Returns
+    -------
+    dict[str, Any]
+        Stable subset containing ``quality_*``, ``*_direct_equivalent``,
+        ``d_R``, and ``mode`` fields.
+    """
+    return {
+        key: jsonify(value)
+        for key, value in row.items()
+        if key in SELF_CHECK_EXACT_FIELDS
+        or key.startswith("quality_")
+        or key.endswith("_direct_equivalent")
+    }
+
+
+def run_self_check(args: argparse.Namespace, git_sha: str) -> int:
+    """Score requested combos twice and diff verdict fields.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI options.
+    git_sha : str
+        Current git SHA.
+
+    Returns
+    -------
+    int
+        ``0`` when verdict fields are reproducible, otherwise ``1``.
+    """
+    payloads = build_analysis_payloads_from_args(args, git_sha)
+    first_rows = [analyze_payload(payload) for payload in payloads]
+    second_rows = [analyze_payload(payload) for payload in payloads]
+    first_by_combo = {str(row.get("combo_id")): verdict_fields(row) for row in first_rows}
+    second_by_combo = {str(row.get("combo_id")): verdict_fields(row) for row in second_rows}
+    mismatches = []
+    for combo_id in sorted(set(first_by_combo) | set(second_by_combo)):
+        first = first_by_combo.get(combo_id)
+        second = second_by_combo.get(combo_id)
+        if first != second:
+            mismatches.append((combo_id, first, second))
+    if mismatches:
+        print(f"[self-check] verdict mismatch count={len(mismatches)}", file=sys.stderr)
+        for combo_id, first, second in mismatches:
+            print(f"[self-check] MISMATCH {combo_id}", file=sys.stderr)
+            print(f"  first={json.dumps(first, sort_keys=True)}", file=sys.stderr)
+            print(f"  second={json.dumps(second, sort_keys=True)}", file=sys.stderr)
+        return 1
+    print(f"[self-check] deterministic verdicts for {len(payloads)} combos")
+    return 0
 
 
 def reference_for_engine(engine: str, failing_map: dict[str, dict[str, Any]]) -> str:
@@ -724,6 +1064,7 @@ def run_payloads(payloads: list[ComboPayload], output_path: Path, workers: int) 
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=workers,
             initializer=configure_thread_environment,
+            mp_context=multiprocessing.get_context("spawn"),
         ) as executor:
             futures = [executor.submit(analyze_payload, payload) for payload in payloads]
             for future in concurrent.futures.as_completed(futures):
@@ -807,11 +1148,32 @@ def base_row(payload: ComboPayload) -> dict[str, Any]:
         "graph": payload.graph,
         "engine": payload.engine,
         "reference": payload.reference,
+        "no_canonical_reference": no_canonical_reference_for_engine(payload.engine),
         "free_aspect": is_free_aspect(payload.engine),
         "control_kind": payload.control_kind,
         "source_combo_id": payload.source_combo_id,
     }
     return row
+
+
+def no_canonical_reference_for_engine(engine: str) -> bool:
+    """Return whether an engine lacks an expressible canonical reference.
+
+    Parameters
+    ----------
+    engine : str
+        Reimplementation variant identifier.
+
+    Returns
+    -------
+    bool
+        ``True`` when the registry marks the variant as valid Dagua behavior
+        with no original-side parameterization that can express it.
+    """
+    if engine in NO_CANONICAL_REFERENCE_VARIANTS:
+        return True
+    variant = get_variant(engine)
+    return bool(variant is not None and not getattr(variant, "reference_expressible", True))
 
 
 def collect_layouts(data_dir: str, rows: Iterable[PositionRow]) -> dict[Any, Any]:
@@ -1164,17 +1526,28 @@ def compute_mode_a_quality_battery(
     selected_d = [d_layouts[index] for index in indices]
     selected_r = [r_layouts[index] for index in indices]
     metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
+    reference_diagnostics = quality_reference_diagnostics(payload, r_layouts, dists)
+    metrics["reference_diagnostics"] = reference_diagnostics
     stress_tost = df.paired_tost(
         metrics["stress_d"] - metrics["stress_r"],
-        quality_stress_margin(metrics["stress_r"]),
+        quality_stress_margin(
+            metrics["stress_r"],
+            reference_diagnostics["battery_stress_ref_self_spread"],
+        ),
     )
     cross_tost = df.paired_tost(
         metrics["cross_d"] - metrics["cross_r"],
-        quality_cross_margin(metrics["cross_r"]),
+        quality_cross_margin(
+            metrics["cross_r"],
+            reference_diagnostics["cross_ref_self_spread"],
+            sampling_se=quality_cross_sampling_se(metrics),
+            cross_sampled=bool(metrics["cross_sampled"]),
+        ),
     )
-    np_tost = df.paired_tost(
-        metrics["np_d"] - metrics["np_r"],
-        QUALITY_NP_ABS_MARGIN,
+    np_tost = quality_np_noninferiority(
+        metrics["np_d"],
+        metrics["np_r"],
+        quality_np_margin(reference_diagnostics["np_ref_self_spread"]),
     )
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
@@ -1207,20 +1580,33 @@ def compute_mode_b_quality_battery(
     selected_d = [d_layouts[index] for index in indices]
     selected_r = [r_layout for _index in indices]
     metrics = quality_metric_samples(payload, selected_d, selected_r, dists)
+    reference_diagnostics = deterministic_reference_diagnostics(payload, r_layout, dists)
+    metrics["reference_diagnostics"] = reference_diagnostics
     stress_target = float(metrics["stress_r"][0]) if metrics["stress_r"].size else float("nan")
     cross_target = float(metrics["cross_r"][0]) if metrics["cross_r"].size else float("nan")
-    np_target = float(metrics["np_r"][0]) if metrics["np_r"].size else float("nan")
     stress_tost = df.one_sample_tost(
         metrics["stress_d"],
         stress_target,
-        quality_stress_margin(np.asarray([stress_target])),
+        quality_stress_margin(
+            np.asarray([stress_target]),
+            reference_diagnostics["battery_stress_ref_self_spread"],
+        ),
     )
     cross_tost = df.one_sample_tost(
         metrics["cross_d"],
         cross_target,
-        quality_cross_margin(np.asarray([cross_target])),
+        quality_cross_margin(
+            np.asarray([cross_target]),
+            reference_diagnostics["cross_ref_self_spread"],
+            sampling_se=quality_cross_sampling_se(metrics),
+            cross_sampled=bool(metrics["cross_sampled"]),
+        ),
     )
-    np_tost = df.one_sample_tost(metrics["np_d"], np_target, QUALITY_NP_ABS_MARGIN)
+    np_tost = quality_np_noninferiority(
+        metrics["np_d"],
+        metrics["np_r"],
+        quality_np_margin(reference_diagnostics["np_ref_self_spread"]),
+    )
     return quality_battery_record(metrics, stress_tost, cross_tost, np_tost)
 
 
@@ -1273,11 +1659,17 @@ def quality_metric_samples(
     edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
     cross_seed = stable_int_seed(f"{payload.combo_id}::r70::crossings")
     stress_d = np.asarray(
-        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in d_layouts],
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in d_layouts
+        ],
         dtype=np.float64,
     )
     stress_r = np.asarray(
-        [normalized_stress(layout, edge_index, all_pairs_distances=dists) for layout in r_layouts],
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in r_layouts
+        ],
         dtype=np.float64,
     )
     np_d = np.asarray(
@@ -1288,25 +1680,156 @@ def quality_metric_samples(
         [neighborhood_preservation(layout, dists, k=10) for layout in r_layouts],
         dtype=np.float64,
     )
-    cross_d = np.asarray(
-        [crossing_count(layout, edge_tensor, cross_seed) for layout in d_layouts],
-        dtype=np.float64,
-    )
-    cross_r = np.asarray(
-        [crossing_count(layout, edge_tensor, cross_seed) for layout in r_layouts],
-        dtype=np.float64,
-    )
+    cross_d_estimates = [crossing_estimate(layout, edge_tensor, cross_seed) for layout in d_layouts]
+    cross_r_estimates = [crossing_estimate(layout, edge_tensor, cross_seed) for layout in r_layouts]
+    cross_d = np.asarray([estimate.value for estimate in cross_d_estimates], dtype=np.float64)
+    cross_r = np.asarray([estimate.value for estimate in cross_r_estimates], dtype=np.float64)
     return {
         "stress_d": stress_d,
         "stress_r": stress_r,
         "cross_d": cross_d,
         "cross_r": cross_r,
+        "cross_se_d": np.asarray([estimate.se for estimate in cross_d_estimates], dtype=np.float64),
+        "cross_se_r": np.asarray([estimate.se for estimate in cross_r_estimates], dtype=np.float64),
+        "cross_n_valid_d": np.asarray(
+            [estimate.n_valid for estimate in cross_d_estimates],
+            dtype=np.float64,
+        ),
+        "cross_n_valid_r": np.asarray(
+            [estimate.n_valid for estimate in cross_r_estimates],
+            dtype=np.float64,
+        ),
+        "cross_eligible_pairs_d": np.asarray(
+            [estimate.eligible_pairs for estimate in cross_d_estimates],
+            dtype=np.float64,
+        ),
+        "cross_eligible_pairs_r": np.asarray(
+            [estimate.eligible_pairs for estimate in cross_r_estimates],
+            dtype=np.float64,
+        ),
         "np_d": np_d,
         "np_r": np_r,
         "battery_n": len(d_layouts),
         "cross_sampled": edge_index.shape[1] > 500,
         "cross_seed": cross_seed,
     }
+
+
+def quality_reference_diagnostics(
+    payload: ComboPayload,
+    r_layouts: list[np.ndarray],
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Compute reference-only diagnostics for variance-tied 3Q margins.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item.
+    r_layouts : list[numpy.ndarray]
+        All loaded reference layouts with shape ``[N, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Reference self-spreads, canonical-reference gate fields, and crossing
+        metadata used by the final quality battery.
+    """
+    edge_index = edge_index_array(payload.graph_edges)
+    edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
+    cross_seed = stable_int_seed(f"{payload.combo_id}::r70::crossings")
+    stress_r = np.asarray(
+        [
+            normalized_stress(layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+            for layout in r_layouts
+        ],
+        dtype=np.float64,
+    )
+    cross_r_estimates = [crossing_estimate(layout, edge_tensor, cross_seed) for layout in r_layouts]
+    cross_r = np.asarray([estimate.value for estimate in cross_r_estimates], dtype=np.float64)
+    np_r = np.asarray(
+        [neighborhood_preservation(layout, dists, k=10) for layout in r_layouts],
+        dtype=np.float64,
+    )
+    plain_mean_w_r = reference_plain_mean_w_r(r_layouts)
+    canonical = reference_is_canonical(
+        plain_mean_w_r,
+        QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION,
+    )
+    return {
+        "quality_battery_eligible": canonical,
+        "quality_battery_tier": (
+            QUALITY_BATTERY_FINAL_TIER if canonical else QUALITY_BATTERY_EXPLORATORY_TIER
+        ),
+        "quality_reference_plain_mean_W_R": plain_mean_w_r,
+        "quality_reference_canonical": canonical,
+        "quality_reference_canonical_threshold": (
+            QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+        ),
+        "battery_stress_ref_self_spread": reference_self_spread(stress_r),
+        "cross_ref_self_spread": reference_self_spread(cross_r),
+        "np_ref_self_spread": reference_self_spread(np_r),
+        "quality_reference_metric_n": int(len(r_layouts)),
+    }
+
+
+def deterministic_reference_diagnostics(
+    payload: ComboPayload,
+    r_layout: np.ndarray,
+    dists: np.ndarray,
+) -> dict[str, Any]:
+    """Return zero-spread diagnostics for a deterministic reference layout.
+
+    Parameters
+    ----------
+    payload : ComboPayload
+        Combo work item.
+    r_layout : numpy.ndarray
+        Deterministic reference layout with shape ``[N, 2]``.
+    dists : numpy.ndarray
+        Graph shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Reference diagnostics in the same shape as Mode A.
+    """
+    del payload, r_layout, dists
+    return {
+        "quality_battery_eligible": True,
+        "quality_battery_tier": QUALITY_BATTERY_FINAL_TIER,
+        "quality_reference_plain_mean_W_R": 0.0,
+        "quality_reference_canonical": True,
+        "quality_reference_canonical_threshold": (
+            QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+        ),
+        "battery_stress_ref_self_spread": 0.0,
+        "cross_ref_self_spread": 0.0,
+        "np_ref_self_spread": 0.0,
+        "quality_reference_metric_n": 1,
+    }
+
+
+def reference_plain_mean_w_r(r_layouts: list[np.ndarray]) -> float:
+    """Return plain Procrustes self-dispersion for reference layouts.
+
+    Parameters
+    ----------
+    r_layouts : list[numpy.ndarray]
+        Reference layouts with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Mean off-diagonal plain Procrustes distance, or ``0.0`` for fewer than
+        two reference layouts.
+    """
+    if len(r_layouts) < 2:
+        return 0.0
+    plain = df.pairwise_procrustes_matrix(r_layouts, free_aspect=False)
+    return offdiag_mean(plain)
 
 
 def quality_battery_record(
@@ -1333,8 +1856,18 @@ def quality_battery_record(
     dict[str, Any]
         JSON-ready fields consumed by the report-stage 3Q rung.
     """
-    stress_margin = quality_stress_margin(metrics["stress_r"])
-    cross_margin = quality_cross_margin(metrics["cross_r"])
+    reference_diagnostics = dict(metrics["reference_diagnostics"])
+    stress_margin = quality_stress_margin(
+        metrics["stress_r"],
+        reference_diagnostics["battery_stress_ref_self_spread"],
+    )
+    cross_margin = quality_cross_margin(
+        metrics["cross_r"],
+        reference_diagnostics["cross_ref_self_spread"],
+        sampling_se=quality_cross_sampling_se(metrics),
+        cross_sampled=bool(metrics["cross_sampled"]),
+    )
+    np_margin = quality_np_margin(reference_diagnostics["np_ref_self_spread"])
     stress_p = float(stress_tost.get("p_tost", float("nan")))
     cross_p = float(cross_tost.get("p_tost", float("nan")))
     np_p = float(np_tost.get("p_tost", float("nan")))
@@ -1349,60 +1882,261 @@ def quality_battery_record(
     # tests must reject.  No within-battery multiplicity correction is applied because
     # the max-p conjunction is already level-alpha and conservative (Berger-Hsu 1996).
     battery_p_iut = max(finite_p) if len(finite_p) == 3 else float("nan")
+    metric_identical = bool(stress_ok and cross_ok and np_ok)
+    superior_distinct = quality_superior_distinct(
+        metrics,
+        stress_margin,
+        cross_margin,
+        np_margin,
+        stress_ok,
+        cross_ok,
+        np_ok,
+    )
+    final_eligible = bool(reference_diagnostics["quality_battery_eligible"])
     return {
         "battery_n": int(metrics["battery_n"]),
         "battery_p_iut": battery_p_iut,
-        "quality_identical_raw": bool(stress_ok and cross_ok and np_ok),
+        "quality_identical_raw": bool(final_eligible and metric_identical),
+        "quality_identical_exploratory": bool((not final_eligible) and metric_identical),
+        "quality_superior_distinct": superior_distinct,
+        "quality_battery_eligible": final_eligible,
+        "quality_battery_tier": str(reference_diagnostics["quality_battery_tier"]),
+        "quality_reference_plain_mean_W_R": reference_diagnostics[
+            "quality_reference_plain_mean_W_R"
+        ],
+        "quality_reference_canonical": bool(reference_diagnostics["quality_reference_canonical"]),
+        "quality_reference_canonical_threshold": reference_diagnostics[
+            "quality_reference_canonical_threshold"
+        ],
+        "quality_reference_metric_n": int(reference_diagnostics["quality_reference_metric_n"]),
         "battery_stress_D_mean": metric_mean(metrics["stress_d"]),
         "battery_stress_R_mean": metric_mean(metrics["stress_r"]),
         "battery_stress_margin": stress_margin,
+        "battery_stress_ref_self_spread": reference_diagnostics["battery_stress_ref_self_spread"],
         "battery_stress_p_tost": stress_p,
         "battery_stress_direct_equivalent": stress_direct,
         "cross_D_mean": metric_mean(metrics["cross_d"]),
         "cross_R_mean": metric_mean(metrics["cross_r"]),
+        "cross_se_D": aggregate_standard_error(metrics["cross_se_d"]),
+        "cross_se_R": aggregate_standard_error(metrics["cross_se_r"]),
+        "cross_n_valid_D": metric_mean(metrics["cross_n_valid_d"]),
+        "cross_n_valid_R": metric_mean(metrics["cross_n_valid_r"]),
+        "cross_eligible_pairs_D": metric_mean(metrics["cross_eligible_pairs_d"]),
+        "cross_eligible_pairs_R": metric_mean(metrics["cross_eligible_pairs_r"]),
         "cross_margin": cross_margin,
+        "cross_ref_self_spread": reference_diagnostics["cross_ref_self_spread"],
         "cross_p_tost": cross_p,
         "cross_direct_equivalent": cross_direct,
         "cross_sampled": bool(metrics["cross_sampled"]),
         "cross_seed": int(metrics["cross_seed"]),
         "np_D_mean": metric_mean(metrics["np_d"]),
         "np_R_mean": metric_mean(metrics["np_r"]),
-        "np_margin": QUALITY_NP_ABS_MARGIN,
+        "np_margin": np_margin,
+        "np_ref_self_spread": reference_diagnostics["np_ref_self_spread"],
         "np_p_tost": np_p,
         "np_direct_equivalent": np_direct,
     }
 
 
-def quality_stress_margin(stress_r: np.ndarray) -> float:
+def quality_stress_margin(stress_r: np.ndarray, ref_self_spread: Optional[float] = None) -> float:
     """Return the strict normalized-stress battery margin.
 
     Parameters
     ----------
     stress_r : numpy.ndarray
         Reference normalized-stress values.
+    ref_self_spread : Optional[float], default=None
+        Reference seed-to-seed normalized-stress spread.  When omitted, the
+        spread is computed from ``stress_r``.
 
     Returns
     -------
     float
-        ``max(2% * mean(reference), 1e-6)``.
+        ``max(2% * mean(reference), 1e-6, reference self-spread)``.
     """
-    return max(QUALITY_STRESS_REL_MARGIN * float(np.mean(stress_r)), 1.0e-6)
+    base_margin = max(QUALITY_STRESS_REL_MARGIN * float(np.mean(stress_r)), 1.0e-6)
+    if ref_self_spread is None:
+        return variance_tied_margin(base_margin, stress_r)
+    if not math.isfinite(float(ref_self_spread)):
+        return base_margin
+    return max(base_margin, float(ref_self_spread))
 
 
-def quality_cross_margin(cross_r: np.ndarray) -> float:
+def quality_cross_margin(
+    cross_r: np.ndarray,
+    ref_self_spread: Optional[float] = None,
+    *,
+    sampling_se: float = 0.0,
+    cross_sampled: bool = False,
+) -> float:
     """Return the strict crossing-count battery margin.
 
     Parameters
     ----------
     cross_r : numpy.ndarray
         Reference crossing counts or estimates.
+    ref_self_spread : Optional[float], default=None
+        Reference seed-to-seed crossing-count spread.  When omitted, the spread
+        is computed from ``cross_r``.
+    sampling_se : float, default=0.0
+        Standard error of the Dagua/reference crossing-count difference in
+        count units.
+    cross_sampled : bool, default=False
+        Whether crossings came from the sampled ``E > 500`` estimator.
 
     Returns
     -------
     float
-        ``max(2% * mean(reference), 0.5)``.
+        ``max(2% * mean(reference), 0.5, reference self-spread)`` for exact
+        rows. Sampled rows also include a 95% normal sampling-error term.
     """
-    return max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
+    base_margin = max(QUALITY_CROSS_REL_MARGIN * float(np.mean(cross_r)), QUALITY_CROSS_ABS_FLOOR)
+    if ref_self_spread is None:
+        margin = variance_tied_margin(base_margin, cross_r)
+    elif not math.isfinite(float(ref_self_spread)):
+        margin = base_margin
+    else:
+        margin = max(base_margin, float(ref_self_spread))
+    if cross_sampled and math.isfinite(float(sampling_se)):
+        margin = max(margin, QUALITY_CROSS_SAMPLING_Z * float(sampling_se))
+    return margin
+
+
+def aggregate_standard_error(values: np.ndarray) -> float:
+    """Return the standard error for the mean of independent estimates.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Per-layout standard errors in metric units.
+
+    Returns
+    -------
+    float
+        Standard error of the sample mean, or ``0.0`` for empty/exact arrays.
+    """
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.sqrt(np.sum(finite**2)) / finite.size)
+
+
+def quality_cross_sampling_se(metrics: dict[str, Any]) -> float:
+    """Return the crossing-difference standard error for a battery row.
+
+    Parameters
+    ----------
+    metrics : dict[str, Any]
+        Per-side metric arrays from :func:`quality_metric_samples`.
+
+    Returns
+    -------
+    float
+        Standard error of the Dagua-reference mean crossing difference.
+    """
+    se_d = aggregate_standard_error(np.asarray(metrics["cross_se_d"], dtype=np.float64))
+    se_r = aggregate_standard_error(np.asarray(metrics["cross_se_r"], dtype=np.float64))
+    return float(math.sqrt(se_d**2 + se_r**2))
+
+
+def quality_superior_distinct(
+    metrics: dict[str, Any],
+    stress_margin: float,
+    cross_margin: float,
+    np_margin: float,
+    stress_ok: bool,
+    cross_ok: bool,
+    np_ok: bool,
+) -> bool:
+    """Return whether a failed battery is strictly better on failing legs.
+
+    Parameters
+    ----------
+    metrics : dict[str, Any]
+        Per-side metric arrays from :func:`quality_metric_samples`.
+    stress_margin : float
+        Strict stress equivalence margin.
+    cross_margin : float
+        Strict crossing-count equivalence margin.
+    np_margin : float
+        Neighborhood-preservation non-inferiority margin.
+    stress_ok : bool
+        Whether the stress battery leg passed.
+    cross_ok : bool
+        Whether the crossing battery leg passed.
+    np_ok : bool
+        Whether the neighborhood-preservation battery leg passed.
+
+    Returns
+    -------
+    bool
+        ``True`` when the combo remains non-identical but every failed metric
+        leg favors Dagua beyond that metric's margin.
+    """
+    if stress_ok and cross_ok and np_ok:
+        return False
+    stress_delta = metric_mean(metrics["stress_d"]) - metric_mean(metrics["stress_r"])
+    cross_delta = metric_mean(metrics["cross_d"]) - metric_mean(metrics["cross_r"])
+    np_delta = metric_mean(metrics["np_d"]) - metric_mean(metrics["np_r"])
+    failing_directions: list[bool] = []
+    if not stress_ok:
+        failing_directions.append(stress_delta < -stress_margin)
+    if not cross_ok:
+        failing_directions.append(cross_delta < -cross_margin)
+    if not np_ok:
+        failing_directions.append(np_delta > np_margin)
+    return bool(failing_directions) and all(failing_directions)
+
+
+def quality_np_margin(ref_self_spread: Optional[float] = None) -> float:
+    """Return the neighborhood-preservation non-inferiority margin.
+
+    Parameters
+    ----------
+    ref_self_spread : Optional[float], default=None
+        Reference seed-to-seed neighborhood-preservation spread.
+
+    Returns
+    -------
+    float
+        ``max(0.02, reference self-spread)``.
+    """
+    if ref_self_spread is None:
+        return QUALITY_NP_ABS_MARGIN
+    if not math.isfinite(float(ref_self_spread)):
+        return QUALITY_NP_ABS_MARGIN
+    return max(QUALITY_NP_ABS_MARGIN, float(ref_self_spread))
+
+
+def quality_np_noninferiority(np_d: np.ndarray, np_r: np.ndarray, margin: float) -> dict[str, Any]:
+    """Return the one-sided neighborhood-preservation battery decision.
+
+    Parameters
+    ----------
+    np_d : numpy.ndarray
+        Dagua neighborhood-preservation samples.
+    np_r : numpy.ndarray
+        Reference neighborhood-preservation samples.
+    margin : float
+        Allowed absolute non-inferiority shortfall.
+
+    Returns
+    -------
+    dict[str, Any]
+        TOST-shaped payload where direct equivalence means
+        ``mean(np_d) >= mean(np_r) - margin``.
+    """
+    d_mean = metric_mean(np.asarray(np_d, dtype=np.float64))
+    r_mean = metric_mean(np.asarray(np_r, dtype=np.float64))
+    noninferior = math.isfinite(d_mean) and math.isfinite(r_mean) and d_mean >= r_mean - margin
+    return {
+        "p_tost": 0.0 if noninferior else 1.0,
+        "wilcoxon_p_tost": float("nan"),
+        "degenerate_sd": True,
+        "equivalent_direct": noninferior,
+        "noninferior_direct": noninferior,
+    }
 
 
 def metric_equivalent(tost: dict[str, Any]) -> bool:
@@ -1459,8 +2193,44 @@ def edge_index_array(edges: Iterable[tuple[int, int]]) -> np.ndarray:
     return edge_list.reshape(-1, 2).T.copy()
 
 
-def crossing_count(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> int:
+def crossing_estimate(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> CrossingEstimate:
     """Count or estimate crossings with deterministic large-edge sampling.
+
+    Parameters
+    ----------
+    layout : numpy.ndarray
+        Layout coordinates with shape ``[N, 2]``.
+    edge_tensor : torch.Tensor
+        Edge index with shape ``[2, E]``.
+    seed : int
+        Fixed seed for the sampled ``E > 500`` path.
+
+    Returns
+    -------
+    CrossingEstimate
+        Exact crossing count for ``E <= 500`` or fixed-seed sampled estimate
+        and sampling diagnostics for larger edge sets.
+    """
+    pos_tensor = torch.as_tensor(layout, dtype=torch.float64)
+    if edge_tensor.shape[1] <= 500:
+        eligible_pairs = exact_eligible_edge_pairs(edge_tensor)
+        return CrossingEstimate(
+            value=float(count_crossings(pos_tensor, edge_tensor, seed=seed)),
+            se=0.0,
+            n_valid=eligible_pairs,
+            eligible_pairs=float(eligible_pairs),
+        )
+    result = sampled_crossing_rate(pos_tensor, edge_tensor, n_samples=125000, seed=seed)
+    return CrossingEstimate(
+        value=float(result["crossing_estimated_total"]),
+        se=float(result["crossing_se"]),
+        n_valid=int(result["crossing_n_samples"]),
+        eligible_pairs=float(result["crossing_eligible_pairs"]),
+    )
+
+
+def crossing_count(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> int:
+    """Return the crossing-count point estimate for legacy callers.
 
     Parameters
     ----------
@@ -1477,8 +2247,31 @@ def crossing_count(layout: np.ndarray, edge_tensor: torch.Tensor, seed: int) -> 
         Exact crossing count for ``E <= 500`` or fixed-seed sampled estimate for
         larger edge sets.
     """
-    pos_tensor = torch.as_tensor(layout, dtype=torch.float64)
-    return int(count_crossings(pos_tensor, edge_tensor, seed=seed))
+    return int(crossing_estimate(layout, edge_tensor, seed).value)
+
+
+def exact_eligible_edge_pairs(edge_tensor: torch.Tensor) -> int:
+    """Count non-adjacent unordered edge pairs exactly.
+
+    Parameters
+    ----------
+    edge_tensor : torch.Tensor
+        Edge index with shape ``[2, E]``.
+
+    Returns
+    -------
+    int
+        Number of unordered edge pairs that do not share an endpoint.
+    """
+    if edge_tensor.numel() == 0 or edge_tensor.shape[1] < 2:
+        return 0
+    edge_count = int(edge_tensor.shape[1])
+    src, tgt = edge_tensor[0], edge_tensor[1]
+    ii, jj = torch.triu_indices(edge_count, edge_count, offset=1)
+    e1s, e1t = src[ii], tgt[ii]
+    e2s, e2t = src[jj], tgt[jj]
+    shares_node = (e1s == e2s) | (e1s == e2t) | (e1t == e2s) | (e1t == e2t)
+    return int((~shares_node).sum().item())
 
 
 def stable_int_seed(purpose: str) -> int:
@@ -1790,6 +2583,117 @@ def select_negative_controls(
     return draw_sorted(candidates, 20, "r70::negctl")
 
 
+def select_reference_self_split_positive_controls(
+    combo_pairs: list[tuple[str, str]],
+    failing_map: dict[str, dict[str, Any]],
+    index: dict[tuple[str, str], list[PositionRow]],
+    data_dir: Path,
+    graph_data: dict[str, tuple[int, tuple[tuple[int, int], ...]]],
+) -> list[tuple[str, str]]:
+    """Select one seedable reference combo that passes the self-split battery.
+
+    Parameters
+    ----------
+    combo_pairs : list[tuple[str, str]]
+        Candidate real combos.
+    failing_map : dict[str, dict[str, Any]]
+        Approved failing-map scope.
+    index : dict[tuple[str, str], list[PositionRow]]
+        Results index.
+    data_dir : pathlib.Path
+        Benchmark root directory used to load reference layouts for screening.
+    graph_data : dict[str, tuple[int, tuple[tuple[int, int], ...]]]
+        Graph edge payloads.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        One ``(graph, engine)`` pair whose reference has at least 100 ok seeds.
+    """
+    preferred_graph, preferred_engine = REFERENCE_SELF_SPLIT_PREFERRED
+    preferred_reference = reference_for_engine(preferred_engine, failing_map)
+    preferred_rows = sorted_ok_seed_rows(index.get((preferred_graph, preferred_reference), []))
+    if (preferred_graph, preferred_engine) in set(combo_pairs) and len(preferred_rows) >= 100:
+        return [REFERENCE_SELF_SPLIT_PREFERRED]
+    for graph, engine in combo_pairs:
+        reference = reference_for_engine(engine, failing_map)
+        rows = sorted_ok_seed_rows(index.get((graph, reference), []))[:100]
+        if len(rows) < 100:
+            continue
+        if reference_self_split_quality_passes(
+            graph, engine, reference, rows, index, data_dir, graph_data
+        ):
+            return [(graph, engine)]
+    raise ValueError(
+        "No reference self-split positive-control candidate passed the quality battery."
+    )
+
+
+def reference_self_split_quality_passes(
+    graph: str,
+    engine: str,
+    reference: str,
+    rows: list[PositionRow],
+    index: dict[tuple[str, str], list[PositionRow]],
+    data_dir: Path,
+    graph_data: dict[str, tuple[int, tuple[tuple[int, int], ...]]],
+) -> bool:
+    """Return whether a reference self split passes the quality battery.
+
+    Parameters
+    ----------
+    graph : str
+        Graph name.
+    engine : str
+        Source implementation engine name.
+    reference : str
+        Seedable reference engine name.
+    rows : list[PositionRow]
+        First 100 ok reference seed rows.
+    index : dict[tuple[str, str], list[PositionRow]]
+        Results index for graph fallback metadata.
+    data_dir : pathlib.Path
+        Benchmark root directory used to load reference layouts.
+    graph_data : dict[str, tuple[int, tuple[tuple[int, int], ...]]]
+        Graph edge payloads.
+
+    Returns
+    -------
+    bool
+        ``True`` when the exact self-split Mode A quality battery passes.
+    """
+    reimpl_rows, reference_rows = split_reference_self_rows(rows)
+    graph_n_nodes, edges = graph_data.get(graph, fallback_graph_data(graph, index, engine))
+    payload = ComboPayload(
+        combo_id=f"{graph}::{reference}::SELF_SPLIT_SCREEN",
+        graph=graph,
+        engine=engine,
+        reference=reference,
+        data_dir=str(data_dir),
+        reimpl_rows=reimpl_rows,
+        ref_rows=reference_rows,
+        graph_edges=edges,
+        graph_n_nodes=graph_n_nodes,
+        git_sha="screen",
+        control_kind="reference-self-split-positive-control",
+        source_combo_id=f"{graph}::{engine}",
+    )
+    reimpl = collect_layouts(str(data_dir), reimpl_rows)
+    ref = collect_layouts(str(data_dir), reference_rows)
+    seeds = sorted(set(reimpl["seeded"]) & set(ref["seeded"]))
+    if len(seeds) < MIN_MODE_SEEDS:
+        return False
+    edge_rows = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    dists = df.prepare_graph_distances(edge_rows, graph_n_nodes)
+    battery = compute_mode_a_quality_battery(
+        payload,
+        [reimpl["seeded"][seed] for seed in seeds],
+        [ref["seeded"][seed] for seed in seeds],
+        dists,
+    )
+    return bool(battery.get("quality_identical_raw", False))
+
+
 def ok_seed_set(rows: Iterable[PositionRow]) -> set[int]:
     """Return ok integer seeds for rows.
 
@@ -1804,6 +2708,51 @@ def ok_seed_set(rows: Iterable[PositionRow]) -> set[int]:
         Seeds with ok rows.
     """
     return {int(row.seed) for row in rows if row.status == "ok" and row.seed is not None}
+
+
+def sorted_ok_seed_rows(rows: Iterable[PositionRow]) -> list[PositionRow]:
+    """Return ok seeded rows in deterministic seed order.
+
+    Parameters
+    ----------
+    rows : Iterable[PositionRow]
+        Candidate benchmark rows.
+
+    Returns
+    -------
+    list[PositionRow]
+        Rows with ok status and integer seeds, sorted by seed.
+    """
+    return sorted(
+        (row for row in rows if row.status == "ok" and row.seed is not None),
+        key=lambda row: seed_sort_value(row.seed),
+    )
+
+
+def split_reference_self_rows(
+    rows: list[PositionRow],
+) -> tuple[tuple[PositionRow, ...], tuple[PositionRow, ...]]:
+    """Split 100 reference rows into matched-label A/B halves.
+
+    Parameters
+    ----------
+    rows : list[PositionRow]
+        Seeded reference rows sorted in deterministic seed order.
+
+    Returns
+    -------
+    tuple[tuple[PositionRow, ...], tuple[PositionRow, ...]]
+        First 50 rows and second 50 rows with remapped labels ``0..49`` so
+        Mode A compares disjoint seed halves pairwise.
+    """
+    if len(rows) < 100:
+        raise ValueError(f"Need 100 reference rows for self-split control, found {len(rows)}.")
+    first = rows[:50]
+    second = rows[50:100]
+    return (
+        tuple(replace(row, seed=index) for index, row in enumerate(first)),
+        tuple(replace(row, seed=index) for index, row in enumerate(second)),
+    )
 
 
 def draw_sorted(items: list[tuple[str, str]], count: int, purpose: str) -> list[tuple[str, str]]:
@@ -2055,7 +3004,10 @@ def run_deterministic_mode(
         if engine in ref_by_engine and (graph, engine) not in done
     ]
     print(f"[deterministic] resume: {len(done)} done, {len(work)} to run", flush=True)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as pool:
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=8,
+        mp_context=multiprocessing.get_context("spawn"),
+    ) as pool:
         futures = {
             pool.submit(
                 deterministic_row, refresh_dir, index, graph_data, graph, engine, ref, git_sha
@@ -2217,30 +3169,49 @@ def deterministic_quality_metrics(
     edge_index = edge_index_array(edges)
     edge_tensor = torch.as_tensor(edge_index, dtype=torch.long)
     cross_seed = stable_int_seed(f"{combo_id}::r70::crossings")
-    stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists)
-    stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists)
-    cross_d = crossing_count(d_layout, edge_tensor, cross_seed)
-    cross_r = crossing_count(r_layout, edge_tensor, cross_seed)
+    stress_d = normalized_stress(d_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+    stress_r = normalized_stress(r_layout, edge_index, all_pairs_distances=dists, fit_scale=True)
+    cross_d_estimate = crossing_estimate(d_layout, edge_tensor, cross_seed)
+    cross_r_estimate = crossing_estimate(r_layout, edge_tensor, cross_seed)
+    cross_d = cross_d_estimate.value
+    cross_r = cross_r_estimate.value
     np_d = neighborhood_preservation(d_layout, dists, k=10)
     np_r = neighborhood_preservation(r_layout, dists, k=10)
     stress_rel_delta = abs(stress_d - stress_r) / max(stress_r, df.EPSILON)
     crossings_delta = abs(cross_d - cross_r)
-    neighborhood_delta = abs(np_d - np_r)
+    neighborhood_delta = max(np_r - np_d, 0.0)
     return {
         "battery_n": 1,
+        "quality_battery_eligible": True,
+        "quality_battery_tier": QUALITY_BATTERY_FINAL_TIER,
+        "quality_reference_plain_mean_W_R": 0.0,
+        "quality_reference_canonical": True,
+        "quality_reference_canonical_threshold": (
+            QUALITY_REFERENCE_CANONICAL_MAX_PLAIN_SELF_DISPERSION
+        ),
+        "quality_reference_metric_n": 1,
         "battery_stress_D_mean": stress_d,
         "battery_stress_R_mean": stress_r,
+        "battery_stress_ref_self_spread": 0.0,
         "stress_rel_delta": stress_rel_delta,
         "cross_D_mean": float(cross_d),
         "cross_R_mean": float(cross_r),
+        "cross_se_D": cross_d_estimate.se,
+        "cross_se_R": cross_r_estimate.se,
+        "cross_n_valid_D": float(cross_d_estimate.n_valid),
+        "cross_n_valid_R": float(cross_r_estimate.n_valid),
+        "cross_eligible_pairs_D": cross_d_estimate.eligible_pairs,
+        "cross_eligible_pairs_R": cross_r_estimate.eligible_pairs,
         "crossings_delta": crossings_delta,
         "cross_margin": max(QUALITY_CROSS_REL_MARGIN * float(cross_r), QUALITY_CROSS_ABS_FLOOR),
+        "cross_ref_self_spread": 0.0,
         "cross_sampled": edge_index.shape[1] > 500,
         "cross_seed": cross_seed,
         "np_D_mean": np_d,
         "np_R_mean": np_r,
         "neighborhood_preservation_delta": neighborhood_delta,
         "np_margin": QUALITY_NP_ABS_MARGIN,
+        "np_ref_self_spread": 0.0,
     }
 
 

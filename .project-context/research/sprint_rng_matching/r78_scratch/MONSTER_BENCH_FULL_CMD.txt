@@ -1,0 +1,7 @@
+python3 scripts/run_benchmark.py --variants --engines all --seed-refs
+graphviz_sfdp,graphviz_fdp,graphviz_neato,igraph_davidson_harel,igraph_drl,igraph_mds,ogdf_fmmm,ogdf
+_gem,ogdf_stress,umap_graph,nx_spring,sgd2,sgd2_multi_ref --graphs
+ba_500,er_500,rgg_500,small_world_500,powerlaw_500,dependency_500,grid_20x20,grid_50x50,sbm_8x100,ba
+_2000,er_2000,powerlaw_2000,rgg_2000,small_world_2000,ba_5000 --max-nodes 0 --seeds 25 --seed-start
+100 --workers 5 --timeout 21600 --watchdog-timeout 28800 --resume --output-dir
+eval_output/benchmark_100seed_r78_biggraph

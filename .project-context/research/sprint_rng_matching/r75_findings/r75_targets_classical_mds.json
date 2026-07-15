@@ -1,0 +1,872 @@
+[
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "bipartite_4_3_4",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "bipartite_4_3_4::classic_classical_mds_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.24980721420860652,
+   "R": 0.2671388200137273,
+   "margin": 0.005342776400274546,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 29.0,
+   "R": 16.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "bipartite_4_3_4",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "bipartite_4_3_4::classic_classical_mds_igraph_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.24980721420860652,
+   "R": 0.2671388200137273,
+   "margin": 0.005342776400274546,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 29.0,
+   "R": 16.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "center_port_backedge_hub",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "center_port_backedge_hub::classic_classical_mds_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.17914548919708936,
+   "R": 0.2777783317873006,
+   "margin": 0.005555566635746012,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "center_port_backedge_hub",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "center_port_backedge_hub::classic_classical_mds_igraph_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.17914548919708936,
+   "R": 0.2777783317873006,
+   "margin": 0.005555566635746012,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 2.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "densenet_block",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "densenet_block::classic_classical_mds_igraph_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19967600759210852,
+   "R": 0.2349085797168596,
+   "margin": 0.004698171594337192,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 6.0,
+   "R": 13.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "densenet_block",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "densenet_block::classic_classical_mds_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.19967600759210852,
+   "R": 0.2349085797168596,
+   "margin": 0.004698171594337192,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 6.0,
+   "R": 13.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "disconnected_encoder_residual",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "disconnected_encoder_residual::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35044014508202215,
+   "R": 0.024788372472043976,
+   "margin": 0.0004957674494408795,
+   "ref_spread": 3.2548621970091055e-09,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.8811728395061726,
+   "margin": 0.06905678053658175,
+   "ref_spread": 0.06905678053658175,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "disconnected_encoder_residual",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "disconnected_encoder_residual::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.35044014508202215,
+   "R": 0.024788372722744652,
+   "margin": 0.000495767454454893,
+   "ref_spread": 3.2548621970091055e-09,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.8810185185185184,
+   "margin": 0.06905678053658175,
+   "ref_spread": 0.06905678053658175,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "disconnected_label_cycle_collage",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "disconnected_label_cycle_collage::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 1.0,
+   "R": 8.059447459476042e-07,
+   "margin": 1e-06,
+   "ref_spread": 2.5696956314153416e-11,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.46547619047619043,
+   "margin": 0.09655742019525981,
+   "ref_spread": 0.09655742019525981,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "disconnected_label_cycle_collage",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "disconnected_label_cycle_collage::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 1.0,
+   "R": 8.059447540615887e-07,
+   "margin": 1e-06,
+   "ref_spread": 2.5696956314153416e-11,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.47500000000000003,
+   "margin": 0.09655742019525981,
+   "ref_spread": 0.09655742019525981,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "kitchen_sink_platform_graph::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1098906778511548,
+   "R": 0.06133110321723931,
+   "margin": 0.0012266220643447861,
+   "ref_spread": 2.890304641038492e-09,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9500000000000003,
+   "R": 0.8968518518518521,
+   "margin": 0.02935791873486517,
+   "ref_spread": 0.02935791873486517,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "kitchen_sink_platform_graph::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1098906778511548,
+   "R": 0.06133110352404223,
+   "margin": 0.0012266220704808446,
+   "ref_spread": 2.890304641038492e-09,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9500000000000003,
+   "R": 0.9012962962962965,
+   "margin": 0.02935791873486517,
+   "ref_spread": 0.02935791873486517,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "multi_component_80",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "multi_component_80::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5611707315319917,
+   "R": 0.08385253029767313,
+   "margin": 0.0016770506059534626,
+   "ref_spread": 3.057777142909471e-09,
+   "equiv": false
+  },
+  "cross": {
+   "D": 8.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5192307692307693,
+   "R": 0.8526804368471036,
+   "margin": 0.02,
+   "ref_spread": 0.015811432295487093,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "multi_component_80",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "multi_component_80::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5611707315319917,
+   "R": 0.0838525313054196,
+   "margin": 0.001677050626108392,
+   "ref_spread": 3.057777142909471e-09,
+   "equiv": false
+  },
+  "cross": {
+   "D": 8.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.5192307692307693,
+   "R": 0.8523955365622033,
+   "margin": 0.02,
+   "ref_spread": 0.015811432295487093,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "org_chart_1_5_4_8",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "org_chart_1_5_4_8::classic_classical_mds_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.14733136540131558,
+   "R": 0.14786783364354142,
+   "margin": 0.0029573566728708285,
+   "ref_spread": 2.7895403077993544e-17,
+   "equiv": true
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7999999999999997,
+   "R": 0.8388888888888888,
+   "margin": 0.02,
+   "ref_spread": 3.3474483693592255e-16,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "org_chart_1_5_4_8",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "org_chart_1_5_4_8::classic_classical_mds_igraph_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.14733136540131558,
+   "R": 0.14786783364354142,
+   "margin": 0.0029573566728708285,
+   "ref_spread": 2.7895403077993544e-17,
+   "equiv": true
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 0.7999999999999997,
+   "R": 0.8388888888888888,
+   "margin": 0.02,
+   "ref_spread": 3.3474483693592255e-16,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "parallel_cycles_4x5",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "parallel_cycles_4x5::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 1.0,
+   "R": 0.01102276250003845,
+   "margin": 0.00022045525000076902,
+   "ref_spread": 1.056990401233864e-15,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.19999999999999998,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.6997916666666668,
+   "margin": 0.026451248753245293,
+   "ref_spread": 0.026451248753245293,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "parallel_cycles_4x5",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "parallel_cycles_4x5::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 1.0,
+   "R": 0.011022762500038346,
+   "margin": 0.00022045525000076693,
+   "ref_spread": 1.056990401233864e-15,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.19999999999999998,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.7010416666666667,
+   "margin": 0.026451248753245293,
+   "ref_spread": 0.026451248753245293,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "petersen_10",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "petersen_10::classic_classical_mds_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1681646874525052,
+   "R": 0.16219497360741877,
+   "margin": 0.0032438994721483757,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 10.0,
+   "R": 5.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "petersen_10",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "petersen_10::classic_classical_mds_igraph_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1681646874525052,
+   "R": 0.16219497360741877,
+   "margin": 0.0032438994721483757,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 10.0,
+   "R": 5.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "random_bipartite_60",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "random_bipartite_60::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.25285899075056045,
+   "R": 0.1503889864478489,
+   "margin": 0.003007779728956978,
+   "ref_spread": 9.70880185829491e-10,
+   "equiv": false
+  },
+  "cross": {
+   "D": 174.0,
+   "R": 127.0,
+   "margin": 2.54,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.3421052631578947,
+   "R": 0.47476608187134495,
+   "margin": 0.02,
+   "ref_spread": 0.0012189224117566749,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "random_bipartite_60",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "random_bipartite_60::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.25285899075056045,
+   "R": 0.15038898637054351,
+   "margin": 0.00300777972741087,
+   "ref_spread": 9.70880185829491e-10,
+   "equiv": false
+  },
+  "cross": {
+   "D": 174.0,
+   "R": 127.0,
+   "margin": 2.54,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.3421052631578947,
+   "R": 0.47464912280701743,
+   "margin": 0.02,
+   "ref_spread": 0.0012189224117566749,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "random_dag_50",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "random_dag_50::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5451728475201822,
+   "R": 0.48550097900180494,
+   "margin": 0.0097100195800361,
+   "ref_spread": 0.0034338922271637145,
+   "equiv": false
+  },
+  "cross": {
+   "D": 406.3,
+   "R": 363.31666666666666,
+   "margin": 20.684183680905914,
+   "ref_spread": 20.684183680905914,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.23265957446808513,
+   "R": 0.19996453900709227,
+   "margin": 0.02,
+   "ref_spread": 0.002374562984791949,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "random_dag_50",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "random_dag_50::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5449448768798393,
+   "R": 0.485941341266382,
+   "margin": 0.00971882682532764,
+   "ref_spread": 0.009026358635640276,
+   "equiv": false
+  },
+  "cross": {
+   "D": 406.53333333333336,
+   "R": 357.8333333333333,
+   "margin": 9.694088587141833,
+   "ref_spread": 9.694088587141833,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.23312056737588657,
+   "R": 0.2130496453900709,
+   "margin": 0.02,
+   "ref_spread": 0.003414716357669982,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "random_dag_200",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "random_dag_200::classic_classical_mds_default",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.5288191961556058,
+   "R": 0.39617873751923915,
+   "margin": 0.007923574750384783,
+   "ref_spread": 0.00131877825487582,
+   "equiv": false
+  },
+  "cross": {
+   "D": 8299.0,
+   "R": 8954.683333333332,
+   "margin": 179.09366666666665,
+   "ref_spread": 92.74846836384083,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.06284153005464481,
+   "R": 0.061584699453551904,
+   "margin": 0.02,
+   "ref_spread": 0.00024382297450190342,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "random_dag_200",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "random_dag_200::classic_classical_mds_igraph_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4978045040325555,
+   "R": 0.38983216989713315,
+   "margin": 0.007796643397942663,
+   "ref_spread": 0.0005202618222381497,
+   "equiv": false
+  },
+  "cross": {
+   "D": 9904.0,
+   "R": 7659.15,
+   "margin": 153.183,
+   "ref_spread": 30.18189135320326,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.057377049180327884,
+   "R": 0.05501821493624772,
+   "margin": 0.02,
+   "ref_spread": 0.0002703943550515001,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "wide_single_layer_1_50_1",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "wide_single_layer_1_50_1::classic_classical_mds_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.6098346602524429,
+   "R": 0.7103261236087565,
+   "margin": 0.01420652247217513,
+   "ref_spread": 2.2316322462394835e-16,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 5.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.1846153846153846,
+   "R": 0.1730769230769231,
+   "margin": 0.02,
+   "ref_spread": 2.7895403077993544e-17,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "wide_single_layer_1_50_1",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "wide_single_layer_1_50_1::classic_classical_mds_igraph_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.6098346602524429,
+   "R": 0.7103261236087565,
+   "margin": 0.01420652247217513,
+   "ref_spread": 2.2316322462394835e-16,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 5.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.1846153846153846,
+   "R": 0.1730769230769231,
+   "margin": 0.02,
+   "ref_spread": 2.7895403077993544e-17,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_default",
+  "graph": "wide_3_50_3",
+  "reference": "igraph_mds__for__classic_classical_mds_default",
+  "combo_id": "wide_3_50_3::classic_classical_mds_default",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 1.0,
+   "R": 0.4747699088947415,
+   "margin": 0.009495398177894831,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 6001.0,
+   "margin": 120.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7053571428571433,
+   "R": 0.13392857142857142,
+   "margin": 0.02,
+   "ref_spread": 2.7895403077993544e-17,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_classical_mds_igraph_fidelity",
+  "graph": "wide_3_50_3",
+  "reference": "igraph_mds__for__classic_classical_mds_igraph_fidelity",
+  "combo_id": "wide_3_50_3::classic_classical_mds_igraph_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 1.0,
+   "R": 0.4747699088947415,
+   "margin": 0.009495398177894831,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 6001.0,
+   "margin": 120.02,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7053571428571433,
+   "R": 0.13392857142857142,
+   "margin": 0.02,
+   "ref_spread": 2.7895403077993544e-17,
+   "equiv": true
+  }
+ }
+]

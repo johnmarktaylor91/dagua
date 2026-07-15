@@ -1,0 +1,930 @@
+[
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "asymmetric_hourglass_hub",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "asymmetric_hourglass_hub::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.04118059159327926,
+   "R": 0.028029437347429725,
+   "margin": 0.0033001910739697696,
+   "ref_spread": 0.0033001910739697696,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.36666666666666664,
+   "R": 0.016666666666666666,
+   "margin": 0.5,
+   "ref_spread": 0.09999999999999999,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9238095238095239,
+   "R": 0.9329761904761905,
+   "margin": 0.02,
+   "ref_spread": 0.004594458584042096,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "clustered_longlabel_handoffs",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "clustered_longlabel_handoffs::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.025031476639996726,
+   "R": 0.01832375339105606,
+   "margin": 0.007067697090321367,
+   "ref_spread": 0.007067697090321367,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.2833333333333333,
+   "R": 0.18333333333333332,
+   "margin": 0.5,
+   "ref_spread": 0.31446603773522014,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "deep_chain_20",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "deep_chain_20::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.11289595211229783,
+   "R": 0.022287763851391862,
+   "margin": 0.02694907272594238,
+   "ref_spread": 0.02694907272594238,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.4666666666666667,
+   "R": 0.03333333333333333,
+   "margin": 0.5,
+   "ref_spread": 0.1969463855669324,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8034848484848485,
+   "R": 0.9825757575757574,
+   "margin": 0.05994167518854793,
+   "ref_spread": 0.05994167518854793,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps100",
+  "graph": "deep_chain_20",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps100",
+  "combo_id": "deep_chain_20::classic_fmmm_steps100",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.003382377817678316,
+   "R": 0.025529731333941777,
+   "margin": 0.02694907272594238,
+   "ref_spread": 0.02694907272594238,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.06666666666666667,
+   "margin": 0.5,
+   "ref_spread": 0.1969463855669324,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 0.9756818181818182,
+   "margin": 0.05994167518854793,
+   "ref_spread": 0.05994167518854793,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_graphviz_fdp_fidelity",
+  "graph": "extreme_mixed_width_transformer",
+  "reference": "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity",
+  "combo_id": "extreme_mixed_width_transformer::classic_fmmm_graphviz_fdp_fidelity",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1237609819536168,
+   "R": 0.19144351491456063,
+   "margin": 0.04977973260946536,
+   "ref_spread": 0.04977973260946536,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.8833333333333333,
+   "R": 1.5,
+   "margin": 1.123261844681449,
+   "ref_spread": 1.123261844681449,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "grid_5x5",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "grid_5x5::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.03571639990701795,
+   "R": 0.02368225206882273,
+   "margin": 0.0004736450413764546,
+   "ref_spread": 0.00039333768208878346,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.5833333333333333,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8795999999999997,
+   "R": 0.9133999999999999,
+   "margin": 0.02,
+   "ref_spread": 0.007151350794207918,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "heavy_tail_weights_50",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "heavy_tail_weights_50::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1182578987381611,
+   "R": 0.10528535037893352,
+   "margin": 0.00955455281911648,
+   "ref_spread": 0.00955455281911648,
+   "equiv": false
+  },
+  "cross": {
+   "D": 65.23333333333333,
+   "R": 55.13333333333333,
+   "margin": 7.104728827842179,
+   "ref_spread": 7.104728827842179,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.4897,
+   "R": 0.5261333333333333,
+   "margin": 0.03125374159418937,
+   "ref_spread": 0.03125374159418937,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "grid_rect_6x8",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "grid_rect_6x8::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.040751997038586764,
+   "R": 0.023661743244724854,
+   "margin": 0.014905358848221322,
+   "ref_spread": 0.014905358848221322,
+   "equiv": false
+  },
+  "cross": {
+   "D": 5.616666666666666,
+   "R": 0.35,
+   "margin": 4.550324663741538,
+   "ref_spread": 4.550324663741538,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8179166666666667,
+   "R": 0.8592708333333333,
+   "margin": 0.039188392811811516,
+   "ref_spread": 0.039188392811811516,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "hexagonal_lattice_42",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "hexagonal_lattice_42::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.046986953437574086,
+   "R": 0.03454610060826569,
+   "margin": 0.01261632963890359,
+   "ref_spread": 0.01261632963890359,
+   "equiv": false
+  },
+  "cross": {
+   "D": 4.433333333333334,
+   "R": 2.566666666666667,
+   "margin": 2.93861439209954,
+   "ref_spread": 2.93861439209954,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8034126984126982,
+   "R": 0.8108730158730157,
+   "margin": 0.039654614994293305,
+   "ref_spread": 0.039654614994293305,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "kitchen_sink_platform_graph",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "kitchen_sink_platform_graph::classic_fmmm_steps10",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.039130875476237385,
+   "R": 0.02339939637227099,
+   "margin": 0.007979715486993296,
+   "ref_spread": 0.007979715486993296,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.7,
+   "R": 0.06666666666666667,
+   "margin": 0.5702205846437983,
+   "ref_spread": 0.5702205846437983,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.9033333333333332,
+   "R": 0.9283333333333333,
+   "margin": 0.02,
+   "ref_spread": 0.014396016547311869,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "kitchen_sink_hybrid_net",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "kitchen_sink_hybrid_net::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.06587212451068127,
+   "R": 0.058166098249376484,
+   "margin": 0.004998618962821558,
+   "ref_spread": 0.004998618962821558,
+   "equiv": false
+  },
+  "cross": {
+   "D": 4.383333333333334,
+   "R": 4.516666666666667,
+   "margin": 0.8586458683722453,
+   "ref_spread": 0.8586458683722453,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8200877192982456,
+   "R": 0.841578947368421,
+   "margin": 0.02,
+   "ref_spread": 0.014961453779341109,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "long_range_residual_ladder",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "long_range_residual_ladder::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.07358647229447625,
+   "R": 0.0353723898333354,
+   "margin": 0.013181787235665767,
+   "ref_spread": 0.013181787235665767,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.05,
+   "R": 1.6166666666666667,
+   "margin": 1.4487542541400484,
+   "ref_spread": 1.4487542541400484,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7644298245614036,
+   "R": 0.8343421052631577,
+   "margin": 0.027401053522227582,
+   "ref_spread": 0.027401053522227582,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "multi_component_80",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "multi_component_80::classic_fmmm_steps10",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.06987382915075749,
+   "R": 0.052926875212469304,
+   "margin": 0.006127403280600876,
+   "ref_spread": 0.006127403280600876,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.2333333333333334,
+   "R": 0.38333333333333336,
+   "margin": 1.0227710428344197,
+   "ref_spread": 1.0227710428344197,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.7532882241215575,
+   "R": 0.7507716049382716,
+   "margin": 0.02,
+   "ref_spread": 0.01832985149183703,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "multiscale_skip_cascade",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "multiscale_skip_cascade::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.08452834803882704,
+   "R": 0.07487661901353512,
+   "margin": 0.010485056243773648,
+   "ref_spread": 0.010485056243773648,
+   "equiv": false
+  },
+  "cross": {
+   "D": 10.483333333333333,
+   "R": 9.566666666666666,
+   "margin": 1.7889673111613975,
+   "ref_spread": 1.7889673111613975,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.864777777777778,
+   "R": 0.8736666666666669,
+   "margin": 0.02,
+   "ref_spread": 0.017753013054205968,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "nested_cluster_label_stack",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "nested_cluster_label_stack::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.004802114364876773,
+   "R": 0.0017507771215629563,
+   "margin": 0.00029593010557849904,
+   "ref_spread": 0.00029593010557849904,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.0,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": true
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_graphviz_fdp_fidelity",
+  "graph": "parallel_cycles_4x5",
+  "reference": "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity",
+  "combo_id": "parallel_cycles_4x5::classic_fmmm_graphviz_fdp_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.10221254021746441,
+   "R": 0.1898240586902301,
+   "margin": 0.02845192546314758,
+   "ref_spread": 0.02845192546314758,
+   "equiv": false
+  },
+  "cross": {
+   "D": 2.4,
+   "R": 0.2,
+   "margin": 0.8761716542303613,
+   "ref_spread": 0.8761716542303613,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8985416666666667,
+   "R": 0.7591666666666667,
+   "margin": 0.059699769681297775,
+   "ref_spread": 0.059699769681297775,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_graphviz_fdp_fidelity",
+  "graph": "random_dag_50",
+  "reference": "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity",
+  "combo_id": "random_dag_50::classic_fmmm_graphviz_fdp_fidelity",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4622593507060266,
+   "R": 0.4435794566638625,
+   "margin": 0.01212734104016939,
+   "ref_spread": 0.01212734104016939,
+   "equiv": false
+  },
+  "cross": {
+   "D": 406.53333333333336,
+   "R": 378.3333333333333,
+   "margin": 45.02254878380275,
+   "ref_spread": 45.02254878380275,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.1819503546099291,
+   "R": 0.14833333333333332,
+   "margin": 0.02,
+   "ref_spread": 0.017663315666156258,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "random_dag_50",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "random_dag_50::classic_fmmm_steps10",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.45955752103960334,
+   "R": 0.4415988283724666,
+   "margin": 0.013277432476751639,
+   "ref_spread": 0.013277432476751639,
+   "equiv": false
+  },
+  "cross": {
+   "D": 418.78333333333336,
+   "R": 409.35,
+   "margin": 52.910658451561325,
+   "ref_spread": 52.910658451561325,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.20329787234042548,
+   "R": 0.20148936170212764,
+   "margin": 0.02,
+   "ref_spread": 0.012981277471862231,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps100",
+  "graph": "random_dag_50",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps100",
+  "combo_id": "random_dag_50::classic_fmmm_steps100",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.45630744660041656,
+   "R": 0.4197678273903518,
+   "margin": 0.013890857727755423,
+   "ref_spread": 0.013890857727755423,
+   "equiv": false
+  },
+  "cross": {
+   "D": 388.95,
+   "R": 485.8,
+   "margin": 63.32500423700074,
+   "ref_spread": 63.32500423700074,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.20379432624113472,
+   "R": 0.22411347517730498,
+   "margin": 0.023249434193813794,
+   "ref_spread": 0.023249434193813794,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps200",
+  "graph": "random_dag_50",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps200",
+  "combo_id": "random_dag_50::classic_fmmm_steps200",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.4575453941657214,
+   "R": 0.4410046005921041,
+   "margin": 0.009694832384563146,
+   "ref_spread": 0.009694832384563146,
+   "equiv": false
+  },
+  "cross": {
+   "D": 392.26666666666665,
+   "R": 401.9,
+   "margin": 50.75006991088383,
+   "ref_spread": 50.75006991088383,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.20354609929078013,
+   "R": 0.26471631205673757,
+   "margin": 0.02,
+   "ref_spread": 0.012551315395255643,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "random_dag_200",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "random_dag_200::classic_fmmm_steps10",
+  "disconnected": true,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.37806213170620323,
+   "R": 0.35553263182682643,
+   "margin": 0.007110652636536529,
+   "ref_spread": 0.004178086660569098,
+   "equiv": false
+  },
+  "cross": {
+   "D": 7974.283333333334,
+   "R": 8417.066666666668,
+   "margin": 341.0645064731268,
+   "ref_spread": 341.0645064731268,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.05686703096539161,
+   "R": 0.060755919854280506,
+   "margin": 0.02,
+   "ref_spread": 0.0042127546710227165,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "residual_block",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "residual_block::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.02894923263239894,
+   "R": 0.0145983921746674,
+   "margin": 0.011104479915739682,
+   "ref_spread": 0.011104479915739682,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.13333333333333333,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.19999999999999998,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "resnet_stack_4x16",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "resnet_stack_4x16::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.05555107779817984,
+   "R": 0.0324661110400263,
+   "margin": 0.004515321336627247,
+   "ref_spread": 0.004515321336627247,
+   "equiv": false
+  },
+  "cross": {
+   "D": 1.2833333333333334,
+   "R": 0.13333333333333333,
+   "margin": 0.5,
+   "ref_spread": 0.348735088019777,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8454999999999998,
+   "R": 0.896611111111111,
+   "margin": 0.02,
+   "ref_spread": 0.013219208552234681,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "tl_cnn_small",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "tl_cnn_small::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.02671668616367296,
+   "R": 0.001133505535083105,
+   "margin": 0.00040810374962628026,
+   "ref_spread": 0.00040810374962628026,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.08333333333333333,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "sparse_pair_50",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "sparse_pair_50::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.12507102126011999,
+   "R": 0.042027529665199376,
+   "margin": 0.03367810285947188,
+   "ref_spread": 0.03367810285947188,
+   "equiv": false
+  },
+  "cross": {
+   "D": 2.8333333333333335,
+   "R": 0.36666666666666664,
+   "margin": 1.1927389750596156,
+   "ref_spread": 1.1927389750596156,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8076333333333333,
+   "R": 0.9236666666666667,
+   "margin": 0.04359123255375507,
+   "ref_spread": 0.04359123255375507,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "tl_mlp_3layer",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "tl_mlp_3layer::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.0070709480759905555,
+   "R": 0.00040102259874095814,
+   "margin": 0.00012513195962592224,
+   "ref_spread": 0.00012513195962592224,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.016666666666666666,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 1.0,
+   "R": 1.0,
+   "margin": 0.02,
+   "ref_spread": 0.0,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "tl_resnet_2block",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "tl_resnet_2block::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.04333533966043543,
+   "R": 0.020436237893147923,
+   "margin": 0.004737408730133832,
+   "ref_spread": 0.004737408730133832,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.6666666666666666,
+   "R": 0.1,
+   "margin": 0.5,
+   "ref_spread": 0.3074824459143229,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8833333333333333,
+   "R": 0.9223333333333332,
+   "margin": 0.02,
+   "ref_spread": 0.014204850501775028,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "sierpinski_42",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "sierpinski_42::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.035261436292409264,
+   "R": 0.017681353483620613,
+   "margin": 0.002430224234441798,
+   "ref_spread": 0.002430224234441798,
+   "equiv": false
+  },
+  "cross": {
+   "D": 4.433333333333334,
+   "R": 0.18333333333333332,
+   "margin": 1.1160446028522137,
+   "ref_spread": 1.1160446028522137,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.856626984126984,
+   "R": 0.8997619047619047,
+   "margin": 0.02,
+   "ref_spread": 0.006562262256297659,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "tl_transformer_1layer",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "tl_transformer_1layer::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.1002540664643756,
+   "R": 0.0454824959122876,
+   "margin": 0.01102774027910307,
+   "ref_spread": 0.01102774027910307,
+   "equiv": false
+  },
+  "cross": {
+   "D": 2.716666666666667,
+   "R": 1.2166666666666666,
+   "margin": 0.9977753031397177,
+   "ref_spread": 0.9977753031397177,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.74359649122807,
+   "R": 0.823333333333333,
+   "margin": 0.030548901798631616,
+   "ref_spread": 0.030548901798631616,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "transformer_full_4h_2l",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "transformer_full_4h_2l::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.056315870333515185,
+   "R": 0.050781483400380016,
+   "margin": 0.0010156296680076003,
+   "ref_spread": 0.0009307626139166977,
+   "equiv": false
+  },
+  "cross": {
+   "D": 11.1,
+   "R": 10.533333333333333,
+   "margin": 1.6899883449481559,
+   "ref_spread": 1.6899883449481559,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8586538461538461,
+   "R": 0.8691666666666666,
+   "margin": 0.02,
+   "ref_spread": 0.010180664355672,
+   "equiv": true
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "weighted_chain_20",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "weighted_chain_20::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.08621094305443015,
+   "R": 0.01439588287357218,
+   "margin": 0.031079202192090174,
+   "ref_spread": 0.031079202192090174,
+   "equiv": false
+  },
+  "cross": {
+   "D": 0.35,
+   "R": 0.016666666666666666,
+   "margin": 0.5,
+   "ref_spread": 0.23868325657594203,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.8492500000000001,
+   "R": 0.9914999999999999,
+   "margin": 0.06622755003650961,
+   "ref_spread": 0.06622755003650961,
+   "equiv": false
+  }
+ },
+ {
+  "engine": "classic_fmmm_steps10",
+  "graph": "triangular_lattice_36",
+  "reference": "ogdf_fmmm__for__classic_fmmm_steps10",
+  "combo_id": "triangular_lattice_36::classic_fmmm_steps10",
+  "disconnected": false,
+  "n": 100,
+  "battery_stress": {
+   "D": 0.013125340247477716,
+   "R": 0.006180119056548892,
+   "margin": 0.0001530117729814346,
+   "ref_spread": 0.0001530117729814346,
+   "equiv": false
+  },
+  "cross": {
+   "D": 3.8333333333333335,
+   "R": 0.0,
+   "margin": 0.5,
+   "ref_spread": 0.0,
+   "equiv": false
+  },
+  "np": {
+   "D": 0.853287037037037,
+   "R": 0.8651388888888886,
+   "margin": 0.02,
+   "ref_spread": 0.0022644349282618667,
+   "equiv": true
+  }
+ }
+]

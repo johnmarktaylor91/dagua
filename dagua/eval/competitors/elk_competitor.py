@@ -1,18 +1,66 @@
-"""ELK competitor adapter — elkjs via Node.js subprocess."""
+"""ELK competitor adapter — elkjs via Node.js subprocess.
+
+Size policy (r80-P6): elk_layered natively accepts per-node width/height in
+the JSON request, in the same point units dagua uses. When size-aware
+externals are enabled (the default; see ``dagua.eval.size_policy``), real
+per-node sizes from ``graph.node_sizes`` are submitted instead of the old
+hardcoded 120x40 placeholder box. ``--size-blind-externals`` restores the
+placeholder for store-compatibility experiments.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.size_policy import size_aware_externals
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
+
+_DEFAULT_NODE_WIDTH = 120.0
+_DEFAULT_NODE_HEIGHT = 40.0
+_DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
+_ELKJS_NODE_MODULES = Path("/home/jtaylor/projects/dagua/node_modules")
+_ELK_SECONDARY_ALGORITHMS: Dict[str, str] = {
+    "elk_force": "org.eclipse.elk.force",
+    "elk_stress": "org.eclipse.elk.stress",
+    "elk_mrtree": "org.eclipse.elk.mrtree",
+    "elk_radial": "org.eclipse.elk.radial",
+}
+
+
+def _node_wh(graph: DaguaGraph, node_index: int) -> Tuple[float, float]:
+    """Return the width/height ELK should use for one node.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    node_index : int
+        Node index.
+
+    Returns
+    -------
+    Tuple[float, float]
+        ``(width, height)`` in point units: the real label-measured size
+        when ``graph.node_sizes`` is populated and size-aware externals are
+        enabled, otherwise the historical 120x40 placeholder.
+    """
+    if graph.node_sizes is not None and size_aware_externals():
+        return (
+            float(graph.node_sizes[node_index, 0].item()),
+            float(graph.node_sizes[node_index, 1].item()),
+        )
+    return (_DEFAULT_NODE_WIDTH, _DEFAULT_NODE_HEIGHT)
+
 
 _ELK_SCRIPT = r"""
 const ELK = require('elkjs');
@@ -30,6 +78,109 @@ process.stdin.on('end', () => {
     });
 });
 """
+
+
+def _node_subprocess_env() -> Dict[str, str]:
+    """Return a Node environment that can resolve the repo-local elkjs install.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables for the Node subprocess.
+    """
+    env = dict(os.environ)
+    paths = [str(path) for path in (_DURABLE_NODE_MODULES, _ELKJS_NODE_MODULES) if path.exists()]
+    existing = env.get("NODE_PATH", "")
+    if existing:
+        paths.append(existing)
+    if paths:
+        env["NODE_PATH"] = os.pathsep.join(paths)
+    return env
+
+
+def _build_flat_elk_graph(
+    graph: DaguaGraph,
+    algorithm_id: str,
+    layout_options: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """Build a flat ELK graph for secondary algorithm references.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    algorithm_id : str
+        ELK algorithm identifier.
+    layout_options : dict[str, object] or None
+        Extra layout options merged after the pinned defaults.
+
+    Returns
+    -------
+    dict[str, object]
+        JSON-compatible ELK graph.
+    """
+    children: List[Dict[str, object]] = []
+    for node_index in range(graph.num_nodes):
+        node_w, node_h = _node_wh(graph, node_index)
+        children.append({"id": str(node_index), "width": node_w, "height": node_h})
+
+    edges: List[Dict[str, object]] = []
+    if graph.edge_index.numel() > 0:
+        for e_idx in range(graph.edge_index.shape[1]):
+            s = graph.edge_index[0, e_idx].item()
+            t = graph.edge_index[1, e_idx].item()
+            edges.append({"id": f"e{e_idx}", "sources": [str(s)], "targets": [str(t)]})
+
+    options: Dict[str, object] = {
+        "elk.algorithm": algorithm_id,
+        "elk.randomSeed": 1,
+        "elk.spacing.nodeNode": 80,
+        "elk.separateConnectedComponents": False,
+    }
+    if layout_options is not None:
+        options.update(layout_options)
+    return {"id": "root", "layoutOptions": options, "children": children, "edges": edges}
+
+
+def _run_elk_layout_json(
+    elk_graph: Dict[str, object],
+    timeout: float,
+) -> Tuple[Optional[Dict[str, object]], float, Optional[str]]:
+    """Run elkjs and parse the output graph.
+
+    Parameters
+    ----------
+    elk_graph : dict[str, object]
+        JSON-compatible ELK graph.
+    timeout : float
+        Maximum runtime in seconds.
+
+    Returns
+    -------
+    tuple[dict[str, object] | None, float, str | None]
+        Parsed graph, elapsed seconds, and optional error.
+    """
+    graph_json = json.dumps(elk_graph)
+    graph_kb = len(graph_json) // 1024
+    heap_mb = min(65536, max(16384, graph_kb * 48))
+    start = time.perf_counter()
+    try:
+        result = subprocess.run(
+            ["node", f"--max-old-space-size={heap_mb}", "-e", _ELK_SCRIPT],
+            input=graph_json,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_node_subprocess_env(),
+        )
+        elapsed = time.perf_counter() - start
+        if result.returncode != 0:
+            return None, elapsed, result.stderr[:500]
+        return json.loads(result.stdout), elapsed, None
+    except subprocess.TimeoutExpired:
+        return None, time.perf_counter() - start, "timeout"
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return None, time.perf_counter() - start, str(exc)
 
 
 def _cluster_members(graph: DaguaGraph, cluster_name: str) -> List[int]:
@@ -119,7 +270,8 @@ def _build_elk_children(
         for node_index in _cluster_members(graph, cluster_name):
             if node_index in descendant_members or node_index in emitted_nodes:
                 continue
-            direct_members.append({"id": str(node_index), "width": 120, "height": 40})
+            node_w, node_h = _node_wh(graph, node_index)
+            direct_members.append({"id": str(node_index), "width": node_w, "height": node_h})
             emitted_nodes.add(node_index)
 
         cluster_entry: Dict[str, object] = {
@@ -134,7 +286,8 @@ def _build_elk_children(
     if parent_name is None:
         for node_index in range(graph.num_nodes):
             if node_index not in emitted_nodes:
-                children.append({"id": str(node_index), "width": 120, "height": 40})
+                node_w, node_h = _node_wh(graph, node_index)
+                children.append({"id": str(node_index), "width": node_w, "height": node_h})
 
     return children
 
@@ -180,6 +333,74 @@ def _collect_elk_positions(
         _collect_elk_positions(child.get("children", []), positions, child_x, child_y)
 
 
+def _collect_elk_routes(
+    data: dict,
+    num_edges: int,
+) -> Optional[List[Optional[List[Tuple[float, float]]]]]:
+    """Parse ELK edge sections into per-edge polylines (r80-S6).
+
+    Every benchmark edge is submitted at root level with id ``e{idx}``, so
+    section coordinates are relative to the root and need no offsetting.
+    Each section contributes ``startPoint -> bendPoints... -> endPoint``.
+
+    Parameters
+    ----------
+    data : dict
+        Parsed ELK JSON output.
+    num_edges : int
+        Expected edge count.
+
+    Returns
+    -------
+    list | None
+        Per-edge polylines aligned to ``edge_index`` columns (``None``
+        entries for unrouted edges), or ``None`` when no edge carries
+        routing sections.
+    """
+    edges = data.get("edges")
+    if not isinstance(edges, list) or num_edges <= 0:
+        return None
+
+    routes: List[Optional[List[Tuple[float, float]]]] = [None] * num_edges
+    any_route = False
+    for edge_obj in edges:
+        if not isinstance(edge_obj, dict):
+            continue
+        edge_id = str(edge_obj.get("id", ""))
+        if not edge_id.startswith("e") or not edge_id[1:].isdigit():
+            continue
+        e_idx = int(edge_id[1:])
+        if e_idx >= num_edges:
+            continue
+        sections = edge_obj.get("sections")
+        if not isinstance(sections, list) or not sections:
+            continue
+        polyline: List[Tuple[float, float]] = []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            points = [section.get("startPoint")]
+            bend_points = section.get("bendPoints")
+            if isinstance(bend_points, list):
+                points.extend(bend_points)
+            points.append(section.get("endPoint"))
+            for point in points:
+                if not isinstance(point, dict):
+                    continue
+                try:
+                    xy = (float(point["x"]), float(point["y"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if polyline and polyline[-1] == xy:
+                    continue
+                polyline.append(xy)
+        if len(polyline) >= 2:
+            routes[e_idx] = polyline
+            any_route = True
+
+    return routes if any_route else None
+
+
 @register
 class ElkLayered(CompetitorBase):
     name = "elk_layered"
@@ -201,16 +422,13 @@ class ElkLayered(CompetitorBase):
         timeout : float, default=300.0
             Maximum runtime in seconds.
         seed : int | None, default=None
-            Accepted for interface consistency but ignored because ELK layered
-            is deterministic for a fixed input.
+            ELK random seed. ``None`` pins seed 1.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
-        del seed
-
         n = graph.num_nodes
         emitted_nodes: Set[int] = set()
         children = _build_elk_children(graph, None, _cluster_children(graph), emitted_nodes)
@@ -228,48 +446,29 @@ class ElkLayered(CompetitorBase):
                 "elk.direction": "DOWN",
                 "elk.spacing.nodeNode": "40",
                 "elk.layered.spacing.nodeNodeBetweenLayers": "60",
+                "elk.layered.thoroughness": "7",
+                "elk.randomSeed": 1 if seed is None else int(seed),
             },
             "children": children,
             "edges": edges,
         }
 
-        graph_json = json.dumps(elk_graph)
-        graph_kb = len(graph_json) // 1024
-        heap_mb = min(65536, max(16384, graph_kb * 48))
+        data, elapsed, error = _run_elk_layout_json(elk_graph, timeout)
+        if data is None:
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=error)
 
-        start = time.perf_counter()
-        try:
-            result = subprocess.run(
-                ["node", f"--max-old-space-size={heap_mb}", "-e", _ELK_SCRIPT],
-                input=graph_json,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            elapsed = time.perf_counter() - start
+        # Parse positions from ELK output
+        pos = torch.zeros(n, 2)
+        _collect_elk_positions(data.get("children", []), pos)
+        num_edges = graph.edge_index.shape[1] if graph.edge_index.numel() > 0 else 0
+        routes = _collect_elk_routes(data, int(num_edges))
 
-            if result.returncode != 0:
-                return CompetitorResult(
-                    name=self.name,
-                    pos=None,
-                    runtime_seconds=elapsed,
-                    error=result.stderr[:500],
-                )
-
-            # Parse positions from ELK output
-            data = json.loads(result.stdout)
-            pos = torch.zeros(n, 2)
-            _collect_elk_positions(data.get("children", []), pos)
-
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
-        except subprocess.TimeoutExpired:
-            elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name, pos=None, runtime_seconds=elapsed, error="timeout"
-            )
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
+        return CompetitorResult(
+            name=self.name,
+            pos=pos,
+            runtime_seconds=elapsed,
+            routes=routes,
+        )
 
     def available(self) -> bool:
         try:
@@ -277,7 +476,107 @@ class ElkLayered(CompetitorBase):
                 ["node", "-e", "require('elkjs')"],
                 capture_output=True,
                 timeout=10,
+                env=_node_subprocess_env(),
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
+
+
+class _ElkSecondary(CompetitorBase):
+    """Base adapter for flat ELK secondary algorithms."""
+
+    name = "elk_secondary"
+    algorithm_id = ""
+    max_nodes = 15_000
+    supports_clusters = False
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run one flat ELK secondary algorithm.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+        seed : int | None, default=None
+            ELK random seed. ``None`` pins seed 1.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and timing information.
+        """
+        options = {"elk.randomSeed": 1 if seed is None else int(seed)}
+        elk_graph = _build_flat_elk_graph(graph, self.algorithm_id, options)
+        data, elapsed, error = _run_elk_layout_json(elk_graph, timeout)
+        if data is None:
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=error)
+
+        pos = torch.zeros(graph.num_nodes, 2)
+        _collect_elk_positions(data.get("children", []), pos)
+        num_edges = graph.edge_index.shape[1] if graph.edge_index.numel() > 0 else 0
+        routes = _collect_elk_routes(data, int(num_edges))
+        return CompetitorResult(
+            name=self.name,
+            pos=pos,
+            runtime_seconds=elapsed,
+            routes=routes,
+        )
+
+    def available(self) -> bool:
+        """Return whether elkjs is available to Node.
+
+        Returns
+        -------
+        bool
+            ``True`` when the adapter can import ``elkjs``.
+        """
+        try:
+            result = subprocess.run(
+                ["node", "-e", "require('elkjs')"],
+                capture_output=True,
+                timeout=10,
+                env=_node_subprocess_env(),
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+
+@register
+class ElkForce(_ElkSecondary):
+    """ELK Force reference adapter."""
+
+    name = "elk_force"
+    algorithm_id = _ELK_SECONDARY_ALGORITHMS[name]
+
+
+@register
+class ElkStress(_ElkSecondary):
+    """ELK Stress reference adapter."""
+
+    name = "elk_stress"
+    algorithm_id = _ELK_SECONDARY_ALGORITHMS[name]
+
+
+@register
+class ElkMrTree(_ElkSecondary):
+    """ELK MrTree reference adapter."""
+
+    name = "elk_mrtree"
+    algorithm_id = _ELK_SECONDARY_ALGORITHMS[name]
+
+
+@register
+class ElkRadial(_ElkSecondary):
+    """ELK Radial reference adapter."""
+
+    name = "elk_radial"
+    algorithm_id = _ELK_SECONDARY_ALGORITHMS[name]

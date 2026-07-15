@@ -12,6 +12,16 @@ from dagua.layout.ops.base import Op, Pipeline, Repeat
 from dagua.layout.ops.graph_utils import (
     layout_device as _layout_device,
 )
+from dagua.layout.ops.pipelines.neato import (
+    _GRAPHVIZ_DEFAULT_NODE_SIZE,
+    _GRAPHVIZ_PACK_MARGIN_POINTS,
+    _component_bbox_points,
+    _compute_polyomino_step,
+    _generate_node_polyomino,
+    _place_polyomino_component,
+    _slice_component_edges,
+    _weak_components,
+)
 from dagua.layout.ops.quadtree import GraphvizQuadTree, graphviz_supernode_repulsive_force
 from dagua.layout.ops.sfdp import (
     _BASE_GRAPH_KEY,
@@ -33,7 +43,9 @@ from dagua.layout.ops.sfdp import (
     SFDPHierarchyConfig,
     SFDPProlongateAndRefineLevels,
     SFDPRefineCoarsestLevel,
+    _average_edge_length,
     _build_graph,
+    _principal_component_rotate,
     _prolongate_positions,
 )
 from dagua.layout.ops.state import (
@@ -49,6 +61,10 @@ _DEFAULT_P = -1.0
 _GRAPHVIZ_MAX_CLUSTER_SIZE = 4
 _GRAPHVIZ_FIDELITY_MODE = "graphviz"
 _GRAPHVIZ_MIN_DISTANCE = 1.0e-15
+_GRAPHVIZ_POINTS_PER_INCH = 72.0
+_GRAPHVIZ_PRISM_MARGIN_POINTS = 4.0
+_GRAPHVIZ_PRISM_INITIAL_SCALING = 4.0
+_GRAPHVIZ_SHARED_RNG_KEY = "sfdp_graphviz_shared_rng"
 SFDPFidelityMode = Optional[Union[bool, str]]
 
 
@@ -72,8 +88,8 @@ def _decompose_graphviz_supervariables(graph: GraphData) -> list[list[int]]:
 
     super_ids = [0 for _ in range(num_nodes)]
     super_sizes = [0 for _ in range(num_nodes + 1)]
-    mask = [-1 for _ in range(num_nodes)]
-    newmap = [0 for _ in range(num_nodes)]
+    mask = [-1 for _ in range(num_nodes + 1)]
+    newmap = [0 for _ in range(num_nodes + 1)]
     super_sizes[0] = num_nodes
     next_super_id = 1
 
@@ -92,6 +108,14 @@ def _decompose_graphviz_supervariables(graph: GraphData) -> list[list[int]]:
                 else:
                     new_super = next_super_id
                     next_super_id += 1
+                    # Refinement IDs follow creation order and are never
+                    # recycled, so their high-water mark can exceed the node
+                    # count even though at most ``num_nodes`` groups are live.
+                    # All three ID-indexed workspaces must grow together.
+                    if new_super >= len(super_sizes):
+                        super_sizes.append(0)
+                        mask.append(-1)
+                        newmap.append(0)
                     newmap[old_super] = new_super
                     super_sizes[new_super] = 1
                     super_ids[neighbor] = new_super
@@ -341,12 +365,21 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
             State with SFDP graph levels, mappings, and generator populated.
         """
         del ctx
-        permutation_generator = GraphvizRandom(seed=1)
+        shared_generator = state.extras.get(_GRAPHVIZ_SHARED_RNG_KEY)
+        if shared_generator is not None and not isinstance(shared_generator, GraphvizRandom):
+            raise TypeError("_GRAPHVIZ_SHARED_RNG_KEY must contain a GraphvizRandom instance.")
+        if isinstance(shared_generator, GraphvizRandom):
+            permutation_generator = shared_generator
+        else:
+            permutation_generator = GraphvizRandom(seed=1)
 
         base_graph = _build_graph(
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
-            edge_weights=problem.edge_weights,
+            # The Graphviz reference path used by the benchmark DOT exporter
+            # does not emit edge ``weight`` attributes, so makeMatrix sees a
+            # unit-valued sparse matrix even when DaguaGraph carries weights.
+            edge_weights=None,
             graphviz_order=True,
         )
         state.extras[_BASE_GRAPH_KEY] = base_graph
@@ -370,9 +403,16 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
 
         state.extras[_GRAPH_KEY] = graphs
         state.extras[_MAPPING_KEY] = mappings
-        # Graphviz coarsening consumes the process-default rand stream before
-        # spring_electrical.c resets srand(ctrl->random_seed) for random_start.
-        state.extras[_GENERATOR_KEY] = GraphvizRandom(seed=problem.seed)
+        # Graphviz coarsening consumes the process rand stream before
+        # spring_electrical.c conditionally calls srand(ctrl->random_seed) for
+        # random_start. In the disconnected loop the same rand object must be
+        # reseeded in place so prolongation advances the stream seen by the
+        # next component's coarsening.
+        if isinstance(shared_generator, GraphvizRandom):
+            shared_generator.reseed(seed=problem.seed)
+            state.extras[_GENERATOR_KEY] = shared_generator
+        else:
+            state.extras[_GENERATOR_KEY] = GraphvizRandom(seed=problem.seed)
         return state
 
 
@@ -401,6 +441,33 @@ def _is_graphviz_fidelity_mode(fidelity_mode: SFDPFidelityMode) -> bool:
     if fidelity_mode is True or fidelity_mode == _GRAPHVIZ_FIDELITY_MODE:
         return True
     raise ValueError("fidelity_mode must be False, True, None, or 'graphviz'.")
+
+
+def _graphviz_repulsive_exponent(repulsive_exponent: float) -> float:
+    """Return Graphviz's effective SFDP repulsive exponent.
+
+    Parameters
+    ----------
+    repulsive_exponent : float
+        Requested SFDP repulsion exponent ``p``.
+
+    Returns
+    -------
+    float
+        Effective Graphviz exponent after the ``repulsiveforce`` parse clamp.
+
+    Notes
+    -----
+    Graphviz parses ``repulsiveforce`` with a minimum of zero, negates it into
+    ``p``, then resets only NONNEGATIVE ``p`` back to ``-1``
+    (``spring_electrical.c``). Genuinely negative exponents are honored as-is:
+    ``repulsiveforce=2`` -> internal ``p=-2`` (force denominator ``dist**3``).
+    The ``p_neg2`` variant therefore runs a real ``p=-2`` law, matching the
+    corrected ``repulsiveforce=2`` reference oracle (r79 fix).
+    """
+    if repulsive_exponent >= 0.0:
+        return _DEFAULT_P
+    return repulsive_exponent
 
 
 def _sfdp_force_scales(ideal_length: float, repulsive_exponent: float) -> tuple[float, float]:
@@ -879,6 +946,11 @@ def build_sfdp_pipeline(
         raise ValueError("steps must be non-negative.")
 
     graphviz_fidelity = _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
+    effective_repulsive_exponent = (
+        _graphviz_repulsive_exponent(repulsive_exponent)
+        if graphviz_fidelity
+        else repulsive_exponent
+    )
     hierarchy_op: Op
     refine_op: Op
     prolongate_op: Op
@@ -887,24 +959,24 @@ def build_sfdp_pipeline(
         refine_op = _SFDPGraphvizRefineCoarsestLevel(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
         prolongate_op = _SFDPGraphvizProlongateAndRefineLevels(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
     else:
         hierarchy_op = BuildSFDPHierarchy()
         refine_op = SFDPRefineCoarsestLevel(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
         prolongate_op = SFDPProlongateAndRefineLevels(
             steps=steps,
             theta=theta,
-            repulsive_exponent=repulsive_exponent,
+            repulsive_exponent=effective_repulsive_exponent,
         )
 
     return Pipeline(
@@ -918,6 +990,250 @@ def build_sfdp_pipeline(
         ],
         name="sfdp_pipeline",
     )
+
+
+def _layout_graphviz_sfdp_components(
+    edge_index: torch.Tensor,
+    components: list[list[int]],
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    steps: int,
+    seed: int,
+    theta: float,
+    repulsive_exponent: float,
+    edge_weights: Optional[torch.Tensor],
+    direction: str,
+    fidelity_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Lay out disconnected SFDP components independently and pack them.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Parent graph edge tensor with shape ``[2, E]``.
+    components : list[list[int]]
+        Weak components expressed as parent node indices.
+    num_nodes : int
+        Number of parent graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional parent node sizes with shape ``[N, 2]``.
+    steps : int
+        Maximum number of spring-electrical iterations per level.
+    seed : int
+        Graphviz random seed. The same value is reused per component because
+        Graphviz calls ``sfdpLayout`` separately and each call resets ``srand``.
+    theta : float
+        Barnes-Hut opening angle threshold.
+    repulsive_exponent : float
+        Requested SFDP repulsive exponent ``p``.
+    edge_weights : torch.Tensor, optional
+        Optional parent edge weights with shape ``[E]``.
+    direction : str
+        Requested layout flow direction.
+    fidelity_dtype : torch.dtype
+        Floating dtype forwarded to component SFDP runs.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed parent coordinates with shape ``[N, 2]``.
+    """
+    shared_generator = GraphvizRandom(seed=1)
+    component_positions: list[torch.Tensor] = []
+    component_edges: list[torch.Tensor] = []
+    for component in components:
+        local_edges, local_weights = _slice_component_edges(
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            component=component,
+        )
+        local_sizes = node_sizes[component] if node_sizes is not None else None
+        problem = LayoutProblem(
+            edge_index=local_edges,
+            num_nodes=len(component),
+            node_sizes=local_sizes,
+            edge_weights=local_weights,
+            seed=seed,
+            direction=direction,
+        )
+        state = SolveState(extras={_GRAPHVIZ_SHARED_RNG_KEY: shared_generator})
+        ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
+        component_pipeline = build_sfdp_pipeline(
+            steps=steps,
+            theta=theta,
+            repulsive_exponent=repulsive_exponent,
+            fidelity_mode=_GRAPHVIZ_FIDELITY_MODE,
+            fidelity_dtype=fidelity_dtype,
+        )
+        for op in component_pipeline.ops[:-1]:
+            state = op.apply(problem, state, ctx)
+        if state.pos is None:
+            raise RuntimeError("SFDP component pipeline did not produce final positions.")
+        local_pos = _finalize_graphviz_sfdp_component_positions(
+            problem=problem,
+            state=state,
+        )
+        component_positions.append(local_pos)
+        component_edges.append(local_edges)
+
+    return _pack_graphviz_sfdp_component_positions(
+        components=components,
+        component_positions=component_positions,
+        component_edges=component_edges,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+    )
+
+
+def _finalize_graphviz_sfdp_component_positions(
+    problem: LayoutProblem,
+    state: SolveState,
+) -> torch.Tensor:
+    """Apply Graphviz's default ``prism0`` component scaling.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Component-local inputs. ``node_sizes`` uses point units when present.
+    state : SolveState
+        Component state after force refinement and before Dagua's generic
+        normalization. ``state.pos`` has shape ``[C, 2]`` in Graphviz inches.
+
+    Returns
+    -------
+    torch.Tensor
+        Principal-component-rotated coordinates with shape ``[C, 2]`` in
+        Graphviz points.
+
+    Raises
+    ------
+    ValueError
+        If component positions or the finest Graphviz graph are unavailable.
+
+    Notes
+    -----
+    Graphviz 7.0.5 defaults SFDP to ``overlap=prism0``. Zero prism iterations
+    still apply ``remove_overlap``'s initial scale: the average edge length
+    becomes four times the mean padded node half-size. Component packing then
+    translates these coordinates without rescaling them.
+    """
+    if state.pos is None:
+        raise ValueError("Graphviz SFDP component finalization requires state.pos.")
+    graphs = state.extras.get(_GRAPH_KEY)
+    if not isinstance(graphs, list) or not graphs:
+        raise ValueError("Graphviz SFDP component finalization requires the graph hierarchy.")
+
+    rotated = _principal_component_rotate(state.pos)
+    current_average_edge_length = _average_edge_length(graph=graphs[0], positions=rotated)
+    if problem.node_sizes is None or problem.node_sizes.numel() == 0:
+        mean_half_size_inches = sum(_GRAPHVIZ_DEFAULT_NODE_SIZE) * 0.5
+    else:
+        sizes_points = problem.node_sizes.to(dtype=torch.float64, device="cpu")
+        mean_half_size_inches = (
+            float(((sizes_points[:, 0] + sizes_points[:, 1]) * 0.5).mean().item())
+            / _GRAPHVIZ_POINTS_PER_INCH
+        )
+    padded_half_size_inches = mean_half_size_inches + (
+        2.0 * _GRAPHVIZ_PRISM_MARGIN_POINTS / _GRAPHVIZ_POINTS_PER_INCH
+    )
+    target_average_edge_length = _GRAPHVIZ_PRISM_INITIAL_SCALING * padded_half_size_inches
+    scale = target_average_edge_length / current_average_edge_length
+    return (rotated * scale * _GRAPHVIZ_POINTS_PER_INCH).to(dtype=torch.float32)
+
+
+def _pack_graphviz_sfdp_component_positions(
+    components: list[list[int]],
+    component_positions: list[torch.Tensor],
+    component_edges: list[torch.Tensor],
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Pack Graphviz-fidelity SFDP components using point-unit polyominoes.
+
+    Parameters
+    ----------
+    components : list[list[int]]
+        Parent node indices for each disconnected component.
+    component_positions : list[torch.Tensor]
+        Local SFDP component coordinates in Graphviz points, each with shape
+        ``[C, 2]``.
+    component_edges : list[torch.Tensor]
+        Component-local edge tensors, each with shape ``[2, E_c]``.
+    num_nodes : int
+        Total number of nodes in the parent graph.
+    node_sizes : torch.Tensor, optional
+        Optional parent node sizes in points with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed parent coordinates in points with shape ``[N, 2]``.
+
+    Notes
+    -----
+    Graphviz SFDP emits component coordinates in points before
+    ``packSubgraphs``. The shared neato pack helper models neato's internal
+    inch-space coordinates and therefore multiplies positions and sizes by
+    ``72`` before generating cells. This SFDP-only adapter keeps the
+    ``pack.c:genPoly`` geometry in point units so the grid step, perimeter
+    sort keys, and ``placeGraph`` scan operate on the same scale as Graphviz.
+    """
+    if not component_positions:
+        return torch.empty((0, 2), dtype=torch.float32)
+
+    device = component_positions[0].device
+    dtype = component_positions[0].dtype
+    packed = torch.zeros((num_nodes, 2), dtype=dtype, device=device)
+    if node_sizes is None:
+        sizes_points = torch.empty((num_nodes, 2), dtype=dtype, device=device)
+        sizes_points[:, 0] = _GRAPHVIZ_DEFAULT_NODE_SIZE[0] * 72.0
+        sizes_points[:, 1] = _GRAPHVIZ_DEFAULT_NODE_SIZE[1] * 72.0
+    else:
+        sizes_points = node_sizes.to(device=device, dtype=dtype)
+
+    positions_points = [
+        local_pos.detach().to(device="cpu", dtype=torch.float64)
+        for local_pos in component_positions
+    ]
+    component_sizes_points = [
+        sizes_points[component].detach().to(device="cpu", dtype=torch.float64)
+        for component in components
+    ]
+    boxes = [
+        _component_bbox_points(local_points, local_sizes)
+        for local_points, local_sizes in zip(positions_points, component_sizes_points)
+    ]
+    step = _compute_polyomino_step(boxes, _GRAPHVIZ_PACK_MARGIN_POINTS)
+    polyominoes = [
+        _generate_node_polyomino(
+            positions_points=local_points,
+            sizes_points=local_sizes,
+            local_edges=local_edges,
+            bbox=box,
+            step=step,
+            margin=_GRAPHVIZ_PACK_MARGIN_POINTS,
+            index=index,
+        )
+        for index, (local_points, local_sizes, local_edges, box) in enumerate(
+            zip(positions_points, component_sizes_points, component_edges, boxes)
+        )
+    ]
+    sorted_polyominoes = sorted(polyominoes, key=lambda info: -info.perimeter)
+    occupied: set[tuple[int, int]] = set()
+    offsets = [(0.0, 0.0)] * len(polyominoes)
+    for sorted_index, info in enumerate(sorted_polyominoes):
+        offsets[info.index] = _place_polyomino_component(
+            sorted_index=sorted_index,
+            info=info,
+            occupied=occupied,
+            step=step,
+            margin=_GRAPHVIZ_PACK_MARGIN_POINTS,
+        )
+
+    for component, local_pos, offset_points in zip(components, component_positions, offsets):
+        offset = torch.tensor(offset_points, dtype=dtype, device=device)
+        packed[component] = local_pos + offset
+    return packed - packed.mean(dim=0, keepdim=True)
 
 
 def layout_sfdp_pipeline(
@@ -993,7 +1309,7 @@ def layout_sfdp_pipeline(
             f"edge_weights length {edge_weights.shape[0]} does not match "
             f"edge count {edge_index.shape[1]}"
         )
-    _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
+    graphviz_fidelity = _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
     if edge_index.numel() != 0:
         edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
         if int(edge_index_cpu.min().item()) < 0:
@@ -1006,6 +1322,23 @@ def layout_sfdp_pipeline(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
+
+    if graphviz_fidelity:
+        components = _weak_components(edge_index=edge_index, num_nodes=num_nodes)
+        if len(components) > 1:
+            return _layout_graphviz_sfdp_components(
+                edge_index=edge_index,
+                components=components,
+                num_nodes=num_nodes,
+                node_sizes=node_sizes,
+                steps=steps,
+                seed=seed,
+                theta=theta,
+                repulsive_exponent=repulsive_exponent,
+                edge_weights=edge_weights,
+                direction=direction,
+                fidelity_dtype=fidelity_dtype,
+            )
 
     problem = LayoutProblem(
         edge_index=edge_index,

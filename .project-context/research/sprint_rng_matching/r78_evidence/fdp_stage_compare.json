@@ -1,0 +1,76 @@
+[
+  {
+    "dagua_after_grid_iter0_n0": [
+      -0.35730666570820185,
+      -0.6252025375348073
+    ],
+    "dagua_after_grid_iter299_n0": [
+      0.4543664253076803,
+      -1.1149682045964524
+    ],
+    "dagua_last_xlayout_adjust_n0": [
+      0.6620156158537033,
+      -2.051473052563587
+    ],
+    "first_divergence": "inside fdp_xLayout/prism overlap expansion after matching tLayout and before_xLayout",
+    "graph": "extreme_mixed_width_transformer",
+    "graphviz_after_grid_iter0_n0": [
+      -0.35730666570820185,
+      -0.6252025375348073
+    ],
+    "graphviz_after_grid_iter299_n0": [
+      0.4543664253076803,
+      -1.1149682045964524
+    ],
+    "graphviz_after_init_n0": [
+      -0.3730183085284891,
+      -0.436117518879474
+    ],
+    "graphviz_after_xlayout_only_n0": [
+      -2.488066481043766,
+      -6.183861262418774
+    ],
+    "graphviz_before_xlayout_n0": [
+      0.4543664253076803,
+      -1.1149682045964524
+    ],
+    "seed": 100
+  },
+  {
+    "dagua_after_grid_iter0_n0": [
+      -0.34164516703766584,
+      -0.46290139690106885
+    ],
+    "dagua_after_grid_iter299_n0": [
+      -0.30247037745737265,
+      -0.22114292440163086
+    ],
+    "dagua_last_xlayout_adjust_n0": [
+      -0.7429105345656896,
+      -0.5058763935617793
+    ],
+    "first_divergence": "inside fdp_xLayout/prism overlap expansion after matching tLayout and before_xLayout",
+    "graph": "parallel_cycles_4x5",
+    "graphviz_after_grid_iter0_n0": [
+      -0.34164516703766584,
+      -0.46290139690106885
+    ],
+    "graphviz_after_grid_iter299_n0": [
+      -0.30247037745737265,
+      -0.22114292440163086
+    ],
+    "graphviz_after_init_n0": [
+      -0.2900125128128401,
+      -0.33907058886970864
+    ],
+    "graphviz_after_xlayout_only_n0": [
+      -0.9991949990944944,
+      -0.03864049720835626
+    ],
+    "graphviz_before_xlayout_n0": [
+      -0.30247037745737265,
+      -0.22114292440163086
+    ],
+    "seed": 100
+  }
+]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from collections import deque
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
+from typing import ClassVar, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -33,6 +33,10 @@ _WALKER_ROOT_NUMBER = 1
 _WALKER_BASE_DISTANCE = 1.0
 _COMPONENT_PADDING = 1.0
 _BRANDES_KOEPF_APPLIED_KEY = "brandes_koepf_horizontal_refine_applied"
+_RANK_ROW_SNAP_APPLIED_KEY = "rank_row_snap_applied"
+_CLUSTER_AWARE_X_COMPACTION_APPLIED_KEY = "cluster_aware_x_compaction_applied"
+_COMPONENT_TILING_RISK_APPLIED_KEY = "component_tiling_crossing_risk_applied"
+_UNCLUSTERED_PSEUDO_CLUSTER = "__dagua_unclustered__"
 
 
 def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> torch.Tensor:
@@ -643,6 +647,564 @@ def _center_coordinates(values: Sequence[float]) -> List[float]:
 
     midpoint = (min(values) + max(values)) / 2.0
     return [value - midpoint for value in values]
+
+
+def _cluster_member_sets(
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    num_nodes: int,
+) -> Dict[str, frozenset[int]]:
+    """Return in-range cluster membership sets.
+
+    Parameters
+    ----------
+    clusters : mapping[str, sequence[int]] | None
+        Cluster metadata from the layout problem.
+    num_nodes : int
+        Original graph node count.
+
+    Returns
+    -------
+    dict[str, frozenset[int]]
+        Non-empty clusters keyed by name.
+    """
+    if not clusters:
+        return {}
+    member_sets: Dict[str, frozenset[int]] = {}
+    for name, members in clusters.items():
+        valid = {int(node) for node in members if 0 <= int(node) < num_nodes}
+        if valid:
+            member_sets[str(name)] = frozenset(valid)
+    return member_sets
+
+
+def _with_unclustered_pseudo_cluster(
+    cluster_members: Mapping[str, frozenset[int]],
+    num_nodes: int,
+) -> Dict[str, frozenset[int]]:
+    """Add an outside pseudo-cluster for single-cluster graphs.
+
+    Parameters
+    ----------
+    cluster_members : mapping[str, frozenset[int]]
+        Valid real cluster members.
+    num_nodes : int
+        Original graph node count.
+
+    Returns
+    -------
+    dict[str, frozenset[int]]
+        Cluster mapping, possibly with unclustered original nodes grouped under
+        an internal pseudo-cluster name.
+    """
+    expanded = dict(cluster_members)
+    if len(expanded) != 1 or _UNCLUSTERED_PSEUDO_CLUSTER in expanded:
+        return expanded
+    clustered_nodes = set(next(iter(expanded.values())))
+    outside = frozenset(node for node in range(num_nodes) if node not in clustered_nodes)
+    if outside:
+        expanded[_UNCLUSTERED_PSEUDO_CLUSTER] = outside
+    return expanded
+
+
+def _passes_cluster_compaction_structure_gate(
+    problem: LayoutProblem,
+    real_cluster_count: int,
+) -> bool:
+    """Return whether cluster compaction should run for this graph class.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    real_cluster_count : int
+        Count of non-empty clusters supplied by the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` for the directed layered cluster classes covered by the R79
+        fix: single-cluster dependency DAGs and small multi-cluster layered
+        DAGs. Cyclic, undirected/community, and large chain-like compound
+        graphs keep their existing placement.
+    """
+    structure = problem.structure
+    if structure is not None and not bool(
+        getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+    ):
+        return False
+    if real_cluster_count == 1:
+        return True
+    return real_cluster_count >= 5 and problem.num_nodes <= 120
+
+
+def _cluster_depths(
+    cluster_names: Sequence[str],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> Dict[str, int]:
+    """Return nesting depth for each cluster name.
+
+    Parameters
+    ----------
+    cluster_names : sequence[str]
+        Cluster names with valid members.
+    cluster_parents : mapping[str, str | None] | None
+        Optional parent mapping.
+
+    Returns
+    -------
+    dict[str, int]
+        Depth values where root clusters have depth zero.
+    """
+    names = set(cluster_names)
+    parents = {
+        name: (
+            str(cluster_parents.get(name))
+            if cluster_parents is not None and cluster_parents.get(name) in names
+            else None
+        )
+        for name in cluster_names
+    }
+    depths: Dict[str, int] = {}
+
+    def depth(name: str) -> int:
+        """Return one cluster depth with memoization.
+
+        Parameters
+        ----------
+        name : str
+            Cluster name.
+
+        Returns
+        -------
+        int
+            Nesting depth.
+        """
+        if name in depths:
+            return depths[name]
+        parent = parents[name]
+        depths[name] = 0 if parent is None else depth(parent) + 1
+        return depths[name]
+
+    for cluster_name in cluster_names:
+        depth(cluster_name)
+    return depths
+
+
+def _compact_x_by_layer(
+    pos: torch.Tensor,
+    layers: torch.Tensor,
+    ordering: torch.Tensor,
+    node_sizes: torch.Tensor,
+    node_sep: float,
+) -> torch.Tensor:
+    """Compact x coordinates independently within each layer.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    layers : torch.Tensor
+        CPU layer assignment tensor with shape ``[N]``.
+    ordering : torch.Tensor
+        CPU in-layer ordering tensor with shape ``[N]``.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    node_sep : float
+        Minimum gap between neighboring node boxes.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with rank order preserved and width compacted.
+    """
+    out = pos.detach().clone()
+    if layers.numel() == 0:
+        return out
+    for layer_index in range(int(layers.max().item()) + 1):
+        layer_nodes = torch.where(layers == layer_index)[0].tolist()
+        if not layer_nodes:
+            continue
+        layer_nodes.sort(key=lambda node: (int(ordering[node].item()), node))
+        cursor = 0.0
+        previous_width = 0.0
+        layer_x: List[float] = []
+        for offset, node in enumerate(layer_nodes):
+            width = float(node_sizes[node, 0].item())
+            if offset == 0:
+                cursor = 0.0
+            else:
+                cursor += previous_width * 0.5 + width * 0.5 + node_sep
+            layer_x.append(cursor)
+            previous_width = width
+        midpoint = (layer_x[0] + layer_x[-1]) * 0.5
+        for node, x_value in zip(layer_nodes, layer_x):
+            out[node, 0] = float(x_value - midpoint)
+    return out
+
+
+def _row_adjacent_required_spacing(
+    left_node: int,
+    right_node: int,
+    node_sizes: torch.Tensor,
+    min_gap: float,
+) -> float:
+    """Return the minimum same-row center spacing for a rendered node pair.
+
+    Parameters
+    ----------
+    left_node : int
+        Left node id in the row order.
+    right_node : int
+        Right node id in the row order.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    min_gap : float
+        Minimum visual gap added after the wider node extent.
+
+    Returns
+    -------
+    float
+        Required center-to-center x distance.
+    """
+    left_width = float(node_sizes[left_node, 0].item())
+    right_width = float(node_sizes[right_node, 0].item())
+    return max(left_width, right_width) + max(float(min_gap), 0.0)
+
+
+def _enforce_row_adjacent_min_spacing(
+    pos: torch.Tensor,
+    layers: torch.Tensor,
+    ordering: torch.Tensor,
+    node_sizes: torch.Tensor,
+    min_gap: float,
+) -> torch.Tensor:
+    """Expand crowded rank rows to a minimum adjacent center spacing.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    layers : torch.Tensor
+        CPU layer assignment tensor with shape ``[N]``.
+    ordering : torch.Tensor
+        CPU in-layer ordering tensor with shape ``[N]`` used as a stable
+        tie-breaker when x coordinates coincide.
+    node_sizes : torch.Tensor
+        CPU node sizes with shape ``[N, 2]``.
+    min_gap : float
+        Minimum visual gap added after the wider adjacent node width.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with row-adjacent x distances repaired. Uncrowded rows
+        are copied through exactly.
+    """
+    out = pos.detach().clone()
+    if layers.numel() == 0 or out.shape[0] <= 1:
+        return out
+
+    changed = False
+    pos_cpu = out.detach().to(device="cpu", dtype=torch.float32)
+    for layer_index in torch.unique(layers, sorted=True).tolist():
+        layer_nodes = torch.where(layers == int(layer_index))[0].tolist()
+        if len(layer_nodes) <= 1:
+            continue
+        layer_nodes.sort(
+            key=lambda node: (
+                float(pos_cpu[node, 0].item()),
+                int(ordering[node].item()),
+                node,
+            )
+        )
+        repaired_x = [float(pos_cpu[layer_nodes[0], 0].item())]
+        row_changed = False
+        for left_node, right_node in zip(layer_nodes, layer_nodes[1:]):
+            current_x = float(pos_cpu[right_node, 0].item())
+            required_x = repaired_x[-1] + _row_adjacent_required_spacing(
+                left_node=left_node,
+                right_node=right_node,
+                node_sizes=node_sizes,
+                min_gap=min_gap,
+            )
+            if current_x < required_x:
+                repaired_x.append(required_x)
+                row_changed = True
+            else:
+                repaired_x.append(current_x)
+        if not row_changed:
+            continue
+
+        original_midpoint = (
+            float(pos_cpu[layer_nodes[0], 0].item()) + float(pos_cpu[layer_nodes[-1], 0].item())
+        ) * 0.5
+        repaired_midpoint = (repaired_x[0] + repaired_x[-1]) * 0.5
+        shift = original_midpoint - repaired_midpoint
+        for node, x_value in zip(layer_nodes, repaired_x):
+            out[node, 0] = float(x_value + shift)
+        changed = True
+
+    return out if changed else pos.detach().clone()
+
+
+def _cluster_interval(pos: torch.Tensor, members: Sequence[int]) -> Tuple[float, float]:
+    """Return a cluster x interval for valid members.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    members : sequence[int]
+        Node ids in the cluster.
+
+    Returns
+    -------
+    tuple[float, float]
+        Minimum and maximum x values.
+    """
+    idx = torch.tensor(list(members), dtype=torch.long, device=pos.device)
+    values = pos[idx, 0]
+    return float(values.min().item()), float(values.max().item())
+
+
+def _apply_cluster_gap_level(
+    pos: torch.Tensor,
+    cluster_members: Mapping[str, frozenset[int]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    depth: int,
+    min_gap: float,
+) -> None:
+    """Separate sibling cluster intervals for one nesting level in place.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Mutable position tensor with shape ``[N, 2]``.
+    cluster_members : mapping[str, frozenset[int]]
+        Valid cluster membership sets.
+    cluster_parents : mapping[str, str | None] | None
+        Optional parent metadata.
+    depth : int
+        Nesting level to process.
+    min_gap : float
+        Minimum horizontal gap between sibling intervals.
+
+    Returns
+    -------
+    None
+        ``pos`` is shifted in place.
+    """
+    depths = _cluster_depths(tuple(cluster_members), cluster_parents)
+    names = set(cluster_members)
+    siblings: Dict[Optional[str], List[str]] = {}
+    for name in cluster_members:
+        if depths[name] != depth:
+            continue
+        raw_parent = cluster_parents.get(name) if cluster_parents is not None else None
+        parent = str(raw_parent) if raw_parent in names else None
+        siblings.setdefault(parent, []).append(name)
+
+    for sibling_names in siblings.values():
+        if len(sibling_names) < 2:
+            continue
+        sibling_names.sort(
+            key=lambda name: (
+                _cluster_interval(pos, sorted(cluster_members[name]))[0],
+                name,
+            )
+        )
+        right_edge: Optional[float] = None
+        for name in sibling_names:
+            members = sorted(cluster_members[name])
+            left, right = _cluster_interval(pos, members)
+            if right_edge is not None and left < right_edge + min_gap:
+                shift = right_edge + min_gap - left
+                idx = torch.tensor(members, dtype=torch.long, device=pos.device)
+                pos[idx, 0] += float(shift)
+                left += shift
+                right += shift
+            right_edge = right if right_edge is None else max(right_edge, right)
+
+
+def _weak_components(edge_index: torch.Tensor, num_nodes: int) -> List[List[int]]:
+    """Return weakly connected components.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Components as sorted node-id lists.
+    """
+    parents = list(range(num_nodes))
+
+    def find(node: int) -> int:
+        """Return the component root for one node.
+
+        Parameters
+        ----------
+        node : int
+            Node id.
+
+        Returns
+        -------
+        int
+            Root id.
+        """
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]
+            node = parents[node]
+        return node
+
+    for source, target in edge_index.t().tolist():
+        src_root = find(int(source))
+        tgt_root = find(int(target))
+        if src_root != tgt_root:
+            parents[src_root] = tgt_root
+    grouped: Dict[int, List[int]] = {}
+    for node in range(num_nodes):
+        grouped.setdefault(find(node), []).append(node)
+    return [sorted(nodes) for nodes in grouped.values()]
+
+
+def _has_skip_edge(edge_index: torch.Tensor, layers: torch.Tensor) -> bool:
+    """Return whether any edge skips at least one assigned rank.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        CPU layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when any edge spans two or more ranks.
+    """
+    if edge_index.numel() == 0:
+        return False
+    deltas = (layers[edge_index[1]] - layers[edge_index[0]]).abs()
+    return bool(torch.any(deltas > 1).item())
+
+
+def _long_edge_fraction(edge_index: torch.Tensor, layers: torch.Tensor) -> float:
+    """Return the fraction of edges spanning at least one intermediate rank.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        CPU layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    float
+        Fraction in ``[0, 1]`` whose absolute layer delta is greater than one.
+    """
+    if edge_index.numel() == 0:
+        return 0.0
+    deltas = (layers[edge_index[1]] - layers[edge_index[0]]).abs()
+    return float(torch.count_nonzero(deltas > 1).item()) / float(edge_index.shape[1])
+
+
+def _original_long_edge_fraction(problem: LayoutProblem, state: SolveState) -> float:
+    """Return long-edge fraction measured on original graph nodes.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable state whose layer tensor may include dummy nodes.
+
+    Returns
+    -------
+    float
+        Fraction of original edges spanning at least one intermediate rank.
+    """
+    if state.layers is None or int(state.layers.shape[0]) < problem.num_nodes:
+        return 0.0
+    original_layers = state.layers.detach().to(device="cpu", dtype=torch.long)[: problem.num_nodes]
+    original_edges = _validate_edge_index(problem.edge_index, problem.num_nodes)
+    return _long_edge_fraction(original_edges, original_layers)
+
+
+def _has_original_strict_forward_layering(problem: LayoutProblem, state: SolveState) -> bool:
+    """Return whether original edges advance in the assigned layer tensor.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable state whose layer tensor may include dummy nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when all original edges point from lower to higher layers.
+    """
+    if state.layers is None or int(state.layers.shape[0]) < problem.num_nodes:
+        return False
+    original_layers = state.layers.detach().to(device="cpu", dtype=torch.long)[: problem.num_nodes]
+    original_edges = _validate_edge_index(problem.edge_index, problem.num_nodes)
+    return _has_strict_forward_layering(original_edges, original_layers)
+
+
+def _segment_intersects_bbox(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    bbox: Tuple[float, float, float, float],
+) -> bool:
+    """Return whether a segment intersects an axis-aligned bbox.
+
+    Parameters
+    ----------
+    start : torch.Tensor
+        Segment start point with shape ``[2]``.
+    end : torch.Tensor
+        Segment end point with shape ``[2]``.
+    bbox : tuple[float, float, float, float]
+        ``(xmin, xmax, ymin, ymax)`` box.
+
+    Returns
+    -------
+    bool
+        ``True`` when the segment touches or crosses the box interior.
+    """
+    xmin, xmax, ymin, ymax = bbox
+    x0 = float(start[0].item())
+    y0 = float(start[1].item())
+    x1 = float(end[0].item())
+    y1 = float(end[1].item())
+    if max(x0, x1) < xmin or min(x0, x1) > xmax or max(y0, y1) < ymin or min(y0, y1) > ymax:
+        return False
+    if xmin <= x0 <= xmax and ymin <= y0 <= ymax:
+        return True
+    if xmin <= x1 <= xmax and ymin <= y1 <= ymax:
+        return True
+    dx = x1 - x0
+    dy = y1 - y0
+    for boundary_x in (xmin, xmax):
+        if abs(dx) > 1.0e-9:
+            t = (boundary_x - x0) / dx
+            y = y0 + t * dy
+            if 0.0 <= t <= 1.0 and ymin <= y <= ymax:
+                return True
+    for boundary_y in (ymin, ymax):
+        if abs(dy) > 1.0e-9:
+            t = (boundary_y - y0) / dy
+            x = x0 + t * dx
+            if 0.0 <= t <= 1.0 and xmin <= x <= xmax:
+                return True
+    return False
 
 
 def _target_device(problem: LayoutProblem, state: SolveState) -> torch.device:
@@ -1611,6 +2173,111 @@ class BrandesKoepfHorizontalRefineConfig:
 
 
 @dataclass(frozen=True)
+class RankRowSnapConfig:
+    """Configuration for :class:`RankRowSnap`.
+
+    Parameters
+    ----------
+    enabled : bool, default=True
+        Master switch for snapping solved y coordinates onto assigned ranks.
+    is_acyclic : bool, default=True
+        Whether the routed layered graph is acyclic after cycle handling.
+    require_forward_edges : bool, default=True
+        Require every active edge to advance in the assigned layer tensor.
+    min_layers : int, default=10
+        Minimum assigned rank count before snapping is allowed. Very shallow
+        wide DAGs often use useful sub-rank vertical separation during the
+        gradient polish; snapping them to only a few rows regresses protected
+        wins.
+    node_sep : float, default=1.0
+        Node separation used to derive the default row-adjacent visual gap.
+    row_min_gap : float | None, default=None
+        Optional minimum visual gap for adjacent same-row centers after rank
+        snapping. When omitted, ``row_min_gap_fraction * node_sep`` is used.
+    row_min_gap_fraction : float, default=0.35
+        Fraction of ``node_sep`` used for the default adjacent-row visual gap.
+    """
+
+    enabled: bool = True
+    is_acyclic: bool = True
+    require_forward_edges: bool = True
+    min_layers: int = 10
+    node_sep: float = 1.0
+    row_min_gap: Optional[float] = None
+    row_min_gap_fraction: float = 0.35
+
+
+@dataclass(frozen=True)
+class ClusterAwareXCompactionConfig:
+    """Configuration for :class:`ClusterAwareXCompaction`.
+
+    Parameters
+    ----------
+    enabled : bool, default=True
+        Master switch for cluster-aware horizontal compaction.
+    node_sep : float, default=1.0
+        Minimum same-layer node-box gap.
+    cluster_gap_multiplier : float, default=1.0
+        Multiplier applied to ``node_sep`` for sibling cluster interval gaps.
+    min_clusters : int, default=2
+        Minimum number of valid clusters required before the op fires.
+    min_long_edge_fraction : float, default=0.25
+        Minimum fraction of long-span edges. This keeps the lane compactor on
+        the dossier's clustered layered failures while avoiding small
+        cross-talk graphs where dense sibling links are better left to the
+        gradient solution.
+    row_min_gap : float | None, default=None
+        Optional minimum visual gap for adjacent same-row centers after
+        cluster shifts. When omitted, ``row_min_gap_fraction * node_sep`` is
+        used.
+    row_min_gap_fraction : float, default=0.35
+        Fraction of ``node_sep`` used for the default adjacent-row visual gap.
+    """
+
+    enabled: bool = True
+    node_sep: float = 1.0
+    cluster_gap_multiplier: float = 1.0
+    min_clusters: int = 2
+    min_long_edge_fraction: float = 0.25
+    row_min_gap: Optional[float] = None
+    row_min_gap_fraction: float = 0.35
+
+
+@dataclass(frozen=True)
+class ComponentTilingCrossingRiskConfig:
+    """Configuration for :class:`ComponentTilingCrossingRisk`.
+
+    Parameters
+    ----------
+    enabled : bool, default=True
+        Master switch for the small disconnected-DAG tiling scorer.
+    min_components : int, default=2
+        Minimum weak-component count.
+    max_components : int, default=10
+        Maximum weak-component count.
+    max_nodes : int, default=100
+        Maximum graph size for candidate scoring.
+    stagger_fraction : float, default=0.35
+        Fraction of median component height used for y-stagger candidates.
+    gap_multiplier : float, default=2.0
+        Gap multiplier applied to median node extent during repacking.
+    fallback_gap_fraction : float, default=0.5
+        Fraction of median current component width used when node sizes are
+        unavailable. Component tiling often runs after a prior packer has
+        already established safe visual spacing, so this recovers a structural
+        gap scale without graph-name gates.
+    """
+
+    enabled: bool = True
+    min_components: int = 2
+    max_components: int = 10
+    max_nodes: int = 100
+    stagger_fraction: float = 0.35
+    gap_multiplier: float = 2.0
+    fallback_gap_fraction: float = 0.5
+
+
+@dataclass(frozen=True)
 class BucheimWalkerTreeConfig:
     """Configuration for :class:`BucheimWalkerTree`.
 
@@ -1733,6 +2400,470 @@ class BrandesKoepfHorizontalRefine(Op):
         state.ordering = ordering_cpu.to(device=refined_pos.device)
         state.extras[_BRANDES_KOEPF_APPLIED_KEY] = True
         return state
+
+
+@register_op
+class ClusterAwareXCompaction(Op):
+    """Compact layered x coordinates while separating sibling cluster intervals."""
+
+    name: ClassVar[str] = "cluster_aware_x_compaction"
+    category: ClassVar[OpCategory] = OpCategory.COORDINATE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers", "ordering", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "layers")
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[ClusterAwareXCompactionConfig] = None) -> None:
+        """Store the cluster-aware compaction configuration.
+
+        Parameters
+        ----------
+        config : ClusterAwareXCompactionConfig | None, optional
+            Optional op configuration.
+        """
+        self.config = config or ClusterAwareXCompactionConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Apply cluster-aware x compaction for clustered layered graphs.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs with optional cluster metadata.
+        state : SolveState
+            Mutable solve state containing positions and layer assignments.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this deterministic op.
+
+        Returns
+        -------
+        SolveState
+            Updated state when the clustered layered predicate matches.
+        """
+        del ctx
+
+        state.extras[_CLUSTER_AWARE_X_COMPACTION_APPLIED_KEY] = False
+        if not self.config.enabled or state.pos is None:
+            return state
+
+        real_cluster_members = _cluster_member_sets(problem.clusters, problem.num_nodes)
+        if not _passes_cluster_compaction_structure_gate(problem, len(real_cluster_members)):
+            return state
+        cluster_members = _with_unclustered_pseudo_cluster(
+            real_cluster_members,
+            problem.num_nodes,
+        )
+        if len(cluster_members) < self.config.min_clusters:
+            return state
+
+        active_num_nodes, _, active_node_sizes = _active_coordinate_graph(
+            problem=problem,
+            state=state,
+        )
+        layers_cpu = _validate_layers(state.layers, active_num_nodes)
+        if not _has_original_strict_forward_layering(problem, state):
+            return state
+        if _original_long_edge_fraction(problem, state) < self.config.min_long_edge_fraction:
+            return state
+        ordering_cpu = (
+            _validate_ordering(state.ordering, active_num_nodes)
+            if state.ordering is not None
+            else _ordering_from_current_x(layers_cpu, state.pos)
+        )
+
+        compacted = _compact_x_by_layer(
+            pos=state.pos,
+            layers=layers_cpu,
+            ordering=ordering_cpu,
+            node_sizes=active_node_sizes,
+            node_sep=self.config.node_sep,
+        )
+        depths = _cluster_depths(tuple(cluster_members), problem.cluster_parents)
+        min_gap = max(self.config.node_sep * self.config.cluster_gap_multiplier, 0.0)
+        for depth in sorted(set(depths.values()), reverse=True):
+            _apply_cluster_gap_level(
+                pos=compacted,
+                cluster_members=cluster_members,
+                cluster_parents=problem.cluster_parents,
+                depth=depth,
+                min_gap=min_gap,
+            )
+        row_min_gap = (
+            float(self.config.row_min_gap)
+            if self.config.row_min_gap is not None
+            else float(self.config.node_sep) * float(self.config.row_min_gap_fraction)
+        )
+        compacted = _enforce_row_adjacent_min_spacing(
+            pos=compacted,
+            layers=layers_cpu,
+            ordering=ordering_cpu,
+            node_sizes=active_node_sizes,
+            min_gap=max(row_min_gap, 0.0),
+        )
+        if compacted.numel() > 0:
+            compacted[:, 0] -= (compacted[:, 0].min() + compacted[:, 0].max()) * 0.5
+        state.pos = compacted.detach().to(device=state.pos.device, dtype=state.pos.dtype)
+        state.extras[_CLUSTER_AWARE_X_COMPACTION_APPLIED_KEY] = True
+        return state
+
+
+@register_op
+class RankRowSnap(Op):
+    """Snap y coordinates to the discrete rows implied by assigned layers."""
+
+    name: ClassVar[str] = "rank_row_snap"
+    category: ClassVar[OpCategory] = OpCategory.COORDINATE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "layers")
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[RankRowSnapConfig] = None) -> None:
+        """Store the row-snapping configuration.
+
+        Parameters
+        ----------
+        config : RankRowSnapConfig | None, optional
+            Optional op configuration.
+        """
+        self.config = config or RankRowSnapConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Replace within-rank y jitter by each rank's median row.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state with positions and layer assignments.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this deterministic op.
+
+        Returns
+        -------
+        SolveState
+            Updated state when the layered acyclic predicate matches.
+        """
+        del ctx
+
+        state.extras[_RANK_ROW_SNAP_APPLIED_KEY] = False
+        if not self.config.enabled or not self.config.is_acyclic or state.pos is None:
+            return state
+        active_num_nodes, active_edge_index, active_node_sizes = _active_coordinate_graph(
+            problem,
+            state,
+        )
+        layers_cpu = _validate_layers(state.layers, active_num_nodes)
+        if int(torch.unique(layers_cpu).numel()) < self.config.min_layers:
+            return state
+        edge_index_cpu = _validate_edge_index(active_edge_index, active_num_nodes)
+        if self.config.require_forward_edges and not _has_strict_forward_layering(
+            edge_index=edge_index_cpu,
+            layers=layers_cpu,
+        ):
+            return state
+
+        snapped = state.pos.detach().clone()
+        for layer_index in torch.unique(layers_cpu, sorted=True).tolist():
+            members_cpu = torch.where(layers_cpu == int(layer_index))[0]
+            if members_cpu.numel() == 0:
+                continue
+            members = members_cpu.to(device=snapped.device)
+            snapped[members, 1] = snapped[members, 1].median()
+        row_min_gap = (
+            float(self.config.row_min_gap)
+            if self.config.row_min_gap is not None
+            else float(self.config.node_sep) * float(self.config.row_min_gap_fraction)
+        )
+        ordering_cpu = (
+            _validate_ordering(state.ordering, active_num_nodes)
+            if state.ordering is not None
+            else _ordering_from_current_x(layers_cpu, snapped)
+        )
+        snapped = _enforce_row_adjacent_min_spacing(
+            pos=snapped,
+            layers=layers_cpu,
+            ordering=ordering_cpu,
+            node_sizes=active_node_sizes,
+            min_gap=max(row_min_gap, 0.0),
+        )
+        state.pos = snapped
+        state.extras[_RANK_ROW_SNAP_APPLIED_KEY] = True
+        return state
+
+
+@register_op
+class ComponentTilingCrossingRisk(Op):
+    """Choose a small disconnected-DAG component tiling by edge-box crossing risk."""
+
+    name: ClassVar[str] = "component_tiling_crossing_risk"
+    category: ClassVar[OpCategory] = OpCategory.COORDINATE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[ComponentTilingCrossingRiskConfig] = None) -> None:
+        """Store the component-tiling scorer configuration.
+
+        Parameters
+        ----------
+        config : ComponentTilingCrossingRiskConfig | None, optional
+            Optional op configuration.
+        """
+        self.config = config or ComponentTilingCrossingRiskConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Score candidate component offsets and keep the lowest-risk tiling.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable disconnected graph inputs.
+        state : SolveState
+            Mutable solve state containing the already tiled positions.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this deterministic op.
+
+        Returns
+        -------
+        SolveState
+            Updated state when the small disconnected-DAG predicate matches.
+        """
+        del ctx
+
+        state.extras[_COMPONENT_TILING_RISK_APPLIED_KEY] = False
+        if not self.config.enabled or state.pos is None:
+            return state
+        num_nodes = int(problem.num_nodes)
+        if num_nodes > self.config.max_nodes or num_nodes < 2:
+            return state
+        edge_index_cpu = _validate_edge_index(problem.edge_index, num_nodes)
+        if edge_index_cpu.numel() == 0:
+            return state
+        if state.layers is not None and state.layers.shape[0] == num_nodes:
+            layers_cpu = _validate_layers(state.layers, num_nodes)
+        else:
+            from dagua.utils import longest_path_layering
+
+            layers_cpu = torch.as_tensor(
+                longest_path_layering(edge_index_cpu, num_nodes),
+                dtype=torch.long,
+            )
+        if not _has_strict_forward_layering(edge_index_cpu, layers_cpu):
+            return state
+        if not _has_skip_edge(edge_index_cpu, layers_cpu):
+            return state
+
+        components = _weak_components(edge_index_cpu, num_nodes)
+        if not self.config.min_components <= len(components) <= self.config.max_components:
+            return state
+
+        best_pos = state.pos.detach().clone()
+        best_score = self._risk_score(best_pos, edge_index_cpu, components)
+        for candidate in self._candidate_tilings(best_pos, components, problem.node_sizes):
+            candidate_score = self._risk_score(candidate, edge_index_cpu, components)
+            if candidate_score < best_score:
+                best_score = candidate_score
+                best_pos = candidate
+        changed = not torch.allclose(state.pos.detach(), best_pos)
+        state.pos = best_pos.to(device=state.pos.device, dtype=state.pos.dtype)
+        state.extras[_COMPONENT_TILING_RISK_APPLIED_KEY] = changed
+        return state
+
+    def _candidate_tilings(
+        self,
+        pos: torch.Tensor,
+        components: Sequence[Sequence[int]],
+        node_sizes: Optional[torch.Tensor],
+    ) -> List[torch.Tensor]:
+        """Build deterministic component ordering and y-stagger candidates.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Baseline tiled positions with shape ``[N, 2]``.
+        components : sequence[sequence[int]]
+            Weak components as node-id lists.
+        node_sizes : torch.Tensor | None
+            Optional node sizes with shape ``[N, 2]``.
+
+        Returns
+        -------
+        list[torch.Tensor]
+            Candidate position tensors.
+        """
+        comp_infos: List[Tuple[int, float, float, float, float]] = []
+        for index, nodes in enumerate(components):
+            idx = torch.tensor(list(nodes), dtype=torch.long, device=pos.device)
+            xs = pos[idx, 0]
+            ys = pos[idx, 1]
+            comp_infos.append(
+                (
+                    index,
+                    float((xs.max() - xs.min()).item()),
+                    float((ys.max() - ys.min()).item()),
+                    float(xs.min().item()),
+                    float(ys.min().item()),
+                )
+            )
+        nonzero_widths = [info[1] for info in comp_infos if info[1] > 1.0e-6]
+        median_component_width = (
+            sorted(nonzero_widths)[len(nonzero_widths) // 2] if nonzero_widths else 1.0
+        )
+        median_extent = median_component_width * self.config.fallback_gap_fraction
+        if node_sizes is not None and node_sizes.numel() > 0:
+            median_extent = max(float(node_sizes.detach().to(device="cpu").median().item()), 1.0)
+        gap = max(median_extent * self.config.gap_multiplier, 1.0)
+        median_height = sorted(max(info[2], median_extent) for info in comp_infos)[
+            len(comp_infos) // 2
+        ]
+        stagger = max(median_height * self.config.stagger_fraction, gap)
+        orderings = [
+            [info[0] for info in sorted(comp_infos, key=lambda item: (item[3], item[4]))],
+            [
+                info[0]
+                for info in sorted(
+                    comp_infos,
+                    key=lambda item: (-item[1] * item[2], item[0]),
+                )
+            ],
+        ]
+        if len(components) == 2:
+            orderings.append(list(reversed(orderings[0])))
+
+        candidates: List[torch.Tensor] = []
+        for order in orderings:
+            for sign in (0.0, 1.0, -1.0):
+                candidates.append(
+                    self._pack_components(
+                        pos=pos,
+                        components=components,
+                        order=order,
+                        gap=gap,
+                        stagger=stagger * sign,
+                    )
+                )
+        return candidates
+
+    def _pack_components(
+        self,
+        pos: torch.Tensor,
+        components: Sequence[Sequence[int]],
+        order: Sequence[int],
+        gap: float,
+        stagger: float,
+    ) -> torch.Tensor:
+        """Pack components in columns with optional alternating y stagger.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Baseline positions with shape ``[N, 2]``.
+        components : sequence[sequence[int]]
+            Weak components as node-id lists.
+        order : sequence[int]
+            Component indices in left-to-right order.
+        gap : float
+            Horizontal gap between component boxes.
+        stagger : float
+            Alternating y offset applied to odd columns.
+
+        Returns
+        -------
+        torch.Tensor
+            Repacked candidate positions.
+        """
+        out = pos.detach().clone()
+        cursor_x = 0.0
+        for column, comp_index in enumerate(order):
+            nodes = components[comp_index]
+            idx = torch.tensor(list(nodes), dtype=torch.long, device=pos.device)
+            comp = pos[idx]
+            min_xy = comp.min(dim=0).values
+            max_xy = comp.max(dim=0).values
+            width = float((max_xy[0] - min_xy[0]).item())
+            target = torch.tensor(
+                [
+                    cursor_x - float(min_xy[0].item()),
+                    (column % 2) * stagger - float(min_xy[1].item()),
+                ],
+                dtype=out.dtype,
+                device=out.device,
+            )
+            out[idx] = comp + target
+            cursor_x += max(width, gap) + gap
+        out -= out.mean(dim=0, keepdim=True)
+        return out
+
+    def _risk_score(
+        self,
+        pos: torch.Tensor,
+        edge_index: torch.Tensor,
+        components: Sequence[Sequence[int]],
+    ) -> float:
+        """Score visual risk of component boxes crossing other components' edges.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+        edge_index : torch.Tensor
+            CPU edge tensor with shape ``[2, E]``.
+        components : sequence[sequence[int]]
+            Weak components as node-id lists.
+
+        Returns
+        -------
+        float
+            Lower is better. Primary term counts edge-vs-foreign-box
+            intersections; secondary term mildly prefers compact boxes.
+        """
+        comp_id: Dict[int, int] = {}
+        bboxes: List[Tuple[float, float, float, float]] = []
+        for index, nodes in enumerate(components):
+            for node in nodes:
+                comp_id[node] = index
+            idx = torch.tensor(list(nodes), dtype=torch.long, device=pos.device)
+            xs = pos[idx, 0]
+            ys = pos[idx, 1]
+            bboxes.append(
+                (
+                    float(xs.min().item()),
+                    float(xs.max().item()),
+                    float(ys.min().item()),
+                    float(ys.max().item()),
+                )
+            )
+        risk = 0.0
+        for source, target in edge_index.t().tolist():
+            edge_comp = comp_id[int(source)]
+            start = pos[int(source)]
+            end = pos[int(target)]
+            for bbox_index, bbox in enumerate(bboxes):
+                if bbox_index == edge_comp:
+                    continue
+                if _segment_intersects_bbox(start, end, bbox):
+                    risk += 1.0
+        width = float((pos[:, 0].max() - pos[:, 0].min()).item())
+        height = float((pos[:, 1].max() - pos[:, 1].min()).item())
+        return risk + 1.0e-6 * width * height
 
 
 @register_op
