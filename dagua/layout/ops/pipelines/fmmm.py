@@ -7021,7 +7021,6 @@ def _graphviz_fdp_prism_delaunay_edges(
         }
 
     import numpy as np
-    from scipy.spatial import Delaunay, QhullError
 
     points = np.column_stack(
         [
@@ -7029,12 +7028,17 @@ def _graphviz_fdp_prism_delaunay_edges(
             np.asarray(y_positions, dtype=float),
         ]
     )
+    if not np.isfinite(points).all():
+        return set()
+
+    from scipy.spatial import Delaunay, QhullError
+
     try:
         triangulation = Delaunay(points)
-    except QhullError:
+    except (QhullError, ValueError):
         try:
             triangulation = Delaunay(points, qhull_options="QJ")
-        except QhullError:
+        except (QhullError, ValueError):
             return {
                 (source, target)
                 for source in range(num_nodes)
