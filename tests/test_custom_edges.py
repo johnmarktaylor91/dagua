@@ -11,6 +11,7 @@ from matplotlib.collections import LineCollection, PatchCollection
 from dagua.graph import DaguaGraph
 from dagua.render.borders.shapes import NOTE_FOLD_SIZE_RATIO, ShapeSpec, note_path
 from dagua.render.edges import available_arrowheads, build_arrowhead
+from dagua.render.edges.arrowheads import graphviz_arrow_fill_mode
 from dagua.render.edges.collection import (
     MIN_TAPER_WIDTH,
     DaguaEdge,
@@ -297,8 +298,8 @@ def test_open_arrowhead_becomes_stroked() -> None:
     assert len(result.stroked_paths) >= 1
 
 
-def test_graphviz_open_arrowhead_is_stroked_chevron() -> None:
-    """Graphviz's named ``open`` head should render as an outline chevron.
+def test_graphviz_open_arrowhead_is_filled_vee() -> None:
+    """Graphviz's named ``open`` head should render as a filled vee polygon.
 
     Returns
     -------
@@ -307,8 +308,59 @@ def test_graphviz_open_arrowhead_is_stroked_chevron() -> None:
     """
     result = build_arrowhead("open", tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
 
+    assert len(result.filled_paths) == 1
+    assert result.stroked_paths == []
+
+
+@pytest.mark.parametrize("spec", ["ediamond", "ebox"])
+def test_empty_modifier_hollows_prefixed_primitive(spec: str) -> None:
+    """The Graphviz ``e`` modifier should hollow the prefixed primitive.
+
+    Parameters
+    ----------
+    spec : str
+        Arrowhead specification using Graphviz's empty modifier.
+
+    Returns
+    -------
+    None
+        This test only performs assertions.
+    """
+    result = build_arrowhead(spec, tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
+
     assert result.filled_paths == []
-    assert len(result.stroked_paths) == 2
+    assert len(result.stroked_paths) >= 1
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("obox", "hollow"),
+        ("odiamond", "hollow"),
+        ("open", "filled"),
+        ("odotinv", "filled"),
+        ("odotinvbox", "filled"),
+    ],
+)
+def test_graphviz_arrow_fill_mode_uses_first_polygon_primitive(
+    spec: str,
+    expected: str,
+) -> None:
+    """Fill-mode classification should match Graphviz SVG polygon extraction.
+
+    Parameters
+    ----------
+    spec : str
+        Arrowhead specification to classify.
+    expected : str
+        Expected fill mode for the first polygon-emitting primitive.
+
+    Returns
+    -------
+    None
+        This test only performs assertions.
+    """
+    assert graphviz_arrow_fill_mode(spec) == expected
 
 
 def test_hollow_arrowheads_gain_extra_size_for_visual_weight() -> None:

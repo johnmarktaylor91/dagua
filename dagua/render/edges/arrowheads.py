@@ -46,6 +46,16 @@ CROWS_FOOT_MANY_OPTIONAL_TRIM_RATIO = 0.75
 TRIANGLE_TEE_TRIANGLE_LENGTH_RATIO = 0.6
 TRIANGLE_TEE_BAR_HALF_WIDTH_RATIO = 1.1
 TRIANGLE_TEE_TRIM_PADDING_RATIO = 0.05
+GRAPHVIZ_OPEN_FILL_MODIFIERS = {"e", "o"}
+GRAPHVIZ_POLYGON_PRIMITIVES = {
+    "box",
+    "crow",
+    "diamond",
+    "inv",
+    "normal",
+    "tee",
+    "vee",
+}
 
 
 @dataclass(frozen=True)
@@ -1146,7 +1156,7 @@ def _parse_one(spec: str, start: int) -> Tuple[ParsedPrimitive, int]:
     open_fill = False
     side = "both"
     index = start
-    if index < len(spec) and spec[index] == "o":
+    if index < len(spec) and spec[index] in GRAPHVIZ_OPEN_FILL_MODIFIERS:
         open_fill = True
         index += 1
     if index < len(spec) and spec[index] in {"l", "r"}:
@@ -1173,7 +1183,7 @@ def parse_arrowhead_spec(spec: str) -> List[ParsedPrimitive]:
     """
     normalized = ARROWHEAD_ALIASES.get(spec, spec)
     if normalized == "open":
-        return [ParsedPrimitive(shape="open", open_fill=False, side="both")]
+        return [ParsedPrimitive(shape="vee", open_fill=False, side="both")]
     if normalized in {"odot", "obox", "odiamond"}:
         return [ParsedPrimitive(shape=normalized[1:], open_fill=True, side="both")]
     if normalized == "none":
@@ -1187,6 +1197,34 @@ def parse_arrowhead_spec(spec: str) -> List[ParsedPrimitive]:
     if index != len(normalized):
         raise ValueError(f"Could not fully parse arrowhead spec {spec!r}.")
     return primitives
+
+
+def graphviz_arrow_fill_mode(spec: str) -> str:
+    """Return Graphviz's polygon fill mode for an arrowhead specification.
+
+    Parameters
+    ----------
+    spec : str
+        Graphviz-style arrowhead string.
+
+    Returns
+    -------
+    str
+        ``"filled"`` or ``"hollow"`` for the first polygon-emitting
+        primitive in the specification.
+
+    Notes
+    -----
+    Graphviz's ``o`` and ``e`` modifiers hollow only the primitive they
+    prefix. The parity extractor records fill from the first SVG polygon, so
+    non-polygon primitives such as ``dot`` and ``curve`` are skipped here; for
+    example, ``odotinv`` is classified from ``inv`` and remains filled.
+    """
+    for primitive in parse_arrowhead_spec(spec):
+        if primitive.shape not in GRAPHVIZ_POLYGON_PRIMITIVES:
+            continue
+        return "hollow" if primitive.open_fill else "filled"
+    return "filled"
 
 
 def _translated_path(path: Path, dx: float) -> Path:
