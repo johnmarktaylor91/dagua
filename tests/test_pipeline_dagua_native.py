@@ -52,6 +52,36 @@ def test_directed_polish_rejects_degenerate_geometry_candidate(monkeypatch) -> N
     assert torch.equal(polished, pos)
 
 
+def test_polish_candidate_memory_error_is_skipped(monkeypatch: object) -> None:
+    """A failing polish candidate must not sink the full solve."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+
+    pos = torch.tensor([[0.0, 0.0], [0.0, 100.0], [0.0, 200.0]])
+    edge_index = torch.tensor([[0, 0], [1, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 10.0)
+
+    def raise_memory_error(*args: object, **kwargs: object) -> torch.Tensor:
+        """Raise the same exception class as an oversized LP allocation."""
+        del args, kwargs
+        raise MemoryError("synthetic polish allocation failure")
+
+    monkeypatch.setattr(native, "_POLISH_SETTINGS", ())
+    monkeypatch.setattr(native, "_collinear_dodge", raise_memory_error)
+
+    polished = _best_of_polish(
+        pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+    )
+
+    assert polished.shape == pos.shape
+    assert bool(torch.isfinite(polished).all().item())
+
+
 def test_polish_scores_cyclic_digraph_with_common_ruler(monkeypatch) -> None:
     """Cyclic directed polish candidates use the benchmark's common table."""
     import dagua.metrics as metrics

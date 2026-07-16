@@ -117,15 +117,28 @@ def layout_native_community_pipeline(
     del kwargs
     from dagua.layout.graph_classify import label_propagation_communities
     from dagua.layout.ops.pipelines.native_lattice_grid import (
+        _deterministic_fallback_positions,
         _target_edge_length,
+        geodesic_dense_work_is_allowed,
         layout_geodesic_stress_pipeline,
     )
 
     resolved_sep = float(getattr(config, "node_sep", 36.0) or 36.0)
     if num_nodes <= 0:
         return torch.zeros((0, 2), dtype=torch.float32)
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() else 0
 
     def _flat_fallback() -> torch.Tensor:
+        """Return the flat fallback without violating dense-work guards.
+
+        Returns
+        -------
+        torch.Tensor
+            Finite fallback positions with shape ``[N, 2]``.
+        """
+        if not geodesic_dense_work_is_allowed(num_nodes, edge_count):
+            spacing = _target_edge_length(node_sizes, resolved_sep)
+            return _deterministic_fallback_positions(num_nodes, spacing, seed)
         return layout_geodesic_stress_pipeline(
             edge_index=edge_index,
             num_nodes=num_nodes,
@@ -170,15 +183,20 @@ def layout_native_community_pipeline(
             cpu_edges, cpu_weights, member_mask, local_index
         )
         local_sizes = cpu_sizes[members] if cpu_sizes is not None else None
-        internal = layout_geodesic_stress_pipeline(
-            edge_index=local_edges,
-            num_nodes=int(members.numel()),
-            node_sizes=local_sizes,
-            config=config,
-            seed=seed + community,
-            edge_weights=local_weights,
-            node_sep=resolved_sep,
-        )
+        local_count = int(members.numel())
+        local_edge_count = int(local_edges.shape[1]) if local_edges.numel() else 0
+        if not geodesic_dense_work_is_allowed(local_count, local_edge_count):
+            internal = _deterministic_fallback_positions(local_count, spacing, seed + community)
+        else:
+            internal = layout_geodesic_stress_pipeline(
+                edge_index=local_edges,
+                num_nodes=local_count,
+                node_sizes=local_sizes,
+                config=config,
+                seed=seed + community,
+                edge_weights=local_weights,
+                node_sep=resolved_sep,
+            )
         internal = internal - internal.mean(dim=0, keepdim=True)
         positions[members] = internal
         radii = torch.linalg.vector_norm(internal, dim=1)
@@ -232,6 +250,7 @@ def _metagraph_positions(
     """
     from dagua.layout.ops.pipelines.native_lattice_grid import (
         _deterministic_fallback_positions,
+        geodesic_dense_work_is_allowed,
         layout_geodesic_stress_pipeline,
     )
 
@@ -255,6 +274,8 @@ def _metagraph_positions(
     # Heavier coupling means "closer": distance cost 1/sqrt(count) keeps the
     # quotient metric finite and monotone in coupling strength.
     meta_weights = counts.to(dtype=torch.float32).clamp_min(1.0).rsqrt()
+    if not geodesic_dense_work_is_allowed(num_communities, int(meta_edges.shape[1])):
+        return _deterministic_fallback_positions(num_communities, spacing, seed)
     return layout_geodesic_stress_pipeline(
         edge_index=meta_edges,
         num_nodes=num_communities,
