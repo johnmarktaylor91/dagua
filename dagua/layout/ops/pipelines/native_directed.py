@@ -17,6 +17,15 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 MAX_DIRECTED_CONTEST_NODES = 2000
+DIRECTED_FULL_REFEREE_TOP_K = 6
+DIRECTED_FULL_SCORE_MIN_REMAINING_S = 5.0
+DIRECTED_LARGE_NODE_THRESHOLD = 250
+DIRECTED_LARGE_GRID_MIN_REMAINING_S = 240.0
+DIRECTED_GRID_DUMMY_LIMIT = 10_000
+DIRECTED_GRID_WIDTH_LIMIT = 80
+DIRECTED_SUGIYAMA_SIMPLEX_PRIOR_S = 60.0
+DIRECTED_FORCE_PRIOR_S = 90.0
+DIRECTED_PREDICTED_COST_MULTIPLIER = 2.0
 FORCE_SKIP_RATIO_THRESHOLD = 0.3
 SCALED_SUGIYAMA_RANK_SEP = 72.0
 SCALED_SUGIYAMA_NODE_SEP = 18.0
@@ -106,6 +115,177 @@ def _score_directed_candidate_cached(
         return _score_directed_candidate(pos, problem, cluster_ids)
 
 
+def _proxy_directed_candidate(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> float:
+    """Return a cheap directed-table proxy score for challenger shortlisting.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed acyclic layout problem.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    float
+        Higher-is-better proxy composite score.
+    """
+    from dagua.metrics import cluster_silhouette_score, composite_auto, quick
+
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    numeric = quick(
+        cpu_pos,
+        cpu_edges,
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        direction=problem.direction,
+        all_pairs_dist=all_pairs_dist,
+    )
+    if cluster_ids is not None:
+        numeric.update(cluster_silhouette_score(cpu_pos, cluster_ids))
+    numeric["declared_hierarchical"] = True
+    return float(composite_auto(numeric, is_semantically_directed=True))
+
+
+def _directed_candidate_family(candidate_name: str) -> str:
+    """Return the base family for one directed portfolio candidate.
+
+    Parameters
+    ----------
+    candidate_name : str
+        Candidate arm name.
+
+    Returns
+    -------
+    str
+        Family name shared by raw, projected, and convergent cleanup variants.
+    """
+    if candidate_name.endswith("_raw"):
+        return candidate_name[:-4]
+    if candidate_name.endswith("_convergent"):
+        return candidate_name[: -len("_convergent")]
+    return candidate_name
+
+
+def _directed_layer_work_estimate(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> tuple[int, int]:
+    """Estimate dummy expansion and widest rank for directed grid gating.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    tuple[int, int]
+        Estimated dummy-node count for long edges and maximum rank width.
+    """
+    if num_nodes <= 0 or edge_index.numel() == 0:
+        return 0, max(num_nodes, 0)
+    edges = [(int(src), int(dst)) for src, dst in edge_index.t().detach().cpu().tolist()]
+    outgoing: list[list[int]] = [[] for _ in range(num_nodes)]
+    indegree = [0] * num_nodes
+    for src, dst in edges:
+        if src == dst or src < 0 or dst < 0 or src >= num_nodes or dst >= num_nodes:
+            continue
+        outgoing[src].append(dst)
+        indegree[dst] += 1
+    queue = [node for node, degree in enumerate(indegree) if degree == 0]
+    ranks = [0] * num_nodes
+    cursor = 0
+    while cursor < len(queue):
+        src = queue[cursor]
+        cursor += 1
+        for dst in outgoing[src]:
+            ranks[dst] = max(ranks[dst], ranks[src] + 1)
+            indegree[dst] -= 1
+            if indegree[dst] == 0:
+                queue.append(dst)
+    rank_counts: dict[int, int] = {}
+    for rank in ranks:
+        rank_counts[rank] = rank_counts.get(rank, 0) + 1
+    dummy_count = sum(max(ranks[dst] - ranks[src] - 1, 0) for src, dst in edges)
+    return int(dummy_count), max(rank_counts.values(), default=0)
+
+
+def _full_sugiyama_grid_enabled(problem: LayoutProblem, config: LayoutConfig) -> bool:
+    """Return whether the expensive Cartesian Sugiyama grid may run.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed acyclic layout problem.
+    config : LayoutConfig
+        Prepared native configuration carrying optional benchmark deadline.
+
+    Returns
+    -------
+    bool
+        ``True`` when graph size and remaining budget allow the full grid.
+    """
+    n = int(problem.num_nodes)
+    if n < DIRECTED_LARGE_NODE_THRESHOLD:
+        return True
+    dummy_count, max_width = _directed_layer_work_estimate(problem.edge_index, n)
+    if dummy_count > DIRECTED_GRID_DUMMY_LIMIT or max_width > DIRECTED_GRID_WIDTH_LIMIT:
+        return False
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    return _portfolio_has_budget(config, min_remaining_s=DIRECTED_LARGE_GRID_MIN_REMAINING_S)
+
+
+def _predicted_arm_budget_available(
+    config: LayoutConfig,
+    predicted_cost_s: float,
+) -> bool:
+    """Return whether a predicted-cost arm may start before the deadline.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Prepared native configuration carrying optional benchmark deadline.
+    predicted_cost_s : float
+        Estimated wall-clock seconds for the arm.
+
+    Returns
+    -------
+    bool
+        ``True`` when no deadline is known or remaining budget covers twice
+        the predicted cost plus the route's return reserve.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import (
+        ABSOLUTE_DEADLINE_RESERVE_S,
+        _portfolio_remaining_s,
+    )
+
+    remaining = _portfolio_remaining_s(config)
+    if remaining is None:
+        return True
+    required = (
+        DIRECTED_PREDICTED_COST_MULTIPLIER * max(0.0, float(predicted_cost_s))
+        + ABSOLUTE_DEADLINE_RESERVE_S
+    )
+    return float(remaining) > required
+
+
 def _force_challengers_enabled(edge_index: torch.Tensor, num_nodes: int) -> bool:
     """Return whether skip edges or multiedges justify force challengers.
 
@@ -157,6 +337,8 @@ def _register_challenger_variants(
     config: LayoutConfig,
     positions: Dict[str, torch.Tensor],
     preserve_rank_order: bool = False,
+    arm_timings: Optional[Dict[str, Tuple[float, float]]] = None,
+    timing_span: Optional[Tuple[float, float]] = None,
 ) -> None:
     """Register guarded raw and projected variants of one challenger.
 
@@ -175,6 +357,10 @@ def _register_challenger_variants(
     preserve_rank_order : bool, default=False
         Whether projected variants must retain the raw candidate's within-rank
         ordering.
+    arm_timings : dict[str, tuple[float, float]], optional
+        Per-arm timing registry updated when ``timing_span`` is supplied.
+    timing_span : tuple[float, float], optional
+        ``time.perf_counter()`` start/end span for the candidate family.
 
     Returns
     -------
@@ -209,6 +395,8 @@ def _register_challenger_variants(
             _LOGGER.info("Rejected directed candidate %s: %s", variant_name, reason)
             continue
         positions[variant_name] = candidate
+        if arm_timings is not None and timing_span is not None:
+            arm_timings[variant_name] = timing_span
 
 
 def _restore_projected_rank_order(
@@ -284,22 +472,11 @@ def layout_native_directed_portfolio(
     incumbent_config = copy.copy(config)
     setattr(incumbent_config, "_dagua_native_suppress_portfolio", True)
     incumbent_state = SolveState(pos=None if state.pos is None else state.pos.detach().clone())
+    arm_timings: Dict[str, Tuple[float, float]] = {}
+    incumbent_started = time.perf_counter()
     incumbent = _run_native_problem(problem, incumbent_state, ctx, incumbent_config)
+    arm_timings["incumbent"] = (incumbent_started, time.perf_counter())
     n = int(problem.num_nodes)
-    if n > MAX_DIRECTED_CONTEST_NODES:
-        _LOGGER.info(
-            "Directed contest gate=incumbent_only n=%d wall_time_s=%.3f",
-            n,
-            time.perf_counter() - started,
-        )
-        return incumbent
-    if not _portfolio_has_budget(config):
-        _LOGGER.info(
-            "Directed marketplace budget exhausted after incumbent n=%d remaining_s=%s",
-            n,
-            _portfolio_remaining_s(config),
-        )
-        return incumbent
 
     positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
     seed = int(problem.seed) if problem.seed is not None else 42
@@ -317,106 +494,177 @@ def layout_native_directed_portfolio(
         if problem.edge_weights is None
         else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
     )
+    from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+    offsets, targets = _build_csr(cpu_edges, n)
+    all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
+    cluster_ids = _build_cluster_ids(problem)
+    scores: Dict[str, float] = {
+        "incumbent": _score_directed_candidate_cached(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+    }
+    if n > MAX_DIRECTED_CONTEST_NODES:
+        _LOGGER.info(
+            "Directed contest gate=incumbent_only n=%d incumbent_score=%.3f wall_time_s=%.3f",
+            n,
+            scores["incumbent"],
+            time.perf_counter() - started,
+        )
+        return incumbent
+    if not _portfolio_has_budget(config):
+        _LOGGER.info(
+            "Directed marketplace budget exhausted after incumbent n=%d score=%.3f remaining_s=%s",
+            n,
+            scores["incumbent"],
+            _portfolio_remaining_s(config),
+        )
+        return incumbent
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 
-            corrected_cluster_dot_x = layout_sugiyama_pipeline(
-                edge_index=cpu_edges,
-                num_nodes=n,
-                node_sizes=cpu_sizes,
-                rank_sep=SCALED_SUGIYAMA_RANK_SEP,
-                node_sep=SCALED_SUGIYAMA_NODE_SEP,
-                seed=seed,
-                edge_weights=cpu_weights,
-                fidelity_mode="graphviz",
-                clusters=problem.clusters,
-                cluster_parents=problem.cluster_parents,
-                graphviz_apply_cluster_constraints=True,
-                graphviz_corrected_dot_x=True,
-            )
-            if not isinstance(corrected_cluster_dot_x, torch.Tensor):
-                raise RuntimeError("corrected cluster dot-x Sugiyama returned non-position output")
-            _register_challenger_variants(
-                "graphviz_dotx_cluster_corrected",
-                corrected_cluster_dot_x,
-                problem,
-                config,
-                positions,
-                preserve_rank_order=True,
-            )
-            point_unit_dot_x = layout_sugiyama_pipeline(
-                edge_index=cpu_edges,
-                num_nodes=n,
-                node_sizes=cpu_sizes,
-                rank_sep=SCALED_SUGIYAMA_RANK_SEP,
-                node_sep=SCALED_SUGIYAMA_NODE_SEP,
-                seed=seed,
-                edge_weights=cpu_weights,
-                fidelity_mode="graphviz",
-                clusters=problem.clusters,
-                cluster_parents=problem.cluster_parents,
-                graphviz_preserve_point_units=True,
-            )
-            if not isinstance(point_unit_dot_x, torch.Tensor):
-                raise RuntimeError("point-unit dot-x Sugiyama returned non-position output")
-            _register_challenger_variants(
-                "graphviz_dotx_point_units",
-                point_unit_dot_x,
-                problem,
-                config,
-                positions,
-            )
-
-            for mode in ("graphviz_dot", "igraph"):
-                if not _portfolio_has_budget(config):
-                    break
-                candidate = layout_sugiyama_pipeline(
+            candidate_started = time.perf_counter()
+            if not _predicted_arm_budget_available(config, DIRECTED_SUGIYAMA_SIMPLEX_PRIOR_S):
+                _LOGGER.info("Skipped directed cluster dot-x: insufficient predicted budget")
+            else:
+                corrected_cluster_dot_x = layout_sugiyama_pipeline(
                     edge_index=cpu_edges,
                     num_nodes=n,
                     node_sizes=cpu_sizes,
+                    rank_sep=SCALED_SUGIYAMA_RANK_SEP,
+                    node_sep=SCALED_SUGIYAMA_NODE_SEP,
                     seed=seed,
                     edge_weights=cpu_weights,
-                    fidelity_mode=mode,
+                    fidelity_mode="graphviz",
                     clusters=problem.clusters,
                     cluster_parents=problem.cluster_parents,
+                    graphviz_apply_cluster_constraints=True,
+                    graphviz_corrected_dot_x=True,
                 )
-                if not isinstance(candidate, torch.Tensor):
-                    raise RuntimeError(f"{mode} Sugiyama returned non-position output")
-                _register_challenger_variants(mode, candidate, problem, config, positions)
-            # The fixed Cartesian grid is global: every directed graph sees every
-            # fidelity mode and spacing point before the honest referee chooses.
-            for mode in SUGIYAMA_FIDELITY_MODES:
-                for rank_sep in SUGIYAMA_RANK_SEP_GRID:
-                    for node_sep in SUGIYAMA_NODE_SEP_GRID:
-                        if not _portfolio_has_budget(config):
+                if not isinstance(corrected_cluster_dot_x, torch.Tensor):
+                    raise RuntimeError(
+                        "corrected cluster dot-x Sugiyama returned non-position output"
+                    )
+                _register_challenger_variants(
+                    "graphviz_dotx_cluster_corrected",
+                    corrected_cluster_dot_x,
+                    problem,
+                    config,
+                    positions,
+                    preserve_rank_order=True,
+                    arm_timings=arm_timings,
+                    timing_span=(candidate_started, time.perf_counter()),
+                )
+                cluster_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                run_remaining_sugiyama = True
+                if not _predicted_arm_budget_available(config, cluster_cost_s):
+                    _LOGGER.info("Skipped directed point-unit dot-x: insufficient predicted budget")
+                    sibling_cost_s = cluster_cost_s
+                    run_remaining_sugiyama = False
+                else:
+                    candidate_started = time.perf_counter()
+                    point_unit_dot_x = layout_sugiyama_pipeline(
+                        edge_index=cpu_edges,
+                        num_nodes=n,
+                        node_sizes=cpu_sizes,
+                        rank_sep=SCALED_SUGIYAMA_RANK_SEP,
+                        node_sep=SCALED_SUGIYAMA_NODE_SEP,
+                        seed=seed,
+                        edge_weights=cpu_weights,
+                        fidelity_mode="graphviz",
+                        clusters=problem.clusters,
+                        cluster_parents=problem.cluster_parents,
+                        graphviz_preserve_point_units=True,
+                    )
+                    if not isinstance(point_unit_dot_x, torch.Tensor):
+                        raise RuntimeError("point-unit dot-x Sugiyama returned non-position output")
+                    _register_challenger_variants(
+                        "graphviz_dotx_point_units",
+                        point_unit_dot_x,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+
+                    sibling_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                    for mode in ("graphviz_dot", "igraph"):
+                        if not _portfolio_has_budget(config) or not _predicted_arm_budget_available(
+                            config,
+                            sibling_cost_s,
+                        ):
                             break
+                        candidate_started = time.perf_counter()
                         candidate = layout_sugiyama_pipeline(
                             edge_index=cpu_edges,
                             num_nodes=n,
                             node_sizes=cpu_sizes,
-                            rank_sep=rank_sep,
-                            node_sep=node_sep,
                             seed=seed,
                             edge_weights=cpu_weights,
                             fidelity_mode=mode,
                             clusters=problem.clusters,
                             cluster_parents=problem.cluster_parents,
                         )
-                        grid_name = f"{mode}_r{rank_sep:g}_n{node_sep:g}"
                         if not isinstance(candidate, torch.Tensor):
-                            raise RuntimeError(f"{grid_name} Sugiyama returned non-position output")
-                        if mode == "igraph":
-                            # Match the reference adapter's fixed conversion from
-                            # igraph coordinate units into renderer point units.
-                            candidate = candidate * IGRAPH_OUTPUT_SCALE
+                            raise RuntimeError(f"{mode} Sugiyama returned non-position output")
                         _register_challenger_variants(
-                            grid_name,
+                            mode,
                             candidate,
                             problem,
                             config,
                             positions,
+                            arm_timings=arm_timings,
+                            timing_span=(candidate_started, time.perf_counter()),
                         )
+                        sibling_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                if run_remaining_sugiyama and _full_sugiyama_grid_enabled(problem, config):
+                    # The full spacing grid remains exact for small DAGs. At
+                    # n>=250 it runs only when structural expansion and remaining
+                    # budget leave enough space for the already-returnable incumbent.
+                    for mode in SUGIYAMA_FIDELITY_MODES:
+                        for rank_sep in SUGIYAMA_RANK_SEP_GRID:
+                            for node_sep in SUGIYAMA_NODE_SEP_GRID:
+                                if not _portfolio_has_budget(
+                                    config
+                                ) or not _predicted_arm_budget_available(config, sibling_cost_s):
+                                    break
+                                candidate_started = time.perf_counter()
+                                candidate = layout_sugiyama_pipeline(
+                                    edge_index=cpu_edges,
+                                    num_nodes=n,
+                                    node_sizes=cpu_sizes,
+                                    rank_sep=rank_sep,
+                                    node_sep=node_sep,
+                                    seed=seed,
+                                    edge_weights=cpu_weights,
+                                    fidelity_mode=mode,
+                                    clusters=problem.clusters,
+                                    cluster_parents=problem.cluster_parents,
+                                )
+                                grid_name = f"{mode}_r{rank_sep:g}_n{node_sep:g}"
+                                if not isinstance(candidate, torch.Tensor):
+                                    raise RuntimeError(
+                                        f"{grid_name} Sugiyama returned non-position output"
+                                    )
+                                if mode == "igraph":
+                                    # Match the reference adapter's fixed conversion from
+                                    # igraph coordinate units into renderer point units.
+                                    candidate = candidate * IGRAPH_OUTPUT_SCALE
+                                _register_challenger_variants(
+                                    grid_name,
+                                    candidate,
+                                    problem,
+                                    config,
+                                    positions,
+                                    arm_timings=arm_timings,
+                                    timing_span=(candidate_started, time.perf_counter()),
+                                )
+                                sibling_cost_s = max(0.0, time.perf_counter() - candidate_started)
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed Sugiyama challenger failed", exc_info=True)
@@ -427,9 +675,13 @@ def layout_native_directed_portfolio(
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
             from dagua.layout.ops.pipelines.native_undirected import FCOSE_CONTEST_SEEDS
 
+            force_cost_s = DIRECTED_FORCE_PRIOR_S
             for seed_offset in range(FCOSE_CONTEST_SEEDS):
-                if not _portfolio_has_budget(config):
+                if not _portfolio_has_budget(config) or (
+                    n >= 120 and not _predicted_arm_budget_available(config, force_cost_s)
+                ):
                     break
+                candidate_started = time.perf_counter()
                 candidate = layout_fcose_pipeline(
                     edge_index=cpu_edges,
                     num_nodes=n,
@@ -438,38 +690,85 @@ def layout_native_directed_portfolio(
                     edge_weights=cpu_weights,
                 )
                 _register_challenger_variants(
-                    f"fcose_seed{seed_offset}", candidate, problem, config, positions
+                    f"fcose_seed{seed_offset}",
+                    candidate,
+                    problem,
+                    config,
+                    positions,
+                    arm_timings=arm_timings,
+                    timing_span=(candidate_started, time.perf_counter()),
                 )
+                force_cost_s = max(0.0, time.perf_counter() - candidate_started)
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed fCoSE challenger failed", exc_info=True)
         try:
-            if not _portfolio_has_budget(config):
-                raise RuntimeError("directed YifanHu skipped: insufficient remaining budget")
-            from dagua.layout.ops.pipelines.yifanhu import layout_yifanhu_pipeline
+            if not _portfolio_has_budget(config) or (
+                n >= 120 and not _predicted_arm_budget_available(config, DIRECTED_FORCE_PRIOR_S)
+            ):
+                _LOGGER.info("Skipped directed YifanHu: insufficient predicted budget")
+            else:
+                from dagua.layout.ops.pipelines.yifanhu import layout_yifanhu_pipeline
 
-            candidate = layout_yifanhu_pipeline(
-                edge_index=cpu_edges,
-                num_nodes=n,
-                node_sizes=cpu_sizes,
-                seed=123,
-                edge_weights=cpu_weights,
-                direction=problem.direction,
-            )
-            _register_challenger_variants("yifanhu", candidate, problem, config, positions)
+                candidate_started = time.perf_counter()
+                candidate = layout_yifanhu_pipeline(
+                    edge_index=cpu_edges,
+                    num_nodes=n,
+                    node_sizes=cpu_sizes,
+                    seed=123,
+                    edge_weights=cpu_weights,
+                    direction=problem.direction,
+                )
+                _register_challenger_variants(
+                    "yifanhu",
+                    candidate,
+                    problem,
+                    config,
+                    positions,
+                    arm_timings=arm_timings,
+                    timing_span=(candidate_started, time.perf_counter()),
+                )
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed YifanHu challenger failed", exc_info=True)
 
-    from dagua.metrics import _all_pairs_unweighted, _build_csr
-
-    offsets, targets = _build_csr(cpu_edges, n)
-    all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
-    cluster_ids = _build_cluster_ids(problem)
-    scores = {
-        name: _score_directed_candidate_cached(candidate, problem, cluster_ids, all_pairs_dist)
+    proxy_scores = {
+        name: _proxy_directed_candidate(candidate, problem, cluster_ids, all_pairs_dist)
         for name, candidate in positions.items()
     }
+    challenger_names = sorted(
+        (name for name in positions if name != "incumbent"),
+        key=lambda name: (-proxy_scores[name], name),
+    )
+    if n < DIRECTED_LARGE_NODE_THRESHOLD:
+        finalist_names = ["incumbent", *challenger_names]
+    else:
+        admitted_families: list[str] = []
+        for name in challenger_names:
+            family = _directed_candidate_family(name)
+            if family in admitted_families:
+                continue
+            admitted_families.append(family)
+            if len(admitted_families) >= DIRECTED_FULL_REFEREE_TOP_K:
+                break
+        finalist_names = ["incumbent"]
+        finalist_names.extend(
+            name
+            for name in challenger_names
+            if _directed_candidate_family(name) in admitted_families
+        )
+    for name in finalist_names:
+        if name == "incumbent" or name in scores:
+            continue
+        if not _portfolio_has_budget(config, min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S):
+            _LOGGER.info("Skipped directed full score for %s: insufficient return reserve", name)
+            continue
+        scores[name] = _score_directed_candidate_cached(
+            positions[name],
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
     best_name = "incumbent"
     for name, score in scores.items():
         if name != "incumbent" and score > scores[best_name]:
@@ -478,11 +777,12 @@ def layout_native_directed_portfolio(
         route="directed",
         structural_gate="force" if force_gate else "layered",
         positions=positions,
-        proxy_scores=scores,
+        proxy_scores=proxy_scores,
         full_scores=scores,
         finalist_names=list(scores),
         winner_name=best_name,
         started_at=started,
+        arm_timings=arm_timings,
     )
     _LOGGER.info(
         "Directed contest gate=%s candidates=%s winner=%s wall_time_s=%.3f",
