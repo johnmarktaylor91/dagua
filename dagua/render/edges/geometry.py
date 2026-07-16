@@ -289,8 +289,10 @@ def cubic_flatness(curve: CubicBezier) -> float:
     chord_length = vector_norm(chord)
     if chord_length <= FLOAT_EPSILON:
         return max(vector_norm(curve.cp1 - curve.p0), vector_norm(curve.cp2 - curve.p0))
-    distance_1 = abs(np.cross(chord, curve.cp1 - curve.p0)) / chord_length
-    distance_2 = abs(np.cross(chord, curve.cp2 - curve.p0)) / chord_length
+    to_cp1 = curve.cp1 - curve.p0
+    to_cp2 = curve.cp2 - curve.p0
+    distance_1 = abs(chord[0] * to_cp1[1] - chord[1] * to_cp1[0]) / chord_length
+    distance_2 = abs(chord[0] * to_cp2[1] - chord[1] * to_cp2[0]) / chord_length
     return float(max(distance_1, distance_2))
 
 

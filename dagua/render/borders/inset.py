@@ -96,11 +96,11 @@ def _line_intersection(
         Intersection point, or ``None`` for nearly parallel lines.
     """
 
-    denominator = float(np.cross(direction_a, direction_b))
+    denominator = float(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
     if abs(denominator) <= FLOAT_EPSILON:
         return None
     delta = point_b - point_a
-    scale = float(np.cross(delta, direction_b) / denominator)
+    scale = float((delta[0] * direction_b[1] - delta[1] * direction_b[0]) / denominator)
     return point_a + direction_a * scale
 
 
