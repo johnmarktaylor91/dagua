@@ -3898,6 +3898,8 @@ def _normalize_external_label_position(position: str) -> str:
         "bottom": "bottom-center",
         "left": "center-left",
         "right": "center-right",
+        "middle-left": "center-left",
+        "middle-right": "center-right",
     }
     normalized_position = aliases.get(normalized_position, normalized_position)
     if normalized_position in {

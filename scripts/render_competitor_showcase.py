@@ -573,6 +573,8 @@ def _cluster_padding_scene() -> Tuple[DaguaGraph, torch.Tensor]:
             label_offset=(6.0, 7.0),
             font_size=10.0,
             font_color="#1E3A8A",
+            label_background="",
+            label_background_opacity=0.0,
             opacity=1.0,
         ),
     )
@@ -802,7 +804,7 @@ def _graphviz_cluster_svg() -> bytes:
     bytes
         Native Graphviz SVG document.
     """
-    source = r'''
+    source = r"""
 digraph G {
   graph [bgcolor="white", pad="0.25", rankdir="LR"];
   node [shape=ellipse, style=filled, fillcolor="white", color="#1E3A5F",
@@ -819,7 +821,7 @@ digraph G {
     a -> b;
   }
 }
-'''
+"""
     return subprocess.run(
         ["dot", "-Tsvg"],
         input=source.encode("utf-8"),
