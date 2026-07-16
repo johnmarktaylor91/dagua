@@ -1065,6 +1065,35 @@ def _none(length: float, width: float, body_width: float) -> ArrowheadResult:
     )
 
 
+def _cross(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a Mermaid-style X marker centered on the endpoint.
+
+    Parameters
+    ----------
+    length : float
+        Marker extent along the edge direction.
+    width : float
+        Marker extent perpendicular to the edge direction.
+    body_width : float
+        Ribbon body width at the marker.
+
+    Returns
+    -------
+    ArrowheadResult
+        Two stroked diagonal paths forming an X without trimming the body.
+    """
+    half_length = max(length * 0.5, FLOAT_EPSILON)
+    half_width = max(width * 0.5, body_width, FLOAT_EPSILON)
+    ascending = _local_path([(-half_length, -half_width), (half_length, half_width)], closed=False)
+    descending = _local_path([(-half_length, half_width), (half_length, -half_width)], closed=False)
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[ascending, descending],
+        trim_contour=_local_trim_contour(0.0, max(body_width, FLOAT_EPSILON)),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
 ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "normal": PrimitiveSpec("normal", _triangle),
     "inv": PrimitiveSpec("inv", _inverted_triangle),
@@ -1114,6 +1143,7 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "fancy": PrimitiveSpec("fancy", _fancy),
     "wedge": PrimitiveSpec("wedge", _wedge),
     "bracket": PrimitiveSpec("bracket", _bracket, stroke_only=True),
+    "cross": PrimitiveSpec("cross", _cross, stroke_only=True),
     "none": PrimitiveSpec("none", _none),
 }
 

@@ -11,7 +11,7 @@ from matplotlib.collections import LineCollection, PatchCollection
 from dagua.graph import DaguaGraph
 from dagua.render.borders.shapes import GRAPHVIZ_NOTE_FOLD_SIZE, ShapeSpec, note_path
 from dagua.render.edges import available_arrowheads, build_arrowhead
-from dagua.render.edges.arrowheads import graphviz_arrow_fill_mode
+from dagua.render.edges.arrowheads import arrowhead_back_point, graphviz_arrow_fill_mode
 from dagua.render.edges.collection import (
     MIN_TAPER_WIDTH,
     DaguaEdge,
@@ -23,6 +23,7 @@ from dagua.render.edges.collection import (
     _terminal_face,
     _trimmed_body_curve,
     choose_rendering_tier,
+    sample_wavy_curve,
 )
 from dagua.render.edges.dashes import dash_curve, parse_dash_pattern
 from dagua.render.edges.geometry import (
@@ -640,7 +641,7 @@ def test_trimmed_head_preserves_stroke_scale() -> None:
     """Prepared head results should keep their requested stroke-weight multiplier."""
     edge = DaguaEdge(curve=_curve(), width=3.0, stroke_width=3.0, arrowhead="vee")
 
-    _, head_result, _ = _trimmed_body_curve(edge, edge.curve)
+    _, head_result, _, _, _ = _trimmed_body_curve(edge, edge.curve)
 
     assert head_result is not None
     assert head_result.stroke_width_scale > 1.0
@@ -749,6 +750,101 @@ def test_label_rotation_follows_curve_tangent() -> None:
     assert placement.t > 0.0
     assert placement.t < 1.0
     assert placement.angle_degrees != 0.0
+
+
+def test_custom_edge_dash_pattern_splits_visible_body() -> None:
+    """Arbitrary on/off arrays should split the rendered edge body."""
+    edge = DaguaEdge(
+        curve=_curve(),
+        width=2.0,
+        linestyle=(3.0, 2.0, 1.0, 2.0),
+        arrowhead="none",
+    )
+    collection = DaguaEdgeCollection([edge], tier="full")
+    fig, ax = plt.subplots()
+
+    artists = collection.render_bodies(ax)
+
+    assert len(artists) == 1
+    assert len(artists[0].get_paths()) > 2
+    plt.close(fig)
+
+
+def test_edge_label_outline_emits_halo_paths() -> None:
+    """Edge-label outline fields should paint halo geometry behind glyphs."""
+    edge = DaguaEdge(
+        curve=_curve(),
+        arrowhead="none",
+        label="halo",
+        label_outline_color="#FFFFFF",
+        label_outline_width=2.0,
+    )
+    collection = DaguaEdgeCollection([edge])
+    fig, ax = plt.subplots()
+
+    artists = collection.render_labels(ax, display_scale=1.0)
+    gids = {artist.get_gid() for artist in artists}
+
+    assert any(gid is not None and "outline" in gid for gid in gids)
+    assert any(gid == "dagua-edge-label-0" for gid in gids)
+    plt.close(fig)
+
+
+def test_wavy_edge_samples_sinusoidal_centerline() -> None:
+    """Wavy edges should oscillate perpendicular to a straight base path."""
+    straight = CubicBezier.from_points((0.0, 0.0), (20.0, 0.0), (40.0, 0.0), (60.0, 0.0))
+
+    points = sample_wavy_curve(straight, amplitude=3.0, wavelength=15.0)
+
+    assert points[0] == pytest.approx((0.0, 0.0))
+    assert points[-1] == pytest.approx((60.0, 0.0), abs=1e-6)
+    assert float(points[:, 1].max()) == pytest.approx(3.0, rel=0.03)
+    assert float(points[:, 1].min()) == pytest.approx(-3.0, rel=0.03)
+    assert np.count_nonzero(np.diff(np.signbit(points[:, 1]))) >= 7
+
+
+def test_source_and_mid_arrowheads_are_seated_and_target_directed() -> None:
+    """Source and midpoint markers should use their semantic path positions."""
+    straight = CubicBezier.from_points((0.0, 0.0), (20.0, 0.0), (40.0, 0.0), (60.0, 0.0))
+    collection = DaguaEdgeCollection(
+        [
+            DaguaEdge(
+                curve=straight,
+                arrowhead="none",
+                source_arrow="normal",
+                mid_arrow="normal",
+                arrowhead_length=8.0,
+                arrowhead_width=6.0,
+            )
+        ]
+    )
+    prepared = collection.prepared_edges[0]
+
+    assert prepared.source_result is not None
+    assert prepared.mid_result is not None
+    source_tip = prepared.source_result.filled_paths[0].vertices[0]
+    mid_tip = prepared.mid_result.filled_paths[0].vertices[0]
+    assert source_tip == pytest.approx((0.0, 0.0))
+    assert mid_tip == pytest.approx((30.0, 0.0), abs=0.1)
+    assert float(arrowhead_back_point(prepared.source_result)[0]) > 0.0
+    assert float(arrowhead_back_point(prepared.mid_result)[0]) < float(mid_tip[0])
+
+
+def test_cross_arrowhead_registry_and_geometry() -> None:
+    """The Mermaid cross marker should register and render two X diagonals."""
+    assert "cross" in available_arrowheads()
+
+    result = build_arrowhead("cross", tip=(10.0, 5.0), tangent=(-1.0, 0.0), length=8.0, width=8.0)
+
+    assert result.filled_paths == []
+    assert len(result.stroked_paths) == 2
+    slopes = [
+        float(np.diff(path.vertices[:, 1])[0] / np.diff(path.vertices[:, 0])[0])
+        for path in result.stroked_paths
+    ]
+    assert slopes[0] == pytest.approx(-slopes[1])
+    for path in result.stroked_paths:
+        assert path.vertices.mean(axis=0) == pytest.approx((10.0, 5.0))
 
 
 def test_rendering_tier_thresholds_match_spec() -> None:
@@ -923,6 +1019,56 @@ def test_mpl_translation_builds_custom_collection() -> None:
     assert len(collection.edges) == 2
     assert collection.edges[0].linestyle == "dashed"
     assert collection.edges[1].tail_arrow == "dot"
+    plt.close(fig)
+
+
+def test_mpl_translation_maps_cosmetic_edge_features() -> None:
+    """The matplotlib adapter should propagate every new EdgeStyle field."""
+    graph = DaguaGraph.from_edge_list([("a", "b")])
+    graph.edge_labels = ["cosmetic"]
+    graph.edge_styles[0] = EdgeStyle(
+        arrow="cross",
+        source_arrow="diamond",
+        mid_arrow="vee",
+        line_dash_pattern=(4.0, 2.0, 1.0, 2.0),
+        text_outline_color="#FFFFFF",
+        text_outline_width=1.5,
+        label_autorotate=True,
+        line_wave=True,
+        line_wave_amplitude=3.0,
+        line_wave_wavelength=18.0,
+    )
+    graph.compute_node_sizes()
+    curve = type(
+        "Curve",
+        (),
+        {
+            "p0": (0.0, 0.0),
+            "cp1": (15.0, 10.0),
+            "cp2": (35.0, 20.0),
+            "p1": (50.0, 30.0),
+        },
+    )()
+    fig, ax = plt.subplots()
+    ax.set_xlim(-10.0, 60.0)
+    ax.set_ylim(-20.0, 50.0)
+    ax.set_aspect("equal")
+
+    collection = _build_custom_edge_collection(ax, graph, [curve])  # type: ignore[arg-type]
+    edge = collection.edges[0]
+
+    assert not isinstance(edge.linestyle, str)
+    assert len(edge.linestyle) == 4
+    assert edge.source_arrow == "diamond"
+    assert edge.mid_arrow == "vee"
+    assert edge.label_rotate is True
+    assert edge.label_outline_color == "#FFFFFF"
+    assert edge.label_outline_width == pytest.approx(1.5)
+    assert edge.line_wave is True
+    assert edge.line_wave_amplitude > 0.0
+    assert edge.line_wave_wavelength > edge.line_wave_amplitude
+    assert collection.prepared_edges[0].source_result is not None
+    assert collection.prepared_edges[0].mid_result is not None
     plt.close(fig)
 
 
