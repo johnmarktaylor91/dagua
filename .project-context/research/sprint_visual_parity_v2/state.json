@@ -6,10 +6,13 @@
   "max_rounds": 60,
   "next_action_if_dark": "launch S0 by filing the round-0 VLM census before any S1 dial work",
   "phase": "LAUNCHED",
-  "round": "g000",
+  "round": "g003",
   "run": "visual_parity_v2",
   "s0_round0_vlm_census": "audits/audit_g000_sol.md + audits/audit_g000_opus.md (dual-lab, 2026-07-16)",
   "stop_criteria_ref": "RUNBOOK.md#7-stop-criteria-and-ratchets",
   "sub_sprint": "S1",
-  "tripwires_last_pass": "g000"
+  "tripwires_last_pass": "g000",
+  "s1_font_fix": "commit 880c0b7c (fc-match) -- serif confirmed by Sol",
+  "s1_render_size_fix": "commit fa0fe4ed (node size floors) -- ink ratios ~1.0 pixel-verified; mean SSIM 0.638->0.685",
+  "s1_status": "node scale + font matched (pixel-verified). Residual 5 declarative node_autosize_w misses accepted (render matches). Remaining panel gaps -> edges/arrowheads/splines/clusters (S2+)."
 }
