@@ -76,6 +76,22 @@ _ANYTIME_FALLBACK_NODE_SEP_FACTOR = 1.4
 
 
 @dataclass(frozen=True)
+class _AnytimeBestRecord:
+    """Contract-passed position tensor available to deadline exception paths.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Returnable positions with shape ``[N, 2]``.
+    provenance : str
+        Stable label for the milestone that admitted ``pos``.
+    """
+
+    pos: torch.Tensor
+    provenance: str
+
+
+@dataclass(frozen=True)
 class _DotClusterSkeleton:
     """Graphviz-dot cluster skeleton counters for one cluster.
 
@@ -5337,14 +5353,18 @@ def _best_of_polish(
                     incumbent_score_pair,
                     0.05,
                 ):
+                    register_anytime_best = getattr(
+                        config,
+                        "_dagua_native_register_anytime_best",
+                        None,
+                    )
+                    if callable(register_anytime_best):
+                        register_anytime_best(w5_result.winner_pos, "post_w5_accept")
                     candidate_positions.append(w5_result.winner_pos)
                     forced_honest_scores[len(candidate_positions) - 1] = w5_result.winner_score_pair
                     if not use_proxy_search:
                         best_score = scalar_from_pair(w5_result.winner_score_pair)
                         best_pos = w5_result.winner_pos
-                elif not use_proxy_search:
-                    best_pos = w5_result.winner_pos
-                    best_score = scalar_from_pair(w5_result.winner_score_pair)
         except Exception as exc:  # noqa: BLE001 -- W5 is additive and must never sink polish
             if is_worker_timeout_like_exception(exc):
                 raise
@@ -5898,152 +5918,205 @@ def layout_dagua_native_pipeline(
         edge_weights=prepared_edge_weights,
         seed=int(resolved_seed if resolved_seed is not None else 42),
     )
-    if _large_row_anytime_fallback_enabled(
-        prepared_config,
-        num_nodes,
-        int(prepared_edge_index.shape[1]) if prepared_edge_index.ndim == 2 else 0,
-    ):
-        return _anytime_fallback_positions(
-            prepared_edge_index,
-            num_nodes,
-            normalized_node_sizes,
-            problem.structure,
-            target_device,
-        )
-    state = SolveState(pos=prepared_init_pos)
-    ctx = RuntimeContext(
-        plan=ExecutionPlan(
-            device=str(target_device),
-            optimizer_type=optimizer_type,
-        ),
-    )
-    component_ids: Optional[torch.Tensor] = None
-    if (
-        getattr(prepared_config, "decompose_components", True)
-        and num_nodes >= 2
-        and not problem.clusters
-        and not _has_pins(problem.flex)
-    ):
-        component_state = DetectComponents().apply(problem, SolveState(), ctx)
-        component_ids = component_state.component_ids
 
-    full_graph_route = _choose_native_pipeline(problem.structure, prepared_config)
-    if full_graph_route not in {
-        "directed_portfolio",
-        "undirected_portfolio",
-    } and _should_decompose_native_components(problem, prepared_config, component_ids):
-        component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
-        parent_layers = getattr(prepared_config, "_dagua_native_layer_assignments", None)
-        assert component_ids is not None
-        for component_id in torch.unique(component_ids, sorted=True).tolist():
-            component_nodes = torch.nonzero(
-                component_ids == component_id,
-                as_tuple=False,
-            ).squeeze(1)
-            child_problem, child_state, parent_indices, child_layers = _extract_component_problem(
-                problem,
-                state,
-                component_nodes,
-                layer_assignments=parent_layers,
-            )
-            if child_problem.num_nodes <= 1:
-                child_pos = torch.zeros(
-                    (child_problem.num_nodes, 2),
-                    dtype=torch.float32,
-                    device=target_device,
-                )
-            else:
-                child_config = _prepare_native_config(
-                    config=effective_config,
-                    num_nodes=child_problem.num_nodes,
-                    edge_index=child_problem.edge_index,
-                    device=str(target_device),
-                    optimizer_type=optimizer_type,
-                    layer_assignments=child_layers,
-                    prebuilt_layer_index=None,
-                    graph_structure=child_problem.structure,
-                    skip_classification=False,
-                )
-                # component packing is a protected win for cyclic
-                # / general-family children. Allow tree- and
-                # chain-shaped children to re-classify into the dedicated
-                # native_tree fast-path instead of forcing every child
-                # through legacy_monolith. The original blanket override
-                # cost +3.26 on disconnected_label_cycle_collage and small
-                # wins on org_chart_deep, random_dag_50, kitchen_sink_hybrid_net
-                # by preventing simple-component re-classification.
-                child_structure = (
-                    getattr(child_config, "_dagua_native_structure", None)
-                    or child_problem.structure
-                )
-                child_is_simple = child_structure is not None and child_structure.family in {
-                    GraphFamily.TREE,
-                    GraphFamily.CHAIN,
-                }
-                if _selected_force_pipeline(child_config) is None and not child_is_simple:
-                    child_config.force_pipeline = "legacy_monolith"
-                child_pos = _run_native_problem(child_problem, child_state, ctx, child_config)
-            component_results.append((parent_indices, child_pos))
+    def register_anytime_best(pos: torch.Tensor, provenance: str) -> None:
+        """Write the sole deadline-return register with an admitted tensor.
 
-        tiled_positions = _tile_component_positions(
-            component_results,
-            node_sep=float(
-                getattr(prepared_config, "_dagua_native_node_sep", prepared_config.node_sep)
-            ),
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Contract-passed positions with shape ``[N, 2]``.
+        provenance : str
+            Stable label for the admission milestone.
+
+        Returns
+        -------
+        None
+            The prepared config receives the current anytime record.
+        """
+        setattr(
+            prepared_config,
+            "_dagua_native_anytime_best",
+            _AnytimeBestRecord(pos=pos.detach(), provenance=provenance),
         )
-        outer_state = AspectRatioFit(AspectRatioFitConfig()).apply(
-            problem,
-            SolveState(pos=tiled_positions),
-            ctx,
-        )
-        if outer_state.pos is None:
-            raise RuntimeError("dagua_native component tiling did not produce positions.")
-        result = outer_state.pos.detach()
-        # Also polish the per-component-tiled output. Closes
-        # +2.96 on disconnected_label_cycle_collage (the (50, 0.05)
-        # variant lifts depth_spearman by repacking nodes around the
-        # tile centers).
-        if (
-            getattr(effective_config, "edge_equalize_polish", True)
-            and _selected_force_pipeline(effective_config) is None
-            and getattr(effective_config, "time_budget_s", None) is None
-            and result.shape[0] >= 4
-            and prepared_edge_index.numel() > 0
-            and normalized_node_sizes is not None
-        ):
-            contest_structure = problem.structure or classify_graph(
-                prepared_edge_index, problem.num_nodes
-            )
-            is_semantically_directed, declared_hierarchical = _honest_ruler_flags(contest_structure)
-            result = _best_of_polish(
-                result,
+
+    setattr(prepared_config, "_dagua_native_register_anytime_best", register_anytime_best)
+    edge_count = int(prepared_edge_index.shape[1]) if prepared_edge_index.ndim == 2 else 0
+    if _large_row_anytime_fallback_enabled(prepared_config, num_nodes, edge_count):
+        register_anytime_best(
+            _anytime_fallback_positions(
                 prepared_edge_index,
+                num_nodes,
                 normalized_node_sizes,
-                is_semantically_directed=is_semantically_directed,
-                declared_hierarchical=declared_hierarchical,
-                direction_is_declared=bool(
-                    getattr(contest_structure, "direction_is_declared", False)
-                ),
-                direction=prepared_config.direction,
-                polish_battery=str(
-                    getattr(prepared_config, "_dagua_native_polish_battery", "full")
-                ),
-                config=prepared_config,
-            )
-        risk_state = ComponentTilingCrossingRisk(
-            ComponentTilingCrossingRiskConfig(
-                enabled=bool(getattr(prepared_config, "component_tiling_crossing_risk", True))
-            )
-        ).apply(
-            problem,
-            SolveState(
-                pos=result,
-                layers=getattr(prepared_config, "_dagua_native_layer_assignments", None),
+                problem.structure,
+                target_device,
             ),
-            ctx,
+            "prelayout_fallback",
         )
-        if risk_state.pos is not None:
-            result = risk_state.pos.detach()
+
+    def run_pipeline_body() -> torch.Tensor:
+        """Run the real native pipeline after anytime fallback registration.
+
+        Returns
+        -------
+        torch.Tensor
+            Finished native positions with shape ``[N, 2]``.
+        """
+        state = SolveState(pos=prepared_init_pos)
+        ctx = RuntimeContext(
+            plan=ExecutionPlan(
+                device=str(target_device),
+                optimizer_type=optimizer_type,
+            ),
+        )
+        component_ids: Optional[torch.Tensor] = None
+        if (
+            getattr(prepared_config, "decompose_components", True)
+            and num_nodes >= 2
+            and not problem.clusters
+            and not _has_pins(problem.flex)
+        ):
+            component_state = DetectComponents().apply(problem, SolveState(), ctx)
+            component_ids = component_state.component_ids
+
+        full_graph_route = _choose_native_pipeline(problem.structure, prepared_config)
+        if full_graph_route not in {
+            "directed_portfolio",
+            "undirected_portfolio",
+        } and _should_decompose_native_components(problem, prepared_config, component_ids):
+            component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
+            parent_layers = getattr(prepared_config, "_dagua_native_layer_assignments", None)
+            assert component_ids is not None
+            for component_id in torch.unique(component_ids, sorted=True).tolist():
+                component_nodes = torch.nonzero(
+                    component_ids == component_id,
+                    as_tuple=False,
+                ).squeeze(1)
+                (
+                    child_problem,
+                    child_state,
+                    parent_indices,
+                    child_layers,
+                ) = _extract_component_problem(
+                    problem,
+                    state,
+                    component_nodes,
+                    layer_assignments=parent_layers,
+                )
+                if child_problem.num_nodes <= 1:
+                    child_pos = torch.zeros(
+                        (child_problem.num_nodes, 2),
+                        dtype=torch.float32,
+                        device=target_device,
+                    )
+                else:
+                    child_config = _prepare_native_config(
+                        config=effective_config,
+                        num_nodes=child_problem.num_nodes,
+                        edge_index=child_problem.edge_index,
+                        device=str(target_device),
+                        optimizer_type=optimizer_type,
+                        layer_assignments=child_layers,
+                        prebuilt_layer_index=None,
+                        graph_structure=child_problem.structure,
+                        skip_classification=False,
+                    )
+                    # component packing is a protected win for cyclic
+                    # / general-family children. Allow tree- and
+                    # chain-shaped children to re-classify into the dedicated
+                    # native_tree fast-path instead of forcing every child
+                    # through legacy_monolith. The original blanket override
+                    # cost +3.26 on disconnected_label_cycle_collage and small
+                    # wins on org_chart_deep, random_dag_50, kitchen_sink_hybrid_net
+                    # by preventing simple-component re-classification.
+                    child_structure = (
+                        getattr(child_config, "_dagua_native_structure", None)
+                        or child_problem.structure
+                    )
+                    child_is_simple = child_structure is not None and child_structure.family in {
+                        GraphFamily.TREE,
+                        GraphFamily.CHAIN,
+                    }
+                    if _selected_force_pipeline(child_config) is None and not child_is_simple:
+                        child_config.force_pipeline = "legacy_monolith"
+                    child_pos = _run_native_problem(child_problem, child_state, ctx, child_config)
+                component_results.append((parent_indices, child_pos))
+
+            tiled_positions = _tile_component_positions(
+                component_results,
+                node_sep=float(
+                    getattr(prepared_config, "_dagua_native_node_sep", prepared_config.node_sep)
+                ),
+            )
+            outer_state = AspectRatioFit(AspectRatioFitConfig()).apply(
+                problem,
+                SolveState(pos=tiled_positions),
+                ctx,
+            )
+            if outer_state.pos is None:
+                raise RuntimeError("dagua_native component tiling did not produce positions.")
+            result = outer_state.pos.detach()
+            register_anytime_best(result, "post_base_contest")
+            # Also polish the per-component-tiled output. Closes
+            # +2.96 on disconnected_label_cycle_collage (the (50, 0.05)
+            # variant lifts depth_spearman by repacking nodes around the
+            # tile centers).
+            if (
+                getattr(effective_config, "edge_equalize_polish", True)
+                and _selected_force_pipeline(effective_config) is None
+                and getattr(effective_config, "time_budget_s", None) is None
+                and result.shape[0] >= 4
+                and prepared_edge_index.numel() > 0
+                and normalized_node_sizes is not None
+            ):
+                contest_structure = problem.structure or classify_graph(
+                    prepared_edge_index, problem.num_nodes
+                )
+                is_semantically_directed, declared_hierarchical = _honest_ruler_flags(
+                    contest_structure
+                )
+                result = _best_of_polish(
+                    result,
+                    prepared_edge_index,
+                    normalized_node_sizes,
+                    is_semantically_directed=is_semantically_directed,
+                    declared_hierarchical=declared_hierarchical,
+                    direction_is_declared=bool(
+                        getattr(contest_structure, "direction_is_declared", False)
+                    ),
+                    direction=prepared_config.direction,
+                    polish_battery=str(
+                        getattr(prepared_config, "_dagua_native_polish_battery", "full")
+                    ),
+                    config=prepared_config,
+                )
+                register_anytime_best(result, "post_polish_accept")
+            risk_state = ComponentTilingCrossingRisk(
+                ComponentTilingCrossingRiskConfig(
+                    enabled=bool(getattr(prepared_config, "component_tiling_crossing_risk", True))
+                )
+            ).apply(
+                problem,
+                SolveState(
+                    pos=result,
+                    layers=getattr(prepared_config, "_dagua_native_layer_assignments", None),
+                ),
+                ctx,
+            )
+            if risk_state.pos is not None:
+                result = risk_state.pos.detach()
+            if dot_cluster_fidelity:
+                result = _apply_dot_cluster_fidelity_layout(
+                    result,
+                    prepared_edge_index,
+                    normalized_node_sizes,
+                    clusters,
+                    cluster_parents,
+                )
+            return result
+
+        result = _run_native_problem(problem, state, ctx, prepared_config)
+        register_anytime_best(result, "post_base_contest")
         if dot_cluster_fidelity:
             result = _apply_dot_cluster_fidelity_layout(
                 result,
@@ -6054,16 +6127,18 @@ def layout_dagua_native_pipeline(
             )
         return result
 
-    result = _run_native_problem(problem, state, ctx, prepared_config)
-    if dot_cluster_fidelity:
-        result = _apply_dot_cluster_fidelity_layout(
-            result,
-            prepared_edge_index,
-            normalized_node_sizes,
-            clusters,
-            cluster_parents,
+    try:
+        return run_pipeline_body()
+    except Exception as exc:
+        from dagua.layout.ops.pipelines.native_finisher import (
+            is_worker_timeout_like_exception,
         )
-    return result
+
+        if is_worker_timeout_like_exception(exc):
+            anytime_best = getattr(prepared_config, "_dagua_native_anytime_best", None)
+            if anytime_best is not None:
+                return anytime_best.pos.to(device=target_device, dtype=torch.float32)
+        raise
 
 
 __all__ = [

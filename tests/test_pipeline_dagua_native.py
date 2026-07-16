@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.dagua_native import (
+    _anytime_fallback_positions,
     _apply_dot_cluster_fidelity_layout,
     _best_of_polish,
     _build_dot_cluster_skeletons,
@@ -14,6 +17,133 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _is_graphviz_dot_cluster_fidelity_mode,
     layout_dagua_native_pipeline,
 )
+
+
+class _WorkerLayoutTimeoutError(RuntimeError):
+    """Local stand-in for the benchmark worker alarm exception."""
+
+
+def _gate_row_graph() -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Return a connected graph that triggers the old large-row fallback gate.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, int]
+        Edge-index tensor, node-size tensor, and node count.
+    """
+    num_nodes = 250
+    source = torch.arange(700, dtype=torch.long).remainder(num_nodes)
+    target = (source * 37 + 11).remainder(num_nodes)
+    edge_index = torch.stack((source, target), dim=0)
+    node_sizes = torch.full((num_nodes, 2), 2.0)
+    return edge_index, node_sizes, num_nodes
+
+
+def _deadline_gate_config() -> LayoutConfig:
+    """Build a config carrying benchmark-deadline metadata for gate tests.
+
+    Returns
+    -------
+    LayoutConfig
+        Native config that triggers the prelayout fallback registration path.
+    """
+    config = LayoutConfig(
+        steps=1,
+        edge_equalize_polish=False,
+        decompose_components=False,
+        route_flat_to_stress=False,
+        force_pipeline="hybrid",
+    )
+    config._dagua_native_deadline_s = 9999999999.0
+    config._dagua_native_total_budget_s = 300.0
+    return config
+
+
+def test_gate_row_deadline_runs_real_pipeline_not_prelayout_fallback(
+    monkeypatch: Any,
+) -> None:
+    """A deadline-gated large row must not return the deterministic fallback."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    edge_index, node_sizes, num_nodes = _gate_row_graph()
+    real_pipeline_pos = torch.stack(
+        (
+            torch.arange(num_nodes, dtype=torch.float32),
+            torch.arange(num_nodes, dtype=torch.float32) + 1000.0,
+        ),
+        dim=1,
+    )
+
+    def fake_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        config: Any,
+    ) -> torch.Tensor:
+        """Return a distinct finished pipeline tensor for the wired path."""
+        del state, ctx, config
+        return real_pipeline_pos.to(device=problem.edge_index.device)
+
+    monkeypatch.setattr(native, "_run_native_problem", fake_run_native_problem)
+
+    actual = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        config=_deadline_gate_config(),
+        device="cpu",
+    )
+    fallback = _anytime_fallback_positions(
+        edge_index,
+        num_nodes,
+        node_sizes,
+        None,
+        torch.device("cpu"),
+    )
+
+    assert torch.equal(actual, real_pipeline_pos)
+    assert not torch.equal(actual, fallback)
+
+
+def test_worker_timeout_returns_registered_prelayout_fallback(
+    monkeypatch: Any,
+) -> None:
+    """Worker timeout exits return the anytime register, not live optimizer state."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    edge_index, node_sizes, num_nodes = _gate_row_graph()
+
+    def raising_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        config: Any,
+    ) -> torch.Tensor:
+        """Raise the benchmark worker-timeout sentinel after registration."""
+        del problem, state, ctx, config
+        raise _WorkerLayoutTimeoutError("worker layout timeout exceeded")
+
+    monkeypatch.setattr(native, "_run_native_problem", raising_run_native_problem)
+
+    actual = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        config=_deadline_gate_config(),
+        device="cpu",
+    )
+    fallback = _anytime_fallback_positions(
+        edge_index,
+        num_nodes,
+        node_sizes,
+        None,
+        torch.device("cpu"),
+    )
+
+    assert torch.equal(actual, fallback)
+    assert bool(torch.isfinite(actual).all().item())
 
 
 def test_collinear_dodge_moves_blocker_off_skip_edge() -> None:
