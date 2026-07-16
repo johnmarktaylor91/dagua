@@ -163,8 +163,8 @@ def test_cluster_label_background_sentinel_renders_opaque_mask(
     plt.close(fig)
 
 
-def test_graphviz_strict_nested_cluster_labels_mask_strokes() -> None:
-    """Graphviz-strict label masks should sit opaquely above cluster borders."""
+def test_graphviz_strict_empty_label_background_does_not_emit_masks() -> None:
+    """Graphviz-strict labels should use their reserved band without a background patch."""
     graph = DaguaGraph()
     graph._theme = get_theme("graphviz_strict")
     for node_id in ("a", "b", "c"):
@@ -184,22 +184,24 @@ def test_graphviz_strict_nested_cluster_labels_mask_strokes() -> None:
         sizes=np.array([[28.0, 24.0], [28.0, 24.0], [28.0, 24.0]], dtype=float),
     )
 
-    backgrounds = _background_patches(ax)
-    border_zorders = [collection.get_zorder() for collection in ax.collections]
-    assert len(backgrounds) == 2
-    assert border_zorders
-    for patch in backgrounds:
-        assert patch.get_facecolor()[-1] == pytest.approx(1.0)
-        assert any(patch.get_zorder() > border_zorder for border_zorder in border_zorders)
+    assert _background_patches(ax) == []
     plt.close(fig)
 
 
 def test_cluster_label_background_renders_above_node_fills() -> None:
-    """Cluster label masks should stay above node fills when labels overlap nodes."""
+    """Explicit cluster label masks should stay above node fills when labels overlap nodes."""
     graph = DaguaGraph()
     graph._theme = get_theme("graphviz_strict")
     graph.add_node("a")
-    graph.add_cluster("outer", ["a"], label="Outer Group")
+    graph.add_cluster(
+        "outer",
+        ["a"],
+        label="Outer Group",
+        style=ClusterStyle(
+            label_background="@background",
+            label_background_opacity=1.0,
+        ),
+    )
 
     fig, ax = mpl_renderer.render(
         graph,
