@@ -18,8 +18,12 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
+    _directed_mrtree_enabled,
+    _directed_pivot_mds_candidates,
+    _directed_stress_blend_candidates,
     _force_challengers_enabled,
     _full_sugiyama_grid_enabled,
+    _rank_local_zero_crossing_swap_candidate,
     _register_challenger_variants,
     _restore_projected_rank_order,
     _score_directed_candidate,
@@ -127,6 +131,69 @@ def test_directed_portfolio_is_incumbent_monotone() -> None:
     winner_score = _score_directed_candidate(winner_pos, problem, None)
 
     assert winner_score >= incumbent_score
+
+
+def test_directed_narrow_seed_candidates_are_finite() -> None:
+    """W3 narrow directed seeds produce finite non-degenerate layouts."""
+    edge_index = torch.tensor(
+        [[0, 0, 1, 2, 3, 4, 2, 5, 6, 7, 1], [1, 2, 3, 3, 4, 6, 5, 7, 7, 8, 8]],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=9,
+        node_sizes=torch.full((9, 2), 30.0),
+    )
+    incumbent = torch.stack(
+        [torch.arange(9, dtype=torch.float32) * 40.0, torch.arange(9, dtype=torch.float32) * 8.0],
+        dim=1,
+    )
+
+    pivot_candidates = _directed_pivot_mds_candidates(problem, incumbent, node_sep=30.0, seed=42)
+    stress_candidates = _directed_stress_blend_candidates(problem, incumbent, seed=42)
+
+    assert {"pivot_mds", "pivot_mds_rot90", "pivot_mds_flow_blend"} <= set(pivot_candidates)
+    assert {"stress_blend_0.2", "stress_blend_0.4"} == set(stress_candidates)
+    for candidate in [*pivot_candidates.values(), *stress_candidates.values()]:
+        assert candidate.shape == (9, 2)
+        assert bool(torch.isfinite(candidate).all().item())
+        extent = candidate.max(dim=0).values - candidate.min(dim=0).values
+        assert float(extent.max().item()) > 0.0
+
+
+def test_directed_mrtree_and_rank_swap_targets_are_structurally_gated() -> None:
+    """W3 MrTree and rank-local swap candidates cover long-skip DAGs."""
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5],
+            [1, 2, 3, 4, 5, 6, 3, 4, 5, 6, 7, 8],
+        ],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=9,
+        node_sizes=torch.full((9, 2), 20.0),
+    )
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [80.0, 40.0],
+            [20.0, 80.0],
+            [60.0, 120.0],
+            [10.0, 160.0],
+            [90.0, 200.0],
+            [40.0, 240.0],
+            [70.0, 280.0],
+            [30.0, 320.0],
+        ]
+    )
+
+    swapped = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index)
+
+    assert _directed_mrtree_enabled(problem)
+    assert swapped.shape == incumbent.shape
+    assert bool(torch.isfinite(swapped).all().item())
 
 
 def test_directed_incumbent_config_is_not_deadline_weakened(monkeypatch: object) -> None:

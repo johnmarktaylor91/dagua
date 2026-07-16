@@ -27,6 +27,11 @@ DIRECTED_SUGIYAMA_SIMPLEX_PRIOR_S = 60.0
 DIRECTED_FORCE_PRIOR_S = 90.0
 DIRECTED_PREDICTED_COST_MULTIPLIER = 2.0
 FORCE_SKIP_RATIO_THRESHOLD = 0.3
+DIRECTED_NARROW_SEED_NODE_CAP = 128
+DIRECTED_NARROW_SEED_EDGE_CAP = 512
+DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
+DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
+DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
 SCALED_SUGIYAMA_RANK_SEP = 72.0
 SCALED_SUGIYAMA_NODE_SEP = 18.0
 SUGIYAMA_FIDELITY_MODES = ("graphviz_dot", "graphviz", "igraph")
@@ -435,6 +440,364 @@ def _restore_projected_rank_order(
     return out
 
 
+def _directed_rank_profile(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> tuple[list[int], int, float]:
+    """Return longest-path ranks, widest rank, and long-edge ratio.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    tuple[list[int], int, float]
+        Per-node ranks, maximum rank width, and fraction of edges spanning
+        more than one rank.
+    """
+    if num_nodes <= 0:
+        return [], 0, 0.0
+    from dagua.utils import longest_path_layering
+
+    ranks_raw = longest_path_layering(edge_index.detach().to(device="cpu"), num_nodes)
+    rank_values = ranks_raw.tolist() if hasattr(ranks_raw, "tolist") else ranks_raw
+    ranks = [int(value) for value in rank_values]
+    rank_counts: dict[int, int] = {}
+    for rank in ranks:
+        rank_counts[rank] = rank_counts.get(rank, 0) + 1
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() else 0
+    if edge_count == 0:
+        return ranks, max(rank_counts.values(), default=0), 0.0
+    long_edges = 0
+    for src, dst in edge_index.t().detach().cpu().tolist():
+        if 0 <= int(src) < num_nodes and 0 <= int(dst) < num_nodes:
+            long_edges += int(abs(ranks[int(dst)] - ranks[int(src)]) > 1)
+    return ranks, max(rank_counts.values(), default=0), float(long_edges) / float(edge_count)
+
+
+def _normalize_seed_to_point_units(
+    positions: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+    node_sep: float,
+) -> torch.Tensor:
+    """Normalize arbitrary seed coordinates into node-size point units.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Raw candidate coordinates with shape ``[N, 2]``.
+    node_sizes : torch.Tensor, optional
+        Node boxes with shape ``[N, 2]``.
+    node_sep : float
+        Fallback node separation in points.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered and uniformly scaled coordinates with shape ``[N, 2]``.
+    """
+    pos = positions.detach().to(device="cpu", dtype=torch.float32).clone()
+    if pos.numel() == 0:
+        return pos
+    centered = pos - pos.mean(dim=0, keepdim=True)
+    span = float((centered.max(dim=0).values - centered.min(dim=0).values).max().item())
+    if not np.isfinite(span) or span <= 1.0e-6:
+        return torch.zeros_like(centered)
+    if node_sizes is not None and node_sizes.numel() > 0:
+        size_scale = float(
+            torch.linalg.vector_norm(node_sizes.detach().to(dtype=torch.float32), dim=1)
+            .mean()
+            .item()
+        )
+    else:
+        size_scale = float(node_sep)
+    target_span = max(size_scale, float(node_sep), 1.0) * max(1.0, np.sqrt(float(pos.shape[0])))
+    return centered * (target_span / span)
+
+
+def _align_to_incumbent(candidate: torch.Tensor, incumbent: torch.Tensor) -> torch.Tensor:
+    """Orthogonally align a seed to the incumbent scale and centroid.
+
+    Parameters
+    ----------
+    candidate : torch.Tensor
+        Candidate coordinates with shape ``[N, 2]``.
+    incumbent : torch.Tensor
+        Incumbent coordinates with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Candidate transformed into the incumbent coordinate frame.
+    """
+    cand = candidate.detach().to(device="cpu", dtype=torch.float32)
+    ref = incumbent.detach().to(device="cpu", dtype=torch.float32)
+    if cand.shape != ref.shape or cand.shape[0] <= 1:
+        return cand.clone()
+    cand_centered = cand - cand.mean(dim=0, keepdim=True)
+    ref_centered = ref - ref.mean(dim=0, keepdim=True)
+    try:
+        u, _, vh = torch.linalg.svd(cand_centered.t().mm(ref_centered))
+        rotation = u.mm(vh)
+    except RuntimeError:
+        rotation = torch.eye(2, dtype=torch.float32)
+    rotated = cand_centered.mm(rotation)
+    cand_norm = float(torch.linalg.vector_norm(rotated).item())
+    ref_norm = float(torch.linalg.vector_norm(ref_centered).item())
+    if cand_norm > 1.0e-6 and ref_norm > 1.0e-6:
+        rotated = rotated * (ref_norm / cand_norm)
+    return rotated + ref.mean(dim=0, keepdim=True)
+
+
+def _directed_pivot_mds_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    node_sep: float,
+    seed: int,
+) -> dict[str, torch.Tensor]:
+    """Build narrow PivotMDS directed challengers.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Full-scored incumbent positions with shape ``[N, 2]``.
+    node_sep : float
+        Node separation in points for normalization.
+    seed : int
+        Deterministic seed.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate family names mapped to raw positions.
+    """
+    n = int(problem.num_nodes)
+    if n <= 2 or n > DIRECTED_NARROW_SEED_NODE_CAP:
+        return {}
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if edge_count == 0 or edge_count > DIRECTED_NARROW_SEED_EDGE_CAP:
+        return {}
+    from dagua.layout.ops.pipelines.nnpnet_reference import (
+        canonical_adjacency,
+        reference_pmds,
+    )
+
+    cpu_edges = problem.edge_index.detach().to(device="cpu", dtype=torch.long).numpy()
+    adjacency = canonical_adjacency(cpu_edges, n)
+    raw_np = reference_pmds(adjacency, dims=2, pivots=min(64, n), seed=seed)
+    raw = torch.from_numpy(raw_np).to(dtype=torch.float32)
+    normalized = _normalize_seed_to_point_units(raw, problem.node_sizes, node_sep)
+    aligned = _align_to_incumbent(normalized, incumbent)
+    rotated = torch.stack([-normalized[:, 1], normalized[:, 0]], dim=1)
+    rotated = _align_to_incumbent(rotated, incumbent)
+    scaled = _align_to_incumbent(normalized * 0.85, incumbent)
+    flow_blend = incumbent.detach().to(device="cpu", dtype=torch.float32) * 0.85 + aligned * 0.15
+    return {
+        "pivot_mds": aligned,
+        "pivot_mds_rot90": rotated,
+        "pivot_mds_scale085": scaled,
+        "pivot_mds_flow_blend": flow_blend,
+    }
+
+
+def _directed_mrtree_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the DAG is a narrow MrTree exception candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+
+    Returns
+    -------
+    bool
+        ``True`` for small tree-like or long-skip DAGs.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n <= 2 or n > DIRECTED_NARROW_SEED_NODE_CAP or edge_count == 0:
+        return False
+    _, max_width, long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
+    return (
+        float(edge_count) <= DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX * float(n)
+        and max_width <= DIRECTED_MRTREE_MAX_RANK_WIDTH
+        and (
+            long_edge_ratio >= 0.12
+            or edge_count <= max(n, 2)
+            or (max_width <= 3 and edge_count <= 2 * max(n, 2))
+        )
+    )
+
+
+def _directed_stress_blend_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    seed: int,
+) -> dict[str, torch.Tensor]:
+    """Build affine-aligned native-stress blend seed challengers.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Full-scored incumbent positions with shape ``[N, 2]``.
+    seed : int
+        Deterministic seed.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Stress-blend family names mapped to raw positions.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n <= 2 or n > DIRECTED_NARROW_SEED_NODE_CAP or edge_count > DIRECTED_NARROW_SEED_EDGE_CAP:
+        return {}
+    from dagua.layout.ops.pipelines.native_stress import (
+        NativeStressConfig,
+        layout_native_stress_pipeline,
+    )
+
+    stress = layout_native_stress_pipeline(
+        edge_index=problem.edge_index.detach().to(device="cpu"),
+        num_nodes=n,
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        edge_weights=(
+            None
+            if problem.edge_weights is None
+            else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        seed=seed,
+        config=NativeStressConfig(steps=40, late_steps=8, seed=seed, target_unit="points"),
+    )
+    aligned = _align_to_incumbent(stress, incumbent)
+    incumbent_cpu = incumbent.detach().to(device="cpu", dtype=torch.float32)
+    return {
+        f"stress_blend_{weight:g}": incumbent_cpu * (1.0 - weight) + aligned * weight
+        for weight in DIRECTED_STRESS_BLEND_WEIGHTS
+    }
+
+
+def _segments_cross(
+    first_start: torch.Tensor,
+    first_end: torch.Tensor,
+    second_start: torch.Tensor,
+    second_end: torch.Tensor,
+) -> bool:
+    """Return whether two line segments cross at their interiors.
+
+    Parameters
+    ----------
+    first_start : torch.Tensor
+        First segment start coordinate with shape ``[2]``.
+    first_end : torch.Tensor
+        First segment end coordinate with shape ``[2]``.
+    second_start : torch.Tensor
+        Second segment start coordinate with shape ``[2]``.
+    second_end : torch.Tensor
+        Second segment end coordinate with shape ``[2]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the two segments strictly cross.
+    """
+
+    def _orient(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> float:
+        return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+    o1 = _orient(first_start, first_end, second_start)
+    o2 = _orient(first_start, first_end, second_end)
+    o3 = _orient(second_start, second_end, first_start)
+    o4 = _orient(second_start, second_end, first_end)
+    return (o1 * o2 < 0.0) and (o3 * o4 < 0.0)
+
+
+def _exact_crossing_count(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
+    """Count exact non-incident straight-line edge crossings.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    int
+        Number of crossing non-incident edge pairs.
+    """
+    edges = [(int(src), int(dst)) for src, dst in edge_index.t().detach().cpu().tolist()]
+    crossings = 0
+    for left_idx, (src_a, dst_a) in enumerate(edges):
+        for src_b, dst_b in edges[left_idx + 1 :]:
+            if len({src_a, dst_a, src_b, dst_b}) < 4:
+                continue
+            crossings += int(_segments_cross(pos[src_a], pos[dst_a], pos[src_b], pos[dst_b]))
+    return crossings
+
+
+def _rank_local_zero_crossing_swap_candidate(
+    incumbent: torch.Tensor,
+    edge_index: torch.Tensor,
+    max_passes: int = 3,
+) -> torch.Tensor:
+    """Greedily swap within-rank x positions when crossings strictly drop.
+
+    Parameters
+    ----------
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    max_passes : int, default=3
+        Maximum adjacent-swap sweeps.
+
+    Returns
+    -------
+    torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    """
+    pos = incumbent.detach().to(device="cpu", dtype=torch.float32).clone()
+    n = int(pos.shape[0])
+    if n <= 2 or n > DIRECTED_NARROW_SEED_NODE_CAP:
+        return pos
+    ranks, max_width, _ = _directed_rank_profile(edge_index, n)
+    if max_width < 2 or max_width > 32:
+        return pos
+    rank_to_nodes: dict[int, list[int]] = {}
+    for node, rank in enumerate(ranks):
+        rank_to_nodes.setdefault(rank, []).append(node)
+    best_crossings = _exact_crossing_count(pos, edge_index)
+    for _pass in range(max(0, int(max_passes))):
+        changed = False
+        for nodes in rank_to_nodes.values():
+            ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
+            for left, right in zip(ordered, ordered[1:]):
+                candidate = pos.clone()
+                candidate[left, 0], candidate[right, 0] = pos[right, 0], pos[left, 0]
+                crossings = _exact_crossing_count(candidate, edge_index)
+                if crossings < best_crossings:
+                    pos = candidate
+                    best_crossings = crossings
+                    changed = True
+        if not changed or best_crossings == 0:
+            break
+    return pos
+
+
 def layout_native_directed_portfolio(
     problem: LayoutProblem,
     state: SolveState,
@@ -523,6 +886,97 @@ def layout_native_directed_portfolio(
             _portfolio_remaining_s(config),
         )
         return incumbent
+    if _portfolio_has_budget(config, min_remaining_s=2.0):
+        try:
+            node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+            candidate_started = time.perf_counter()
+            for name, candidate in _directed_pivot_mds_candidates(
+                problem,
+                incumbent,
+                node_sep,
+                seed,
+            ).items():
+                _register_challenger_variants(
+                    name,
+                    candidate,
+                    problem,
+                    config,
+                    positions,
+                    arm_timings=arm_timings,
+                    timing_span=(candidate_started, time.perf_counter()),
+                )
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed PivotMDS challenger failed", exc_info=True)
+    if _portfolio_has_budget(config, min_remaining_s=2.0) and _directed_mrtree_enabled(problem):
+        try:
+            from dagua.layout.ops.pipelines.elk_mrtree import layout_elk_mrtree_pipeline
+
+            candidate_started = time.perf_counter()
+            candidate = layout_elk_mrtree_pipeline(
+                edge_index=cpu_edges,
+                num_nodes=n,
+                node_sizes=cpu_sizes,
+                seed=seed,
+                edge_weights=cpu_weights,
+                fidelity_dtype=torch.float32,
+            )
+            _register_challenger_variants(
+                "elk_mrtree",
+                candidate,
+                problem,
+                config,
+                positions,
+                preserve_rank_order=True,
+                arm_timings=arm_timings,
+                timing_span=(candidate_started, time.perf_counter()),
+            )
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed ELK MrTree challenger failed", exc_info=True)
+    if _portfolio_has_budget(config, min_remaining_s=2.0):
+        try:
+            candidate_started = time.perf_counter()
+            for name, candidate in _directed_stress_blend_candidates(
+                problem,
+                incumbent,
+                seed,
+            ).items():
+                _register_challenger_variants(
+                    name,
+                    candidate,
+                    problem,
+                    config,
+                    positions,
+                    arm_timings=arm_timings,
+                    timing_span=(candidate_started, time.perf_counter()),
+                )
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed stress-blend challenger failed", exc_info=True)
+    if _portfolio_has_budget(config, min_remaining_s=2.0):
+        edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+        if n <= DIRECTED_NARROW_SEED_NODE_CAP and edge_count <= DIRECTED_NARROW_SEED_EDGE_CAP:
+            try:
+                candidate_started = time.perf_counter()
+                candidate = _rank_local_zero_crossing_swap_candidate(
+                    incumbent,
+                    problem.edge_index,
+                )
+                if not torch.equal(candidate, incumbent.detach().to(device="cpu")):
+                    _register_challenger_variants(
+                        "rank_local_zero_crossing_swap",
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        preserve_rank_order=True,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+            except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+                _reraise_worker_timeout(exc)
+                _LOGGER.warning("directed rank-local swap challenger failed", exc_info=True)
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
