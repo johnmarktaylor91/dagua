@@ -37,6 +37,7 @@ from dagua.render.edges.arrowheads import (
     ARROWHEAD_ALIASES,
     ARROWHEAD_REGISTRY,
     available_arrowheads,
+    graphviz_arrow_fill_mode,
 )
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle, get_theme
 
@@ -662,7 +663,7 @@ def _make_arrow_types() -> Tuple[DaguaGraph, str]:
         graph.add_node(target, label="target")
         edge_style = EdgeStyle(
             arrow=arrow,
-            arrow_fill="hollow" if arrow in {"circle", "open"} else "filled",
+            arrow_fill=graphviz_arrow_fill_mode(arrow),
             width=1.2,
             label_font_size=10.0,
         )
@@ -811,9 +812,7 @@ def _make_arrowhead_atlas() -> Tuple[DaguaGraph, str]:
             graph.add_node(target, label="")
             edge_style = EdgeStyle(
                 arrow=spec,
-                arrow_fill="hollow"
-                if spec.startswith("o") or spec in {"circle", "open"}
-                else "filled",
+                arrow_fill=graphviz_arrow_fill_mode(spec),
                 width=1.1,
             )
             _add_edge_with_graphviz_attrs(
