@@ -49,11 +49,11 @@ def line_intersection(
     numpy.ndarray | None
         Intersection point, or ``None`` when the lines are nearly parallel.
     """
-    denominator = float(np.cross(direction_a, direction_b))
+    denominator = float(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
     if abs(denominator) <= FLOAT_EPSILON:
         return None
     delta = point_b - point_a
-    t = float(np.cross(delta, direction_b) / denominator)
+    t = float((delta[0] * direction_b[1] - delta[1] * direction_b[0]) / denominator)
     return point_a + direction_a * t
 
 

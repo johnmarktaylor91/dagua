@@ -401,12 +401,12 @@ def _ray_segment_intersection(
         Ray parameter at the intersection, or ``None``.
     """
     segment = b - a
-    denominator = float(np.cross(direction, segment))
+    denominator = float(direction[0] * segment[1] - direction[1] * segment[0])
     if abs(denominator) <= FLOAT_EPSILON:
         return None
     delta = a - origin
-    t = float(np.cross(delta, segment) / denominator)
-    u = float(np.cross(delta, direction) / denominator)
+    t = float((delta[0] * segment[1] - delta[1] * segment[0]) / denominator)
+    u = float((delta[0] * direction[1] - delta[1] * direction[0]) / denominator)
     if t < -FLOAT_EPSILON or u < -FLOAT_EPSILON or u > 1.0 + FLOAT_EPSILON:
         return None
     return t
