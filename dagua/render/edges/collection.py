@@ -1857,18 +1857,21 @@ class DaguaEdgeCollection:
 
         for prepared in self.prepared_edges:
             edge = prepared.edge
-            arrow_color = edge.arrow_color or edge.color
             # Boost arrowhead alpha at low opacity so heads remain readable
             # (matches matplotlib behavior where arrowheads stay more opaque)
             head_alpha = min(edge.alpha + 0.15, 1.0) if edge.alpha < 0.5 else edge.alpha
-            for result in (
-                prepared.head_result,
-                prepared.tail_result,
-                prepared.source_result,
-                prepared.mid_result,
+            for result, marker in (
+                (prepared.head_result, edge.arrowhead),
+                (prepared.tail_result, edge.tail_arrow),
+                (prepared.source_result, edge.source_arrow),
+                (prepared.mid_result, edge.mid_arrow),
             ):
                 if result is None:
                     continue
+                # Cross markers are line-terminal decorations, so their stroke
+                # follows the edge body rather than becoming an independently
+                # colored glyph over the connected node.
+                arrow_color = edge.color if marker == "cross" else edge.arrow_color or edge.color
                 for path in result.filled_paths:
                     filled_patches.append(PathPatch(path))
                     filled_colors.append(to_rgba(arrow_color, head_alpha))

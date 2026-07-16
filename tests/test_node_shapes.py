@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dagua.render.borders.shapes import ShapeSpec, build_shape_path
+from dagua.render.borders.shapes import ShapeSpec, build_shape_path, polygon_vertices
 from dagua.render.edges.intersection import ray_polygon_intersection
 from dagua.utils import compute_node_size
 
@@ -120,6 +120,15 @@ def test_rounded_polygon_paths_curve_every_corner(shape: str, vertex_count: int)
     assert np.count_nonzero(path.codes == path.CURVE3) == vertex_count * 2
     assert np.count_nonzero(path.codes == path.LINETO) == vertex_count - 1
     assert len(path.vertices) == vertex_count * 3 + 1
+
+    base_shape = shape.removeprefix("round_")
+    corners = polygon_vertices(
+        ShapeSpec(center_x=0.0, center_y=0.0, width=100.0, height=80.0, shape=base_shape)
+    )
+    linear_vertices = path.vertices[path.codes == path.LINETO]
+    assert all(
+        not np.any(np.all(np.isclose(linear_vertices, corner), axis=1)) for corner in corners
+    ), "Base-polygon corners must only act as curve controls, never sharp linear joins"
 
 
 @pytest.mark.parametrize(("shape", "vertex_count"), ROUNDED_POLYGON_VERTEX_COUNTS.items())
