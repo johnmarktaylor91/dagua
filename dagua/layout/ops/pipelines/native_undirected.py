@@ -73,6 +73,7 @@ MAX_CONTEST_NODES = 1500
 DEFAULT_CANDIDATE_BUDGET_S = 25.0
 FULL_REFEREE_TOP_K = 8
 MIN_OPTIONAL_ARM_REMAINING_S = 10.0
+ABSOLUTE_DEADLINE_RESERVE_S = 5.0
 MAX_COLLINEAR_WORK = 100_000
 MAX_DENSE_STRESS_NODES = 200
 MAX_DENSE_STRESS_EDGES = 20_000
@@ -193,7 +194,34 @@ def _portfolio_has_budget(
         ``True`` when there is no known deadline or enough remaining budget.
     """
     remaining = _portfolio_remaining_s(config)
-    return remaining is None or remaining > min_remaining_s
+    required_remaining = max(float(min_remaining_s), ABSOLUTE_DEADLINE_RESERVE_S)
+    return remaining is None or remaining > required_remaining
+
+
+def _portfolio_available_work_s(
+    config: Optional[LayoutConfig],
+    reserve_s: float = ABSOLUTE_DEADLINE_RESERVE_S,
+) -> Optional[float]:
+    """Return deadline seconds available before the hard return reserve.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration.
+    reserve_s : float, default=ABSOLUTE_DEADLINE_RESERVE_S
+        Seconds reserved for scoring, cleanup, and returning the best finite
+        layout to the benchmark worker.
+
+    Returns
+    -------
+    Optional[float]
+        Seconds available for additional work, clamped to zero. ``None`` means
+        no benchmark deadline is known.
+    """
+    remaining = _portfolio_remaining_s(config)
+    if remaining is None:
+        return None
+    return max(0.0, float(remaining) - float(reserve_s))
 
 
 def _is_worker_timeout_exception(exc: Exception) -> bool:
@@ -242,6 +270,7 @@ def _log_marketplace_telemetry(
     finalist_names: list[str],
     winner_name: str,
     started_at: float,
+    arm_timings: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> None:
     """Log structured per-arm marketplace telemetry.
 
@@ -263,6 +292,9 @@ def _log_marketplace_telemetry(
         Final winning arm name.
     started_at : float
         Route ``time.perf_counter()`` timestamp.
+    arm_timings : dict[str, tuple[float, float]], optional
+        Per-arm ``time.perf_counter()`` start/end spans. Missing arms fall
+        back to the whole route span for backward compatibility.
 
     Returns
     -------
@@ -275,6 +307,14 @@ def _log_marketplace_telemetry(
     started_wall_time = ended_wall_time - (ended_at - started_at)
     arms = []
     for name in sorted(positions):
+        timing = None if arm_timings is None else arm_timings.get(name)
+        if timing is None:
+            arm_started_at = started_at
+            arm_ended_at = ended_at
+        else:
+            arm_started_at, arm_ended_at = timing
+        arm_started_wall_time = started_wall_time + max(0.0, arm_started_at - started_at)
+        arm_ended_wall_time = started_wall_time + max(0.0, arm_ended_at - started_at)
         full_score = full_scores.get(name)
         if name == winner_name:
             status = "winner"
@@ -290,9 +330,9 @@ def _log_marketplace_telemetry(
                 "name": name,
                 "family": _marketplace_family(name),
                 "structural_gate": structural_gate,
-                "start_wall_time_s": started_wall_time,
-                "end_wall_time_s": ended_wall_time,
-                "wall_time_s": ended_at - started_at,
+                "start_wall_time_s": arm_started_wall_time,
+                "end_wall_time_s": arm_ended_wall_time,
+                "wall_time_s": max(0.0, arm_ended_at - arm_started_at),
                 "raw_score": proxy_scores.get(name),
                 "full_score": full_score,
                 "status": status,

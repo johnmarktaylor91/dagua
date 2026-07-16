@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import time
+from typing import Optional
 
 import torch
 
@@ -11,11 +13,13 @@ from dagua.graph import DaguaGraph
 from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
 from dagua.layout.ops.pipelines.native_directed import (
+    DIRECTED_FULL_REFEREE_TOP_K,
     IGRAPH_OUTPUT_SCALE,
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
     _force_challengers_enabled,
+    _full_sugiyama_grid_enabled,
     _register_challenger_variants,
     _restore_projected_rank_order,
     _score_directed_candidate,
@@ -125,6 +129,48 @@ def test_directed_portfolio_is_incumbent_monotone() -> None:
     assert winner_score >= incumbent_score
 
 
+def test_directed_incumbent_config_is_not_deadline_weakened(monkeypatch: object) -> None:
+    """A benchmark deadline must not alter the exact incumbent solve config."""
+    captured: list[LayoutConfig] = []
+
+    def fake_native_problem(
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Capture the incumbent config and return finite positions."""
+        del state, ctx
+        captured.append(config)
+        return torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Return a tied score so the incumbent remains selected."""
+        del args, kwargs
+        return 1.0
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    config = LayoutConfig(time_budget_s=123.0, multi_start_k=4)
+    config._dagua_native_deadline_s = time.perf_counter() - 1.0
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        num_nodes=2,
+        node_sizes=torch.full((2, 2), 60.0),
+    )
+
+    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), config)
+
+    assert len(captured) == 1
+    assert captured[0].time_budget_s == 123.0
+    assert captured[0].multi_start_k == 4
+    assert getattr(captured[0], "_dagua_native_suppress_portfolio") is True
+    assert not hasattr(captured[0], "_dagua_native_polish_battery")
+    assert not hasattr(captured[0], "_dagua_native_final_projection_iterations")
+
+
 def test_directed_portfolio_adds_uniform_sugiyama_grid(monkeypatch: object) -> None:
     """Every directed graph receives the same mode and spacing grid."""
     calls: list[dict[str, object]] = []
@@ -145,9 +191,11 @@ def test_directed_portfolio_adds_uniform_sugiyama_grid(monkeypatch: object) -> N
         config: LayoutConfig,
         positions: dict[str, torch.Tensor],
         preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
     ) -> None:
         """Record each challenger without invoking overlap projection."""
-        del preserve_rank_order
+        del preserve_rank_order, arm_timings, timing_span
         positions[name] = raw_pos
 
     def fake_score(*args: object) -> float:
@@ -190,3 +238,259 @@ def test_directed_portfolio_adds_uniform_sugiyama_grid(monkeypatch: object) -> N
     }
     assert observed == expected
     assert IGRAPH_OUTPUT_SCALE == 50.0
+
+
+def test_directed_grid_gate_keeps_small_wide_dags() -> None:
+    """Width and dummy structural limits apply only to n>=250 DAGs."""
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 1.0
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=102,
+        node_sizes=torch.full((102, 2), 60.0),
+    )
+
+    assert _full_sugiyama_grid_enabled(problem, config)
+
+
+def test_directed_large_deadline_skips_cartesian_sugiyama_grid(monkeypatch: object) -> None:
+    """Large DAGs under a hard deadline keep only fast Sugiyama arms."""
+    calls: list[dict[str, object]] = []
+    num_nodes = 300
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite incumbent quickly."""
+        del args, kwargs
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Record each Sugiyama solve and return finite positions."""
+        calls.append(kwargs)
+        y = torch.arange(num_nodes, dtype=torch.float32)
+        return torch.stack([torch.zeros_like(y), y * 100.0], dim=1)
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Record one candidate without projection cost."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        positions[name] = raw_pos
+
+    def fake_proxy(*args: object, **kwargs: object) -> float:
+        """Return a tied proxy score."""
+        del args, kwargs
+        return 0.0
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Return a tied full score."""
+        del args, kwargs
+        return 0.0
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(native_directed, "_proxy_directed_candidate", fake_proxy)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    edge_index = torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 130.0
+
+    layout_native_directed_portfolio(
+        LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=torch.full((num_nodes, 2), 60.0),
+        ),
+        SolveState(),
+        RuntimeContext(),
+        config,
+    )
+
+    assert len(calls) == 4
+    assert all("rank_sep" not in call and "node_sep" not in call for call in calls[2:])
+
+
+def test_directed_predicted_cost_skips_second_dotx_arm(monkeypatch: object) -> None:
+    """The point-unit dot-x arm does not start when sibling cost predicts risk."""
+    calls: list[dict[str, object]] = []
+    predictions: list[float] = []
+    num_nodes = 250
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite incumbent quickly."""
+        del args, kwargs
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Record each Sugiyama solve and return finite positions."""
+        calls.append(kwargs)
+        y = torch.arange(num_nodes, dtype=torch.float32)
+        return torch.stack([torch.zeros_like(y), y * 100.0], dim=1)
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Record one candidate without projection cost."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        positions[name] = raw_pos
+
+    def fake_predicted(config: LayoutConfig, predicted_cost_s: float) -> bool:
+        """Allow the first dot-x arm and reject the measured sibling follow-up."""
+        del config
+        predictions.append(predicted_cost_s)
+        return len(predictions) == 1
+
+    def fake_proxy(*args: object, **kwargs: object) -> float:
+        """Return a tied proxy score."""
+        del args, kwargs
+        return 0.0
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Return a tied full score."""
+        del args, kwargs
+        return 0.0
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(native_directed, "_predicted_arm_budget_available", fake_predicted)
+    monkeypatch.setattr(native_directed, "_proxy_directed_candidate", fake_proxy)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    edge_index = torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+
+    layout_native_directed_portfolio(
+        LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=torch.full((num_nodes, 2), 60.0),
+        ),
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["graphviz_corrected_dot_x"] is True
+    assert len(predictions) == 2
+
+
+def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) -> None:
+    """Directed contests quick-score all arms but full-score only challenger finalists."""
+    full_scored: list[float] = []
+    proxy_scored: list[float] = []
+    num_nodes = 250
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the incumbent position."""
+        del args, kwargs
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Return distinct x coordinates so proxy order is deterministic."""
+        rank_sep = float(kwargs.get("rank_sep", len(proxy_scored) + 1.0))
+        node_sep = float(kwargs.get("node_sep", 0.0))
+        value = rank_sep + node_sep * 0.01
+        y = torch.arange(num_nodes, dtype=torch.float32)
+        return torch.stack([torch.full_like(y, value), y * 100.0], dim=1)
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Register one variant per candidate family."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        positions[name] = raw_pos
+
+    def fake_proxy(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        all_pairs_dist: object = None,
+    ) -> float:
+        """Use x coordinate as the proxy score."""
+        del problem, cluster_ids, all_pairs_dist
+        score = float(pos[0, 0].item())
+        proxy_scored.append(score)
+        return score
+
+    def fake_score(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        all_pairs_dist: object = None,
+    ) -> float:
+        """Use x coordinate as the full score."""
+        del problem, cluster_ids, all_pairs_dist
+        score = float(pos[0, 0].item())
+        full_scored.append(score)
+        return score
+
+    def fake_grid_enabled(problem: LayoutProblem, config: LayoutConfig) -> bool:
+        """Force the large-graph test to build enough candidates."""
+        del problem, config
+        return True
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(native_directed, "_proxy_directed_candidate", fake_proxy)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(native_directed, "_full_sugiyama_grid_enabled", fake_grid_enabled)
+    edge_index = torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=torch.full((num_nodes, 2), 60.0),
+    )
+
+    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), LayoutConfig())
+
+    expected_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(SUGIYAMA_RANK_SEP_GRID) * len(
+        SUGIYAMA_NODE_SEP_GRID
+    )
+    assert len(proxy_scored) == expected_candidates + 1
+    assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
