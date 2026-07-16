@@ -35,6 +35,7 @@ from dagua.layout.ops.pipelines.native_community import (
 from dagua.layout.ops.pipelines.native_lattice_grid import (
     certificate_grid_positions,
     certify_rect_grid,
+    geodesic_dense_work_is_allowed,
     layout_geodesic_stress_pipeline,
     layout_native_lattice_grid_pipeline,
 )
@@ -246,6 +247,41 @@ def test_geodesic_stress_is_finite_and_uniform_on_grid() -> None:
     extent = pos.max(dim=0).values - pos.min(dim=0).values
     assert float(extent.min().item()) > 0.0
     assert _edge_length_cv(pos, edge_index) < 0.15
+
+
+def test_geodesic_dense_work_guard_allows_contest_band() -> None:
+    """The dense-work guard permits memory-safe 500-node geodesic callers."""
+    num_nodes = 500
+    edge_index = torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+
+    assert geodesic_dense_work_is_allowed(num_nodes, int(edge_index.shape[1]))
+
+
+def test_geodesic_pipeline_raises_before_dense_work_above_cap() -> None:
+    """The geodesic route refuses oversized dense work without allocation."""
+    num_nodes = 1600
+    edge_index = torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+
+    try:
+        layout_geodesic_stress_pipeline(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=torch.full((num_nodes, 2), 20.0),
+        )
+    except ValueError as exc:
+        assert "geodesic stress" in str(exc)
+    else:  # pragma: no cover - defensive assertion branch
+        raise AssertionError("geodesic dense-work guard did not trip")
 
 
 def test_geodesic_stress_handles_weighted_mesh() -> None:

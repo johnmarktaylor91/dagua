@@ -34,6 +34,7 @@ DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
 SCALED_SUGIYAMA_RANK_SEP = 72.0
 SCALED_SUGIYAMA_NODE_SEP = 18.0
+EXACT_CROSSING_COUNT_VECTOR_PAIR_CAP = 5_000_000
 SUGIYAMA_FIDELITY_MODES = ("graphviz_dot", "graphviz", "igraph")
 SUGIYAMA_RANK_SEP_GRID = (36.0, 72.0, 108.0)
 SUGIYAMA_NODE_SEP_GRID = (18.0, 36.0, 54.0)
@@ -739,6 +740,82 @@ def _exact_crossing_count(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
     int
         Number of crossing non-incident edge pairs.
     """
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    edge_count = int(cpu_edges.shape[1]) if cpu_edges.numel() else 0
+    if edge_count < 2:
+        return 0
+    pair_count = edge_count * (edge_count - 1) // 2
+    if pair_count > EXACT_CROSSING_COUNT_VECTOR_PAIR_CAP:
+        return _exact_crossing_count_loop(pos, cpu_edges)
+
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    src = cpu_edges[0]
+    dst = cpu_edges[1]
+    left, right = torch.triu_indices(edge_count, edge_count, offset=1)
+    src_a = src[left]
+    dst_a = dst[left]
+    src_b = src[right]
+    dst_b = dst[right]
+    non_incident = (src_a != src_b) & (src_a != dst_b) & (dst_a != src_b) & (dst_a != dst_b)
+    if not bool(non_incident.any().item()):
+        return 0
+    src_a = src_a[non_incident]
+    dst_a = dst_a[non_incident]
+    src_b = src_b[non_incident]
+    dst_b = dst_b[non_incident]
+    a = cpu_pos[src_a]
+    b = cpu_pos[dst_a]
+    c = cpu_pos[src_b]
+    d = cpu_pos[dst_b]
+
+    def _orient_batch(
+        first: torch.Tensor,
+        second: torch.Tensor,
+        third: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return batched signed triangle areas for crossing tests.
+
+        Parameters
+        ----------
+        first : torch.Tensor
+            First point batch with shape ``[P, 2]``.
+        second : torch.Tensor
+            Second point batch with shape ``[P, 2]``.
+        third : torch.Tensor
+            Third point batch with shape ``[P, 2]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Signed areas with shape ``[P]``.
+        """
+        return (second[:, 0] - first[:, 0]) * (third[:, 1] - first[:, 1]) - (
+            second[:, 1] - first[:, 1]
+        ) * (third[:, 0] - first[:, 0])
+
+    o1 = _orient_batch(a, b, c)
+    o2 = _orient_batch(a, b, d)
+    o3 = _orient_batch(c, d, a)
+    o4 = _orient_batch(c, d, b)
+    crossings = (o1 * o2 < 0.0) & (o3 * o4 < 0.0)
+    return int(crossings.sum().item())
+
+
+def _exact_crossing_count_loop(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
+    """Count crossings with the pre-vectorized loop implementation.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    int
+        Number of crossing non-incident edge pairs.
+    """
     edges = [(int(src), int(dst)) for src, dst in edge_index.t().detach().cpu().tolist()]
     crossings = 0
     for left_idx, (src_a, dst_a) in enumerate(edges):
@@ -753,6 +830,7 @@ def _rank_local_zero_crossing_swap_candidate(
     incumbent: torch.Tensor,
     edge_index: torch.Tensor,
     max_passes: int = 3,
+    config: Optional[LayoutConfig] = None,
 ) -> torch.Tensor:
     """Greedily swap within-rank x positions when crossings strictly drop.
 
@@ -764,6 +842,8 @@ def _rank_local_zero_crossing_swap_candidate(
         Directed edge tensor with shape ``[2, E]``.
     max_passes : int, default=3
         Maximum adjacent-swap sweeps.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying an optional benchmark deadline.
 
     Returns
     -------
@@ -777,15 +857,29 @@ def _rank_local_zero_crossing_swap_candidate(
     ranks, max_width, _ = _directed_rank_profile(edge_index, n)
     if max_width < 2 or max_width > 32:
         return pos
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
     rank_to_nodes: dict[int, list[int]] = {}
     for node, rank in enumerate(ranks):
         rank_to_nodes.setdefault(rank, []).append(node)
     best_crossings = _exact_crossing_count(pos, edge_index)
     for _pass in range(max(0, int(max_passes))):
+        if not _portfolio_has_budget(config, min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S):
+            break
         changed = False
         for nodes in rank_to_nodes.values():
+            if not _portfolio_has_budget(
+                config,
+                min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S,
+            ):
+                break
             ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
             for left, right in zip(ordered, ordered[1:]):
+                if not _portfolio_has_budget(
+                    config,
+                    min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S,
+                ):
+                    break
                 candidate = pos.clone()
                 candidate[left, 0], candidate[right, 0] = pos[right, 0], pos[left, 0]
                 crossings = _exact_crossing_count(candidate, edge_index)
@@ -962,6 +1056,7 @@ def layout_native_directed_portfolio(
                 candidate = _rank_local_zero_crossing_swap_candidate(
                     incumbent,
                     problem.edge_index,
+                    config=config,
                 )
                 if not torch.equal(candidate, incumbent.detach().to(device="cpu")):
                     _register_challenger_variants(
@@ -1213,9 +1308,6 @@ def layout_native_directed_portfolio(
         )
     for name in finalist_names:
         if name == "incumbent" or name in scores:
-            continue
-        if not _portfolio_has_budget(config, min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S):
-            _LOGGER.info("Skipped directed full score for %s: insufficient return reserve", name)
             continue
         scores[name] = _score_directed_candidate_cached(
             positions[name],
