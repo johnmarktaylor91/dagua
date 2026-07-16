@@ -14,6 +14,7 @@ import torch
 
 from dagua.render.mpl import _density_scaled_node_sizes, density_aware_size_factor
 from dagua.styles import GRAPHVIZ_STRICT_THEME
+from scripts import graphviz_theme_comparison as gthc
 from scripts import parity_metrics as pmetrics
 from scripts.visual_parity.io import read_ledger
 
@@ -263,6 +264,27 @@ def test_known_graphviz_font_stack_residual_has_per_node_waiver() -> None:
     assert width_delta["in_tolerance"] is False
     assert width_delta["waiver"]["scope"] == "mixed_styles.n3.node_autosize_w_pt"
     assert "Pango/CoreText" in width_delta["waiver"]["reason"]
+
+
+@pytest.mark.skipif(shutil.which("dot") is None, reason="Graphviz dot is required")
+def test_fill_atlas_declarations_match_graphviz_svg() -> None:
+    """Every fill-atlas node should match its SVG-declared mechanism."""
+
+    graph, _ = gthc._make_fill_atlas()
+    reference = pmetrics.extract_reference_fill_declarations(pmetrics.render_reference_svg(graph))
+    candidate = pmetrics.extract_candidate_features(graph).fill_declarations
+
+    assert len(reference) == graph.num_nodes
+    assert {declaration.pattern for declaration in reference.values()} == {
+        "solid",
+        "linear",
+        "radial",
+        "striped",
+        "wedged",
+    }
+    for node_id, target in reference.items():
+        deltas = pmetrics._fill_declaration_deltas(target, candidate[node_id])
+        assert not pmetrics._flag_out_of_tolerance(deltas), node_id
 
 
 def test_ledger_locked_feature_missing_is_failure(tmp_path: Path) -> None:
