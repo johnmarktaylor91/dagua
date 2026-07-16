@@ -16,5 +16,7 @@
   "s1_render_size_fix": "commit fa0fe4ed (node size floors) -- ink ratios ~1.0 pixel-verified; mean SSIM 0.638->0.685",
   "s1_status": "node scale + font matched (pixel-verified). Residual 5 declarative node_autosize_w misses accepted (render matches). Remaining panel gaps -> edges/arrowheads/splines/clusters (S2+).",
   "s3_arrow_fix": "commit 82c83489 -- arrow_width_pt 82.64->100%, arrow_length_pt 90.68->100%, overall 96.37%",
-  "ssim_floor_analysis": "mean SSIM 0.685 floored by: arrowhead_atlas 0.20 (170 fixture label mismatches), shape_atlas 0.46 (flat shapes), cluster_nest_deep 0.43 / dense_graph 0.54 (dense/cluster). Standard panels 0.80-0.92 = good parity."
+  "ssim_floor_analysis": "mean SSIM 0.685 floored by: arrowhead_atlas 0.20 (170 fixture label mismatches), shape_atlas 0.46 (flat shapes), cluster_nest_deep 0.43 / dense_graph 0.54 (dense/cluster). Standard panels 0.80-0.92 = good parity.",
+  "session_milestone": "2026-07-16 devmini: core cosmetic parity ACHIEVED+verified (font/node-size/arrowheads). Declarative 88.21->96.37%. See SUMMARY.md.",
+  "vlm_over_read_finding": "All 3 VLMs (Opus/Sol/Fable) over-read residual gaps; pixel+declarative verification is authoritative. Do NOT chase VLM residuals without pixel-verifying."
 }
