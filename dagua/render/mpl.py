@@ -1126,12 +1126,6 @@ def _cluster_style_for_render(graph: Any, cluster_name: str) -> ClusterStyle:
         Render-local cluster style. The graph's stored style is not mutated.
     """
     style = graph.get_style_for_cluster(cluster_name)
-    if _is_graphviz_strict_render(graph) and not str(getattr(style, "label_background", "")):
-        style = replace(
-            style,
-            label_background="@background",
-            label_background_opacity=1.0,
-        )
     background_color = str(graph.graph_style.background_color)
     if not _should_auto_contrast(graph, background_color):
         return style
