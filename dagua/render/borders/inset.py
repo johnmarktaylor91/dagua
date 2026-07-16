@@ -272,6 +272,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             shape=spec.shape,
             corner_radius=add_corner_radius(spec.corner_radius, -inset),
             aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
         )
         return build_shape_path(inner_spec)
     if spec.shape in {
@@ -292,6 +293,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             shape=spec.shape,
             corner_radius=spec.corner_radius,
             aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
         )
         return build_shape_path(inner_spec)
     try:
@@ -307,6 +309,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             shape=spec.shape,
             corner_radius=spec.corner_radius,
             aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
         )
         return build_shape_path(inner_spec)
     if spec.shape == "star":

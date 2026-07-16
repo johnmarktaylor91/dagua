@@ -55,6 +55,9 @@ class ShapeSpec:
     aspect_ratio : float | None, default=None
         Optional shape-specific aspect ratio hint. Semicircle variants use
         this to tune their dome curvature while keeping the flat edge fixed.
+    polygon_points : list[tuple[float, float]] | None, default=None
+        Custom polygon vertices in Cytoscape's centered unit coordinates,
+        where each axis spans ``-1`` to ``1`` across the node box.
     """
 
     center_x: float
@@ -64,6 +67,7 @@ class ShapeSpec:
     shape: str
     corner_radius: CornerRadius = 0.0
     aspect_ratio: Optional[float] = None
+    polygon_points: Optional[List[Tuple[float, float]]] = None
 
 
 def scale_corner_radius(corner_radius: CornerRadius, scale: float) -> CornerRadius:
@@ -382,6 +386,18 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
     y = float(spec.center_y)
     width = float(spec.width)
     height = float(spec.height)
+    if spec.shape == "polygon":
+        if spec.polygon_points is None or len(spec.polygon_points) < 3:
+            raise ValueError("Custom polygon shapes require at least three polygon_points.")
+        unit_points = np.asarray(spec.polygon_points, dtype=np.float64)
+        if unit_points.ndim != 2 or unit_points.shape[1] != 2:
+            raise ValueError("polygon_points must contain two-coordinate vertices.")
+        return np.column_stack(
+            (
+                x + unit_points[:, 0] * width / 2.0,
+                y + unit_points[:, 1] * height / 2.0,
+            )
+        )
     if spec.shape in {"diamond", "Mdiamond"}:
         return np.array(
             [
@@ -1742,6 +1758,7 @@ def build_shape_path(spec: ShapeSpec) -> Path:
             shape=rounded_polygon_bases[shape],
             corner_radius=0.0,
             aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
         )
         radius = min(max(float(spec.width), 0.0), max(float(spec.height), 0.0))
         radius *= ROUNDED_POLYGON_RADIUS_FRACTION
@@ -1794,6 +1811,8 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return box3d_path(spec)
     if shape == "arrow":
         return arrow_path(spec)
+    if shape == "polygon":
+        return closed_path_from_vertices(polygon_vertices(spec))
     if shape == "assembly":
         return assembly_path(spec)
     if shape == "promoter":
@@ -1843,6 +1862,7 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         shape="roundrect",
         corner_radius=spec.corner_radius,
         aspect_ratio=spec.aspect_ratio,
+        polygon_points=spec.polygon_points,
     )
     return build_shape_path(fallback)
 

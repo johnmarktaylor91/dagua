@@ -35,11 +35,6 @@ from dagua.edges import (
     preferred_edge_label_position,
     route_edges,
 )
-from dagua.layout.ops.cluster_geometry import (
-    ClusterLabelMetrics,
-    ClusterPlacementBox,
-    compute_cluster_placement_bbox,
-)
 from dagua.render._backend import _render_via_cairosvg, stroke_width_scale_for
 from dagua.render.borders import (
     GRAPHVIZ_COMPONENT_DETAIL,
@@ -1528,26 +1523,25 @@ def _expand_bounds_for_external_labels(
         offset = float(style.external_label_offset)
         position = _normalize_external_label_position(style.external_label_position)
 
-        if position == "top":
-            anchor_y = cy + half_height + offset
-            x_min = min(x_min, cx - label_width / 2.0)
-            x_max = max(x_max, cx + label_width / 2.0)
-            y_max = max(y_max, anchor_y + label_height)
-        elif position == "left":
-            anchor_x = cx - half_width - offset
-            x_min = min(x_min, anchor_x - label_width)
-            y_min = min(y_min, cy - label_height / 2.0)
-            y_max = max(y_max, cy + label_height / 2.0)
-        elif position == "right":
-            anchor_x = cx + half_width + offset
-            x_max = max(x_max, anchor_x + label_width)
-            y_min = min(y_min, cy - label_height / 2.0)
-            y_max = max(y_max, cy + label_height / 2.0)
-        else:
-            anchor_y = cy - half_height - offset
-            x_min = min(x_min, cx - label_width / 2.0)
-            x_max = max(x_max, cx + label_width / 2.0)
-            y_min = min(y_min, anchor_y - label_height)
+        text_x, text_y, ha, va = _external_label_anchor(
+            cx, cy, half_width, half_height, offset, position
+        )
+        label_x_min = text_x - label_width if ha == "right" else text_x
+        if ha == "center":
+            label_x_min = text_x - label_width / 2.0
+        label_x_max = text_x + label_width if ha == "left" else text_x
+        if ha == "center":
+            label_x_max = text_x + label_width / 2.0
+        label_y_min = text_y - label_height if va == "top" else text_y
+        if va == "center":
+            label_y_min = text_y - label_height / 2.0
+        label_y_max = text_y + label_height if va == "bottom" else text_y
+        if va == "center":
+            label_y_max = text_y + label_height / 2.0
+        x_min = min(x_min, label_x_min)
+        x_max = max(x_max, label_x_max)
+        y_min = min(y_min, label_y_min)
+        y_max = max(y_max, label_y_max)
 
     return x_min, x_max, y_min, y_max
 
@@ -3895,18 +3889,88 @@ def _normalize_external_label_position(position: str) -> str:
     Parameters
     ----------
     position : str
-        Requested label side.
+        Requested label position. Underscores and legacy four-way names are
+        accepted as aliases.
 
     Returns
     -------
     str
-        One of ``"top"``, ``"bottom"``, ``"left"``, or ``"right"``. Invalid
-        values fall back to ``"bottom"``.
+        One of the nine row-column positions. Invalid values fall back to
+        ``"bottom-center"``.
     """
     normalized_position = str(position).replace("_", "-")
-    if normalized_position in {"top", "bottom", "left", "right"}:
+    aliases = {
+        "top": "top-center",
+        "bottom": "bottom-center",
+        "left": "center-left",
+        "right": "center-right",
+    }
+    normalized_position = aliases.get(normalized_position, normalized_position)
+    if normalized_position in {
+        "top-left",
+        "top-center",
+        "top-right",
+        "center-left",
+        "center",
+        "center-right",
+        "bottom-left",
+        "bottom-center",
+        "bottom-right",
+    }:
         return normalized_position
-    return "bottom"
+    return "bottom-center"
+
+
+def _external_label_anchor(
+    center_x: float,
+    center_y: float,
+    half_width: float,
+    half_height: float,
+    offset: float,
+    position: str,
+) -> Tuple[float, float, str, str]:
+    """Return the anchor and alignment for a nine-position external label.
+
+    Parameters
+    ----------
+    center_x : float
+        Node center x-coordinate.
+    center_y : float
+        Node center y-coordinate.
+    half_width : float
+        Half of the node width.
+    half_height : float
+        Half of the node height.
+    offset : float
+        Clearance outside the selected node sides.
+    position : str
+        Normalized nine-position label token.
+
+    Returns
+    -------
+    tuple[float, float, str, str]
+        Text x/y anchor followed by Matplotlib horizontal and vertical
+        alignment values.
+    """
+
+    row, separator, column = position.partition("-")
+    if not separator:
+        row = column = "center"
+
+    if column == "left":
+        text_x, horizontal_alignment = center_x - half_width - offset, "right"
+    elif column == "right":
+        text_x, horizontal_alignment = center_x + half_width + offset, "left"
+    else:
+        text_x, horizontal_alignment = center_x, "center"
+
+    if row == "top":
+        text_y, vertical_alignment = center_y + half_height + offset, "bottom"
+    elif row == "bottom":
+        text_y, vertical_alignment = center_y - half_height - offset, "top"
+    else:
+        text_y, vertical_alignment = center_y, "center"
+    return text_x, text_y, horizontal_alignment, vertical_alignment
 
 
 def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
@@ -3935,6 +3999,7 @@ def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
         shape=spec.shape,
         corner_radius=add_corner_radius(spec.corner_radius, delta),
         aspect_ratio=spec.aspect_ratio,
+        polygon_points=spec.polygon_points,
     )
 
 
@@ -4832,12 +4897,42 @@ class _ClusterRenderBox:
     ----------
     bbox : tuple[float, float, float, float]
         Rendered cluster bounds as ``(x_min, y_min, x_max, y_max)``.
-    padding : float
-        Effective cluster padding in render data units.
+    paddings : tuple[float, float, float, float]
+        Effective ``(top, right, bottom, left)`` paddings in render data units.
     """
 
     bbox: Tuple[float, float, float, float]
-    padding: float
+    paddings: Tuple[float, float, float, float]
+
+
+def _cluster_side_paddings(style: ClusterStyle, depth: int) -> Tuple[float, float, float, float]:
+    """Return effective top, right, bottom, and left cluster paddings.
+
+    Parameters
+    ----------
+    style : ClusterStyle
+        Cluster style with a shared padding and optional side overrides.
+    depth : int
+        Cluster nesting depth used for the shared-padding depth adjustment.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Effective ``(top, right, bottom, left)`` paddings. Explicit side values
+        replace the depth-adjusted shared padding on their corresponding side.
+    """
+
+    depth_step = float(getattr(style, "depth_padding_step", -3.0))
+    shared = max(float(style.padding) + int(depth) * depth_step, 0.0)
+    return tuple(
+        shared if value is None else max(float(value), 0.0)
+        for value in (
+            style.padding_top,
+            style.padding_right,
+            style.padding_bottom,
+            style.padding_left,
+        )
+    )
 
 
 def _graphviz_strict_cluster_top_cap(
@@ -4948,12 +5043,12 @@ def _compute_cluster_y_maxes(
 
         style = _cluster_style_for_render(graph, name)
         depth = cluster_depths.get(name, 0)
-        padding = float(style.padding)
+        padding_top, _, padding_bottom, _ = _cluster_side_paddings(style, 0)
         label_text = graph.cluster_labels.get(name, name)
         member_pos = pos[indices]
         member_sizes = sizes[indices]
         raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max())
-        raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()) - padding
+        raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()) - padding_bottom
 
         for child_name, parent_name in cluster_parents.items():
             if parent_name == name and child_name in cluster_y_maxes:
@@ -4984,77 +5079,9 @@ def _compute_cluster_y_maxes(
             if _cluster_label_expands_top(str(style.label_position))
             else 0.0
         )
-        bbox = _cluster_bbox_from_inner_bounds(
-            x_min=float((member_pos[:, 0] - member_sizes[:, 0] / 2).min()),
-            y_min=float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()),
-            x_max=float((member_pos[:, 0] + member_sizes[:, 0] / 2).max()),
-            y_max=raw_y_max,
-            label_width=0.0,
-            label_height=label_height,
-            padding=padding,
-            label_band=label_band,
-        )
-        if _cluster_label_expands_top(str(style.label_position)):
-            cluster_y_maxes[name] = bbox.label_band_y_extent[0]
-        else:
-            cluster_y_maxes[name] = bbox.inner_bbox[3] + padding
+        cluster_y_maxes[name] = raw_y_max + padding_top + label_band
 
     return cluster_y_maxes
-
-
-def _cluster_bbox_from_inner_bounds(
-    x_min: float,
-    y_min: float,
-    x_max: float,
-    y_max: float,
-    label_width: float,
-    label_height: float,
-    padding: float,
-    label_band: float,
-) -> ClusterPlacementBox:
-    """Return shared cluster geometry for precomputed render bounds.
-
-    Parameters
-    ----------
-    x_min : float
-        Inner content left bound.
-    y_min : float
-        Inner content bottom bound.
-    x_max : float
-        Inner content right bound.
-    y_max : float
-        Inner content top bound.
-    label_width : float
-        Measured label width in render data units.
-    label_height : float
-        Measured label height in render data units.
-    padding : float
-        Cluster side padding in render data units.
-    label_band : float
-        Top label band to reserve in render data units.
-
-    Returns
-    -------
-    ClusterPlacementBox
-        Shared bbox helper result for the supplied render bounds.
-    """
-    inner_width = max(float(x_max) - float(x_min), 0.0)
-    inner_height = max(float(y_max) - float(y_min), 0.0)
-    inner_positions = torch.tensor(
-        [[float(x_min) + inner_width / 2.0, float(y_min) + inner_height / 2.0]],
-        dtype=torch.float64,
-    )
-    inner_sizes = torch.tensor([[inner_width, inner_height]], dtype=torch.float64)
-    return compute_cluster_placement_bbox(
-        inner_positions=inner_positions,
-        inner_sizes=inner_sizes,
-        label_metrics=ClusterLabelMetrics(
-            label_width_pt=float(label_width),
-            label_height_pt=float(label_height),
-        ),
-        side_padding_pt=float(padding),
-        label_band_pt=float(label_band),
-    )
 
 
 def _cluster_min_render_height(
@@ -5171,25 +5198,32 @@ def _compute_cluster_render_bboxes(
 
         style = _cluster_style_for_render(graph, name)
         depth = cluster_depths.get(name, 0)
-        depth_padding_step = getattr(style, "depth_padding_step", -3.0)
-        padding = max(float(style.padding) + depth * float(depth_padding_step), 5.0)
+        padding_top, padding_right, padding_bottom, padding_left = _cluster_side_paddings(
+            style, depth
+        )
+        padding_top = max(padding_top, 5.0) if style.padding_top is None else padding_top
+        padding_right = max(padding_right, 5.0) if style.padding_right is None else padding_right
+        padding_bottom = (
+            max(padding_bottom, 5.0) if style.padding_bottom is None else padding_bottom
+        )
+        padding_left = max(padding_left, 5.0) if style.padding_left is None else padding_left
         member_pos = pos[indices]
         member_sizes = sizes[indices]
 
-        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
-        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
+        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding_left)
+        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding_right)
         base_x_min = x_min
         base_x_max = x_max
         y_min = float(
             cluster_y_mins.get(
                 name,
-                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
+                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding_bottom,
             )
         )
         y_max = float(
             cluster_y_maxes.get(
                 name,
-                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
+                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding_top,
             )
         )
 
@@ -5252,7 +5286,7 @@ def _compute_cluster_render_bboxes(
 
         boxes[name] = _ClusterRenderBox(
             bbox=(float(x_min), float(y_min), float(x_max), float(y_max)),
-            padding=float(padding),
+            paddings=(padding_top, padding_right, padding_bottom, padding_left),
         )
 
     for child_name in reversed(ordered_clusters):
@@ -5263,15 +5297,16 @@ def _compute_cluster_render_bboxes(
             continue
         px_min, py_min, px_max, py_max = parent.bbox
         cx_min, cy_min, cx_max, cy_max = child.bbox
-        containment_padding = max(min(parent.padding, child.padding), 1e-6)
+        parent_top, parent_right, parent_bottom, parent_left = parent.paddings
+        child_top, child_right, child_bottom, child_left = child.paddings
         boxes[parent_name] = _ClusterRenderBox(
             bbox=(
-                min(px_min, cx_min - containment_padding),
-                min(py_min, cy_min - containment_padding),
-                max(px_max, cx_max + containment_padding),
-                max(py_max, cy_max + containment_padding),
+                min(px_min, cx_min - max(min(parent_left, child_left), 1e-6)),
+                min(py_min, cy_min - max(min(parent_bottom, child_bottom), 1e-6)),
+                max(px_max, cx_max + max(min(parent_right, child_right), 1e-6)),
+                max(py_max, cy_max + max(min(parent_top, child_top), 1e-6)),
             ),
-            padding=parent.padding,
+            paddings=parent.paddings,
         )
 
     return boxes
@@ -5323,11 +5358,11 @@ def _compute_cluster_y_mins(
 
         style = _cluster_style_for_render(graph, name)
         depth = cluster_depths.get(name, 0)
-        padding = float(style.padding)
+        padding_top, _, padding_bottom, _ = _cluster_side_paddings(style, 0)
         label_text = graph.cluster_labels.get(name, name)
         member_pos = pos[indices]
         member_sizes = sizes[indices]
-        raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()) + padding
+        raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()) + padding_top
         raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min())
 
         for child_name, parent_name in cluster_parents.items():
@@ -5359,20 +5394,7 @@ def _compute_cluster_y_mins(
             if _cluster_label_expands_bottom(str(style.label_position))
             else 0.0
         )
-        bbox = _cluster_bbox_from_inner_bounds(
-            x_min=float((member_pos[:, 0] - member_sizes[:, 0] / 2).min()),
-            y_min=raw_y_min,
-            x_max=float((member_pos[:, 0] + member_sizes[:, 0] / 2).max()),
-            y_max=float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()),
-            label_width=0.0,
-            label_height=label_height,
-            padding=padding,
-            label_band=label_band,
-        )
-        if _cluster_label_expands_bottom(str(style.label_position)):
-            cluster_y_mins[name] = bbox.inner_bbox[1] - padding - label_band
-        else:
-            cluster_y_mins[name] = bbox.inner_bbox[1] - padding
+        cluster_y_mins[name] = raw_y_min - padding_bottom - label_band
 
     return cluster_y_mins
 
@@ -5709,6 +5731,7 @@ def _draw_nodes(
             shape=str(style.shape),
             corner_radius=corner_radius,
             aspect_ratio=style.aspect_ratio,
+            polygon_points=style.polygon_points,
         )
         outer_path = build_shape_path(shape_spec)
         fill_path = _node_fill_path(shape_spec, outer_path, border_width, border_position)
@@ -6009,6 +6032,7 @@ def _draw_shadow(
         shape=str(style.shape),
         corner_radius=corner_radius,
         aspect_ratio=getattr(style, "aspect_ratio", None),
+        polygon_points=getattr(style, "polygon_points", None),
     )
     for idx in range(steps, 0, -1):
         scale = 1.0 + (0.01 * style.shadow_blur * idx)
@@ -6021,6 +6045,7 @@ def _draw_shadow(
             shape=base_shape_spec.shape,
             corner_radius=scale_corner_radius(base_shape_spec.corner_radius, scale),
             aspect_ratio=base_shape_spec.aspect_ratio,
+            polygon_points=base_shape_spec.polygon_points,
         )
         shadow = PathPatch(
             build_shape_path(shadow_spec),
@@ -9212,6 +9237,11 @@ def _draw_external_labels(
         Node sizes with shape ``[N, 2]``.
     svg_hover_map : dict[str, str], optional
         SVG hover text accumulator.
+
+    Returns
+    -------
+    None
+        Adds external-label artists to ``ax``.
     """
     display_scale = _compute_display_scale(ax)
     specs: List[DaguaText] = []
@@ -9237,26 +9267,9 @@ def _draw_external_labels(
             font_weight=font_weight,
         )
 
-        if position == "top":
-            text_x = cx
-            text_y = cy + half_height + offset
-            ha = "center"
-            va = "bottom"
-        elif position == "left":
-            text_x = cx - half_width - offset
-            text_y = cy
-            ha = "right"
-            va = "center"
-        elif position == "right":
-            text_x = cx + half_width + offset
-            text_y = cy
-            ha = "left"
-            va = "center"
-        else:
-            text_x = cx
-            text_y = cy - half_height - offset
-            ha = "center"
-            va = "top"
+        text_x, text_y, ha, va = _external_label_anchor(
+            cx, cy, half_width, half_height, offset, position
+        )
 
         specs.append(
             DaguaText(
