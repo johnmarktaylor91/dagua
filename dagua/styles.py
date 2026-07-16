@@ -69,6 +69,224 @@ PALETTE_ORDER: List[str] = [
     "#F0E442",  # yellow
 ]
 
+# Common ColorBrewer schemes exposed by Graphviz's ``colorscheme`` attribute.
+# Indices are one-based, matching Graphviz rather than Python sequence indexing.
+COLOR_SCHEMES: Dict[str, Tuple[str, ...]] = {
+    "accent8": (
+        "#7fc97f",
+        "#beaed4",
+        "#fdc086",
+        "#ffff99",
+        "#386cb0",
+        "#f0027f",
+        "#bf5b17",
+        "#666666",
+    ),
+    "blues9": (
+        "#f7fbff",
+        "#deebf7",
+        "#c6dbef",
+        "#9ecae1",
+        "#6baed6",
+        "#4292c6",
+        "#2171b5",
+        "#08519c",
+        "#08306b",
+    ),
+    "dark28": (
+        "#1b9e77",
+        "#d95f02",
+        "#7570b3",
+        "#e7298a",
+        "#66a61e",
+        "#e6ab02",
+        "#a6761d",
+        "#666666",
+    ),
+    "greens9": (
+        "#f7fcf5",
+        "#e5f5e0",
+        "#c7e9c0",
+        "#a1d99b",
+        "#74c476",
+        "#41ab5d",
+        "#238b45",
+        "#006d2c",
+        "#00441b",
+    ),
+    "greys9": (
+        "#ffffff",
+        "#f0f0f0",
+        "#d9d9d9",
+        "#bdbdbd",
+        "#969696",
+        "#737373",
+        "#525252",
+        "#252525",
+        "#000000",
+    ),
+    "oranges9": (
+        "#fff5eb",
+        "#fee6ce",
+        "#fdd0a2",
+        "#fdae6b",
+        "#fd8d3c",
+        "#f16913",
+        "#d94801",
+        "#a63603",
+        "#7f2704",
+    ),
+    "paired12": (
+        "#a6cee3",
+        "#1f78b4",
+        "#b2df8a",
+        "#33a02c",
+        "#fb9a99",
+        "#e31a1c",
+        "#fdbf6f",
+        "#ff7f00",
+        "#cab2d6",
+        "#6a3d9a",
+        "#ffff99",
+        "#b15928",
+    ),
+    "pastel19": (
+        "#fbb4ae",
+        "#b3cde3",
+        "#ccebc5",
+        "#decbe4",
+        "#fed9a6",
+        "#ffffcc",
+        "#e5d8bd",
+        "#fddaec",
+        "#f2f2f2",
+    ),
+    "pastel28": (
+        "#b3e2cd",
+        "#fdcdac",
+        "#cbd5e8",
+        "#f4cae4",
+        "#e6f5c9",
+        "#fff2ae",
+        "#f1e2cc",
+        "#cccccc",
+    ),
+    "purples9": (
+        "#fcfbfd",
+        "#efedf5",
+        "#dadaeb",
+        "#bcbddc",
+        "#9e9ac8",
+        "#807dba",
+        "#6a51a3",
+        "#54278f",
+        "#3f007d",
+    ),
+    "rdbu11": (
+        "#67001f",
+        "#b2182b",
+        "#d6604d",
+        "#f4a582",
+        "#fddbc7",
+        "#f7f7f7",
+        "#d1e5f0",
+        "#92c5de",
+        "#4393c3",
+        "#2166ac",
+        "#053061",
+    ),
+    "reds9": (
+        "#fff5f0",
+        "#fee0d2",
+        "#fcbba1",
+        "#fc9272",
+        "#fb6a4a",
+        "#ef3b2c",
+        "#cb181d",
+        "#a50f15",
+        "#67000d",
+    ),
+    "set19": (
+        "#e41a1c",
+        "#377eb8",
+        "#4daf4a",
+        "#984ea3",
+        "#ff7f00",
+        "#ffff33",
+        "#a65628",
+        "#f781bf",
+        "#999999",
+    ),
+    "set28": (
+        "#66c2a5",
+        "#fc8d62",
+        "#8da0cb",
+        "#e78ac3",
+        "#a6d854",
+        "#ffd92f",
+        "#e5c494",
+        "#b3b3b3",
+    ),
+    "set312": (
+        "#8dd3c7",
+        "#ffffb3",
+        "#bebada",
+        "#fb8072",
+        "#80b1d3",
+        "#fdb462",
+        "#b3de69",
+        "#fccde5",
+        "#d9d9d9",
+        "#bc80bd",
+        "#ccebc5",
+        "#ffed6f",
+    ),
+    "spectral11": (
+        "#9e0142",
+        "#d53e4f",
+        "#f46d43",
+        "#fdae61",
+        "#fee08b",
+        "#ffffbf",
+        "#e6f598",
+        "#abdda4",
+        "#66c2a5",
+        "#3288bd",
+        "#5e4fa2",
+    ),
+}
+
+
+def resolve_color_scheme(color: str, color_scheme: str) -> str:
+    """Resolve a Graphviz ColorBrewer index to a hexadecimal color.
+
+    Parameters
+    ----------
+    color : str
+        Color value, optionally a one-based integer index.
+    color_scheme : str
+        Graphviz ColorBrewer scheme name, such as ``"oranges9"``.
+
+    Returns
+    -------
+    str
+        Resolved hexadecimal color, or the original value when the scheme or
+        index is unsupported.
+    """
+
+    scheme_name = str(color_scheme).strip().strip("/").lower()
+    palette = COLOR_SCHEMES.get(scheme_name)
+    if palette is None:
+        return color
+    try:
+        index = int(str(color).strip())
+    except ValueError:
+        return color
+    if 1 <= index <= len(palette):
+        return palette[index - 1]
+    return color
+
+
 # Neutrals
 NEAR_BLACK = "#2D2D2D"
 DARK_GRAY = "#4A4A4A"
@@ -111,6 +329,7 @@ _STYLE_REPR_PRIORITY_FIELDS: Dict[str, List[str]] = {
 }
 
 NODE_SHAPE_NAMES: Tuple[str, ...] = (
+    "polygon",
     "rect",
     "roundrect",
     "arrow",
@@ -325,6 +544,8 @@ class NodeStyle:
     """
 
     shape: str = "roundrect"
+    polygon_points: Optional[List[Tuple[float, float]]] = None
+    color_scheme: str = ""
     fill: str = ""  # empty = computed from base_color
     fill_opacity: float = 1.0  # render-only opacity of the fill layer
     stroke: str = ""  # empty = computed from base_color
@@ -389,7 +610,7 @@ class NodeStyle:
     text_background_padding: Tuple[float, float] = (3.0, 2.0)
     text_background_corner_radius: float = 2.0
     external_label: str = ""  # render-only label outside the node boundary
-    external_label_position: str = "bottom"  # render-only: top, bottom, left, right
+    external_label_position: str = "bottom-center"  # render-only 3x3 anchor position
     external_label_font_size: float = 8.0  # render-only size in points
     external_label_font_color: str = ""  # render-only; empty = use font_color
     external_label_offset: float = 4.0  # render-only distance from boundary in points
@@ -444,10 +665,44 @@ class NodeStyle:
     bevel: bool = False  # render-only highlight/shadow overlay
     bevel_intensity: float = 0.5  # render-only 0-1 bevel strength
 
-    def __post_init__(self):
-        """Populate derived defaults after dataclass initialization."""
+    def __post_init__(self) -> None:
+        """Populate derived defaults after dataclass initialization.
+
+        Returns
+        -------
+        None
+            Indexed colors and computed defaults are applied in place.
+        """
         object.__setattr__(self, "_set_fields", set())
         object.__setattr__(self, "_init_done", False)
+        if self.color_scheme:
+            for field_name in (
+                "fill",
+                "stroke",
+                "font_color",
+                "outline_color",
+                "text_outline_color",
+                "text_shadow_color",
+                "text_background",
+                "gradient_color",
+                "base_color",
+                "external_label_font_color",
+                "shadow_color",
+            ):
+                value = getattr(self, field_name)
+                if value:
+                    object.__setattr__(
+                        self, field_name, resolve_color_scheme(str(value), self.color_scheme)
+                    )
+            if self.fill_pattern_colors is not None:
+                object.__setattr__(
+                    self,
+                    "fill_pattern_colors",
+                    [
+                        resolve_color_scheme(value, self.color_scheme)
+                        for value in self.fill_pattern_colors
+                    ],
+                )
         if not self.fill:
             self.fill = make_fill(self.base_color)
         if not self.stroke:
@@ -482,6 +737,7 @@ class NodeStyle:
 class EdgeStyle:
     """Visual style for an edge."""
 
+    color_scheme: str = ""
     color: str = "#6B7280"  # medium gray — visible but recedes behind nodes
     width: float = 1.4
     width_override_points: Optional[float] = field(
@@ -554,6 +810,30 @@ class EdgeStyle:
     port_indicator_size: float = 5.0  # indicator radius/half-size in points
     port_indicator_color: str = ""  # empty = use edge color
 
+    def __post_init__(self) -> None:
+        """Resolve indexed Graphviz colors after dataclass initialization.
+
+        Returns
+        -------
+        None
+            Color-bearing fields are updated in place.
+        """
+
+        if not self.color_scheme:
+            return
+        for field_name in (
+            "color",
+            "arrow_color",
+            "label_font_color",
+            "label_background",
+            "text_outline_color",
+            "color_gradient_end",
+            "port_indicator_color",
+        ):
+            value = getattr(self, field_name)
+            if value:
+                setattr(self, field_name, resolve_color_scheme(str(value), self.color_scheme))
+
     def __repr__(self) -> str:
         """Return a compact repr showing only non-default fields."""
         return _compact_style_repr(self)
@@ -585,6 +865,10 @@ class ClusterStyle:
     stroke_dash: str = "solid"
     corner_radius: float = 8.0
     padding: float = 38.0
+    padding_top: Optional[float] = None
+    padding_right: Optional[float] = None
+    padding_bottom: Optional[float] = None
+    padding_left: Optional[float] = None
     # inside: top-left/top-center/top-right, bottom-left/bottom-center/bottom-right
     # outside: outside-top/outside-bottom
     label_position: str = "top-left"
