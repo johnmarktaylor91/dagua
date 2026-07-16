@@ -6,7 +6,7 @@
   "max_rounds": 60,
   "next_action_if_dark": "launch S0 by filing the round-0 VLM census before any S1 dial work",
   "phase": "LAUNCHED",
-  "round": "g004",
+  "round": "g005",
   "run": "visual_parity_v2",
   "s0_round0_vlm_census": "audits/audit_g000_sol.md + audits/audit_g000_opus.md (dual-lab, 2026-07-16)",
   "stop_criteria_ref": "RUNBOOK.md#7-stop-criteria-and-ratchets",
@@ -18,5 +18,7 @@
   "s3_arrow_fix": "commit 82c83489 -- arrow_width_pt 82.64->100%, arrow_length_pt 90.68->100%, overall 96.37%",
   "ssim_floor_analysis": "mean SSIM 0.685 floored by: arrowhead_atlas 0.20 (170 fixture label mismatches), shape_atlas 0.46 (flat shapes), cluster_nest_deep 0.43 / dense_graph 0.54 (dense/cluster). Standard panels 0.80-0.92 = good parity.",
   "session_milestone": "2026-07-16 devmini: core cosmetic parity ACHIEVED+verified (font/node-size/arrowheads). Declarative 88.21->96.37%. See SUMMARY.md.",
-  "vlm_over_read_finding": "All 3 VLMs (Opus/Sol/Fable) over-read residual gaps; pixel+declarative verification is authoritative. Do NOT chase VLM residuals without pixel-verifying."
+  "vlm_over_read_finding": "All 3 VLMs (Opus/Sol/Fable) over-read residual gaps; pixel+declarative verification is authoritative. Do NOT chase VLM residuals without pixel-verifying.",
+  "shapes_common": "commit 1401e681 -- 11 shapes, shape_path_iou 47/47=100%, overall 99.86%",
+  "program": "full parity push: see PROGRAM_STATE.md; S8 scoped in S8_competitor_plan.md"
 }
