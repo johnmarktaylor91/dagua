@@ -13,9 +13,15 @@ from numpy.typing import NDArray
 FloatArray = NDArray[np.float64]
 CornerRadius = Union[float, Tuple[float, float, float, float]]
 ELLIPSE_KAPPA = 0.5522847498
-# Increased to ``0.45`` so the folded corner remains legible after downscaling
-# and thin strokes still separate the fold line from the outer outline.
-NOTE_FOLD_SIZE_RATIO = 0.45
+GRAPHVIZ_COMPONENT_DETAIL = 4.0
+GRAPHVIZ_FOLDER_TAB_HEIGHT = 4.0
+GRAPHVIZ_FOLDER_TAB_WIDTH = 27.0
+GRAPHVIZ_M_CIRCLE_CHORD_RATIO = 0.75
+GRAPHVIZ_M_CORNER_MARK_LENGTH = 12.0
+GRAPHVIZ_NOTE_FOLD_SIZE = 6.0
+GRAPHVIZ_OCTAGON_PERIPHERY_GAP = 4.0
+GRAPHVIZ_TAB_HEIGHT = 4.0
+GRAPHVIZ_TAB_WIDTH = 12.0
 SEMICIRCLE_DEFAULT_CURVATURE = 1.0
 SEMICIRCLE_MIN_CURVATURE = 1e-6
 
@@ -265,6 +271,87 @@ def star_vertices(center_x: float, center_y: float, width: float, height: float)
     return np.asarray(points, dtype=np.float64)
 
 
+def graphviz_octagon_vertices(spec: ShapeSpec, offset: float = 0.0) -> FloatArray:
+    """Return Graphviz octagon vertices with an optional outward offset.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Base octagon bounds in data units.
+    offset : float, default=0.0
+        Perpendicular outward distance from every base edge.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clockwise vertices with shape ``[8, 2]``.
+    """
+
+    x = float(spec.center_x)
+    y = float(spec.center_y)
+    width = float(spec.width)
+    height = float(spec.height)
+    corner_ratio = 1.0 - 1.0 / np.sqrt(2.0)
+    corner_x = width * corner_ratio
+    corner_y = height * corner_ratio
+    left = x - width / 2.0
+    right = x + width / 2.0
+    bottom = y - height / 2.0
+    top = y + height / 2.0
+    vertices = np.array(
+        [
+            [left + corner_x, top],
+            [right - corner_x, top],
+            [right, top - corner_y],
+            [right, bottom + corner_y],
+            [right - corner_x, bottom],
+            [left + corner_x, bottom],
+            [left, bottom + corner_y],
+            [left, top - corner_y],
+        ],
+        dtype=np.float64,
+    )
+    if offset <= 0.0:
+        return vertices
+
+    offset_vertices: List[FloatArray] = []
+    for index, point in enumerate(vertices):
+        previous_point = vertices[(index - 1) % len(vertices)]
+        next_point = vertices[(index + 1) % len(vertices)]
+        incoming = point - previous_point
+        outgoing = next_point - point
+        incoming_normal = _normalize_vector(np.array([-incoming[1], incoming[0]]))
+        outgoing_normal = _normalize_vector(np.array([-outgoing[1], outgoing[0]]))
+        shifted_incoming = point + incoming_normal * offset
+        shifted_outgoing = point + outgoing_normal * offset
+        matrix = np.column_stack([incoming, -outgoing])
+        if abs(float(np.linalg.det(matrix))) <= np.finfo(np.float64).eps:
+            offset_vertices.append((shifted_incoming + shifted_outgoing) / 2.0)
+            continue
+        parameters = np.linalg.solve(matrix, shifted_outgoing - shifted_incoming)
+        offset_vertices.append(shifted_incoming + incoming * parameters[0])
+    return np.vstack(offset_vertices)
+
+
+def graphviz_octagon_path(spec: ShapeSpec, offset: float = 0.0) -> Path:
+    """Return a Graphviz octagon path at one periphery offset.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Base octagon bounds in data units.
+    offset : float, default=0.0
+        Perpendicular outward distance from every base edge.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed octagon path.
+    """
+
+    return closed_path_from_vertices(graphviz_octagon_vertices(spec, offset))
+
+
 def polygon_vertices(spec: ShapeSpec) -> FloatArray:
     """Return polygon vertices for polygonal node shapes.
 
@@ -288,7 +375,7 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
     y = float(spec.center_y)
     width = float(spec.width)
     height = float(spec.height)
-    if spec.shape == "diamond":
+    if spec.shape in {"diamond", "Mdiamond"}:
         return np.array(
             [
                 [x, y + height / 2.0],
@@ -298,14 +385,50 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
             ],
             dtype=np.float64,
         )
+    if spec.shape == "Msquare":
+        side = max(width, height)
+        half_side = side / 2.0
+        return np.array(
+            [
+                [x - half_side, y + half_side],
+                [x + half_side, y + half_side],
+                [x + half_side, y - half_side],
+                [x - half_side, y - half_side],
+            ],
+            dtype=np.float64,
+        )
     if spec.shape == "triangle":
         return triangle_vertices(x, y, width, height)
     if spec.shape == "hexagon":
         return regular_polygon_vertices(6, x, y, width, height)
     if spec.shape == "pentagon":
         return regular_polygon_vertices(5, x, y, width, height)
+    if spec.shape in {"house", "invhouse"}:
+        # Graphviz normalizes the regular pentagon horizontally to the node
+        # box while retaining its regular-polygon vertical coordinates.
+        shoulder_y = height * 0.1545084972
+        base_y = -height * 0.4045084972
+        vertices = np.array(
+            [
+                [x, y + height / 2.0],
+                [x + width / 2.0, y + shoulder_y],
+                [x + width / 2.0, y + base_y],
+                [x - width / 2.0, y + base_y],
+                [x - width / 2.0, y + shoulder_y],
+            ],
+            dtype=np.float64,
+        )
+        if spec.shape == "invhouse":
+            vertices[:, 1] = 2.0 * y - vertices[:, 1]
+        return vertices
     if spec.shape == "octagon":
         return regular_polygon_vertices(8, x, y, width, height, rotation=np.pi / 8.0)
+    if spec.shape in {"doubleoctagon", "tripleoctagon"}:
+        periphery_count = 2 if spec.shape == "doubleoctagon" else 3
+        return graphviz_octagon_vertices(
+            spec,
+            GRAPHVIZ_OCTAGON_PERIPHERY_GAP * (periphery_count - 1),
+        )
     if spec.shape == "star":
         return star_vertices(x, y, width, height)
     if spec.shape == "parallelogram":
@@ -1062,10 +1185,8 @@ def tab_path(spec: ShapeSpec) -> Path:
     right = spec.center_x + half_width
     bottom = spec.center_y - half_height
     top = spec.center_y + half_height
-    # Tuned from ``0.30 / 0.20`` so the tab survives small-card rendering and
-    # reads as a folder tab instead of a tiny notch.
-    tab_width = spec.width * 0.38
-    tab_height = spec.height * 0.28
+    tab_width = min(GRAPHVIZ_TAB_WIDTH, spec.width)
+    tab_height = min(GRAPHVIZ_TAB_HEIGHT, spec.height / 2.0)
     vertices = np.array(
         [
             [left, bottom],
@@ -1091,7 +1212,7 @@ def note_path(spec: ShapeSpec) -> Path:
     Returns
     -------
     matplotlib.path.Path
-        Compound path with an outer outline and inner fold line.
+        Closed note silhouette. The renderer draws the interior fold lines.
     """
 
     half_width = spec.width / 2.0
@@ -1100,8 +1221,7 @@ def note_path(spec: ShapeSpec) -> Path:
     right = spec.center_x + half_width
     bottom = spec.center_y - half_height
     top = spec.center_y + half_height
-    # Oversize the fold slightly so it survives thin strokes and card downscaling.
-    fold = min(half_width, half_height) * NOTE_FOLD_SIZE_RATIO
+    fold = min(GRAPHVIZ_NOTE_FOLD_SIZE, half_width, half_height)
     outer = closed_path_from_vertices(
         np.array(
             [
@@ -1114,17 +1234,84 @@ def note_path(spec: ShapeSpec) -> Path:
             dtype=np.float64,
         )
     )
-    fold_line = open_path_from_vertices(
+    return outer
+
+
+def folder_path(spec: ShapeSpec) -> Path:
+    """Return Graphviz's rectangular folder with a raised right tab.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed folder silhouette.
+    """
+
+    left = spec.center_x - spec.width / 2.0
+    right = spec.center_x + spec.width / 2.0
+    bottom = spec.center_y - spec.height / 2.0
+    top = spec.center_y + spec.height / 2.0
+    tab_width = min(GRAPHVIZ_FOLDER_TAB_WIDTH, spec.width)
+    tab_height = min(GRAPHVIZ_FOLDER_TAB_HEIGHT, spec.height / 2.0)
+    slope_width = min(3.0, tab_width / 2.0)
+    return closed_path_from_vertices(
         np.array(
             [
-                [right - fold, top],
-                [right - fold, top - fold],
-                [right, top - fold],
+                [left, bottom],
+                [right, bottom],
+                [right, top],
+                [right - slope_width, top + tab_height],
+                [right - tab_width + slope_width, top + tab_height],
+                [right - tab_width, top],
+                [left, top],
             ],
             dtype=np.float64,
         )
     )
-    return Path.make_compound_path(outer, fold_line)
+
+
+def component_path(spec: ShapeSpec) -> Path:
+    """Return Graphviz's component box with two left-side lugs.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed component silhouette.
+    """
+
+    left = spec.center_x - spec.width / 2.0
+    right = spec.center_x + spec.width / 2.0
+    bottom = spec.center_y - spec.height / 2.0
+    top = spec.center_y + spec.height / 2.0
+    detail = min(GRAPHVIZ_COMPONENT_DETAIL, spec.height / 8.0, spec.width / 4.0)
+    return closed_path_from_vertices(
+        np.array(
+            [
+                [left, top],
+                [right, top],
+                [right, bottom],
+                [left, bottom],
+                [left, bottom + detail],
+                [left - detail, bottom + detail],
+                [left - detail, bottom + 2.0 * detail],
+                [left, bottom + 2.0 * detail],
+                [left, top - 2.0 * detail],
+                [left - detail, top - 2.0 * detail],
+                [left - detail, top - detail],
+                [left, top - detail],
+            ],
+            dtype=np.float64,
+        )
+    )
 
 
 def document_path(spec: ShapeSpec) -> Path:
@@ -1293,6 +1480,9 @@ def build_shape_path(spec: ShapeSpec) -> Path:
     if shape == "circle":
         diameter = max(spec.width, spec.height)
         return extract_patch_path(Circle((spec.center_x, spec.center_y), diameter / 2.0))
+    if shape == "Mcircle":
+        diameter = max(spec.width, spec.height)
+        return extract_patch_path(Circle((spec.center_x, spec.center_y), diameter / 2.0))
     if shape == "cylinder":
         return cylinder_path(spec)
     if shape == "double_circle":
@@ -1311,6 +1501,10 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return semicircle_path(spec, "right")
     if shape == "tab":
         return tab_path(spec)
+    if shape == "folder":
+        return folder_path(spec)
+    if shape == "component":
+        return component_path(spec)
     if shape == "note":
         return note_path(spec)
     if shape == "document":
@@ -1321,10 +1515,16 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return arrow_path(spec)
     if shape in {
         "diamond",
+        "Mdiamond",
+        "Msquare",
         "triangle",
+        "house",
+        "invhouse",
         "hexagon",
         "pentagon",
         "octagon",
+        "doubleoctagon",
+        "tripleoctagon",
         "star",
         "parallelogram",
         "trapezoid",

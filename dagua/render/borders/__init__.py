@@ -11,12 +11,19 @@ from dagua.render.borders.inset import (
     inset_star,
 )
 from dagua.render.borders.shapes import (
+    GRAPHVIZ_COMPONENT_DETAIL,
+    GRAPHVIZ_M_CIRCLE_CHORD_RATIO,
+    GRAPHVIZ_M_CORNER_MARK_LENGTH,
+    GRAPHVIZ_NOTE_FOLD_SIZE,
+    GRAPHVIZ_OCTAGON_PERIPHERY_GAP,
+    GRAPHVIZ_TAB_WIDTH,
     ShapeSpec,
     add_corner_radius,
     build_shape_path,
     closed_path_from_vertices,
     cylinder_path,
     extract_patch_path,
+    graphviz_octagon_path,
     path_to_closed_vertices,
     polygon_vertices,
     regular_polygon_vertices,
@@ -26,6 +33,12 @@ from dagua.render.borders.shapes import (
 )
 
 __all__ = [
+    "GRAPHVIZ_COMPONENT_DETAIL",
+    "GRAPHVIZ_M_CIRCLE_CHORD_RATIO",
+    "GRAPHVIZ_M_CORNER_MARK_LENGTH",
+    "GRAPHVIZ_NOTE_FOLD_SIZE",
+    "GRAPHVIZ_OCTAGON_PERIPHERY_GAP",
+    "GRAPHVIZ_TAB_WIDTH",
     "MAX_BORDER_FRACTION",
     "PolylineDashSegment",
     "ShapeSpec",
@@ -39,6 +52,7 @@ __all__ = [
     "dash_ribbon_paths",
     "dash_segments",
     "extract_patch_path",
+    "graphviz_octagon_path",
     "inset_convex_polygon",
     "inset_shape_path",
     "inset_star",
