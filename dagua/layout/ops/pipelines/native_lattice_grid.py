@@ -50,6 +50,8 @@ GEODESIC_MEDIUM_STEPS = 300
 GEODESIC_LARGE_STEPS = 150
 GEODESIC_FULL_NODE_CAP = 150
 GEODESIC_MEDIUM_NODE_CAP = 600
+GEODESIC_DENSE_WORK_BYTES_CAP = 200 * 1024 * 1024
+GEODESIC_DENSE_WORK_ELEMENT_CAP = GEODESIC_MAX_NODES * GEODESIC_MAX_NODES
 # Default spacing used when node sizes are unavailable (points).
 DEFAULT_TARGET_EDGE_LENGTH = 54.0
 
@@ -338,6 +340,47 @@ def _geodesic_descent_steps(num_nodes: int) -> int:
     return GEODESIC_LARGE_STEPS
 
 
+def geodesic_dense_work_is_allowed(
+    num_nodes: int,
+    edge_count: int,
+    steps: Optional[int] = None,
+    *,
+    bytes_cap: int = GEODESIC_DENSE_WORK_BYTES_CAP,
+) -> bool:
+    """Return whether dense geodesic/MDS work fits the guard budget.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    edge_count : int
+        Number of edges.
+    steps : int, optional
+        Stress-descent steps; defaults to the size schedule.
+    bytes_cap : int, default=GEODESIC_DENSE_WORK_BYTES_CAP
+        Maximum estimated resident bytes for dense float64 matrices.
+
+    Returns
+    -------
+    bool
+        ``True`` when the caller may build dense all-pairs geodesic tensors.
+    """
+    n = max(0, int(num_nodes))
+    e = max(0, int(edge_count))
+    if n > GEODESIC_MAX_NODES:
+        return False
+    dense_elements = n * n
+    scheduled_steps = _geodesic_descent_steps(n) if steps is None else max(0, int(steps))
+    estimated_dense_bytes = dense_elements * 8 * 4
+    estimated_sparse_bytes = e * 2 * 8
+    dense_step_work = dense_elements * max(1, scheduled_steps)
+    return (
+        dense_elements <= GEODESIC_DENSE_WORK_ELEMENT_CAP
+        and estimated_dense_bytes + estimated_sparse_bytes <= int(bytes_cap)
+        and dense_step_work <= GEODESIC_DENSE_WORK_ELEMENT_CAP * GEODESIC_LARGE_STEPS
+    )
+
+
 def _target_edge_length(node_sizes: Optional[torch.Tensor], node_sep: float) -> float:
     """Return the point-unit spacing target for geodesic layouts.
 
@@ -447,6 +490,12 @@ def layout_geodesic_stress_pipeline(
     if num_nodes > GEODESIC_MAX_NODES:
         raise ValueError(
             f"geodesic stress route caps at {GEODESIC_MAX_NODES} nodes (got {num_nodes})."
+        )
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() else 0
+    if not geodesic_dense_work_is_allowed(num_nodes, edge_count, steps):
+        raise ValueError(
+            "geodesic stress dense-work cap exceeded "
+            f"(n={num_nodes}, e={edge_count}, steps={steps or _geodesic_descent_steps(num_nodes)})"
         )
 
     from dagua.layout.ops.graph_utils import shortest_path_distances

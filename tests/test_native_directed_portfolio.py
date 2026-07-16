@@ -21,6 +21,8 @@ from dagua.layout.ops.pipelines.native_directed import (
     _directed_mrtree_enabled,
     _directed_pivot_mds_candidates,
     _directed_stress_blend_candidates,
+    _exact_crossing_count,
+    _exact_crossing_count_loop,
     _force_challengers_enabled,
     _full_sugiyama_grid_enabled,
     _rank_local_zero_crossing_swap_candidate,
@@ -194,6 +196,51 @@ def test_directed_mrtree_and_rank_swap_targets_are_structurally_gated() -> None:
     assert _directed_mrtree_enabled(problem)
     assert swapped.shape == incumbent.shape
     assert bool(torch.isfinite(swapped).all().item())
+
+
+def test_exact_crossing_count_vectorized_matches_loop() -> None:
+    """The vectorized crossing count matches the old strict-crossing loop."""
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+            [10.0, 0.0],
+            [5.0, 12.0],
+            [12.0, 5.0],
+        ],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor(
+        [
+            [0, 2, 4, 0, 1],
+            [1, 3, 5, 2, 3],
+        ],
+        dtype=torch.long,
+    )
+
+    assert _exact_crossing_count(pos, edge_index) == _exact_crossing_count_loop(pos, edge_index)
+    assert _exact_crossing_count(pos, edge_index) == 3
+
+
+def test_rank_swap_respects_exhausted_deadline() -> None:
+    """The rank-local swap arm exits before trials when no budget remains."""
+    edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 10.0],
+            [10.0, 0.0],
+            [0.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() - 1.0
+
+    swapped = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index, config=config)
+
+    assert torch.equal(swapped, incumbent)
 
 
 def test_directed_incumbent_config_is_not_deadline_weakened(monkeypatch: object) -> None:

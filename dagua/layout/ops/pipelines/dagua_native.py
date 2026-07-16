@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -61,11 +62,14 @@ from dagua.layout.resolve import (
     resolve_quality_budgets,
 )
 
+_LOGGER = logging.getLogger(__name__)
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
 _DOT_DEFAULT_RANK_CENTER_SEP = 72.0
 _DOT_DEFAULT_NODE_SEP = 18.0
 _DOT_AUX_EDGE_MINLEN = 1.0
 _DOT_VIRTUAL_EDGE_WEIGHT = 8.0
+_DOT_LATTICE_LP_MAX_MATRIX_BYTES = 200 * 1024 * 1024
+_DOT_LATTICE_LP_MAX_X_VARS = 12_000
 
 
 @dataclass(frozen=True)
@@ -3190,6 +3194,7 @@ def _dot_lattice_lp(
         return cand
     try:
         import numpy as np
+        from scipy import sparse
         from scipy.optimize import linprog
     except Exception:
         return cand
@@ -3203,24 +3208,26 @@ def _dot_lattice_lp(
     if e == 0:
         return cand
 
-    c_rank = np.zeros(n)
-    rows: list[np.ndarray] = []
+    c_rank = np.zeros(n, dtype=np.float64)
+    rank_row: list[int] = []
+    rank_col: list[int] = []
+    rank_data: list[float] = []
     rhs: list[float] = []
     for i in range(e):
         u = int(src[i].item())
         v = int(tgt[i].item())
         c_rank[v] += 1.0
         c_rank[u] -= 1.0
-        row = np.zeros(n)
-        row[u] = 1.0
-        row[v] = -1.0
-        rows.append(row)
+        rank_row.extend((i, i))
+        rank_col.extend((u, v))
+        rank_data.extend((1.0, -1.0))
         rhs.append(-1.0)
     bounds_rank = [(0, None)] * n
     try:
+        rank_matrix = sparse.csr_matrix((rank_data, (rank_row, rank_col)), shape=(e, n))
         res = linprog(
             c=c_rank,
-            A_ub=np.array(rows),
+            A_ub=rank_matrix,
             b_ub=np.array(rhs),
             bounds=bounds_rank,
             method="highs",
@@ -3315,41 +3322,57 @@ def _dot_lattice_lp(
     if e_count == 0:
         return cand
     n_vars = n_total + e_count
-    cx = np.zeros(n_vars)
+    row_count = 2 * e_count + sum(
+        max(0, len(nodes_in_layer) - 1) for nodes_in_layer in layers.values()
+    )
+    estimated_dense_bytes = row_count * n_vars * 8
+    if (
+        n_vars > _DOT_LATTICE_LP_MAX_X_VARS
+        or estimated_dense_bytes > _DOT_LATTICE_LP_MAX_MATRIX_BYTES
+    ):
+        _LOGGER.info(
+            "Skipped dot-lattice LP polish: n_vars=%d rows=%d dense_bytes=%d",
+            n_vars,
+            row_count,
+            estimated_dense_bytes,
+        )
+        return cand
+    cx = np.zeros(n_vars, dtype=np.float64)
     for k, (_, _, w) in enumerate(edges_pos_w):
         cx[n_total + k] = w
-    A_ub: list[np.ndarray] = []
+    x_row: list[int] = []
+    x_col: list[int] = []
+    x_data: list[float] = []
     b_ub: list[float] = []
+    row_index = 0
     for k, (u, v, _) in enumerate(edges_pos_w):
-        r1 = np.zeros(n_vars)
-        r1[n_total + k] = -1.0
-        r1[v] = 1.0
-        r1[u] = -1.0
-        A_ub.append(r1)
+        x_row.extend((row_index, row_index, row_index))
+        x_col.extend((n_total + k, v, u))
+        x_data.extend((-1.0, 1.0, -1.0))
         b_ub.append(0.0)
-        r2 = np.zeros(n_vars)
-        r2[n_total + k] = -1.0
-        r2[v] = -1.0
-        r2[u] = 1.0
-        A_ub.append(r2)
+        row_index += 1
+        x_row.extend((row_index, row_index, row_index))
+        x_col.extend((n_total + k, v, u))
+        x_data.extend((-1.0, -1.0, 1.0))
         b_ub.append(0.0)
-    for r_l, nodes_in_layer in layers.items():
+        row_index += 1
+    for nodes_in_layer in layers.values():
         for i in range(len(nodes_in_layer) - 1):
             a = nodes_in_layer[i]
             b = nodes_in_layer[i + 1]
-            row = np.zeros(n_vars)
-            row[a] = 1.0
-            row[b] = -1.0
-            A_ub.append(row)
+            x_row.extend((row_index, row_index))
+            x_col.extend((a, b))
+            x_data.extend((1.0, -1.0))
             b_ub.append(-nodesep)
-    A_eq = np.zeros((1, n_vars))
-    A_eq[0, 0] = 1.0
+            row_index += 1
+    A_ub = sparse.csr_matrix((x_data, (x_row, x_col)), shape=(row_index, n_vars))
+    A_eq = sparse.csr_matrix(([1.0], ([0], [0])), shape=(1, n_vars))
     b_eq = np.array([0.0])
     bounds_x = [(None, None)] * n_total + [(0, None)] * e_count
     try:
         res_x = linprog(
             c=cx,
-            A_ub=np.array(A_ub),
+            A_ub=A_ub,
             b_ub=np.array(b_ub),
             A_eq=A_eq,
             b_eq=b_eq,
@@ -5155,7 +5178,11 @@ def _best_of_polish(
         )
     for candidate_name, make_polish_candidate in polish_candidates:
         started = time.monotonic()
-        cand = make_polish_candidate(best_pos, edge_index, node_sizes)
+        try:
+            cand = make_polish_candidate(best_pos, edge_index, node_sizes)
+        except Exception:  # noqa: BLE001 -- polish failures must not sink the solve
+            _LOGGER.warning("Polish candidate %s failed", candidate_name, exc_info=True)
+            continue
         if cand is None or time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
             continue
         candidate_input = (
