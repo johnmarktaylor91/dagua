@@ -1109,7 +1109,12 @@ GRAPHVIZ_STRICT_THEME = Theme(
     graph_style=GraphStyle(
         background_color="#FFFFFF",
         margin=4.0,
-        density_aware_node_shrink=True,
+        # Graphviz's SVG canvas extends four points beyond the layout bbox.
+        margin_inches=4.0 / 72.0,
+        # Dot renders nodes at their computed dimensions, including the
+        # 0.75in by 0.5in minimum. A render-time density multiplier would
+        # discard those floors and collapse short-label ellipses.
+        density_aware_node_shrink=False,
         title_font_size=14.0,
         title_font_color="#000000",
         # Graphviz defaults edge labels to the same 14pt Times face as node

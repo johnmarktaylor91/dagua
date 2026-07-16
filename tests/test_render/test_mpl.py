@@ -46,11 +46,27 @@ from dagua.render.mpl import (
     _trim_curve_for_arrows,
 )
 from dagua.render.text import layout_plain_text
-from dagua.styles import RESOLVED_FONT, ClusterStyle, EdgeStyle, NodeStyle
+from dagua.styles import GRAPHVIZ_STRICT_THEME, RESOLVED_FONT, ClusterStyle, EdgeStyle, NodeStyle
 from dagua.utils import compute_node_size, prepare_label_text
 from scripts.generate_cosmetic_album import build_case_catalog
 
 mpl_renderer = importlib.import_module("dagua.render.mpl")
+
+
+def test_graphviz_strict_explicit_canvas_preserves_full_axes() -> None:
+    """Strict rendering should not inset an explicitly sized Graphviz canvas."""
+
+    graph = DaguaGraph()
+    graph._theme = GRAPHVIZ_STRICT_THEME
+    graph.add_node("in", label="In")
+    graph.add_node("mid", label="Mid")
+    graph.add_node("out", label="Out")
+    positions = torch.tensor([[0.0, 144.0], [0.0, 72.0], [0.0, 0.0]], dtype=torch.float32)
+
+    fig, ax = render(graph, positions=positions, figsize=(1.0, 3.0), dpi=120, show=False)
+
+    assert ax.get_position().bounds == pytest.approx((0.0, 0.0, 1.0, 1.0))
+    plt.close(fig)
 
 
 def _rgba_luminance(color: tuple[float, float, float, float]) -> float:
