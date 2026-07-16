@@ -1931,6 +1931,7 @@ def render(
 
     figure_dpi = render_dpi if canvas_fit_margin is None else None
     fig, ax = _new_figure_axes(figsize, backend=backend, dpi=figure_dpi)
+    setattr(ax, "_dagua_render_theme_name", _render_theme_name(graph))
     fig.patch.set_facecolor(bg)
     fig.patch.set_alpha(1.0)
     ax.set_facecolor(bg)
@@ -6408,9 +6409,19 @@ def _edge_width_data_units(ax: Any, width_points: float) -> float:
     -------
     float
         Width in data units.
+
+    Notes
+    -----
+    ``graphviz_strict`` uses the same calibrated point scale as node and
+    cluster borders and intentionally bypasses the general visibility floor.
     """
     if float(width_points) <= 0.0:
         return 0.0
+    if str(getattr(ax, "_dagua_render_theme_name", "")) == "graphviz_strict":
+        # Strict edges and node borders both represent Graphviz penwidth in
+        # points. Use the border calibration here so a 1pt ribbon carries the
+        # same rendered ink weight as a 1pt node outline.
+        return max(float(width_points) * _effective_stroke_scale(ax), 1e-6)
     width_x = _points_to_data_units(ax, width_points, "x")
     width_y = _points_to_data_units(ax, width_points, "y")
     width = min(width_x, width_y)
@@ -6432,8 +6443,11 @@ def _minimum_visible_edge_width_data_units(ax: Any) -> float:
     Returns
     -------
     float
-        Data-coordinate width corresponding to ``_MIN_VISIBLE_STROKE_POINTS``.
+        Data-coordinate width corresponding to ``_MIN_VISIBLE_STROKE_POINTS``,
+        or zero for ``graphviz_strict`` where nominal penwidth is authoritative.
     """
+    if str(getattr(ax, "_dagua_render_theme_name", "")) == "graphviz_strict":
+        return 0.0
     return _compute_display_scale(ax) * _MIN_VISIBLE_STROKE_POINTS
 
 
