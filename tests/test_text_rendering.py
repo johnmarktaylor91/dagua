@@ -1299,10 +1299,7 @@ def test_fc_match_font_path_builds_normalized_pattern(monkeypatch: pytest.Monkey
     monkeypatch.setattr(paths.subprocess, "run", fake_run)
 
     try:
-        assert (
-            _fc_match_font_path("Times,serif", "700", "italic")
-            == "/fonts/Times Bold Italic.ttc"
-        )
+        assert _fc_match_font_path("Times,serif", "700", "italic") == "/fonts/Times Bold Italic.ttc"
         assert calls == [
             [
                 "/usr/bin/fc-match",
