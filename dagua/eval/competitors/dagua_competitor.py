@@ -93,6 +93,7 @@ class DaguaCompetitor(CompetitorBase):
             "_dagua_native_deadline_s",
             start + max(0.001, float(timeout) - _TIMEOUT_CUSHION_SECONDS),
         )
+        setattr(config, "_dagua_native_total_budget_s", max(0.001, float(timeout)))
 
         try:
             with suspend_torchlens_decoration():

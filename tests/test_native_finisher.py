@@ -2,76 +2,223 @@
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.layout.ops.pipelines.native_finisher import W5Seed, run_w5_finisher
+from dagua.layout.ops.pipelines.native_finisher import (
+    W5ScorePair,
+    W5Seed,
+    log_w5_telemetry,
+    run_w5_finisher,
+)
 
 
-def test_w5_finisher_skips_when_no_budget() -> None:
-    """The predicted-cost entry gate skips W5 when the deadline is exhausted."""
-    config = LayoutConfig()
-    config._dagua_native_deadline_s = time.perf_counter() - 1.0
-    pos = torch.zeros((4, 2), dtype=torch.float32)
-    edge_index = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
-    node_sizes = torch.full((4, 2), 10.0)
-
-    result = run_w5_finisher(
-        seeds=[W5Seed("incumbent", pos)],
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        score_fn=lambda candidate: 0.0,
-        current_best_score=0.0,
-        is_semantically_directed=False,
-        declared_hierarchical=False,
-        config=config,
-    )
-
-    assert result.skipped_reason == "no_budget"
-    assert result.candidates == ()
-    assert result.checkpoints == ()
+class _WorkerLayoutTimeoutError(RuntimeError):
+    """Local stand-in for the benchmark worker alarm exception."""
 
 
-def test_w5_finisher_drops_nonfinite_seed() -> None:
-    """Non-finite warm starts are ignored instead of scored."""
-    pos = torch.full((4, 2), float("nan"), dtype=torch.float32)
-    edge_index = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
-    node_sizes = torch.full((4, 2), 10.0)
+def _pair(directed: float, undirected: float) -> W5ScorePair:
+    """Build a W5 score pair for tests.
 
-    result = run_w5_finisher(
-        seeds=[W5Seed("bad", pos)],
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        score_fn=lambda candidate: 1.0,
-        current_best_score=0.0,
-        is_semantically_directed=False,
-        declared_hierarchical=False,
-    )
+    Parameters
+    ----------
+    directed : float
+        Directed composite score.
+    undirected : float
+        Undirected composite score.
 
-    assert result.skipped_reason == "no_finite_seed"
-    assert result.candidates == ()
+    Returns
+    -------
+    W5ScorePair
+        Test score pair.
+    """
+    return W5ScorePair(directed=directed, undirected=undirected)
 
 
-def test_w5_finisher_never_accepts_below_incumbent_score() -> None:
-    """Rejected checkpoints cannot become returned W5 candidates."""
+def _tiny_layout() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return a finite four-node layout for W5 tests.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Position, edge-index, and node-size tensors.
+    """
     pos = torch.tensor(
         [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]],
         dtype=torch.float32,
     )
     edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
     node_sizes = torch.full((4, 2), 2.0)
+    return pos, edge_index, node_sizes
+
+
+def test_w5_finisher_returns_exact_incumbent_when_candidates_are_worse() -> None:
+    """W5 returns the incumbent tensor values when every checkpoint is worse."""
+    pos, edge_index, node_sizes = _tiny_layout()
 
     result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
         seeds=[W5Seed("incumbent", pos)],
         edge_index=edge_index,
         node_sizes=node_sizes,
-        score_fn=lambda candidate: -1.0,
-        current_best_score=0.0,
+        score_fn=lambda candidate: _pair(9.0, 9.0),
         is_semantically_directed=False,
         declared_hierarchical=False,
     )
 
-    assert result.candidates == ()
+    assert torch.equal(result.winner_pos, pos)
+    assert result.winner_score_pair == _pair(10.0, 10.0)
+    assert result.accepted == ()
     assert all(not checkpoint.accepted for checkpoint in result.checkpoints)
+
+
+def test_w5_finisher_deadline_returns_exact_incumbent() -> None:
+    """Expired benchmark budget returns the incumbent with deadline telemetry."""
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 1.0
+    config._dagua_native_total_budget_s = 300.0
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(1.0, 1.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        config=config,
+    )
+
+    assert result.skipped_reason == "no_budget"
+    assert result.deadline_returned is True
+    assert torch.equal(result.winner_pos, pos)
+
+
+def test_w5_finisher_reraises_worker_timeout_like_exception() -> None:
+    """Worker-timeout-like exceptions are not swallowed by optional catches."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def raising_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Raise the local worker-timeout sentinel.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Never returned.
+        """
+        raise _WorkerLayoutTimeoutError("worker layout timeout exceeded")
+
+    with pytest.raises(_WorkerLayoutTimeoutError):
+        run_w5_finisher(
+            incumbent_pos=pos,
+            incumbent_score_pair=_pair(0.0, 0.0),
+            seeds=[W5Seed("incumbent", pos)],
+            edge_index=edge_index,
+            node_sizes=node_sizes,
+            score_fn=raising_score_fn,
+            is_semantically_directed=False,
+            declared_hierarchical=False,
+        )
+
+
+def test_w5_finisher_rejects_one_sided_composite_win() -> None:
+    """The dominance gate rejects wins under only one frozen-ruler branch."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(11.0, 10.0),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert torch.equal(result.winner_pos, pos)
+    assert result.accepted == ()
+    assert result.rejected
+    assert all(checkpoint.reason == "does_not_dominate_both" for checkpoint in result.rejected)
+
+
+def test_w5_telemetry_emits_skip_reject_accept_and_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Telemetry is visible for skip, reject, accept, and deadline returns."""
+    telemetry_path = tmp_path / "w5.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    skip_result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("bad", torch.full_like(pos, float("nan")))],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(1.0, 1.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+    reject_result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(11.0, 10.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+    accept_result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(1.0, 1.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 1.0
+    deadline_result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(1.0, 1.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        config=config,
+    )
+
+    for result in (skip_result, reject_result, accept_result, deadline_result):
+        log_w5_telemetry(result, None)
+
+    stdout = capsys.readouterr().out
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+
+    assert stdout.count("native_w5_finisher ") == 4
+    assert len(records) == 4
+    assert any(record["skipped_reason"] == "no_finite_seed" for record in records)
+    assert any(record["rejected"] for record in records)
+    assert any(record["accepted"] for record in records)
+    assert any(record["deadline_returned"] for record in records)
