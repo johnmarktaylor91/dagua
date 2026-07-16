@@ -30,6 +30,7 @@ GRAPHVIZ_TAB_HEIGHT = 4.0
 GRAPHVIZ_TAB_WIDTH = 12.0
 SEMICIRCLE_DEFAULT_CURVATURE = 1.0
 SEMICIRCLE_MIN_CURVATURE = 1e-6
+ROUNDED_POLYGON_RADIUS_FRACTION = 0.08
 
 
 @dataclass(frozen=True)
@@ -721,6 +722,55 @@ def closed_path_from_vertices(vertices: FloatArray) -> Path:
     closed_vertices = np.vstack([vertices, vertices[0:1]])
     codes = [Path.MOVETO] + [Path.LINETO] * (closed_vertices.shape[0] - 2) + [Path.CLOSEPOLY]
     return Path(closed_vertices, codes)
+
+
+def rounded_polygon_path(vertices: FloatArray, radius: float) -> Path:
+    """Build a closed polygon path with quadratic curves at every corner.
+
+    Parameters
+    ----------
+    vertices : numpy.ndarray
+        Polygon corners with shape ``[N, 2]``.
+    radius : float
+        Distance from each corner to the curve endpoints in data units.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed path containing one quadratic curve per polygon corner.
+    """
+
+    if vertices.shape[0] < 3:
+        raise ValueError("A rounded polygon requires at least three vertices.")
+
+    safe_radius = max(float(radius), 0.0)
+    incoming_points: List[FloatArray] = []
+    outgoing_points: List[FloatArray] = []
+    for index, vertex in enumerate(vertices):
+        previous_vertex = vertices[(index - 1) % vertices.shape[0]]
+        next_vertex = vertices[(index + 1) % vertices.shape[0]]
+        incoming = vertex - previous_vertex
+        outgoing = next_vertex - vertex
+        incoming_length = float(np.linalg.norm(incoming))
+        outgoing_length = float(np.linalg.norm(outgoing))
+        corner_radius = min(safe_radius, incoming_length / 2.0, outgoing_length / 2.0)
+        incoming_unit = incoming / max(incoming_length, np.finfo(np.float64).eps)
+        outgoing_unit = outgoing / max(outgoing_length, np.finfo(np.float64).eps)
+        incoming_points.append(vertex - incoming_unit * corner_radius)
+        outgoing_points.append(vertex + outgoing_unit * corner_radius)
+
+    path_vertices: List[FloatArray] = [incoming_points[0]]
+    codes: List[int] = [Path.MOVETO]
+    for index, vertex in enumerate(vertices):
+        path_vertices.extend([vertex, outgoing_points[index]])
+        codes.extend([Path.CURVE3, Path.CURVE3])
+        next_index = (index + 1) % vertices.shape[0]
+        if next_index != 0:
+            path_vertices.append(incoming_points[next_index])
+            codes.append(Path.LINETO)
+    path_vertices.append(incoming_points[0])
+    codes.append(Path.CLOSEPOLY)
+    return Path(np.asarray(path_vertices, dtype=np.float64), codes)
 
 
 def open_path_from_vertices(vertices: FloatArray) -> Path:
@@ -1676,6 +1726,26 @@ def build_shape_path(spec: ShapeSpec) -> Path:
     """
 
     shape = spec.shape
+    rounded_polygon_bases = {
+        "round_triangle": "triangle",
+        "round_diamond": "diamond",
+        "round_pentagon": "pentagon",
+        "round_hexagon": "hexagon",
+        "round_octagon": "octagon",
+    }
+    if shape in rounded_polygon_bases:
+        base_spec = ShapeSpec(
+            center_x=spec.center_x,
+            center_y=spec.center_y,
+            width=spec.width,
+            height=spec.height,
+            shape=rounded_polygon_bases[shape],
+            corner_radius=0.0,
+            aspect_ratio=spec.aspect_ratio,
+        )
+        radius = min(max(float(spec.width), 0.0), max(float(spec.height), 0.0))
+        radius *= ROUNDED_POLYGON_RADIUS_FRACTION
+        return rounded_polygon_path(polygon_vertices(base_spec), radius)
     if shape == "roundrect":
         return roundrect_path(spec)
     if shape == "rect":

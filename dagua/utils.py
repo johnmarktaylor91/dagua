@@ -805,6 +805,13 @@ CURVED_NODE_SHAPES = {
     "semicircle_left",
     "semicircle_right",
 }
+ROUNDED_POLYGON_BASE_SHAPES = {
+    "round_triangle": "triangle",
+    "round_diamond": "diamond",
+    "round_pentagon": "pentagon",
+    "round_hexagon": "hexagon",
+    "round_octagon": "octagon",
+}
 
 
 def _rotated_text_bounds(width: float, height: float, angle_degrees: float) -> Tuple[float, float]:
@@ -929,6 +936,7 @@ def _shape_text_capacity(
         Available text width and height in points after accounting for the
         node's interior geometry and padding.
     """
+    shape = ROUNDED_POLYGON_BASE_SHAPES.get(shape, shape)
     padded_width = max(float(width), 0.0)
     padded_height = max(float(height), 0.0)
 
@@ -1198,6 +1206,9 @@ def _compute_node_size_cached(
     tuple[float, float, float]
         Node width, node height, and effective font size.
     """
+    # Rounded polygons reserve the same label interior as their sharp base
+    # shape; corner smoothing changes only the cosmetic boundary path.
+    shape = ROUNDED_POLYGON_BASE_SHAPES.get(shape, shape)
     effective_font_size = font_size
 
     if overflow_policy == "shrink_text":

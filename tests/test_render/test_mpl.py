@@ -53,6 +53,154 @@ from scripts.generate_cosmetic_album import build_case_catalog
 mpl_renderer = importlib.import_module("dagua.render.mpl")
 
 
+def _patches_with_gid_prefix(ax: Any, prefix: str) -> List[PathPatch]:
+    """Return path patches whose string identifiers start with ``prefix``.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes containing rendered artists.
+    prefix : str
+        Artist identifier prefix to match.
+
+    Returns
+    -------
+    list[matplotlib.patches.PathPatch]
+        Matching path patches in axes order.
+    """
+
+    return [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith(prefix)
+    ]
+
+
+def test_node_fill_and_text_opacity_target_only_their_layers() -> None:
+    """Verify fill and label opacity do not alter the node border.
+
+    Returns
+    -------
+    None
+        This test asserts alpha values on the rendered fill, border, and text.
+    """
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "alpha",
+        label="Alpha",
+        style=NodeStyle(fill="#FF0000", fill_opacity=0.35, text_opacity=0.45),
+    )
+
+    fig, ax = render(
+        graph,
+        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        show=False,
+    )
+
+    fill_colors = [color for collection in ax.collections for color in collection.get_facecolors()]
+    assert any(np.allclose(color, to_rgba("#FF0000", 0.35)) for color in fill_colors)
+    assert any(color[3] == pytest.approx(1.0) for color in fill_colors)
+    label_patches = [
+        patch
+        for patch in _patches_with_gid_prefix(ax, "dagua-node-label-0")
+        if "shadow" not in str(patch.get_gid())
+    ]
+    assert label_patches
+    assert all(patch.get_alpha() == pytest.approx(0.45) for patch in label_patches)
+    plt.close(fig)
+
+
+def test_node_outline_is_a_separate_offset_stroke() -> None:
+    """Verify node outlines render beyond the fill with requested stroke styling.
+
+    Returns
+    -------
+    None
+        This test asserts outline identity, geometry, color, width, and dashes.
+    """
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "outlined",
+        label="",
+        style=NodeStyle(
+            shape="rect",
+            fill="#FFFFFF",
+            stroke="#222222",
+            stroke_width=2.0,
+            outline_color="#00AA55",
+            outline_width=3.0,
+            outline_offset=4.0,
+            outline_style="dashed",
+        ),
+    )
+
+    fig, ax = render(
+        graph,
+        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        show=False,
+    )
+
+    outlines = _patches_with_gid_prefix(ax, "dagua-node-outline-0")
+    assert len(outlines) == 1
+    outline = outlines[0]
+    assert outline.get_edgecolor() == pytest.approx(to_rgba("#00AA55"))
+    assert outline.get_linewidth() == pytest.approx(3.0)
+    assert outline.get_linestyle() == "dashed"
+    fill_path = ax.collections[0].get_paths()[0]
+    assert outline.get_path().get_extents().width > fill_path.get_extents().width
+    assert outline.get_path().get_extents().height > fill_path.get_extents().height
+    plt.close(fig)
+
+
+def test_node_text_shadow_is_offset_and_blurred_behind_label() -> None:
+    """Verify text shadow copies are offset, layered, and behind the foreground.
+
+    Returns
+    -------
+    None
+        This test asserts shadow artist count, translation, color, and z-order.
+    """
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "shadowed",
+        label="Shadow",
+        style=NodeStyle(
+            text_shadow_color="#3366CC80",
+            text_shadow_offset=(3.0, -2.0),
+            text_shadow_blur=2.0,
+        ),
+    )
+
+    fig, ax = render(
+        graph,
+        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        show=False,
+    )
+
+    foreground = next(
+        patch
+        for patch in _patches_with_gid_prefix(ax, "dagua-node-label-0")
+        if patch.get_gid() == "dagua-node-label-0"
+    )
+    shadows = _patches_with_gid_prefix(ax, "dagua-node-label-0-shadow-")
+    assert len(shadows) > 1
+    central_shadow = next(
+        patch for patch in shadows if patch.get_gid() == "dagua-node-label-0-shadow-0"
+    )
+    display_scale = _compute_display_scale(ax)
+    foreground_min = foreground.get_path().vertices.min(axis=0)
+    shadow_min = central_shadow.get_path().vertices.min(axis=0)
+    assert shadow_min - foreground_min == pytest.approx(np.array([3.0, -2.0]) * display_scale)
+    assert central_shadow.get_facecolor()[:3] == pytest.approx(to_rgba("#3366CC")[:3])
+    assert all(shadow.get_zorder() < foreground.get_zorder() for shadow in shadows)
+    plt.close(fig)
+
+
 def test_graphviz_strict_explicit_canvas_preserves_full_axes() -> None:
     """Strict rendering should not inset an explicitly sized Graphviz canvas."""
 
