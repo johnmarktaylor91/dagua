@@ -41,7 +41,9 @@ from dagua.render.mpl import (
     _draw_sharp_crossing,
     _edge_linestyle,
     _edge_width_data_units,
+    _effective_stroke_scale,
     _marker_data_size,
+    _minimum_visible_edge_width_data_units,
     _node_linestyle,
     _star_vertices,
     _trim_curve_for_arrows,
@@ -2050,6 +2052,24 @@ def test_custom_edge_collection_converts_stroke_width_to_data_units() -> None:
 
     assert edge.width == pytest.approx(expected_width)
     assert edge.stroke_width == pytest.approx(expected_width)
+
+
+def test_graphviz_strict_edge_width_matches_border_scale_without_visibility_floor() -> None:
+    """Strict 1pt edge ribbons should carry the same width as 1pt node borders."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=96)
+    ax.set_xlim(-80.0, 80.0)
+    ax.set_ylim(-80.0, 80.0)
+    setattr(ax, "_dagua_render_theme_name", "graphviz_strict")
+    fig.canvas.draw()
+
+    edge_width = _edge_width_data_units(ax, 1.0)
+    border_width = _effective_stroke_scale(ax)
+    minimum_visible_width = _minimum_visible_edge_width_data_units(ax)
+    plt.close(fig)
+
+    assert edge_width == pytest.approx(border_width)
+    assert minimum_visible_width == 0.0
 
 
 def test_custom_edge_collection_scales_arrowheads_with_edge_width() -> None:
