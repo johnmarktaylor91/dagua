@@ -2412,6 +2412,7 @@ def _build_node_patch(
     if shape in {
         "house",
         "invhouse",
+        "invtrapezium",
         "folder",
         "tab",
         "component",
@@ -2421,6 +2422,17 @@ def _build_node_patch(
         "Mcircle",
         "doubleoctagon",
         "tripleoctagon",
+        "promoter",
+        "cds",
+        "terminator",
+        "ribosite",
+        "proteasesite",
+        "rpromoter",
+        "rarrow",
+        "larrow",
+        "assembly",
+        "insulator",
+        "signature",
     }:
         return PathPatch(
             build_shape_path(
@@ -5516,7 +5528,15 @@ def _draw_nodes(
         # For non-convex shapes (star), clip text to the bounding
         # rectangle instead of the shape path so glyphs aren't cut by
         # interior concavities.
-        _NONCONVEX_SHAPES = {"star"}
+        _NONCONVEX_SHAPES = {
+            "star",
+            "promoter",
+            "terminator",
+            "ribosite",
+            "proteasesite",
+            "assembly",
+            "insulator",
+        }
         if style.shape in _NONCONVEX_SHAPES:
             from matplotlib.path import Path as MplPath
 
