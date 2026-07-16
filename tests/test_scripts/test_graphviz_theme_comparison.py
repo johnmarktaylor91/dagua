@@ -191,6 +191,38 @@ def test_shape_atlas_covers_all_supported_shapes_without_placeholders() -> None:
     )
 
 
+def test_compose_stress_stacks_cosmetics_and_nested_structures() -> None:
+    """The composition panel should combine cosmetics rather than isolate them."""
+
+    graph, title = graphviz_theme_comparison._make_compose_stress()
+
+    assert title == "Compose Stress"
+    assert graph.num_nodes == 6
+    assert len(graph.cluster_labels) == 3
+    assert len(graph.cluster_parents) == 2
+    assert all(style is not None and style.border_count == 2 for style in graph.node_styles)
+    assert {style.fill_pattern for style in graph.node_styles if style is not None} == {
+        "gradient",
+        "striped",
+        "pie",
+    }
+    assert any(source == target for source, target in graph.edge_index.T.tolist())
+    assert any(
+        source > target for source, target in graph.edge_index.T.tolist() if source != target
+    )
+
+
+def test_compose_stress_dot_preserves_explicit_pattern_styles() -> None:
+    """Explicit Graphviz striped and wedged styles must survive style synthesis."""
+
+    graph, _ = graphviz_theme_comparison._make_compose_stress()
+    dot_source = graphviz_theme_comparison.graph_to_dot(graph)
+
+    assert "style=striped" in dot_source
+    assert "style=wedged" in dot_source
+    assert "peripheries=2" in dot_source
+
+
 def test_spline_stress_scene_has_back_edges_flat_edge_and_self_loops() -> None:
     """The spline-stress case should exercise back-edges, a flat edge, and self-loops."""
 
