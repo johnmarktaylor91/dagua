@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 from dagua.config import LayoutConfig
@@ -613,8 +615,8 @@ def test_large_shortlist_runs_before_expensive_incumbent(monkeypatch: object) ->
     torch.testing.assert_close(result, shortcut_pos)
 
 
-def test_large_w4_seed_shortcut_includes_exact_incumbent(monkeypatch: object) -> None:
-    """Seed-gated large mini-contests keep the exact incumbent eligible."""
+def test_large_w4_seed_shortcut_uses_shortlist_holder(monkeypatch: object) -> None:
+    """Seed-gated large mini-contests do not pull in the full incumbent."""
     import importlib
     from types import SimpleNamespace
 
@@ -642,36 +644,27 @@ def test_large_w4_seed_shortcut_includes_exact_incumbent(monkeypatch: object) ->
         seed=42,
     )
     shortcut_pos = torch.zeros((n, 2), dtype=torch.float32)
-    expected_incumbent = torch.ones((n, 2), dtype=torch.float32)
     native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
-    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
 
     def fake_shortlist(*args: object, **kwargs: object) -> torch.Tensor:
         """Return a finite shortcut candidate."""
         del args, kwargs
         return shortcut_pos
 
-    def fake_incumbent(*args: object, **kwargs: object) -> torch.Tensor:
-        """Return the exact incumbent expected by the seed mini-contest."""
-        del args, kwargs
-        return expected_incumbent
-
     def fake_mini_contest(
         baseline_pos: torch.Tensor,
         problem: LayoutProblem,
         config: LayoutConfig,
-        incumbent_pos: torch.Tensor | None = None,
+        incumbent_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Assert the incumbent is an eligible seed-contest finalist."""
+        """Assert the mini-contest receives only the shortlist holder."""
         del problem, config
         torch.testing.assert_close(baseline_pos, shortcut_pos)
-        assert incumbent_pos is not None
-        torch.testing.assert_close(incumbent_pos, expected_incumbent)
-        return incumbent_pos
+        assert incumbent_pos is None
+        return baseline_pos
 
     monkeypatch.setattr(native_undirected, "_large_prism_shortlist_candidate", fake_shortlist)
     monkeypatch.setattr(native_undirected, "_router_v2_large_mini_contest", fake_mini_contest)
-    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_incumbent)
 
     result = layout_native_undirected_portfolio(
         problem,
@@ -680,7 +673,7 @@ def test_large_w4_seed_shortcut_includes_exact_incumbent(monkeypatch: object) ->
         LayoutConfig(seed=42),
     )
 
-    torch.testing.assert_close(result, expected_incumbent)
+    torch.testing.assert_close(result, shortcut_pos)
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:

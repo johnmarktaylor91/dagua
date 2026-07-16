@@ -111,10 +111,13 @@ NEATO_BALANCED_LARGE_ITERATIONS = 4
 # seeds are bounded substitutes for the reference best-of-many field.
 FCOSE_CONTEST_SEEDS = 3
 FCOSE_REFERENCE_STEPS = 2500
+FCOSE_PRIOR_S = 45.0
 TSNET_CONTEST_SEEDS = 3
 TSNET_MAX_CONTEST_NODES = 300
 TSNET_REFERENCE_STEPS = 500
 TSNET_PERPLEXITIES = (30.0, 5.0)
+TSNET_PRIOR_S = 90.0
+UNDIRECTED_PREDICTED_COST_MULTIPLIER = 2.0
 FR_REFERENCE_STEPS = 50
 SMALL_WORLD_SEED_NODE_MIN = 100
 SMALL_WORLD_SEED_NODE_MAX = 1000
@@ -228,6 +231,32 @@ def _portfolio_available_work_s(
     if remaining is None:
         return None
     return max(0.0, float(remaining) - float(reserve_s))
+
+
+def _predicted_undirected_arm_budget_available(
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+) -> bool:
+    """Return whether a long optional arm may start before the deadline.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional benchmark deadline.
+    predicted_cost_s : float
+        Estimated wall-clock seconds for the arm.
+
+    Returns
+    -------
+    bool
+        ``True`` when no deadline is known or remaining budget covers the
+        predicted arm cost with a conservative multiplier and return reserve.
+    """
+    available = _portfolio_available_work_s(config)
+    if available is None:
+        return True
+    required = UNDIRECTED_PREDICTED_COST_MULTIPLIER * max(0.0, float(predicted_cost_s))
+    return available > required
 
 
 def _is_worker_timeout_exception(exc: Exception) -> bool:
@@ -1361,7 +1390,7 @@ def _rgg_geometric_seed_candidate(
     problem: LayoutProblem,
     seed: int,
     node_sep: float,
-) -> torch.Tensor:
+) -> Optional[torch.Tensor]:
     """Build the sparse/geodesic stress seed for geometric graphs.
 
     Parameters
@@ -1375,11 +1404,19 @@ def _rgg_geometric_seed_candidate(
 
     Returns
     -------
-    torch.Tensor
-        Seed positions with shape ``[N, 2]``.
+    torch.Tensor or None
+        Seed positions with shape ``[N, 2]``, or ``None`` when dense geodesic
+        work would exceed the guard budget.
     """
-    from dagua.layout.ops.pipelines.native_lattice_grid import layout_geodesic_stress_pipeline
+    from dagua.layout.ops.pipelines.native_lattice_grid import (
+        geodesic_dense_work_is_allowed,
+        layout_geodesic_stress_pipeline,
+    )
 
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if not geodesic_dense_work_is_allowed(int(problem.num_nodes), edge_count):
+        _LOGGER.info("Skipped RGG geometric seed: geodesic dense-work guard")
+        return None
     return layout_geodesic_stress_pipeline(
         edge_index=problem.edge_index,
         num_nodes=int(problem.num_nodes),
@@ -1631,32 +1668,36 @@ def _router_v2_large_mini_contest(
     if "geodesic_stress" in shortlist.candidates and _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.native_lattice_grid import (
+                geodesic_dense_work_is_allowed,
                 layout_geodesic_stress_pipeline,
             )
 
-            _admit(
-                "geodesic_stress",
-                layout_geodesic_stress_pipeline(
-                    edge_index=problem.edge_index,
-                    num_nodes=n,
-                    node_sizes=problem.node_sizes,
-                    seed=seed,
-                    edge_weights=problem.edge_weights,
-                    node_sep=node_sep,
-                ),
-            )
-            if problem.edge_weights is not None:
+            if not geodesic_dense_work_is_allowed(n, int(problem.edge_index.shape[1])):
+                _LOGGER.info("Skipped large mini-contest geodesic: dense-work guard")
+            else:
                 _admit(
-                    "geodesic_stress_unweighted",
+                    "geodesic_stress",
                     layout_geodesic_stress_pipeline(
                         edge_index=problem.edge_index,
                         num_nodes=n,
                         node_sizes=problem.node_sizes,
                         seed=seed,
-                        edge_weights=None,
+                        edge_weights=problem.edge_weights,
                         node_sep=node_sep,
                     ),
                 )
+                if problem.edge_weights is not None:
+                    _admit(
+                        "geodesic_stress_unweighted",
+                        layout_geodesic_stress_pipeline(
+                            edge_index=problem.edge_index,
+                            num_nodes=n,
+                            node_sizes=problem.node_sizes,
+                            seed=seed,
+                            edge_weights=None,
+                            node_sep=node_sep,
+                        ),
+                    )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("large mini-contest geodesic challenger failed", exc_info=True)
@@ -1801,19 +1842,13 @@ def layout_native_undirected_portfolio(
             # admits geodesic/community candidates they now compete in a
             # bounded mini-contest instead of being skipped wholesale (the
             # 250 < n <= 1500 non-mesh band was previously unreachable by
-            # every new candidate family). W4 seed-gated contests include the
-            # exact incumbent as tie-break finalist; other ties keep the
-            # historical sfdp_prism holder.
-            incumbent_for_seed_contest = None
-            if (
-                _small_world_knn_seed_enabled(problem) or _rgg_geometric_seed_enabled(problem)
-            ) and _portfolio_has_budget(config, min_remaining_s=2.0):
-                incumbent_for_seed_contest = _run_incumbent()
+            # every new candidate family). The fast-path sfdp+PRISM holder is
+            # the incumbent for this branch; pulling in the full native route
+            # here re-enters expensive polish work that the branch exists to avoid.
             winner_pos = _router_v2_large_mini_contest(
                 shortlisted_pos,
                 problem,
                 config,
-                incumbent_pos=incumbent_for_seed_contest,
             )
             return _never_nan_winner(
                 winner_pos,
@@ -2123,9 +2158,14 @@ def layout_native_undirected_portfolio(
         try:
             edge_count = int(problem.edge_index.shape[1])
             if n > MAX_DENSE_STRESS_NODES or edge_count > MAX_DENSE_STRESS_EDGES:
-                raise RuntimeError("point-unit stress exceeds dense-work cap")
-            candidate = _stress_points_candidate(problem, seed)
-            stress_points_pos = candidate
+                _LOGGER.info(
+                    "Skipped point-unit stress undirected challenger: dense-work cap n=%d e=%d",
+                    n,
+                    edge_count,
+                )
+            else:
+                candidate = _stress_points_candidate(problem, seed)
+                stress_points_pos = candidate
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
@@ -2148,7 +2188,8 @@ def layout_native_undirected_portfolio(
     if _rgg_geometric_seed_enabled(problem) and _portfolio_has_budget(config):
         try:
             rgg_seed = _rgg_geometric_seed_candidate(problem, seed, challenger_node_sep)
-            _add_challenger("rgg_geometric_seed", rgg_seed)
+            if rgg_seed is not None:
+                _add_challenger("rgg_geometric_seed", rgg_seed)
         except Exception as exc:  # noqa: BLE001 -- a failed seed never sinks the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("RGG geometric seed challenger failed", exc_info=True)
@@ -2162,9 +2203,20 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
 
+            fcose_cost_s = FCOSE_PRIOR_S
             for seed_offset in range(FCOSE_CONTEST_SEEDS):
-                if not _portfolio_has_budget(config):
+                if not _portfolio_has_budget(
+                    config
+                ) or not _predicted_undirected_arm_budget_available(
+                    config,
+                    fcose_cost_s,
+                ):
+                    _LOGGER.info(
+                        "Skipped fCoSE seed %d: insufficient predicted budget",
+                        seed_offset,
+                    )
                     break
+                candidate_started = time.perf_counter()
                 fcose_pos = layout_fcose_pipeline(
                     edge_index=problem.edge_index,
                     num_nodes=n,
@@ -2177,6 +2229,7 @@ def layout_native_undirected_portfolio(
                 )
                 fcose_runs += 1
                 _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
+                fcose_cost_s = max(0.0, time.perf_counter() - candidate_started)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
@@ -2195,10 +2248,24 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 
+            tsnet_cost_s = TSNET_PRIOR_S
+            stop_tsnet = False
             for perplexity in TSNET_PERPLEXITIES:
                 for seed_offset in range(TSNET_CONTEST_SEEDS):
-                    if not _portfolio_has_budget(config):
+                    if not _portfolio_has_budget(
+                        config
+                    ) or not _predicted_undirected_arm_budget_available(
+                        config,
+                        tsnet_cost_s,
+                    ):
+                        _LOGGER.info(
+                            "Skipped tsNET perp=%g seed=%d: insufficient predicted budget",
+                            perplexity,
+                            seed_offset,
+                        )
+                        stop_tsnet = True
                         break
+                    candidate_started = time.perf_counter()
                     tsnet_pos = layout_tsnet_pipeline(
                         edge_index=problem.edge_index,
                         num_nodes=n,
@@ -2214,6 +2281,9 @@ def layout_native_undirected_portfolio(
                     _add_challenger(
                         f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
                     )
+                    tsnet_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                if stop_tsnet:
+                    break
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("tsNET undirected challenger failed", exc_info=True)
@@ -2304,36 +2374,40 @@ def layout_native_undirected_portfolio(
         geodesic_started = time.perf_counter()
         try:
             from dagua.layout.ops.pipelines.native_lattice_grid import (
+                geodesic_dense_work_is_allowed,
                 layout_geodesic_stress_pipeline,
             )
 
-            geodesic_pos = layout_geodesic_stress_pipeline(
-                edge_index=problem.edge_index,
-                num_nodes=n,
-                node_sizes=problem.node_sizes,
-                seed=seed,
-                edge_weights=problem.edge_weights,
-                node_sep=challenger_node_sep,
-            )
-            _add_challenger("geodesic_stress", geodesic_pos, include_raw=True)
-            if problem.edge_weights is not None:
-                # Mirror the sfdp_unweighted/neato_unweighted pattern: the
-                # frozen ruler's stress axes measure HOP distances, so a
-                # hop-geodesic variant competes alongside the weighted one
-                # and the referee picks per graph.
-                geodesic_unweighted_pos = layout_geodesic_stress_pipeline(
+            if not geodesic_dense_work_is_allowed(n, int(problem.edge_index.shape[1])):
+                _LOGGER.info("Skipped geodesic stress challenger: dense-work guard")
+            else:
+                geodesic_pos = layout_geodesic_stress_pipeline(
                     edge_index=problem.edge_index,
                     num_nodes=n,
                     node_sizes=problem.node_sizes,
                     seed=seed,
-                    edge_weights=None,
+                    edge_weights=problem.edge_weights,
                     node_sep=challenger_node_sep,
                 )
-                _add_challenger(
-                    "geodesic_stress_unweighted",
-                    geodesic_unweighted_pos,
-                    include_raw=True,
-                )
+                _add_challenger("geodesic_stress", geodesic_pos, include_raw=True)
+                if problem.edge_weights is not None:
+                    # Mirror the sfdp_unweighted/neato_unweighted pattern: the
+                    # frozen ruler's stress axes measure HOP distances, so a
+                    # hop-geodesic variant competes alongside the weighted one
+                    # and the referee picks per graph.
+                    geodesic_unweighted_pos = layout_geodesic_stress_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        seed=seed,
+                        edge_weights=None,
+                        node_sep=challenger_node_sep,
+                    )
+                    _add_challenger(
+                        "geodesic_stress_unweighted",
+                        geodesic_unweighted_pos,
+                        include_raw=True,
+                    )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("geodesic stress undirected challenger failed", exc_info=True)
