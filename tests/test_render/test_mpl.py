@@ -1731,6 +1731,66 @@ def test_arrowhead_does_not_extend_into_target_node() -> None:
     assert np.linalg.norm(base - target_center) > np.linalg.norm(tip - target_center)
 
 
+def test_shallow_edge_approach_reclips_stroke_and_markers_to_node_sides() -> None:
+    """Clip shallow edge bodies and terminal markers along their true approach.
+
+    Returns
+    -------
+    None
+        Routed endpoints and prepared marker geometry are asserted in place.
+    """
+    graph = DaguaGraph.from_edge_list([("A", "B")], direction="TB")
+    graph.node_styles = [NodeStyle(shape="roundrect"), NodeStyle(shape="roundrect")]
+    graph.edge_styles[0] = EdgeStyle(
+        arrow="normal",
+        source_arrow="diamond",
+        curvature=0.0,
+        avoid_nodes=False,
+    )
+    graph.compute_node_sizes()
+    positions = torch.tensor([[-72.0, 0.0], [72.0, 0.0]], dtype=torch.float32)
+
+    curve = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)[0]
+    source_right = float(positions[0, 0] + graph.node_sizes[0, 0] / 2.0)
+    target_left = float(positions[1, 0] - graph.node_sizes[1, 0] / 2.0)
+
+    assert curve.p0 == pytest.approx((source_right, 0.0))
+    assert curve.p1 == pytest.approx((target_left, 0.0))
+    assert curve.cp1 == curve.p0
+    assert curve.cp2 == curve.p1
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-110.0, 110.0)
+    ax.set_ylim(-60.0, 60.0)
+    fig.canvas.draw()
+    collection = _build_custom_edge_collection(ax, graph, [curve], positions=positions.numpy())
+    prepared = collection.prepared_edges[0]
+    assert prepared.head_result is not None
+    assert prepared.source_result is not None
+    head_vertices = np.vstack(
+        [
+            path.vertices
+            for path in [
+                *prepared.head_result.filled_paths,
+                *prepared.head_result.stroked_paths,
+            ]
+        ]
+    )
+    source_vertices = np.vstack(
+        [
+            path.vertices
+            for path in [
+                *prepared.source_result.filled_paths,
+                *prepared.source_result.stroked_paths,
+            ]
+        ]
+    )
+    plt.close(fig)
+
+    assert float(head_vertices[:, 0].max()) <= target_left + 1e-9
+    assert float(source_vertices[:, 0].min()) >= source_right - 1e-9
+
+
 def test_vee_arrow_is_open_polygon() -> None:
     """Vee arrow should render as a stroked custom head, not FancyArrowPatch."""
 
@@ -2381,6 +2441,44 @@ def test_external_label_nine_position_anchors(
     actual = mpl_renderer._external_label_anchor(0.0, 0.0, 10.0, 6.0, 2.0, position)
 
     assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("position", "expected_x"),
+    [("middle-left", -12.0), ("middle-right", 12.0)],
+)
+def test_external_label_middle_aliases_stay_beside_node(
+    position: str,
+    expected_x: float,
+) -> None:
+    """Keep middle-row aliases horizontal and distinct from bottom-center.
+
+    Parameters
+    ----------
+    position : str
+        Middle-left or middle-right alias under test.
+    expected_x : float
+        Expected horizontal anchor beside the node.
+
+    Returns
+    -------
+    None
+        Normalization and placement geometry are asserted in place.
+    """
+    normalized = mpl_renderer._normalize_external_label_position(position)
+    actual = mpl_renderer._external_label_anchor(0.0, 0.0, 10.0, 6.0, 2.0, normalized)
+    bottom_center = mpl_renderer._external_label_anchor(
+        0.0,
+        0.0,
+        10.0,
+        6.0,
+        2.0,
+        "bottom-center",
+    )
+
+    assert actual[0] == pytest.approx(expected_x)
+    assert actual[1] == pytest.approx(0.0)
+    assert actual[:2] != bottom_center[:2]
 
 
 def test_bold_node_and_external_labels_normalize_weight_and_gain_size_boost(
