@@ -301,6 +301,14 @@ def _polygon_vertices(shape: str, half_size: Point) -> np.ndarray:
     numpy.ndarray
         Vertices with shape ``[N, 2]``, wound counter-clockwise.
     """
+    rounded_polygon_bases = {
+        "round_triangle": "triangle",
+        "round_diamond": "diamond",
+        "round_pentagon": "pentagon",
+        "round_hexagon": "hexagon",
+        "round_octagon": "octagon",
+    }
+    shape = rounded_polygon_bases.get(shape, shape)
     hw = float(half_size[0])
     hh = float(half_size[1])
     if shape == "diamond":

@@ -118,10 +118,15 @@ NODE_SHAPE_NAMES: Tuple[str, ...] = (
     "diamond",
     "circle",
     "triangle",
+    "round_triangle",
     "hexagon",
+    "round_hexagon",
     "parallelogram",
     "pentagon",
+    "round_pentagon",
     "octagon",
+    "round_octagon",
+    "round_diamond",
     "star",
     "cylinder",
     "trapezoid",
@@ -321,6 +326,7 @@ class NodeStyle:
 
     shape: str = "roundrect"
     fill: str = ""  # empty = computed from base_color
+    fill_opacity: float = 1.0  # render-only opacity of the fill layer
     stroke: str = ""  # empty = computed from base_color
     stroke_width: float = 0.57
     stroke_width_override_points: Optional[float] = field(
@@ -343,6 +349,10 @@ class NodeStyle:
     stroke_dash: str = "solid"  # solid, dashed, dotted
     stroke_dash_pattern: Optional[Tuple[float, ...]] = None  # custom (on, off, ...)
     border_opacity: float = 1.0
+    outline_color: str = ""  # empty = use the node stroke color
+    outline_width: float = 0.0  # render-only width in points
+    outline_offset: float = 0.0  # render-only gap beyond the node border in points
+    outline_style: str = "solid"  # solid, dashed, dotted
     font_family: str = ""  # empty = use FONT_FAMILY default
     font_size: float = 9.0
     font_size_override_points: Optional[float] = field(
@@ -359,6 +369,7 @@ class NodeStyle:
     data-coord font sizing and routes directly to matplotlib ``fontsize=``
     (display points). NOT DIFFERENTIABLE."""
     font_color: str = NEAR_BLACK
+    text_opacity: float = 1.0  # render-only opacity of the node label
     text_align: str = "center"  # left, center, right
     text_valign: str = "center"  # top, center, bottom
     text_rotation: float = 0.0  # render-only degrees, counter-clockwise
@@ -370,6 +381,9 @@ class NodeStyle:
     # Tuned down from ``2.0`` so outlined labels stay crisp without producing
     # oversized halos around small text or rich-text runs.
     text_outline_width: float = 1.4
+    text_shadow_color: str = ""  # empty = no label shadow
+    text_shadow_offset: Tuple[float, float] = (0.0, 0.0)  # render-only points
+    text_shadow_blur: float = 0.0  # render-only blur radius in points
     text_background: str = ""  # Background color behind node label (empty = none)
     text_background_opacity: float = 0.85
     text_background_padding: Tuple[float, float] = (3.0, 2.0)

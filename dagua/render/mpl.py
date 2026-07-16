@@ -2410,6 +2410,11 @@ def _build_node_patch(
             zorder=zorder,
         )
     if shape in {
+        "round_triangle",
+        "round_diamond",
+        "round_pentagon",
+        "round_hexagon",
+        "round_octagon",
         "house",
         "invhouse",
         "invtrapezium",
@@ -2515,7 +2520,7 @@ def _build_node_patch(
             linestyle=linestyle,
             zorder=zorder,
         )
-    if shape == "triangle":
+    if shape in {"triangle", "round_triangle"}:
         vertices = _triangle_vertices(x, y, w, h)
         return Polygon(
             vertices,
@@ -3132,7 +3137,7 @@ def _draw_gradient_fill(
         origin="lower",
         cmap=cmap,
         interpolation="bicubic",
-        alpha=float(style.opacity) * float(alpha_multiplier),
+        alpha=_node_fill_alpha(style) * float(alpha_multiplier),
         zorder=zorder,
         aspect="auto",
     )
@@ -3155,6 +3160,25 @@ def _pattern_fill_colors(style: Any) -> List[str]:
     if style.fill_pattern_colors:
         return list(style.fill_pattern_colors)
     return [str(style.fill), darken_hex(str(style.fill), 0.18)]
+
+
+def _node_fill_alpha(style: Any) -> float:
+    """Return the effective opacity for node fill layers.
+
+    Parameters
+    ----------
+    style : Any
+        Node style exposing overall and fill-only opacity values.
+
+    Returns
+    -------
+    float
+        Product of overall and fill-only opacity, clamped to ``[0, 1]``.
+    """
+
+    overall_opacity = float(getattr(style, "opacity", 1.0))
+    fill_opacity = float(getattr(style, "fill_opacity", 1.0))
+    return min(max(overall_opacity * fill_opacity, 0.0), 1.0)
 
 
 def _hatched_overlay_color(style: Any) -> str:
@@ -3238,7 +3262,7 @@ def _draw_striped_fill(
         origin="lower",
         cmap=ListedColormap(colors),
         interpolation="nearest",
-        alpha=style.opacity,
+        alpha=_node_fill_alpha(style),
         zorder=1.95,
         aspect="auto",
         vmin=0,
@@ -3309,7 +3333,7 @@ def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) 
             facecolor=colors[index % len(colors)],
             edgecolor=str(getattr(style, "stroke", "#000000")),
             linewidth=0.5,
-            alpha=float(style.opacity),
+            alpha=_node_fill_alpha(style),
             zorder=2.01,
         )
         wedge.set_clip_path(clip_patch)
@@ -3367,7 +3391,7 @@ def _draw_node_fill(
             )
             ax.add_patch(fill_patch)
         _draw_pie_fill(ax, shape_spec, style, clip_patch)
-        if style.gradient != "none" and style.opacity > 0.0:
+        if style.gradient != "none" and _node_fill_alpha(style) > 0.0:
             # Pie wedges fully cover the base fill, so the gradient must be
             # layered afterward to remain visible in combo renders.
             _draw_gradient_fill(
@@ -3400,12 +3424,12 @@ def _draw_node_fill(
             edgecolor=_hatched_overlay_color(style),
             linewidth=_MIN_HATCH_LINEWIDTH_POINTS,
             hatch=_HATCH_PATTERN,
-            alpha=style.opacity,
+            alpha=_node_fill_alpha(style),
             zorder=2.01,
         )
         ax.add_patch(hatch_patch)
         return
-    if style.gradient != "none" and style.opacity > 0.0:
+    if style.gradient != "none" and _node_fill_alpha(style) > 0.0:
         _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
         return
 
@@ -3471,6 +3495,63 @@ def _draw_node_border_path(
         zorder=2.06,
     )
     ax.add_patch(patch)
+
+
+def _draw_node_outline(
+    ax: Any,
+    node_index: int,
+    shape_spec: ShapeSpec,
+    style: Any,
+    border_width: float,
+    border_position: str,
+    display_scale: float,
+) -> None:
+    """Draw a Cytoscape-style stroke outside a node's visible border.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the outline.
+    node_index : int
+        Node index used to identify the outline artist.
+    shape_spec : ShapeSpec
+        Base node geometry in data coordinates.
+    style : Any
+        Node style exposing outline color, width, offset, and style.
+    border_width : float
+        Visible node-border width in data coordinates.
+    border_position : str
+        Node-border placement mode.
+    display_scale : float
+        Point-to-data conversion factor.
+
+    Returns
+    -------
+    None
+        Adds an outline patch to ``ax`` when its width is positive.
+    """
+
+    outline_width = max(float(getattr(style, "outline_width", 0.0)), 0.0)
+    if outline_width <= 0.0:
+        return
+
+    border_outset_factors = {"inside": 0.0, "center": 0.5, "outside": 1.0}
+    border_outset = border_width * border_outset_factors.get(border_position, 0.5)
+    outline_gap = max(float(getattr(style, "outline_offset", 0.0)), 0.0) * display_scale
+    outline_half_width = outline_width * display_scale / 2.0
+    centerline_outset = border_outset + outline_gap + outline_half_width
+    outline_path = build_shape_path(_expanded_shape_spec(shape_spec, centerline_outset))
+    outline_color = str(getattr(style, "outline_color", "") or style.stroke)
+    _draw_display_point_path_stroke(
+        ax,
+        outline_path,
+        outline_color,
+        outline_width,
+        zorder=2.07,
+        linestyle=_display_point_linestyle(getattr(style, "outline_style", "solid"), None),
+        joinstyle="round",
+        gid=f"dagua-node-outline-{node_index}",
+    )
 
 
 def _requires_custom_node_rendering(style: Any) -> bool:
@@ -4338,6 +4419,65 @@ def _draw_display_point_text(
         artist.set_gid(spec.gid)
         _register_svg_hover_text(svg_hover_map, spec.gid, spec.text)
     return artist
+
+
+def _text_shadow_specs(spec: DaguaText, style: Any, display_scale: float) -> List[DaguaText]:
+    """Return layered label copies approximating a Cytoscape text shadow.
+
+    Parameters
+    ----------
+    spec : DaguaText
+        Foreground label specification.
+    style : Any
+        Node style exposing text-shadow properties.
+    display_scale : float
+        Point-to-data conversion factor for offsets and blur radius.
+
+    Returns
+    -------
+    list[DaguaText]
+        Shadow specifications ordered from outer blur samples to the center.
+    """
+
+    from matplotlib.colors import to_rgba
+
+    shadow_color = str(getattr(style, "text_shadow_color", ""))
+    if shadow_color == "":
+        return []
+    red, green, blue, color_alpha = to_rgba(shadow_color)
+    if color_alpha <= 0.0:
+        return []
+
+    offset_x, offset_y = getattr(style, "text_shadow_offset", (0.0, 0.0))
+    blur_points = max(float(getattr(style, "text_shadow_blur", 0.0)), 0.0)
+    samples: List[Tuple[float, float]] = [(0.0, 0.0)]
+    if blur_points > 0.0:
+        ring_count = min(max(int(math.ceil(blur_points)), 2), 4)
+        for ring_index in range(ring_count, 0, -1):
+            radius = blur_points * float(ring_index) / float(ring_count)
+            for angle_index in range(8):
+                angle = 2.0 * math.pi * float(angle_index) / 8.0
+                samples.append((radius * math.cos(angle), radius * math.sin(angle)))
+
+    layer_alpha = color_alpha if len(samples) == 1 else color_alpha / math.sqrt(len(samples))
+    shadow_specs: List[DaguaText] = []
+    for layer_index, (blur_x, blur_y) in enumerate(samples):
+        shadow_specs.append(
+            replace(
+                spec,
+                x=spec.x + (float(offset_x) + blur_x) * display_scale,
+                y=spec.y + (float(offset_y) + blur_y) * display_scale,
+                font_color=(red, green, blue),
+                alpha=layer_alpha,
+                outline=False,
+                background=None,
+                underline=False,
+                strikethrough=False,
+                zorder=spec.zorder - 0.05,
+                gid=(f"{spec.gid}-shadow-{layer_index}" if spec.gid is not None else None),
+            )
+        )
+    return shadow_specs
 
 
 def _register_svg_hover_text(
@@ -5552,7 +5692,7 @@ def _draw_nodes(
         if style.shadow:
             _draw_shadow(ax, x, y, w, h, scaled_style, corner_radius)
 
-        facecolor = to_rgba(style.fill, style.opacity)
+        facecolor = to_rgba(style.fill, _node_fill_alpha(style))
         edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
         # For non-convex shapes (star), clip text to the bounding
         # rectangle instead of the shape path so glyphs aren't cut by
@@ -5667,7 +5807,7 @@ def _draw_nodes(
             if style.gradient == "none":
                 fill_paths.append(fill_path)
                 fill_colors.append(facecolor)
-            elif style.opacity > 0.0:
+            elif _node_fill_alpha(style) > 0.0:
                 _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
 
             _draw_image_node(ax, shape_spec, style, image_clip_patch)
@@ -5767,6 +5907,21 @@ def _draw_nodes(
                     ribbons = dash_ribbon_paths(centerline_path, dash_pattern, border_width)
                     border_paths.extend(ribbons)
                     border_colors.extend([edgecolor] * len(ribbons))
+
+        effective_border_width = (
+            max(float(stroke_override), 0.0) * display_scale
+            if stroke_override is not None
+            else border_width
+        )
+        _draw_node_outline(
+            ax,
+            i,
+            shape_spec,
+            style,
+            effective_border_width,
+            border_position,
+            display_scale,
+        )
 
         clip_patches.append(clip_patch)
         _set_svg_hover(clip_patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
@@ -8833,6 +8988,7 @@ def _draw_node_labels(
     display_scale = _compute_display_scale(ax)
     density_font_factor = max(float(density_size_factor), _DENSITY_LABEL_FONT_FLOOR)
     clip_patch_seq: Sequence[Any] = clip_patches or []
+    shadow_specs: List[DaguaText] = []
     specs: List[DaguaText] = []
 
     for i in range(graph.num_nodes):
@@ -8911,64 +9067,19 @@ def _draw_node_labels(
         text_bg_corner_radius = style.text_background_corner_radius
 
         if font_size_override is not None:
-            _draw_display_point_text(
-                ax,
-                DaguaText(
-                    x=text_x,
-                    y=text_y,
-                    text=label,
-                    font_size=font_size_points,
-                    font_family=_text_font_family(style),
-                    font_weight=font_weight,
-                    font_style=style.font_style,
-                    font_color=style.font_color,
-                    alpha=1.0,
-                    ha=style.text_align,
-                    va=style.text_valign,
-                    rotation=float(style.text_rotation),
-                    background=text_bg,
-                    background_alpha=text_bg_alpha,
-                    background_padding=style.text_background_padding,
-                    background_corner_radius=text_bg_corner_radius,
-                    clip_patch=clip_patch if style.overflow_policy != "overflow" else None,
-                    clip_on=style.overflow_policy != "overflow",
-                    zorder=3.0,
-                    gid=f"dagua-node-label-{i}",
-                ),
-                svg_hover_map,
-            )
-            continue
-
-        specs.append(
-            DaguaText(
+            label_spec = DaguaText(
                 x=text_x,
                 y=text_y,
                 text=label,
-                # ``render_text`` multiplies by display_scale to recover data units.
-                font_size=(
-                    font_size_points
-                    if font_size_override is not None
-                    else _effective_font_size_points(font_size_data, display_scale)
-                ),
+                font_size=font_size_points,
                 font_family=_text_font_family(style),
                 font_weight=font_weight,
                 font_style=style.font_style,
                 font_color=style.font_color,
-                alpha=1.0,
+                alpha=min(max(float(style.text_opacity), 0.0), 1.0),
                 ha=style.text_align,
                 va=style.text_valign,
                 rotation=float(style.text_rotation),
-                rich=is_rich,
-                line_spacing=1.2,
-                secondary_scale=secondary,
-                max_width=max_width,
-                min_font_size=style.min_font_size,
-                text_wrap=style.text_wrap,
-                text_max_width=text_max_width,
-                text_transform=style.text_transform,
-                outline=style.text_outline,
-                outline_color=style.text_outline_color,
-                outline_width=style.text_outline_width,
                 background=text_bg,
                 background_alpha=text_bg_alpha,
                 background_padding=style.text_background_padding,
@@ -8978,9 +9089,53 @@ def _draw_node_labels(
                 zorder=3.0,
                 gid=f"dagua-node-label-{i}",
             )
-        )
+            for shadow_spec in _text_shadow_specs(label_spec, style, display_scale):
+                _draw_display_point_text(ax, shadow_spec, svg_hover_map)
+            _draw_display_point_text(ax, label_spec, svg_hover_map)
+            continue
 
-    render_text(ax, specs, display_scale, svg_hover_map)
+        label_spec = DaguaText(
+            x=text_x,
+            y=text_y,
+            text=label,
+            # ``render_text`` multiplies by display_scale to recover data units.
+            font_size=(
+                font_size_points
+                if font_size_override is not None
+                else _effective_font_size_points(font_size_data, display_scale)
+            ),
+            font_family=_text_font_family(style),
+            font_weight=font_weight,
+            font_style=style.font_style,
+            font_color=style.font_color,
+            alpha=min(max(float(style.text_opacity), 0.0), 1.0),
+            ha=style.text_align,
+            va=style.text_valign,
+            rotation=float(style.text_rotation),
+            rich=is_rich,
+            line_spacing=1.2,
+            secondary_scale=secondary,
+            max_width=max_width,
+            min_font_size=style.min_font_size,
+            text_wrap=style.text_wrap,
+            text_max_width=text_max_width,
+            text_transform=style.text_transform,
+            outline=style.text_outline,
+            outline_color=style.text_outline_color,
+            outline_width=style.text_outline_width,
+            background=text_bg,
+            background_alpha=text_bg_alpha,
+            background_padding=style.text_background_padding,
+            background_corner_radius=text_bg_corner_radius,
+            clip_patch=clip_patch if style.overflow_policy != "overflow" else None,
+            clip_on=style.overflow_policy != "overflow",
+            zorder=3.0,
+            gid=f"dagua-node-label-{i}",
+        )
+        shadow_specs.extend(_text_shadow_specs(label_spec, style, display_scale))
+        specs.append(label_spec)
+
+    render_text(ax, [*shadow_specs, *specs], display_scale, svg_hover_map)
 
 
 def _draw_external_labels(
