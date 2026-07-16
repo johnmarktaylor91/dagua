@@ -62,7 +62,7 @@ from dagua.render.borders import (
 )
 from dagua.render.crossings import EdgeCrossing, detect_crossings
 from dagua.render.edges import CubicBezier as RenderBezier
-from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
+from dagua.render.edges import DaguaEdge, DaguaEdgeCollection, place_edge_label
 from dagua.render.edges.collection import MIN_TAPER_WIDTH
 from dagua.render.edges.dashes import dash_curve, parse_dash_pattern
 from dagua.render.edges.geometry import (
@@ -2217,6 +2217,8 @@ def _edge_linestyle(style: Any) -> Any:
     Any
         Matplotlib linestyle string or dash tuple.
     """
+    if getattr(style, "line_dash_pattern", None) is not None:
+        return (0, tuple(float(value) for value in style.line_dash_pattern))
     if style.style == "dashed":
         return (0, _GRAPHVIZ_DASH_PATTERN)
     if style.style == "dotted":
@@ -2900,12 +2902,8 @@ def _draw_node_shape_extras(
         chord_x = radius * math.sqrt(1.0 - GRAPHVIZ_M_CIRCLE_CHORD_RATIO**2)
         graphviz_detail_paths.extend(
             [
-                MplPath(
-                    np.array([[x - chord_x, y + chord_y], [x + chord_x, y + chord_y]])
-                ),
-                MplPath(
-                    np.array([[x - chord_x, y - chord_y], [x + chord_x, y - chord_y]])
-                ),
+                MplPath(np.array([[x - chord_x, y + chord_y], [x + chord_x, y + chord_y]])),
+                MplPath(np.array([[x - chord_x, y - chord_y], [x + chord_x, y - chord_y]])),
             ]
         )
     elif style.shape in {"doubleoctagon", "tripleoctagon"}:
@@ -3841,6 +3839,7 @@ def _offset_custom_edge_collection_terminals(
         edge = prepared.edge
         head_result = prepared.head_result
         tail_result = prepared.tail_result
+        source_result = prepared.source_result
 
         if head_result is not None and edge.target_node is not None:
             shifted_tip = _offset_edge_terminal_point(
@@ -3866,11 +3865,24 @@ def _offset_custom_edge_collection_terminals(
             dy = shifted_tip[1] - float(prepared.lane_curve.p0[1])
             tail_result = _translate_arrowhead_result(tail_result, dx, dy)
 
+        if source_result is not None and edge.source_node is not None:
+            shifted_tip = _offset_edge_terminal_point(
+                graph,
+                positions,
+                int(edge.source_node),
+                (float(prepared.lane_curve.p0[0]), float(prepared.lane_curve.p0[1])),
+                stroke_scale,
+            )
+            dx = shifted_tip[0] - float(prepared.lane_curve.p0[0])
+            dy = shifted_tip[1] - float(prepared.lane_curve.p0[1])
+            source_result = _translate_arrowhead_result(source_result, dx, dy)
+
         updated_prepared_edges.append(
             replace(
                 prepared,
                 head_result=head_result,
                 tail_result=tail_result,
+                source_result=source_result,
             )
         )
 
@@ -4413,6 +4425,18 @@ def _draw_display_point_text(
         zorder=spec.zorder,
         bbox=bbox,
     )
+    if spec.outline and spec.outline_width > 0.0:
+        import matplotlib.patheffects as path_effects
+
+        artist.set_path_effects(
+            [
+                path_effects.withStroke(
+                    linewidth=float(spec.outline_width) * 2.0,
+                    foreground=spec.outline_color,
+                ),
+                path_effects.Normal(),
+            ]
+        )
     if spec.clip_patch is not None:
         artist.set_clip_path(spec.clip_patch)
     if spec.gid is not None:
@@ -8726,6 +8750,7 @@ def _build_custom_edge_collection(
     # single_edge) get the same arrowhead silhouette as panels with long edges
     # (pipeline, colors_showcase).
     disable_curve_length_clamp = _is_graphviz_strict_render(graph)
+    display_scale = _compute_display_scale(ax)
     edges: List[DaguaEdge] = []
     for e_idx, curve in enumerate(curves):
         style = _edge_style_for_render(graph, e_idx)
@@ -8759,6 +8784,17 @@ def _build_custom_edge_collection(
         label = graph.edge_labels[e_idx] if e_idx < len(graph.edge_labels) else None
         arrowhead = str(style.arrow)
         tail_arrow = str(style.tail_arrow)
+        source_arrow = str(getattr(style, "source_arrow", "none"))
+        mid_arrow = str(getattr(style, "mid_arrow", "none"))
+        line_dash_pattern = getattr(style, "line_dash_pattern", None)
+        edge_linestyle = (
+            tuple(float(value) * display_scale for value in line_dash_pattern)
+            if line_dash_pattern is not None
+            else style.style
+        )
+        line_wave = bool(getattr(style, "line_wave", False))
+        line_wave_amplitude = float(getattr(style, "line_wave_amplitude", 4.0)) * display_scale
+        line_wave_wavelength = float(getattr(style, "line_wave_wavelength", 16.0)) * display_scale
         if (
             str(getattr(graph, "direction", "")).upper() == "BT"
             and arrowhead == "none"
@@ -8793,7 +8829,10 @@ def _build_custom_edge_collection(
                         taper_width_end=taper_width_end,
                         color=str(style.color or "#8C8C8C"),
                         alpha=float(style.opacity if style.opacity is not None else 0.7),
-                        linestyle=style.style,
+                        linestyle=edge_linestyle,
+                        line_wave=line_wave,
+                        line_wave_amplitude=line_wave_amplitude,
+                        line_wave_wavelength=line_wave_wavelength,
                         arrowhead="none",
                         tail_arrow="none",
                         stroke_width=body_width,
@@ -8820,9 +8859,11 @@ def _build_custom_edge_collection(
                     width=body_width,
                     color=str(style.color or "#8C8C8C"),
                     alpha=float(style.opacity if style.opacity is not None else 0.7),
-                    linestyle=style.style,
+                    linestyle=edge_linestyle,
                     arrowhead=arrowhead,
                     tail_arrow=tail_arrow,
+                    source_arrow=source_arrow,
+                    mid_arrow=mid_arrow,
                     arrowhead_length=head_length,
                     arrowhead_width=head_width,
                     tail_arrow_length=tail_length,
@@ -8833,13 +8874,18 @@ def _build_custom_edge_collection(
                     label=label,
                     label_position=float(style.label_position),
                     label_offset=float(style.label_offset),
-                    label_rotate=False,
+                    label_rotate=bool(getattr(style, "label_autorotate", False)),
                     label_side=str(style.label_side),
                     label_font_size=float(style.label_font_size),
                     label_font_color=str(style.label_font_color),
                     label_background=str(style.label_background),
                     label_font_family=str(style.label_font_family),
                     label_font_weight=str(style.label_font_weight),
+                    label_outline_color=str(getattr(style, "text_outline_color", "")),
+                    label_outline_width=float(getattr(style, "text_outline_width", 0.0)),
+                    line_wave=line_wave,
+                    line_wave_amplitude=line_wave_amplitude,
+                    line_wave_wavelength=line_wave_wavelength,
                     group_key=(e_idx, -1),
                     source_node=src_idx,
                     target_node=tgt_idx,
@@ -8867,9 +8913,11 @@ def _build_custom_edge_collection(
                 taper_width_end=taper_width_end,
                 color=str(style.color or "#8C8C8C"),
                 alpha=float(style.opacity if style.opacity is not None else 0.7),
-                linestyle=style.style,
+                linestyle=edge_linestyle,
                 arrowhead=arrowhead,
                 tail_arrow=tail_arrow,
+                source_arrow=source_arrow,
+                mid_arrow=mid_arrow,
                 arrowhead_length=head_length,
                 arrowhead_width=head_width,
                 tail_arrow_length=tail_length,
@@ -8880,13 +8928,18 @@ def _build_custom_edge_collection(
                 label=label,
                 label_position=float(style.label_position),
                 label_offset=float(style.label_offset),
-                label_rotate=False,
+                label_rotate=bool(getattr(style, "label_autorotate", False)),
                 label_side=str(style.label_side),
                 label_font_size=float(style.label_font_size),
                 label_font_color=str(style.label_font_color),
                 label_background=str(style.label_background),
                 label_font_family=str(style.label_font_family),
                 label_font_weight=str(style.label_font_weight),
+                label_outline_color=str(getattr(style, "text_outline_color", "")),
+                label_outline_width=float(getattr(style, "text_outline_width", 0.0)),
+                line_wave=line_wave,
+                line_wave_amplitude=line_wave_amplitude,
+                line_wave_wavelength=line_wave_wavelength,
                 group_key=(src_idx, tgt_idx),
                 source_node=src_idx,
                 target_node=tgt_idx,
@@ -9835,6 +9888,9 @@ def _append_endpoint_edge_label_specs(
                 font_family=str(style.label_font_family or RESOLVED_FONT),
                 font_weight=str(style.label_font_weight),
                 font_color=str(style.label_font_color),
+                outline=bool(style.text_outline_color and style.text_outline_width > 0.0),
+                outline_color=str(style.text_outline_color or "#FFFFFF"),
+                outline_width=float(style.text_outline_width),
                 ha="center",
                 va="center",
                 background=style.label_background if style.label_background else None,
@@ -10035,6 +10091,9 @@ def _draw_edge_labels(
                 font_family=str(style.label_font_family or RESOLVED_FONT),
                 font_weight=str(style.label_font_weight),
                 font_color=str(style.label_font_color),
+                outline=bool(style.text_outline_color and style.text_outline_width > 0.0),
+                outline_color=str(style.text_outline_color or "#FFFFFF"),
+                outline_width=float(style.text_outline_width),
                 ha="center",
                 va="center",
                 rotation=placement.angle_degrees if prepared.edge.label_rotate else 0.0,
@@ -10116,6 +10175,19 @@ def _draw_edge_labels(
                 font_family=str(style.label_font_family or RESOLVED_FONT),
                 font_weight=str(style.label_font_weight),
                 font_color=str(style.label_font_color),
+                rotation=(
+                    place_edge_label(
+                        _curve_to_render_bezier(curve),
+                        label_position=float(style.label_position),
+                        label_offset=0.0,
+                        label_rotate=True,
+                    ).angle_degrees
+                    if bool(getattr(style, "label_autorotate", False))
+                    else 0.0
+                ),
+                outline=bool(style.text_outline_color and style.text_outline_width > 0.0),
+                outline_color=str(style.text_outline_color or "#FFFFFF"),
+                outline_width=float(style.text_outline_width),
                 ha="center",
                 va="center",
                 background=style.label_background if style.label_background else None,
