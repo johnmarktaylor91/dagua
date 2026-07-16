@@ -1962,6 +1962,7 @@ def _run_native_problem(
             declared_hierarchical=declared_hierarchical,
             cluster_ids=cluster_ids,
             polish_battery=str(getattr(config, "_dagua_native_polish_battery", "full")),
+            config=config,
         )
     return result
 
@@ -4832,6 +4833,7 @@ def _best_of_polish(
     declared_hierarchical: bool,
     cluster_ids: Optional[torch.Tensor] = None,
     polish_battery: str = "full",
+    config: Optional[LayoutConfig] = None,
 ) -> torch.Tensor:
     """Try named polish candidates; return the best by composite.
 
@@ -4871,6 +4873,9 @@ def _best_of_polish(
         Quality-derived polish budget. ``"off"`` returns ``base_pos``;
         ``"default"`` and ``"full"`` currently preserve the existing
         class-gated candidate set.
+    config : LayoutConfig, optional
+        Prepared native configuration. When present, W5 uses its benchmark
+        deadline metadata and attaches finisher telemetry to it.
 
     Returns
     -------
@@ -4945,6 +4950,7 @@ def _best_of_polish(
         return float(composite_auto(numeric, is_semantically_directed))
 
     candidate_positions = [base_pos]
+    forced_honest_scores: dict[int, float] = {}
 
     def safe_score(pos: torch.Tensor) -> Optional[float]:
         """Return a finite composite score or ``None`` for invalid candidates.
@@ -5199,6 +5205,54 @@ def _best_of_polish(
         if cand_score > best_score + margin:
             best_score = cand_score
             best_pos = cand
+    try:
+        from dagua.layout.ops.pipelines.native_finisher import (
+            W5Seed,
+            log_w5_telemetry,
+            run_w5_finisher,
+        )
+
+        seed_bank: list[W5Seed] = [
+            W5Seed("incumbent", base_pos),
+            W5Seed("current_best", best_pos),
+        ]
+        seed_bank.extend(
+            W5Seed(name=edge_name, pos=edge_pos) for edge_name, edge_pos in edge_seed_positions
+        )
+        if len(candidate_positions) > 1:
+            ranked_seed_indices = sorted(
+                range(1, len(candidate_positions)),
+                key=lambda index: (-score(candidate_positions[index]), index),
+            )
+            seed_bank.extend(
+                W5Seed(f"proxy_top_{rank}", candidate_positions[index])
+                for rank, index in enumerate(ranked_seed_indices[:2], start=1)
+            )
+        honest_current_best_score = honest_score(base_pos)
+        if not torch.allclose(best_pos, base_pos, atol=1.0e-5, rtol=1.0e-5):
+            best_honest_score = honest_score(best_pos)
+            honest_current_best_score = max(honest_current_best_score, best_honest_score)
+        w5_result = run_w5_finisher(
+            seeds=seed_bank,
+            edge_index=edge_index,
+            node_sizes=node_sizes,
+            score_fn=honest_score,
+            current_best_score=honest_current_best_score,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            config=config,
+        )
+        log_w5_telemetry(w5_result, config)
+        for accepted in w5_result.candidates:
+            candidate_positions.append(accepted.pos)
+            forced_honest_scores[len(candidate_positions) - 1] = accepted.score
+            if accepted.score > honest_current_best_score + 0.05:
+                honest_current_best_score = accepted.score
+                if not use_proxy_search:
+                    best_score = accepted.score
+                    best_pos = accepted.pos
+    except Exception:  # noqa: BLE001 -- W5 is additive and must never sink polish
+        _LOGGER.warning("W5 finisher failed; preserving pre-W5 polish winner", exc_info=True)
     if not use_proxy_search:
         return best_pos
 
@@ -5209,14 +5263,15 @@ def _best_of_polish(
         range(1, len(candidate_positions)),
         key=lambda index: (-score(candidate_positions[index]), index),
     )
-    finalist_indices = {0, *ranked_indices[: full_score_budget - 1]}
+    finalist_indices = {0, *ranked_indices[: full_score_budget - 1], *forced_honest_scores}
     honest_best_pos = base_pos
     honest_best_score = honest_score(base_pos)
     for index, candidate in enumerate(candidate_positions[1:], start=1):
         if index not in finalist_indices:
             continue
-        candidate_score = honest_score(candidate)
-        if candidate_score > honest_best_score + margin:
+        candidate_score = forced_honest_scores.get(index, honest_score(candidate))
+        candidate_margin = 0.05 if index in forced_honest_scores else margin
+        if candidate_score > honest_best_score + candidate_margin:
             honest_best_score = candidate_score
             honest_best_pos = candidate
     return honest_best_pos
@@ -5502,6 +5557,7 @@ def layout_dagua_native_pipeline(
                                             "full",
                                         )
                                     ),
+                                    config=effective_config,
                                 )
                             if dot_cluster_fidelity:
                                 stress_pos = _apply_dot_cluster_fidelity_layout(
@@ -5762,6 +5818,7 @@ def layout_dagua_native_pipeline(
                 polish_battery=str(
                     getattr(prepared_config, "_dagua_native_polish_battery", "full")
                 ),
+                config=prepared_config,
             )
         risk_state = ComponentTilingCrossingRisk(
             ComponentTilingCrossingRiskConfig(
