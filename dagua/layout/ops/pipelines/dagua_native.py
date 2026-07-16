@@ -1960,6 +1960,8 @@ def _run_native_problem(
             problem.node_sizes,
             is_semantically_directed=is_semantically_directed,
             declared_hierarchical=declared_hierarchical,
+            direction_is_declared=bool(getattr(structure, "direction_is_declared", False)),
+            direction=problem.direction,
             cluster_ids=cluster_ids,
             polish_battery=str(getattr(config, "_dagua_native_polish_battery", "full")),
             config=config,
@@ -4831,6 +4833,8 @@ def _best_of_polish(
     *,
     is_semantically_directed: bool,
     declared_hierarchical: bool,
+    direction_is_declared: bool = False,
+    direction: str = "TB",
     cluster_ids: Optional[torch.Tensor] = None,
     polish_battery: str = "full",
     config: Optional[LayoutConfig] = None,
@@ -4869,6 +4873,10 @@ def _best_of_polish(
         Whether edge direction has domain meaning.
     declared_hierarchical : bool
         Whether the graph is both semantically directed and acyclic.
+    direction_is_declared : bool, default=False
+        Whether directedness came from explicit user/config metadata.
+    direction : str, default="TB"
+        Layout direction passed into full-ruler metric evaluation.
     polish_battery : str, default="full"
         Quality-derived polish budget. ``"off"`` returns ``base_pos``;
         ``"default"`` and ``"full"`` currently preserve the existing
@@ -4882,13 +4890,27 @@ def _best_of_polish(
     torch.Tensor
         Best position tensor with shape ``[N, 2]``.
     """
-    from dagua.metrics import _all_pairs_unweighted, _build_csr, composite_auto, full, quick
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5ScorePair,
+        is_worker_timeout_like_exception,
+        w5_dominates,
+    )
+    from dagua.metrics import (
+        _all_pairs_unweighted,
+        _build_csr,
+        composite,
+        composite_auto,
+        composite_undirected,
+        full,
+        quick,
+    )
 
     if polish_battery == "off":
         return base_pos
 
     cpu_edge_index = edge_index.detach().to(device="cpu")
     cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
     offsets, targets = _build_csr(cpu_edge_index, int(base_pos.shape[0]))
     all_pairs_dist = _all_pairs_unweighted(
         offsets, targets, int(base_pos.shape[0]), max_dist=int(base_pos.shape[0])
@@ -4903,8 +4925,10 @@ def _best_of_polish(
         110 <= num_nodes <= 150 and max_degree <= 8
     )
 
-    def honest_score(pos: torch.Tensor) -> float:
-        """Score one finalist with the frozen honest ruler.
+    honest_score_cache: dict[int, W5ScorePair] = {}
+
+    def honest_score(pos: torch.Tensor) -> W5ScorePair:
+        """Score one finalist with both frozen-ruler composites.
 
         Parameters
         ----------
@@ -4913,18 +4937,47 @@ def _best_of_polish(
 
         Returns
         -------
-        float
-            Honest composite score.
+        W5ScorePair
+            Directed and undirected honest composites from one metrics pass.
         """
+        cache_key = id(pos)
+        cached = honest_score_cache.get(cache_key)
+        if cached is not None:
+            return cached
         torch.manual_seed(0)
         numeric = full(
             pos.detach().to(device="cpu", dtype=torch.float32),
             cpu_edge_index,
             node_sizes=cpu_node_sizes,
+            cluster_ids=cpu_cluster_ids,
+            direction=direction,
+            declared_hierarchical=declared_hierarchical,
             all_pairs_dist=all_pairs_dist,
         )
         numeric["declared_hierarchical"] = declared_hierarchical
-        return float(composite_auto(numeric, is_semantically_directed))
+        score_pair = W5ScorePair(
+            directed=float(composite(numeric)),
+            undirected=float(composite_undirected(numeric)),
+        )
+        honest_score_cache[cache_key] = score_pair
+        return score_pair
+
+    def scalar_from_pair(pair: W5ScorePair) -> float:
+        """Return the existing scalar picker score for a score pair.
+
+        Parameters
+        ----------
+        pair : W5ScorePair
+            Directed and undirected honest scores.
+
+        Returns
+        -------
+        float
+            Composite selected by the existing non-W5 picker route.
+        """
+        if is_semantically_directed and declared_hierarchical:
+            return pair.directed
+        return pair.undirected
 
     def score(pos: torch.Tensor) -> float:
         """Score one inner-search position with a deterministic cheap proxy.
@@ -4940,7 +4993,7 @@ def _best_of_polish(
             Proxy composite score.
         """
         if not use_proxy_search:
-            return honest_score(pos)
+            return scalar_from_pair(honest_score(pos))
         numeric = quick(
             pos.detach().to(device="cpu", dtype=torch.float32),
             cpu_edge_index,
@@ -4950,7 +5003,7 @@ def _best_of_polish(
         return float(composite_auto(numeric, is_semantically_directed))
 
     candidate_positions = [base_pos]
-    forced_honest_scores: dict[int, float] = {}
+    forced_honest_scores: dict[int, W5ScorePair] = {}
 
     def safe_score(pos: torch.Tensor) -> Optional[float]:
         """Return a finite composite score or ``None`` for invalid candidates.
@@ -4969,7 +5022,9 @@ def _best_of_polish(
             return None
         try:
             candidate_score = score(pos)
-        except Exception:
+        except Exception as exc:
+            if is_worker_timeout_like_exception(exc):
+                raise
             return None
         candidate_positions.append(pos)
         return candidate_score
@@ -5186,7 +5241,9 @@ def _best_of_polish(
         started = time.monotonic()
         try:
             cand = make_polish_candidate(best_pos, edge_index, node_sizes)
-        except Exception:  # noqa: BLE001 -- polish failures must not sink the solve
+        except Exception as exc:  # noqa: BLE001 -- polish failures must not sink the solve
+            if is_worker_timeout_like_exception(exc):
+                raise
             _LOGGER.warning("Polish candidate %s failed", candidate_name, exc_info=True)
             continue
         if cand is None or time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
@@ -5208,50 +5265,74 @@ def _best_of_polish(
     try:
         from dagua.layout.ops.pipelines.native_finisher import (
             W5Seed,
+            _finisher_slice_s,
             log_w5_telemetry,
+            make_w5_skip_result,
             run_w5_finisher,
         )
 
-        seed_bank: list[W5Seed] = [
-            W5Seed("incumbent", base_pos),
-            W5Seed("current_best", best_pos),
-        ]
-        seed_bank.extend(
-            W5Seed(name=edge_name, pos=edge_pos) for edge_name, edge_pos in edge_seed_positions
-        )
-        if len(candidate_positions) > 1:
-            ranked_seed_indices = sorted(
-                range(1, len(candidate_positions)),
-                key=lambda index: (-score(candidate_positions[index]), index),
+        finisher_slice = _finisher_slice_s(config)
+        if finisher_slice is None:
+            log_w5_telemetry(
+                make_w5_skip_result(
+                    incumbent_pos=best_pos,
+                    incumbent_score_pair=None,
+                    reason="no_budget",
+                    edge_index=edge_index,
+                    config=config,
+                    is_semantically_directed=is_semantically_directed,
+                    declared_hierarchical=declared_hierarchical,
+                    direction_is_declared=direction_is_declared,
+                ),
+                config,
             )
+        else:
+            seed_bank: list[W5Seed] = [
+                W5Seed("incumbent", best_pos),
+                W5Seed("base", base_pos),
+            ]
             seed_bank.extend(
-                W5Seed(f"proxy_top_{rank}", candidate_positions[index])
-                for rank, index in enumerate(ranked_seed_indices[:2], start=1)
+                W5Seed(name=edge_name, pos=edge_pos) for edge_name, edge_pos in edge_seed_positions
             )
-        honest_current_best_score = honest_score(base_pos)
-        if not torch.allclose(best_pos, base_pos, atol=1.0e-5, rtol=1.0e-5):
-            best_honest_score = honest_score(best_pos)
-            honest_current_best_score = max(honest_current_best_score, best_honest_score)
-        w5_result = run_w5_finisher(
-            seeds=seed_bank,
-            edge_index=edge_index,
-            node_sizes=node_sizes,
-            score_fn=honest_score,
-            current_best_score=honest_current_best_score,
-            is_semantically_directed=is_semantically_directed,
-            declared_hierarchical=declared_hierarchical,
-            config=config,
-        )
-        log_w5_telemetry(w5_result, config)
-        for accepted in w5_result.candidates:
-            candidate_positions.append(accepted.pos)
-            forced_honest_scores[len(candidate_positions) - 1] = accepted.score
-            if accepted.score > honest_current_best_score + 0.05:
-                honest_current_best_score = accepted.score
+            if len(candidate_positions) > 1:
+                ranked_seed_indices = sorted(
+                    range(1, len(candidate_positions)),
+                    key=lambda index: (-score(candidate_positions[index]), index),
+                )
+                seed_bank.extend(
+                    W5Seed(f"proxy_top_{rank}", candidate_positions[index])
+                    for rank, index in enumerate(ranked_seed_indices[:2], start=1)
+                )
+            incumbent_score_pair = honest_score(best_pos)
+            w5_result = run_w5_finisher(
+                incumbent_pos=best_pos,
+                incumbent_score_pair=incumbent_score_pair,
+                seeds=seed_bank,
+                edge_index=edge_index,
+                node_sizes=node_sizes,
+                score_fn=honest_score,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=direction_is_declared,
+                config=config,
+            )
+            log_w5_telemetry(w5_result, config)
+            if w5_result.accepted and w5_dominates(
+                w5_result.winner_score_pair,
+                incumbent_score_pair,
+                0.05,
+            ):
+                candidate_positions.append(w5_result.winner_pos)
+                forced_honest_scores[len(candidate_positions) - 1] = w5_result.winner_score_pair
                 if not use_proxy_search:
-                    best_score = accepted.score
-                    best_pos = accepted.pos
-    except Exception:  # noqa: BLE001 -- W5 is additive and must never sink polish
+                    best_score = scalar_from_pair(w5_result.winner_score_pair)
+                    best_pos = w5_result.winner_pos
+            elif not use_proxy_search:
+                best_pos = w5_result.winner_pos
+                best_score = scalar_from_pair(w5_result.winner_score_pair)
+    except Exception as exc:  # noqa: BLE001 -- W5 is additive and must never sink polish
+        if is_worker_timeout_like_exception(exc):
+            raise
         _LOGGER.warning("W5 finisher failed; preserving pre-W5 polish winner", exc_info=True)
     if not use_proxy_search:
         return best_pos
@@ -5265,13 +5346,22 @@ def _best_of_polish(
     )
     finalist_indices = {0, *ranked_indices[: full_score_budget - 1], *forced_honest_scores}
     honest_best_pos = base_pos
-    honest_best_score = honest_score(base_pos)
+    honest_best_pair = honest_score(base_pos)
+    honest_best_score = scalar_from_pair(honest_best_pair)
     for index, candidate in enumerate(candidate_positions[1:], start=1):
         if index not in finalist_indices:
             continue
-        candidate_score = forced_honest_scores.get(index, honest_score(candidate))
-        candidate_margin = 0.05 if index in forced_honest_scores else margin
-        if candidate_score > honest_best_score + candidate_margin:
+        if index in forced_honest_scores:
+            candidate_pair = forced_honest_scores[index]
+            if w5_dominates(candidate_pair, honest_best_pair, 0.05):
+                honest_best_pair = candidate_pair
+                honest_best_score = scalar_from_pair(candidate_pair)
+                honest_best_pos = candidate
+            continue
+        candidate_pair = honest_score(candidate)
+        candidate_score = scalar_from_pair(candidate_pair)
+        if candidate_score > honest_best_score + margin:
+            honest_best_pair = candidate_pair
             honest_best_score = candidate_score
             honest_best_pos = candidate
     return honest_best_pos
@@ -5550,6 +5640,10 @@ def layout_dagua_native_pipeline(
                                     node_sizes,
                                     is_semantically_directed=is_semantically_directed,
                                     declared_hierarchical=declared_hierarchical,
+                                    direction_is_declared=bool(
+                                        getattr(contest_structure, "direction_is_declared", False)
+                                    ),
+                                    direction=effective_config.direction,
                                     polish_battery=str(
                                         getattr(
                                             effective_config,
@@ -5815,6 +5909,10 @@ def layout_dagua_native_pipeline(
                 normalized_node_sizes,
                 is_semantically_directed=is_semantically_directed,
                 declared_hierarchical=declared_hierarchical,
+                direction_is_declared=bool(
+                    getattr(contest_structure, "direction_is_declared", False)
+                ),
+                direction=prepared_config.direction,
                 polish_battery=str(
                     getattr(prepared_config, "_dagua_native_polish_battery", "full")
                 ),
