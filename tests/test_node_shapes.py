@@ -69,6 +69,32 @@ ROUNDED_POLYGON_VERTEX_COUNTS = {
 }
 
 
+def test_custom_polygon_scales_centered_unit_points_to_node_box() -> None:
+    """Scale Cytoscape ``-1..1`` polygon points to the requested node bounds.
+
+    Returns
+    -------
+    None
+        The closed path vertices are asserted in data coordinates.
+    """
+
+    path = build_shape_path(
+        ShapeSpec(
+            center_x=10.0,
+            center_y=-5.0,
+            width=20.0,
+            height=10.0,
+            shape="polygon",
+            polygon_points=[(-1.0, -1.0), (1.0, -1.0), (0.0, 1.0)],
+        )
+    )
+
+    np.testing.assert_allclose(
+        path.vertices,
+        np.array([[0.0, -10.0], [20.0, -10.0], [10.0, 0.0], [0.0, -10.0]]),
+    )
+
+
 @pytest.mark.parametrize(("shape", "vertex_count"), ROUNDED_POLYGON_VERTEX_COUNTS.items())
 def test_rounded_polygon_paths_curve_every_corner(shape: str, vertex_count: int) -> None:
     """Verify rounded polygons preserve corner count and replace sharp joins.

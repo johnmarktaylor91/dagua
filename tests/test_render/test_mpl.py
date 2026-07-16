@@ -2305,6 +2305,44 @@ def test_node_and_external_label_font_sizes_use_data_coordinate_scaling(
     plt.close(fig)
 
 
+@pytest.mark.parametrize(
+    ("position", "expected"),
+    [
+        ("top-left", (-12.0, 8.0, "right", "bottom")),
+        ("top-center", (0.0, 8.0, "center", "bottom")),
+        ("top-right", (12.0, 8.0, "left", "bottom")),
+        ("center-left", (-12.0, 0.0, "right", "center")),
+        ("center", (0.0, 0.0, "center", "center")),
+        ("center-right", (12.0, 0.0, "left", "center")),
+        ("bottom-left", (-12.0, -8.0, "right", "top")),
+        ("bottom-center", (0.0, -8.0, "center", "top")),
+        ("bottom-right", (12.0, -8.0, "left", "top")),
+    ],
+)
+def test_external_label_nine_position_anchors(
+    position: str,
+    expected: tuple[float, float, str, str],
+) -> None:
+    """Place each external-label grid position against the node boundary.
+
+    Parameters
+    ----------
+    position : str
+        Nine-position token under test.
+    expected : tuple[float, float, str, str]
+        Expected x/y anchor and horizontal/vertical alignments.
+
+    Returns
+    -------
+    None
+        Placement geometry is asserted in place.
+    """
+
+    actual = mpl_renderer._external_label_anchor(0.0, 0.0, 10.0, 6.0, 2.0, position)
+
+    assert actual == expected
+
+
 def test_bold_node_and_external_labels_normalize_weight_and_gain_size_boost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2901,6 +2939,68 @@ def test_cluster_box_expands_for_bottom_labels_but_not_outside_labels(
     assert outside_y_min == pytest.approx(raw_y_min, abs=0.25)
     plt.close(bottom_fig)
     plt.close(outside_fig)
+
+
+def test_cluster_right_padding_overrides_shared_padding() -> None:
+    """Apply a per-side cluster override only to the requested bbox side.
+
+    Returns
+    -------
+    None
+        The right bound expands while the left bound remains unchanged.
+    """
+
+    def render_box(padding_right: float | None) -> tuple[float, float, float, float]:
+        """Compute one deterministic cluster render bbox.
+
+        Parameters
+        ----------
+        padding_right : float | None
+            Optional right-side override.
+
+        Returns
+        -------
+        tuple[float, float, float, float]
+            Computed cluster bbox.
+        """
+
+        graph = DaguaGraph()
+        graph.add_node("a")
+        graph.add_cluster(
+            "outer",
+            ["a"],
+            label="",
+            style=ClusterStyle(
+                padding=10.0,
+                padding_right=padding_right,
+                label_position="outside-top",
+                stroke_width=0.0,
+            ),
+        )
+        fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+        ax.set_xlim(-100.0, 100.0)
+        ax.set_ylim(-50.0, 50.0)
+        fig.canvas.draw()
+        boxes = mpl_renderer._compute_cluster_render_bboxes(
+            ax=ax,
+            graph=graph,
+            pos=np.array([[0.0, 0.0]], dtype=float),
+            sizes=np.array([[100.0, 20.0]], dtype=float),
+            ordered_clusters=["outer"],
+            cluster_depths={"outer": 0},
+            cluster_y_mins={"outer": -20.0},
+            cluster_y_maxes={"outer": 20.0},
+            display_scale=1.0,
+            cluster_aware=False,
+        )
+        plt.close(fig)
+        return boxes["outer"].bbox
+
+    shared_bbox = render_box(None)
+    overridden_bbox = render_box(30.0)
+
+    assert overridden_bbox[0] == pytest.approx(shared_bbox[0])
+    assert overridden_bbox[2] == pytest.approx(shared_bbox[2] + 20.0)
 
 
 def test_sibling_cluster_labels_avoid_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
