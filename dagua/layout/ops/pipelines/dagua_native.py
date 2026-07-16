@@ -29,6 +29,7 @@ from dagua.layout.ops.pipelines._native_shared import (
     _tile_component_positions,
     build_gradient_core,
 )
+from dagua.layout.ops.pipelines.native_finisher import is_worker_timeout_like_exception
 from dagua.layout.ops.pipelines.native_force_directed import (
     build_native_force_directed_pipeline,
     layout_native_force_directed_pipeline,
@@ -5937,7 +5938,7 @@ def layout_dagua_native_pipeline(
         setattr(
             prepared_config,
             "_dagua_native_anytime_best",
-            _AnytimeBestRecord(pos=pos.detach(), provenance=provenance),
+            _AnytimeBestRecord(pos=pos.detach().clone(), provenance=provenance),
         )
 
     setattr(prepared_config, "_dagua_native_register_anytime_best", register_anytime_best)
@@ -6130,10 +6131,6 @@ def layout_dagua_native_pipeline(
     try:
         return run_pipeline_body()
     except Exception as exc:
-        from dagua.layout.ops.pipelines.native_finisher import (
-            is_worker_timeout_like_exception,
-        )
-
         if is_worker_timeout_like_exception(exc):
             anytime_best = getattr(prepared_config, "_dagua_native_anytime_best", None)
             if anytime_best is not None:
