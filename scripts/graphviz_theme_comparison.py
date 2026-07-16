@@ -864,6 +864,165 @@ def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
     return graph, "Shape Atlas"
 
 
+def _make_fill_atlas() -> Tuple[DaguaGraph, str]:
+    """Create a grid covering Graphviz's complete node fill-style vocabulary.
+
+    Returns
+    -------
+    tuple[DaguaGraph, str]
+        Graph and display title. Invisible vertical chains arrange the
+        disconnected fill samples as four stable atlas columns.
+    """
+
+    graph = DaguaGraph(direction="TB")
+    primary = "#F28E2B"
+    secondary = "#4E79A7"
+    tertiary = "#59A14F"
+    specs: Tuple[Tuple[str, str, NodeStyle, Dict[str, str]], ...] = (
+        (
+            "solid",
+            "solid filled",
+            NodeStyle(fill=primary),
+            {"shape": "ellipse", "style": "filled", "fillcolor": primary},
+        ),
+        *tuple(
+            (
+                f"linear_{angle}",
+                f"linear {angle}°",
+                NodeStyle(
+                    fill=primary,
+                    gradient="linear",
+                    gradient_color=secondary,
+                    gradient_angle=float(angle),
+                ),
+                {
+                    "shape": "ellipse",
+                    "style": "filled",
+                    "fillcolor": f"{primary}:{secondary}",
+                    "gradientangle": str(angle),
+                },
+            )
+            for angle in (0, 45, 90, 135, 270)
+        ),
+        *tuple(
+            (
+                f"radial_{angle}",
+                "radial centered" if angle == 0 else f"radial focus {angle}°",
+                NodeStyle(
+                    fill=primary,
+                    gradient="radial",
+                    gradient_color=secondary,
+                    gradient_angle=float(angle),
+                ),
+                {
+                    "shape": "ellipse",
+                    "style": "radial",
+                    "fillcolor": f"{primary}:{secondary}",
+                    "gradientangle": str(angle),
+                },
+            )
+            for angle in (0, 45)
+        ),
+        (
+            "striped_2",
+            "striped 2 equal",
+            NodeStyle(
+                shape="rect",
+                fill=primary,
+                fill_pattern="striped",
+                fill_pattern_colors=[primary, secondary],
+                fill_pattern_values=[1.0, 1.0],
+            ),
+            {
+                "shape": "box",
+                "style": "striped",
+                "fillcolor": f"{primary}:{secondary}",
+            },
+        ),
+        (
+            "striped_3_weighted",
+            "striped 3 weighted",
+            NodeStyle(
+                shape="rect",
+                fill=primary,
+                fill_pattern="striped",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[2.0, 3.0, 5.0],
+            ),
+            {
+                "shape": "box",
+                "style": "striped",
+                "fillcolor": f"{primary};0.2:{secondary};0.3:{tertiary};0.5",
+            },
+        ),
+        (
+            "wedged_ellipse_equal",
+            "wedged ellipse equal",
+            NodeStyle(
+                fill=primary,
+                fill_pattern="pie",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[1.0, 1.0, 1.0],
+            ),
+            {
+                "shape": "ellipse",
+                "style": "wedged",
+                "fillcolor": f"{primary}:{secondary}:{tertiary}",
+            },
+        ),
+        (
+            "wedged_ellipse_weighted",
+            "wedged ellipse weighted",
+            NodeStyle(
+                fill=primary,
+                fill_pattern="pie",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[2.0, 3.0, 5.0],
+            ),
+            {
+                "shape": "ellipse",
+                "style": "wedged",
+                "fillcolor": f"{primary};0.2:{secondary};0.3:{tertiary};0.5",
+            },
+        ),
+        (
+            "wedged_circle_weighted",
+            "wedged circle weighted",
+            NodeStyle(
+                shape="circle",
+                fill=primary,
+                fill_pattern="pie",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[2.0, 3.0, 5.0],
+            ),
+            {
+                "shape": "circle",
+                "style": "wedged",
+                "fillcolor": f"{primary};0.2:{secondary};0.3:{tertiary};0.5",
+            },
+        ),
+    )
+    columns: List[List[str]] = [[], [], [], []]
+    for index, (node_id, label, style, graphviz_attrs) in enumerate(specs):
+        node_index = graph.add_node(node_id, label=label, style=style)
+        _set_graphviz_node_attrs(graph, node_index, graphviz_attrs)
+        columns[index % len(columns)].append(node_id)
+
+    for column in columns:
+        for source, target in zip(column, column[1:]):
+            edge_index = graph.add_edge(
+                source,
+                target,
+                style=EdgeStyle(arrow="none", opacity=0.0),
+            )
+            _set_graphviz_edge_attrs(
+                graph,
+                edge_index,
+                {"style": "invis", "arrowhead": "none"},
+            )
+    return graph, "Fill Pattern Atlas"
+
+
 def _make_compose_stress() -> Tuple[DaguaGraph, str]:
     """Create pathological combinations of Graphviz-compatible cosmetics.
 
@@ -1299,6 +1458,7 @@ def _custom_graph_cases() -> List[GraphCase]:
         _make_cluster_showcase,
         _make_arrowhead_atlas,
         _make_shape_atlas,
+        _make_fill_atlas,
         _make_compose_stress,
         _make_spline_stress,
         _make_cluster_nest_deep,

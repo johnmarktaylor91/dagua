@@ -3094,7 +3094,31 @@ def _draw_gradient_fill(
     xx, yy = np.meshgrid(grid, grid)
 
     if style.gradient == "radial":
-        data = np.clip(np.power(np.sqrt(xx**2 + yy**2), 0.7), 0.0, 1.0)
+        gradient_angle = float(style.gradient_angle) % 360.0
+        if abs(gradient_angle) <= 1e-9:
+            focus_x = 0.0
+            focus_y = 0.0
+        else:
+            angle = np.deg2rad(gradient_angle)
+            focus_x = float(np.cos(angle))
+            focus_y = float(np.sin(angle))
+        dx = xx - focus_x
+        dy = yy - focus_y
+        ray_norm_sq = dx**2 + dy**2
+        focus_dot_ray = focus_x * dx + focus_y * dy
+        # Graphviz emits an SVG radial gradient with a 75% object-bbox
+        # radius. In this [-1, 1] raster that is a radius of 1.5. Solve each
+        # focal ray's intersection with that circle to reproduce SVG focal
+        # gradients, including non-zero gradientangle values.
+        radius = 1.5
+        discriminant = np.maximum(
+            focus_dot_ray**2 - ray_norm_sq * (focus_x**2 + focus_y**2 - radius**2),
+            0.0,
+        )
+        denominator = np.maximum(ray_norm_sq, 1e-12)
+        end_scale = (-focus_dot_ray + np.sqrt(discriminant)) / denominator
+        data = np.where(ray_norm_sq <= 1e-12, 0.0, 1.0 / np.maximum(end_scale, 1e-12))
+        data = np.clip(data, 0.0, 1.0)
     else:
         angle = np.deg2rad(style.gradient_angle)
         projection = xx * np.cos(angle) + yy * np.sin(angle)
@@ -3199,14 +3223,18 @@ def _draw_striped_fill(
     projection_range = max(float(np.max(projection)) - projection_min, 1e-9)
     normalized = (projection - projection_min) / projection_range
     palette_count = max(len(colors), 1)
-    stripe_count = max(palette_count * 8, 8)
-    bands = np.mod((normalized * stripe_count).astype(int), palette_count)
-    # Inset the image extent so anti-aliasing bleed at the clip
-    # boundary stays inside the node outline.
-    inset = min(w, h) * 0.03
+    raw_values = list(getattr(style, "fill_pattern_values", None) or [])
+    if len(raw_values) != palette_count or sum(max(float(value), 0.0) for value in raw_values) <= 0:
+        weights = np.full(palette_count, 1.0 / palette_count)
+    else:
+        positive_values = np.asarray([max(float(value), 0.0) for value in raw_values])
+        weights = positive_values / float(np.sum(positive_values))
+    boundaries = np.cumsum(weights)
+    bands = np.searchsorted(boundaries, normalized, side="right")
+    bands = np.clip(bands, 0, palette_count - 1)
     image = ax.imshow(
         bands,
-        extent=(x - w / 2.0 + inset, x + w / 2.0 - inset, y - h / 2.0 + inset, y + h / 2.0 - inset),
+        extent=(x - w / 2.0, x + w / 2.0, y - h / 2.0, y + h / 2.0),
         origin="lower",
         cmap=ListedColormap(colors),
         interpolation="nearest",
@@ -3253,7 +3281,7 @@ def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) 
 
     hole_fraction = min(max(float(getattr(style, "fill_pattern_hole", 0.0)), 0.0), 0.99)
     wedge_width = None if hole_fraction <= 0.0 else 1.0 - hole_fraction
-    current_angle = 90.0 - float(getattr(style, "fill_pattern_angle", 0.0))
+    current_angle = -float(getattr(style, "fill_pattern_angle", 0.0))
     pie_transform = (
         Affine2D()
         .scale(radius_x, radius_y)
@@ -3268,8 +3296,8 @@ def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) 
         wedge_kwargs: Dict[str, Any] = {
             "center": (0.0, 0.0),
             "r": 1.0,
-            "theta1": current_angle - sweep,
-            "theta2": current_angle,
+            "theta1": current_angle,
+            "theta2": current_angle + sweep,
         }
         if wedge_width is not None:
             wedge_kwargs["width"] = wedge_width
@@ -3279,13 +3307,14 @@ def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) 
         wedge = PathPatch(
             wedge_path,
             facecolor=colors[index % len(colors)],
-            edgecolor="none",
+            edgecolor=str(getattr(style, "stroke", "#000000")),
+            linewidth=0.5,
             alpha=float(style.opacity),
             zorder=2.01,
         )
         wedge.set_clip_path(clip_patch)
         ax.add_patch(wedge)
-        current_angle -= sweep
+        current_angle += sweep
 
 
 def _draw_node_fill(

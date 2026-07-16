@@ -191,6 +191,23 @@ def test_shape_atlas_covers_all_supported_shapes_without_placeholders() -> None:
     )
 
 
+def test_fill_atlas_covers_graphviz_fill_variants_and_dot_declarations() -> None:
+    """The fill atlas should declare every supported Graphviz fill mechanism."""
+
+    graph, title = graphviz_theme_comparison._make_fill_atlas()
+    dot_source = graphviz_theme_comparison.graph_to_dot(graph)
+
+    assert title == "Fill Pattern Atlas"
+    assert graph.num_nodes == 13
+    for angle in (0, 45, 90, 135, 270):
+        assert f"gradientangle={angle}" in dot_source
+    assert "style=radial" in dot_source
+    assert "style=striped" in dot_source
+    assert "style=wedged" in dot_source
+    assert "shape=circle" in dot_source
+    assert 'fillcolor="#F28E2B;0.2:#4E79A7;0.3:#59A14F;0.5"' in dot_source
+
+
 def test_compose_stress_stacks_cosmetics_and_nested_structures() -> None:
     """The composition panel should combine cosmetics rather than isolate them."""
 

@@ -173,6 +173,9 @@ class ReferenceNode:
         Ellipse stroke color.
     node_stroke_width_pt : float
         Ellipse stroke width in points (Graphviz default 1.0 if absent).
+    fill_is_complex : bool
+        Whether Graphviz emitted gradient definitions or wedge paths instead
+        of a directly comparable single fill color.
     """
 
     node_id: str
@@ -184,6 +187,7 @@ class ReferenceNode:
     node_fill: str
     node_stroke: str
     node_stroke_width_pt: float
+    fill_is_complex: bool = False
 
     @property
     def ellipse_aspect(self) -> float:
@@ -191,6 +195,33 @@ class ReferenceNode:
 
         return self.ellipse_rx / self.ellipse_ry if self.ellipse_ry > 0 else float("nan")
 
+
+@dataclass
+class FillDeclaration:
+    """Declarative fill features extracted from SVG or Dagua node style.
+
+    Attributes
+    ----------
+    node_id
+        Stable DOT node id.
+    pattern
+        Canonical mechanism: solid, linear, radial, striped, or wedged.
+    colors
+        Ordered canonical color list.
+    angle_deg
+        Gradient angle when the mechanism uses one.
+    values
+        Normalized stripe weights when SVG exposes geometric partitions.
+    slice_count
+        Number of stripe bands or wedge slices.
+    """
+
+    node_id: str
+    pattern: str
+    colors: List[str]
+    angle_deg: Optional[float] = None
+    values: Optional[List[float]] = None
+    slice_count: int = 1
 
 @dataclass
 class ReferenceEdge:
@@ -437,7 +468,189 @@ def _node_record(node_group: ET.Element) -> Optional[ReferenceNode]:
         node_stroke=ellipse.attrib.get("stroke", ""),
         # Graphviz omits stroke-width for the default 1.0 pen; default to 1.0.
         node_stroke_width_pt=_parse_float(ellipse.attrib.get("stroke-width"), default=1.0),
+        fill_is_complex=(
+            any(
+                _strip_ns(child.tag) in {"linearGradient", "radialGradient"}
+                for child in node_group.iter()
+            )
+            or sum(
+                1
+                for child in node_group
+                if _strip_ns(child.tag) == "path"
+                and child.attrib.get("fill", "").lower() not in {"", "none"}
+            )
+            > 1
+        ),
     )
+
+
+def _svg_stop_color(stop: ET.Element) -> str:
+    """Extract a gradient stop color from a Graphviz SVG stop element.
+
+    Parameters
+    ----------
+    stop
+        SVG ``stop`` element.
+
+    Returns
+    -------
+    str
+        CSS color literal, or an empty string when absent.
+    """
+
+    if stop.attrib.get("stop-color"):
+        return stop.attrib["stop-color"]
+    for declaration in stop.attrib.get("style", "").split(";"):
+        key, separator, value = declaration.partition(":")
+        if separator and key.strip() == "stop-color":
+            return value.strip()
+    return ""
+
+
+def _gradient_angle(
+    gradient: ET.Element,
+    radial: bool,
+    node_group: Optional[ET.Element] = None,
+) -> float:
+    """Recover Graphviz's gradient angle from emitted SVG geometry.
+
+    Parameters
+    ----------
+    gradient
+        SVG linear or radial gradient element.
+    radial
+        Whether focal-point attributes should be interpreted.
+    node_group
+        Owning SVG node group. Ellipse dimensions remove aspect-ratio scaling
+        from Graphviz's linear-gradient endpoints.
+
+    Returns
+    -------
+    float
+        Angle normalized to ``[0, 360)`` degrees.
+    """
+
+    import math
+
+    if radial:
+        fx = _parse_float(gradient.attrib.get("fx", "50%").rstrip("%"))
+        fy = _parse_float(gradient.attrib.get("fy", "50%").rstrip("%"))
+        dx = fx - 50.0
+        dy = 50.0 - fy
+    else:
+        x1 = _parse_float(gradient.attrib.get("x1"))
+        y1 = _parse_float(gradient.attrib.get("y1"))
+        x2 = _parse_float(gradient.attrib.get("x2"))
+        y2 = _parse_float(gradient.attrib.get("y2"))
+        dx = x2 - x1
+        dy = y1 - y2
+        ellipse = node_group.find(f"{{{SVG_NS}}}ellipse") if node_group is not None else None
+        if ellipse is not None:
+            rx = _parse_float(ellipse.attrib.get("rx"), default=1.0)
+            ry = _parse_float(ellipse.attrib.get("ry"), default=1.0)
+            dx /= max(rx, 1e-9)
+            dy /= max(ry, 1e-9)
+    if abs(dx) <= 1e-9 and abs(dy) <= 1e-9:
+        return 0.0
+    return math.degrees(math.atan2(dy, dx)) % 360.0
+
+
+def extract_reference_fill_declarations(svg_text: str) -> Dict[str, FillDeclaration]:
+    """Extract rendered node fill declarations from Graphviz SVG.
+
+    Parameters
+    ----------
+    svg_text
+        Graphviz ``dot -Tsvg`` payload.
+
+    Returns
+    -------
+    dict[str, FillDeclaration]
+        Fill declarations keyed by DOT node id. Stripe weights come from the
+        widths of Graphviz's emitted rectangular slice polygons; wedge slice
+        count and color order come from its emitted filled paths.
+    """
+
+    root = ET.fromstring(svg_text)
+    declarations: Dict[str, FillDeclaration] = {}
+    for group in root.iter():
+        if _strip_ns(group.tag) != "g" or group.attrib.get("class") != "node":
+            continue
+        title_el = group.find(f"{{{SVG_NS}}}title")
+        node_id = (title_el.text or "").strip() if title_el is not None else ""
+        gradients = [
+            child
+            for child in group.iter()
+            if _strip_ns(child.tag) in {"linearGradient", "radialGradient"}
+        ]
+        if gradients:
+            gradient = gradients[0]
+            radial = _strip_ns(gradient.tag) == "radialGradient"
+            colors = [
+                _svg_stop_color(stop)
+                for stop in gradient
+                if _strip_ns(stop.tag) == "stop" and _svg_stop_color(stop)
+            ]
+            declarations[node_id] = FillDeclaration(
+                node_id=node_id,
+                pattern="radial" if radial else "linear",
+                colors=colors,
+                angle_deg=_gradient_angle(gradient, radial, group),
+                slice_count=len(colors),
+            )
+            continue
+
+        filled_paths = [
+            child
+            for child in group
+            if _strip_ns(child.tag) == "path"
+            and child.attrib.get("fill", "").lower() not in {"", "none"}
+        ]
+        if len(filled_paths) > 1:
+            declarations[node_id] = FillDeclaration(
+                node_id=node_id,
+                pattern="wedged",
+                colors=[child.attrib["fill"] for child in filled_paths],
+                slice_count=len(filled_paths),
+            )
+            continue
+
+        filled_polygons = [
+            child
+            for child in group
+            if _strip_ns(child.tag) == "polygon"
+            and child.attrib.get("fill", "").lower() not in {"", "none"}
+        ]
+        if len(filled_polygons) > 1:
+            widths = []
+            for polygon in filled_polygons:
+                points = _parse_polygon_points(polygon.attrib.get("points", ""))
+                min_x, _, max_x, _ = _polygon_bbox(points)
+                widths.append(max_x - min_x)
+            total_width = sum(widths)
+            values = [width / total_width for width in widths] if total_width > 0 else None
+            declarations[node_id] = FillDeclaration(
+                node_id=node_id,
+                pattern="striped",
+                colors=[child.attrib["fill"] for child in filled_polygons],
+                values=values,
+                slice_count=len(filled_polygons),
+            )
+            continue
+
+        filled_shapes = [
+            child
+            for child in group
+            if _strip_ns(child.tag) in {"ellipse", "polygon", "path"}
+            and child.attrib.get("fill", "").lower() not in {"", "none"}
+        ]
+        if filled_shapes:
+            declarations[node_id] = FillDeclaration(
+                node_id=node_id,
+                pattern="solid",
+                colors=[filled_shapes[0].attrib["fill"]],
+            )
+    return declarations
 
 
 def _edge_record(edge_group: ET.Element) -> ReferenceEdge:
@@ -852,6 +1065,7 @@ class CandidateGraph:
     nodes: List[CandidateNode] = field(default_factory=list)
     edges: List[CandidateEdge] = field(default_factory=list)
     clusters: List[CandidateCluster] = field(default_factory=list)
+    fill_declarations: Dict[str, FillDeclaration] = field(default_factory=dict)
 
 
 def _apply_strict_theme(graph: DaguaGraph) -> DaguaGraph:
@@ -946,6 +1160,58 @@ def _candidate_nodes(graph: DaguaGraph) -> List[CandidateNode]:
             )
         )
     return out
+
+
+def _candidate_fill_declarations(graph: DaguaGraph) -> Dict[str, FillDeclaration]:
+    """Extract canonical fill declarations from effective Dagua node styles.
+
+    Parameters
+    ----------
+    graph
+        Strict-themed graph clone.
+
+    Returns
+    -------
+    dict[str, FillDeclaration]
+        Fill declarations keyed by DOT node id.
+    """
+
+    declarations: Dict[str, FillDeclaration] = {}
+    for index in range(graph.num_nodes):
+        style = graph.get_style_for_node(index)
+        if style.gradient in {"linear", "radial"}:
+            pattern = str(style.gradient)
+            colors = [str(style.fill), str(style.gradient_color or style.stroke)]
+            angle = float(style.gradient_angle) % 360.0
+            values = None
+        elif style.fill_pattern == "striped":
+            pattern = "striped"
+            colors = list(style.fill_pattern_colors or [str(style.fill)])
+            angle = None
+            values = list(style.fill_pattern_values or [1.0] * len(colors))
+        elif style.fill_pattern == "pie":
+            pattern = "wedged"
+            colors = list(style.fill_pattern_colors or [str(style.fill)])
+            angle = None
+            values = list(style.fill_pattern_values or [1.0] * len(colors))
+        else:
+            pattern = "solid"
+            colors = [str(style.fill)]
+            angle = None
+            values = None
+        if values is not None:
+            positive = [max(float(value), 0.0) for value in values]
+            total = sum(positive)
+            values = [value / total for value in positive] if total > 0.0 else None
+        declarations[f"n{index}"] = FillDeclaration(
+            node_id=f"n{index}",
+            pattern=pattern,
+            colors=colors,
+            angle_deg=angle,
+            values=values,
+            slice_count=len(colors),
+        )
+    return declarations
 
 
 def _candidate_edges(graph: DaguaGraph) -> List[CandidateEdge]:
@@ -1099,6 +1365,7 @@ def extract_candidate_features(graph: DaguaGraph) -> CandidateGraph:
         nodes=_candidate_nodes(themed),
         edges=_candidate_edges(themed),
         clusters=_candidate_clusters(themed),
+        fill_declarations=_candidate_fill_declarations(themed),
     )
 
 
@@ -1455,9 +1722,10 @@ def _flatten_node_deltas(
 
         deltas["font_family"] = _compare_string(target.font_family, candidate.font_family).__dict__
 
-    deltas["node_fill"] = _compare_string(
-        target.node_fill, candidate.node_fill, use_color_eq=True
-    ).__dict__
+    if not target.fill_is_complex:
+        deltas["node_fill"] = _compare_string(
+            target.node_fill, candidate.node_fill, use_color_eq=True
+        ).__dict__
 
     deltas["node_stroke"] = _compare_string(
         target.node_stroke, candidate.node_stroke, use_color_eq=True
@@ -1935,6 +2203,75 @@ def _v2_arrow_family_deltas(
     }
 
 
+def _fill_declaration_deltas(
+    target: FillDeclaration,
+    candidate: FillDeclaration,
+) -> Dict[str, Any]:
+    """Compare one SVG fill declaration with Dagua's effective style.
+
+    Parameters
+    ----------
+    target
+        Graphviz SVG-derived fill declaration.
+    candidate
+        Dagua style-derived fill declaration.
+
+    Returns
+    -------
+    dict[str, Any]
+        Declarative fill feature deltas.
+    """
+
+    target_colors = [_normalize_color(color) for color in target.colors]
+    candidate_colors = [_normalize_color(color) for color in candidate.colors]
+    deltas: Dict[str, Any] = {
+        "id": target.node_id,
+        "fill_pattern": FeatureDelta(
+            target=target.pattern,
+            dagua=candidate.pattern,
+            delta=f"target={target.pattern!r} dagua={candidate.pattern!r}",
+            in_tolerance=target.pattern == candidate.pattern,
+        ).__dict__,
+        "fill_colors": FeatureDelta(
+            target=target_colors,
+            dagua=candidate_colors,
+            delta={"target": target_colors, "dagua": candidate_colors},
+            in_tolerance=target_colors == candidate_colors,
+        ).__dict__,
+        "fill_slice_count": FeatureDelta(
+            target=target.slice_count,
+            dagua=candidate.slice_count,
+            delta=candidate.slice_count - target.slice_count,
+            in_tolerance=target.slice_count == candidate.slice_count,
+        ).__dict__,
+    }
+    if target.angle_deg is not None and candidate.angle_deg is not None:
+        raw_delta = abs(float(candidate.angle_deg) - float(target.angle_deg)) % 360.0
+        circular_delta = min(raw_delta, 360.0 - raw_delta)
+        deltas["fill_angle_deg"] = FeatureDelta(
+            target=round(float(target.angle_deg), 4),
+            dagua=round(float(candidate.angle_deg), 4),
+            delta=round(circular_delta, 4),
+            in_tolerance=circular_delta <= 0.1,
+        ).__dict__
+    if target.values is not None and candidate.values is not None:
+        value_delta = (
+            max(
+                abs(float(left) - float(right))
+                for left, right in zip(target.values, candidate.values)
+            )
+            if len(target.values) == len(candidate.values)
+            else float("inf")
+        )
+        deltas["fill_values"] = FeatureDelta(
+            target=[round(float(value), 4) for value in target.values],
+            dagua=[round(float(value), 4) for value in candidate.values],
+            delta=round(value_delta, 4),
+            in_tolerance=value_delta <= 0.01,
+        ).__dict__
+    return deltas
+
+
 def augment_panel_v2(
     panel: PanelReport,
     reference: ReferenceGraph,
@@ -2064,6 +2401,17 @@ def augment_panel_v2(
         ),
         "geometry_mode": "graphviz_spline",
     }
+    if case_id == "fill_pattern_atlas":
+        reference_fills = extract_reference_fill_declarations(svg_text)
+        for node_id, target_fill in reference_fills.items():
+            candidate_fill = candidate.fill_declarations.get(node_id)
+            if candidate_fill is None:
+                panel.out_of_tolerance.append(f"node[{node_id}].fill_declaration_missing")
+                continue
+            fill_deltas = _fill_declaration_deltas(target_fill, candidate_fill)
+            panel.nodes.append(fill_deltas)
+            fill_failures = _flag_out_of_tolerance(fill_deltas)
+            panel.out_of_tolerance.extend(f"node[{node_id}].{failure}" for failure in fill_failures)
     failures = _flag_out_of_tolerance(panel.graph)
     panel.out_of_tolerance.extend(f"graph.{f}" for f in failures)
     panel.in_tolerance = not panel.out_of_tolerance
