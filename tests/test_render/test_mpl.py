@@ -662,6 +662,10 @@ def test_graphviz_dash_patterns_are_explicit() -> None:
     assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == (0, (1.2, 3.0))
     assert _edge_linestyle(EdgeStyle(style="dashed")) == (0, (5.0, 3.0))
     assert _edge_linestyle(EdgeStyle(style="dotted")) == (0, (1.2, 3.0))
+    assert _edge_linestyle(EdgeStyle(line_dash_pattern=(4.0, 2.0, 1.0, 2.0))) == (
+        0,
+        (4.0, 2.0, 1.0, 2.0),
+    )
     assert _cluster_linestyle("dotted") == (0, (1.2, 3.0))
 
 

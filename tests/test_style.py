@@ -345,7 +345,8 @@ def test_graphviz_strict_theme_loads() -> None:
     assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "Times,serif"
     assert theme.cluster_style.label_position == "top-center"
-    assert theme.cluster_style.label_background == ""  # FLAG: verify cluster label background vs graphviz
+    # FLAG: verify cluster label background against Graphviz.
+    assert theme.cluster_style.label_background == ""
     assert theme.cluster_style.label_background_opacity == pytest.approx(0.0)
     assert theme.cluster_style.label_background_padding == (6.0, 4.0)
     assert theme.cluster_style.opacity == pytest.approx(1.0)
