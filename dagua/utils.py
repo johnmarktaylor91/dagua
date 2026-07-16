@@ -555,6 +555,16 @@ def _measure_text_exact_cached(
     line_spacing = 1.2
     text_to_path = TextToPath()
     font_path = _tex_gyre_termes_font_path(font_family, font_weight, font_style)
+    normalized_family = str(font_family).strip().lower().replace(" ", "")
+    if font_path is None and normalized_family in {
+        "texgyretermes",
+        "times-roman",
+        "times,serif",
+        "times",
+    }:
+        from dagua.render.text.paths import _fc_match_font_path
+
+        font_path = _fc_match_font_path(font_family, font_weight, font_style)
     if font_path is None:
         fp = FontProperties(
             family=font_family,
@@ -563,7 +573,12 @@ def _measure_text_exact_cached(
             style=_normalize_font_style(font_style),
         )
     else:
-        fp = FontProperties(fname=font_path, size=font_size)
+        fp = FontProperties(
+            fname=font_path,
+            size=font_size,
+            weight=font_weight,
+            style=_normalize_font_style(font_style),
+        )
     _, height_ref, _ = text_to_path.get_text_width_height_descent("Hg", fp, ismath=False)
     stable_line_height = max(float(height_ref), float(font_size))
     lines = text.split("\n")
