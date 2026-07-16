@@ -846,6 +846,15 @@ def run_w5_finisher(
         W5FinisherResult
             Finalized W5 result.
         """
+        if winner_pos is not incumbent_pos and not w5_dominates(
+            winner_score_pair,
+            incumbent_score_pair,
+            float(accept_margin),
+        ):
+            winner_pos = incumbent_pos
+            winner_score_pair = incumbent_score_pair
+            winner_name = "incumbent"
+            skipped_reason = "clamped_to_incumbent"
         spent_s = max(0.0, time.perf_counter() - started_perf)
         if config is not None:
             previous_spent = float(getattr(config, "_dagua_native_w5_spent_s", 0.0))
