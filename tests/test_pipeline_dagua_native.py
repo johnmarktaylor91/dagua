@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -144,6 +145,94 @@ def test_worker_timeout_returns_registered_prelayout_fallback(
 
     assert torch.equal(actual, fallback)
     assert bool(torch.isfinite(actual).all().item())
+
+
+def test_worker_timeout_reraises_without_anytime_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-gate row with no admitted milestone must re-raise worker timeout."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 2.0)
+    config = LayoutConfig(
+        steps=1,
+        edge_equalize_polish=False,
+        decompose_components=False,
+        route_flat_to_stress=False,
+        force_pipeline="hybrid",
+    )
+
+    def raising_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        prepared_config: Any,
+    ) -> torch.Tensor:
+        """Raise before any milestone can populate the anytime register."""
+        del problem, state, ctx, prepared_config
+        raise _WorkerLayoutTimeoutError("worker layout timeout exceeded")
+
+    monkeypatch.setattr(native, "_run_native_problem", raising_run_native_problem)
+
+    with pytest.raises(_WorkerLayoutTimeoutError):
+        layout_dagua_native_pipeline(
+            edge_index=edge_index,
+            num_nodes=4,
+            node_sizes=node_sizes,
+            config=config,
+            device="cpu",
+        )
+
+
+def test_worker_timeout_returns_cloned_anytime_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout fallback must preserve the admitted tensor against later mutation."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 2.0)
+    admitted = torch.tensor(
+        [[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [30.0, 0.0]],
+        dtype=torch.float32,
+    )
+    expected = admitted.clone()
+    config = LayoutConfig(
+        steps=1,
+        edge_equalize_polish=False,
+        decompose_components=False,
+        route_flat_to_stress=False,
+        force_pipeline="hybrid",
+    )
+
+    def mutating_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        prepared_config: Any,
+    ) -> torch.Tensor:
+        """Register a milestone, mutate its source tensor, then time out."""
+        del problem, state, ctx
+        register_anytime_best = getattr(prepared_config, "_dagua_native_register_anytime_best")
+        register_anytime_best(admitted, "post_base_contest")
+        admitted.add_(1000.0)
+        raise _WorkerLayoutTimeoutError("worker layout timeout exceeded")
+
+    monkeypatch.setattr(native, "_run_native_problem", mutating_run_native_problem)
+
+    actual = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=node_sizes,
+        config=config,
+        device="cpu",
+    )
+
+    assert torch.equal(actual, expected)
+    assert not torch.equal(actual, admitted)
 
 
 def test_collinear_dodge_moves_blocker_off_skip_edge() -> None:

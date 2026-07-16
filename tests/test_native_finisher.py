@@ -295,6 +295,69 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
     assert result.accepted == ()
 
 
+def test_w5_finisher_finish_clamps_non_dominant_winner_to_incumbent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The finish clamp preserves the incumbent when a winner stops dominating."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    telemetry_path = tmp_path / "w5-clamp.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    pos, edge_index, node_sizes = _tiny_layout()
+    candidate_pos = pos + 5.0
+    dominance_calls = {"count": 0}
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return one scoreable checkpoint that is initially accepted."""
+        del seed, edge_work, size_work, topo_depth, mode, deadline
+        return candidate_pos, 1, 2.0, [(1, candidate_pos, 1.0)]
+
+    def fake_w5_dominates(
+        candidate: W5ScorePair,
+        incumbent: W5ScorePair,
+        margin: float = 0.05,
+    ) -> bool:
+        """Accept inside the loop, then force the final clamp branch."""
+        del candidate, incumbent, margin
+        dominance_calls["count"] += 1
+        return dominance_calls["count"] == 1
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+    monkeypatch.setattr(native_finisher, "w5_dominates", fake_w5_dominates)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(10.2, 10.2),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+    log_w5_telemetry(result, None)
+
+    capsys.readouterr()
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+
+    assert dominance_calls["count"] == 2
+    assert torch.equal(result.winner_pos, pos)
+    assert result.winner_score_pair == _pair(10.0, 10.0)
+    assert result.winner_name == "incumbent"
+    assert result.skipped_reason == "clamped_to_incumbent"
+    assert records[-1]["skipped_reason"] == "clamped_to_incumbent"
+
+
 def test_w5_telemetry_emits_skip_reject_accept_and_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
