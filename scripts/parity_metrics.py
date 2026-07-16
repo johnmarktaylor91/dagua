@@ -1432,13 +1432,14 @@ def _flatten_node_deltas(
         if aspect_delta is not None:
             deltas["ellipse_aspect_pct"] = aspect_delta.__dict__
 
-    fs_delta = _compare_numeric(
-        target.font_size_pt, candidate.font_size_pt, tolerance["font_size_pt"]
-    )
-    if fs_delta is not None:
-        deltas["font_size_pt"] = fs_delta.__dict__
+    if _node_has_rendered_text(target):
+        fs_delta = _compare_numeric(
+            target.font_size_pt, candidate.font_size_pt, tolerance["font_size_pt"]
+        )
+        if fs_delta is not None:
+            deltas["font_size_pt"] = fs_delta.__dict__
 
-    deltas["font_family"] = _compare_string(target.font_family, candidate.font_family).__dict__
+        deltas["font_family"] = _compare_string(target.font_family, candidate.font_family).__dict__
 
     deltas["node_fill"] = _compare_string(
         target.node_fill, candidate.node_fill, use_color_eq=True
@@ -1457,6 +1458,25 @@ def _flatten_node_deltas(
         deltas["node_stroke_width_pt"] = sw_delta.__dict__
 
     return deltas
+
+
+def _node_has_rendered_text(node: ReferenceNode) -> bool:
+    """Return whether a reference node rendered comparable text.
+
+    Parameters
+    ----------
+    node : ReferenceNode
+        SVG-derived reference node record.
+
+    Returns
+    -------
+    bool
+        ``True`` when the reference emitted non-whitespace label text. Empty
+        labels do not draw glyphs in Graphviz, so their latent dagua font
+        defaults are not comparable font evidence.
+    """
+
+    return bool(node.label.strip())
 
 
 def _flatten_edge_deltas(
@@ -1955,12 +1975,13 @@ def augment_panel_v2(
             candidate=cand.ellipse_ry * 2.0,
             tolerance=tolerance["node_autosize_h_pt"],
         ).__dict__
-        node_entry["label_glyph_extent_pt"] = _v2_label_delta(
-            ref.label,
-            ref.font_size_pt,
-            cand.font_size_pt,
-            float(tolerance["label_glyph_extent_pt"]),
-        )
+        if _node_has_rendered_text(ref):
+            node_entry["label_glyph_extent_pt"] = _v2_label_delta(
+                ref.label,
+                ref.font_size_pt,
+                cand.font_size_pt,
+                float(tolerance["label_glyph_extent_pt"]),
+            )
 
     for edge_entry in panel.edges:
         title = str(edge_entry.get("title", ""))
