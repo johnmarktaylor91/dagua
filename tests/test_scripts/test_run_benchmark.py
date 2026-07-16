@@ -10,6 +10,7 @@ from pytest import MonkeyPatch
 
 from scripts.run_benchmark import (
     BenchmarkRecord,
+    effective_timeout,
     expired_watchdog_futures,
     is_record_complete,
     parse_args,
@@ -24,6 +25,12 @@ def test_seeds_for_engine_respects_stochastic_registry() -> None:
     assert seeds_for_engine("classic_fr", seed_count=3, seed_start=42) == [42, 43, 44]
     assert seeds_for_engine("classic_fr", seed_count=3, seed_start=50) == [50, 51, 52]
     assert seeds_for_engine("dagua", seed_count=3, seed_start=42) == [None]
+
+
+def test_effective_timeout_keeps_full_budget_for_dagua() -> None:
+    """Dagua keeps the requested timeout while other engines stay size-scaled."""
+    assert effective_timeout(300.0, 120, "dagua") == 300.0
+    assert effective_timeout(300.0, 120, "graphviz_sfdp") == 72.0
 
 
 def test_parse_args_accepts_seed_start(monkeypatch: MonkeyPatch) -> None:

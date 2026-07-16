@@ -318,6 +318,37 @@ def _all_pairs_unweighted(
     return distance_int
 
 
+def _cached_all_pairs_unweighted(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    max_dist: int,
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Return cached or freshly computed unweighted all-pairs distances.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    max_dist : int
+        Maximum distance to preserve in a newly computed matrix.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Precomputed distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Distance matrix with shape ``[N, N]`` using ``-1`` for unreachable
+        pairs and pairs beyond ``max_dist`` when the matrix was computed here.
+    """
+    if all_pairs_dist is not None:
+        return all_pairs_dist
+    offsets, targets = _build_csr(_ensure_cpu(edge_index), num_nodes)
+    return _all_pairs_unweighted(offsets, targets, num_nodes, max_dist=max_dist)
+
+
 def _bfs_distances(
     csr_offsets: np.ndarray,
     csr_targets: np.ndarray,
@@ -992,8 +1023,7 @@ def sampled_stress(
     pos_np = pos_norm.numpy()
 
     if all_pairs_dist is None:
-        csr_off, csr_tgt = _build_csr(ei, N)
-        all_pairs_dist = _all_pairs_unweighted(csr_off, csr_tgt, N, max_dist=max_dist)
+        all_pairs_dist = _cached_all_pairs_unweighted(ei, N, max_dist=max_dist)
     sources = _deterministic_sample_indices(N, min(n_sources, N))
 
     total_stress = 0.0
@@ -1243,8 +1273,7 @@ def _legacy_neighborhood_preservation(
         return {"neighborhood_mean": 0.0, "neighborhood_median": 0.0, "neighborhood_std": 0.0}
 
     if all_pairs_dist is None:
-        csr_off, csr_tgt = _build_csr(ei, N)
-        all_pairs_dist = _all_pairs_unweighted(csr_off, csr_tgt, N, max_dist=k)
+        all_pairs_dist = _cached_all_pairs_unweighted(ei, N, max_dist=k)
     samples = torch.randperm(N)[: min(n_samples, N)].numpy()
 
     scores = []
@@ -1603,8 +1632,7 @@ def _crossing_pair_geometry(
     elif total_pairs <= 10_000_000:
         generator = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
         selected = torch.randperm(total_pairs, generator=generator)[:n_samples]
-        all_first, all_second = torch.triu_indices(m, m, offset=1)
-        first, second = all_first[selected], all_second[selected]
+        first, second = _triu_pair_indices_from_linear(selected, m)
     else:
         generator = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
         first = torch.randint(0, m, (n_samples,), generator=generator)
@@ -1625,6 +1653,41 @@ def _crossing_pair_geometry(
         int(first.numel()),
         n_samples is None or total_pairs <= n_samples,
     )
+
+
+def _triu_pair_indices_from_linear(
+    linear_indices: torch.Tensor,
+    matrix_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Map upper-triangle offsets to edge-pair indices.
+
+    Parameters
+    ----------
+    linear_indices : torch.Tensor
+        Zero-based offsets into ``torch.triu_indices(matrix_size, matrix_size,
+        offset=1)`` order with shape ``[K]``.
+    matrix_size : int
+        Number of rows/columns in the conceptual square matrix.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        Row and column index tensors with shape ``[K]``.
+    """
+    if linear_indices.numel() == 0:
+        empty = torch.empty_like(linear_indices, dtype=torch.long)
+        return empty, empty
+    k = linear_indices.to(dtype=torch.float64)
+    width = float(2 * matrix_size - 1)
+    rows = torch.floor((width - torch.sqrt(width * width - 8.0 * k)) * 0.5).to(torch.long)
+    before = rows * (2 * matrix_size - rows - 1) // 2
+    # Floating-point floor can land one row high at exact triangular
+    # boundaries; correct in integer space without materializing the triangle.
+    too_high = before > linear_indices
+    rows = torch.where(too_high, rows - 1, rows)
+    before = rows * (2 * matrix_size - rows - 1) // 2
+    cols = rows + 1 + (linear_indices - before)
+    return rows.to(dtype=torch.long), cols.to(dtype=torch.long)
 
 
 def crossing_angle_score(
@@ -2686,6 +2749,7 @@ def quick(
     *,
     seed: Optional[int] = None,
     declared_hierarchical: bool = False,
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Compute the Tier-1 metric bundle.
 
@@ -2710,6 +2774,9 @@ def quick(
         existing stochastic behavior.
     declared_hierarchical : bool, optional
         Explicit declaration that DAG or pre-layout rank semantics apply.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Precomputed unweighted shortest paths with shape ``[N, N]`` for
+        large-graph quick metrics that need graph-distance rows.
 
     Returns
     -------
@@ -2792,9 +2859,18 @@ def quick(
                     N,
                     n_sources=source_budget,
                     n_targets=target_budget,
+                    all_pairs_dist=all_pairs_dist,
                 )
             )
-            result.update(neighborhood_preservation(pos, ei, N, n_samples=neighborhood_budget))
+            result.update(
+                neighborhood_preservation(
+                    pos,
+                    ei,
+                    N,
+                    n_samples=neighborhood_budget,
+                    all_pairs_dist=all_pairs_dist,
+                )
+            )
             result.update(angular_resolution_score(pos, ei, n_samples=512))
             result.update(path_continuity_score(pos, ei, n_samples=512))
         else:
@@ -2907,6 +2983,7 @@ def full(
         direction=direction,
         back_edge_mask=back_edge_mask,
         declared_hierarchical=declared_hierarchical,
+        all_pairs_dist=all_pairs_dist,
     )
 
     if edge_length_targets is not None:
@@ -2940,6 +3017,7 @@ def full(
             ei,
             N,
             n_samples=neighborhood_samples,
+            all_pairs_dist=all_pairs_dist,
         )
     )
     result.update(angular_resolution(pos, ei))

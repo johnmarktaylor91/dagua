@@ -373,6 +373,51 @@ class TestLayoutSimilarityAndEvaluate:
         )
         assert neighborhood_cached == pytest.approx(neighborhood_direct)
 
+    def test_full_scores_identical_with_precomputed_all_pairs(self) -> None:
+        """``full`` should be score-identical with or without an APSP cache.
+
+        Returns
+        -------
+        None
+            This test compares the frozen metric payload except wall-clock
+            timing, which is intentionally not part of scoring.
+        """
+        torch.manual_seed(17)
+        pos = torch.randn(9, 2)
+        edge_index = torch.tensor(
+            [[0, 1, 2, 3, 4, 5, 6, 7, 0], [1, 2, 3, 4, 5, 6, 7, 8, 8]],
+            dtype=torch.long,
+        )
+        csr_offsets, csr_targets = _build_csr(edge_index, 9)
+        all_pairs = _all_pairs_unweighted(csr_offsets, csr_targets, 9, max_dist=9)
+
+        direct = full(
+            pos,
+            edge_index,
+            stress_sources=5,
+            stress_targets=5,
+            crossing_samples=20,
+            neighborhood_samples=5,
+        )
+        cached = full(
+            pos,
+            edge_index,
+            stress_sources=5,
+            stress_targets=5,
+            crossing_samples=20,
+            neighborhood_samples=5,
+            all_pairs_dist=all_pairs,
+        )
+
+        for key, direct_value in direct.items():
+            if key == "_compute_time_seconds":
+                continue
+            cached_value = cached[key]
+            if isinstance(direct_value, float):
+                assert cached_value == pytest.approx(direct_value), key
+            else:
+                assert cached_value == direct_value, key
+
     def test_full_reuses_one_all_pairs_distance_matrix(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
