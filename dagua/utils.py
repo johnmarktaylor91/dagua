@@ -787,6 +787,7 @@ BOX3D_INTERIOR_HEIGHT_FACTOR = 1.5
 CURVED_NODE_SHAPES = {
     "ellipse",
     "circle",
+    "Mcircle",
     "double_circle",
     "semicircle",
     "semicircle_up",
@@ -1313,7 +1314,7 @@ def _compute_node_size_cached(
         # damping breaks label legibility.
         w = max(w, h) * 2.2
         h = w
-    elif shape == "circle":
+    elif shape in {"circle", "Mcircle"}:
         r = max(w, h)
         w = h = r
     elif (

@@ -242,25 +242,22 @@ DAGUA_SHAPE_TO_GRAPHVIZ: Dict[str, str] = {
     "trapezoid": "trapezium",
     "box3d": "box3d",
     "double_circle": "doublecircle",
+    "house": "house",
+    "invhouse": "invhouse",
+    "folder": "folder",
+    "tab": "tab",
+    "component": "component",
+    "note": "note",
+    "Msquare": "Msquare",
+    "Mdiamond": "Mdiamond",
+    "Mcircle": "Mcircle",
+    "doubleoctagon": "doubleoctagon",
+    "tripleoctagon": "tripleoctagon",
 }
 
-# JMT-gate recommended default cut line (FINAL_DESIGN.md section 13, item
-# 2): common shapes worth implementing next. "cylinder" and "box3d" are
-# already supported (see DAGUA_SHAPE_TO_GRAPHVIZ) so they are excluded here;
-# the remainder render as gap placeholders.
-GV_SHAPE_GAP_COMMON: Tuple[str, ...] = (
-    "house",
-    "invhouse",
-    "folder",
-    "tab",
-    "component",
-    "note",
-    "Msquare",
-    "Mdiamond",
-    "Mcircle",
-    "doubleoctagon",
-    "tripleoctagon",
-)
+# Common Graphviz shapes not yet implemented by Dagua. The visual-parity-v2
+# shape pass completed this bucket, so it remains as an explicit empty gate.
+GV_SHAPE_GAP_COMMON: Tuple[str, ...] = ()
 
 # A representative SAMPLE of the SynBio/exotic tier recommended for
 # out_of_scope waiver. This is illustrative, not the authoritative waiver
@@ -837,10 +834,9 @@ def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
     Dagua-supported shapes render through dagua's real shape drawers. Gap
     and waived shapes render as PLACEHOLDER nodes on the dagua side (a plain
     "rect" fallback labeled with the missing shape name) while the graphviz
-    side renders the true reference shape, so the atlas documents coverage
-    without implementing new shape-drawing code (out of scope for this
-    surgery). See GV_SHAPE_GAP_COMMON / GV_SHAPE_WAIVED_SAMPLE for
-    provenance.
+    side renders the true reference shape, so the atlas documents both
+    implemented coverage and the explicitly waived sample. See
+    GV_SHAPE_GAP_COMMON / GV_SHAPE_WAIVED_SAMPLE for provenance.
 
     Returns
     -------
@@ -862,8 +858,6 @@ def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
                 dagua_shape = shape_name
                 label = shape_name
                 gv_attrs = _graphviz_shape_attrs(NodeStyle(shape=dagua_shape))
-                if dagua_shape == "double_circle":
-                    gv_attrs = {"shape": "doublecircle"}
             else:
                 dagua_shape = "rect"
                 label = f"GAP: {shape_name}"
