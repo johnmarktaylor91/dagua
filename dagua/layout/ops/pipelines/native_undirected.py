@@ -116,6 +116,12 @@ TSNET_MAX_CONTEST_NODES = 300
 TSNET_REFERENCE_STEPS = 500
 TSNET_PERPLEXITIES = (30.0, 5.0)
 FR_REFERENCE_STEPS = 50
+SMALL_WORLD_SEED_NODE_MIN = 100
+SMALL_WORLD_SEED_NODE_MAX = 1000
+SMALL_WORLD_EDGE_NODE_RATIO_MAX = 4.0
+RGG_GEOMETRIC_SEED_NODE_MIN = 100
+RGG_GEOMETRIC_SEED_NODE_MAX = 1000
+RGG_GEOMETRIC_EDGE_NODE_RATIO_MIN = 4.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1204,6 +1210,186 @@ def _neato_in_contest(config: Optional[LayoutConfig], num_nodes: int) -> bool:
     return num_nodes <= NEATO_BALANCED_NODE_CAP
 
 
+def _small_world_knn_seed_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the local kNN seed should enter the contest.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Undirected portfolio problem.
+
+    Returns
+    -------
+    bool
+        ``True`` for medium sparse cyclic small-world-like topology.
+    """
+    n = int(problem.num_nodes)
+    if n < SMALL_WORLD_SEED_NODE_MIN or n > SMALL_WORLD_SEED_NODE_MAX:
+        return False
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if edge_count == 0:
+        return False
+    edge_ratio = float(edge_count) / float(max(n, 1))
+    structure = problem.structure
+    max_degree = int(getattr(structure, "max_degree", 0)) if structure is not None else 0
+    hub_fraction = (
+        float(getattr(structure, "hub_edge_fraction", 1.0)) if structure is not None else 1.0
+    )
+    is_cyclic = not bool(getattr(structure, "is_directed_acyclic", True))
+    return (
+        is_cyclic
+        and max_degree <= 12
+        and hub_fraction <= 0.25
+        and 1.5 <= edge_ratio <= SMALL_WORLD_EDGE_NODE_RATIO_MAX
+    )
+
+
+def _rgg_geometric_seed_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the geometric sparse-stress seed should enter.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Undirected portfolio problem.
+
+    Returns
+    -------
+    bool
+        ``True`` for medium dense spatial/geometric proxy structure.
+    """
+    n = int(problem.num_nodes)
+    if n < RGG_GEOMETRIC_SEED_NODE_MIN or n > RGG_GEOMETRIC_SEED_NODE_MAX:
+        return False
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    edge_ratio = float(edge_count) / float(max(n, 1))
+    structure = problem.structure
+    if structure is None:
+        return False
+    diameter = int(getattr(structure, "diameter_estimate", 0))
+    communities = int(getattr(structure, "num_communities", 0))
+    return (
+        edge_ratio >= RGG_GEOMETRIC_EDGE_NODE_RATIO_MIN
+        and int(getattr(structure, "max_degree", 0)) <= 80
+        and float(getattr(structure, "degree_uniformity", 1.0)) <= 0.45
+        and float(getattr(structure, "hub_edge_fraction", 1.0)) <= 0.25
+        and diameter > 0
+        and float(diameter) <= 0.9 * np.sqrt(float(n))
+        and float(getattr(structure, "community_score", 0.0)) >= 0.35
+        and 2 <= communities <= max(2, n // 5)
+    )
+
+
+def _unique_undirected_pairs(edge_index: torch.Tensor) -> torch.Tensor:
+    """Return sorted unique undirected edge pairs.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Unique undirected pairs with shape ``[2, U]``.
+    """
+    if edge_index.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+    pairs = torch.stack(
+        [
+            torch.minimum(edge_index[0], edge_index[1]),
+            torch.maximum(edge_index[0], edge_index[1]),
+        ],
+        dim=0,
+    ).to(device="cpu", dtype=torch.long)
+    pairs = pairs[:, pairs[0] != pairs[1]]
+    if pairs.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.unique(pairs.t(), dim=0).t().contiguous()
+
+
+def _small_world_knn_seed_candidate(
+    incumbent: torch.Tensor,
+    problem: LayoutProblem,
+    steps: int = 24,
+) -> torch.Tensor:
+    """Relax the incumbent with local-neighborhood and edge-CV forces.
+
+    Parameters
+    ----------
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Undirected portfolio problem.
+    steps : int, default=24
+        Deterministic local relaxation iterations.
+
+    Returns
+    -------
+    torch.Tensor
+        Seed positions with shape ``[N, 2]``.
+    """
+    pos = incumbent.detach().to(device="cpu", dtype=torch.float32).clone()
+    pairs = _unique_undirected_pairs(problem.edge_index)
+    if pairs.numel() == 0 or pos.shape[0] <= 2:
+        return pos
+    source = pairs[0]
+    target = pairs[1]
+    lengths = torch.linalg.vector_norm(pos[target] - pos[source], dim=1)
+    target_length = float(torch.median(lengths).clamp_min(1.0).item())
+    count = torch.zeros((pos.shape[0], 1), dtype=torch.float32)
+    count.scatter_add_(0, source.unsqueeze(1), torch.ones((source.numel(), 1)))
+    count.scatter_add_(0, target.unsqueeze(1), torch.ones((target.numel(), 1)))
+    count = count.clamp_min(1.0)
+    anchor = pos.clone()
+    for _iteration in range(max(0, int(steps))):
+        delta = pos[target] - pos[source]
+        length = torch.linalg.vector_norm(delta, dim=1).clamp_min(1.0e-6)
+        correction = 0.035 * ((length - target_length) / length).unsqueeze(1) * delta
+        updates = torch.zeros_like(pos)
+        updates.scatter_add_(0, source.unsqueeze(1).expand(-1, 2), correction)
+        updates.scatter_add_(0, target.unsqueeze(1).expand(-1, 2), -correction)
+        neighbor_sum = torch.zeros_like(pos)
+        neighbor_sum.scatter_add_(0, source.unsqueeze(1).expand(-1, 2), pos[target])
+        neighbor_sum.scatter_add_(0, target.unsqueeze(1).expand(-1, 2), pos[source])
+        centroid_pull = (neighbor_sum / count) - pos
+        pos = pos + updates + 0.018 * centroid_pull
+        pos = anchor + 0.985 * (pos - anchor)
+    return pos
+
+
+def _rgg_geometric_seed_candidate(
+    problem: LayoutProblem,
+    seed: int,
+    node_sep: float,
+) -> torch.Tensor:
+    """Build the sparse/geodesic stress seed for geometric graphs.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Undirected portfolio problem.
+    seed : int
+        Deterministic seed.
+    node_sep : float
+        Node separation in points.
+
+    Returns
+    -------
+    torch.Tensor
+        Seed positions with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.native_lattice_grid import layout_geodesic_stress_pipeline
+
+    return layout_geodesic_stress_pipeline(
+        edge_index=problem.edge_index,
+        num_nodes=int(problem.num_nodes),
+        node_sizes=problem.node_sizes,
+        seed=seed,
+        edge_weights=problem.edge_weights,
+        node_sep=node_sep,
+    )
+
+
 # r80-S9 Deliverable 2: weighted-similarity Dijkstra-target transform. A
 # 3-graph mini-probe (r79_weighted_small_world_120, r79_weighted_community_
 # 4x18, real_lesmis_77; see P12_SQUEEZE.md) compared "inverse" (1/w) against
@@ -1368,6 +1554,7 @@ def _router_v2_large_mini_contest(
     baseline_pos: torch.Tensor,
     problem: LayoutProblem,
     config: LayoutConfig,
+    incumbent_pos: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Score router-v2 candidates against the large-graph sfdp+PRISM holder.
 
@@ -1386,6 +1573,10 @@ def _router_v2_large_mini_contest(
         Prepared undirected layout problem.
     config : LayoutConfig
         Prepared native configuration.
+    incumbent_pos : torch.Tensor, optional
+        Exact native incumbent positions with shape ``[N, 2]``. When supplied,
+        the mini-contest uses the incumbent as the tie-break finalist so W4
+        seed challengers remain monotone against the frozen native route.
 
     Returns
     -------
@@ -1411,6 +1602,8 @@ def _router_v2_large_mini_contest(
         config, "_dagua_native_aesthetic_profile", None
     )
     positions: Dict[str, torch.Tensor] = {"sfdp_prism": baseline_pos}
+    if incumbent_pos is not None and bool(torch.isfinite(incumbent_pos).all().item()):
+        positions["incumbent"] = incumbent_pos
 
     def _admit(name: str, raw_pos: Optional[torch.Tensor]) -> None:
         if raw_pos is None or not bool(torch.isfinite(raw_pos).all().item()):
@@ -1487,6 +1680,22 @@ def _router_v2_large_mini_contest(
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("large mini-contest community challenger failed", exc_info=True)
+    if _small_world_knn_seed_enabled(problem) and _portfolio_has_budget(
+        config,
+        min_remaining_s=2.0,
+    ):
+        seed_base = incumbent_pos if incumbent_pos is not None else baseline_pos
+        try:
+            _admit("small_world_knn_seed", _small_world_knn_seed_candidate(seed_base, problem))
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest small-world seed failed", exc_info=True)
+    if _rgg_geometric_seed_enabled(problem) and _portfolio_has_budget(config):
+        try:
+            _admit("rgg_geometric_seed", _rgg_geometric_seed_candidate(problem, seed, node_sep))
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest RGG geometric seed failed", exc_info=True)
 
     cluster_ids = _build_cluster_ids(problem)
     from dagua.metrics import _all_pairs_unweighted, _build_csr
@@ -1507,9 +1716,9 @@ def _router_v2_large_mini_contest(
         )
         for name, pos in positions.items()
     }
-    best_name = "sfdp_prism"
+    best_name = "incumbent" if "incumbent" in positions else "sfdp_prism"
     for name, score in scores.items():
-        if name != "sfdp_prism" and score > scores[best_name]:
+        if name != best_name and score > scores[best_name]:
             best_name = name
     _log_marketplace_telemetry(
         route="undirected_large_mini",
@@ -1592,8 +1801,20 @@ def layout_native_undirected_portfolio(
             # admits geodesic/community candidates they now compete in a
             # bounded mini-contest instead of being skipped wholesale (the
             # 250 < n <= 1500 non-mesh band was previously unreachable by
-            # every new candidate family). Ties go to sfdp_prism.
-            winner_pos = _router_v2_large_mini_contest(shortlisted_pos, problem, config)
+            # every new candidate family). W4 seed-gated contests include the
+            # exact incumbent as tie-break finalist; other ties keep the
+            # historical sfdp_prism holder.
+            incumbent_for_seed_contest = None
+            if (
+                _small_world_knn_seed_enabled(problem) or _rgg_geometric_seed_enabled(problem)
+            ) and _portfolio_has_budget(config, min_remaining_s=2.0):
+                incumbent_for_seed_contest = _run_incumbent()
+            winner_pos = _router_v2_large_mini_contest(
+                shortlisted_pos,
+                problem,
+                config,
+                incumbent_pos=incumbent_for_seed_contest,
+            )
             return _never_nan_winner(
                 winner_pos,
                 problem,
@@ -1910,6 +2131,27 @@ def layout_native_undirected_portfolio(
             _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
     if stress_points_pos is not None:
         _add_challenger("stress_points", stress_points_pos)
+
+    # W4 narrow geometry seeds: structurally gated and referee-protected.
+    # They only add seed layouts to the existing challenger marketplace; the
+    # incumbent remains full-scored and wins every tie.
+    if _small_world_knn_seed_enabled(problem) and _portfolio_has_budget(
+        config,
+        min_remaining_s=2.0,
+    ):
+        try:
+            small_world_seed = _small_world_knn_seed_candidate(incumbent_pos, problem)
+            _add_challenger("small_world_knn_seed", small_world_seed)
+        except Exception as exc:  # noqa: BLE001 -- a failed seed never sinks the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("small-world kNN seed challenger failed", exc_info=True)
+    if _rgg_geometric_seed_enabled(problem) and _portfolio_has_budget(config):
+        try:
+            rgg_seed = _rgg_geometric_seed_candidate(problem, seed, challenger_node_sep)
+            _add_challenger("rgg_geometric_seed", rgg_seed)
+        except Exception as exc:  # noqa: BLE001 -- a failed seed never sinks the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("RGG geometric seed challenger failed", exc_info=True)
 
     # Candidate G (r83-P3.3): local fCoSE at the fidelity campaign's
     # reference defaults. Three adjacent deterministic seeds retain bounded

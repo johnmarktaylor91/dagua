@@ -28,7 +28,11 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _neato_in_contest,
     _project_candidate_prism,
     _repair_flung_isolates,
+    _rgg_geometric_seed_candidate,
+    _rgg_geometric_seed_enabled,
     _score_undirected_candidate,
+    _small_world_knn_seed_candidate,
+    _small_world_knn_seed_enabled,
     _use_large_prism_shortlist,
 )
 from dagua.layout.ops.state import LayoutProblem
@@ -397,6 +401,52 @@ def test_candidate_refinement_schedule_preserves_high_quality() -> None:
     assert _candidate_refinement_steps(high, 500) == FULL_REFINEMENT_STEPS
 
 
+def test_small_world_knn_seed_is_finite_and_structurally_gated() -> None:
+    """W4 small-world seed covers sparse cyclic local-neighborhood graphs."""
+    from dagua.eval.graphs import make_small_world
+
+    graph = make_small_world(120, 6, 0.1, seed=42)
+    structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 18.0),
+        structure=structure,
+    )
+    angles = torch.arange(graph.num_nodes, dtype=torch.float32) * (2.0 * torch.pi / graph.num_nodes)
+    incumbent = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * 200.0
+
+    candidate = _small_world_knn_seed_candidate(incumbent, problem, steps=4)
+
+    assert _small_world_knn_seed_enabled(problem)
+    assert candidate.shape == incumbent.shape
+    assert bool(torch.isfinite(candidate).all().item())
+    assert not torch.equal(candidate, incumbent)
+
+
+def test_rgg_geometric_seed_is_finite_and_structurally_gated() -> None:
+    """W4 geometric seed covers dense spatial random graphs."""
+    from dagua.eval.graphs import make_random_geometric
+
+    test_graph = make_random_geometric(120, radius=0.18, seed=42)
+    graph = test_graph.graph
+    structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 18.0),
+        structure=structure,
+    )
+
+    candidate = _rgg_geometric_seed_candidate(problem, seed=42, node_sep=18.0)
+
+    assert _rgg_geometric_seed_enabled(problem)
+    assert candidate.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(candidate).all().item())
+    extent = candidate.max(dim=0).values - candidate.min(dim=0).values
+    assert float(extent.min().item()) > 0.0
+
+
 def test_prism_candidate_finishes_residual_overlaps_to_zero() -> None:
     """PRISM plus its residual scale loop reaches literal zero overlaps."""
     positions = torch.tensor(
@@ -561,6 +611,76 @@ def test_large_shortlist_runs_before_expensive_incumbent(monkeypatch: object) ->
 
     assert calls == ["shortcut", "mini"]
     torch.testing.assert_close(result, shortcut_pos)
+
+
+def test_large_w4_seed_shortcut_includes_exact_incumbent(monkeypatch: object) -> None:
+    """Seed-gated large mini-contests keep the exact incumbent eligible."""
+    import importlib
+    from types import SimpleNamespace
+
+    from dagua.layout.ops.pipelines.native_undirected import layout_native_undirected_portfolio
+    from dagua.layout.ops.state import RuntimeContext, SolveState
+
+    n = LARGE_CONTEST_NODE_THRESHOLD + 50
+    edges = []
+    for node in range(n):
+        edges.append((node, (node + 1) % n))
+        edges.append((node, (node + 2) % n))
+        edges.append((node, (node + 5) % n))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    structure = SimpleNamespace(
+        max_degree=6,
+        is_directed_acyclic=False,
+        hub_edge_fraction=0.1,
+        degree_uniformity=0.0,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=n,
+        node_sizes=torch.full((n, 2), 18.0),
+        structure=structure,
+        seed=42,
+    )
+    shortcut_pos = torch.zeros((n, 2), dtype=torch.float32)
+    expected_incumbent = torch.ones((n, 2), dtype=torch.float32)
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+
+    def fake_shortlist(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite shortcut candidate."""
+        del args, kwargs
+        return shortcut_pos
+
+    def fake_incumbent(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the exact incumbent expected by the seed mini-contest."""
+        del args, kwargs
+        return expected_incumbent
+
+    def fake_mini_contest(
+        baseline_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        incumbent_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Assert the incumbent is an eligible seed-contest finalist."""
+        del problem, config
+        torch.testing.assert_close(baseline_pos, shortcut_pos)
+        assert incumbent_pos is not None
+        torch.testing.assert_close(incumbent_pos, expected_incumbent)
+        return incumbent_pos
+
+    monkeypatch.setattr(native_undirected, "_large_prism_shortlist_candidate", fake_shortlist)
+    monkeypatch.setattr(native_undirected, "_router_v2_large_mini_contest", fake_mini_contest)
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_incumbent)
+
+    result = layout_native_undirected_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(seed=42),
+    )
+
+    torch.testing.assert_close(result, expected_incumbent)
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
