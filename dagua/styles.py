@@ -493,6 +493,8 @@ class EdgeStyle:
     """Optional pixel/point override for edge stroke width. NOT DIFFERENTIABLE."""
     arrow: str = "normal"  # normal, vee, dot, diamond, tee, crow, circle, open, none
     tail_arrow: str = "none"
+    source_arrow: str = "none"  # Cytoscape source-arrow marker at the source endpoint
+    mid_arrow: str = "none"  # Cytoscape mid-target-arrow marker, directed toward target
     arrow_fill: str = "filled"  # filled, hollow
     arrow_color: str = ""  # empty = use edge color
     arrow_length: float = 12.0
@@ -502,6 +504,10 @@ class EdgeStyle:
     arrow_node_fraction: float = 0.35  # fraction of target node height (0 = use fixed arrow_length)
     arrow_width_ratio: float = 0.85  # width = length * this ratio (for node-relative mode)
     style: str = "solid"  # solid, dashed, dotted
+    line_dash_pattern: Optional[Tuple[float, ...]] = None  # custom (on, off, ...) in points
+    line_wave: bool = False  # Mermaid wavy edge centerline
+    line_wave_amplitude: float = 4.0  # wave amplitude in display points
+    line_wave_wavelength: float = 16.0  # wave wavelength in display points
     line_cap: str = "butt"  # render-only: butt, round, square
     line_join: str = "miter"  # render-only: miter, bevel, round
     opacity: float = 0.75
@@ -522,6 +528,9 @@ class EdgeStyle:
     label_background_corner_radius: float = 2.0
     label_font_family: str = ""  # empty = use default
     label_font_weight: str = "regular"  # regular, bold
+    text_outline_color: str = ""  # empty = no edge-label halo
+    text_outline_width: float = 0.0  # edge-label halo width in display points
+    label_autorotate: bool = False  # align label with the local edge tangent
     # New fields (Part 3) — edge aesthetics
     label_position: float = 0.5  # Position along curve (0=start, 1=end)
     label_offset: float = 8.0  # Perpendicular distance from edge centerline
