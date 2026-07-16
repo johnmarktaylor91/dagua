@@ -125,6 +125,7 @@ NODE_SHAPE_NAMES: Tuple[str, ...] = (
     "star",
     "cylinder",
     "trapezoid",
+    "invtrapezium",
     "double_circle",
     "house",
     "invhouse",
@@ -146,6 +147,17 @@ NODE_SHAPE_NAMES: Tuple[str, ...] = (
     "note",
     "document",
     "box3d",
+    "promoter",
+    "cds",
+    "terminator",
+    "ribosite",
+    "proteasesite",
+    "rpromoter",
+    "rarrow",
+    "larrow",
+    "assembly",
+    "insulator",
+    "signature",
 )
 
 
@@ -296,7 +308,9 @@ class NodeStyle:
     ``"cylinder"``, ``"trapezoid"``, ``"double_circle"``, ``"cloud"``,
     ``"stadium"``, ``"semicircle"``, ``"semicircle_up"``,
     ``"semicircle_down"``, ``"semicircle_left"``, ``"semicircle_right"``,
-    ``"tab"``, ``"note"``, ``"document"``, and ``"box3d"``.
+    ``"tab"``, ``"note"``, ``"document"``, ``"box3d"``, Graphviz's
+    synthetic-biology shapes, ``"rarrow"``, ``"larrow"``, and
+    ``"invtrapezium"``.
 
     The ``_set_fields`` attribute tracks which fields were explicitly modified
     after construction, allowing the style cascade to distinguish between

@@ -13,6 +13,12 @@ from numpy.typing import NDArray
 FloatArray = NDArray[np.float64]
 CornerRadius = Union[float, Tuple[float, float, float, float]]
 ELLIPSE_KAPPA = 0.5522847498
+GRAPHVIZ_BIO_DETAIL = 6.0
+GRAPHVIZ_BIO_ARROW_LENGTH = 12.0
+GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH = 18.0
+GRAPHVIZ_BIO_PROMOTER_STEM_FRACTION = 0.25
+GRAPHVIZ_BIO_PROMOTER_ARROW_FRACTION = 0.625
+GRAPHVIZ_INVTRAPEZIUM_INSET_RATIO = 29.95 / 144.0
 GRAPHVIZ_COMPONENT_DETAIL = 4.0
 GRAPHVIZ_FOLDER_TAB_HEIGHT = 4.0
 GRAPHVIZ_FOLDER_TAB_WIDTH = 27.0
@@ -457,6 +463,169 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
             ],
             dtype=np.float64,
         )
+    if spec.shape == "invtrapezium":
+        # Graphviz 7.0.5 normalizes its regular four-sided polygon to this
+        # horizontal inset (29.95 points for a 144-point-wide node).
+        inset = width * GRAPHVIZ_INVTRAPEZIUM_INSET_RATIO
+        return np.array(
+            [
+                [x - width / 2.0 + inset, y - height / 2.0],
+                [x + width / 2.0 - inset, y - height / 2.0],
+                [x + width / 2.0, y + height / 2.0],
+                [x - width / 2.0, y + height / 2.0],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "promoter":
+        detail = GRAPHVIZ_BIO_DETAIL
+        arrow_base_x = x - width / 2.0 + width * GRAPHVIZ_BIO_PROMOTER_ARROW_FRACTION
+        stem_x = x - width / 2.0 + width * GRAPHVIZ_BIO_PROMOTER_STEM_FRACTION
+        return np.array(
+            [
+                [arrow_base_x, y + 3.0 * detail],
+                [stem_x, y + 3.0 * detail],
+                [stem_x, y],
+                [stem_x + detail, y],
+                [stem_x + detail, y + 2.0 * detail],
+                [arrow_base_x, y + 2.0 * detail],
+                [arrow_base_x, y + 1.5 * detail],
+                [arrow_base_x + GRAPHVIZ_BIO_ARROW_LENGTH, y + 2.5 * detail],
+                [arrow_base_x, y + 3.5 * detail],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "cds":
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        return np.array(
+            [
+                [right - GRAPHVIZ_BIO_ARROW_LENGTH, top - detail],
+                [left, top - detail],
+                [left, bottom + detail],
+                [right - GRAPHVIZ_BIO_ARROW_LENGTH, bottom + detail],
+                [right, y],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "terminator":
+        detail = GRAPHVIZ_BIO_DETAIL
+        half_detail = detail / 2.0
+        return np.array(
+            [
+                [x + half_detail, y],
+                [x + half_detail, y + detail],
+                [x + 1.5 * detail, y + detail],
+                [x + 1.5 * detail, y + 2.0 * detail],
+                [x - 1.5 * detail, y + 2.0 * detail],
+                [x - 1.5 * detail, y + detail],
+                [x - half_detail, y + detail],
+                [x - half_detail, y],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape in {"ribosite", "proteasesite"}:
+        half_detail = GRAPHVIZ_BIO_DETAIL / 2.0
+        quarter_detail = GRAPHVIZ_BIO_DETAIL / 4.0
+        base_y = y + GRAPHVIZ_BIO_DETAIL
+        return np.array(
+            [
+                [x + half_detail, base_y],
+                [x + half_detail, base_y + quarter_detail],
+                [x + quarter_detail, base_y + half_detail],
+                [x + half_detail, base_y + 3.0 * quarter_detail],
+                [x + half_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x + quarter_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x, base_y + 3.0 * quarter_detail],
+                [x - quarter_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x - half_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x - half_detail, base_y + 3.0 * quarter_detail],
+                [x - quarter_detail, base_y + half_detail],
+                [x - half_detail, base_y + quarter_detail],
+                [x - half_detail, base_y],
+                [x - quarter_detail, base_y],
+                [x, base_y + quarter_detail],
+                [x + quarter_detail, base_y],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape in {"rpromoter", "rarrow"}:
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        arrow_base_x = right - GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH
+        if spec.shape == "rpromoter":
+            vertices = [
+                [arrow_base_x, top - detail],
+                [left, top - detail],
+                [left, bottom],
+                [left + GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH, bottom],
+                [left + GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH, bottom + detail],
+                [arrow_base_x, bottom + detail],
+                [arrow_base_x, bottom],
+                [right, y],
+                [arrow_base_x, top],
+            ]
+        else:
+            vertices = [
+                [arrow_base_x, top - detail],
+                [left, top - detail],
+                [left, bottom + detail],
+                [arrow_base_x, bottom + detail],
+                [arrow_base_x, bottom],
+                [right, y],
+                [arrow_base_x, top],
+            ]
+        return np.asarray(vertices, dtype=np.float64)
+    if spec.shape == "larrow":
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        arrow_base_x = left + GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH
+        return np.array(
+            [
+                [right, top - detail],
+                [arrow_base_x, top - detail],
+                [arrow_base_x, top],
+                [left, y],
+                [arrow_base_x, bottom],
+                [arrow_base_x, bottom + detail],
+                [right, bottom + detail],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "insulator":
+        half_size = GRAPHVIZ_BIO_DETAIL
+        return np.array(
+            [
+                [x + half_size, y + half_size],
+                [x + half_size, y - half_size],
+                [x - half_size, y - half_size],
+                [x - half_size, y + half_size],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "signature":
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        return np.array(
+            [
+                [right, top - detail],
+                [left, top - detail],
+                [left, bottom + detail],
+                [right, bottom + detail],
+            ],
+            dtype=np.float64,
+        )
     if spec.shape == "arrow":
         half_width = width / 2.0
         half_height = height / 2.0
@@ -489,6 +658,48 @@ def arrow_path(spec: ShapeSpec) -> Path:
     """
 
     return closed_path_from_vertices(polygon_vertices(spec))
+
+
+def assembly_path(spec: ShapeSpec) -> Path:
+    """Return Graphviz's two-bar synthetic-biology assembly symbol.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Compound path containing the two closed rectangular bars.
+    """
+
+    half_width = 2.0 * GRAPHVIZ_BIO_DETAIL
+    half_height = GRAPHVIZ_BIO_DETAIL / 2.0
+    center_offset = 0.75 * GRAPHVIZ_BIO_DETAIL
+    upper = closed_path_from_vertices(
+        np.array(
+            [
+                [spec.center_x - half_width, spec.center_y + center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y + center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y + center_offset + half_height],
+                [spec.center_x - half_width, spec.center_y + center_offset + half_height],
+            ],
+            dtype=np.float64,
+        )
+    )
+    lower = closed_path_from_vertices(
+        np.array(
+            [
+                [spec.center_x - half_width, spec.center_y - center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y - center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y - center_offset + half_height],
+                [spec.center_x - half_width, spec.center_y - center_offset + half_height],
+            ],
+            dtype=np.float64,
+        )
+    )
+    return Path.make_compound_path(upper, lower)
 
 
 def closed_path_from_vertices(vertices: FloatArray) -> Path:
@@ -1513,6 +1724,30 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return box3d_path(spec)
     if shape == "arrow":
         return arrow_path(spec)
+    if shape == "assembly":
+        return assembly_path(spec)
+    if shape == "promoter":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "cds":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "terminator":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "ribosite":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "proteasesite":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "rpromoter":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "rarrow":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "larrow":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "insulator":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "signature":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "invtrapezium":
+        return closed_path_from_vertices(polygon_vertices(spec))
     if shape in {
         "diamond",
         "Mdiamond",

@@ -30,6 +30,18 @@ NEW_SHAPES = [
     "tripleoctagon",
     "document",
     "box3d",
+    "promoter",
+    "cds",
+    "terminator",
+    "ribosite",
+    "proteasesite",
+    "rpromoter",
+    "rarrow",
+    "larrow",
+    "assembly",
+    "insulator",
+    "signature",
+    "invtrapezium",
 ]
 EXISTING_SHAPES = [
     "rect",
@@ -244,3 +256,194 @@ def test_graphviz_shape_silhouette_bounds(
     )
 
     np.testing.assert_allclose(actual_bounds, expected_bounds, atol=0.01)
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected_vertices"),
+    [
+        (
+            "promoter",
+            [
+                [18.0, 18.0],
+                [-36.0, 18.0],
+                [-36.0, 0.0],
+                [-30.0, 0.0],
+                [-30.0, 12.0],
+                [18.0, 12.0],
+                [18.0, 9.0],
+                [30.0, 15.0],
+                [18.0, 21.0],
+                [18.0, 18.0],
+            ],
+        ),
+        (
+            "cds",
+            [[60.0, 30.0], [-72.0, 30.0], [-72.0, -30.0], [60.0, -30.0], [72.0, 0.0], [60.0, 30.0]],
+        ),
+        (
+            "terminator",
+            [
+                [3.0, 0.0],
+                [3.0, 6.0],
+                [9.0, 6.0],
+                [9.0, 12.0],
+                [-9.0, 12.0],
+                [-9.0, 6.0],
+                [-3.0, 6.0],
+                [-3.0, 0.0],
+                [3.0, 0.0],
+            ],
+        ),
+        (
+            "ribosite",
+            [
+                [3.0, 6.0],
+                [3.0, 7.5],
+                [1.5, 9.0],
+                [3.0, 10.5],
+                [3.0, 12.0],
+                [1.5, 12.0],
+                [0.0, 10.5],
+                [-1.5, 12.0],
+                [-3.0, 12.0],
+                [-3.0, 10.5],
+                [-1.5, 9.0],
+                [-3.0, 7.5],
+                [-3.0, 6.0],
+                [-1.5, 6.0],
+                [0.0, 7.5],
+                [1.5, 6.0],
+                [3.0, 6.0],
+            ],
+        ),
+        (
+            "proteasesite",
+            [
+                [3.0, 6.0],
+                [3.0, 7.5],
+                [1.5, 9.0],
+                [3.0, 10.5],
+                [3.0, 12.0],
+                [1.5, 12.0],
+                [0.0, 10.5],
+                [-1.5, 12.0],
+                [-3.0, 12.0],
+                [-3.0, 10.5],
+                [-1.5, 9.0],
+                [-3.0, 7.5],
+                [-3.0, 6.0],
+                [-1.5, 6.0],
+                [0.0, 7.5],
+                [1.5, 6.0],
+                [3.0, 6.0],
+            ],
+        ),
+        (
+            "rpromoter",
+            [
+                [54.0, 30.0],
+                [-72.0, 30.0],
+                [-72.0, -36.0],
+                [-54.0, -36.0],
+                [-54.0, -30.0],
+                [54.0, -30.0],
+                [54.0, -36.0],
+                [72.0, 0.0],
+                [54.0, 36.0],
+                [54.0, 30.0],
+            ],
+        ),
+        (
+            "rarrow",
+            [
+                [54.0, 30.0],
+                [-72.0, 30.0],
+                [-72.0, -30.0],
+                [54.0, -30.0],
+                [54.0, -36.0],
+                [72.0, 0.0],
+                [54.0, 36.0],
+                [54.0, 30.0],
+            ],
+        ),
+        (
+            "larrow",
+            [
+                [72.0, 30.0],
+                [-54.0, 30.0],
+                [-54.0, 36.0],
+                [-72.0, 0.0],
+                [-54.0, -36.0],
+                [-54.0, -30.0],
+                [72.0, -30.0],
+                [72.0, 30.0],
+            ],
+        ),
+        (
+            "signature",
+            [[72.0, 30.0], [-72.0, 30.0], [-72.0, -30.0], [72.0, -30.0], [72.0, 30.0]],
+        ),
+        (
+            "insulator",
+            [[6.0, 6.0], [6.0, -6.0], [-6.0, -6.0], [-6.0, 6.0], [6.0, 6.0]],
+        ),
+        (
+            "invtrapezium",
+            [[-42.05, -36.0], [42.05, -36.0], [72.0, 36.0], [-72.0, 36.0], [-42.05, -36.0]],
+        ),
+    ],
+)
+def test_graphviz_705_special_shape_vertices(
+    shape: str,
+    expected_vertices: list[list[float]],
+) -> None:
+    """Match Graphviz 7.0.5 fixed-size special-shape polygon coordinates.
+
+    Parameters
+    ----------
+    shape : str
+        Graphviz-compatible Dagua shape name.
+    expected_vertices : list[list[float]]
+        Expected centered vertices for a 144-by-72 point node.
+
+    Returns
+    -------
+    None
+        The emitted vertices are asserted in place.
+    """
+
+    path = build_shape_path(
+        ShapeSpec(center_x=0.0, center_y=0.0, width=144.0, height=72.0, shape=shape)
+    )
+
+    np.testing.assert_allclose(path.vertices, np.asarray(expected_vertices), atol=0.01)
+
+
+def test_graphviz_705_assembly_uses_two_exact_bars() -> None:
+    """Match Graphviz 7.0.5's two closed assembly rectangles.
+
+    Returns
+    -------
+    None
+        Both compound subpaths are asserted in place.
+    """
+
+    path = build_shape_path(
+        ShapeSpec(center_x=0.0, center_y=0.0, width=144.0, height=72.0, shape="assembly")
+    )
+    expected = np.array(
+        [
+            [-12.0, 1.5],
+            [12.0, 1.5],
+            [12.0, 7.5],
+            [-12.0, 7.5],
+            [-12.0, 1.5],
+            [-12.0, -7.5],
+            [12.0, -7.5],
+            [12.0, -1.5],
+            [-12.0, -1.5],
+            [-12.0, -7.5],
+        ]
+    )
+
+    np.testing.assert_allclose(path.vertices, expected)

@@ -174,15 +174,17 @@ def test_registry_arrow_types_replaces_hard_coded_tuple() -> None:
     assert not hasattr(graphviz_theme_comparison, "ARROW_TYPES")
 
 
-def test_shape_atlas_covers_supported_gap_and_waived_buckets() -> None:
-    """The shape atlas should render supported, gap, and waived-sample buckets."""
+def test_shape_atlas_covers_all_supported_shapes_without_placeholders() -> None:
+    """The shape atlas should render every implemented shape directly."""
 
     graph, title = graphviz_theme_comparison._make_shape_atlas()
 
     assert title == "Shape Atlas"
     labels = graph.node_labels
     assert any(label == "ellipse" for label in labels)
-    assert any(label.startswith("GAP: ") for label in labels)
+    assert "promoter" in labels
+    assert "invtrapezium" in labels
+    assert not any(label.startswith("GAP: ") for label in labels)
     gap_labels = {label.removeprefix("GAP: ") for label in labels if label.startswith("GAP: ")}
     assert gap_labels == set(graphviz_theme_comparison.GV_SHAPE_GAP_COMMON) | set(
         graphviz_theme_comparison.GV_SHAPE_WAIVED_SAMPLE
