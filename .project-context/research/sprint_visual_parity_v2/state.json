@@ -5,11 +5,11 @@
   "in_flight": null,
   "max_rounds": 60,
   "next_action_if_dark": "launch S0 by filing the round-0 VLM census before any S1 dial work",
-  "phase": "PRELAUNCH",
+  "phase": "LAUNCHED",
   "round": "g000",
   "run": "visual_parity_v2",
-  "s0_round0_vlm_census": "required",
+  "s0_round0_vlm_census": "audits/audit_g000_sol.md + audits/audit_g000_opus.md (dual-lab, 2026-07-16)",
   "stop_criteria_ref": "RUNBOOK.md#7-stop-criteria-and-ratchets",
-  "sub_sprint": "S0",
+  "sub_sprint": "S1",
   "tripwires_last_pass": "g000"
 }
