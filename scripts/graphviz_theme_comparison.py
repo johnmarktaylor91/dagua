@@ -154,11 +154,8 @@ assert len(ARROWHEAD_COMPOUND_SAMPLES) >= 12
 # special shapes such as point/plaintext). dagua's currently-supported
 # shapes map onto a subset of these names (see _DAGUA_SHAPE_TO_GRAPHVIZ);
 # the JMT-gate default cut line (FINAL_DESIGN.md section 13, item 2)
-# recommends implementing ~12-16 common gap shapes and waiving the
-# SynBio/exotic tier as out_of_scope. This module renders the gap and
-# waived shapes as PLACEHOLDER nodes (dagua-side falls back to "rect"); it
-# does not implement new shape drawing code -- that is separate follow-up
-# work, not part of Lane D's calibration-suite/atlas surgery.
+# originally recommended waiving the SynBio/exotic tier. Those sampled
+# shapes are now implemented and included in DAGUA_SHAPE_TO_GRAPHVIZ.
 GV_SHAPE_CATALOG: Tuple[str, ...] = (
     "box",
     "polygon",
@@ -253,30 +250,27 @@ DAGUA_SHAPE_TO_GRAPHVIZ: Dict[str, str] = {
     "Mcircle": "Mcircle",
     "doubleoctagon": "doubleoctagon",
     "tripleoctagon": "tripleoctagon",
+    "promoter": "promoter",
+    "cds": "cds",
+    "terminator": "terminator",
+    "ribosite": "ribosite",
+    "proteasesite": "proteasesite",
+    "rpromoter": "rpromoter",
+    "rarrow": "rarrow",
+    "larrow": "larrow",
+    "assembly": "assembly",
+    "insulator": "insulator",
+    "signature": "signature",
+    "invtrapezium": "invtrapezium",
 }
 
 # Common Graphviz shapes not yet implemented by Dagua. The visual-parity-v2
 # shape pass completed this bucket, so it remains as an explicit empty gate.
 GV_SHAPE_GAP_COMMON: Tuple[str, ...] = ()
 
-# A representative SAMPLE of the SynBio/exotic tier recommended for
-# out_of_scope waiver. This is illustrative, not the authoritative waiver
-# list -- the exhaustive enumeration and waiver bookkeeping belongs to Lane
-# C's scripts.visual_parity.coverage + reference_specs/gv_attr_triage.json.
-GV_SHAPE_WAIVED_SAMPLE: Tuple[str, ...] = (
-    "promoter",
-    "cds",
-    "terminator",
-    "ribosite",
-    "proteasesite",
-    "rpromoter",
-    "rarrow",
-    "larrow",
-    "assembly",
-    "insulator",
-    "signature",
-    "invtrapezium",
-)
+# The former representative SynBio/exotic waiver sample is fully implemented,
+# so this explicit gate remains empty.
+GV_SHAPE_WAIVED_SAMPLE: Tuple[str, ...] = ()
 
 DOT_ALLOWED_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:+"
 CLUSTER_NAME_SANITIZER = re.compile(r"[^0-9A-Za-z_]")
@@ -829,14 +823,11 @@ def _make_arrowhead_atlas() -> Tuple[DaguaGraph, str]:
 
 
 def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
-    """Create the labeled shape atlas: supported, gap, and waived-sample shapes.
+    """Create the labeled shape atlas for supported and outstanding shapes.
 
-    Dagua-supported shapes render through dagua's real shape drawers. Gap
-    and waived shapes render as PLACEHOLDER nodes on the dagua side (a plain
-    "rect" fallback labeled with the missing shape name) while the graphviz
-    side renders the true reference shape, so the atlas documents both
-    implemented coverage and the explicitly waived sample. See
-    GV_SHAPE_GAP_COMMON / GV_SHAPE_WAIVED_SAMPLE for provenance.
+    Dagua-supported shapes render through dagua's real shape drawers. Any
+    remaining gap or waived shapes render as placeholder rectangles while
+    the Graphviz side renders their reference geometry.
 
     Returns
     -------
