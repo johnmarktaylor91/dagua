@@ -9,7 +9,7 @@ import torch
 from matplotlib.collections import LineCollection, PatchCollection
 
 from dagua.graph import DaguaGraph
-from dagua.render.borders.shapes import NOTE_FOLD_SIZE_RATIO, ShapeSpec, note_path
+from dagua.render.borders.shapes import GRAPHVIZ_NOTE_FOLD_SIZE, ShapeSpec, note_path
 from dagua.render.edges import available_arrowheads, build_arrowhead
 from dagua.render.edges.arrowheads import graphviz_arrow_fill_mode
 from dagua.render.edges.collection import (
@@ -502,8 +502,8 @@ def test_tee_arrowhead_is_filled_rectangle_at_line_tip() -> None:
     assert bar_height == pytest.approx(10.0)
 
 
-def test_note_shape_fold_is_large_enough_to_read_after_downscaling() -> None:
-    """Note cards should keep a visible fold line and clipped corner.
+def test_note_shape_uses_graphviz_fold_size() -> None:
+    """Note cards should use Graphviz's fixed six-point clipped corner.
 
     Returns
     -------
@@ -511,14 +511,13 @@ def test_note_shape_fold_is_large_enough_to_read_after_downscaling() -> None:
         The folded-corner geometry is asserted in place.
     """
 
-    spec = ShapeSpec(center_x=0.0, center_y=0.0, width=20.0, height=10.0, shape="note")
+    spec = ShapeSpec(center_x=0.0, center_y=0.0, width=20.0, height=20.0, shape="note")
 
     path = note_path(spec)
 
-    assert NOTE_FOLD_SIZE_RATIO == pytest.approx(0.45)
-    assert [7.75, 5.0] in path.vertices.tolist()
-    assert [7.75, 2.75] in path.vertices.tolist()
-    assert [10.0, 2.75] in path.vertices.tolist()
+    assert GRAPHVIZ_NOTE_FOLD_SIZE == pytest.approx(6.0)
+    assert [4.0, 10.0] in path.vertices.tolist()
+    assert [10.0, 4.0] in path.vertices.tolist()
 
 
 def test_crow_arrowhead_tines_merge_at_the_neck() -> None:

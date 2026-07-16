@@ -19,6 +19,15 @@ NEW_SHAPES = [
     "semicircle_right",
     "tab",
     "note",
+    "house",
+    "invhouse",
+    "folder",
+    "component",
+    "Msquare",
+    "Mdiamond",
+    "Mcircle",
+    "doubleoctagon",
+    "tripleoctagon",
     "document",
     "box3d",
 ]
@@ -186,3 +195,52 @@ def test_arrow_shape_uses_expected_vertices_and_closes() -> None:
     np.testing.assert_allclose(path.vertices[4], np.array([-5.0, -5.0]))
     np.testing.assert_allclose(path.vertices[5], np.array([-1.5, 0.0]))
     np.testing.assert_allclose(path.vertices[0], path.vertices[-1])
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected_bounds"),
+    [
+        ("house", (-72.0, -29.12, 72.0, 36.0)),
+        ("invhouse", (-72.0, -36.0, 72.0, 29.12)),
+        ("folder", (-72.0, -36.0, 72.0, 40.0)),
+        ("tab", (-72.0, -36.0, 72.0, 40.0)),
+        ("component", (-76.0, -36.0, 72.0, 36.0)),
+        ("note", (-72.0, -36.0, 72.0, 36.0)),
+        ("Msquare", (-72.0, -72.0, 72.0, 72.0)),
+        ("Mdiamond", (-72.0, -36.0, 72.0, 36.0)),
+        ("Mcircle", (-72.0, -72.0, 72.0, 72.0)),
+        ("doubleoctagon", (-76.0, -40.0, 76.0, 40.0)),
+        ("tripleoctagon", (-80.0, -44.0, 80.0, 44.0)),
+    ],
+)
+def test_graphviz_shape_silhouette_bounds(
+    shape: str,
+    expected_bounds: tuple[float, float, float, float],
+) -> None:
+    """Match Graphviz's fixed-size 144-by-72 point silhouette bounds.
+
+    Parameters
+    ----------
+    shape : str
+        Graphviz-compatible Dagua shape name.
+    expected_bounds : tuple[float, float, float, float]
+        Expected ``(left, bottom, right, top)`` bounds in points.
+
+    Returns
+    -------
+    None
+        The emitted path bounds are asserted in place.
+    """
+
+    path = build_shape_path(
+        ShapeSpec(center_x=0.0, center_y=0.0, width=144.0, height=72.0, shape=shape)
+    )
+    vertices = np.asarray(path.vertices, dtype=np.float64)
+    actual_bounds = (
+        float(vertices[:, 0].min()),
+        float(vertices[:, 1].min()),
+        float(vertices[:, 0].max()),
+        float(vertices[:, 1].max()),
+    )
+
+    np.testing.assert_allclose(actual_bounds, expected_bounds, atol=0.01)
