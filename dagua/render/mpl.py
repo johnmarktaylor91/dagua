@@ -42,6 +42,12 @@ from dagua.layout.ops.cluster_geometry import (
 )
 from dagua.render._backend import _render_via_cairosvg, stroke_width_scale_for
 from dagua.render.borders import (
+    GRAPHVIZ_COMPONENT_DETAIL,
+    GRAPHVIZ_M_CIRCLE_CHORD_RATIO,
+    GRAPHVIZ_M_CORNER_MARK_LENGTH,
+    GRAPHVIZ_NOTE_FOLD_SIZE,
+    GRAPHVIZ_OCTAGON_PERIPHERY_GAP,
+    GRAPHVIZ_TAB_WIDTH,
     ShapeSpec,
     add_corner_radius,
     add_filled_collections,
@@ -49,6 +55,7 @@ from dagua.render.borders import (
     build_shape_path,
     clamp_border_width,
     dash_ribbon_paths,
+    graphviz_octagon_path,
     inset_shape_path,
     make_clip_proxy,
     scale_corner_radius,
@@ -2402,6 +2409,37 @@ def _build_node_patch(
             linestyle=linestyle,
             zorder=zorder,
         )
+    if shape in {
+        "house",
+        "invhouse",
+        "folder",
+        "tab",
+        "component",
+        "note",
+        "Msquare",
+        "Mdiamond",
+        "Mcircle",
+        "doubleoctagon",
+        "tripleoctagon",
+    }:
+        return PathPatch(
+            build_shape_path(
+                ShapeSpec(
+                    center_x=x,
+                    center_y=y,
+                    width=w,
+                    height=h,
+                    shape=shape,
+                    corner_radius=0.0,
+                    aspect_ratio=getattr(style, "aspect_ratio", None),
+                )
+            ),
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
     if shape == "ellipse":
         return Ellipse(
             (x, y),
@@ -2733,6 +2771,150 @@ def _draw_node_shape_extras(
     zorder : float
         Artist z-order.
     """
+    graphviz_detail_paths: List[Any] = []
+    from matplotlib.path import Path as MplPath
+
+    if style.shape == "tab":
+        left = x - w / 2.0
+        top = y + h / 2.0
+        tab_width = min(GRAPHVIZ_TAB_WIDTH, w)
+        graphviz_detail_paths.append(
+            MplPath(np.array([[left, top], [left + tab_width, top]], dtype=np.float64))
+        )
+    elif style.shape == "component":
+        left = x - w / 2.0
+        bottom = y - h / 2.0
+        top = y + h / 2.0
+        detail = min(GRAPHVIZ_COMPONENT_DETAIL, h / 8.0, w / 4.0)
+        graphviz_detail_paths.extend(
+            [
+                MplPath(
+                    np.array(
+                        [
+                            [left, top - detail],
+                            [left + detail, top - detail],
+                            [left + detail, top - 2.0 * detail],
+                            [left, top - 2.0 * detail],
+                        ],
+                        dtype=np.float64,
+                    )
+                ),
+                MplPath(
+                    np.array(
+                        [
+                            [left, bottom + 2.0 * detail],
+                            [left + detail, bottom + 2.0 * detail],
+                            [left + detail, bottom + detail],
+                            [left, bottom + detail],
+                        ],
+                        dtype=np.float64,
+                    )
+                ),
+            ]
+        )
+    elif style.shape == "note":
+        right = x + w / 2.0
+        top = y + h / 2.0
+        fold = min(GRAPHVIZ_NOTE_FOLD_SIZE, w / 2.0, h / 2.0)
+        graphviz_detail_paths.append(
+            MplPath(
+                np.array(
+                    [
+                        [right - fold, top],
+                        [right - fold, top - fold],
+                        [right, top - fold],
+                    ],
+                    dtype=np.float64,
+                )
+            )
+        )
+    elif style.shape == "Msquare":
+        side = max(w, h)
+        half_side = side / 2.0
+        left = x - half_side
+        right = x + half_side
+        bottom = y - half_side
+        top = y + half_side
+        mark = min(GRAPHVIZ_M_CORNER_MARK_LENGTH, side / 4.0)
+        mark_vertices = (
+            ((left + mark, top), (left, top - mark)),
+            ((left, bottom + mark), (left + mark, bottom)),
+            ((right - mark, bottom), (right, bottom + mark)),
+            ((right, top - mark), (right - mark, top)),
+        )
+        graphviz_detail_paths.extend(
+            MplPath(np.asarray(vertices, dtype=np.float64)) for vertices in mark_vertices
+        )
+    elif style.shape == "Mdiamond":
+        corners = np.array(
+            [
+                [x, y + h / 2.0],
+                [x + w / 2.0, y],
+                [x, y - h / 2.0],
+                [x - w / 2.0, y],
+            ],
+            dtype=np.float64,
+        )
+        for index, corner in enumerate(corners):
+            previous_corner = corners[(index - 1) % len(corners)]
+            next_corner = corners[(index + 1) % len(corners)]
+            previous_direction = previous_corner - corner
+            next_direction = next_corner - corner
+            previous_length = max(float(np.linalg.norm(previous_direction)), 1.0)
+            next_length = max(float(np.linalg.norm(next_direction)), 1.0)
+            mark_length = min(
+                GRAPHVIZ_M_CORNER_MARK_LENGTH,
+                previous_length / 2.0,
+                next_length / 2.0,
+            )
+            graphviz_detail_paths.append(
+                MplPath(
+                    np.vstack(
+                        [
+                            corner + previous_direction * (mark_length / previous_length),
+                            corner + next_direction * (mark_length / next_length),
+                        ]
+                    )
+                )
+            )
+    elif style.shape == "Mcircle":
+        radius = max(w, h) / 2.0
+        chord_y = radius * GRAPHVIZ_M_CIRCLE_CHORD_RATIO
+        chord_x = radius * math.sqrt(1.0 - GRAPHVIZ_M_CIRCLE_CHORD_RATIO**2)
+        graphviz_detail_paths.extend(
+            [
+                MplPath(
+                    np.array([[x - chord_x, y + chord_y], [x + chord_x, y + chord_y]])
+                ),
+                MplPath(
+                    np.array([[x - chord_x, y - chord_y], [x + chord_x, y - chord_y]])
+                ),
+            ]
+        )
+    elif style.shape in {"doubleoctagon", "tripleoctagon"}:
+        inner_ring_count = 1 if style.shape == "doubleoctagon" else 2
+        for ring_index in range(inner_ring_count):
+            graphviz_detail_paths.append(
+                graphviz_octagon_path(
+                    ShapeSpec(center_x=x, center_y=y, width=w, height=h, shape="octagon"),
+                    offset=GRAPHVIZ_OCTAGON_PERIPHERY_GAP * ring_index,
+                )
+            )
+
+    if graphviz_detail_paths:
+        for detail_path in graphviz_detail_paths:
+            _draw_display_point_path_stroke(
+                ax,
+                detail_path,
+                edgecolor,
+                max(float(style.stroke_width), 0.0),
+                zorder=zorder,
+                linestyle=_display_point_linestyle(style.stroke_dash, style.stroke_dash_pattern),
+                capstyle=str(getattr(style, "stroke_cap", "butt")),
+                joinstyle=str(getattr(style, "stroke_join", "miter")),
+            )
+        return
+
     if style.shape == "box3d":
         # Overlay darker tints on the top and right extrusion faces so the
         # 3D illusion reads at a glance.
