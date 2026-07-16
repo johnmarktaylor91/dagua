@@ -239,6 +239,62 @@ def test_w5_finisher_rejects_one_sided_composite_win() -> None:
     assert all(checkpoint.reason == "does_not_dominate_both" for checkpoint in result.rejected)
 
 
+def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget exhaustion after optimizer steps still returns the exact incumbent."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+
+    pos, edge_index, node_sizes = _tiny_layout()
+    worse_pos = pos + 1000.0
+    spent_calls = {"count": 0}
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return a worse checkpoint after one completed optimizer step."""
+        del seed, edge_work, size_work, topo_depth, mode, deadline
+        return worse_pos, 1, 1.0, [(1, worse_pos, 2.0)]
+
+    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
+        """Exhaust the W5 cap only after the seed optimizer has run."""
+        del config, started_perf
+        spent_calls["count"] += 1
+        return 0.0 if spent_calls["count"] == 1 else 999.0
+
+    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if a budget-exhausted checkpoint is scored or accepted."""
+        del candidate
+        raise AssertionError("budget-exhausted checkpoint should not be scored")
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=forbidden_score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert result.steps == 1
+    assert result.deadline_returned is True
+    assert torch.equal(result.winner_pos, pos)
+    assert result.winner_score_pair == _pair(10.0, 10.0)
+    assert result.accepted == ()
+
+
 def test_w5_telemetry_emits_skip_reject_accept_and_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
