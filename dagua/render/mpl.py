@@ -4542,7 +4542,9 @@ def _text_shadow_specs(spec: DaguaText, style: Any, display_scale: float) -> Lis
                 angle = 2.0 * math.pi * float(angle_index) / 8.0
                 samples.append((radius * math.cos(angle), radius * math.sin(angle)))
 
-    layer_alpha = color_alpha if len(samples) == 1 else color_alpha / math.sqrt(len(samples))
+    # Distribute authored opacity across blur samples. Dividing by the square
+    # root made overlapping glyph copies compound into a near-opaque smudge.
+    layer_alpha = color_alpha if len(samples) == 1 else color_alpha / float(len(samples))
     shadow_specs: List[DaguaText] = []
     for layer_index, (blur_x, blur_y) in enumerate(samples):
         shadow_specs.append(

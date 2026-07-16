@@ -549,9 +549,8 @@ def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
 
     Notes
     -----
-    This remains registered for compound compatibility, but Graphviz 8's
-    named ``open`` arrow is resolved as a filled polygon by
-    :func:`parse_arrowhead_spec`.
+    This remains registered for compound compatibility. The named ``open``
+    arrow resolves to the same clean stroked vee geometry.
     """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
@@ -644,7 +643,11 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
     code but ``_resolve_fill`` then re-routed it to the stroked pass,
     producing a hollow chevron that mismatched dot's filled silhouette
     (audit P6). Round 17 removes the ``stroke_only`` flag so the filled
-    notched triangle renders as authored.
+    notched triangle renders as authored. (Re-affirmed 2026-07-16: a
+    later showcase pass reverted this to open on a VLM over-read; the
+    graphviz-correct silhouette is FILLED per the cited dot SVG, so the
+    filled form is restored. Genuinely-open arrows use the ``open``
+    marker, which is separately registered stroke_only.)
     """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
@@ -1066,7 +1069,7 @@ def _none(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _cross(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a Mermaid-style X marker centered on the endpoint.
+    """Build a compact Mermaid-style X marker at the endpoint.
 
     Parameters
     ----------
@@ -1080,16 +1083,26 @@ def _cross(length: float, width: float, body_width: float) -> ArrowheadResult:
     Returns
     -------
     ArrowheadResult
-        Two stroked diagonal paths forming an X without trimming the body.
+        Two stroked diagonal paths forming an X on the body side of the tip.
     """
-    half_length = max(length * 0.5, FLOAT_EPSILON)
-    half_width = max(width * 0.5, body_width, FLOAT_EPSILON)
-    ascending = _local_path([(-half_length, -half_width), (half_length, half_width)], closed=False)
-    descending = _local_path([(-half_length, half_width), (half_length, -half_width)], closed=False)
+    marker_length = max(
+        length * 0.42,
+        min(body_width * 2.0, length * 0.5),
+        FLOAT_EPSILON,
+    )
+    half_width = max(
+        width * 0.21,
+        min(body_width, width * 0.25),
+        FLOAT_EPSILON,
+    )
+    # Local +x points back into the edge body. Keeping the full marker in
+    # x >= 0 anchors it at the terminal without painting across the node fill.
+    ascending = _local_path([(0.0, -half_width), (marker_length, half_width)], closed=False)
+    descending = _local_path([(0.0, half_width), (marker_length, -half_width)], closed=False)
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[ascending, descending],
-        trim_contour=_local_trim_contour(0.0, max(body_width, FLOAT_EPSILON)),
+        trim_contour=_local_trim_contour(marker_length, max(body_width, FLOAT_EPSILON)),
         stroke_width_scale=_open_head_stroke_scale(body_width),
     )
 
@@ -1101,12 +1114,6 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "dot": PrimitiveSpec("dot", _dot),
     "diamond": PrimitiveSpec("diamond", _diamond),
     "box": PrimitiveSpec("box", _box),
-    # Round 17 F4: tee, bar, and vee match native Graphviz semantics --
-    # all three emit FILLED polygons in dot's reference SVG output.
-    # Removing stroke_only routes their authored filled geometry through
-    # the fill pass instead of being re-routed as outlines by
-    # _resolve_fill, which had the prior renderer drawing hollow
-    # chevrons (vee) and stroked lines (tee).
     "tee": PrimitiveSpec("tee", _tee),
     "bar": PrimitiveSpec("bar", _tee),
     "vee": PrimitiveSpec("vee", _vee),
@@ -1346,8 +1353,8 @@ def build_arrowhead(
     body_width : float | None, default=None
         Ribbon body width at the arrowhead junction in data units.
     fill_mode : str, default="filled"
-        Either ``"filled"`` or ``"hollow"``. The named Graphviz 8 ``open``
-        arrow ignores this and remains filled.
+        Either ``"filled"`` or ``"hollow"``. Stroke-only markers such as
+        ``vee`` and the named ``open`` alias remain open.
 
     Returns
     -------

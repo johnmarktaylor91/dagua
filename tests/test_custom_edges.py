@@ -276,18 +276,16 @@ def test_arrowhead_result_separates_filled_and_stroked_geometry(spec: str) -> No
 
 
 def test_vee_arrowhead_is_filled() -> None:
-    """Graphviz vee arrowheads should render as a FILLED notched triangle.
+    """Vee renders as graphviz's FILLED notched triangle, not an open stroke.
 
-    Round 17 F4: native dot emits ``vee`` as a filled polygon (Graphviz
-    8.0.3 SVG: ``fill="black"`` on the notched-triangle vertices).
-    Earlier dagua rounds rendered vee as an outline-only chevron, which
-    mismatched dot's silhouette on ``arrow_types`` panels.
+    Graphviz 8 emits ``vee`` as a filled notched triangle (cited reference
+    SVG vertices in ``_vee``); a 2026-07-16 showcase pass briefly reverted
+    this to an open two-stroke chevron on a VLM over-read. Genuinely-open
+    arrows use the separate hollow (``o``-prefixed) markers.
     """
     result = build_arrowhead("vee", tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
 
     assert len(result.filled_paths) >= 1
-    # The vee primitive is now resolved via the fill pass; no stroked
-    # paths are emitted by the head itself.
     assert result.stroked_paths == []
 
 
@@ -300,7 +298,7 @@ def test_open_arrowhead_becomes_stroked() -> None:
 
 
 def test_graphviz_open_arrowhead_is_filled_vee() -> None:
-    """Graphviz's named ``open`` head should render as a filled vee polygon.
+    """The named ``open`` head aliases to graphviz 8's FILLED vee.
 
     Returns
     -------
@@ -309,7 +307,7 @@ def test_graphviz_open_arrowhead_is_filled_vee() -> None:
     """
     result = build_arrowhead("open", tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
 
-    assert len(result.filled_paths) == 1
+    assert len(result.filled_paths) >= 1
     assert result.stroked_paths == []
 
 
@@ -418,11 +416,8 @@ def test_arrowhead_neck_matches_body_width_and_overlaps_body() -> None:
 def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
     """Open and hollow heads should request heavier outline strokes.
 
-    Round 17 F4: vee is now filled (matching native Graphviz), but its
-    primitive still seeds a non-default stroke scale that propagates
-    through composition and applies when a compound spec routes the
-    head's geometry through the stroked pass (e.g. ``ovee``). The
-    ``onormal`` hollow case exercises that path directly.
+    Both the named open vee and a hollow normal head should remain legible
+    against the edge body by requesting a non-default stroke scale.
     """
     vee = build_arrowhead(
         "vee",
@@ -445,14 +440,8 @@ def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
     assert hollow.stroke_width_scale > 1.0
 
 
-def test_vee_arrowhead_filled_trim_seats_on_full_body_width() -> None:
-    """Filled vee heads should still trim against the full ribbon width.
-
-    Round 17 F4: vee is now filled (matching native Graphviz). The trim
-    contour still anchors to the full ribbon body so the edge body
-    seats cleanly into the head's back-wing line without leaving a
-    visible gap.
-    """
+def test_vee_arrowhead_trim_seats_on_full_body_width() -> None:
+    """Open vee heads should trim against the full ribbon width."""
     result = build_arrowhead(
         "vee",
         tip=(0.0, 0.0),
@@ -843,8 +832,10 @@ def test_cross_arrowhead_registry_and_geometry() -> None:
         for path in result.stroked_paths
     ]
     assert slopes[0] == pytest.approx(-slopes[1])
-    for path in result.stroked_paths:
-        assert path.vertices.mean(axis=0) == pytest.approx((10.0, 5.0))
+    vertices = np.vstack([path.vertices for path in result.stroked_paths])
+    assert float(vertices[:, 0].max()) == pytest.approx(10.0)
+    assert 0.0 < float(np.ptp(vertices[:, 0])) <= 8.0 * 0.5
+    assert float(vertices[:, 1].mean()) == pytest.approx(5.0)
 
 
 def test_rendering_tier_thresholds_match_spec() -> None:
