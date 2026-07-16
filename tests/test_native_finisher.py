@@ -102,6 +102,89 @@ def test_w5_finisher_deadline_returns_exact_incumbent() -> None:
     assert torch.equal(result.winner_pos, pos)
 
 
+def test_w5_finisher_predicted_large_graph_skip_returns_exact_incumbent() -> None:
+    """Predicted-cost skip preserves the incumbent without scoring candidates."""
+    pos = torch.stack(
+        (
+            torch.arange(250, dtype=torch.float32),
+            torch.zeros(250, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    node_sizes = torch.full((250, 2), 2.0)
+
+    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if predicted-cost skip accidentally scores a candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Never returned.
+        """
+        raise AssertionError("predicted-cost skip should not call score_fn")
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=forbidden_score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert result.skipped_reason == "predicted_cost_large_graph"
+    assert result.deadline_returned is False
+    assert torch.equal(result.winner_pos, pos)
+
+
+def test_w5_finisher_accumulated_cap_returns_exact_incumbent() -> None:
+    """Exhausted accumulated W5 spend returns the incumbent without scoring."""
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 120.0
+    config._dagua_native_total_budget_s = 300.0
+    config._dagua_native_w5_spent_s = 19.5
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if exhausted W5 budget accidentally scores a candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Never returned.
+        """
+        raise AssertionError("exhausted W5 budget should not call score_fn")
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=forbidden_score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        config=config,
+    )
+
+    assert result.skipped_reason == "no_budget"
+    assert result.deadline_returned is True
+    assert torch.equal(result.winner_pos, pos)
+
+
 def test_w5_finisher_reraises_worker_timeout_like_exception() -> None:
     """Worker-timeout-like exceptions are not swallowed by optional catches."""
     pos, edge_index, node_sizes = _tiny_layout()

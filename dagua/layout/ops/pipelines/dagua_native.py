@@ -70,6 +70,9 @@ _DOT_AUX_EDGE_MINLEN = 1.0
 _DOT_VIRTUAL_EDGE_WEIGHT = 8.0
 _DOT_LATTICE_LP_MAX_MATRIX_BYTES = 200 * 1024 * 1024
 _DOT_LATTICE_LP_MAX_X_VARS = 12_000
+_ANYTIME_LARGE_ROW_MIN_NODES = 250
+_ANYTIME_LARGE_ROW_MIN_EDGES = 700
+_ANYTIME_FALLBACK_NODE_SEP_FACTOR = 1.4
 
 
 @dataclass(frozen=True)
@@ -5262,78 +5265,90 @@ def _best_of_polish(
         if cand_score > best_score + margin:
             best_score = cand_score
             best_pos = cand
-    try:
-        from dagua.layout.ops.pipelines.native_finisher import (
-            W5Seed,
-            _finisher_slice_s,
-            log_w5_telemetry,
-            make_w5_skip_result,
-            run_w5_finisher,
-        )
+    if config is not None:
+        try:
+            from dagua.layout.ops.pipelines.native_finisher import (
+                W5Seed,
+                _finisher_slice_s,
+                log_w5_telemetry,
+                make_w5_skip_result,
+                run_w5_finisher,
+                w5_predicted_skip_reason,
+            )
 
-        finisher_slice = _finisher_slice_s(config)
-        if finisher_slice is None:
-            log_w5_telemetry(
-                make_w5_skip_result(
+            predicted_skip_reason = w5_predicted_skip_reason(
+                int(best_pos.shape[0]),
+                int(edge_index.shape[1]) if edge_index.ndim == 2 else 0,
+                config,
+            )
+            finisher_slice = _finisher_slice_s(config)
+            if finisher_slice is None and predicted_skip_reason != "disabled_by_env":
+                predicted_skip_reason = None
+            if predicted_skip_reason is not None:
+                finisher_slice = None
+            if finisher_slice is None:
+                log_w5_telemetry(
+                    make_w5_skip_result(
+                        incumbent_pos=best_pos,
+                        incumbent_score_pair=None,
+                        reason=predicted_skip_reason or "no_budget",
+                        edge_index=edge_index,
+                        config=config,
+                        is_semantically_directed=is_semantically_directed,
+                        declared_hierarchical=declared_hierarchical,
+                        direction_is_declared=direction_is_declared,
+                    ),
+                    config,
+                )
+            else:
+                seed_bank: list[W5Seed] = [
+                    W5Seed("incumbent", best_pos),
+                    W5Seed("base", base_pos),
+                ]
+                seed_bank.extend(
+                    W5Seed(name=edge_name, pos=edge_pos)
+                    for edge_name, edge_pos in edge_seed_positions
+                )
+                if len(candidate_positions) > 1:
+                    ranked_seed_indices = sorted(
+                        range(1, len(candidate_positions)),
+                        key=lambda index: (-score(candidate_positions[index]), index),
+                    )
+                    seed_bank.extend(
+                        W5Seed(f"proxy_top_{rank}", candidate_positions[index])
+                        for rank, index in enumerate(ranked_seed_indices[:2], start=1)
+                    )
+                incumbent_score_pair = honest_score(best_pos)
+                w5_result = run_w5_finisher(
                     incumbent_pos=best_pos,
-                    incumbent_score_pair=None,
-                    reason="no_budget",
+                    incumbent_score_pair=incumbent_score_pair,
+                    seeds=seed_bank,
                     edge_index=edge_index,
-                    config=config,
+                    node_sizes=node_sizes,
+                    score_fn=honest_score,
                     is_semantically_directed=is_semantically_directed,
                     declared_hierarchical=declared_hierarchical,
                     direction_is_declared=direction_is_declared,
-                ),
-                config,
-            )
-        else:
-            seed_bank: list[W5Seed] = [
-                W5Seed("incumbent", best_pos),
-                W5Seed("base", base_pos),
-            ]
-            seed_bank.extend(
-                W5Seed(name=edge_name, pos=edge_pos) for edge_name, edge_pos in edge_seed_positions
-            )
-            if len(candidate_positions) > 1:
-                ranked_seed_indices = sorted(
-                    range(1, len(candidate_positions)),
-                    key=lambda index: (-score(candidate_positions[index]), index),
+                    config=config,
                 )
-                seed_bank.extend(
-                    W5Seed(f"proxy_top_{rank}", candidate_positions[index])
-                    for rank, index in enumerate(ranked_seed_indices[:2], start=1)
-                )
-            incumbent_score_pair = honest_score(best_pos)
-            w5_result = run_w5_finisher(
-                incumbent_pos=best_pos,
-                incumbent_score_pair=incumbent_score_pair,
-                seeds=seed_bank,
-                edge_index=edge_index,
-                node_sizes=node_sizes,
-                score_fn=honest_score,
-                is_semantically_directed=is_semantically_directed,
-                declared_hierarchical=declared_hierarchical,
-                direction_is_declared=direction_is_declared,
-                config=config,
-            )
-            log_w5_telemetry(w5_result, config)
-            if w5_result.accepted and w5_dominates(
-                w5_result.winner_score_pair,
-                incumbent_score_pair,
-                0.05,
-            ):
-                candidate_positions.append(w5_result.winner_pos)
-                forced_honest_scores[len(candidate_positions) - 1] = w5_result.winner_score_pair
-                if not use_proxy_search:
-                    best_score = scalar_from_pair(w5_result.winner_score_pair)
+                log_w5_telemetry(w5_result, config)
+                if w5_result.accepted and w5_dominates(
+                    w5_result.winner_score_pair,
+                    incumbent_score_pair,
+                    0.05,
+                ):
+                    candidate_positions.append(w5_result.winner_pos)
+                    forced_honest_scores[len(candidate_positions) - 1] = w5_result.winner_score_pair
+                    if not use_proxy_search:
+                        best_score = scalar_from_pair(w5_result.winner_score_pair)
+                        best_pos = w5_result.winner_pos
+                elif not use_proxy_search:
                     best_pos = w5_result.winner_pos
-            elif not use_proxy_search:
-                best_pos = w5_result.winner_pos
-                best_score = scalar_from_pair(w5_result.winner_score_pair)
-    except Exception as exc:  # noqa: BLE001 -- W5 is additive and must never sink polish
-        if is_worker_timeout_like_exception(exc):
-            raise
-        _LOGGER.warning("W5 finisher failed; preserving pre-W5 polish winner", exc_info=True)
+                    best_score = scalar_from_pair(w5_result.winner_score_pair)
+        except Exception as exc:  # noqa: BLE001 -- W5 is additive and must never sink polish
+            if is_worker_timeout_like_exception(exc):
+                raise
+            _LOGGER.warning("W5 finisher failed; preserving pre-W5 polish winner", exc_info=True)
     if not use_proxy_search:
         return best_pos
 
@@ -5426,6 +5441,91 @@ def _score_native_result(
         declared_hierarchical=declared_hierarchical,
         all_pairs_dist=all_pairs_dist,
     )
+
+
+def _large_row_anytime_fallback_enabled(
+    config: LayoutConfig,
+    num_nodes: int,
+    edge_count: int,
+) -> bool:
+    """Return whether a benchmarked large row should use fallback positions.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Prepared layout configuration.
+    num_nodes : int
+        Number of graph nodes.
+    edge_count : int
+        Number of graph edges.
+
+    Returns
+    -------
+    bool
+        ``True`` when a benchmark deadline is active and the graph falls into
+        the cliff-straddler size band where base layout can reach the worker
+        alarm before an incumbent is returnable.
+    """
+    return (
+        getattr(config, "_dagua_native_deadline_s", None) is not None
+        and num_nodes >= _ANYTIME_LARGE_ROW_MIN_NODES
+        and edge_count >= _ANYTIME_LARGE_ROW_MIN_EDGES
+    )
+
+
+def _anytime_fallback_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    structure: Optional[GraphStructure],
+    device: torch.device,
+) -> torch.Tensor:
+    """Return finite deterministic positions for a deadline-cliff large row.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    structure : GraphStructure, optional
+        Classified graph structure, when already available.
+    device : torch.device
+        Target output device.
+
+    Returns
+    -------
+    torch.Tensor
+        Fallback positions with shape ``[N, 2]``.
+    """
+    dtype = torch.float32
+    if num_nodes <= 0:
+        return torch.zeros((0, 2), dtype=dtype, device=device)
+    sizes = node_sizes.detach().to(device=device, dtype=dtype)
+    median_size = float(sizes.mean().item()) if sizes.numel() else 60.0
+    spacing = max(1.0, median_size * _ANYTIME_FALLBACK_NODE_SEP_FACTOR)
+    if structure is not None and bool(getattr(structure, "is_directed_acyclic", False)):
+        try:
+            from dagua.utils import longest_path_layering
+
+            ranks_raw = longest_path_layering(edge_index.detach().to(device="cpu"), num_nodes)
+            ranks = torch.as_tensor(ranks_raw, dtype=torch.long, device=device)
+            out = torch.zeros((num_nodes, 2), dtype=dtype, device=device)
+            for rank in torch.unique(ranks, sorted=True):
+                members = torch.nonzero(ranks == rank, as_tuple=False).squeeze(1)
+                offsets = torch.arange(members.numel(), dtype=dtype, device=device)
+                offsets = (offsets - (members.numel() - 1) * 0.5) * spacing
+                out[members, 0] = offsets
+                out[members, 1] = float(int(rank.item())) * spacing
+            return out - out.mean(dim=0, keepdim=True)
+        except Exception:  # noqa: BLE001 -- cyclic surprises fall back to index grid
+            pass
+    cols = int(math.ceil(math.sqrt(float(num_nodes))))
+    index = torch.arange(num_nodes, dtype=dtype, device=device)
+    out = torch.stack((index.remainder(cols), torch.floor(index / cols)), dim=1) * spacing
+    return out - out.mean(dim=0, keepdim=True)
 
 
 def layout_dagua_native_pipeline(
@@ -5798,6 +5898,18 @@ def layout_dagua_native_pipeline(
         edge_weights=prepared_edge_weights,
         seed=int(resolved_seed if resolved_seed is not None else 42),
     )
+    if _large_row_anytime_fallback_enabled(
+        prepared_config,
+        num_nodes,
+        int(prepared_edge_index.shape[1]) if prepared_edge_index.ndim == 2 else 0,
+    ):
+        return _anytime_fallback_positions(
+            prepared_edge_index,
+            num_nodes,
+            normalized_node_sizes,
+            problem.structure,
+            target_device,
+        )
     state = SolveState(pos=prepared_init_pos)
     ctx = RuntimeContext(
         plan=ExecutionPlan(

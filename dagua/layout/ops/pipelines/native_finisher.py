@@ -36,6 +36,9 @@ _MIN_FINISHER_ENTRY_S = 1.0
 _MAX_W5_SPEND_S = 20.0
 _TOTAL_BUDGET_FRACTION = 0.10
 _W5_ACCEPT_MARGIN = 0.05
+_PREDICTED_COST_SKIP_NODES = 250
+_PREDICTED_COST_LATE_ENTRY_REMAINING_S = 90.0
+_DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 
 
 @dataclass(frozen=True)
@@ -265,6 +268,96 @@ def _remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     return float(deadline) - time.perf_counter()
 
 
+def _w5_disabled_by_env() -> bool:
+    """Return whether W5 is disabled by the diagnostic environment flag.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``DAGUA_NATIVE_DISABLE_W5`` is set to a truthy value.
+    """
+    raw = os.environ.get(_DISABLE_W5_ENV, "")
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _w5_spend_cap_s(config: Optional[LayoutConfig], remaining: Optional[float]) -> float:
+    """Return the per-layout accumulated W5 wall-clock cap.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark budget metadata.
+    remaining : float, optional
+        Remaining benchmark seconds, used as a fallback budget outside normal
+        benchmark configuration.
+
+    Returns
+    -------
+    float
+        Maximum total seconds W5 may spend for this layout invocation.
+    """
+    if config is None or (
+        remaining is None and not hasattr(config, "_dagua_native_total_budget_s")
+    ):
+        return _DEFAULT_FINISHER_SLICE_S
+    fallback_budget = _DEFAULT_FINISHER_SLICE_S if remaining is None else remaining
+    total_budget = float(getattr(config, "_dagua_native_total_budget_s", fallback_budget))
+    return min(_MAX_W5_SPEND_S, _TOTAL_BUDGET_FRACTION * total_budget)
+
+
+def _w5_spent_s(config: Optional[LayoutConfig], started_perf: Optional[float] = None) -> float:
+    """Return accumulated W5 seconds, including this invocation when supplied.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying accumulated W5 runtime.
+    started_perf : float, optional
+        ``time.perf_counter()`` value for the active invocation.
+
+    Returns
+    -------
+    float
+        Accumulated W5 wall-clock seconds.
+    """
+    previous = float(getattr(config, "_dagua_native_w5_spent_s", 0.0))
+    if started_perf is None:
+        return previous
+    return previous + max(0.0, time.perf_counter() - started_perf)
+
+
+def w5_predicted_skip_reason(
+    node_count: int,
+    edge_count: int,
+    config: Optional[LayoutConfig],
+) -> Optional[str]:
+    """Return a predicted-cost skip reason before W5 does expensive work.
+
+    Parameters
+    ----------
+    node_count : int
+        Number of graph nodes.
+    edge_count : int
+        Number of graph edges.
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark deadline metadata.
+
+    Returns
+    -------
+    str or None
+        Skip reason when W5 should preserve the incumbent without running, or
+        ``None`` when W5 may proceed.
+    """
+    if _w5_disabled_by_env():
+        return "disabled_by_env"
+    if node_count >= _PREDICTED_COST_SKIP_NODES:
+        return "predicted_cost_large_graph"
+    remaining = _remaining_s(config)
+    if remaining is not None and remaining < _PREDICTED_COST_LATE_ENTRY_REMAINING_S:
+        return "predicted_cost_late_entry"
+    return None
+
+
 def _finisher_slice_s(config: Optional[LayoutConfig]) -> Optional[float]:
     """Return the bounded W5 work slice, or ``None`` when it must skip.
 
@@ -278,6 +371,8 @@ def _finisher_slice_s(config: Optional[LayoutConfig]) -> Optional[float]:
     float or None
         Available finisher seconds before the return reserve.
     """
+    if _w5_disabled_by_env():
+        return None
     remaining = _remaining_s(config)
     if remaining is None:
         return _DEFAULT_FINISHER_SLICE_S
@@ -286,9 +381,8 @@ def _finisher_slice_s(config: Optional[LayoutConfig]) -> Optional[float]:
     available = remaining - _ABSOLUTE_DEADLINE_RESERVE_S
     if available < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
         return None
-    total_budget = float(getattr(config, "_dagua_native_total_budget_s", remaining))
-    spend_cap = min(_MAX_W5_SPEND_S, _TOTAL_BUDGET_FRACTION * total_budget)
-    spent = float(getattr(config, "_dagua_native_w5_spent_s", 0.0))
+    spend_cap = _w5_spend_cap_s(config, remaining)
+    spent = _w5_spent_s(config)
     remaining_w5_budget = spend_cap - spent
     if remaining_w5_budget < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
         return None
@@ -703,6 +797,11 @@ def run_w5_finisher(
     slice_s = _finisher_slice_s(config)
     node_count = int(incumbent_pos.shape[0])
     edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+    predicted_skip_reason = w5_predicted_skip_reason(node_count, edge_count, config)
+    if slice_s is None and predicted_skip_reason != "disabled_by_env":
+        predicted_skip_reason = None
+    if predicted_skip_reason is not None:
+        slice_s = None
 
     def finish(
         *,
@@ -779,13 +878,13 @@ def run_w5_finisher(
             winner_pos=incumbent_pos,
             winner_score_pair=incumbent_score_pair,
             winner_name="incumbent",
-            deadline_returned=True,
+            deadline_returned=predicted_skip_reason in {None, "predicted_cost_late_entry"},
             accepted=[],
             rejected=[],
             checkpoints=[],
             mode="skip",
             steps=0,
-            skipped_reason="no_budget",
+            skipped_reason=predicted_skip_reason or "no_budget",
         )
     kept_seeds = _dedupe_seeds(seeds)
     if not kept_seeds:
@@ -820,6 +919,9 @@ def run_w5_finisher(
     incumbent_overlap = _overlap_count(incumbent_pos, size_work)
     deadline_returned = False
     for seed in kept_seeds:
+        if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
+            deadline_returned = True
+            break
         if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
             deadline_returned = True
             break
@@ -855,6 +957,9 @@ def run_w5_finisher(
             )
             scored_points.append((steps, final_pos, final_loss))
         for step, checkpoint_pos, checkpoint_loss in scored_points[:2]:
+            if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
+                deadline_returned = True
+                break
             if time.monotonic() >= deadline:
                 deadline_returned = True
                 break
