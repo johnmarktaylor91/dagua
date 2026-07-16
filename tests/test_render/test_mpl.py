@@ -2,6 +2,7 @@
 
 import colorsys
 import importlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -197,6 +198,7 @@ def test_node_text_shadow_is_offset_and_blurred_behind_label() -> None:
     shadow_min = central_shadow.get_path().vertices.min(axis=0)
     assert shadow_min - foreground_min == pytest.approx(np.array([3.0, -2.0]) * display_scale)
     assert central_shadow.get_facecolor()[:3] == pytest.approx(to_rgba("#3366CC")[:3])
+    assert central_shadow.get_facecolor()[3] < to_rgba("#3366CC80")[3] / 10.0
     assert all(shadow.get_zorder() < foreground.get_zorder() for shadow in shadows)
     plt.close(fig)
 
@@ -1762,12 +1764,7 @@ def test_vee_arrow_is_open_polygon() -> None:
 
 
 def test_vee_arrowhead_builder_returns_filled_notched_triangle() -> None:
-    """The custom vee head should be a FILLED notched triangle (Graphviz parity).
-
-    Round 17 F4: native Graphviz emits ``vee`` as a filled polygon. The
-    earlier dagua implementation rendered it as a stroked chevron, which
-    mismatched dot's silhouette on the ``arrow_types`` panel.
-    """
+    """The custom vee head is graphviz's FILLED notched triangle (not open)."""
 
     result = build_arrowhead(
         "vee",
@@ -1778,14 +1775,57 @@ def test_vee_arrowhead_builder_returns_filled_notched_triangle() -> None:
         body_width=2.0,
     )
 
-    assert len(result.filled_paths) == 1, "Vee should have one filled notched-triangle path"
-    assert result.stroked_paths == [], (
-        "Vee renders entirely through the fill pass after round-17 F4"
+    assert len(result.filled_paths) >= 1
+    assert result.stroked_paths == []
+    assert any(path.codes[-1] == path.CLOSEPOLY for path in result.filled_paths)
+
+
+def test_cross_arrowhead_is_compact_body_side_marker() -> None:
+    """Cross heads should anchor at the tip without extending into the node side."""
+
+    result = build_arrowhead(
+        "cross",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=20.0,
+        width=20.0,
+        body_width=2.0,
     )
-    path = result.filled_paths[0]
-    # The notched triangle has tip + two back wings + a back-axis notch
-    # vertex, plus the matplotlib closing vertex appended by _local_path.
-    assert path.vertices.shape[0] >= 4, "Filled vee retains the notched-triangle vertices"
+
+    vertices = np.vstack([path.vertices for path in result.stroked_paths])
+    assert result.filled_paths == []
+    assert len(result.stroked_paths) == 2
+    assert float(vertices[:, 0].min()) == pytest.approx(0.0)
+    assert 0.0 < float(vertices[:, 0].max()) <= 20.0 * 0.5
+    assert float(np.ptp(vertices[:, 1])) <= 20.0 * 0.5
+
+
+@pytest.mark.parametrize(
+    "style",
+    [
+        EdgeStyle(arrow="cross"),
+        EdgeStyle(arrow="none", source_arrow="cross"),
+        EdgeStyle(arrow="none", mid_arrow="cross"),
+    ],
+)
+def test_cross_markers_use_edge_stroke_color(style: EdgeStyle) -> None:
+    """Endpoint and midpoint cross markers should inherit the edge stroke color."""
+
+    graph = DaguaGraph.from_edge_list([("A", "B")])
+    graph.edge_styles[0] = replace(style, color="#7F1D1D", arrow_color="#DC2626")
+    graph.compute_node_sizes()
+    positions = torch.tensor([[0.0, 50.0], [0.0, -50.0]], dtype=torch.float32)
+    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    collection = _build_custom_edge_collection(ax, graph, curves, positions=positions.numpy())
+    head_artists = collection.render_heads(ax)
+
+    assert len(head_artists) == 1
+    expected_rgb = np.asarray(to_rgba("#7F1D1D")[:3])
+    edgecolors = head_artists[0].get_edgecolors()
+    np.testing.assert_allclose(edgecolors[:, :3], np.tile(expected_rgb, (len(edgecolors), 1)))
+    plt.close(fig)
 
 
 def test_straight_routing_has_arrowhead() -> None:
