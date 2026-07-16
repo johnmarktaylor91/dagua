@@ -223,6 +223,7 @@ class FillDeclaration:
     values: Optional[List[float]] = None
     slice_count: int = 1
 
+
 @dataclass
 class ReferenceEdge:
     """SVG-derived geometry for a single reference edge.

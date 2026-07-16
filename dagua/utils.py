@@ -568,9 +568,7 @@ def _measure_text_exact_cached(
         # through Pango. Asking fontconfig for the generic "Times,serif" stack
         # selects Apple's Times.ttc instead, whose short-label advances differ.
         graphviz_family = (
-            font_family
-            if str(font_weight).strip().lower() == "bold"
-            else "Times New Roman"
+            font_family if str(font_weight).strip().lower() == "bold" else "Times New Roman"
         )
         font_path = _fc_match_font_path(graphviz_family, font_weight, font_style)
     if font_path is None:
@@ -1268,9 +1266,7 @@ def _compute_node_size_cached(
                 # spare requested height to solve the containing ellipse.
                 # Its Pango plugin fixes each line height at round(1.1*font).
                 line_count = label.count("\n") + 1
-                graphviz_line_height = int(
-                    effective_font_size * GRAPHVIZ_LABEL_HEIGHT_FACTOR + 0.5
-                )
+                graphviz_line_height = int(effective_font_size * GRAPHVIZ_LABEL_HEIGHT_FACTOR + 0.5)
                 graphviz_text_height = float(line_count * graphviz_line_height)
                 graphviz_padded_height = graphviz_text_height + padding[1] * 2.0
                 requested_height = max(

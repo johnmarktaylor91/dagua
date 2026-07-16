@@ -245,9 +245,7 @@ def test_known_graphviz_font_stack_residual_has_per_node_waiver() -> None:
         node_stroke_width_pt=1.0,
     )
     panel = pmetrics.PanelReport(slug="mixed_styles", in_tolerance=True)
-    panel.nodes.append(
-        pmetrics._flatten_node_deltas("n3", ref, cand, pmetrics.V2_TOLERANCE)
-    )
+    panel.nodes.append(pmetrics._flatten_node_deltas("n3", ref, cand, pmetrics.V2_TOLERANCE))
 
     pmetrics.augment_panel_v2(
         panel,
