@@ -1105,7 +1105,16 @@ def _adjust_port_for_shape(
         )
         return float(hit[0]), float(hit[1])
 
-    if shape == "diamond":
+    rounded_polygon_bases = {
+        "round_triangle": "triangle",
+        "round_diamond": "diamond",
+        "round_pentagon": "pentagon",
+        "round_hexagon": "hexagon",
+        "round_octagon": "octagon",
+    }
+    boundary_shape = rounded_polygon_bases.get(shape, shape)
+
+    if boundary_shape == "diamond":
         # Diamond edges: 4 sides connecting top/right/bottom/left
         # Project port onto nearest diamond edge
         dx = port_x - cx
@@ -1137,7 +1146,7 @@ def _adjust_port_for_shape(
     }
     # Non-convex shapes where arrowheads can enter concavities.
     _CONCAVE_SHAPES = {"star"}
-    if shape in _POLYGON_SHAPES:
+    if boundary_shape in _POLYGON_SHAPES:
         from dagua.render.edges.intersection import ray_polygon_intersection
 
         dx = port_x - cx
@@ -1148,7 +1157,7 @@ def _adjust_port_for_shape(
         hit = ray_polygon_intersection(
             center=[cx, cy],
             half_size=[w / 2, h / 2],
-            shape=shape,
+            shape=boundary_shape,
             ray_origin=[cx, cy],
             ray_direction=[dx, dy],
         )

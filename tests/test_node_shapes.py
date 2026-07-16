@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 
 from dagua.render.borders.shapes import ShapeSpec, build_shape_path
+from dagua.render.edges.intersection import ray_polygon_intersection
+from dagua.utils import compute_node_size
 
 NEW_SHAPES = [
     "arrow",
@@ -58,6 +60,80 @@ EXISTING_SHAPES = [
     "parallelogram",
     "trapezoid",
 ]
+ROUNDED_POLYGON_VERTEX_COUNTS = {
+    "round_triangle": 3,
+    "round_diamond": 4,
+    "round_pentagon": 5,
+    "round_hexagon": 6,
+    "round_octagon": 8,
+}
+
+
+@pytest.mark.parametrize(("shape", "vertex_count"), ROUNDED_POLYGON_VERTEX_COUNTS.items())
+def test_rounded_polygon_paths_curve_every_corner(shape: str, vertex_count: int) -> None:
+    """Verify rounded polygons preserve corner count and replace sharp joins.
+
+    Parameters
+    ----------
+    shape : str
+        Rounded-polygon shape name.
+    vertex_count : int
+        Expected number of base polygon corners.
+
+    Returns
+    -------
+    None
+        This test asserts quadratic path-code structure and nonzero rounding.
+    """
+
+    path = build_shape_path(
+        ShapeSpec(center_x=0.0, center_y=0.0, width=100.0, height=80.0, shape=shape)
+    )
+
+    assert path.codes is not None
+    assert np.count_nonzero(path.codes == path.CURVE3) == vertex_count * 2
+    assert np.count_nonzero(path.codes == path.LINETO) == vertex_count - 1
+    assert len(path.vertices) == vertex_count * 3 + 1
+
+
+@pytest.mark.parametrize(("shape", "vertex_count"), ROUNDED_POLYGON_VERTEX_COUNTS.items())
+def test_rounded_polygons_share_base_shape_layout_geometry(shape: str, vertex_count: int) -> None:
+    """Verify rounded variants retain base sizing and edge-intersection geometry.
+
+    Parameters
+    ----------
+    shape : str
+        Rounded-polygon shape name.
+    vertex_count : int
+        Base polygon corner count used to select the corresponding name.
+
+    Returns
+    -------
+    None
+        This test asserts layout sizing and routed boundary intersections.
+    """
+
+    base_shapes = {3: "triangle", 4: "diamond", 5: "pentagon", 6: "hexagon", 8: "octagon"}
+    base_shape = base_shapes[vertex_count]
+    rounded_size = compute_node_size("rounded label", shape=shape)
+    base_size = compute_node_size("rounded label", shape=base_shape)
+    rounded_hit = ray_polygon_intersection(
+        center=[0.0, 0.0],
+        half_size=[50.0, 40.0],
+        shape=shape,
+        ray_origin=[0.0, 0.0],
+        ray_direction=[1.0, 0.35],
+    )
+    base_hit = ray_polygon_intersection(
+        center=[0.0, 0.0],
+        half_size=[50.0, 40.0],
+        shape=base_shape,
+        ray_origin=[0.0, 0.0],
+        ray_direction=[1.0, 0.35],
+    )
+
+    assert rounded_size == pytest.approx(base_size)
+    assert rounded_hit == pytest.approx(base_hit)
 
 
 @pytest.mark.parametrize("shape", NEW_SHAPES)
