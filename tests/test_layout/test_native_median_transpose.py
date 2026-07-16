@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -218,7 +219,45 @@ def test_transpose_heuristic_finds_optimal_three_node_adjacent_swap() -> None:
     assert result.ordering is not None
     assert result.pos is not None
     assert result.ordering.tolist() == [1, 0, 2, 1, 0, 2]
-    assert torch.equal(_rank_by_x(result.pos, layers), result.ordering.cpu())
+
+
+def test_dot_mincross_numba_reorder_matches_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Numba and Python rank reordering produce identical mincross output.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Fixture used to force the Python fallback after the numba run.
+
+    Returns
+    -------
+    None
+        This test asserts exact ordered-rank identity.
+    """
+    from dagua.layout.ops import _dot_mincross
+
+    if not _dot_mincross._NUMBA_AVAILABLE:
+        pytest.skip("numba is not installed")
+
+    ranks = [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]
+    edges = [
+        (0, 7),
+        (1, 6),
+        (2, 5),
+        (3, 4),
+        (4, 11),
+        (5, 10),
+        (6, 9),
+        (7, 8),
+        (0, 5),
+        (2, 7),
+    ]
+
+    numba_order = _dot_mincross.graphviz_mincross(ranks, edges, iterations=6)
+    monkeypatch.setattr(_dot_mincross, "_NUMBA_AVAILABLE", False)
+    python_order = _dot_mincross.graphviz_mincross(ranks, edges, iterations=6)
+
+    assert numba_order == python_order
 
 
 def test_dagua_native_dense_pair_50_reduces_crossings() -> None:

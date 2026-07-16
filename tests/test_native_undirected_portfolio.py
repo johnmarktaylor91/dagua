@@ -115,6 +115,28 @@ def test_forced_pipeline_beats_portfolio_branch() -> None:
     assert _choose_native_pipeline(structure=structure, config=config) == "stress"
 
 
+def test_undirected_portfolio_is_incumbent_monotone() -> None:
+    """The selected winner must not score below the suppressed incumbent."""
+    from dagua.layout import layout
+
+    graph = _ring_with_chords(num_nodes=8)
+    incumbent_config = LayoutConfig(seed=42, device="cpu")
+    incumbent_config._dagua_native_suppress_portfolio = True
+    incumbent_pos = layout(graph, incumbent_config)
+    winner_pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        direction=graph.direction,
+    )
+
+    incumbent_score = _score_undirected_candidate(incumbent_pos, problem, None)
+    winner_score = _score_undirected_candidate(winner_pos, problem, None)
+
+    assert winner_score >= incumbent_score
+
+
 def test_degenerate_collapsed_candidate_is_rejected() -> None:
     """A fully-collapsed candidate trips the degeneracy guard."""
     num_nodes = 8
@@ -465,6 +487,80 @@ def test_large_shortlist_retains_degree_four_mesh_incumbent() -> None:
 
     assert _use_large_prism_shortlist(mesh_problem) is False
     assert _use_large_prism_shortlist(hub_problem) is True
+
+
+def test_mid_size_prism_shortlist_requires_low_degree_uniformity() -> None:
+    """Mid-size shortcut admits BA-like hubs but excludes Chung-Lu-like hubs."""
+    from types import SimpleNamespace
+
+    n = 120
+    hub_edges = torch.tensor([[0] * 30, list(range(1, 31))], dtype=torch.long)
+    ba_like = LayoutProblem(
+        edge_index=hub_edges,
+        num_nodes=n,
+        structure=SimpleNamespace(degree_uniformity=0.8),
+    )
+    chung_lu_like = LayoutProblem(
+        edge_index=hub_edges,
+        num_nodes=n,
+        structure=SimpleNamespace(degree_uniformity=2.5),
+    )
+
+    assert _use_large_prism_shortlist(ba_like) is True
+    assert _use_large_prism_shortlist(chung_lu_like) is False
+
+
+def test_large_shortlist_runs_before_expensive_incumbent(monkeypatch: object) -> None:
+    """Large non-mesh graphs use the SFDP-PRISM holder before the incumbent."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_undirected import layout_native_undirected_portfolio
+    from dagua.layout.ops.state import RuntimeContext, SolveState
+
+    n = LARGE_CONTEST_NODE_THRESHOLD + 1
+    edge_index = torch.tensor(
+        [[0, 0, 0, 0, 0], [1, 2, 3, 4, 5]],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=n, seed=42)
+    shortcut_pos = torch.stack(
+        (torch.arange(n, dtype=torch.float32), torch.zeros(n, dtype=torch.float32)),
+        dim=1,
+    )
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    calls: list[str] = []
+
+    def fake_shortlist(*args: object, **kwargs: object) -> torch.Tensor:
+        """Record the shortcut and return a finite large-graph candidate."""
+        del args, kwargs
+        calls.append("shortcut")
+        return shortcut_pos
+
+    def fake_mini_contest(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the shortcut candidate without running extra challengers."""
+        del args, kwargs
+        calls.append("mini")
+        return shortcut_pos
+
+    def fail_incumbent(*args: object, **kwargs: object) -> torch.Tensor:
+        """Fail if the expensive incumbent runs before the shortcut."""
+        del args, kwargs
+        raise AssertionError("incumbent ran before large shortlist")
+
+    monkeypatch.setattr(native_undirected, "_large_prism_shortlist_candidate", fake_shortlist)
+    monkeypatch.setattr(native_undirected, "_router_v2_large_mini_contest", fake_mini_contest)
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fail_incumbent)
+
+    result = layout_native_undirected_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(seed=42),
+    )
+
+    assert calls == ["shortcut", "mini"]
+    torch.testing.assert_close(result, shortcut_pos)
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:

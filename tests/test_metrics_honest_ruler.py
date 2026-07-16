@@ -11,6 +11,7 @@ import dagua.metrics as metrics_module
 from dagua.metrics import (
     _COMMON_WEIGHTS,
     _DIRECTED_WEIGHTS,
+    _triu_pair_indices_from_linear,
     angular_resolution_score,
     cluster_silhouette_score,
     composite,
@@ -96,6 +97,18 @@ def test_edge_crossing_sqrt_degree_correction_and_k4_order() -> None:
     )
     star = torch.tensor([[0, 0, 0], [1, 2, 3]], dtype=torch.long)
     assert edge_crossing_score(torch.rand(4, 2), star)["edge_crossing_score"] == 1.0
+
+
+def test_triu_pair_decoder_matches_torch_order() -> None:
+    """Decoded sampled crossing pairs match ``torch.triu_indices`` order."""
+    matrix_size = 37
+    first, second = torch.triu_indices(matrix_size, matrix_size, offset=1)
+    selected = torch.tensor([0, 1, 35, 36, 37, 100, first.numel() - 1], dtype=torch.long)
+
+    decoded_first, decoded_second = _triu_pair_indices_from_linear(selected, matrix_size)
+
+    assert torch.equal(decoded_first, first[selected])
+    assert torch.equal(decoded_second, second[selected])
 
 
 def test_node_occlusion_saturates_monotonically() -> None:

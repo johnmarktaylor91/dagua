@@ -120,6 +120,56 @@ if _NUMBA_AVAILABLE:
             if delta < 1:
                 break
 
+    @njit(cache=True)
+    def _reorder_rank_njit(  # type: ignore[misc]
+        rank_nodes: "np.ndarray",
+        mvals: "np.ndarray",
+        reverse: bool,
+        hasfixed: bool,
+    ) -> None:
+        """Reorder one rank using Graphviz's median pair-exchange rule.
+
+        Parameters
+        ----------
+        rank_nodes : np.ndarray
+            Mutable node ids in rank order with shape ``[R]``.
+        mvals : np.ndarray
+            Median values aligned with ``rank_nodes`` and mutated alongside
+            swaps so lookups remain equivalent to the Python dict path.
+        reverse : bool
+            Whether equal median values should be swapped.
+        hasfixed : bool
+            Whether Graphviz fixed sentinel nodes keep the full scan window.
+
+        Returns
+        -------
+        None
+            ``rank_nodes`` and ``mvals`` are updated in place.
+        """
+        end = rank_nodes.shape[0]
+        for _iteration in range(rank_nodes.shape[0] - 1, -1, -1):
+            left = 0
+            while left < end:
+                while left < end and mvals[left] < 0.0:
+                    left += 1
+                if left >= end:
+                    break
+                right = left + 1
+                while right < end and mvals[right] < 0.0:
+                    right += 1
+                if right >= end:
+                    break
+
+                left_value = mvals[left]
+                right_value = mvals[right]
+                if left_value > right_value or (left_value >= right_value and reverse):
+                    rank_nodes[left], rank_nodes[right] = rank_nodes[right], rank_nodes[left]
+                    mvals[left], mvals[right] = mvals[right], mvals[left]
+                left = right
+
+            if not hasfixed and not reverse:
+                end -= 1
+
 
 @dataclass(frozen=True)
 class _MincrossEdge:
@@ -731,6 +781,13 @@ def _reorder_rank(
     None
         ``rank_nodes`` is updated in place.
     """
+    if _NUMBA_AVAILABLE and np is not None:
+        rank_array = np.asarray(rank_nodes, dtype=np.int64)
+        mval_array = np.asarray([mvals[node] for node in rank_nodes], dtype=np.float64)
+        _reorder_rank_njit(rank_array, mval_array, reverse, hasfixed)
+        rank_nodes[:] = [int(node) for node in rank_array.tolist()]
+        return
+
     end = len(rank_nodes)
     for _ in range(len(rank_nodes) - 1, -1, -1):
         left = 0
