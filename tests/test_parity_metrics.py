@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import pytest
+import torch
 
-from dagua.render.mpl import density_aware_size_factor
+from dagua.render.mpl import _density_scaled_node_sizes, density_aware_size_factor
+from dagua.styles import GRAPHVIZ_STRICT_THEME
 from scripts.visual_parity.io import read_ledger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +110,22 @@ def test_density_aware_size_factor_matches_graphviz_fixture_density() -> None:
     assert density_aware_size_factor(2, 400.0) == pytest.approx(1.0)
     assert density_aware_size_factor(5, 400.0) < 1.0
     assert density_aware_size_factor(20, 400.0) == pytest.approx(0.25)
+
+
+def test_graphviz_strict_render_preserves_computed_node_floor() -> None:
+    """Graphviz-strict rendering should not shrink computed node dimensions."""
+
+    computed_sizes = torch.tensor([[54.0, 36.0]] * 3, dtype=torch.float32)
+
+    rendered_sizes, factor = _density_scaled_node_sizes(
+        computed_sizes,
+        node_count=3,
+        layout_extent_pt=144.0,
+        enabled=GRAPHVIZ_STRICT_THEME.graph_style.density_aware_node_shrink,
+    )
+
+    assert factor == pytest.approx(1.0)
+    assert torch.equal(rendered_sizes, computed_sizes)
 
 
 def test_ledger_locked_feature_missing_is_failure(tmp_path: Path) -> None:

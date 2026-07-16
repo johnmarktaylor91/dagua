@@ -129,9 +129,6 @@ _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18
 _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
-_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE = 1.18
-_GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP = 3.0
-_GRAPHVIZ_STRICT_MIN_OVAL_ASPECT = 1.50
 _GRAPHVIZ_STRICT_EDGE_WIDTH_RENDER_MULTIPLIER = 1.5
 _GRAPHVIZ_STRICT_CLUSTER_HORIZONTAL_SEPARATION_POINTS = 18.0
 _GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS = 4.0
@@ -2062,7 +2059,11 @@ def render(
             svg_hover_map,
         )
 
-    if canvas_fit_margin is None and figsize != natural_figsize:
+    if (
+        canvas_fit_margin is None
+        and figsize != natural_figsize
+        and not _is_graphviz_strict_render(graph)
+    ):
         fig.tight_layout()
 
     if output:
@@ -3621,54 +3622,6 @@ def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
     )
 
 
-def _graphviz_strict_ellipse_shape_spec(spec: ShapeSpec, style: NodeStyle) -> ShapeSpec:
-    """Return a Graphviz-style visual ellipse spec for strict rendering.
-
-    Parameters
-    ----------
-    spec : ShapeSpec
-        Node outline spec computed from the graph's node-size tensor.
-    style : NodeStyle
-        Effective node style for the same node.
-
-    Returns
-    -------
-    ShapeSpec
-        Ellipse spec with a uniform Graphviz-style circumscription multiplier
-        when the node is an ellipse or circle.
-    """
-    if str(style.shape) not in {"ellipse", "circle"}:
-        return spec
-    aspect = max(float(spec.width), float(spec.height)) / max(
-        min(float(spec.width), float(spec.height)),
-        1e-9,
-    )
-    aspect_blend = min(1.0, _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP / max(aspect, 1e-9))
-    scale = 1.0 + (_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE - 1.0) * aspect_blend
-    adjusted_width = float(spec.width) * scale
-    base_height = float(spec.height)
-    if float(spec.width) > float(spec.height) and aspect > _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP:
-        min_height = float(style.min_height) if style.min_height is not None else 0.0
-        base_height = min(base_height, max(min_height, float(spec.height) / aspect))
-    adjusted_height = base_height * scale
-    if str(style.shape) == "ellipse" and adjusted_width <= 70.0:
-        adjusted_width = max(
-            adjusted_width,
-            adjusted_height * _GRAPHVIZ_STRICT_MIN_OVAL_ASPECT,
-        )
-    if str(style.shape) == "circle":
-        adjusted_width = adjusted_height = max(adjusted_width, adjusted_height)
-    return ShapeSpec(
-        center_x=spec.center_x,
-        center_y=spec.center_y,
-        width=adjusted_width,
-        height=adjusted_height,
-        shape=spec.shape,
-        corner_radius=spec.corner_radius,
-        aspect_ratio=spec.aspect_ratio,
-    )
-
-
 def _graphviz_strict_terminal_point(
     curve: BezierCurve,
     center: Tuple[float, float],
@@ -3702,17 +3655,14 @@ def _graphviz_strict_terminal_point(
     if str(style.shape) not in {"ellipse", "circle"}:
         return curve.p0 if terminal == "source" else curve.p1
 
-    visual_spec = _graphviz_strict_ellipse_shape_spec(
-        ShapeSpec(
-            center_x=float(center[0]),
-            center_y=float(center[1]),
-            width=float(size[0]),
-            height=float(size[1]),
-            shape=str(style.shape),
-            corner_radius=0.0,
-            aspect_ratio=style.aspect_ratio,
-        ),
-        style,
+    visual_spec = ShapeSpec(
+        center_x=float(center[0]),
+        center_y=float(center[1]),
+        width=float(size[0]),
+        height=float(size[1]),
+        shape=str(style.shape),
+        corner_radius=0.0,
+        aspect_ratio=style.aspect_ratio,
     )
     original_terminal = curve.p0 if terminal == "source" else curve.p1
     center_point = np.asarray(center, dtype=float)
@@ -5373,8 +5323,6 @@ def _draw_nodes(
             corner_radius=corner_radius,
             aspect_ratio=style.aspect_ratio,
         )
-        if _is_graphviz_strict_render(graph):
-            shape_spec = _graphviz_strict_ellipse_shape_spec(shape_spec, style)
         outer_path = build_shape_path(shape_spec)
         fill_path = _node_fill_path(shape_spec, outer_path, border_width, border_position)
 
