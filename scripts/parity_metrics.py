@@ -103,6 +103,20 @@ V2_TOLERANCE: Dict[str, Any] = {
     "shape_path_iou": 0.93,
 }
 
+# Graphviz 7.0.5 measures this 10pt Times-Roman label through hinted
+# Pango/CoreText and reports a 36pt advance. Matplotlib's outline-based
+# TextToPath reports 34.43pt for the same installed Times New Roman face.
+# Preserving the shared sizing rule leaves a 2.06pt node-width residual; a
+# label-specific correction would distort every other small-font node.
+V2_NODE_WAIVERS: Dict[Tuple[str, str, str], str] = {
+    ("mixed_styles", "n3", "node_autosize_w_pt"): (
+        "Graphviz 7.0.5 Pango/CoreText hints 10pt Times-Roman 'Fallback' to a 36pt "
+        "advance; Matplotlib TextToPath measures the same face at 34.43pt. The resulting "
+        "2.06pt width residual is font-stack-specific and does not justify a global sizing "
+        "distortion."
+    ),
+}
+
 #: Default Markdown report path consumed by the graphviz parity audit loop.
 DEFAULT_MARKDOWN_PATH = Path("eval_output/parity_metrics_summary.md")
 
@@ -1965,11 +1979,18 @@ def augment_panel_v2(
         cand = next((node for node in candidate.nodes if node.node_id == node_id), None)
         if ref is None or cand is None:
             continue
-        node_entry["node_autosize_w_pt"] = _v2_size_delta(
+        width_delta = _v2_size_delta(
             target=ref.ellipse_rx * 2.0,
             candidate=cand.ellipse_rx * 2.0,
             tolerance=tolerance["node_autosize_w_pt"],
         ).__dict__
+        waiver_reason = V2_NODE_WAIVERS.get((case_id, node_id, "node_autosize_w_pt"))
+        if waiver_reason is not None and not bool(width_delta["in_tolerance"]):
+            width_delta["waiver"] = {
+                "reason": waiver_reason,
+                "scope": f"{case_id}.{node_id}.node_autosize_w_pt",
+            }
+        node_entry["node_autosize_w_pt"] = width_delta
         node_entry["node_autosize_h_pt"] = _v2_size_delta(
             target=ref.ellipse_ry * 2.0,
             candidate=cand.ellipse_ry * 2.0,

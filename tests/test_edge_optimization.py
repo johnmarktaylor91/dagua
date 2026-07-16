@@ -125,6 +125,32 @@ def test_expand_node_ellipse_aspect_ratio_capped() -> None:
 
 
 @pytest.mark.smoke
+def test_graphviz_compact_multiline_ellipse_uses_poly_init_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz compact sizing should reproduce its multiline ellipse fit."""
+    from dagua.utils import compute_node_size
+
+    monkeypatch.setattr(dagua_utils, "measure_text", lambda *args, **kwargs: (30.0, 33.6))
+    dagua_utils._compute_node_size_cached.cache_clear()
+    try:
+        width, height, _ = compute_node_size(
+            "batch\nnorm",
+            font_size=14.0,
+            padding=(8.0, 4.0),
+            shape="ellipse",
+            overflow_policy="expand_node",
+            compact_shape_factors=True,
+            graphviz_ellipse_min_height=36.0,
+        )
+    finally:
+        dagua_utils._compute_node_size_cached.cache_clear()
+
+    assert width == pytest.approx((30.0 + 16.0) * math.sqrt(2.0))
+    assert height == pytest.approx((2.0 * 15.0 + 8.0) * math.sqrt(2.0))
+
+
+@pytest.mark.smoke
 @pytest.mark.parametrize(
     "shape",
     ["ellipse", "circle", "double_circle", "semicircle", "semicircle_left"],
