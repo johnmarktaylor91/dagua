@@ -101,6 +101,30 @@ def test_directed_scorer_sets_declared_hierarchy(monkeypatch: object) -> None:
     assert captured["metrics"] == {"node_occlusion": 1.0, "declared_hierarchical": True}
 
 
+def test_directed_portfolio_is_incumbent_monotone() -> None:
+    """The selected directed winner must not score below the incumbent."""
+    from dagua.layout import layout
+
+    edges = [(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)]
+    graph = DaguaGraph.from_edge_list(edges, num_nodes=5)
+    graph.compute_node_sizes()
+    incumbent_config = LayoutConfig(seed=42, device="cpu")
+    incumbent_config._dagua_native_suppress_portfolio = True
+    incumbent_pos = layout(graph, incumbent_config)
+    winner_pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        direction=graph.direction,
+    )
+
+    incumbent_score = _score_directed_candidate(incumbent_pos, problem, None)
+    winner_score = _score_directed_candidate(winner_pos, problem, None)
+
+    assert winner_score >= incumbent_score
+
+
 def test_directed_portfolio_adds_uniform_sugiyama_grid(monkeypatch: object) -> None:
     """Every directed graph receives the same mode and spacing grid."""
     calls: list[dict[str, object]] = []

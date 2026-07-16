@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict, Optional, Tuple
 
+import numpy as np
 import torch
 
 from dagua.config import LayoutConfig
@@ -30,6 +31,7 @@ def _score_directed_candidate(
     pos: torch.Tensor,
     problem: LayoutProblem,
     cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> float:
     """Score a finalist with the frozen honest directed composite.
 
@@ -41,6 +43,8 @@ def _score_directed_candidate(
         Directed acyclic layout problem.
     cluster_ids : torch.Tensor, optional
         Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
 
     Returns
     -------
@@ -59,9 +63,47 @@ def _score_directed_candidate(
         ),
         cluster_ids=cluster_ids,
         direction=problem.direction,
+        all_pairs_dist=all_pairs_dist,
     )
     numeric["declared_hierarchical"] = True
     return float(composite_auto(numeric, is_semantically_directed=True))
+
+
+def _score_directed_candidate_cached(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> float:
+    """Score a directed candidate while preserving old monkeypatch arity.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed acyclic layout problem.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : Optional[numpy.ndarray]
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    float
+        Higher-is-better directed composite score.
+    """
+    try:
+        return _score_directed_candidate(
+            pos,
+            problem,
+            cluster_ids,
+            all_pairs_dist=all_pairs_dist,
+        )
+    except TypeError as exc:
+        if "all_pairs_dist" not in str(exc):
+            raise
+        return _score_directed_candidate(pos, problem, cluster_ids)
 
 
 def _force_challengers_enabled(edge_index: torch.Tensor, num_nodes: int) -> bool:
@@ -230,7 +272,13 @@ def layout_native_directed_portfolio(
         Winning positions with shape ``[N, 2]``.
     """
     from dagua.layout.ops.pipelines.dagua_native import _run_native_problem
-    from dagua.layout.ops.pipelines.native_undirected import _build_cluster_ids
+    from dagua.layout.ops.pipelines.native_undirected import (
+        _build_cluster_ids,
+        _log_marketplace_telemetry,
+        _portfolio_has_budget,
+        _portfolio_remaining_s,
+        _reraise_worker_timeout,
+    )
 
     started = time.perf_counter()
     incumbent_config = copy.copy(config)
@@ -243,6 +291,13 @@ def layout_native_directed_portfolio(
             "Directed contest gate=incumbent_only n=%d wall_time_s=%.3f",
             n,
             time.perf_counter() - started,
+        )
+        return incumbent
+    if not _portfolio_has_budget(config):
+        _LOGGER.info(
+            "Directed marketplace budget exhausted after incumbent n=%d remaining_s=%s",
+            n,
+            _portfolio_remaining_s(config),
         )
         return incumbent
 
@@ -262,103 +317,109 @@ def layout_native_directed_portfolio(
         if problem.edge_weights is None
         else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
     )
-    try:
-        from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
+    if _portfolio_has_budget(config):
+        try:
+            from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 
-        corrected_cluster_dot_x = layout_sugiyama_pipeline(
-            edge_index=cpu_edges,
-            num_nodes=n,
-            node_sizes=cpu_sizes,
-            rank_sep=SCALED_SUGIYAMA_RANK_SEP,
-            node_sep=SCALED_SUGIYAMA_NODE_SEP,
-            seed=seed,
-            edge_weights=cpu_weights,
-            fidelity_mode="graphviz",
-            clusters=problem.clusters,
-            cluster_parents=problem.cluster_parents,
-            graphviz_apply_cluster_constraints=True,
-            graphviz_corrected_dot_x=True,
-        )
-        if not isinstance(corrected_cluster_dot_x, torch.Tensor):
-            raise RuntimeError("corrected cluster dot-x Sugiyama returned non-position output")
-        _register_challenger_variants(
-            "graphviz_dotx_cluster_corrected",
-            corrected_cluster_dot_x,
-            problem,
-            config,
-            positions,
-            preserve_rank_order=True,
-        )
-        point_unit_dot_x = layout_sugiyama_pipeline(
-            edge_index=cpu_edges,
-            num_nodes=n,
-            node_sizes=cpu_sizes,
-            rank_sep=SCALED_SUGIYAMA_RANK_SEP,
-            node_sep=SCALED_SUGIYAMA_NODE_SEP,
-            seed=seed,
-            edge_weights=cpu_weights,
-            fidelity_mode="graphviz",
-            clusters=problem.clusters,
-            cluster_parents=problem.cluster_parents,
-            graphviz_preserve_point_units=True,
-        )
-        if not isinstance(point_unit_dot_x, torch.Tensor):
-            raise RuntimeError("point-unit dot-x Sugiyama returned non-position output")
-        _register_challenger_variants(
-            "graphviz_dotx_point_units",
-            point_unit_dot_x,
-            problem,
-            config,
-            positions,
-        )
-
-        for mode in ("graphviz_dot", "igraph"):
-            candidate = layout_sugiyama_pipeline(
+            corrected_cluster_dot_x = layout_sugiyama_pipeline(
                 edge_index=cpu_edges,
                 num_nodes=n,
                 node_sizes=cpu_sizes,
+                rank_sep=SCALED_SUGIYAMA_RANK_SEP,
+                node_sep=SCALED_SUGIYAMA_NODE_SEP,
                 seed=seed,
                 edge_weights=cpu_weights,
-                fidelity_mode=mode,
+                fidelity_mode="graphviz",
                 clusters=problem.clusters,
                 cluster_parents=problem.cluster_parents,
+                graphviz_apply_cluster_constraints=True,
+                graphviz_corrected_dot_x=True,
             )
-            if not isinstance(candidate, torch.Tensor):
-                raise RuntimeError(f"{mode} Sugiyama returned non-position output")
-            _register_challenger_variants(mode, candidate, problem, config, positions)
-        # The fixed Cartesian grid is global: every directed graph sees every
-        # fidelity mode and spacing point before the honest referee chooses.
-        for mode in SUGIYAMA_FIDELITY_MODES:
-            for rank_sep in SUGIYAMA_RANK_SEP_GRID:
-                for node_sep in SUGIYAMA_NODE_SEP_GRID:
-                    candidate = layout_sugiyama_pipeline(
-                        edge_index=cpu_edges,
-                        num_nodes=n,
-                        node_sizes=cpu_sizes,
-                        rank_sep=rank_sep,
-                        node_sep=node_sep,
-                        seed=seed,
-                        edge_weights=cpu_weights,
-                        fidelity_mode=mode,
-                        clusters=problem.clusters,
-                        cluster_parents=problem.cluster_parents,
-                    )
-                    grid_name = f"{mode}_r{rank_sep:g}_n{node_sep:g}"
-                    if not isinstance(candidate, torch.Tensor):
-                        raise RuntimeError(f"{grid_name} Sugiyama returned non-position output")
-                    if mode == "igraph":
-                        # Match the reference adapter's fixed conversion from
-                        # igraph coordinate units into renderer point units.
-                        candidate = candidate * IGRAPH_OUTPUT_SCALE
-                    _register_challenger_variants(
-                        grid_name,
-                        candidate,
-                        problem,
-                        config,
-                        positions,
-                    )
-    except Exception:  # noqa: BLE001 -- challengers cannot sink the incumbent
-        _LOGGER.warning("directed Sugiyama challenger failed", exc_info=True)
+            if not isinstance(corrected_cluster_dot_x, torch.Tensor):
+                raise RuntimeError("corrected cluster dot-x Sugiyama returned non-position output")
+            _register_challenger_variants(
+                "graphviz_dotx_cluster_corrected",
+                corrected_cluster_dot_x,
+                problem,
+                config,
+                positions,
+                preserve_rank_order=True,
+            )
+            point_unit_dot_x = layout_sugiyama_pipeline(
+                edge_index=cpu_edges,
+                num_nodes=n,
+                node_sizes=cpu_sizes,
+                rank_sep=SCALED_SUGIYAMA_RANK_SEP,
+                node_sep=SCALED_SUGIYAMA_NODE_SEP,
+                seed=seed,
+                edge_weights=cpu_weights,
+                fidelity_mode="graphviz",
+                clusters=problem.clusters,
+                cluster_parents=problem.cluster_parents,
+                graphviz_preserve_point_units=True,
+            )
+            if not isinstance(point_unit_dot_x, torch.Tensor):
+                raise RuntimeError("point-unit dot-x Sugiyama returned non-position output")
+            _register_challenger_variants(
+                "graphviz_dotx_point_units",
+                point_unit_dot_x,
+                problem,
+                config,
+                positions,
+            )
+
+            for mode in ("graphviz_dot", "igraph"):
+                if not _portfolio_has_budget(config):
+                    break
+                candidate = layout_sugiyama_pipeline(
+                    edge_index=cpu_edges,
+                    num_nodes=n,
+                    node_sizes=cpu_sizes,
+                    seed=seed,
+                    edge_weights=cpu_weights,
+                    fidelity_mode=mode,
+                    clusters=problem.clusters,
+                    cluster_parents=problem.cluster_parents,
+                )
+                if not isinstance(candidate, torch.Tensor):
+                    raise RuntimeError(f"{mode} Sugiyama returned non-position output")
+                _register_challenger_variants(mode, candidate, problem, config, positions)
+            # The fixed Cartesian grid is global: every directed graph sees every
+            # fidelity mode and spacing point before the honest referee chooses.
+            for mode in SUGIYAMA_FIDELITY_MODES:
+                for rank_sep in SUGIYAMA_RANK_SEP_GRID:
+                    for node_sep in SUGIYAMA_NODE_SEP_GRID:
+                        if not _portfolio_has_budget(config):
+                            break
+                        candidate = layout_sugiyama_pipeline(
+                            edge_index=cpu_edges,
+                            num_nodes=n,
+                            node_sizes=cpu_sizes,
+                            rank_sep=rank_sep,
+                            node_sep=node_sep,
+                            seed=seed,
+                            edge_weights=cpu_weights,
+                            fidelity_mode=mode,
+                            clusters=problem.clusters,
+                            cluster_parents=problem.cluster_parents,
+                        )
+                        grid_name = f"{mode}_r{rank_sep:g}_n{node_sep:g}"
+                        if not isinstance(candidate, torch.Tensor):
+                            raise RuntimeError(f"{grid_name} Sugiyama returned non-position output")
+                        if mode == "igraph":
+                            # Match the reference adapter's fixed conversion from
+                            # igraph coordinate units into renderer point units.
+                            candidate = candidate * IGRAPH_OUTPUT_SCALE
+                        _register_challenger_variants(
+                            grid_name,
+                            candidate,
+                            problem,
+                            config,
+                            positions,
+                        )
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed Sugiyama challenger failed", exc_info=True)
 
     force_gate = _force_challengers_enabled(problem.edge_index, n)
     if force_gate:
@@ -367,6 +428,8 @@ def layout_native_directed_portfolio(
             from dagua.layout.ops.pipelines.native_undirected import FCOSE_CONTEST_SEEDS
 
             for seed_offset in range(FCOSE_CONTEST_SEEDS):
+                if not _portfolio_has_budget(config):
+                    break
                 candidate = layout_fcose_pipeline(
                     edge_index=cpu_edges,
                     num_nodes=n,
@@ -377,9 +440,12 @@ def layout_native_directed_portfolio(
                 _register_challenger_variants(
                     f"fcose_seed{seed_offset}", candidate, problem, config, positions
                 )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _reraise_worker_timeout(exc)
             _LOGGER.warning("directed fCoSE challenger failed", exc_info=True)
         try:
+            if not _portfolio_has_budget(config):
+                raise RuntimeError("directed YifanHu skipped: insufficient remaining budget")
             from dagua.layout.ops.pipelines.yifanhu import layout_yifanhu_pipeline
 
             candidate = layout_yifanhu_pipeline(
@@ -391,18 +457,33 @@ def layout_native_directed_portfolio(
                 direction=problem.direction,
             )
             _register_challenger_variants("yifanhu", candidate, problem, config, positions)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _reraise_worker_timeout(exc)
             _LOGGER.warning("directed YifanHu challenger failed", exc_info=True)
 
+    from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+    offsets, targets = _build_csr(cpu_edges, n)
+    all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
     cluster_ids = _build_cluster_ids(problem)
     scores = {
-        name: _score_directed_candidate(candidate, problem, cluster_ids)
+        name: _score_directed_candidate_cached(candidate, problem, cluster_ids, all_pairs_dist)
         for name, candidate in positions.items()
     }
     best_name = "incumbent"
     for name, score in scores.items():
         if name != "incumbent" and score > scores[best_name]:
             best_name = name
+    _log_marketplace_telemetry(
+        route="directed",
+        structural_gate="force" if force_gate else "layered",
+        positions=positions,
+        proxy_scores=scores,
+        full_scores=scores,
+        finalist_names=list(scores),
+        winner_name=best_name,
+        started_at=started,
+    )
     _LOGGER.info(
         "Directed contest gate=%s candidates=%s winner=%s wall_time_s=%.3f",
         "force" if force_gate else "layered",
