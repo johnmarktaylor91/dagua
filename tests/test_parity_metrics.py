@@ -219,6 +219,52 @@ def test_labeled_node_keeps_font_metric_features() -> None:
     assert panel.nodes[0]["label_glyph_extent_pt"]["in_tolerance"] is True
 
 
+def test_known_graphviz_font_stack_residual_has_per_node_waiver() -> None:
+    """The 10pt Fallback width residual should carry its narrow waiver."""
+    ref = pmetrics.ReferenceNode(
+        node_id="n3",
+        label="Fallback",
+        ellipse_rx=30.72,
+        ellipse_ry=18.0,
+        font_size_pt=10.0,
+        font_family="Times,serif",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+    cand = pmetrics.CandidateNode(
+        node_id="n3",
+        label="Fallback",
+        ellipse_rx=29.68885,
+        ellipse_ry=18.0,
+        font_size_pt=10.0,
+        font_family="Times,serif",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+    panel = pmetrics.PanelReport(slug="mixed_styles", in_tolerance=True)
+    panel.nodes.append(
+        pmetrics._flatten_node_deltas("n3", ref, cand, pmetrics.V2_TOLERANCE)
+    )
+
+    pmetrics.augment_panel_v2(
+        panel,
+        pmetrics.ReferenceGraph(bg_color="white", margin=0.0, nodes=[ref]),
+        pmetrics.CandidateGraph(bg_color="white", margin=0.0, nodes=[cand]),
+        svg_text="<svg></svg>",
+        tolerance=pmetrics.V2_TOLERANCE,
+        dot_text="",
+        case_id="mixed_styles",
+        source_hash="",
+    )
+
+    width_delta = panel.nodes[0]["node_autosize_w_pt"]
+    assert width_delta["in_tolerance"] is False
+    assert width_delta["waiver"]["scope"] == "mixed_styles.n3.node_autosize_w_pt"
+    assert "Pango/CoreText" in width_delta["waiver"]["reason"]
+
+
 def test_ledger_locked_feature_missing_is_failure(tmp_path: Path) -> None:
     """Assert ledger locks fail when a locked feature is absent."""
 

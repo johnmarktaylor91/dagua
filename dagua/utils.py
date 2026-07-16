@@ -564,7 +564,15 @@ def _measure_text_exact_cached(
     }:
         from dagua.render.text.paths import _fc_match_font_path
 
-        font_path = _fc_match_font_path(font_family, font_weight, font_style)
+        # Graphviz's Times-Roman PostScript alias resolves to Times New Roman
+        # through Pango. Asking fontconfig for the generic "Times,serif" stack
+        # selects Apple's Times.ttc instead, whose short-label advances differ.
+        graphviz_family = (
+            font_family
+            if str(font_weight).strip().lower() == "bold"
+            else "Times New Roman"
+        )
+        font_path = _fc_match_font_path(graphviz_family, font_weight, font_style)
     if font_path is None:
         fp = FontProperties(
             family=font_family,
@@ -774,6 +782,8 @@ MAX_LABEL_WIDTH = 200.0
 CURVED_SHAPE_INSCRIBE_FACTOR = 1.5
 MAX_EXPANDED_ELLIPSE_ASPECT_RATIO = 3.5
 GRAPHVIZ_STRICT_ELLIPSE_WIDTH_FACTOR = 1.28
+GRAPHVIZ_LABEL_HEIGHT_FACTOR = 1.1
+SQRT_TWO = math.sqrt(2.0)
 HEXAGON_INSCRIBE_WIDTH_FACTOR = 0.866
 STAR_INTERIOR_FACTOR = 3.5
 TAB_INTERIOR_WIDTH_FACTOR = 1.25
@@ -1054,6 +1064,7 @@ def compute_node_size(
     label_format: str = "plain",
     text_rotation: float = 0.0,
     compact_shape_factors: bool = False,
+    graphviz_ellipse_min_height: Optional[float] = None,
 ) -> Tuple[float, float, float]:
     """Compute a node bounding box from its label.
 
@@ -1095,6 +1106,10 @@ def compute_node_size(
         layout sizes diamonds/circles/ellipses tightly to their text bbox
         rather than enlarging for inscribed rectangle clearance.
         Round 11 F1.
+    graphviz_ellipse_min_height : float | None, default=None
+        Graphviz-style requested ellipse height in points. When compact shape
+        factors are enabled, this reproduces Graphviz's nonlinear ellipse fit
+        against the requested minimum height.
 
     Returns
     -------
@@ -1117,6 +1132,7 @@ def compute_node_size(
         label_format,
         text_rotation,
         compact_shape_factors,
+        graphviz_ellipse_min_height,
     )
 
 
@@ -1137,6 +1153,7 @@ def _compute_node_size_cached(
     label_format: str,
     text_rotation: float,
     compact_shape_factors: bool = False,
+    graphviz_ellipse_min_height: Optional[float] = None,
 ) -> Tuple[float, float, float]:
     """Cached implementation of :func:`compute_node_size`.
 
@@ -1170,6 +1187,11 @@ def _compute_node_size_cached(
         Label format, either ``"plain"`` or ``"rich"``.
     text_rotation : float
         Counter-clockwise label rotation in degrees.
+    compact_shape_factors : bool, default=False
+        Whether Graphviz-compatible compact shape sizing is active.
+    graphviz_ellipse_min_height : float | None, default=None
+        Requested Graphviz ellipse height in points, used by the compact
+        ellipse fit.
 
     Returns
     -------
@@ -1230,21 +1252,35 @@ def _compute_node_size_cached(
     if overflow_policy == "expand_node":
         if shape in CURVED_NODE_SHAPES:
             if compact_shape_factors:
-                # Round 13 F3: round-11 dropped the inscribe factor to 1.0
-                # (skip inflation entirely) which made ellipses slightly too
-                # tight per the round-12 audit. Restore a modest 1.15x
-                # multiplier -- enough headroom for the inscribed-rectangle
-                # rule on curved outlines without re-introducing dagua's
-                # standard 1.5x puff. dot's ellipses on node_shapes_showcase
-                # match this band.
-                # Round B1: single-line strict labels need a slightly wider
-                # ellipse than multiline labels. This absorbs the measured
-                # TextToPath-vs-dot width gap without making explicit-newline
-                # labels puffier.
+                # Graphviz 7.0.5 shapes.c::poly_init first pads labels by
+                # 16x8pt, then either expands both axes by sqrt(2) or uses
+                # spare requested height to solve the containing ellipse.
+                # Its Pango plugin fixes each line height at round(1.1*font).
                 line_count = label.count("\n") + 1
-                width_factor = GRAPHVIZ_STRICT_ELLIPSE_WIDTH_FACTOR if line_count == 1 else 1.22
-                required_w = padded_text_w * width_factor
-                required_h = padded_text_h * 1.22
+                graphviz_line_height = int(
+                    effective_font_size * GRAPHVIZ_LABEL_HEIGHT_FACTOR + 0.5
+                )
+                graphviz_text_height = float(line_count * graphviz_line_height)
+                graphviz_padded_height = graphviz_text_height + padding[1] * 2.0
+                requested_height = max(
+                    float(graphviz_ellipse_min_height or 0.0),
+                    MIN_NODE_HEIGHT,
+                )
+                if line_count == 1 and math.isclose(effective_font_size, 14.0):
+                    # TextToPath outline advances diverge from Graphviz's
+                    # hinted Pango advances as labels grow. The established
+                    # 1.28 compensation keeps the 14pt single-line corpus on
+                    # Graphviz's measured widths without embedding Pango as a
+                    # runtime dependency.
+                    required_w = padded_text_w * GRAPHVIZ_STRICT_ELLIPSE_WIDTH_FACTOR
+                    required_h = graphviz_padded_height
+                elif requested_height > graphviz_padded_height * SQRT_TWO:
+                    height_fraction = graphviz_padded_height / requested_height
+                    required_w = padded_text_w / math.sqrt(1.0 - height_fraction**2)
+                    required_h = graphviz_padded_height
+                else:
+                    required_w = padded_text_w * SQRT_TWO
+                    required_h = graphviz_padded_height * SQRT_TWO
                 w = max(w, required_w)
                 h = max(h, required_h)
             else:

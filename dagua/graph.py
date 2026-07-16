@@ -1104,6 +1104,7 @@ class DaguaGraph:
                 label_format=style.label_format,
                 text_rotation=style.text_rotation,
                 compact_shape_factors=compact_shape_factors,
+                graphviz_ellipse_min_height=style.min_height,
             )
             # Auto-sized nodes treat min_width/min_height as Graphviz-style
             # floors. Existing fixed-size overflow policies keep their cap
@@ -1180,6 +1181,7 @@ class DaguaGraph:
                         label_format=style.label_format,
                         text_rotation=style.text_rotation,
                         compact_shape_factors=compact_shape_factors,
+                        graphviz_ellipse_min_height=style.min_height,
                     )
                     if expand_w > w:
                         w = expand_w
