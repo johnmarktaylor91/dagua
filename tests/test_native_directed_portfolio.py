@@ -694,6 +694,159 @@ def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
     assert torch.equal(returned, incumbent)
 
 
+def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: object) -> None:
+    """The directed W5 incumbent route passes pair and axes from one payload."""
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        make_w5_skip_result,
+    )
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+    ordering_seed = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1], [3, 2]], dtype=torch.long)
+    stale_pair = W5ScorePair(directed=10.0, undirected=10.0)
+    payload_pair = W5ScorePair(directed=20.0, undirected=20.0)
+    payload_axes = W5HonestAxes(flow=0.42, depth=0.84, ksm=0.9, edge_length=0.8)
+    captured: dict[str, object] = {}
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the incumbent for the directed contest."""
+        del args, kwargs
+        return incumbent.clone()
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Keep the scalar incumbent winner despite an ordering W5 seed."""
+        del args, kwargs
+        return 100.0
+
+    def fake_pair(*args: object, **kwargs: object) -> W5ScorePair:
+        """Return the older pair that must not be split from fresh axes."""
+        del args, kwargs
+        return stale_pair
+
+    def fake_payload(*args: object, **kwargs: object) -> tuple[W5ScorePair, W5HonestAxes]:
+        """Return the pair and axes that must travel together into W5."""
+        del args, kwargs
+        return payload_pair, payload_axes
+
+    def fake_dual_gate(*args: object, **kwargs: object) -> tuple[bool, W5ScorePair]:
+        """Admit the ordering seed while keeping scalar best_name incumbent."""
+        del args, kwargs
+        return True, W5ScorePair(directed=11.0, undirected=11.0)
+
+    def fake_rank_swap(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a distinct zero-crossing ordering seed."""
+        del args, kwargs
+        return ordering_seed.clone()
+
+    def fake_crossing_count(pos: torch.Tensor, edges: torch.Tensor) -> int:
+        """Report the ordering seed as crossing-improving."""
+        del edges
+        return 1 if torch.equal(pos, incumbent) else 0
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Return an incumbent-identical challenger."""
+        del kwargs
+        return incumbent.clone()
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Register only no-op challengers."""
+        del name, problem, config, preserve_rank_order, arm_timings, timing_span
+        positions["noop"] = raw_pos
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: object,
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+    ) -> W5FinisherResult:
+        """Capture the W5 incumbent payload and return a no-op result."""
+        del seeds, node_sizes, score_fn, accept_margin
+        captured["pair"] = incumbent_score_pair
+        captured["axes"] = incumbent_axes
+        return make_w5_skip_result(
+            incumbent_pos=incumbent_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            reason="unit_noop",
+            edge_index=edge_index,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_pair)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_payload", fake_payload)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_ordering_candidate_dual_dominates",
+        fake_dual_gate,
+    )
+    monkeypatch.setattr(native_directed, "_rank_local_zero_crossing_swap_candidate", fake_rank_swap)
+    monkeypatch.setattr(native_directed, "_exact_crossing_count", fake_crossing_count)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", lambda *args: None)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0),
+    )
+
+    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), LayoutConfig())
+
+    assert captured["pair"] == payload_pair
+    assert captured["pair"] != stale_pair
+    assert captured["axes"] == payload_axes
+
+
 def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
     monkeypatch: object,
 ) -> None:

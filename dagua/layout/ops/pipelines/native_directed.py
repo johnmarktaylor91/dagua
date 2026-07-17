@@ -18,6 +18,9 @@ from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
+if TYPE_CHECKING:
+    from dagua.layout.ops.pipelines.native_finisher import W5HonestAxes
+
 MAX_DIRECTED_CONTEST_NODES = 2000
 DIRECTED_FULL_REFEREE_TOP_K = 6
 DIRECTED_FULL_SCORE_MIN_REMAINING_S = 5.0
@@ -180,7 +183,35 @@ def _score_directed_candidate_pair(
         Directed and undirected frozen-ruler composites from the same metric
         pass.
     """
-    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+    return _score_directed_candidate_payload(pos, problem, cluster_ids, all_pairs_dist)[0]
+
+
+def _score_directed_candidate_payload(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> tuple["W5ScorePair", "W5HonestAxes"]:
+    """Score a directed candidate and expose honest W5 route axes.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed acyclic layout problem.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    tuple[W5ScorePair, W5HonestAxes]
+        Directed/undirected composites and honest W5 routing axes from the
+        same metric pass.
+    """
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair, w5_honest_axes_from_metrics
     from dagua.metrics import composite, composite_undirected, full
 
     numeric = full(
@@ -196,9 +227,12 @@ def _score_directed_candidate_pair(
         all_pairs_dist=all_pairs_dist,
     )
     numeric["declared_hierarchical"] = True
-    return W5ScorePair(
-        directed=float(composite(numeric)),
-        undirected=float(composite_undirected(numeric)),
+    return (
+        W5ScorePair(
+            directed=float(composite(numeric)),
+            undirected=float(composite_undirected(numeric)),
+        ),
+        w5_honest_axes_from_metrics(numeric),
     )
 
 
@@ -2832,19 +2866,16 @@ def layout_native_directed_portfolio(
                 w5_dominates,
             )
 
-            best_pair = (
-                incumbent_pair
-                if best_name == "incumbent"
-                else _score_directed_candidate_pair(
-                    best_position,
+            if best_name == "incumbent":
+                best_pair, best_axes = _score_directed_candidate_payload(
+                    incumbent,
                     problem,
                     cluster_ids,
                     all_pairs_dist,
                 )
-            )
-            if best_pair is None:
-                best_pair = _score_directed_candidate_pair(
-                    incumbent,
+            else:
+                best_pair, best_axes = _score_directed_candidate_payload(
+                    best_position,
                     problem,
                     cluster_ids,
                     all_pairs_dist,
@@ -2891,6 +2922,7 @@ def layout_native_directed_portfolio(
                 declared_hierarchical=True,
                 direction_is_declared=True,
                 config=config,
+                incumbent_axes=best_axes,
             )
             log_w5_telemetry(w5_result, config)
             if w5_result.accepted and w5_dominates(w5_result.winner_score_pair, best_pair, 0.05):
