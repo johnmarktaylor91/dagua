@@ -4911,9 +4911,11 @@ def _best_of_polish(
         Best position tensor with shape ``[N, 2]``.
     """
     from dagua.layout.ops.pipelines.native_finisher import (
+        W5HonestAxes,
         W5ScorePair,
         is_worker_timeout_like_exception,
         w5_dominates,
+        w5_honest_axes_from_metrics,
     )
     from dagua.metrics import (
         _all_pairs_unweighted,
@@ -4945,10 +4947,10 @@ def _best_of_polish(
         110 <= num_nodes <= 150 and max_degree <= 8
     )
 
-    honest_score_cache: dict[int, W5ScorePair] = {}
+    honest_score_cache: dict[int, tuple[W5ScorePair, W5HonestAxes]] = {}
 
-    def honest_score(pos: torch.Tensor) -> W5ScorePair:
-        """Score one finalist with both frozen-ruler composites.
+    def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
+        """Score one finalist and expose its honest W5 routing axes.
 
         Parameters
         ----------
@@ -4957,8 +4959,9 @@ def _best_of_polish(
 
         Returns
         -------
-        W5ScorePair
-            Directed and undirected honest composites from one metrics pass.
+        tuple[W5ScorePair, W5HonestAxes]
+            Directed/undirected composites and honest per-axis route scores
+            from one metrics pass.
         """
         cache_key = id(pos)
         cached = honest_score_cache.get(cache_key)
@@ -4979,8 +4982,24 @@ def _best_of_polish(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
         )
-        honest_score_cache[cache_key] = score_pair
-        return score_pair
+        payload = (score_pair, w5_honest_axes_from_metrics(numeric))
+        honest_score_cache[cache_key] = payload
+        return payload
+
+    def honest_score(pos: torch.Tensor) -> W5ScorePair:
+        """Score one finalist with both frozen-ruler composites.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Directed and undirected honest composites from one metrics pass.
+        """
+        return honest_score_payload(pos)[0]
 
     def scalar_from_pair(pair: W5ScorePair) -> float:
         """Return the existing scalar picker score for a score pair.
@@ -5336,6 +5355,7 @@ def _best_of_polish(
                         for rank, index in enumerate(ranked_seed_indices[:2], start=1)
                     )
                 incumbent_score_pair = honest_score(best_pos)
+                incumbent_axes = honest_score_payload(best_pos)[1]
                 w5_result = run_w5_finisher(
                     incumbent_pos=best_pos,
                     incumbent_score_pair=incumbent_score_pair,
@@ -5347,6 +5367,7 @@ def _best_of_polish(
                     declared_hierarchical=declared_hierarchical,
                     direction_is_declared=direction_is_declared,
                     config=config,
+                    incumbent_axes=incumbent_axes,
                 )
                 log_w5_telemetry(w5_result, config)
                 if w5_result.accepted and w5_dominates(
