@@ -74,6 +74,8 @@ _DOT_LATTICE_LP_MAX_X_VARS = 12_000
 _ANYTIME_LARGE_ROW_MIN_NODES = 250
 _ANYTIME_LARGE_ROW_MIN_EDGES = 700
 _ANYTIME_FALLBACK_NODE_SEP_FACTOR = 1.4
+_TERMINAL_W5_SEED_BANK_MAX = 6
+_TERMINAL_W5_SEED_BANK_MAX_NODES = 249
 
 
 @dataclass(frozen=True)
@@ -5338,6 +5340,11 @@ def _best_of_polish(
                 honest_best_score = candidate_score
                 honest_best_pos = candidate
 
+    if bool(getattr(config, "_dagua_native_defer_w5", False)):
+        _append_terminal_w5_seed(config, "candidate_a", honest_best_pos)
+        if best_pos is not honest_best_pos:
+            _append_terminal_w5_seed(config, "candidate_a_proxy_polish_winner", best_pos)
+
     if config is not None and not bool(getattr(config, "_dagua_native_defer_w5", False)):
         try:
             from dagua.layout.ops.pipelines.native_finisher import (
@@ -5499,6 +5506,271 @@ def _score_native_result(
     )
 
 
+def _append_terminal_w5_seed(
+    config: Optional[LayoutConfig],
+    name: str,
+    pos: torch.Tensor,
+) -> None:
+    """Append a capped warm start for the terminal W5 owner.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared config carrying the terminal seed bank.
+    name : str
+        Stable seed name for W5 telemetry.
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    None
+        The config receives an updated private seed bank when eligible.
+    """
+    if config is None or int(pos.shape[0]) > _TERMINAL_W5_SEED_BANK_MAX_NODES:
+        return
+    existing = list(getattr(config, "_dagua_native_terminal_w5_seed_bank", []))
+    if len(existing) >= _TERMINAL_W5_SEED_BANK_MAX:
+        return
+    seed_pos = pos.detach()
+    if not bool(torch.isfinite(seed_pos).all().item()):
+        return
+    existing.append((str(name), seed_pos))
+    setattr(config, "_dagua_native_terminal_w5_seed_bank", existing)
+
+
+def _terminal_w5_polish(
+    final_pos: torch.Tensor,
+    *,
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+    config: LayoutConfig,
+    structure: Optional[GraphStructure],
+    direction: str,
+    clusters: Optional[dict[str, Any]] = None,
+    cluster_parents: Optional[dict[str, Optional[str]]] = None,
+    extra_seeds: Optional[Sequence[tuple[str, torch.Tensor]]] = None,
+    register_anytime_best: Optional[Callable[[torch.Tensor, str], None]] = None,
+) -> torch.Tensor:
+    """Run the single sentinel-owned W5 pass on the terminal layout tensor.
+
+    Parameters
+    ----------
+    final_pos : torch.Tensor
+        Exact position tensor that the native pipeline is about to return,
+        with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]`` for the returned layout.
+    node_sizes : torch.Tensor, optional
+        Node-size tensor with shape ``[N, 2]``. Missing sizes fall back to the
+        configured node separation for W5 geometry checks.
+    config : LayoutConfig
+        Prepared config owned by the outer native pipeline invocation.
+    structure : GraphStructure, optional
+        Final graph classification used by the honest ruler.
+    direction : str
+        Layout direction passed to the metrics ruler.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata.
+    cluster_parents : dict[str, str | None], optional
+        Nested-cluster parent metadata.
+    extra_seeds : Sequence[tuple[str, torch.Tensor]], optional
+        Route-local warm starts to include after ``final_pos``.
+    register_anytime_best : Callable[[torch.Tensor, str], None], optional
+        Anytime-register callback for an accepted W5 winner.
+
+    Returns
+    -------
+    torch.Tensor
+        ``final_pos`` or a W5 candidate that dominates it under both frozen
+        ruler composites.
+    """
+    if bool(getattr(config, "_dagua_native_terminal_w5_done", False)):
+        return final_pos
+    setattr(config, "_dagua_native_terminal_w5_done", True)
+    if (
+        final_pos.shape[0] < 2
+        or getattr(config, "fidelity_mode", None) is not None
+        or not bool(getattr(config, "_dagua_native_terminal_w5_owner", False))
+    ):
+        return final_pos
+    expected_nodes = int(node_sizes.shape[0]) if node_sizes is not None else int(final_pos.shape[0])
+    max_edge_node = int(edge_index.max().item()) if edge_index.numel() else -1
+    if int(final_pos.shape[0]) != expected_nodes or max_edge_node >= int(final_pos.shape[0]):
+        return final_pos
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+        _finisher_slice_s,
+        log_w5_telemetry,
+        make_w5_skip_result,
+        run_w5_finisher,
+        w5_dominates,
+        w5_honest_axes_from_metrics,
+        w5_predicted_skip_reason,
+    )
+    from dagua.metrics import (
+        _all_pairs_unweighted,
+        _build_csr,
+        composite,
+        composite_undirected,
+        full,
+    )
+
+    terminal_structure = structure or classify_graph(edge_index, int(final_pos.shape[0]))
+    is_semantically_directed, declared_hierarchical = _honest_ruler_flags(terminal_structure)
+    direction_is_declared = bool(getattr(terminal_structure, "direction_is_declared", False))
+    cpu_edge_index = edge_index.detach().to(device="cpu", dtype=torch.long)
+    if node_sizes is None:
+        fallback_size = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+        cpu_node_sizes = torch.full(
+            (int(final_pos.shape[0]), 2),
+            fallback_size,
+            dtype=torch.float32,
+        )
+    else:
+        cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    cluster_ids: Optional[torch.Tensor] = None
+    if clusters:
+        cluster_ids = _problem_cluster_ids(
+            LayoutProblem(
+                edge_index=edge_index,
+                num_nodes=int(final_pos.shape[0]),
+                node_sizes=node_sizes if node_sizes is not None else cpu_node_sizes,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+            )
+        )
+    cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
+    offsets, targets = _build_csr(cpu_edge_index, int(final_pos.shape[0]))
+    all_pairs_dist = _all_pairs_unweighted(
+        offsets,
+        targets,
+        int(final_pos.shape[0]),
+        max_dist=int(final_pos.shape[0]),
+    )
+
+    def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
+        """Score one terminal W5 candidate with the frozen metrics ruler.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        tuple[W5ScorePair, W5HonestAxes]
+            Directed/undirected composites plus honest route axes from the
+            same metrics pass.
+        """
+        torch.manual_seed(0)
+        numeric = full(
+            pos.detach().to(device="cpu", dtype=torch.float32),
+            cpu_edge_index,
+            node_sizes=cpu_node_sizes,
+            cluster_ids=cpu_cluster_ids,
+            direction=direction,
+            declared_hierarchical=declared_hierarchical,
+            all_pairs_dist=all_pairs_dist,
+        )
+        numeric["declared_hierarchical"] = declared_hierarchical
+        return (
+            W5ScorePair(
+                directed=float(composite(numeric)),
+                undirected=float(composite_undirected(numeric)),
+            ),
+            w5_honest_axes_from_metrics(numeric),
+        )
+
+    def honest_score(pos: torch.Tensor) -> W5ScorePair:
+        """Return frozen-ruler score pair for one W5 checkpoint.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Directed and undirected honest composites.
+        """
+        return honest_score_payload(pos)[0]
+
+    incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
+    predicted_skip_reason = w5_predicted_skip_reason(
+        int(final_pos.shape[0]),
+        int(edge_index.shape[1]) if edge_index.ndim == 2 else 0,
+        config,
+    )
+    finisher_slice = _finisher_slice_s(config)
+    if finisher_slice is None and predicted_skip_reason != "disabled_by_env":
+        predicted_skip_reason = None
+    if predicted_skip_reason is not None:
+        finisher_slice = None
+    if finisher_slice is None:
+        log_w5_telemetry(
+            make_w5_skip_result(
+                incumbent_pos=final_pos,
+                incumbent_score_pair=incumbent_score_pair,
+                reason=predicted_skip_reason or "no_budget",
+                edge_index=edge_index,
+                config=config,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=direction_is_declared,
+            ),
+            config,
+        )
+        return final_pos
+
+    seed_bank = [W5Seed("terminal_final", final_pos)]
+    for seed_name, seed_pos in list(getattr(config, "_dagua_native_terminal_w5_seed_bank", [])):
+        seed_bank.append(
+            W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+        )
+    if extra_seeds is not None:
+        seed_bank.extend(
+            W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+            for seed_name, seed_pos in extra_seeds
+        )
+
+    try:
+        w5_result = run_w5_finisher(
+            incumbent_pos=final_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            seeds=seed_bank,
+            edge_index=edge_index,
+            node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            score_fn=honest_score,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+            config=config,
+            incumbent_axes=incumbent_axes,
+        )
+        log_w5_telemetry(w5_result, config)
+        # W5 runs once, sentinel-owned, on the true final tensor, monotone,
+        # fidelity no-op. The unchanged dual-ruler gate preserves the terminal
+        # winner unless a candidate dominates that exact incumbent.
+        if w5_result.accepted and w5_dominates(
+            w5_result.winner_score_pair,
+            incumbent_score_pair,
+            0.05,
+        ):
+            if register_anytime_best is not None:
+                register_anytime_best(w5_result.winner_pos, "terminal_w5_accept")
+            return w5_result.winner_pos
+    except Exception as exc:  # noqa: BLE001 -- terminal W5 cannot sink the returned layout
+        if is_worker_timeout_like_exception(exc):
+            raise
+        _LOGGER.warning("terminal W5 finisher failed; preserving final layout", exc_info=True)
+    return final_pos
+
+
 def _large_row_anytime_fallback_enabled(
     config: LayoutConfig,
     num_nodes: int,
@@ -5653,6 +5925,10 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    owns_terminal_w5 = not bool(getattr(effective_config, "_dagua_native_terminal_w5_owner", False))
+    if owns_terminal_w5:
+        setattr(effective_config, "_dagua_native_terminal_w5_owner", True)
+    setattr(effective_config, "_dagua_native_defer_w5", True)
     quality_budgets = resolve_quality_budgets(
         float(getattr(effective_config, "quality", 0.5)),
         num_nodes=num_nodes,
@@ -5690,12 +5966,23 @@ def layout_dagua_native_pipeline(
             edge_weights=edge_weights,
         )
         if dot_cluster_fidelity:
-            return _apply_dot_cluster_fidelity_layout(
+            legacy_pos = _apply_dot_cluster_fidelity_layout(
                 legacy_pos,
                 edge_index,
                 node_sizes,
                 clusters,
                 cluster_parents,
+            )
+        if owns_terminal_w5:
+            return _terminal_w5_polish(
+                legacy_pos,
+                edge_index=edge_index,
+                node_sizes=node_sizes,
+                config=effective_config,
+                structure=graph_structure,
+                direction=effective_config.direction,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
             )
         return legacy_pos
 
@@ -5817,8 +6104,21 @@ def layout_dagua_native_pipeline(
                                     clusters,
                                     cluster_parents,
                                 )
+                            if owns_terminal_w5:
+                                return _terminal_w5_polish(
+                                    stress_pos,
+                                    edge_index=edge_index,
+                                    node_sizes=node_sizes,
+                                    config=effective_config,
+                                    structure=graph_structure,
+                                    direction=effective_config.direction,
+                                    clusters=clusters,
+                                    cluster_parents=cluster_parents,
+                                )
                             return stress_pos
-        except Exception:
+        except Exception as exc:
+            if is_worker_timeout_like_exception(exc):
+                raise
             # Stress route is best-effort; fall through to the layered path.
             pass
 
@@ -5875,42 +6175,17 @@ def layout_dagua_native_pipeline(
                 best_pos = candidate_pos
         if best_pos is None:
             raise RuntimeError("dagua_native multi-start did not produce candidate positions.")
-        if (
-            getattr(effective_config, "edge_equalize_polish", True)
-            and getattr(effective_config, "time_budget_s", None) is None
-            and node_sizes is not None
-            and best_pos.shape[0] >= 4
-            and edge_index.numel() > 0
-        ):
-            # Multistart chooses a second-stage honest winner after each child
-            # solve has polished its own seed. Defer W5 inside those children
-            # and spend the same W5 slice once, against the final multistart
-            # winner, preserving monotonicity against the row's real output.
-            cluster_ids = None
-            if clusters:
-                cluster_ids = _problem_cluster_ids(
-                    LayoutProblem(
-                        edge_index=edge_index,
-                        num_nodes=num_nodes,
-                        node_sizes=node_sizes,
-                        clusters=clusters,
-                        cluster_parents=cluster_parents,
-                    )
-                )
-            best_pos = _best_of_polish(
+        if owns_terminal_w5:
+            return _terminal_w5_polish(
                 best_pos,
-                edge_index,
-                node_sizes,
-                is_semantically_directed=is_semantically_directed,
-                declared_hierarchical=declared_hierarchical,
-                direction_is_declared=bool(
-                    getattr(contest_structure, "direction_is_declared", False)
-                ),
-                direction=effective_config.direction,
-                cluster_ids=cluster_ids,
-                polish_battery="w5_only",
+                edge_index=edge_index,
+                node_sizes=node_sizes,
                 config=effective_config,
-                w5_seed_positions=w5_seed_positions,
+                structure=contest_structure,
+                direction=effective_config.direction,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+                extra_seeds=w5_seed_positions,
             )
         return best_pos
 
@@ -6189,6 +6464,18 @@ def layout_dagua_native_pipeline(
                     clusters,
                     cluster_parents,
                 )
+            if owns_terminal_w5:
+                result = _terminal_w5_polish(
+                    result,
+                    edge_index=prepared_edge_index,
+                    node_sizes=normalized_node_sizes,
+                    config=prepared_config,
+                    structure=problem.structure,
+                    direction=prepared_config.direction,
+                    clusters=clusters,
+                    cluster_parents=cluster_parents,
+                    register_anytime_best=register_anytime_best,
+                )
             return result
 
         result = _run_native_problem(problem, state, ctx, prepared_config)
@@ -6200,6 +6487,18 @@ def layout_dagua_native_pipeline(
                 normalized_node_sizes,
                 clusters,
                 cluster_parents,
+            )
+        if owns_terminal_w5:
+            result = _terminal_w5_polish(
+                result,
+                edge_index=prepared_edge_index,
+                node_sizes=normalized_node_sizes,
+                config=prepared_config,
+                structure=problem.structure,
+                direction=prepared_config.direction,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+                register_anytime_best=register_anytime_best,
             )
         return result
 
