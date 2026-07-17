@@ -105,13 +105,8 @@ def test_w5_finisher_deadline_returns_exact_incumbent() -> None:
     assert torch.equal(result.winner_pos, pos)
 
 
-def test_w5_finisher_large_graph_runs_when_measured_budget_fits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Measured cost sizing admits a large row when one honest attempt fits."""
-    import importlib
-
-    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+def test_w5_finisher_large_graph_runs_when_measured_budget_fits() -> None:
+    """Measured cost sizing admits a large row with the real wall-clock surrogate."""
     pos = torch.stack(
         (
             torch.arange(500, dtype=torch.float32),
@@ -145,13 +140,6 @@ def test_w5_finisher_large_graph_runs_when_measured_budget_fits(
         scored["count"] += 1
         return _pair(0.0, 0.0)
 
-    def fast_measure(*args: object) -> float:
-        """Return a tiny measured surrogate-step cost."""
-        del args
-        return 0.001
-
-    monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fast_measure)
-
     result = run_w5_finisher(
         incumbent_pos=pos,
         incumbent_score_pair=_pair(0.0, 0.0),
@@ -168,6 +156,93 @@ def test_w5_finisher_large_graph_runs_when_measured_budget_fits(
     assert result.skipped_reason == "no_checkpoint_improved"
     assert result.deadline_returned is False
     assert torch.equal(result.winner_pos, pos)
+    assert result.cost_plan is not None
+    assert result.cost_plan.steps > 0
+    assert result.cost_plan.measured_step_s < 1.0
+    assert result.cost_plan.budget_usable_s >= result.cost_plan.predicted_s
+
+
+def test_measured_cost_plan_uses_wall_surrogate_and_restores_small_row_work() -> None:
+    """The real measured plan uses steady-state wall cost and admits base work."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    large_pos = torch.stack(
+        (
+            torch.arange(500, dtype=torch.float32),
+            torch.zeros(500, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    large_edges = torch.empty((2, 0), dtype=torch.long)
+    large_sizes = torch.full((500, 2), 2.0)
+    large_depth = torch.zeros(500, dtype=torch.long)
+
+    measurement = native_finisher._measure_one_surrogate_step_s(
+        W5Seed("large", large_pos),
+        large_edges,
+        large_sizes,
+        large_depth,
+        "undirected_2d_sampled",
+        None,
+        18.0,
+    )
+    assert measurement.step_s < 1.0
+    assert measurement.warmup_s >= 0.0
+
+    large_config = LayoutConfig()
+    large_config._dagua_native_deadline_s = time.perf_counter() + 300.0
+    large_config._dagua_native_total_budget_s = 300.0
+    large_config._dagua_native_w5_referee_cost_s = 0.01
+    large_plan = native_finisher._measured_cost_plan(
+        seeds=[W5Seed("large", large_pos)],
+        edge_index=large_edges,
+        node_sizes=large_sizes,
+        topo_depth=large_depth,
+        routed_mode="undirected_2d_sampled",
+        slice_s=20.0,
+        config=large_config,
+        started_perf=time.perf_counter(),
+        remaining_entry=300.0,
+        honest_axes=None,
+    )
+    assert large_plan is not None
+    assert large_plan.steps > 0
+    assert large_plan.measured_step_s < 1.0
+
+    small_pos = torch.stack(
+        (
+            torch.arange(200, dtype=torch.float32),
+            torch.zeros(200, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    small_edges = torch.empty((2, 0), dtype=torch.long)
+    small_sizes = torch.full((200, 2), 2.0)
+    small_depth = torch.zeros(200, dtype=torch.long)
+    small_config = LayoutConfig()
+    small_config._dagua_native_deadline_s = time.perf_counter() + 300.0
+    small_config._dagua_native_total_budget_s = 300.0
+    small_config._dagua_native_w5_referee_cost_s = 0.001
+    small_plan = native_finisher._measured_cost_plan(
+        seeds=[
+            W5Seed("small_a", small_pos),
+            W5Seed("small_b", small_pos + 10.0),
+            W5Seed("small_c", small_pos + 20.0),
+        ],
+        edge_index=small_edges,
+        node_sizes=small_sizes,
+        topo_depth=small_depth,
+        routed_mode="undirected_2d_sampled",
+        slice_s=20.0,
+        config=small_config,
+        started_perf=time.perf_counter(),
+        remaining_entry=300.0,
+        honest_axes=None,
+    )
+    assert small_plan is not None
+    assert small_plan.steps == 36
+    assert small_plan.seeds == 3
 
 
 def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
@@ -200,10 +275,10 @@ def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
         del candidate
         raise AssertionError("measured-cost skip should not call score_fn")
 
-    def slow_measure(*args: object) -> float:
+    def slow_measure(*args: object) -> object:
         """Return a surrogate-step cost that exceeds the tiny W5 budget."""
         del args
-        return 0.7
+        return native_finisher.W5StepMeasurement(step_s=0.7, warmup_s=0.0)
 
     monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", slow_measure)
 
@@ -222,6 +297,9 @@ def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
     assert result.skipped_reason == "predicted_cost_measured"
     assert result.deadline_returned is True
     assert torch.equal(result.winner_pos, pos)
+    assert result.cost_plan is not None
+    assert result.cost_plan.steps == 0
+    assert result.cost_plan.predicted_s > result.cost_plan.budget_usable_s
 
 
 def test_w5_finisher_accumulated_cap_returns_exact_incumbent() -> None:
