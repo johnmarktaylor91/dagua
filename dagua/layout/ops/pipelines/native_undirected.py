@@ -75,6 +75,7 @@ DEFAULT_CANDIDATE_BUDGET_S = 25.0
 FULL_REFEREE_TOP_K = 8
 MIN_OPTIONAL_ARM_REMAINING_S = 10.0
 ABSOLUTE_DEADLINE_RESERVE_S = 5.0
+PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 MAX_COLLINEAR_WORK = 100_000
 MAX_DENSE_STRESS_NODES = 200
 MAX_DENSE_STRESS_EDGES = 20_000
@@ -185,6 +186,34 @@ def _portfolio_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     return float(deadline) - time.perf_counter()
 
 
+def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
+    """Return process-time seconds remaining for optional portfolio gates.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration, possibly carrying the benchmark
+        deadline injected by ``DaguaCompetitor``.
+
+    Returns
+    -------
+    float or None
+        Remaining process CPU seconds, or ``None`` when no benchmark
+        deadline is known.
+    """
+    if config is None:
+        return None
+    process_deadline = getattr(config, PROCESS_DEADLINE_ATTR, None)
+    if process_deadline is None:
+        remaining = _portfolio_remaining_s(config)
+        if remaining is None:
+            return None
+        process_deadline = time.process_time() + max(0.0, float(remaining))
+        setattr(config, PROCESS_DEADLINE_ATTR, process_deadline)
+        return float(remaining)
+    return float(process_deadline) - time.process_time()
+
+
 def _portfolio_has_budget(
     config: Optional[LayoutConfig],
     min_remaining_s: float = MIN_OPTIONAL_ARM_REMAINING_S,
@@ -196,14 +225,17 @@ def _portfolio_has_budget(
     config : LayoutConfig, optional
         Prepared native configuration.
     min_remaining_s : float, default=MIN_OPTIONAL_ARM_REMAINING_S
-        Required remaining wall-clock budget before starting the arm.
+        Required remaining process-time budget before starting the arm.
 
     Returns
     -------
     bool
         ``True`` when there is no known deadline or enough remaining budget.
     """
-    remaining = _portfolio_remaining_s(config)
+    wall_remaining = _portfolio_remaining_s(config)
+    if wall_remaining is not None and wall_remaining <= ABSOLUTE_DEADLINE_RESERVE_S:
+        return False
+    remaining = _portfolio_process_remaining_s(config)
     required_remaining = max(float(min_remaining_s), ABSOLUTE_DEADLINE_RESERVE_S)
     return remaining is None or remaining > required_remaining
 
@@ -228,7 +260,10 @@ def _portfolio_available_work_s(
         Seconds available for additional work, clamped to zero. ``None`` means
         no benchmark deadline is known.
     """
-    remaining = _portfolio_remaining_s(config)
+    wall_remaining = _portfolio_remaining_s(config)
+    if wall_remaining is not None and wall_remaining <= float(reserve_s):
+        return 0.0
+    remaining = _portfolio_process_remaining_s(config)
     if remaining is None:
         return None
     return max(0.0, float(remaining) - float(reserve_s))
@@ -245,7 +280,7 @@ def _predicted_undirected_arm_budget_available(
     config : LayoutConfig, optional
         Prepared native configuration carrying optional benchmark deadline.
     predicted_cost_s : float
-        Estimated wall-clock seconds for the arm.
+        Estimated process CPU seconds for the arm.
 
     Returns
     -------
@@ -409,6 +444,8 @@ def _log_marketplace_telemetry(
     winner_name: str,
     started_at: float,
     arm_timings: Optional[Dict[str, Tuple[float, float]]] = None,
+    started_process_at: Optional[float] = None,
+    arm_process_totals: Optional[Dict[str, float]] = None,
 ) -> None:
     """Log structured per-arm marketplace telemetry.
 
@@ -433,6 +470,11 @@ def _log_marketplace_telemetry(
     arm_timings : dict[str, tuple[float, float]], optional
         Per-arm ``time.perf_counter()`` start/end spans. Missing arms fall
         back to the whole route span for backward compatibility.
+    started_process_at : float, optional
+        Route ``time.process_time()`` timestamp for CPU-time attribution.
+    arm_process_totals : dict[str, float], optional
+        Per-arm process CPU totals. Missing arms fall back to the whole route
+        process span for compatibility with older call sites.
 
     Returns
     -------
@@ -441,6 +483,8 @@ def _log_marketplace_telemetry(
     """
     finalists = set(finalist_names)
     ended_at = time.perf_counter()
+    ended_process_at = time.process_time()
+    started_process = ended_process_at if started_process_at is None else float(started_process_at)
     ended_wall_time = time.time()
     started_wall_time = ended_wall_time - (ended_at - started_at)
     arms = []
@@ -454,6 +498,11 @@ def _log_marketplace_telemetry(
         arm_started_wall_time = started_wall_time + max(0.0, arm_started_at - started_at)
         arm_ended_wall_time = started_wall_time + max(0.0, arm_ended_at - started_at)
         full_score = full_scores.get(name)
+        process_time_s = (
+            arm_process_totals.get(name)
+            if arm_process_totals is not None and name in arm_process_totals
+            else max(0.0, ended_process_at - started_process)
+        )
         if name == winner_name:
             status = "winner"
             reason = "highest_full_score"
@@ -471,6 +520,7 @@ def _log_marketplace_telemetry(
                 "start_wall_time_s": arm_started_wall_time,
                 "end_wall_time_s": arm_ended_wall_time,
                 "wall_time_s": max(0.0, arm_ended_at - arm_started_at),
+                "process_time_s": float(process_time_s),
                 "raw_score": proxy_scores.get(name),
                 "full_score": full_score,
                 "status": status,
@@ -483,6 +533,7 @@ def _log_marketplace_telemetry(
         "route": route,
         "top_k": FULL_REFEREE_TOP_K,
         "winner": winner_name,
+        "process_time_s": max(0.0, ended_process_at - started_process),
         "arms": arms,
     }
     _LOGGER.info("Native marketplace telemetry %s", json.dumps(payload, sort_keys=True))
@@ -1726,6 +1777,7 @@ def _router_v2_large_mini_contest(
     from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
 
     started_at = time.perf_counter()
+    started_process_at = time.process_time()
     n = int(problem.num_nodes)
     shortlist = _undirected_route_shortlist(
         problem.structure,
@@ -1873,6 +1925,7 @@ def _router_v2_large_mini_contest(
         finalist_names=list(scores),
         winner_name=best_name,
         started_at=started_at,
+        started_process_at=started_process_at,
     )
     _LOGGER.info(
         "Undirected contest (large mini) candidates=%s winner=%s",
@@ -1911,6 +1964,7 @@ def layout_native_undirected_portfolio(
     from dagua.layout.ops.pipelines.dagua_native import _run_native_problem
 
     started_at = time.perf_counter()
+    started_process_at = time.process_time()
 
     def _run_incumbent() -> torch.Tensor:
         # Candidate A must be EXACTLY today's default output. Re-enter the
@@ -2607,6 +2661,7 @@ def layout_native_undirected_portfolio(
         finalist_names=finalist_names,
         winner_name=best_name,
         started_at=started_at,
+        started_process_at=started_process_at,
     )
     _LOGGER.info(
         "Undirected contest candidates=%s winner=%s",
