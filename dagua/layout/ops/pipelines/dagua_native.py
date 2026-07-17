@@ -5042,7 +5042,6 @@ def _best_of_polish(
         return float(composite_auto(numeric, is_semantically_directed))
 
     candidate_positions = [base_pos]
-    forced_honest_scores: dict[int, W5ScorePair] = {}
 
     def safe_score(pos: torch.Tensor) -> Optional[float]:
         """Return a finite composite score or ``None`` for invalid candidates.
@@ -5301,6 +5300,31 @@ def _best_of_polish(
         if cand_score > best_score + margin:
             best_score = cand_score
             best_pos = cand
+    if not use_proxy_search:
+        honest_best_pos = best_pos
+        honest_best_pair = honest_score(best_pos)
+    else:
+        # Proxy search determines which finished candidates merit expensive
+        # evaluation; the final choice among them remains the honest composite.
+        full_score_budget = 4
+        ranked_indices = sorted(
+            range(1, len(candidate_positions)),
+            key=lambda index: (-score(candidate_positions[index]), index),
+        )
+        finalist_indices = {0, *ranked_indices[: full_score_budget - 1]}
+        honest_best_pos = base_pos
+        honest_best_pair = honest_score(base_pos)
+        honest_best_score = scalar_from_pair(honest_best_pair)
+        for index, candidate in enumerate(candidate_positions[1:], start=1):
+            if index not in finalist_indices:
+                continue
+            candidate_pair = honest_score(candidate)
+            candidate_score = scalar_from_pair(candidate_pair)
+            if candidate_score > honest_best_score + margin:
+                honest_best_pair = candidate_pair
+                honest_best_score = candidate_score
+                honest_best_pos = candidate
+
     if config is not None:
         try:
             from dagua.layout.ops.pipelines.native_finisher import (
@@ -5313,7 +5337,7 @@ def _best_of_polish(
             )
 
             predicted_skip_reason = w5_predicted_skip_reason(
-                int(best_pos.shape[0]),
+                int(honest_best_pos.shape[0]),
                 int(edge_index.shape[1]) if edge_index.ndim == 2 else 0,
                 config,
             )
@@ -5325,8 +5349,8 @@ def _best_of_polish(
             if finisher_slice is None:
                 log_w5_telemetry(
                     make_w5_skip_result(
-                        incumbent_pos=best_pos,
-                        incumbent_score_pair=None,
+                        incumbent_pos=honest_best_pos,
+                        incumbent_score_pair=honest_best_pair,
                         reason=predicted_skip_reason or "no_budget",
                         edge_index=edge_index,
                         config=config,
@@ -5338,7 +5362,8 @@ def _best_of_polish(
                 )
             else:
                 seed_bank: list[W5Seed] = [
-                    W5Seed("incumbent", best_pos),
+                    W5Seed("incumbent", honest_best_pos),
+                    W5Seed("proxy_polish_winner", best_pos),
                     W5Seed("base", base_pos),
                 ]
                 seed_bank.extend(
@@ -5354,10 +5379,9 @@ def _best_of_polish(
                         W5Seed(f"proxy_top_{rank}", candidate_positions[index])
                         for rank, index in enumerate(ranked_seed_indices[:2], start=1)
                     )
-                incumbent_score_pair = honest_score(best_pos)
-                incumbent_axes = honest_score_payload(best_pos)[1]
+                incumbent_score_pair, incumbent_axes = honest_score_payload(honest_best_pos)
                 w5_result = run_w5_finisher(
-                    incumbent_pos=best_pos,
+                    incumbent_pos=honest_best_pos,
                     incumbent_score_pair=incumbent_score_pair,
                     seeds=seed_bank,
                     edge_index=edge_index,
@@ -5370,6 +5394,9 @@ def _best_of_polish(
                     incumbent_axes=incumbent_axes,
                 )
                 log_w5_telemetry(w5_result, config)
+                # W5 is intentionally downstream of honest selection: this gate
+                # compares against the final honest winner, so the returned
+                # layout is either that winner or a dual-composite dominator.
                 if w5_result.accepted and w5_dominates(
                     w5_result.winner_score_pair,
                     incumbent_score_pair,
@@ -5382,45 +5409,14 @@ def _best_of_polish(
                     )
                     if callable(register_anytime_best):
                         register_anytime_best(w5_result.winner_pos, "post_w5_accept")
-                    candidate_positions.append(w5_result.winner_pos)
-                    forced_honest_scores[len(candidate_positions) - 1] = w5_result.winner_score_pair
-                    if not use_proxy_search:
-                        best_score = scalar_from_pair(w5_result.winner_score_pair)
-                        best_pos = w5_result.winner_pos
+                    return w5_result.winner_pos
         except Exception as exc:  # noqa: BLE001 -- W5 is additive and must never sink polish
             if is_worker_timeout_like_exception(exc):
                 raise
-            _LOGGER.warning("W5 finisher failed; preserving pre-W5 polish winner", exc_info=True)
-    if not use_proxy_search:
-        return best_pos
-
-    # Proxy search determines which finished candidates merit expensive
-    # evaluation; the final choice among them remains the honest composite.
-    full_score_budget = 4
-    ranked_indices = sorted(
-        range(1, len(candidate_positions)),
-        key=lambda index: (-score(candidate_positions[index]), index),
-    )
-    finalist_indices = {0, *ranked_indices[: full_score_budget - 1], *forced_honest_scores}
-    honest_best_pos = base_pos
-    honest_best_pair = honest_score(base_pos)
-    honest_best_score = scalar_from_pair(honest_best_pair)
-    for index, candidate in enumerate(candidate_positions[1:], start=1):
-        if index not in finalist_indices:
-            continue
-        if index in forced_honest_scores:
-            candidate_pair = forced_honest_scores[index]
-            if w5_dominates(candidate_pair, honest_best_pair, 0.05):
-                honest_best_pair = candidate_pair
-                honest_best_score = scalar_from_pair(candidate_pair)
-                honest_best_pos = candidate
-            continue
-        candidate_pair = honest_score(candidate)
-        candidate_score = scalar_from_pair(candidate_pair)
-        if candidate_score > honest_best_score + margin:
-            honest_best_pair = candidate_pair
-            honest_best_score = candidate_score
-            honest_best_pos = candidate
+            _LOGGER.warning(
+                "W5 finisher failed; preserving final honest polish winner",
+                exc_info=True,
+            )
     return honest_best_pos
 
 

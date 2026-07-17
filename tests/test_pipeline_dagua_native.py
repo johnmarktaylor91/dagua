@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional, Sequence
 
 import pytest
 import torch
@@ -58,6 +58,166 @@ def _deadline_gate_config() -> LayoutConfig:
     config._dagua_native_deadline_s = 9999999999.0
     config._dagua_native_total_budget_s = 300.0
     return config
+
+
+def _install_proxy_honest_w5_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    base_pos: torch.Tensor,
+    proxy_pos: torch.Tensor,
+) -> None:
+    """Install a fixture where proxy search and honest selection disagree.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest monkeypatch fixture.
+    base_pos : torch.Tensor
+        Position tensor that the honest final selector should keep.
+    proxy_pos : torch.Tensor
+        Position tensor that cheap proxy scoring should prefer.
+    """
+    import dagua.metrics as metrics
+    from dagua.layout.ops.pipelines import dagua_native as native
+    from dagua.layout.ops.pipelines import native_finisher, native_undirected
+
+    def pos_key(pos: torch.Tensor) -> str:
+        """Classify a candidate tensor by value for deterministic fake scoring."""
+        if torch.allclose(pos.detach().cpu(), proxy_pos):
+            return "proxy"
+        if torch.allclose(pos.detach().cpu(), base_pos):
+            return "base"
+        return "other"
+
+    def fake_quick(
+        pos: torch.Tensor,
+        edge_index: torch.Tensor,
+        node_sizes: Optional[torch.Tensor] = None,
+    ) -> dict[str, float]:
+        """Return a cheap proxy payload that prefers ``proxy_pos``."""
+        del edge_index, node_sizes
+        return {"proxy_score": 100.0 if pos_key(pos) == "proxy" else 10.0}
+
+    def fake_full(
+        pos: torch.Tensor,
+        edge_index: torch.Tensor,
+        **kwargs: object,
+    ) -> dict[str, float]:
+        """Return honest metrics that prefer ``base_pos`` over ``proxy_pos``."""
+        del edge_index, kwargs
+        score = 20.0 if pos_key(pos) == "base" else 15.0
+        flow = 0.753 if pos_key(pos) == "base" else 1.0
+        return {
+            "directed_score": score,
+            "undirected_score": score,
+            "directed_flow_score": flow,
+            "depth_order_score": 0.875,
+            "ksm_score": 0.922,
+            "edge_length_deviation_score": 0.876,
+        }
+
+    def fake_composite(numeric: dict[str, float]) -> float:
+        """Return the directed honest score from the fake full payload."""
+        return float(numeric["directed_score"])
+
+    def fake_composite_undirected(numeric: dict[str, float]) -> float:
+        """Return the undirected honest score from the fake full payload."""
+        return float(numeric["undirected_score"])
+
+    def fake_composite_auto(numeric: dict[str, float], directed: bool) -> float:
+        """Return the proxy selector score while recording no ruler state."""
+        del directed
+        return float(numeric["proxy_score"])
+
+    def fake_collinear_dodge(*args: object, **kwargs: object) -> torch.Tensor:
+        """Produce the proxy-favored candidate from the polish battery."""
+        del args, kwargs
+        return proxy_pos.clone()
+
+    def none_candidate(*args: object, **kwargs: object) -> None:
+        """Disable unrelated polish candidates for a one-candidate fixture."""
+        del args, kwargs
+        return None
+
+    def always_eligible(
+        candidate: torch.Tensor,
+        candidate_input: torch.Tensor,
+        node_sizes: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> tuple[bool, str]:
+        """Admit the synthetic proxy candidate through the geometry guard."""
+        del candidate, candidate_input, node_sizes, edge_index
+        return True, ""
+
+    monkeypatch.setattr(metrics, "quick", fake_quick)
+    monkeypatch.setattr(metrics, "full", fake_full)
+    monkeypatch.setattr(metrics, "composite", fake_composite)
+    monkeypatch.setattr(metrics, "composite_undirected", fake_composite_undirected)
+    monkeypatch.setattr(metrics, "composite_auto", fake_composite_auto)
+    monkeypatch.setattr(native, "_POLISH_SETTINGS", ())
+    monkeypatch.setattr(native, "_collinear_dodge", fake_collinear_dodge)
+    for candidate_name in (
+        "_y_layer_snap",
+        "_orthogonal_align",
+        "_overlap_jitter",
+        "_swap_2opt_anti_crossing",
+        "_per_layer_x_kmeans",
+        "_global_depth_align",
+        "_dot_lattice_lp",
+        "_back_edge_relayer",
+        "_tutte_cyclic_planar",
+        "_gap_validated_layer_swaps",
+        "_outerplanar_source_fan_spine",
+        "_multi_component_row_major_repack",
+        "_median_transpose_polish",
+        "_lattice_uniform_centered_slots",
+    ):
+        monkeypatch.setattr(native, candidate_name, none_candidate)
+
+    def no_predicted_skip(*args: object) -> None:
+        """Allow the synthetic W5 call to run."""
+        del args
+        return None
+
+    def fixed_finisher_slice(config: Optional[LayoutConfig]) -> float:
+        """Return a nonzero W5 slice for the synthetic call."""
+        del config
+        return 1.0
+
+    def ignore_w5_telemetry(*args: object) -> None:
+        """Suppress W5 telemetry in the unit fixture."""
+        del args
+        return None
+
+    monkeypatch.setattr(native_undirected, "_candidate_is_eligible", always_eligible)
+    monkeypatch.setattr(native_finisher, "w5_predicted_skip_reason", no_predicted_skip)
+    monkeypatch.setattr(native_finisher, "_finisher_slice_s", fixed_finisher_slice)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", ignore_w5_telemetry)
+
+
+def _proxy_honest_fixture_tensors() -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Return tensors that trigger proxy finalist selection in polish tests.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        Base positions, proxy positions, edge index, node-size tensors, and
+        cluster ids.
+    """
+    base_pos = torch.tensor(
+        [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]],
+        dtype=torch.float32,
+    )
+    proxy_pos = base_pos + torch.tensor([100.0, 0.0])
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    cluster_ids = torch.arange(4, dtype=torch.long)
+    return base_pos, proxy_pos, edge_index, node_sizes, cluster_ids
 
 
 def test_gate_row_deadline_runs_real_pipeline_not_prelayout_fallback(
@@ -334,6 +494,244 @@ def test_polish_scores_cyclic_digraph_with_common_ruler(monkeypatch) -> None:
 
     assert observed
     assert set(observed) == {(True, False)}
+
+
+def test_best_of_polish_w5_receives_final_honest_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W5 receives the final honest winner, not the pre-final proxy winner."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+        make_w5_skip_result,
+    )
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    base_pos, proxy_pos, edge_index, node_sizes, cluster_ids = _proxy_honest_fixture_tensors()
+    _install_proxy_honest_w5_fixture(monkeypatch, base_pos, proxy_pos)
+    captured: dict[str, object] = {"calls": 0}
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+    ) -> W5FinisherResult:
+        """Capture W5 inputs and return a no-op result."""
+        del node_sizes, score_fn, accept_margin
+        captured["calls"] = int(captured["calls"]) + 1
+        captured["incumbent_pos"] = incumbent_pos.detach().cpu()
+        captured["incumbent_score_pair"] = incumbent_score_pair
+        captured["incumbent_axes"] = incumbent_axes
+        captured["seed_names"] = [seed.name for seed in seeds]
+        return make_w5_skip_result(
+            incumbent_pos=incumbent_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            reason="unit_noop",
+            edge_index=edge_index,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    polished = _best_of_polish(
+        base_pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        cluster_ids=cluster_ids,
+        config=LayoutConfig(),
+    )
+
+    assert int(captured["calls"]) == 1
+    assert torch.equal(polished, base_pos)
+    assert torch.equal(captured["incumbent_pos"], base_pos)
+    assert captured["incumbent_score_pair"] == W5ScorePair(directed=20.0, undirected=20.0)
+    assert captured["incumbent_axes"] == W5HonestAxes(
+        flow=0.753,
+        depth=0.875,
+        ksm=0.922,
+        edge_length=0.876,
+    )
+    assert captured["seed_names"][:2] == ["incumbent", "proxy_polish_winner"]
+
+
+def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A W5 result can replace the final winner only by dual dominance."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5Candidate,
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+    )
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    base_pos, proxy_pos, edge_index, node_sizes, cluster_ids = _proxy_honest_fixture_tensors()
+    _install_proxy_honest_w5_fixture(monkeypatch, base_pos, proxy_pos)
+    w5_pos = base_pos + torch.tensor([0.0, 25.0])
+    winner_pair = W5ScorePair(directed=20.2, undirected=20.2)
+    captured: dict[str, W5ScorePair] = {}
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+    ) -> W5FinisherResult:
+        """Return a W5 winner that dominates the final honest incumbent."""
+        del (
+            incumbent_pos,
+            seeds,
+            edge_index,
+            node_sizes,
+            score_fn,
+            is_semantically_directed,
+            declared_hierarchical,
+            direction_is_declared,
+            config,
+            accept_margin,
+            incumbent_axes,
+        )
+        captured["incumbent"] = incumbent_score_pair
+        accepted = W5Candidate("w5_unit", w5_pos, winner_pair, "barrier_2d")
+        return W5FinisherResult(
+            winner_pos=w5_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            winner_score_pair=winner_pair,
+            winner_name="w5_unit",
+            deadline_returned=False,
+            accepted=(accepted,),
+            rejected=(),
+            checkpoints=(),
+            mode="barrier_2d",
+            steps=1,
+        )
+
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    polished = _best_of_polish(
+        base_pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        cluster_ids=cluster_ids,
+        config=LayoutConfig(),
+    )
+
+    assert captured["incumbent"] == W5ScorePair(directed=20.0, undirected=20.0)
+    assert winner_pair.directed > captured["incumbent"].directed + 0.05
+    assert winner_pair.undirected > captured["incumbent"].undirected + 0.05
+    assert torch.equal(polished, w5_pos)
+
+
+def test_best_of_polish_preserves_final_winner_when_w5_does_not_dominate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-dominating W5 winner is a no-op against the final honest winner."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5Candidate,
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+    )
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    base_pos, proxy_pos, edge_index, node_sizes, cluster_ids = _proxy_honest_fixture_tensors()
+    _install_proxy_honest_w5_fixture(monkeypatch, base_pos, proxy_pos)
+    w5_pos = base_pos + torch.tensor([0.0, 25.0])
+    one_sided_pair = W5ScorePair(directed=20.2, undirected=20.0)
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+    ) -> W5FinisherResult:
+        """Return a W5 winner that fails the unchanged dual-ruler gate."""
+        del (
+            incumbent_pos,
+            seeds,
+            edge_index,
+            node_sizes,
+            score_fn,
+            is_semantically_directed,
+            declared_hierarchical,
+            direction_is_declared,
+            config,
+            accept_margin,
+            incumbent_axes,
+        )
+        accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
+        return W5FinisherResult(
+            winner_pos=w5_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            winner_score_pair=one_sided_pair,
+            winner_name="w5_one_sided",
+            deadline_returned=False,
+            accepted=(accepted,),
+            rejected=(),
+            checkpoints=(),
+            mode="barrier_2d",
+            steps=1,
+        )
+
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    polished = _best_of_polish(
+        base_pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        cluster_ids=cluster_ids,
+        config=LayoutConfig(),
+    )
+
+    assert torch.equal(polished, base_pos)
 
 
 def test_dense_collinear_dodge_is_skipped_before_blocker_scan() -> None:
