@@ -2857,7 +2857,7 @@ def layout_native_directed_portfolio(
             except Exception as exc:  # noqa: BLE001 -- late ordering cannot sink the winner
                 _reraise_worker_timeout(exc)
                 _LOGGER.warning("directed late rank-local swap challenger failed", exc_info=True)
-    if ordering_w5_seed is not None:
+    if ordering_w5_seed is not None and not bool(getattr(config, "_dagua_native_defer_w5", False)):
         try:
             from dagua.layout.ops.pipelines.native_finisher import (
                 W5Seed,

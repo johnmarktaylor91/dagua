@@ -846,6 +846,14 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
     assert captured["pair"] != stale_pair
     assert captured["axes"] == payload_axes
 
+    deferred_config = LayoutConfig()
+    deferred_config._dagua_native_defer_w5 = True
+    captured.clear()
+
+    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), deferred_config)
+
+    assert captured == {}
+
 
 def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
     monkeypatch: object,
