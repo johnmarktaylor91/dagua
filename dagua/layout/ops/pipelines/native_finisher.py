@@ -41,10 +41,9 @@ _W5_ACCEPT_MARGIN = 0.05
 _PREDICTED_COST_LATE_ENTRY_REMAINING_S = 90.0
 _PREDICTED_COST_RETURN_RESERVE_S = 2.0
 _MEASURED_COST_MAX_SEEDS = 2
-_MEASURED_COST_MAX_STEPS = 24
 _MEASURED_COST_MAX_CHECKPOINTS = 2
 _MEASURED_COST_DEFAULT_REFEREE_S = 0.40
-_MEASURED_COST_SURROGATE_STEPS = 2
+_MEASURED_COST_SURROGATE_STEPS = 4
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
@@ -1231,23 +1230,6 @@ def _measure_one_surrogate_step_s(
     return W5StepMeasurement(step_s=max(1.0e-6, step_s), warmup_s=warmup_s)
 
 
-def _measured_pressure_step_candidates(max_steps: int) -> list[int]:
-    """Return stable measured-plan step tiers under budget pressure.
-
-    Parameters
-    ----------
-    max_steps : int
-        Maximum pressure-mode step count admitted by the row regime.
-
-    Returns
-    -------
-    list[int]
-        Descending step tiers no larger than ``max_steps``.
-    """
-    tiers = (24, 18, 12, 6, 3, 2, 1)
-    return [steps for steps in tiers if steps <= max_steps]
-
-
 def _measured_cost_plan(
     *,
     seeds: Sequence[W5Seed],
@@ -1321,7 +1303,7 @@ def _measured_cost_plan(
     usable_s = budget_s - _PREDICTED_COST_RETURN_RESERVE_S
     step_s = step_measurement.step_s
     warmup_s = step_measurement.warmup_s
-    minimum_predicted_s = warmup_s + step_s + referee_s
+    minimum_predicted_s = step_s + referee_s
     if usable_s < minimum_predicted_s:
         if config is not None:
             setattr(
@@ -1360,9 +1342,9 @@ def _measured_cost_plan(
         Returns
         -------
         W5CostPlan
-            Cost plan with the one-time warmup charged once.
+            Cost plan for post-probe work under the remaining wall budget.
         """
-        predicted_s = warmup_s + seed_count * (steps * step_s + checkpoints * referee_s)
+        predicted_s = seed_count * (steps * step_s + checkpoints * referee_s)
         return W5CostPlan(
             seeds=seed_count,
             steps=steps,
@@ -1382,8 +1364,7 @@ def _measured_cost_plan(
         return base_plan
 
     max_seeds = min(_MEASURED_COST_MAX_SEEDS, base_seeds)
-    max_steps = min(_MEASURED_COST_MAX_STEPS, base_steps)
-    for steps in _measured_pressure_step_candidates(max_steps):
+    for steps in range(base_steps, 0, -1):
         for checkpoints in range(_MEASURED_COST_MAX_CHECKPOINTS, 0, -1):
             for seed_count in range(max_seeds, 0, -1):
                 candidate_plan = build_plan(seed_count, steps, checkpoints)
