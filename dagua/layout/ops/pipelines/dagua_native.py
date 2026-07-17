@@ -4858,6 +4858,7 @@ def _best_of_polish(
     cluster_ids: Optional[torch.Tensor] = None,
     polish_battery: str = "full",
     config: Optional[LayoutConfig] = None,
+    w5_seed_positions: Optional[Sequence[tuple[str, torch.Tensor]]] = None,
 ) -> torch.Tensor:
     """Try named polish candidates; return the best by composite.
 
@@ -4904,6 +4905,9 @@ def _best_of_polish(
     config : LayoutConfig, optional
         Prepared native configuration. When present, W5 uses its benchmark
         deadline metadata and attaches finisher telemetry to it.
+    w5_seed_positions : Sequence[tuple[str, torch.Tensor]], optional
+        Extra warm starts to include in the W5 seed bank after the final
+        honest winner. Used by outer contests that defer child-local W5.
 
     Returns
     -------
@@ -5379,6 +5383,11 @@ def _best_of_polish(
                     W5Seed(name=edge_name, pos=edge_pos)
                     for edge_name, edge_pos in edge_seed_positions
                 )
+                if w5_seed_positions is not None:
+                    seed_bank.extend(
+                        W5Seed(name=seed_name, pos=seed_pos)
+                        for seed_name, seed_pos in w5_seed_positions
+                    )
                 if len(candidate_positions) > 1:
                     ranked_seed_indices = sorted(
                         range(1, len(candidate_positions)),
@@ -5824,6 +5833,7 @@ def layout_dagua_native_pipeline(
             seed_base = 42
         best_pos: Optional[torch.Tensor] = None
         best_score = float("-inf")
+        w5_seed_positions: list[tuple[str, torch.Tensor]] = []
         offsets, targets = _build_csr(edge_index, num_nodes)
         all_pairs_dist = _all_pairs_unweighted(offsets, targets, num_nodes, max_dist=num_nodes)
         for seed_offset in range(multi_start_k):
@@ -5859,6 +5869,7 @@ def layout_dagua_native_pipeline(
                 declared_hierarchical=declared_hierarchical,
                 all_pairs_dist=all_pairs_dist,
             )
+            w5_seed_positions.append((f"multistart_seed_{seed_offset}", candidate_pos))
             if candidate_score > best_score:
                 best_score = candidate_score
                 best_pos = candidate_pos
@@ -5875,6 +5886,17 @@ def layout_dagua_native_pipeline(
             # solve has polished its own seed. Defer W5 inside those children
             # and spend the same W5 slice once, against the final multistart
             # winner, preserving monotonicity against the row's real output.
+            cluster_ids = None
+            if clusters:
+                cluster_ids = _problem_cluster_ids(
+                    LayoutProblem(
+                        edge_index=edge_index,
+                        num_nodes=num_nodes,
+                        node_sizes=node_sizes,
+                        clusters=clusters,
+                        cluster_parents=cluster_parents,
+                    )
+                )
             best_pos = _best_of_polish(
                 best_pos,
                 edge_index,
@@ -5885,8 +5907,10 @@ def layout_dagua_native_pipeline(
                     getattr(contest_structure, "direction_is_declared", False)
                 ),
                 direction=effective_config.direction,
+                cluster_ids=cluster_ids,
                 polish_battery="w5_only",
                 config=effective_config,
+                w5_seed_positions=w5_seed_positions,
             )
         return best_pos
 
