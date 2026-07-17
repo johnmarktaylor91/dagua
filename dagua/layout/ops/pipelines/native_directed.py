@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import time
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, Optional, Tuple
+from itertools import permutations
+from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -29,6 +31,10 @@ DIRECTED_PREDICTED_COST_MULTIPLIER = 2.0
 FORCE_SKIP_RATIO_THRESHOLD = 0.3
 DIRECTED_NARROW_SEED_NODE_CAP = 128
 DIRECTED_NARROW_SEED_EDGE_CAP = 512
+DIRECTED_ORDERING_MEDIUM_NODE_CAP = 500
+DIRECTED_ORDERING_EXHAUSTIVE_WIDTH_CAP = 8
+DIRECTED_ORDERING_EXHAUSTIVE_PERM_CAP = 50_000
+DIRECTED_ORDERING_DEADLINE_CHECK_INTERVAL = 256
 DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
 DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
@@ -40,6 +46,9 @@ SUGIYAMA_RANK_SEP_GRID = (36.0, 72.0, 108.0)
 SUGIYAMA_NODE_SEP_GRID = (18.0, 36.0, 54.0)
 IGRAPH_OUTPUT_SCALE = 50.0
 _LOGGER = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
 
 
 def _score_directed_candidate(
@@ -119,6 +128,92 @@ def _score_directed_candidate_cached(
         if "all_pairs_dist" not in str(exc):
             raise
         return _score_directed_candidate(pos, problem, cluster_ids)
+
+
+def _score_directed_candidate_pair(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> "W5ScorePair":
+    """Score a directed candidate under both frozen rulers.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed acyclic layout problem.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    W5ScorePair
+        Directed and undirected frozen-ruler composites from the same metric
+        pass.
+    """
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+    from dagua.metrics import composite, composite_undirected, full
+
+    numeric = full(
+        pos.detach().to(device="cpu", dtype=torch.float32),
+        problem.edge_index.detach().to(device="cpu"),
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        cluster_ids=cluster_ids,
+        direction=problem.direction,
+        all_pairs_dist=all_pairs_dist,
+    )
+    numeric["declared_hierarchical"] = True
+    return W5ScorePair(
+        directed=float(composite(numeric)),
+        undirected=float(composite_undirected(numeric)),
+    )
+
+
+def _directed_ordering_candidate_dual_dominates(
+    candidate: torch.Tensor,
+    incumbent_pair: "W5ScorePair",
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> tuple[bool, "W5ScorePair"]:
+    """Return whether an ordering candidate may enter the winner contest.
+
+    Parameters
+    ----------
+    candidate : torch.Tensor
+        Ordering candidate positions with shape ``[N, 2]``.
+    incumbent_pair : W5ScorePair
+        Incumbent directed and undirected scores.
+    problem : LayoutProblem
+        Directed acyclic layout problem.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    tuple[bool, W5ScorePair]
+        Whether the candidate dominates under both rulers and the candidate
+        score pair.
+    """
+    from dagua.layout.ops.pipelines.native_finisher import w5_dominates
+
+    candidate_pair = _score_directed_candidate_pair(
+        candidate,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    return w5_dominates(candidate_pair, incumbent_pair), candidate_pair
 
 
 def _proxy_directed_candidate(
@@ -826,13 +921,140 @@ def _exact_crossing_count_loop(pos: torch.Tensor, edge_index: torch.Tensor) -> i
     return crossings
 
 
+def _apply_rank_order(
+    positions: torch.Tensor,
+    nodes: list[int],
+    ordered_nodes: list[int],
+) -> torch.Tensor:
+    """Assign one rank's x-slot multiset to a requested node ordering.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    nodes : list[int]
+        Node ids in the rank being reordered.
+    ordered_nodes : list[int]
+        Desired left-to-right node order for ``nodes``.
+
+    Returns
+    -------
+    torch.Tensor
+        Reordered candidate positions with shape ``[N, 2]``.
+    """
+    candidate = positions.clone()
+    ordered_x = sorted(float(positions[node, 0].item()) for node in nodes)
+    for node, x_value in zip(ordered_nodes, ordered_x):
+        candidate[node, 0] = x_value
+    return candidate
+
+
+def _rank_order_from_neighbor_stat(
+    nodes: list[int],
+    pos: torch.Tensor,
+    neighbors: dict[int, list[int]],
+    use_median: bool,
+) -> list[int]:
+    """Order rank nodes by neighboring x-coordinate barycenter or median.
+
+    Parameters
+    ----------
+    nodes : list[int]
+        Node ids in one rank.
+    pos : torch.Tensor
+        Current positions with shape ``[N, 2]``.
+    neighbors : dict[int, list[int]]
+        Neighbor ids keyed by node id.
+    use_median : bool
+        Whether to use the median instead of the mean.
+
+    Returns
+    -------
+    list[int]
+        Desired left-to-right node order.
+    """
+    ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
+    keyed: list[tuple[float, int, int]] = []
+    for ordinal, node in enumerate(ordered):
+        values = [float(pos[neighbor, 0].item()) for neighbor in neighbors.get(node, [])]
+        if values:
+            values.sort()
+            if use_median:
+                middle = len(values) // 2
+                key = (
+                    values[middle]
+                    if len(values) % 2
+                    else 0.5 * (values[middle - 1] + values[middle])
+                )
+            else:
+                key = float(sum(values)) / float(len(values))
+        else:
+            key = float(pos[node, 0].item())
+        keyed.append((key, ordinal, node))
+    return [node for _key, _ordinal, node in sorted(keyed)]
+
+
+def _ordering_budget_available(config: Optional[LayoutConfig]) -> bool:
+    """Return whether the ordering arm may perform another trial.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying an optional benchmark deadline.
+
+    Returns
+    -------
+    bool
+        ``True`` when no deadline is known or the guard2 return reserve remains.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    return _portfolio_has_budget(config, min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S)
+
+
+def _try_rank_order(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    nodes: list[int],
+    ordered_nodes: list[int],
+    best_crossings: int,
+) -> tuple[torch.Tensor, int, bool]:
+    """Evaluate one rank ordering and accept it only on fewer crossings.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Current positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    nodes : list[int]
+        Rank node ids.
+    ordered_nodes : list[int]
+        Candidate left-to-right order for ``nodes``.
+    best_crossings : int
+        Current exact crossing count.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, bool]
+        Updated positions, crossing count, and whether the trial improved.
+    """
+    if ordered_nodes == sorted(nodes, key=lambda node: float(pos[node, 0].item())):
+        return pos, best_crossings, False
+    candidate = _apply_rank_order(pos, nodes, ordered_nodes)
+    crossings = _exact_crossing_count(candidate, edge_index)
+    if crossings < best_crossings:
+        return candidate, crossings, True
+    return pos, best_crossings, False
+
+
 def _rank_local_zero_crossing_swap_candidate(
     incumbent: torch.Tensor,
     edge_index: torch.Tensor,
     max_passes: int = 3,
     config: Optional[LayoutConfig] = None,
 ) -> torch.Tensor:
-    """Greedily swap within-rank x positions when crossings strictly drop.
+    """Build a discrete within-rank ordering candidate.
 
     Parameters
     ----------
@@ -852,42 +1074,151 @@ def _rank_local_zero_crossing_swap_candidate(
     """
     pos = incumbent.detach().to(device="cpu", dtype=torch.float32).clone()
     n = int(pos.shape[0])
-    if n <= 2 or n > DIRECTED_NARROW_SEED_NODE_CAP:
+    if n <= 2 or n > DIRECTED_ORDERING_MEDIUM_NODE_CAP:
         return pos
     ranks, max_width, _ = _directed_rank_profile(edge_index, n)
-    if max_width < 2 or max_width > 32:
+    if max_width < 2:
         return pos
-    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
 
     rank_to_nodes: dict[int, list[int]] = {}
     for node, rank in enumerate(ranks):
         rank_to_nodes.setdefault(rank, []).append(node)
     best_crossings = _exact_crossing_count(pos, edge_index)
-    for _pass in range(max(0, int(max_passes))):
-        if not _portfolio_has_budget(config, min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S):
-            break
-        changed = False
+    if best_crossings == 0:
+        return pos
+    if not _ordering_budget_available(config):
+        return pos
+
+    exhaustive_trials = 0
+    if max_width <= DIRECTED_ORDERING_EXHAUSTIVE_WIDTH_CAP:
         for nodes in rank_to_nodes.values():
-            if not _portfolio_has_budget(
-                config,
-                min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S,
-            ):
+            width = len(nodes)
+            if width < 2:
+                continue
+            estimated_trials = math.factorial(width)
+            if exhaustive_trials + estimated_trials > DIRECTED_ORDERING_EXHAUSTIVE_PERM_CAP:
                 break
-            ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
-            for left, right in zip(ordered, ordered[1:]):
-                if not _portfolio_has_budget(
-                    config,
-                    min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S,
+            current_order = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
+            rank_best_pos = pos
+            rank_best_crossings = best_crossings
+            for trial_index, permuted in enumerate(permutations(current_order), start=1):
+                if (
+                    trial_index % DIRECTED_ORDERING_DEADLINE_CHECK_INTERVAL == 0
+                    and not _ordering_budget_available(config)
                 ):
                     break
-                candidate = pos.clone()
-                candidate[left, 0], candidate[right, 0] = pos[right, 0], pos[left, 0]
+                candidate = _apply_rank_order(pos, nodes, list(permuted))
                 crossings = _exact_crossing_count(candidate, edge_index)
-                if crossings < best_crossings:
-                    pos = candidate
-                    best_crossings = crossings
-                    changed = True
-        if not changed or best_crossings == 0:
+                if crossings < rank_best_crossings:
+                    rank_best_pos = candidate
+                    rank_best_crossings = crossings
+            exhaustive_trials += estimated_trials
+            if rank_best_crossings < best_crossings:
+                pos = rank_best_pos
+                best_crossings = rank_best_crossings
+            if best_crossings == 0 or not _ordering_budget_available(config):
+                return pos
+
+    if n <= DIRECTED_NARROW_SEED_NODE_CAP:
+        for _pass in range(max(0, int(max_passes))):
+            if not _ordering_budget_available(config):
+                break
+            changed = False
+            for nodes in rank_to_nodes.values():
+                if len(nodes) < 2:
+                    continue
+                ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
+                rank_orders: list[list[int]] = []
+                for left_index in range(len(ordered) - 1):
+                    for right_index in range(left_index + 2, len(ordered)):
+                        swapped = list(ordered)
+                        swapped[left_index], swapped[right_index] = (
+                            swapped[right_index],
+                            swapped[left_index],
+                        )
+                        rank_orders.append(swapped)
+                for source_index in range(len(ordered)):
+                    for target_index in range(len(ordered)):
+                        if source_index == target_index:
+                            continue
+                        reinserted = list(ordered)
+                        node = reinserted.pop(source_index)
+                        reinserted.insert(target_index, node)
+                        rank_orders.append(reinserted)
+                for rank_order in rank_orders:
+                    if not _ordering_budget_available(config):
+                        break
+                    pos, best_crossings, improved = _try_rank_order(
+                        pos,
+                        edge_index,
+                        nodes,
+                        rank_order,
+                        best_crossings,
+                    )
+                    changed = changed or improved
+                    if best_crossings == 0:
+                        return pos
+            if not changed:
+                break
+        return pos
+
+    incoming: dict[int, list[int]] = {node: [] for node in range(n)}
+    outgoing: dict[int, list[int]] = {node: [] for node in range(n)}
+    for src, dst in edge_index.t().detach().cpu().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if 0 <= src_i < n and 0 <= dst_i < n:
+            outgoing[src_i].append(dst_i)
+            incoming[dst_i].append(src_i)
+    rank_items = sorted(rank_to_nodes.items())
+    for _pass in range(max(0, int(max_passes))):
+        if not _ordering_budget_available(config):
+            break
+        changed = False
+        for _rank, nodes in rank_items:
+            if len(nodes) < 2:
+                continue
+            for neighbors, use_median in (
+                (incoming, False),
+                (outgoing, False),
+                (incoming, True),
+                (outgoing, True),
+            ):
+                if not _ordering_budget_available(config):
+                    break
+                ordered_nodes = _rank_order_from_neighbor_stat(nodes, pos, neighbors, use_median)
+                pos, best_crossings, improved = _try_rank_order(
+                    pos,
+                    edge_index,
+                    nodes,
+                    ordered_nodes,
+                    best_crossings,
+                )
+                changed = changed or improved
+                if best_crossings == 0:
+                    return pos
+            ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
+            for left_index in range(len(ordered) - 1):
+                if not _ordering_budget_available(config):
+                    break
+                swapped = list(ordered)
+                swapped[left_index], swapped[left_index + 1] = (
+                    swapped[left_index + 1],
+                    swapped[left_index],
+                )
+                pos, best_crossings, improved = _try_rank_order(
+                    pos,
+                    edge_index,
+                    nodes,
+                    swapped,
+                    best_crossings,
+                )
+                changed = changed or improved
+                if improved:
+                    ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
+                if best_crossings == 0:
+                    return pos
+        if not changed:
             break
     return pos
 
@@ -964,6 +1295,7 @@ def layout_native_directed_portfolio(
             all_pairs_dist,
         )
     }
+    ordering_w5_seed: Optional[torch.Tensor] = None
     if n > MAX_DIRECTED_CONTEST_NODES:
         _LOGGER.info(
             "Directed contest gate=incumbent_only n=%d incumbent_score=%.3f wall_time_s=%.3f",
@@ -980,6 +1312,12 @@ def layout_native_directed_portfolio(
             _portfolio_remaining_s(config),
         )
         return incumbent
+    incumbent_pair = _score_directed_candidate_pair(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         try:
             node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
@@ -1050,25 +1388,38 @@ def layout_native_directed_portfolio(
             _LOGGER.warning("directed stress-blend challenger failed", exc_info=True)
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
-        if n <= DIRECTED_NARROW_SEED_NODE_CAP and edge_count <= DIRECTED_NARROW_SEED_EDGE_CAP:
+        if n <= DIRECTED_ORDERING_MEDIUM_NODE_CAP and (
+            n > DIRECTED_NARROW_SEED_NODE_CAP or edge_count <= DIRECTED_NARROW_SEED_EDGE_CAP
+        ):
             try:
                 candidate_started = time.perf_counter()
+                incumbent_crossings = _exact_crossing_count(incumbent, problem.edge_index)
                 candidate = _rank_local_zero_crossing_swap_candidate(
                     incumbent,
                     problem.edge_index,
                     config=config,
                 )
-                if not torch.equal(candidate, incumbent.detach().to(device="cpu")):
-                    _register_challenger_variants(
-                        "rank_local_zero_crossing_swap",
+                candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
+                if candidate_crossings < incumbent_crossings and not torch.equal(
+                    candidate, incumbent.detach().to(device="cpu")
+                ):
+                    ordering_w5_seed = candidate
+                    # The discrete ordering arm is intentionally stricter
+                    # than legacy directed challengers: it may enter the
+                    # winner contest only when it already beats the incumbent
+                    # under both frozen rulers, matching the W5 contract.
+                    dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
                         candidate,
+                        incumbent_pair,
                         problem,
-                        config,
-                        positions,
-                        preserve_rank_order=True,
-                        arm_timings=arm_timings,
-                        timing_span=(candidate_started, time.perf_counter()),
+                        cluster_ids,
+                        all_pairs_dist,
                     )
+                    if dominates:
+                        name = "rank_local_zero_crossing_swap"
+                        positions[name] = candidate
+                        scores[name] = candidate_pair.directed
+                        arm_timings[name] = (candidate_started, time.perf_counter())
             except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
                 _reraise_worker_timeout(exc)
                 _LOGGER.warning("directed rank-local swap challenger failed", exc_info=True)
@@ -1319,6 +1670,78 @@ def layout_native_directed_portfolio(
     for name, score in scores.items():
         if name != "incumbent" and score > scores[best_name]:
             best_name = name
+    best_position = positions[best_name]
+    if ordering_w5_seed is not None:
+        try:
+            from dagua.layout.ops.pipelines.native_finisher import (
+                W5Seed,
+                log_w5_telemetry,
+                run_w5_finisher,
+                w5_dominates,
+            )
+
+            best_pair = (
+                incumbent_pair
+                if best_name == "incumbent"
+                else _score_directed_candidate_pair(
+                    best_position,
+                    problem,
+                    cluster_ids,
+                    all_pairs_dist,
+                )
+            )
+
+            def score_w5_candidate(pos: torch.Tensor) -> "W5ScorePair":
+                """Score one W5 checkpoint under both frozen rulers.
+
+                Parameters
+                ----------
+                pos : torch.Tensor
+                    Candidate positions with shape ``[N, 2]``.
+
+                Returns
+                -------
+                W5ScorePair
+                    Directed and undirected frozen-ruler scores.
+                """
+                return _score_directed_candidate_pair(pos, problem, cluster_ids, all_pairs_dist)
+
+            w5_sizes = (
+                cpu_sizes
+                if cpu_sizes is not None
+                else torch.full((n, 2), float(config.node_sep), dtype=torch.float32)
+            )
+            w5_result = run_w5_finisher(
+                incumbent_pos=best_position,
+                incumbent_score_pair=best_pair,
+                seeds=[
+                    W5Seed("directed_winner", best_position),
+                    W5Seed(
+                        "directed_ordering",
+                        ordering_w5_seed.to(device=best_position.device, dtype=best_position.dtype),
+                    ),
+                    W5Seed(
+                        "directed_incumbent",
+                        incumbent.to(device=best_position.device, dtype=best_position.dtype),
+                    ),
+                ],
+                edge_index=cpu_edges,
+                node_sizes=w5_sizes,
+                score_fn=score_w5_candidate,
+                is_semantically_directed=True,
+                declared_hierarchical=True,
+                direction_is_declared=True,
+                config=config,
+            )
+            log_w5_telemetry(w5_result, config)
+            if w5_result.accepted and w5_dominates(w5_result.winner_score_pair, best_pair, 0.05):
+                best_name = w5_result.winner_name
+                best_position = w5_result.winner_pos
+                scores[best_name] = w5_result.winner_score_pair.directed
+                positions[best_name] = best_position
+        except Exception as exc:  # noqa: BLE001 -- W5 warm starts cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed ordering W5 warm start failed", exc_info=True)
     _log_marketplace_telemetry(
         route="directed",
         structural_gate="force" if force_gate else "layered",
@@ -1337,7 +1760,7 @@ def layout_native_directed_portfolio(
         best_name,
         time.perf_counter() - started,
     )
-    return positions[best_name].to(device=incumbent.device, dtype=incumbent.dtype)
+    return best_position.to(device=incumbent.device, dtype=incumbent.dtype)
 
 
 @dataclass(frozen=True)

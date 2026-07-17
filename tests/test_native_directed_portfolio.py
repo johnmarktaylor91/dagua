@@ -19,6 +19,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
     _directed_mrtree_enabled,
+    _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
     _directed_stress_blend_candidates,
     _exact_crossing_count,
@@ -241,6 +242,109 @@ def test_rank_swap_respects_exhausted_deadline() -> None:
     swapped = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index, config=config)
 
     assert torch.equal(swapped, incumbent)
+
+
+def test_rank_ordering_exhaustive_finds_tiny_optimum() -> None:
+    """Width-two exhaustive rank ordering reaches the zero-crossing optimum."""
+    edge_index = torch.tensor([[0, 1], [3, 2]], dtype=torch.long)
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    ordered = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index)
+
+    assert _exact_crossing_count(incumbent, edge_index) == 1
+    assert _exact_crossing_count(ordered, edge_index) == 0
+
+
+def test_rank_ordering_non_adjacent_reinsert_reduces_crossings() -> None:
+    """The small-graph ordering pass accepts only fewer-crossing layouts."""
+    edge_index = torch.tensor([[0, 1, 2], [5, 4, 3]], dtype=torch.long)
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [20.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+            [20.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    ordered = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index)
+
+    assert _exact_crossing_count(ordered, edge_index) < _exact_crossing_count(
+        incumbent,
+        edge_index,
+    )
+
+
+def test_rank_ordering_noop_when_crossings_cannot_improve() -> None:
+    """A rank ordering with no crossing improvement returns byte-identical positions."""
+    edge_index = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    ordered = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index)
+
+    assert torch.equal(ordered, incumbent)
+
+
+def test_directed_ordering_dual_gate_rejects_single_ruler_win(
+    monkeypatch: object,
+) -> None:
+    """Ordering candidates must beat both frozen rulers before contest admission."""
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    edge_index = torch.tensor([[0, 1], [3, 2]], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0),
+    )
+    incumbent_pair = W5ScorePair(directed=10.0, undirected=10.0)
+    candidate = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    def fake_pair(*args: object, **kwargs: object) -> W5ScorePair:
+        """Return a directed-only improvement for the candidate."""
+        del args, kwargs
+        return W5ScorePair(directed=11.0, undirected=9.0)
+
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_pair)
+
+    dominates, pair = _directed_ordering_candidate_dual_dominates(
+        candidate,
+        incumbent_pair,
+        problem,
+        None,
+        None,
+    )
+
+    assert not dominates
+    assert pair == W5ScorePair(directed=11.0, undirected=9.0)
 
 
 def test_directed_incumbent_config_is_not_deadline_weakened(monkeypatch: object) -> None:
