@@ -15,6 +15,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     W5Seed,
     log_w5_telemetry,
     run_w5_finisher,
+    w5_predicted_skip_reason,
 )
 
 
@@ -239,6 +240,128 @@ def test_w5_finisher_rejects_one_sided_composite_win() -> None:
     assert all(checkpoint.reason == "does_not_dominate_both" for checkpoint in result.rejected)
 
 
+def test_w5_projects_overlapping_checkpoint_before_viability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An overlapping checkpoint reaches the scorer after projection repairs it."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    overlapping = torch.tensor(
+        [[0.0, 0.0], [0.5, 0.0], [4.0, 0.0], [8.0, 0.0]],
+        dtype=torch.float32,
+    )
+    scored_candidates: list[torch.Tensor] = []
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return a checkpoint that overlaps until W5 applies projection."""
+        del seed, edge_work, size_work, topo_depth, mode, deadline
+        return overlapping, 1, 2.0, [(1, overlapping, 1.0)]
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Capture the post-viability candidate and return a dominant score."""
+        scored_candidates.append(candidate.detach().cpu())
+        return _pair(1.0, 1.0)
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("overlap", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert scored_candidates
+    assert result.accepted
+    assert result.viability_counts["projected_overlap_candidate"] == 1
+    assert result.viability_counts["projection_resolved_overlap"] == 1
+    assert result.viability_drop_counts == {}
+
+
+def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint that remains overlap-regressed after projection is not scored."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    overlapping = torch.tensor(
+        [[0.0, 0.0], [0.5, 0.0], [4.0, 0.0], [8.0, 0.0]],
+        dtype=torch.float32,
+    )
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return a checkpoint that stays overlapped under the patched projector."""
+        del seed, edge_work, size_work, topo_depth, mode, deadline
+        return overlapping, 1, 2.0, [(1, overlapping, 1.0)]
+
+    def no_op_project(checkpoint_pos: torch.Tensor, size_work: torch.Tensor) -> torch.Tensor:
+        """Leave the overlapping checkpoint unchanged."""
+        del size_work
+        return checkpoint_pos
+
+    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if an overlap-regressed checkpoint reaches honest scoring."""
+        del candidate
+        raise AssertionError("overlap-regressed checkpoint should be dropped")
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+    monkeypatch.setattr(native_finisher, "_project_checkpoint_for_viability", no_op_project)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("overlap", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=forbidden_score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert result.checkpoints == ()
+    assert result.skipped_reason == "no_checkpoint"
+    assert result.viability_counts["drop_overlap_regressed"] == 1
+    assert result.viability_drop_counts == {"overlap_regressed": 1}
+
+
+def test_w5_late_entry_prediction_uses_process_time_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unloaded process-time and wall-clock admission make the same W5 decision."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 200.0
+    monkeypatch.setattr(native_finisher.time, "perf_counter", lambda: 80.0)
+    monkeypatch.setattr(native_finisher.time, "process_time", lambda: 20.0)
+
+    assert w5_predicted_skip_reason(34, 78, config) is None
+    assert getattr(config, "_dagua_native_process_deadline_s") == 140.0
+
+
 def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -400,6 +523,7 @@ def test_w5_telemetry_emits_skip_reject_accept_and_deadline(
     )
     config = LayoutConfig()
     config._dagua_native_deadline_s = time.perf_counter() + 1.0
+    config._dagua_native_graph_name = "unit_graph"
     deadline_result = run_w5_finisher(
         incumbent_pos=pos,
         incumbent_score_pair=_pair(0.0, 0.0),
@@ -424,3 +548,6 @@ def test_w5_telemetry_emits_skip_reject_accept_and_deadline(
     assert any(record["rejected"] for record in records)
     assert any(record["accepted"] for record in records)
     assert any(record["deadline_returned"] for record in records)
+    assert records[-1]["graph_name"] == "unit_graph"
+    assert all("phase_timings_s" in record for record in records)
+    assert all("viability_drop_counts" in record for record in records)

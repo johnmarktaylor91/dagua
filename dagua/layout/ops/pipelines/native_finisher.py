@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import math
 import os
 import time
-from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Sequence
 
 import torch
 
@@ -26,6 +27,7 @@ from dagua.layout.ops.pipelines.native_surrogates import (
     soft_crossing_loss,
     soft_knn_neighborhood_loss,
 )
+from dagua.layout.projection import project_overlaps
 
 _LOGGER = logging.getLogger(__name__)
 _ABSOLUTE_DEADLINE_RESERVE_S = 5.0
@@ -39,6 +41,37 @@ _W5_ACCEPT_MARGIN = 0.05
 _PREDICTED_COST_SKIP_NODES = 250
 _PREDICTED_COST_LATE_ENTRY_REMAINING_S = 90.0
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
+_PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
+_GRAPH_NAME_ATTR = "_dagua_native_graph_name"
+_W5_PROJECTION_ITERATIONS = 20
+
+
+@dataclass(frozen=True)
+class W5PhaseTiming:
+    """Per-seed W5 phase timing telemetry.
+
+    Parameters
+    ----------
+    seed : str
+        Seed family label.
+    mode : str
+        Routed W5 mode for this seed.
+    route_s : float
+        Wall-clock seconds spent choosing the route.
+    optimize_s : float
+        Wall-clock seconds spent in surrogate descent.
+    viability_s : float
+        Wall-clock seconds spent projecting and checking checkpoints.
+    score_s : float
+        Wall-clock seconds spent in honest scoring for checkpoints.
+    """
+
+    seed: str
+    mode: str
+    route_s: float
+    optimize_s: float
+    viability_s: float
+    score_s: float
 
 
 @dataclass(frozen=True)
@@ -178,6 +211,14 @@ class W5FinisherResult:
         Routed hierarchy flag.
     direction_is_declared : bool
         Whether directedness came from a user/config declaration.
+    graph_name : str, optional
+        Benchmark graph name when the driver supplied one on the config.
+    phase_timings_s : tuple[W5PhaseTiming, ...]
+        Per-seed route/optimize/viability/score timing records.
+    viability_counts : dict[str, int]
+        Counts for viability outcomes, including projection outcomes.
+    viability_drop_counts : dict[str, int]
+        Counts for pre-score viability drop reasons.
     """
 
     winner_pos: torch.Tensor
@@ -200,6 +241,10 @@ class W5FinisherResult:
     is_semantically_directed: bool = False
     declared_hierarchical: bool = False
     direction_is_declared: bool = False
+    graph_name: Optional[str] = None
+    phase_timings_s: tuple[W5PhaseTiming, ...] = ()
+    viability_counts: dict[str, int] = field(default_factory=dict)
+    viability_drop_counts: dict[str, int] = field(default_factory=dict)
 
 
 def is_worker_timeout_like_exception(exc: Exception) -> bool:
@@ -266,6 +311,90 @@ def _remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     if deadline is None:
         return None
     return float(deadline) - time.perf_counter()
+
+
+def _stack_graph_name() -> Optional[str]:
+    """Return a benchmark graph name discovered from active driver frames.
+
+    Returns
+    -------
+    str or None
+        Graph name from ``scripts/run_benchmark.py``/``dagua.eval.benchmark``
+        locals when W5 is executing under those drivers, otherwise ``None``.
+    """
+    frame = inspect.currentframe()
+    current = None if frame is None else frame.f_back
+    try:
+        while current is not None:
+            locals_by_name: dict[str, Any] = current.f_locals
+            work_item = locals_by_name.get("work_item")
+            graph_name = getattr(work_item, "graph_name", None)
+            if graph_name is not None:
+                return str(graph_name)
+            test_graph = locals_by_name.get("test_graph")
+            graph_name = getattr(test_graph, "name", None)
+            if graph_name is not None:
+                return str(graph_name)
+            benchmark_graph = locals_by_name.get("bg")
+            graph_name = getattr(getattr(benchmark_graph, "test_graph", None), "name", None)
+            if graph_name is not None:
+                return str(graph_name)
+            current = current.f_back
+        return None
+    finally:
+        del frame
+        del current
+
+
+def _graph_name(config: Optional[LayoutConfig]) -> Optional[str]:
+    """Return the benchmark graph name when it was attached to ``config``.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration.
+
+    Returns
+    -------
+    str or None
+        Stable graph name, or ``None`` outside benchmark/name-aware callers.
+    """
+    name = getattr(config, _GRAPH_NAME_ATTR, None) if config is not None else None
+    if name is not None:
+        return str(name)
+    return _stack_graph_name()
+
+
+def _process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
+    """Return process-time seconds remaining for optional W5 admission gates.
+
+    Wall-clock deadline checks remain the hard return guard. This helper
+    gives optional work a CPU-time ruler so sibling-worker contention does
+    not change late-entry or predicted-cost admission after the process
+    deadline is initialized.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark deadline metadata.
+
+    Returns
+    -------
+    float or None
+        Process CPU seconds remaining, or ``None`` without benchmark budget
+        metadata.
+    """
+    if config is None:
+        return None
+    process_deadline = getattr(config, _PROCESS_DEADLINE_ATTR, None)
+    if process_deadline is None:
+        remaining = _remaining_s(config)
+        if remaining is None:
+            return None
+        process_deadline = time.process_time() + max(0.0, float(remaining))
+        setattr(config, _PROCESS_DEADLINE_ATTR, process_deadline)
+        return float(remaining)
+    return float(process_deadline) - time.process_time()
 
 
 def _w5_disabled_by_env() -> bool:
@@ -352,7 +481,7 @@ def w5_predicted_skip_reason(
         return "disabled_by_env"
     if node_count >= _PREDICTED_COST_SKIP_NODES:
         return "predicted_cost_large_graph"
-    remaining = _remaining_s(config)
+    remaining = _process_remaining_s(config)
     if remaining is not None and remaining < _PREDICTED_COST_LATE_ENTRY_REMAINING_S:
         return "predicted_cost_late_entry"
     return None
@@ -373,15 +502,23 @@ def _finisher_slice_s(config: Optional[LayoutConfig]) -> Optional[float]:
     """
     if _w5_disabled_by_env():
         return None
-    remaining = _remaining_s(config)
-    if remaining is None:
+    wall_remaining = _remaining_s(config)
+    process_remaining = _process_remaining_s(config)
+    if wall_remaining is None and process_remaining is None:
         return _DEFAULT_FINISHER_SLICE_S
+    if wall_remaining is not None and wall_remaining < _ABSOLUTE_DEADLINE_RESERVE_S:
+        return None
+    remaining = wall_remaining if process_remaining is None else process_remaining
     if remaining < _MIN_BENCHMARK_REMAINING_S:
         return None
-    available = remaining - _ABSOLUTE_DEADLINE_RESERVE_S
+    wall_available = (
+        float("inf") if wall_remaining is None else wall_remaining - _ABSOLUTE_DEADLINE_RESERVE_S
+    )
+    process_available = remaining - _ABSOLUTE_DEADLINE_RESERVE_S
+    available = min(wall_available, process_available)
     if available < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
         return None
-    spend_cap = _w5_spend_cap_s(config, remaining)
+    spend_cap = _w5_spend_cap_s(config, wall_remaining)
     spent = _w5_spent_s(config)
     remaining_w5_budget = spend_cap - spent
     if remaining_w5_budget < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
@@ -450,6 +587,7 @@ def make_w5_skip_result(
         is_semantically_directed=is_semantically_directed,
         declared_hierarchical=declared_hierarchical,
         direction_is_declared=direction_is_declared,
+        graph_name=_graph_name(config),
     )
 
 
@@ -605,6 +743,53 @@ def _is_degenerate(pos: torch.Tensor, node_sizes: torch.Tensor) -> bool:
     extent = pos.detach().amax(dim=0) - pos.detach().amin(dim=0)
     min_extent = float(node_sizes.detach().to(dtype=torch.float32).mean().item()) * 0.1
     return float(extent.max().item()) <= max(1.0e-6, min_extent)
+
+
+def _project_checkpoint_for_viability(
+    checkpoint_pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+) -> torch.Tensor:
+    """Return an overlap-projected checkpoint for W5 viability checks.
+
+    Parameters
+    ----------
+    checkpoint_pos : torch.Tensor
+        Candidate checkpoint positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Projected checkpoint positions with shape ``[N, 2]``.
+    """
+    projected = checkpoint_pos.detach().clone().to(dtype=torch.float32)
+    sizes = node_sizes.detach().to(device=projected.device, dtype=projected.dtype)
+    project_overlaps(
+        projected,
+        sizes,
+        iterations=_W5_PROJECTION_ITERATIONS,
+        convergent=True,
+    )
+    return projected
+
+
+def _increment_count(counts: dict[str, int], key: str) -> None:
+    """Increment ``key`` in a telemetry count dictionary.
+
+    Parameters
+    ----------
+    counts : dict[str, int]
+        Mutable telemetry count dictionary.
+    key : str
+        Count key to increment.
+
+    Returns
+    -------
+    None
+        ``counts`` is updated in place.
+    """
+    counts[key] = int(counts.get(key, 0)) + 1
 
 
 def _surrogate_loss(
@@ -812,6 +997,9 @@ def run_w5_finisher(
         accepted: list[W5Candidate],
         rejected: list[W5Checkpoint],
         checkpoints: list[W5Checkpoint],
+        phase_timings: list[W5PhaseTiming],
+        viability_counts: dict[str, int],
+        viability_drop_counts: dict[str, int],
         mode: str,
         steps: int,
         skipped_reason: Optional[str],
@@ -834,6 +1022,12 @@ def run_w5_finisher(
             Rejected checkpoint telemetry.
         checkpoints : list[W5Checkpoint]
             All honest-scored checkpoint telemetry.
+        phase_timings : list[W5PhaseTiming]
+            Per-seed phase timing records.
+        viability_counts : dict[str, int]
+            Viability outcome counts.
+        viability_drop_counts : dict[str, int]
+            Pre-score viability drop counts by reason.
         mode : str
             Last routed mode or ``"skip"``.
         steps : int
@@ -880,6 +1074,10 @@ def run_w5_finisher(
             is_semantically_directed=is_semantically_directed,
             declared_hierarchical=declared_hierarchical,
             direction_is_declared=direction_is_declared,
+            graph_name=_graph_name(config),
+            phase_timings_s=tuple(phase_timings),
+            viability_counts=dict(viability_counts),
+            viability_drop_counts=dict(viability_drop_counts),
         )
 
     if slice_s is None:
@@ -891,6 +1089,9 @@ def run_w5_finisher(
             accepted=[],
             rejected=[],
             checkpoints=[],
+            phase_timings=[],
+            viability_counts={},
+            viability_drop_counts={},
             mode="skip",
             steps=0,
             skipped_reason=predicted_skip_reason or "no_budget",
@@ -905,6 +1106,9 @@ def run_w5_finisher(
             accepted=[],
             rejected=[],
             checkpoints=[],
+            phase_timings=[],
+            viability_counts={},
+            viability_drop_counts={},
             mode="skip",
             steps=0,
             skipped_reason="no_finite_seed",
@@ -923,6 +1127,9 @@ def run_w5_finisher(
     accepted: list[W5Candidate] = []
     rejected: list[W5Checkpoint] = []
     checkpoints: list[W5Checkpoint] = []
+    phase_timings: list[W5PhaseTiming] = []
+    viability_counts: dict[str, int] = {}
+    viability_drop_counts: dict[str, int] = {}
     steps_total = 0
     routed_mode = "skip"
     incumbent_overlap = _overlap_count(incumbent_pos, size_work)
@@ -934,6 +1141,7 @@ def run_w5_finisher(
         if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
             deadline_returned = True
             break
+        route_started = time.perf_counter()
         mode = _route_mode(
             seed.pos.detach().to(device=edge_work.device, dtype=torch.float32),
             edge_work,
@@ -942,8 +1150,13 @@ def run_w5_finisher(
             declared_hierarchical=declared_hierarchical,
             direction_is_declared=direction_is_declared,
         )
+        route_s = max(0.0, time.perf_counter() - route_started)
         routed_mode = mode
+        optimize_s = 0.0
+        viability_s = 0.0
+        score_s = 0.0
         try:
+            optimize_started = time.perf_counter()
             final_pos, steps, start_loss, scored_points = _optimize_seed(
                 seed,
                 edge_work,
@@ -952,10 +1165,21 @@ def run_w5_finisher(
                 mode,
                 deadline - _FINISHER_SCORE_RESERVE_S,
             )
+            optimize_s = max(0.0, time.perf_counter() - optimize_started)
         except Exception as exc:  # noqa: BLE001 -- W5 is optional candidate generation
             if is_worker_timeout_like_exception(exc):
                 raise
             _LOGGER.warning("W5 finisher seed %s failed", seed.name, exc_info=True)
+            phase_timings.append(
+                W5PhaseTiming(
+                    seed=seed.name,
+                    mode=mode,
+                    route_s=route_s,
+                    optimize_s=optimize_s,
+                    viability_s=viability_s,
+                    score_s=score_s,
+                )
+            )
             continue
         steps_total += steps
         if not scored_points or scored_points[-1][0] != steps:
@@ -972,19 +1196,39 @@ def run_w5_finisher(
             if time.monotonic() >= deadline:
                 deadline_returned = True
                 break
-            viable = not _is_degenerate(checkpoint_pos, size_work) and (
-                _overlap_count(checkpoint_pos, size_work) <= incumbent_overlap
-            )
-            if not viable:
+            viability_started = time.perf_counter()
+            checkpoint_overlap = _overlap_count(checkpoint_pos, size_work)
+            if checkpoint_overlap > incumbent_overlap:
+                _increment_count(viability_counts, "projected_overlap_candidate")
+                checkpoint_pos = _project_checkpoint_for_viability(checkpoint_pos, size_work)
+                projected_overlap = _overlap_count(checkpoint_pos, size_work)
+                if projected_overlap <= incumbent_overlap:
+                    _increment_count(viability_counts, "projection_resolved_overlap")
+            if _is_degenerate(checkpoint_pos, size_work):
+                _increment_count(viability_counts, "drop_degenerate")
+                _increment_count(viability_drop_counts, "degenerate")
+                viability_s += max(0.0, time.perf_counter() - viability_started)
                 continue
+            if _overlap_count(checkpoint_pos, size_work) > incumbent_overlap:
+                _increment_count(viability_counts, "drop_overlap_regressed")
+                _increment_count(viability_drop_counts, "overlap_regressed")
+                viability_s += max(0.0, time.perf_counter() - viability_started)
+                continue
+            _increment_count(viability_counts, "scored_viable")
+            viability_s += max(0.0, time.perf_counter() - viability_started)
             try:
+                score_started = time.perf_counter()
                 score_pos = checkpoint_pos.to(device=edge_index.device, dtype=torch.float32)
                 honest = score_fn(score_pos)
+                score_s += max(0.0, time.perf_counter() - score_started)
             except Exception as exc:
+                score_s += max(0.0, time.perf_counter() - score_started)
                 if is_worker_timeout_like_exception(exc):
                     raise
+                _increment_count(viability_counts, "drop_score_exception")
                 continue
             if not math.isfinite(honest.directed) or not math.isfinite(honest.undirected):
+                _increment_count(viability_counts, "drop_nonfinite_score")
                 continue
             directed_delta = honest.directed - winner_score_pair.directed
             undirected_delta = honest.undirected - winner_score_pair.undirected
@@ -1020,6 +1264,16 @@ def run_w5_finisher(
                 accepted.append(accepted_candidate)
             else:
                 rejected.append(checkpoint)
+        phase_timings.append(
+            W5PhaseTiming(
+                seed=seed.name,
+                mode=mode,
+                route_s=route_s,
+                optimize_s=optimize_s,
+                viability_s=viability_s,
+                score_s=score_s,
+            )
+        )
     skipped = None if accepted else ("no_checkpoint_improved" if checkpoints else "no_checkpoint")
     return finish(
         winner_pos=winner_pos,
@@ -1029,6 +1283,9 @@ def run_w5_finisher(
         accepted=accepted,
         rejected=rejected,
         checkpoints=checkpoints,
+        phase_timings=phase_timings,
+        viability_counts=viability_counts,
+        viability_drop_counts=viability_drop_counts,
         mode=routed_mode,
         steps=steps_total,
         skipped_reason=skipped,
@@ -1068,6 +1325,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
 
     payload = {
         "event": "native_w5_finisher",
+        "graph_name": result.graph_name,
         "node_count": result.node_count,
         "edge_count": result.edge_count,
         "mode": result.mode,
@@ -1082,6 +1340,19 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
         "spent_s": result.spent_s,
         "remaining_entry_s": result.remaining_entry_s,
         "remaining_exit_s": result.remaining_exit_s,
+        "phase_timings_s": [
+            {
+                "seed": timing.seed,
+                "mode": timing.mode,
+                "route_s": timing.route_s,
+                "optimize_s": timing.optimize_s,
+                "viability_s": timing.viability_s,
+                "score_s": timing.score_s,
+            }
+            for timing in result.phase_timings_s
+        ],
+        "viability_counts": result.viability_counts,
+        "viability_drop_counts": result.viability_drop_counts,
         "winner_name": result.winner_name,
         "incumbent_score_pair": pair_payload(result.incumbent_score_pair),
         "winner_score_pair": pair_payload(result.winner_score_pair),
@@ -1126,6 +1397,7 @@ __all__ = [
     "W5Candidate",
     "W5Checkpoint",
     "W5FinisherResult",
+    "W5PhaseTiming",
     "W5ScorePair",
     "W5Seed",
     "is_worker_timeout_like_exception",

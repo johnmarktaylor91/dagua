@@ -31,7 +31,9 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _candidate_is_eligible,
     _candidate_refinement_steps,
     _cleanup_variants_for_size,
+    _log_marketplace_telemetry,
     _neato_in_contest,
+    _portfolio_has_budget,
     _predicted_undirected_arm_budget_available,
     _prediction_cpu_elapsed_s,
     _project_candidate_prism,
@@ -1162,14 +1164,50 @@ def test_unloaded_process_time_prediction_preserves_admission_parity(
     from dagua.layout.ops.pipelines import native_undirected as nu
 
     config = LayoutConfig()
-    started_wall = time.perf_counter()
-    config._dagua_native_deadline_s = started_wall + 15.0
+    config._dagua_native_deadline_s = 115.0
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 100.0)
     monkeypatch.setattr(nu.time, "process_time", lambda: 14.0)
 
     cpu_cost_s = _prediction_cpu_elapsed_s(10.0)
 
     assert cpu_cost_s == 4.0
     assert _predicted_undirected_arm_budget_available(config, cpu_cost_s) is True
+    assert _portfolio_has_budget(config, min_remaining_s=10.0) is True
+    assert getattr(config, "_dagua_native_process_deadline_s") == 29.0
+
+
+def test_marketplace_telemetry_includes_process_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Marketplace driver telemetry reports route and per-arm CPU totals."""
+    caplog.set_level("INFO")
+    positions = {"incumbent": torch.zeros((2, 2)), "candidate": torch.ones((2, 2))}
+
+    _log_marketplace_telemetry(
+        route="undirected",
+        structural_gate="unit",
+        positions=positions,
+        proxy_scores={"incumbent": 0.0, "candidate": 1.0},
+        full_scores={"incumbent": 0.0, "candidate": 1.0},
+        finalist_names=["incumbent", "candidate"],
+        winner_name="candidate",
+        started_at=10.0,
+        started_process_at=time.process_time(),
+        arm_process_totals={"incumbent": 0.25, "candidate": 0.5},
+    )
+
+    records = [
+        json.loads(record.message.removeprefix("Native marketplace telemetry "))
+        for record in caplog.records
+        if record.message.startswith("Native marketplace telemetry ")
+    ]
+
+    assert records
+    assert "process_time_s" in records[-1]
+    assert {arm["name"]: arm["process_time_s"] for arm in records[-1]["arms"]} == {
+        "candidate": 0.5,
+        "incumbent": 0.25,
+    }
 
 
 def test_insufficient_predicted_budget_skip_emits_jsonl_telemetry(
