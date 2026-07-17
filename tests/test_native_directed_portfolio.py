@@ -26,7 +26,9 @@ from dagua.layout.ops.pipelines.native_directed import (
     _exact_crossing_count_loop,
     _force_challengers_enabled,
     _full_sugiyama_grid_enabled,
+    _ordering_cost_admissible,
     _rank_local_zero_crossing_swap_candidate,
+    _rank_to_nodes_from_incumbent_y,
     _register_challenger_variants,
     _restore_projected_rank_order,
     _score_directed_candidate,
@@ -263,6 +265,30 @@ def test_rank_ordering_exhaustive_finds_tiny_optimum() -> None:
     assert _exact_crossing_count(ordered, edge_index) == 0
 
 
+def test_rank_ordering_uses_drawn_y_layers_not_longest_path_ranks() -> None:
+    """The ordering arm permutes incumbent y-layers when graph ranks disagree."""
+    edge_index = torch.tensor([[0, 1, 0, 4], [3, 2, 4, 2]], dtype=torch.long)
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+            [5.0, 20.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    drawn_layers = _rank_to_nodes_from_incumbent_y(incumbent, edge_index, 5)
+    ordered = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index)
+
+    assert sorted(drawn_layers[1]) == [2, 3]
+    assert _exact_crossing_count(ordered, edge_index) < _exact_crossing_count(
+        incumbent,
+        edge_index,
+    )
+
+
 def test_rank_ordering_non_adjacent_reinsert_reduces_crossings() -> None:
     """The small-graph ordering pass accepts only fewer-crossing layouts."""
     edge_index = torch.tensor([[0, 1, 2], [5, 4, 3]], dtype=torch.long)
@@ -302,6 +328,211 @@ def test_rank_ordering_noop_when_crossings_cannot_improve() -> None:
     ordered = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index)
 
     assert torch.equal(ordered, incumbent)
+
+
+def test_rank_ordering_library_mode_wall_clock_cap() -> None:
+    """Width-eight ranks return promptly without benchmark deadline metadata."""
+    sources = []
+    targets = []
+    for src in range(8):
+        for dst in range(8, 16):
+            sources.append(src)
+            targets.append(dst)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    x_values = torch.arange(8, dtype=torch.float32) * 10.0
+    incumbent = torch.cat(
+        [
+            torch.stack([x_values, torch.zeros(8)], dim=1),
+            torch.stack([torch.flip(x_values, dims=(0,)), torch.full((8,), 10.0)], dim=1),
+            torch.stack([x_values, torch.full((8,), 20.0)], dim=1),
+        ],
+        dim=0,
+    )
+
+    started = time.perf_counter()
+    ordered = _rank_local_zero_crossing_swap_candidate(incumbent, edge_index, config=None)
+    elapsed_s = time.perf_counter() - started
+
+    assert ordered.shape == incumbent.shape
+    assert elapsed_s < 3.0
+
+
+def test_ordering_cost_gate_blocks_dense_medium_graph() -> None:
+    """Medium DAGs with too many edge pairs are not admitted to ordering."""
+    rank_to_nodes = {0: list(range(65)), 1: list(range(65, 130))}
+
+    assert not _ordering_cost_admissible(
+        num_nodes=130,
+        edge_count=900,
+        rank_to_nodes=rank_to_nodes,
+        max_passes=3,
+    )
+
+
+def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
+    monkeypatch: object,
+) -> None:
+    """A crossing-only ordering win cannot alter the portfolio output."""
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1], [3, 2]], dtype=torch.long)
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_native_problem(
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Return the incumbent that has one fixable crossing."""
+        del problem, state, ctx, config
+        return incumbent.clone()
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Keep all non-ordering candidates tied with the incumbent."""
+        del args, kwargs
+        return 10.0
+
+    def fake_dual_gate(
+        candidate: torch.Tensor,
+        incumbent_pair: W5ScorePair,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        all_pairs_dist: Optional[object],
+    ) -> tuple[bool, W5ScorePair]:
+        """Reject the crossing-improving candidate under the frozen dual gate."""
+        del incumbent_pair, problem, cluster_ids, all_pairs_dist
+        captured["candidate"] = candidate
+        return False, W5ScorePair(directed=11.0, undirected=9.0)
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Return a tied non-ordering challenger without external solver cost."""
+        del kwargs
+        return incumbent.clone()
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Register only incumbent-identical challengers."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        positions[name] = raw_pos
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_score)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_ordering_candidate_dual_dominates",
+        fake_dual_gate,
+    )
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0),
+    )
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert _exact_crossing_count(captured["candidate"], edge_index) == 0
+    assert torch.equal(returned, incumbent)
+
+
+def test_directed_portfolio_full_path_noop_keeps_incumbent(monkeypatch: object) -> None:
+    """The complete portfolio path returns the incumbent when ordering is no-op."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a zero-crossing incumbent."""
+        del args, kwargs
+        return incumbent.clone()
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Keep all candidates tied so the incumbent wins ties."""
+        del args, kwargs
+        return 10.0
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Return an incumbent-identical challenger."""
+        del kwargs
+        return incumbent.clone()
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Register only no-op candidates."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        positions[name] = raw_pos
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [2, 3]], dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0),
+    )
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert torch.equal(returned, incumbent)
 
 
 def test_directed_ordering_dual_gate_rejects_single_ruler_win(
