@@ -8,7 +8,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from itertools import permutations
-from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -46,6 +46,10 @@ DIRECTED_ORDERING_NUDGE_CROSSING_CAP = 64
 DIRECTED_ORDERING_NUDGE_TRIAL_CAP = 256
 DIRECTED_ORDERING_PAIR_BUDGET_CHECK_INTERVAL = 2_000
 DIRECTED_ORDERING_W5_NODE_CAP = 32
+DIRECTED_RECOMBINANT_MIN_NODES = 80
+DIRECTED_RECOMBINANT_MAX_NODES = 600
+DIRECTED_RECOMBINANT_MAX_CANDIDATES = 6
+DIRECTED_RECOMBINANT_PRIOR_S = 15.0
 DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
 DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
@@ -60,6 +64,16 @@ _LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+
+
+@dataclass(frozen=True)
+class _RecombinantLayeredSpec:
+    """One bounded layered-stage cross for the directed portfolio."""
+
+    name: str
+    layering: str
+    ordering: str
+    xcoord: str
 
 
 def _score_directed_candidate(
@@ -396,6 +410,659 @@ def _predicted_arm_budget_available(
         + ABSOLUTE_DEADLINE_RESERVE_S
     )
     return float(remaining) > required
+
+
+def _prediction_cpu_elapsed_s(started_process_time_s: float) -> float:
+    """Return per-process CPU seconds elapsed for arm-cost prediction.
+
+    Parameters
+    ----------
+    started_process_time_s : float
+        ``time.process_time()`` reading captured before a candidate arm.
+
+    Returns
+    -------
+    float
+        Non-negative process CPU seconds elapsed since the captured start.
+    """
+    return max(0.0, time.process_time() - float(started_process_time_s))
+
+
+def _directed_recombinant_layered_enabled(problem: LayoutProblem) -> bool:
+    """Return whether bounded recombinant layered candidates may be built.
+
+    The gate is deliberately structural and narrow: item 3 targets semantic
+    DAGs with scale-free/dependency/citation-like layered-axis gaps. Off-class
+    graphs do not even construct the candidate family, preserving byte-level
+    behavior outside the intended directed rows.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem with prepared topology classification.
+
+    Returns
+    -------
+    bool
+        ``True`` only for the bounded directed layered-gap class.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_RECOMBINANT_MIN_NODES or n > DIRECTED_RECOMBINANT_MAX_NODES or edge_count == 0:
+        return False
+    structure = problem.structure
+    if structure is None:
+        return False
+    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+    tags = set(getattr(structure, "topology_tags", ()))
+    if tags.intersection({"planar_dag", "lattice_like", "wide_layered", "bipartite_dag"}):
+        return False
+    effective_layers = int(
+        getattr(structure, "num_layers_effective", getattr(structure, "num_layers", 0))
+    )
+    if effective_layers < 10:
+        return False
+    # The current target rows are shallow-diameter, hub-skewed DAGs
+    # (dependency/citation/power-law). This rejects broad random DAGs and
+    # undirected-origin grids without naming benchmark rows.
+    return (
+        float(getattr(structure, "edge_to_node_ratio", 0.0)) >= 1.8
+        and float(getattr(structure, "hub_edge_fraction", 0.0)) >= 0.22
+        and 0 < int(getattr(structure, "diameter_estimate", 0)) <= 8
+    )
+
+
+def _recombinant_layered_specs() -> tuple[_RecombinantLayeredSpec, ...]:
+    """Return the curated bounded IDEA-2 layered-stage crosses.
+
+    Returns
+    -------
+    tuple[_RecombinantLayeredSpec, ...]
+        Six complete layering/order/x-coordinate combinations. This is a
+        curated grid, not a Cartesian product.
+    """
+    return (
+        _RecombinantLayeredSpec(
+            name="recomb_lp_bary_bk",
+            layering="longest_path",
+            ordering="barycenter_transpose",
+            xcoord="brandes_koepf",
+        ),
+        _RecombinantLayeredSpec(
+            name="recomb_lp_median_lp",
+            layering="longest_path",
+            ordering="median",
+            xcoord="dot_lp",
+        ),
+        _RecombinantLayeredSpec(
+            name="recomb_ns_bary_bk",
+            layering="network_simplex_tightened",
+            ordering="barycenter_transpose",
+            xcoord="brandes_koepf",
+        ),
+        _RecombinantLayeredSpec(
+            name="recomb_ns_median_lp",
+            layering="network_simplex_tightened",
+            ordering="median",
+            xcoord="dot_lp",
+        ),
+        _RecombinantLayeredSpec(
+            name="recomb_native_discrete_bk",
+            layering="native_current",
+            ordering="discrete",
+            xcoord="brandes_koepf",
+        ),
+        _RecombinantLayeredSpec(
+            name="recomb_lp_discrete_lp",
+            layering="longest_path",
+            ordering="discrete",
+            xcoord="dot_lp",
+        ),
+    )
+
+
+def _dense_rank_values(rank_values: Sequence[int]) -> list[int]:
+    """Return rank values remapped to dense non-negative layer ids.
+
+    Parameters
+    ----------
+    rank_values : sequence[int]
+        Per-node rank values.
+
+    Returns
+    -------
+    list[int]
+        Dense rank id for each node.
+    """
+    if not rank_values:
+        return []
+    unique = {int(value) for value in rank_values}
+    lookup = {value: index for index, value in enumerate(sorted(unique))}
+    return [lookup[int(value)] for value in rank_values]
+
+
+def _native_current_rank_values(incumbent: torch.Tensor, problem: LayoutProblem) -> list[int]:
+    """Infer rank values from the incumbent's drawn y-layers.
+
+    Parameters
+    ----------
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed layout problem.
+
+    Returns
+    -------
+    list[int]
+        Dense per-node rank values.
+    """
+    rank_to_nodes = _rank_to_nodes_from_incumbent_y(
+        incumbent,
+        problem.edge_index,
+        problem.num_nodes,
+    )
+    ranks = [0] * int(problem.num_nodes)
+    for rank, nodes in rank_to_nodes.items():
+        for node in nodes:
+            if 0 <= int(node) < int(problem.num_nodes):
+                ranks[int(node)] = int(rank)
+    return _dense_rank_values(ranks)
+
+
+def _recombinant_rank_values(
+    spec: _RecombinantLayeredSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+) -> Optional[list[int]]:
+    """Return per-node ranks for one recombinant layering stage.
+
+    Parameters
+    ----------
+    spec : _RecombinantLayeredSpec
+        Candidate specification.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    list[int] or None
+        Dense rank values, or ``None`` when the existing layerer cannot solve
+        the graph.
+    """
+    if spec.layering == "native_current":
+        return _native_current_rank_values(incumbent, problem)
+    if spec.layering == "longest_path":
+        ranks, _max_width, _long_edge_ratio = _directed_rank_profile(
+            problem.edge_index,
+            int(problem.num_nodes),
+        )
+        return _dense_rank_values(ranks)
+    if spec.layering == "network_simplex_tightened":
+        try:
+            from dagua.layout.ops.elk import _network_simplex_layers
+
+            edges = [
+                (int(src), int(dst))
+                for src, dst in problem.edge_index.detach().to(device="cpu").t().tolist()
+                if int(src) != int(dst)
+            ]
+            return _dense_rank_values(_network_simplex_layers(int(problem.num_nodes), edges))
+        except Exception:
+            return None
+    return None
+
+
+def _recombinant_adjacency_lists(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+    """Return undirected adjacency lists for registered ordering ops.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Neighbor ids keyed by node, including both directions so barycenter
+        sweeps can see parents and children from the same adjacency cache.
+    """
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    for src, dst in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i == dst_i or not (0 <= src_i < num_nodes and 0 <= dst_i < num_nodes):
+            continue
+        adjacency[src_i].append(dst_i)
+        adjacency[dst_i].append(src_i)
+    return adjacency
+
+
+def _initial_recombinant_positions(
+    rank_values: Sequence[int],
+    node_sizes: Optional[torch.Tensor],
+    rank_sep: float,
+    node_sep: float,
+) -> torch.Tensor:
+    """Build deterministic slots for a layered candidate before x assignment.
+
+    Parameters
+    ----------
+    rank_values : sequence[int]
+        Per-node rank values.
+    node_sizes : torch.Tensor, optional
+        Node sizes with shape ``[N, 2]``.
+    rank_sep : float
+        Vertical center-to-center rank spacing.
+    node_sep : float
+        Horizontal gap added to the median node width.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]``.
+    """
+    ranks = [int(value) for value in rank_values]
+    n = len(ranks)
+    if node_sizes is not None and node_sizes.numel() > 0:
+        widths = node_sizes.detach().to(device="cpu", dtype=torch.float32)[:, 0]
+        slot = float(widths.median().item()) + float(node_sep)
+    else:
+        slot = max(float(node_sep), 1.0)
+    rank_to_nodes: dict[int, list[int]] = {}
+    for node, rank in enumerate(ranks):
+        rank_to_nodes.setdefault(rank, []).append(node)
+    out = torch.zeros((n, 2), dtype=torch.float32)
+    for rank, nodes in rank_to_nodes.items():
+        center = 0.5 * float(len(nodes) - 1)
+        for order, node in enumerate(nodes):
+            out[node, 0] = (float(order) - center) * slot
+            out[node, 1] = float(rank) * float(rank_sep)
+    if n > 0:
+        out = out - out.mean(dim=0, keepdim=True)
+    return out
+
+
+def _ordered_layers_from_ordering(
+    rank_values: Sequence[int],
+    ordering: Optional[torch.Tensor],
+) -> list[list[int]]:
+    """Return ordered node layers from rank values and optional ordering.
+
+    Parameters
+    ----------
+    rank_values : sequence[int]
+        Per-node rank values.
+    ordering : torch.Tensor, optional
+        Per-node ordering values with shape ``[N]``.
+
+    Returns
+    -------
+    list[list[int]]
+        Nodes grouped by rank and sorted left-to-right.
+    """
+    rank_to_nodes: dict[int, list[int]] = {}
+    for node, rank in enumerate(rank_values):
+        rank_to_nodes.setdefault(int(rank), []).append(node)
+    if ordering is None:
+        return [rank_to_nodes[rank] for rank in sorted(rank_to_nodes)]
+    order_cpu = ordering.detach().to(device="cpu", dtype=torch.long)
+    layers: list[list[int]] = []
+    for rank in sorted(rank_to_nodes):
+        nodes = rank_to_nodes[rank]
+        layers.append(sorted(nodes, key=lambda node: (int(order_cpu[node].item()), node)))
+    return layers
+
+
+def _apply_recombinant_ordering(
+    spec: _RecombinantLayeredSpec,
+    problem: LayoutProblem,
+    rank_values: Sequence[int],
+    initial_pos: torch.Tensor,
+    config: LayoutConfig,
+) -> tuple[list[list[int]], torch.Tensor]:
+    """Run one existing ordering stage for a recombinant candidate.
+
+    Parameters
+    ----------
+    spec : _RecombinantLayeredSpec
+        Candidate specification.
+    problem : LayoutProblem
+        Directed layout problem.
+    rank_values : sequence[int]
+        Dense per-node rank values.
+    initial_pos : torch.Tensor
+        Slot-based positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying budget metadata.
+
+    Returns
+    -------
+    tuple[list[list[int]], torch.Tensor]
+        Ordered layers and positions after ordering.
+    """
+    layers = torch.tensor(rank_values, dtype=torch.long)
+    state = SolveState(
+        pos=initial_pos.detach().clone(),
+        layers=layers,
+        adjacency=_recombinant_adjacency_lists(problem.edge_index, int(problem.num_nodes)),
+    )
+    ctx = RuntimeContext()
+    if spec.ordering == "barycenter_transpose":
+        from dagua.layout.ops.ordering import (
+            BarycenterSweep,
+            BarycenterSweepConfig,
+            TransposeHeuristic,
+            TransposeHeuristicConfig,
+        )
+
+        state = BarycenterSweep(BarycenterSweepConfig(passes=12, direction="both")).apply(
+            problem,
+            state,
+            ctx,
+        )
+        state = TransposeHeuristic(TransposeHeuristicConfig(passes=4)).apply(problem, state, ctx)
+    elif spec.ordering == "median":
+        from dagua.layout.ops.ordering import MedianSweep, MedianSweepConfig
+
+        state = MedianSweep(MedianSweepConfig(passes=12)).apply(problem, state, ctx)
+    elif spec.ordering == "discrete":
+        ordered_pos = _rank_local_zero_crossing_swap_candidate(
+            initial_pos,
+            problem.edge_index,
+            max_passes=_ordering_portfolio_max_passes(int(problem.num_nodes)),
+            config=config,
+        )
+        state.pos = ordered_pos
+        state.ordering = None
+    if spec.ordering == "discrete":
+        rank_to_nodes = _rank_to_nodes_from_incumbent_y(
+            state.pos,
+            problem.edge_index,
+            problem.num_nodes,
+        )
+        ordered_layers = [
+            sorted(nodes, key=lambda node: float(state.pos[node, 0].item()))
+            for _rank, nodes in sorted(rank_to_nodes.items())
+        ]
+    else:
+        ordered_layers = _ordered_layers_from_ordering(rank_values, state.ordering)
+    return ordered_layers, state.pos.detach().to(device="cpu", dtype=torch.float32)
+
+
+def _assign_recombinant_x_coordinates(
+    spec: _RecombinantLayeredSpec,
+    ordered_layers: Sequence[Sequence[int]],
+    problem: LayoutProblem,
+    node_sep: float,
+) -> Optional[torch.Tensor]:
+    """Assign x coordinates for one recombinant candidate.
+
+    Parameters
+    ----------
+    spec : _RecombinantLayeredSpec
+        Candidate specification.
+    ordered_layers : sequence[sequence[int]]
+        Ordered node layers.
+    problem : LayoutProblem
+        Directed layout problem.
+    node_sep : float
+        Horizontal node separation.
+
+    Returns
+    -------
+    torch.Tensor or None
+        X coordinates with shape ``[N]``, or ``None`` if the existing x solver
+        cannot run.
+    """
+    n = int(problem.num_nodes)
+    sizes = (
+        problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        if problem.node_sizes is not None
+        else torch.full((n, 2), float(node_sep), dtype=torch.float32)
+    )
+    if spec.xcoord == "dot_lp":
+        try:
+            from dagua.layout.ops.pipelines.dagua_native import (
+                _graphviz_dot_x_position_network_simplex,
+            )
+
+            return _graphviz_dot_x_position_network_simplex(
+                rank_ordering=ordered_layers,
+                node_widths=sizes[:, 0],
+                edge_index=problem.edge_index.detach().to(device="cpu"),
+                node_sep=node_sep,
+                edge_weights=(
+                    None
+                    if problem.edge_weights is None
+                    else problem.edge_weights.detach().to(device="cpu")
+                ),
+                center=True,
+            ).to(dtype=torch.float32)
+        except Exception:
+            return None
+    if spec.xcoord == "brandes_koepf":
+        try:
+            from dagua.layout.ops.brandes_koepf import brandes_koepf_x_assignment
+
+            order_index = {
+                int(node): order for layer in ordered_layers for order, node in enumerate(layer)
+            }
+            rank_index = {
+                int(node): rank for rank, layer in enumerate(ordered_layers) for node in layer
+            }
+            predecessors: dict[int, list[int]] = {node: [] for node in range(n)}
+            successors: dict[int, list[int]] = {node: [] for node in range(n)}
+            candidate_edges = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+            for src, dst in candidate_edges.t().tolist():
+                src_i = int(src)
+                dst_i = int(dst)
+                if src_i == dst_i or not (0 <= src_i < n and 0 <= dst_i < n):
+                    continue
+                if abs(rank_index.get(dst_i, 0) - rank_index.get(src_i, 0)) != 1:
+                    continue
+                successors[src_i].append(dst_i)
+                predecessors[dst_i].append(src_i)
+            for node in range(n):
+                predecessors[node].sort(key=lambda item: (order_index.get(item, 0), item))
+                successors[node].sort(key=lambda item: (order_index.get(item, 0), item))
+            widths = {node: float(sizes[node, 0].item()) for node in range(n)}
+            x_map = brandes_koepf_x_assignment(
+                layering=ordered_layers,
+                predecessors=predecessors,
+                successors=successors,
+                widths=widths,
+                dummy_nodes=set(),
+                node_sep=node_sep,
+            )
+            x_values = torch.tensor([float(x_map.get(node, 0.0)) for node in range(n)])
+            return (x_values - x_values.mean()).to(dtype=torch.float32)
+        except Exception:
+            return None
+    return None
+
+
+def _build_recombinant_layered_candidate(
+    spec: _RecombinantLayeredSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> Optional[torch.Tensor]:
+    """Build one complete recombinant layered candidate.
+
+    Parameters
+    ----------
+    spec : _RecombinantLayeredSpec
+        Candidate specification.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Complete candidate positions with shape ``[N, 2]`` when every existing
+        stage succeeds, otherwise ``None``.
+    """
+    rank_values = _recombinant_rank_values(spec, problem, incumbent)
+    if rank_values is None or len(rank_values) != int(problem.num_nodes):
+        return None
+    rank_sep = float(getattr(config, "_dagua_native_rank_sep", config.rank_sep))
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    initial = _initial_recombinant_positions(rank_values, problem.node_sizes, rank_sep, node_sep)
+    ordered_layers, ordered_pos = _apply_recombinant_ordering(
+        spec,
+        problem,
+        rank_values,
+        initial,
+        config,
+    )
+    x_values = _assign_recombinant_x_coordinates(spec, ordered_layers, problem, node_sep)
+    if x_values is None or int(x_values.numel()) != int(problem.num_nodes):
+        return None
+    y_values = torch.tensor(rank_values, dtype=torch.float32) * rank_sep
+    out = torch.stack([x_values.to(dtype=torch.float32), y_values], dim=1)
+    out[:, 1] = out[:, 1] - out[:, 1].mean()
+    if not torch.isfinite(out).all():
+        return None
+    # Preserve the ordering-stage y frame when native-current/discrete creates
+    # a useful drawn-rank interpretation; x is still replaced by the selected
+    # coordinate stage, making this a complete layered recombination.
+    if spec.layering == "native_current" and ordered_pos.shape == out.shape:
+        out[:, 1] = ordered_pos[:, 1] - ordered_pos[:, 1].mean()
+    return out
+
+
+def _directed_recombinant_layered_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> dict[str, torch.Tensor]:
+    """Build bounded recombinant layered candidates for target DAG classes.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying optional deadline metadata.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate family names mapped to raw complete layouts.
+    """
+    if not _directed_recombinant_layered_enabled(problem):
+        return {}
+    candidates: dict[str, torch.Tensor] = {}
+    predicted_cost_s = DIRECTED_RECOMBINANT_PRIOR_S
+    for spec in _recombinant_layered_specs():
+        if len(candidates) >= DIRECTED_RECOMBINANT_MAX_CANDIDATES:
+            break
+        if not _predicted_arm_budget_available(config, predicted_cost_s):
+            break
+        process_started = time.process_time()
+        candidate = _build_recombinant_layered_candidate(spec, problem, incumbent, config)
+        predicted_cost_s = max(_prediction_cpu_elapsed_s(process_started), 1.0e-3)
+        if candidate is None:
+            continue
+        candidates[spec.name] = candidate
+    return candidates
+
+
+def _register_recombinant_layered_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    positions: Dict[str, torch.Tensor],
+    scores: Dict[str, float],
+    incumbent_pair: Optional["W5ScorePair"],
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    arm_timings: Dict[str, Tuple[float, float]],
+) -> Optional["W5ScorePair"]:
+    """Register only dual-ruler-dominating recombinant candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+    positions : dict[str, torch.Tensor]
+        Candidate registry updated in place.
+    scores : dict[str, float]
+        Full directed scores updated for admitted candidates.
+    incumbent_pair : W5ScorePair, optional
+        Cached incumbent dual-ruler score pair.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    arm_timings : dict[str, tuple[float, float]]
+        Per-arm timing registry updated for admitted candidates.
+
+    Returns
+    -------
+    W5ScorePair or None
+        Cached incumbent score pair when computed, otherwise ``None``.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    if not _portfolio_has_budget(config, min_remaining_s=2.0):
+        return incumbent_pair
+    raw_candidates = _directed_recombinant_layered_candidates(problem, incumbent, config)
+    if not raw_candidates:
+        return incumbent_pair
+    if incumbent_pair is None:
+        incumbent_pair = _score_directed_candidate_pair(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+    for name, raw_candidate in raw_candidates.items():
+        candidate_started = time.perf_counter()
+        variants: Dict[str, torch.Tensor] = {}
+        _register_challenger_variants(
+            name,
+            raw_candidate,
+            problem,
+            config,
+            variants,
+            preserve_rank_order=True,
+        )
+        for variant_name, candidate in variants.items():
+            # Item 3 is monotone by construction: recombinant variants are
+            # admitted only when the same frozen directed and undirected
+            # composites both beat the incumbent. Off-class rows never reach
+            # candidate construction at all.
+            dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
+                candidate,
+                incumbent_pair,
+                problem,
+                cluster_ids,
+                all_pairs_dist,
+            )
+            if not dominates:
+                continue
+            positions[variant_name] = candidate
+            scores[variant_name] = candidate_pair.directed
+            arm_timings[variant_name] = (candidate_started, time.perf_counter())
+    return incumbent_pair
 
 
 def _force_challengers_enabled(edge_index: torch.Tensor, num_nodes: int) -> bool:
@@ -1829,6 +2496,25 @@ def layout_native_directed_portfolio(
             except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
                 _reraise_worker_timeout(exc)
                 _LOGGER.warning("directed rank-local swap challenger failed", exc_info=True)
+    if _directed_recombinant_layered_enabled(problem) and _predicted_arm_budget_available(
+        config,
+        DIRECTED_RECOMBINANT_PRIOR_S,
+    ):
+        try:
+            incumbent_pair = _register_recombinant_layered_candidates(
+                problem=problem,
+                incumbent=incumbent,
+                config=config,
+                positions=positions,
+                scores=scores,
+                incumbent_pair=incumbent_pair,
+                cluster_ids=cluster_ids,
+                all_pairs_dist=all_pairs_dist,
+                arm_timings=arm_timings,
+            )
+        except Exception as exc:  # noqa: BLE001 -- recombinant candidates cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed recombinant layered challenger failed", exc_info=True)
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
