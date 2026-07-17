@@ -16,6 +16,7 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _collinear_dodge,
     _dot_rank_assignment,
     _is_graphviz_dot_cluster_fidelity_mode,
+    _terminal_w5_polish,
     layout_dagua_native_pipeline,
 )
 
@@ -327,6 +328,7 @@ def test_gate_row_deadline_runs_real_pipeline_not_prelayout_fallback(
     import importlib
 
     native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
     edge_index, node_sizes, num_nodes = _gate_row_graph()
     real_pipeline_pos = torch.stack(
         (
@@ -346,7 +348,13 @@ def test_gate_row_deadline_runs_real_pipeline_not_prelayout_fallback(
         del state, ctx, config
         return real_pipeline_pos.to(device=problem.edge_index.device)
 
+    def no_terminal_w5_slice(config: Optional[LayoutConfig]) -> Optional[float]:
+        """Disable terminal W5 so this test isolates the prelayout gate."""
+        del config
+        return None
+
     monkeypatch.setattr(native, "_run_native_problem", fake_run_native_problem)
+    monkeypatch.setattr(native_finisher, "_finisher_slice_s", no_terminal_w5_slice)
 
     actual = layout_dagua_native_pipeline(
         edge_index=edge_index,
@@ -771,6 +779,213 @@ def test_terminal_w5_noops_on_fidelity_no_budget_and_trivial_graph(
     assert torch.equal(fidelity, terminal)
     assert torch.equal(trivial, torch.zeros((1, 2)))
     assert calls == {"run_w5": 0, "telemetry": 1}
+
+
+def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large terminal row runs W5 once and rejects non-dominating winners."""
+    import importlib
+
+    import dagua.metrics as metrics
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5Candidate,
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+    )
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    num_nodes = 500
+    final_pos = torch.stack(
+        (
+            torch.arange(num_nodes, dtype=torch.float32),
+            torch.zeros(num_nodes, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    edge_index = torch.stack(
+        (
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ),
+        dim=0,
+    )
+    node_sizes = torch.full((num_nodes, 2), 1.0)
+    config = _terminal_w5_config()
+    config._dagua_native_terminal_w5_owner = True
+    calls = {"run_w5": 0}
+    one_sided_pair = W5ScorePair(directed=11.0, undirected=10.0)
+    w5_pos = final_pos + torch.tensor([0.0, 10.0])
+
+    def fake_full(*args: object, **kwargs: object) -> dict[str, float]:
+        """Return stable terminal metrics for a large-row incumbent."""
+        del args, kwargs
+        return {
+            "directed_score": 10.0,
+            "undirected_score": 10.0,
+            "directed_flow_score": 1.0,
+            "depth_order_score": 1.0,
+            "ksm_score": 0.9,
+            "edge_length_deviation_score": 0.9,
+        }
+
+    def fake_composite(numeric: dict[str, float]) -> float:
+        """Return the directed fixture score."""
+        return float(numeric["directed_score"])
+
+    def fake_composite_undirected(numeric: dict[str, float]) -> float:
+        """Return the undirected fixture score."""
+        return float(numeric["undirected_score"])
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+    ) -> W5FinisherResult:
+        """Return a one-sided W5 winner for terminal monotonicity checks."""
+        del (
+            incumbent_pos,
+            seeds,
+            edge_index,
+            node_sizes,
+            score_fn,
+            is_semantically_directed,
+            declared_hierarchical,
+            direction_is_declared,
+            config,
+            accept_margin,
+            incumbent_axes,
+        )
+        calls["run_w5"] += 1
+        accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "x_only")
+        return W5FinisherResult(
+            winner_pos=w5_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            winner_score_pair=one_sided_pair,
+            winner_name="w5_one_sided",
+            deadline_returned=False,
+            accepted=(accepted,),
+            rejected=(),
+            checkpoints=(),
+            mode="x_only",
+            steps=1,
+        )
+
+    def ignore_w5_telemetry(*args: object) -> None:
+        """Suppress W5 telemetry in the large-row unit fixture."""
+        del args
+        return None
+
+    monkeypatch.setattr(metrics, "full", fake_full)
+    monkeypatch.setattr(metrics, "composite", fake_composite)
+    monkeypatch.setattr(metrics, "composite_undirected", fake_composite_undirected)
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", ignore_w5_telemetry)
+
+    first = _terminal_w5_polish(
+        final_pos,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        config=config,
+        structure=None,
+        direction="TB",
+    )
+    second = _terminal_w5_polish(
+        final_pos + 1.0,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        config=config,
+        structure=None,
+        direction="TB",
+    )
+
+    assert calls["run_w5"] == 1
+    assert torch.equal(first, final_pos)
+    assert torch.equal(second, final_pos + 1.0)
+    assert bool(getattr(config, "_dagua_native_w5_measured_sizing", False))
+    assert getattr(config, "_dagua_native_w5_referee_cost_s") > 0.0
+
+
+def test_terminal_w5_skip_path_exception_is_additive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal setup/scoring exceptions on the skip path preserve final_pos."""
+    import importlib
+
+    import dagua.metrics as metrics
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    final_pos, _terminal, _w5_pos = _terminal_w5_fixture_tensors()
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    config = _terminal_w5_config()
+    config._dagua_native_terminal_w5_owner = True
+
+    def raising_full(*args: object, **kwargs: object) -> dict[str, float]:
+        """Raise a non-timeout terminal metrics failure."""
+        del args, kwargs
+        raise ValueError("synthetic terminal metrics failure")
+
+    def forbidden_run_w5(*args: object, **kwargs: object) -> None:
+        """Fail if W5 runs after setup scoring failed."""
+        del args, kwargs
+        raise AssertionError("terminal W5 should not run after setup failure")
+
+    monkeypatch.setattr(metrics, "full", raising_full)
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", forbidden_run_w5)
+
+    actual = _terminal_w5_polish(
+        final_pos,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        config=config,
+        structure=None,
+        direction="TB",
+    )
+
+    assert torch.equal(actual, final_pos)
+
+
+def test_terminal_w5_skip_path_worker_timeout_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-timeout-like setup failures still re-raise from terminal W5."""
+    import dagua.metrics as metrics
+
+    final_pos, _terminal, _w5_pos = _terminal_w5_fixture_tensors()
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    config = _terminal_w5_config()
+    config._dagua_native_terminal_w5_owner = True
+
+    def raising_full(*args: object, **kwargs: object) -> dict[str, float]:
+        """Raise the benchmark worker-timeout sentinel from setup scoring."""
+        del args, kwargs
+        raise _WorkerLayoutTimeoutError("worker layout timeout exceeded")
+
+    monkeypatch.setattr(metrics, "full", raising_full)
+
+    with pytest.raises(_WorkerLayoutTimeoutError):
+        _terminal_w5_polish(
+            final_pos,
+            edge_index=edge_index,
+            node_sizes=node_sizes,
+            config=config,
+            structure=None,
+            direction="TB",
+        )
 
 
 def test_collinear_dodge_moves_blocker_off_skip_edge() -> None:

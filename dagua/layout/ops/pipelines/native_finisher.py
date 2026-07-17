@@ -38,8 +38,12 @@ _MIN_FINISHER_ENTRY_S = 1.0
 _MAX_W5_SPEND_S = 20.0
 _TOTAL_BUDGET_FRACTION = 0.10
 _W5_ACCEPT_MARGIN = 0.05
-_PREDICTED_COST_SKIP_NODES = 250
 _PREDICTED_COST_LATE_ENTRY_REMAINING_S = 90.0
+_PREDICTED_COST_RETURN_RESERVE_S = 2.0
+_MEASURED_COST_MAX_SEEDS = 2
+_MEASURED_COST_MAX_STEPS = 24
+_MEASURED_COST_MAX_CHECKPOINTS = 2
+_MEASURED_COST_DEFAULT_REFEREE_S = 0.40
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
@@ -170,6 +174,38 @@ class W5Seed:
 
     name: str
     pos: torch.Tensor
+
+
+@dataclass(frozen=True)
+class W5CostPlan:
+    """Measured W5 work bounds admitted by the shared spend cap.
+
+    Parameters
+    ----------
+    seeds : int
+        Number of finite seeds to run, capped at two.
+    steps : int
+        Maximum optimizer steps per seed, capped at twenty-four.
+    checkpoints : int
+        Maximum honest-scored checkpoints per seed, capped at two.
+    measured_step_s : float
+        Process-time seconds for one surrogate step measurement.
+    referee_s : float
+        Process-time seconds for one honest referee score, measured on the
+        incumbent before W5 entry.
+    budget_s : float
+        Process-time seconds available under the shared W5 spend cap.
+    predicted_s : float
+        Conservative process-time cost estimate for the admitted plan.
+    """
+
+    seeds: int
+    steps: int
+    checkpoints: int
+    measured_step_s: float
+    referee_s: float
+    budget_s: float
+    predicted_s: float
 
 
 @dataclass(frozen=True)
@@ -524,6 +560,30 @@ def _w5_spent_s(config: Optional[LayoutConfig], started_perf: Optional[float] = 
     return previous + max(0.0, time.perf_counter() - started_perf)
 
 
+def _w5_process_spent_s(
+    config: Optional[LayoutConfig],
+    started_process: Optional[float] = None,
+) -> float:
+    """Return accumulated W5 process seconds, including this invocation.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying accumulated process runtime.
+    started_process : float, optional
+        ``time.process_time()`` value for the active invocation.
+
+    Returns
+    -------
+    float
+        Accumulated W5 process seconds.
+    """
+    previous = float(getattr(config, "_dagua_native_w5_process_spent_s", 0.0))
+    if started_process is None:
+        return previous
+    return previous + max(0.0, time.process_time() - started_process)
+
+
 def w5_predicted_skip_reason(
     node_count: int,
     edge_count: int,
@@ -546,10 +606,11 @@ def w5_predicted_skip_reason(
         Skip reason when W5 should preserve the incumbent without running, or
         ``None`` when W5 may proceed.
     """
+    del node_count, edge_count
     if _w5_disabled_by_env():
         return "disabled_by_env"
-    if node_count >= _PREDICTED_COST_SKIP_NODES:
-        return "predicted_cost_large_graph"
+    if bool(getattr(config, "_dagua_native_w5_measured_sizing", False)):
+        return None
     remaining = _process_remaining_s(config)
     if remaining is not None and remaining < _PREDICTED_COST_LATE_ENTRY_REMAINING_S:
         return "predicted_cost_late_entry"
@@ -973,6 +1034,8 @@ def _optimize_seed(
     mode: str,
     deadline: float,
     honest_axes: Optional[W5HonestAxes] = None,
+    max_steps: Optional[int] = None,
+    max_checkpoints: int = _MEASURED_COST_MAX_CHECKPOINTS,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Run one bounded W5 descent from ``seed``.
 
@@ -992,6 +1055,10 @@ def _optimize_seed(
         Absolute ``time.monotonic()`` deadline for optimizer work.
     honest_axes : W5HonestAxes, optional
         Honest incumbent axis scores used to weight barrier-mode gains.
+    max_steps : int, optional
+        Maximum optimizer steps allowed for measured cost sizing.
+    max_checkpoints : int, default=2
+        Maximum checkpoints to return for honest scoring.
 
     Returns
     -------
@@ -1021,10 +1088,19 @@ def _optimize_seed(
     lr = max(0.01, min(4.0, 0.04 * median_size))
     optimizer = torch.optim.Adam([work], lr=lr)
     node_count = int(work.shape[0])
-    desired_steps = 24 if node_count >= 300 else 36
+    base_desired_steps = 24 if node_count >= 300 else 36
+    desired_steps = (
+        min(base_desired_steps, int(max_steps)) if max_steps is not None else base_desired_steps
+    )
+    desired_steps = max(1, desired_steps)
     effective_max_steps = desired_steps
     checkpoints: list[tuple[int, torch.Tensor, float]] = []
-    checkpoint_steps = {max(1, desired_steps // 2), desired_steps}
+    if max_checkpoints <= 0:
+        checkpoint_steps: set[int] = set()
+    elif max_checkpoints == 1:
+        checkpoint_steps = {desired_steps}
+    else:
+        checkpoint_steps = {max(1, desired_steps // 2), desired_steps}
     completed_steps = 0
     for step in range(1, desired_steps + 1):
         if step > effective_max_steps:
@@ -1043,7 +1119,12 @@ def _optimize_seed(
             remaining_step_budget = max(0.0, deadline - time.monotonic())
             steps_that_fit = 1 + int(remaining_step_budget / step_cost)
             effective_max_steps = max(1, min(desired_steps, steps_that_fit))
-            checkpoint_steps = {max(1, effective_max_steps // 2), effective_max_steps}
+            if max_checkpoints <= 0:
+                checkpoint_steps = set()
+            elif max_checkpoints == 1:
+                checkpoint_steps = {effective_max_steps}
+            else:
+                checkpoint_steps = {max(1, effective_max_steps // 2), effective_max_steps}
         if mode == "x_only":
             with torch.no_grad():
                 work[:, 1] = start_y
@@ -1057,6 +1138,133 @@ def _optimize_seed(
             )
             checkpoints.append((step, checkpoint_pos, checkpoint_loss))
     return work.detach(), completed_steps, start_loss, checkpoints
+
+
+def _measure_one_surrogate_step_s(
+    seed: W5Seed,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    topo_depth: torch.Tensor,
+    mode: str,
+    honest_axes: Optional[W5HonestAxes],
+) -> float:
+    """Measure process-time cost for one W5 surrogate optimizer step.
+
+    Parameters
+    ----------
+    seed : W5Seed
+        Finite warm start used as the measurement surrogate.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Depth tensor with shape ``[N]``.
+    mode : str
+        Routed W5 optimization mode.
+    honest_axes : W5HonestAxes, optional
+        Honest incumbent axes used by barrier weighting.
+
+    Returns
+    -------
+    float
+        Positive process-time seconds for one measured surrogate step.
+    """
+    started_process = time.process_time()
+    _optimize_seed(
+        seed,
+        edge_index,
+        node_sizes,
+        topo_depth,
+        mode,
+        time.monotonic() + _PREDICTED_COST_RETURN_RESERVE_S,
+        honest_axes,
+        max_steps=1,
+        max_checkpoints=0,
+    )
+    return max(1.0e-6, time.process_time() - started_process)
+
+
+def _measured_cost_plan(
+    *,
+    seeds: Sequence[W5Seed],
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    topo_depth: torch.Tensor,
+    routed_mode: str,
+    slice_s: float,
+    config: Optional[LayoutConfig],
+    started_process: float,
+    remaining_entry: Optional[float],
+    honest_axes: Optional[W5HonestAxes],
+) -> Optional[W5CostPlan]:
+    """Return a measured W5 plan that fits the shared process-time cap.
+
+    Parameters
+    ----------
+    seeds : Sequence[W5Seed]
+        Finite deduplicated W5 seeds.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Depth tensor with shape ``[N]``.
+    routed_mode : str
+        First routed W5 mode.
+    slice_s : float
+        Work slice admitted by deadline gates.
+    config : LayoutConfig, optional
+        Prepared configuration carrying spend and referee measurements.
+    started_process : float
+        Process-time value captured at W5 entry.
+    remaining_entry : float, optional
+        Benchmark wall seconds remaining at W5 entry.
+    honest_axes : W5HonestAxes, optional
+        Honest incumbent axes used by barrier weighting.
+
+    Returns
+    -------
+    W5CostPlan or None
+        Admitted plan, or ``None`` when one seed and one checkpoint cannot fit.
+    """
+    referee_s = float(
+        getattr(config, "_dagua_native_w5_referee_cost_s", _MEASURED_COST_DEFAULT_REFEREE_S)
+    )
+    referee_s = max(1.0e-6, referee_s)
+    step_s = _measure_one_surrogate_step_s(
+        seeds[0],
+        edge_index,
+        node_sizes,
+        topo_depth,
+        routed_mode,
+        honest_axes,
+    )
+    spend_cap = _w5_spend_cap_s(config, remaining_entry)
+    cap_remaining = spend_cap - _w5_process_spent_s(config, started_process)
+    budget_s = max(0.0, min(float(slice_s), cap_remaining))
+    # W5 is additive: measured admission must leave an explicit return reserve
+    # and prove that the minimum honest attempt fits before any candidate can
+    # challenge the incumbent under the monotone dual-ruler gate.
+    usable_s = budget_s - _PREDICTED_COST_RETURN_RESERVE_S
+    if usable_s < step_s + referee_s:
+        return None
+    max_seeds = min(_MEASURED_COST_MAX_SEEDS, len(seeds))
+    for steps in range(_MEASURED_COST_MAX_STEPS, 0, -1):
+        for checkpoints in range(_MEASURED_COST_MAX_CHECKPOINTS, 0, -1):
+            for seed_count in range(max_seeds, 0, -1):
+                predicted_s = seed_count * (steps * step_s + checkpoints * referee_s)
+                if predicted_s <= usable_s:
+                    return W5CostPlan(
+                        seeds=seed_count,
+                        steps=steps,
+                        checkpoints=checkpoints,
+                        measured_step_s=step_s,
+                        referee_s=referee_s,
+                        budget_s=budget_s,
+                        predicted_s=predicted_s,
+                    )
+    return None
 
 
 def run_w5_finisher(
@@ -1110,6 +1318,7 @@ def run_w5_finisher(
         Anytime winner plus telemetry for all honest-scored checkpoints.
     """
     started_perf = time.perf_counter()
+    started_process = time.process_time()
     remaining_entry = _remaining_s(config)
     slice_s = _finisher_slice_s(config)
     node_count = int(incumbent_pos.shape[0])
@@ -1185,6 +1394,13 @@ def run_w5_finisher(
         if config is not None:
             previous_spent = float(getattr(config, "_dagua_native_w5_spent_s", 0.0))
             setattr(config, "_dagua_native_w5_spent_s", previous_spent + spent_s)
+            previous_process_spent = float(getattr(config, "_dagua_native_w5_process_spent_s", 0.0))
+            process_spent_s = max(0.0, time.process_time() - started_process)
+            setattr(
+                config,
+                "_dagua_native_w5_process_spent_s",
+                previous_process_spent + process_spent_s,
+            )
         return W5FinisherResult(
             winner_pos=winner_pos,
             incumbent_score_pair=incumbent_score_pair,
@@ -1229,7 +1445,11 @@ def run_w5_finisher(
             steps=0,
             skipped_reason=predicted_skip_reason or "no_budget",
         )
-    kept_seeds = _dedupe_seeds(seeds)
+    use_measured_cost = bool(getattr(config, "_dagua_native_w5_measured_sizing", False))
+    kept_seeds = _dedupe_seeds(
+        seeds,
+        max_seeds=_MEASURED_COST_MAX_SEEDS if use_measured_cost else 3,
+    )
     if not kept_seeds:
         return finish(
             winner_pos=incumbent_pos,
@@ -1254,6 +1474,49 @@ def run_w5_finisher(
         int(kept_seeds[0].pos.shape[0]),
         kept_seeds[0].pos.device,
     )
+    max_steps: Optional[int] = None
+    max_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
+    if use_measured_cost:
+        first_mode = _route_mode(
+            kept_seeds[0].pos.detach().to(device=edge_work.device, dtype=torch.float32),
+            edge_work,
+            topo_depth,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+            honest_axes=incumbent_axes,
+        )
+        cost_plan = _measured_cost_plan(
+            seeds=kept_seeds,
+            edge_index=edge_work,
+            node_sizes=size_work,
+            topo_depth=topo_depth,
+            routed_mode=first_mode,
+            slice_s=float(slice_s),
+            config=config,
+            started_process=started_process,
+            remaining_entry=remaining_entry,
+            honest_axes=incumbent_axes,
+        )
+        if cost_plan is None:
+            return finish(
+                winner_pos=incumbent_pos,
+                winner_score_pair=incumbent_score_pair,
+                winner_name="incumbent",
+                deadline_returned=True,
+                accepted=[],
+                rejected=[],
+                checkpoints=[],
+                phase_timings=[],
+                viability_counts={},
+                viability_drop_counts={},
+                mode="skip",
+                steps=0,
+                skipped_reason="predicted_cost_measured",
+            )
+        kept_seeds = kept_seeds[: cost_plan.seeds]
+        max_steps = cost_plan.steps
+        max_checkpoints = cost_plan.checkpoints
     winner_pos = incumbent_pos
     winner_score_pair = incumbent_score_pair
     winner_name = "incumbent"
@@ -1304,15 +1567,28 @@ def run_w5_finisher(
             accepted_before_mode = len(accepted)
             try:
                 optimize_started = time.perf_counter()
-                final_pos, steps, start_loss, scored_points = _optimize_seed(
-                    seed,
-                    edge_work,
-                    size_work,
-                    topo_depth,
-                    mode,
-                    deadline - _FINISHER_SCORE_RESERVE_S,
-                    incumbent_axes,
-                )
+                if use_measured_cost:
+                    final_pos, steps, start_loss, scored_points = _optimize_seed(
+                        seed,
+                        edge_work,
+                        size_work,
+                        topo_depth,
+                        mode,
+                        deadline - _FINISHER_SCORE_RESERVE_S,
+                        incumbent_axes,
+                        max_steps=max_steps,
+                        max_checkpoints=max_checkpoints,
+                    )
+                else:
+                    final_pos, steps, start_loss, scored_points = _optimize_seed(
+                        seed,
+                        edge_work,
+                        size_work,
+                        topo_depth,
+                        mode,
+                        deadline - _FINISHER_SCORE_RESERVE_S,
+                        incumbent_axes,
+                    )
                 optimize_s = max(0.0, time.perf_counter() - optimize_started)
             except Exception as exc:  # noqa: BLE001 -- W5 is optional candidate generation
                 if is_worker_timeout_like_exception(exc):
@@ -1337,7 +1613,7 @@ def run_w5_finisher(
                     .item()
                 )
                 scored_points.append((steps, final_pos, final_loss))
-            for step, checkpoint_pos, checkpoint_loss in scored_points[:2]:
+            for step, checkpoint_pos, checkpoint_loss in scored_points[:max_checkpoints]:
                 if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
                     deadline_returned = True
                     break
