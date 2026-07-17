@@ -105,20 +105,87 @@ def test_w5_finisher_deadline_returns_exact_incumbent() -> None:
     assert torch.equal(result.winner_pos, pos)
 
 
-def test_w5_finisher_predicted_large_graph_skip_returns_exact_incumbent() -> None:
-    """Predicted-cost skip preserves the incumbent without scoring candidates."""
+def test_w5_finisher_large_graph_runs_when_measured_budget_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured cost sizing admits a large row when one honest attempt fits."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
     pos = torch.stack(
         (
-            torch.arange(250, dtype=torch.float32),
-            torch.zeros(250, dtype=torch.float32),
+            torch.arange(500, dtype=torch.float32),
+            torch.zeros(500, dtype=torch.float32),
         ),
         dim=1,
     )
     edge_index = torch.empty((2, 0), dtype=torch.long)
-    node_sizes = torch.full((250, 2), 2.0)
+    node_sizes = torch.full((500, 2), 2.0)
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 300.0
+    config._dagua_native_total_budget_s = 300.0
+    config._dagua_native_w5_referee_cost_s = 0.01
+    config._dagua_native_w5_measured_sizing = True
+    scored = {"count": 0}
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Count honest score calls and return a non-dominating score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Finite non-dominating score pair.
+        """
+        del candidate
+        scored["count"] += 1
+        return _pair(0.0, 0.0)
+
+    def fast_measure(*args: object) -> float:
+        """Return a tiny measured surrogate-step cost."""
+        del args
+        return 0.001
+
+    monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fast_measure)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        config=config,
+    )
+
+    assert scored["count"] > 0
+    assert result.skipped_reason == "no_checkpoint_improved"
+    assert result.deadline_returned is False
+    assert torch.equal(result.winner_pos, pos)
+
+
+def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured cost sizing skips when one seed and checkpoint cannot fit."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 300.0
+    config._dagua_native_total_budget_s = 30.0
+    config._dagua_native_w5_referee_cost_s = 0.4
+    config._dagua_native_w5_measured_sizing = True
 
     def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
-        """Fail if predicted-cost skip accidentally scores a candidate.
+        """Fail if a measured-cost skip accidentally scores a candidate.
 
         Parameters
         ----------
@@ -130,7 +197,15 @@ def test_w5_finisher_predicted_large_graph_skip_returns_exact_incumbent() -> Non
         W5ScorePair
             Never returned.
         """
-        raise AssertionError("predicted-cost skip should not call score_fn")
+        del candidate
+        raise AssertionError("measured-cost skip should not call score_fn")
+
+    def slow_measure(*args: object) -> float:
+        """Return a surrogate-step cost that exceeds the tiny W5 budget."""
+        del args
+        return 0.7
+
+    monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", slow_measure)
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -141,10 +216,11 @@ def test_w5_finisher_predicted_large_graph_skip_returns_exact_incumbent() -> Non
         score_fn=forbidden_score_fn,
         is_semantically_directed=False,
         declared_hierarchical=False,
+        config=config,
     )
 
-    assert result.skipped_reason == "predicted_cost_large_graph"
-    assert result.deadline_returned is False
+    assert result.skipped_reason == "predicted_cost_measured"
+    assert result.deadline_returned is True
     assert torch.equal(result.winner_pos, pos)
 
 
@@ -491,6 +567,15 @@ def test_w5_late_entry_prediction_uses_process_time_parity(
 
     assert w5_predicted_skip_reason(34, 78, config) is None
     assert getattr(config, "_dagua_native_process_deadline_s") == 140.0
+
+
+def test_measured_terminal_w5_bypasses_late_entry_prediction() -> None:
+    """Measured terminal sizing, not the old late-entry gate, owns terminal skips."""
+    config = LayoutConfig()
+    config._dagua_native_process_deadline_s = time.process_time() + 10.0
+    config._dagua_native_w5_measured_sizing = True
+
+    assert w5_predicted_skip_reason(500, 1470, config) is None
 
 
 def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
