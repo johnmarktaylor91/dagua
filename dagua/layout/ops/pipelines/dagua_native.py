@@ -75,7 +75,6 @@ _ANYTIME_LARGE_ROW_MIN_NODES = 250
 _ANYTIME_LARGE_ROW_MIN_EDGES = 700
 _ANYTIME_FALLBACK_NODE_SEP_FACTOR = 1.4
 _TERMINAL_W5_SEED_BANK_MAX = 6
-_TERMINAL_W5_SEED_BANK_MAX_NODES = 249
 
 
 @dataclass(frozen=True)
@@ -5527,7 +5526,7 @@ def _append_terminal_w5_seed(
     None
         The config receives an updated private seed bank when eligible.
     """
-    if config is None or int(pos.shape[0]) > _TERMINAL_W5_SEED_BANK_MAX_NODES:
+    if config is None:
         return
     existing = list(getattr(config, "_dagua_native_terminal_w5_seed_bank", []))
     if len(existing) >= _TERMINAL_W5_SEED_BANK_MAX:
@@ -5599,146 +5598,153 @@ def _terminal_w5_polish(
     if int(final_pos.shape[0]) != expected_nodes or max_edge_node >= int(final_pos.shape[0]):
         return final_pos
 
-    from dagua.layout.ops.pipelines.native_finisher import (
-        W5HonestAxes,
-        W5ScorePair,
-        W5Seed,
-        _finisher_slice_s,
-        log_w5_telemetry,
-        make_w5_skip_result,
-        run_w5_finisher,
-        w5_dominates,
-        w5_honest_axes_from_metrics,
-        w5_predicted_skip_reason,
-    )
-    from dagua.metrics import (
-        _all_pairs_unweighted,
-        _build_csr,
-        composite,
-        composite_undirected,
-        full,
-    )
-
-    terminal_structure = structure or classify_graph(edge_index, int(final_pos.shape[0]))
-    is_semantically_directed, declared_hierarchical = _honest_ruler_flags(terminal_structure)
-    direction_is_declared = bool(getattr(terminal_structure, "direction_is_declared", False))
-    cpu_edge_index = edge_index.detach().to(device="cpu", dtype=torch.long)
-    if node_sizes is None:
-        fallback_size = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
-        cpu_node_sizes = torch.full(
-            (int(final_pos.shape[0]), 2),
-            fallback_size,
-            dtype=torch.float32,
+    try:
+        from dagua.layout.ops.pipelines.native_finisher import (
+            W5HonestAxes,
+            W5ScorePair,
+            W5Seed,
+            _finisher_slice_s,
+            log_w5_telemetry,
+            make_w5_skip_result,
+            run_w5_finisher,
+            w5_dominates,
+            w5_honest_axes_from_metrics,
+            w5_predicted_skip_reason,
         )
-    else:
-        cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
-    cluster_ids: Optional[torch.Tensor] = None
-    if clusters:
-        cluster_ids = _problem_cluster_ids(
-            LayoutProblem(
-                edge_index=edge_index,
-                num_nodes=int(final_pos.shape[0]),
-                node_sizes=node_sizes if node_sizes is not None else cpu_node_sizes,
-                clusters=clusters,
-                cluster_parents=cluster_parents,
+        from dagua.metrics import (
+            _all_pairs_unweighted,
+            _build_csr,
+            composite,
+            composite_undirected,
+            full,
+        )
+
+        terminal_structure = structure or classify_graph(edge_index, int(final_pos.shape[0]))
+        is_semantically_directed, declared_hierarchical = _honest_ruler_flags(terminal_structure)
+        direction_is_declared = bool(getattr(terminal_structure, "direction_is_declared", False))
+        cpu_edge_index = edge_index.detach().to(device="cpu", dtype=torch.long)
+        if node_sizes is None:
+            fallback_size = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+            cpu_node_sizes = torch.full(
+                (int(final_pos.shape[0]), 2),
+                fallback_size,
+                dtype=torch.float32,
             )
-        )
-    cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
-    offsets, targets = _build_csr(cpu_edge_index, int(final_pos.shape[0]))
-    all_pairs_dist = _all_pairs_unweighted(
-        offsets,
-        targets,
-        int(final_pos.shape[0]),
-        max_dist=int(final_pos.shape[0]),
-    )
-
-    def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
-        """Score one terminal W5 candidate with the frozen metrics ruler.
-
-        Parameters
-        ----------
-        pos : torch.Tensor
-            Candidate positions with shape ``[N, 2]``.
-
-        Returns
-        -------
-        tuple[W5ScorePair, W5HonestAxes]
-            Directed/undirected composites plus honest route axes from the
-            same metrics pass.
-        """
-        torch.manual_seed(0)
-        numeric = full(
-            pos.detach().to(device="cpu", dtype=torch.float32),
-            cpu_edge_index,
-            node_sizes=cpu_node_sizes,
-            cluster_ids=cpu_cluster_ids,
-            direction=direction,
-            declared_hierarchical=declared_hierarchical,
-            all_pairs_dist=all_pairs_dist,
-        )
-        numeric["declared_hierarchical"] = declared_hierarchical
-        return (
-            W5ScorePair(
-                directed=float(composite(numeric)),
-                undirected=float(composite_undirected(numeric)),
-            ),
-            w5_honest_axes_from_metrics(numeric),
+        else:
+            cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        cluster_ids: Optional[torch.Tensor] = None
+        if clusters:
+            cluster_ids = _problem_cluster_ids(
+                LayoutProblem(
+                    edge_index=edge_index,
+                    num_nodes=int(final_pos.shape[0]),
+                    node_sizes=node_sizes if node_sizes is not None else cpu_node_sizes,
+                    clusters=clusters,
+                    cluster_parents=cluster_parents,
+                )
+            )
+        cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
+        offsets, targets = _build_csr(cpu_edge_index, int(final_pos.shape[0]))
+        all_pairs_dist = _all_pairs_unweighted(
+            offsets,
+            targets,
+            int(final_pos.shape[0]),
+            max_dist=int(final_pos.shape[0]),
         )
 
-    def honest_score(pos: torch.Tensor) -> W5ScorePair:
-        """Return frozen-ruler score pair for one W5 checkpoint.
+        def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
+            """Score one terminal W5 candidate with the frozen metrics ruler.
 
-        Parameters
-        ----------
-        pos : torch.Tensor
-            Candidate positions with shape ``[N, 2]``.
+            Parameters
+            ----------
+            pos : torch.Tensor
+                Candidate positions with shape ``[N, 2]``.
 
-        Returns
-        -------
-        W5ScorePair
-            Directed and undirected honest composites.
-        """
-        return honest_score_payload(pos)[0]
-
-    incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
-    predicted_skip_reason = w5_predicted_skip_reason(
-        int(final_pos.shape[0]),
-        int(edge_index.shape[1]) if edge_index.ndim == 2 else 0,
-        config,
-    )
-    finisher_slice = _finisher_slice_s(config)
-    if finisher_slice is None and predicted_skip_reason != "disabled_by_env":
-        predicted_skip_reason = None
-    if predicted_skip_reason is not None:
-        finisher_slice = None
-    if finisher_slice is None:
-        log_w5_telemetry(
-            make_w5_skip_result(
-                incumbent_pos=final_pos,
-                incumbent_score_pair=incumbent_score_pair,
-                reason=predicted_skip_reason or "no_budget",
-                edge_index=edge_index,
-                config=config,
-                is_semantically_directed=is_semantically_directed,
+            Returns
+            -------
+            tuple[W5ScorePair, W5HonestAxes]
+                Directed/undirected composites plus honest route axes from the
+                same metrics pass.
+            """
+            torch.manual_seed(0)
+            numeric = full(
+                pos.detach().to(device="cpu", dtype=torch.float32),
+                cpu_edge_index,
+                node_sizes=cpu_node_sizes,
+                cluster_ids=cpu_cluster_ids,
+                direction=direction,
                 declared_hierarchical=declared_hierarchical,
-                direction_is_declared=direction_is_declared,
-            ),
+                all_pairs_dist=all_pairs_dist,
+            )
+            numeric["declared_hierarchical"] = declared_hierarchical
+            return (
+                W5ScorePair(
+                    directed=float(composite(numeric)),
+                    undirected=float(composite_undirected(numeric)),
+                ),
+                w5_honest_axes_from_metrics(numeric),
+            )
+
+        def honest_score(pos: torch.Tensor) -> W5ScorePair:
+            """Return frozen-ruler score pair for one W5 checkpoint.
+
+            Parameters
+            ----------
+            pos : torch.Tensor
+                Candidate positions with shape ``[N, 2]``.
+
+            Returns
+            -------
+            W5ScorePair
+                Directed and undirected honest composites.
+            """
+            return honest_score_payload(pos)[0]
+
+        referee_started = time.process_time()
+        incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
+        setattr(
+            config,
+            "_dagua_native_w5_referee_cost_s",
+            max(1.0e-6, time.process_time() - referee_started),
+        )
+        setattr(config, "_dagua_native_w5_measured_sizing", True)
+        predicted_skip_reason = w5_predicted_skip_reason(
+            int(final_pos.shape[0]),
+            int(edge_index.shape[1]) if edge_index.ndim == 2 else 0,
             config,
         )
-        return final_pos
+        finisher_slice = _finisher_slice_s(config)
+        if finisher_slice is None and predicted_skip_reason != "disabled_by_env":
+            predicted_skip_reason = None
+        if predicted_skip_reason is not None:
+            finisher_slice = None
+        if finisher_slice is None:
+            log_w5_telemetry(
+                make_w5_skip_result(
+                    incumbent_pos=final_pos,
+                    incumbent_score_pair=incumbent_score_pair,
+                    reason=predicted_skip_reason or "no_budget",
+                    edge_index=edge_index,
+                    config=config,
+                    is_semantically_directed=is_semantically_directed,
+                    declared_hierarchical=declared_hierarchical,
+                    direction_is_declared=direction_is_declared,
+                ),
+                config,
+            )
+            return final_pos
 
-    seed_bank = [W5Seed("terminal_final", final_pos)]
-    for seed_name, seed_pos in list(getattr(config, "_dagua_native_terminal_w5_seed_bank", [])):
-        seed_bank.append(
-            W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
-        )
-    if extra_seeds is not None:
-        seed_bank.extend(
-            W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
-            for seed_name, seed_pos in extra_seeds
-        )
+        seed_bank = [W5Seed("terminal_final", final_pos)]
+        for seed_name, seed_pos in list(getattr(config, "_dagua_native_terminal_w5_seed_bank", [])):
+            seed_bank.append(
+                W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+            )
+        if extra_seeds is not None:
+            seed_bank.extend(
+                W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+                for seed_name, seed_pos in extra_seeds
+            )
 
-    try:
         w5_result = run_w5_finisher(
             incumbent_pos=final_pos,
             incumbent_score_pair=incumbent_score_pair,
