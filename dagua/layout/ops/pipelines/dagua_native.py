@@ -5700,12 +5700,12 @@ def _terminal_w5_polish(
             """
             return honest_score_payload(pos)[0]
 
-        referee_started = time.process_time()
+        referee_started = time.perf_counter()
         incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
         setattr(
             config,
             "_dagua_native_w5_referee_cost_s",
-            max(1.0e-6, time.process_time() - referee_started),
+            max(1.0e-6, time.perf_counter() - referee_started),
         )
         setattr(config, "_dagua_native_w5_measured_sizing", True)
         predicted_skip_reason = w5_predicted_skip_reason(
