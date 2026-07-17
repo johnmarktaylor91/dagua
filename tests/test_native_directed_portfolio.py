@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import time
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -22,6 +23,8 @@ from dagua.layout.ops.pipelines.native_directed import (
     _directed_mrtree_enabled,
     _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
+    _directed_recombinant_layered_candidates,
+    _directed_recombinant_layered_enabled,
     _directed_stress_blend_candidates,
     _exact_crossing_count,
     _exact_crossing_count_loop,
@@ -64,6 +67,81 @@ def test_force_gate_accepts_skip_dense_dag_and_multiedges() -> None:
     assert _force_challengers_enabled(skip_edges, 4)
     assert _force_challengers_enabled(multiedges, 3)
     assert not _force_challengers_enabled(chain, 4)
+
+
+def _target_recombinant_structure() -> SimpleNamespace:
+    """Return classifier metadata representative of the item-3 target rows.
+
+    Returns
+    -------
+    SimpleNamespace
+        Structural object with the attributes consumed by the recombinant
+        layered gate.
+    """
+    return SimpleNamespace(
+        is_directed_acyclic=True,
+        is_acyclic=True,
+        is_semantically_directed=True,
+        topology_tags=(),
+        num_layers_effective=18,
+        num_layers=19,
+        edge_to_node_ratio=2.5,
+        hub_edge_fraction=0.35,
+        diameter_estimate=5,
+    )
+
+
+def test_recombinant_layered_gate_is_targeted_and_off_class_noop() -> None:
+    """Recombinant candidates are not constructed for off-class graphs."""
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    target = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=100,
+        node_sizes=torch.full((100, 2), 20.0),
+        structure=_target_recombinant_structure(),
+    )
+    undirected = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=100,
+        node_sizes=torch.full((100, 2), 20.0),
+        structure=SimpleNamespace(
+            **{
+                **vars(_target_recombinant_structure()),
+                "is_semantically_directed": False,
+            }
+        ),
+    )
+    broad_random_dag = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=200,
+        node_sizes=torch.full((200, 2), 20.0),
+        structure=SimpleNamespace(
+            **{
+                **vars(_target_recombinant_structure()),
+                "diameter_estimate": 10,
+            }
+        ),
+    )
+
+    assert _directed_recombinant_layered_enabled(target)
+    assert not _directed_recombinant_layered_enabled(undirected)
+    assert not _directed_recombinant_layered_enabled(broad_random_dag)
+
+
+def test_recombinant_layered_budget_gate_skips_when_tight() -> None:
+    """A tight benchmark deadline prevents recombinant candidate construction."""
+    edge_index = torch.tensor([[0, 0, 1], [1, 2, 3]], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=100,
+        node_sizes=torch.full((100, 2), 20.0),
+        structure=_target_recombinant_structure(),
+    )
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 0.01
+    incumbent = torch.zeros((100, 2), dtype=torch.float32)
+
+    assert _directed_recombinant_layered_candidates(problem, incumbent, config) == {}
 
 
 def test_challenger_registration_includes_guarded_raw_variant() -> None:
@@ -613,6 +691,105 @@ def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
     )
 
     assert _exact_crossing_count(captured["candidate"], edge_index) == 0
+    assert torch.equal(returned, incumbent)
+
+
+def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
+    monkeypatch: object,
+) -> None:
+    """A recombinant candidate that fails the dual gate cannot replace incumbent."""
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    incumbent = torch.zeros((100, 2), dtype=torch.float32)
+    challenger = torch.stack(
+        [torch.arange(100, dtype=torch.float32), torch.arange(100, dtype=torch.float32)],
+        dim=1,
+    )
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the incumbent for the directed contest."""
+        del args, kwargs
+        return incumbent.clone()
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Keep non-recombinant candidates tied with the incumbent."""
+        del args, kwargs
+        return 10.0
+
+    def fake_recombinant_candidates(*args: object, **kwargs: object) -> dict[str, torch.Tensor]:
+        """Return one recombinant candidate that must be dual-gated."""
+        del args, kwargs
+        return {"recomb_test": challenger.clone()}
+
+    def fake_dual_gate(
+        candidate: torch.Tensor,
+        incumbent_pair: W5ScorePair,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        all_pairs_dist: Optional[object],
+    ) -> tuple[bool, W5ScorePair]:
+        """Reject the recombinant candidate under the dual frozen rulers."""
+        del incumbent_pair, problem, cluster_ids, all_pairs_dist
+        captured["candidate"] = candidate
+        return False, W5ScorePair(directed=11.0, undirected=9.0)
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Return tied non-recombinant challengers cheaply."""
+        del kwargs
+        return incumbent.clone()
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Register variants without projection cost."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        positions[name] = raw_pos
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_score)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_recombinant_layered_candidates",
+        fake_recombinant_candidates,
+    )
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_ordering_candidate_dual_dominates",
+        fake_dual_gate,
+    )
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 0, 1], [1, 2, 3]], dtype=torch.long),
+        num_nodes=100,
+        node_sizes=torch.full((100, 2), 20.0),
+        structure=_target_recombinant_structure(),
+    )
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert torch.equal(captured["candidate"], challenger)
     assert torch.equal(returned, incumbent)
 
 
