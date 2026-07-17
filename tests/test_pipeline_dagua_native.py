@@ -220,6 +220,106 @@ def _proxy_honest_fixture_tensors() -> tuple[
     return base_pos, proxy_pos, edge_index, node_sizes, cluster_ids
 
 
+def _terminal_w5_fixture_tensors() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return candidate-A, terminal, and W5 tensors for terminal-owner tests.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Candidate-A positions, final terminal positions, and synthetic W5
+        winner positions, each with shape ``[4, 2]``.
+    """
+    candidate_a = torch.tensor(
+        [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]],
+        dtype=torch.float32,
+    )
+    terminal = candidate_a + torch.tensor([100.0, 0.0])
+    w5_pos = terminal + torch.tensor([0.0, 25.0])
+    return candidate_a, terminal, w5_pos
+
+
+def _install_terminal_w5_metric_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_a: torch.Tensor,
+    terminal: torch.Tensor,
+    w5_pos: torch.Tensor,
+) -> None:
+    """Install deterministic metrics for terminal W5 ownership tests.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest monkeypatch fixture.
+    candidate_a : torch.Tensor
+        Candidate-A tensor that must not be the terminal W5 incumbent.
+    terminal : torch.Tensor
+        Final tensor that terminal W5 must score as incumbent.
+    w5_pos : torch.Tensor
+        Synthetic W5 candidate tensor.
+    """
+    import dagua.metrics as metrics
+
+    def pos_key(pos: torch.Tensor) -> str:
+        """Classify fixture tensors by value."""
+        cpu = pos.detach().cpu()
+        if torch.allclose(cpu, terminal):
+            return "terminal"
+        if torch.allclose(cpu, candidate_a):
+            return "candidate_a"
+        if torch.allclose(cpu, w5_pos):
+            return "w5"
+        return "other"
+
+    def fake_full(
+        pos: torch.Tensor,
+        edge_index: torch.Tensor,
+        **kwargs: object,
+    ) -> dict[str, float]:
+        """Return honest metrics keyed to the fixture tensor."""
+        del edge_index, kwargs
+        key = pos_key(pos)
+        directed = {"terminal": 90.0, "candidate_a": 86.0, "w5": 90.2}.get(key, 50.0)
+        undirected = {"terminal": 94.0, "candidate_a": 81.0, "w5": 94.0}.get(key, 50.0)
+        flow = 0.753 if key == "terminal" else 1.0
+        return {
+            "directed_score": directed,
+            "undirected_score": undirected,
+            "directed_flow_score": flow,
+            "depth_order_score": 0.875,
+            "ksm_score": 0.922,
+            "edge_length_deviation_score": 0.876,
+        }
+
+    def fake_composite(numeric: dict[str, float]) -> float:
+        """Return directed fixture score."""
+        return float(numeric["directed_score"])
+
+    def fake_composite_undirected(numeric: dict[str, float]) -> float:
+        """Return undirected fixture score."""
+        return float(numeric["undirected_score"])
+
+    monkeypatch.setattr(metrics, "full", fake_full)
+    monkeypatch.setattr(metrics, "composite", fake_composite)
+    monkeypatch.setattr(metrics, "composite_undirected", fake_composite_undirected)
+
+
+def _terminal_w5_config() -> LayoutConfig:
+    """Build a config that reaches the non-component terminal return quickly.
+
+    Returns
+    -------
+    LayoutConfig
+        Native config for unit-level terminal W5 tests.
+    """
+    return LayoutConfig(
+        steps=1,
+        edge_equalize_polish=True,
+        decompose_components=False,
+        route_flat_to_stress=False,
+        force_pipeline="hybrid",
+    )
+
+
 def test_gate_row_deadline_runs_real_pipeline_not_prelayout_fallback(
     monkeypatch: Any,
 ) -> None:
@@ -395,6 +495,284 @@ def test_worker_timeout_returns_cloned_anytime_register(
     assert not torch.equal(actual, admitted)
 
 
+def test_terminal_w5_incumbent_is_final_return_tensor_and_runs_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal W5 sees the true final tensor while inner W5 sites defer."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+        make_w5_skip_result,
+    )
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    candidate_a, terminal, w5_pos = _terminal_w5_fixture_tensors()
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    _install_terminal_w5_metric_fixture(monkeypatch, candidate_a, terminal, w5_pos)
+    captured: dict[str, object] = {"calls": 0, "native_calls": 0}
+
+    monkeypatch.setattr(native_finisher, "w5_predicted_skip_reason", lambda *args: None)
+    monkeypatch.setattr(native_finisher, "_finisher_slice_s", lambda config: 1.0)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", lambda *args: None)
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+    ) -> W5FinisherResult:
+        """Capture terminal W5 inputs and return a no-op result."""
+        del node_sizes, score_fn, accept_margin
+        captured["calls"] = int(captured["calls"]) + 1
+        captured["incumbent_pos"] = incumbent_pos.detach().cpu()
+        captured["incumbent_score_pair"] = incumbent_score_pair
+        captured["incumbent_axes"] = incumbent_axes
+        captured["seed_names"] = [seed.name for seed in seeds]
+        return make_w5_skip_result(
+            incumbent_pos=incumbent_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            reason="unit_noop",
+            edge_index=edge_index,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+
+    def fake_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        prepared_config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Simulate a nested contest and an inner polish site before final choice."""
+        del state, ctx
+        captured["native_calls"] = int(captured["native_calls"]) + 1
+        assert bool(getattr(prepared_config, "_dagua_native_defer_w5", False))
+        if int(captured["native_calls"]) == 1:
+            nested = layout_dagua_native_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                node_sizes=problem.node_sizes,
+                config=prepared_config,
+                device="cpu",
+            )
+            assert torch.equal(nested, candidate_a)
+            native._best_of_polish(
+                candidate_a,
+                problem.edge_index,
+                problem.node_sizes,
+                is_semantically_directed=True,
+                declared_hierarchical=True,
+                config=prepared_config,
+            )
+            return terminal.to(device=problem.edge_index.device)
+        return candidate_a.to(device=problem.edge_index.device)
+
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+    monkeypatch.setattr(native, "_run_native_problem", fake_run_native_problem)
+
+    actual = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=node_sizes,
+        config=_terminal_w5_config(),
+        device="cpu",
+    )
+
+    assert int(captured["calls"]) == 1
+    assert torch.equal(actual, terminal)
+    assert torch.equal(captured["incumbent_pos"], terminal)
+    assert captured["incumbent_score_pair"] == W5ScorePair(directed=90.0, undirected=94.0)
+    assert captured["incumbent_axes"] == W5HonestAxes(
+        flow=0.753,
+        depth=0.875,
+        ksm=0.922,
+        edge_length=0.876,
+    )
+    assert captured["seed_names"][0] == "terminal_final"
+    assert "candidate_a" in captured["seed_names"]
+
+
+def test_terminal_w5_preserves_final_tensor_when_candidate_does_not_dominate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal W5 remains monotone against the exact final incumbent."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5Candidate,
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+    )
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    candidate_a, terminal, w5_pos = _terminal_w5_fixture_tensors()
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    one_sided_pair = W5ScorePair(directed=90.2, undirected=94.0)
+    _install_terminal_w5_metric_fixture(monkeypatch, candidate_a, terminal, w5_pos)
+
+    monkeypatch.setattr(native_finisher, "w5_predicted_skip_reason", lambda *args: None)
+    monkeypatch.setattr(native_finisher, "_finisher_slice_s", lambda config: 1.0)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", lambda *args: None)
+
+    def fake_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        prepared_config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Return the terminal incumbent chosen after candidate-A."""
+        del state, ctx, prepared_config
+        return terminal.to(device=problem.edge_index.device)
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+    ) -> W5FinisherResult:
+        """Return a one-sided W5 candidate that must be rejected."""
+        del (
+            incumbent_pos,
+            seeds,
+            edge_index,
+            node_sizes,
+            score_fn,
+            is_semantically_directed,
+            declared_hierarchical,
+            direction_is_declared,
+            config,
+            accept_margin,
+            incumbent_axes,
+        )
+        accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
+        return W5FinisherResult(
+            winner_pos=w5_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            winner_score_pair=one_sided_pair,
+            winner_name="w5_one_sided",
+            deadline_returned=False,
+            accepted=(accepted,),
+            rejected=(),
+            checkpoints=(),
+            mode="barrier_2d",
+            steps=1,
+        )
+
+    monkeypatch.setattr(native, "_run_native_problem", fake_run_native_problem)
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    actual = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=node_sizes,
+        config=_terminal_w5_config(),
+        device="cpu",
+    )
+
+    assert torch.equal(actual, terminal)
+
+
+def test_terminal_w5_noops_on_fidelity_no_budget_and_trivial_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal W5 does not optimize fidelity, no-budget, or n<2 paths."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    candidate_a, terminal, w5_pos = _terminal_w5_fixture_tensors()
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    _install_terminal_w5_metric_fixture(monkeypatch, candidate_a, terminal, w5_pos)
+    calls = {"run_w5": 0, "telemetry": 0}
+
+    def fake_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        prepared_config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Return a stable terminal tensor."""
+        del state, ctx, prepared_config
+        return terminal.to(device=problem.edge_index.device)
+
+    def forbidden_run_w5(*args: object, **kwargs: object) -> None:
+        """Record forbidden optimizer entry."""
+        del args, kwargs
+        calls["run_w5"] += 1
+        raise AssertionError("terminal no-op path must not run W5")
+
+    def record_telemetry(*args: object) -> None:
+        """Record no-budget skip telemetry."""
+        del args
+        calls["telemetry"] += 1
+
+    monkeypatch.setattr(native, "_run_native_problem", fake_run_native_problem)
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", forbidden_run_w5)
+    monkeypatch.setattr(native_finisher, "w5_predicted_skip_reason", lambda *args: None)
+    monkeypatch.setattr(native_finisher, "_finisher_slice_s", lambda config: None)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", record_telemetry)
+
+    no_budget = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=node_sizes,
+        config=_terminal_w5_config(),
+        device="cpu",
+    )
+    fidelity_config = _terminal_w5_config()
+    fidelity_config.fidelity_mode = "faithful"
+    fidelity = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=node_sizes,
+        config=fidelity_config,
+        device="cpu",
+    )
+    trivial = layout_dagua_native_pipeline(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=1,
+        node_sizes=torch.full((1, 2), 1.0),
+        config=_terminal_w5_config(),
+        device="cpu",
+    )
+
+    assert torch.equal(no_budget, terminal)
+    assert torch.equal(fidelity, terminal)
+    assert torch.equal(trivial, torch.zeros((1, 2)))
+    assert calls == {"run_w5": 0, "telemetry": 1}
+
+
 def test_collinear_dodge_moves_blocker_off_skip_edge() -> None:
     """A node centered on a non-incident skip edge is shifted perpendicular."""
     pos = torch.tensor([[0.0, 0.0], [0.0, 10.0], [0.0, 20.0]])
@@ -465,9 +843,10 @@ def test_polish_scores_cyclic_digraph_with_common_ruler(monkeypatch) -> None:
     """Cyclic directed polish candidates use the benchmark's common table."""
     import dagua.metrics as metrics
 
-    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
-    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
-    node_sizes = torch.full((3, 2), 2.0)
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0], [15.0, 10.0]])
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 2.0)
+    cluster_ids = torch.arange(4, dtype=torch.long)
     observed: list[tuple[bool, bool]] = []
 
     def fake_full(*args: object, **kwargs: object) -> dict[str, float]:
@@ -489,6 +868,7 @@ def test_polish_scores_cyclic_digraph_with_common_ruler(monkeypatch) -> None:
         node_sizes,
         is_semantically_directed=True,
         declared_hierarchical=False,
+        cluster_ids=cluster_ids,
         polish_battery="default",
     )
 
