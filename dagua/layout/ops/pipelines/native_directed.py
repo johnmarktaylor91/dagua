@@ -2336,7 +2336,10 @@ def layout_native_directed_portfolio(
     torch.Tensor
         Winning positions with shape ``[N, 2]``.
     """
-    from dagua.layout.ops.pipelines.dagua_native import _run_native_problem
+    from dagua.layout.ops.pipelines.dagua_native import (
+        _append_terminal_w5_seed,
+        _run_native_problem,
+    )
     from dagua.layout.ops.pipelines.native_undirected import (
         _build_cluster_ids,
         _log_marketplace_telemetry,
@@ -2352,6 +2355,10 @@ def layout_native_directed_portfolio(
     arm_timings: Dict[str, Tuple[float, float]] = {}
     incumbent_started = time.perf_counter()
     incumbent = _run_native_problem(problem, incumbent_state, ctx, incumbent_config)
+    for seed_name, seed_pos in list(
+        getattr(incumbent_config, "_dagua_native_terminal_w5_seed_bank", [])
+    ):
+        _append_terminal_w5_seed(config, f"directed_incumbent_{seed_name}", seed_pos)
     arm_timings["incumbent"] = (incumbent_started, time.perf_counter())
     n = int(problem.num_nodes)
 
@@ -2951,6 +2958,18 @@ def layout_native_directed_portfolio(
         best_name,
         time.perf_counter() - started,
     )
+    _append_terminal_w5_seed(config, "directed_candidate_a", incumbent)
+    if ordering_w5_seed is not None:
+        _append_terminal_w5_seed(config, "directed_ordering", ordering_w5_seed)
+    for seed_rank, seed_name in enumerate(
+        sorted(scores, key=lambda name: (-scores[name], name))[:3],
+        start=1,
+    ):
+        _append_terminal_w5_seed(
+            config,
+            f"directed_top_{seed_rank}_{seed_name}",
+            positions[seed_name],
+        )
     return best_position.to(device=incumbent.device, dtype=incumbent.dtype)
 
 
