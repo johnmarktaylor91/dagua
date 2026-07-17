@@ -44,6 +44,7 @@ _MEASURED_COST_MAX_SEEDS = 2
 _MEASURED_COST_MAX_STEPS = 24
 _MEASURED_COST_MAX_CHECKPOINTS = 2
 _MEASURED_COST_DEFAULT_REFEREE_S = 0.40
+_MEASURED_COST_SURROGATE_STEPS = 2
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
@@ -183,29 +184,51 @@ class W5CostPlan:
     Parameters
     ----------
     seeds : int
-        Number of finite seeds to run, capped at two.
+        Number of finite seeds to run.
     steps : int
-        Maximum optimizer steps per seed, capped at twenty-four.
+        Maximum optimizer steps per seed.
     checkpoints : int
         Maximum honest-scored checkpoints per seed, capped at two.
     measured_step_s : float
-        Process-time seconds for one surrogate step measurement.
+        Wall-clock seconds for one post-warmup surrogate step.
+    warmup_s : float
+        One-time wall-clock warmup charge from the first surrogate step.
     referee_s : float
-        Process-time seconds for one honest referee score, measured on the
+        Wall-clock seconds for one honest referee score, measured on the
         incumbent before W5 entry.
     budget_s : float
-        Process-time seconds available under the shared W5 spend cap.
+        Wall-clock seconds available under the shared W5 spend cap.
+    budget_usable_s : float
+        Wall-clock seconds available after the explicit return reserve.
     predicted_s : float
-        Conservative process-time cost estimate for the admitted plan.
+        Conservative wall-clock cost estimate for the admitted plan.
     """
 
     seeds: int
     steps: int
     checkpoints: int
     measured_step_s: float
+    warmup_s: float
     referee_s: float
     budget_s: float
+    budget_usable_s: float
     predicted_s: float
+
+
+@dataclass(frozen=True)
+class W5StepMeasurement:
+    """Measured W5 surrogate cost components.
+
+    Parameters
+    ----------
+    step_s : float
+        Wall-clock seconds for one post-warmup optimizer step.
+    warmup_s : float
+        Wall-clock seconds charged once for the first optimizer step.
+    """
+
+    step_s: float
+    warmup_s: float
 
 
 @dataclass(frozen=True)
@@ -323,6 +346,8 @@ class W5FinisherResult:
         Counts for viability outcomes, including projection outcomes.
     viability_drop_counts : dict[str, int]
         Counts for pre-score viability drop reasons.
+    cost_plan : W5CostPlan, optional
+        Measured-cost admission math, when the terminal W5 path used it.
     """
 
     winner_pos: torch.Tensor
@@ -350,6 +375,7 @@ class W5FinisherResult:
     phase_timings_s: tuple[W5PhaseTiming, ...] = ()
     viability_counts: dict[str, int] = field(default_factory=dict)
     viability_drop_counts: dict[str, int] = field(default_factory=dict)
+    cost_plan: Optional[W5CostPlan] = None
 
 
 def is_worker_timeout_like_exception(exc: Exception) -> bool:
@@ -1036,6 +1062,7 @@ def _optimize_seed(
     honest_axes: Optional[W5HonestAxes] = None,
     max_steps: Optional[int] = None,
     max_checkpoints: int = _MEASURED_COST_MAX_CHECKPOINTS,
+    step_timing_hook: Optional[Callable[[int, float], None]] = None,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Run one bounded W5 descent from ``seed``.
 
@@ -1059,6 +1086,9 @@ def _optimize_seed(
         Maximum optimizer steps allowed for measured cost sizing.
     max_checkpoints : int, default=2
         Maximum checkpoints to return for honest scoring.
+    step_timing_hook : Callable[[int, float], None], optional
+        Callback receiving each completed step index and wall-clock step
+        duration. Used only by measured admission sizing.
 
     Returns
     -------
@@ -1107,17 +1137,19 @@ def _optimize_seed(
             break
         if time.monotonic() >= deadline:
             break
-        step_started = time.monotonic()
+        step_started_perf = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
         loss = _surrogate_loss(work, edge_index, node_sizes, topo_depth, mode, floors)
         if not bool(torch.isfinite(loss).all().item()):
             break
         loss.backward()
         optimizer.step()
+        step_wall_s = max(1.0e-6, time.perf_counter() - step_started_perf)
+        if step_timing_hook is not None:
+            step_timing_hook(step, step_wall_s)
         if step == 1:
-            step_cost = max(1.0e-6, time.monotonic() - step_started)
             remaining_step_budget = max(0.0, deadline - time.monotonic())
-            steps_that_fit = 1 + int(remaining_step_budget / step_cost)
+            steps_that_fit = 1 + int(remaining_step_budget / step_wall_s)
             effective_max_steps = max(1, min(desired_steps, steps_that_fit))
             if max_checkpoints <= 0:
                 checkpoint_steps = set()
@@ -1147,8 +1179,9 @@ def _measure_one_surrogate_step_s(
     topo_depth: torch.Tensor,
     mode: str,
     honest_axes: Optional[W5HonestAxes],
-) -> float:
-    """Measure process-time cost for one W5 surrogate optimizer step.
+    measurement_budget_s: float,
+) -> W5StepMeasurement:
+    """Measure wall-clock cost for one steady-state W5 surrogate step.
 
     Parameters
     ----------
@@ -1164,25 +1197,55 @@ def _measure_one_surrogate_step_s(
         Routed W5 optimization mode.
     honest_axes : W5HonestAxes, optional
         Honest incumbent axes used by barrier weighting.
+    measurement_budget_s : float
+        Wall-clock seconds available for the surrogate probe.
 
     Returns
     -------
-    float
-        Positive process-time seconds for one measured surrogate step.
+    W5StepMeasurement
+        Positive wall-clock seconds for steady-state step cost and one-time
+        first-step warmup.
     """
-    started_process = time.process_time()
+    step_times_s: list[float] = []
     _optimize_seed(
         seed,
         edge_index,
         node_sizes,
         topo_depth,
         mode,
-        time.monotonic() + _PREDICTED_COST_RETURN_RESERVE_S,
+        time.monotonic() + max(1.0e-6, measurement_budget_s),
         honest_axes,
-        max_steps=1,
+        max_steps=_MEASURED_COST_SURROGATE_STEPS,
         max_checkpoints=0,
+        step_timing_hook=lambda _step, duration_s: step_times_s.append(duration_s),
     )
-    return max(1.0e-6, time.process_time() - started_process)
+    if not step_times_s:
+        return W5StepMeasurement(step_s=1.0e-6, warmup_s=0.0)
+    warmup_s = max(0.0, step_times_s[0])
+    if len(step_times_s) == 1:
+        step_s = warmup_s
+        warmup_s = 0.0
+    else:
+        steady_times_s = step_times_s[1:]
+        step_s = sum(steady_times_s) / float(len(steady_times_s))
+    return W5StepMeasurement(step_s=max(1.0e-6, step_s), warmup_s=warmup_s)
+
+
+def _measured_pressure_step_candidates(max_steps: int) -> list[int]:
+    """Return stable measured-plan step tiers under budget pressure.
+
+    Parameters
+    ----------
+    max_steps : int
+        Maximum pressure-mode step count admitted by the row regime.
+
+    Returns
+    -------
+    list[int]
+        Descending step tiers no larger than ``max_steps``.
+    """
+    tiers = (24, 18, 12, 6, 3, 2, 1)
+    return [steps for steps in tiers if steps <= max_steps]
 
 
 def _measured_cost_plan(
@@ -1194,11 +1257,11 @@ def _measured_cost_plan(
     routed_mode: str,
     slice_s: float,
     config: Optional[LayoutConfig],
-    started_process: float,
+    started_perf: float,
     remaining_entry: Optional[float],
     honest_axes: Optional[W5HonestAxes],
 ) -> Optional[W5CostPlan]:
-    """Return a measured W5 plan that fits the shared process-time cap.
+    """Return a measured W5 plan that fits the shared wall-clock cap.
 
     Parameters
     ----------
@@ -1216,8 +1279,8 @@ def _measured_cost_plan(
         Work slice admitted by deadline gates.
     config : LayoutConfig, optional
         Prepared configuration carrying spend and referee measurements.
-    started_process : float
-        Process-time value captured at W5 entry.
+    started_perf : float
+        ``time.perf_counter()`` value captured at W5 entry.
     remaining_entry : float, optional
         Benchmark wall seconds remaining at W5 entry.
     honest_axes : W5HonestAxes, optional
@@ -1232,38 +1295,102 @@ def _measured_cost_plan(
         getattr(config, "_dagua_native_w5_referee_cost_s", _MEASURED_COST_DEFAULT_REFEREE_S)
     )
     referee_s = max(1.0e-6, referee_s)
-    step_s = _measure_one_surrogate_step_s(
+    pre_measure_cap_remaining = _w5_spend_cap_s(config, remaining_entry) - _w5_spent_s(
+        config,
+        started_perf,
+    )
+    measurement_budget_s = max(
+        1.0e-6,
+        min(float(slice_s), pre_measure_cap_remaining) - _PREDICTED_COST_RETURN_RESERVE_S,
+    )
+    step_measurement = _measure_one_surrogate_step_s(
         seeds[0],
         edge_index,
         node_sizes,
         topo_depth,
         routed_mode,
         honest_axes,
+        measurement_budget_s,
     )
     spend_cap = _w5_spend_cap_s(config, remaining_entry)
-    cap_remaining = spend_cap - _w5_process_spent_s(config, started_process)
+    cap_remaining = spend_cap - _w5_spent_s(config, started_perf)
     budget_s = max(0.0, min(float(slice_s), cap_remaining))
-    # W5 is additive: measured admission must leave an explicit return reserve
-    # and prove that the minimum honest attempt fits before any candidate can
-    # challenge the incumbent under the monotone dual-ruler gate.
+    # Invariant: measured plan cost and budget are both wall seconds.
+    # ``process_time`` is telemetry-only; admission matches the wall-based
+    # deadline, slice, and optimizer step guards below.
     usable_s = budget_s - _PREDICTED_COST_RETURN_RESERVE_S
-    if usable_s < step_s + referee_s:
+    step_s = step_measurement.step_s
+    warmup_s = step_measurement.warmup_s
+    minimum_predicted_s = warmup_s + step_s + referee_s
+    if usable_s < minimum_predicted_s:
+        if config is not None:
+            setattr(
+                config,
+                "_dagua_native_w5_cost_plan",
+                W5CostPlan(
+                    seeds=0,
+                    steps=0,
+                    checkpoints=0,
+                    measured_step_s=step_s,
+                    warmup_s=warmup_s,
+                    referee_s=referee_s,
+                    budget_s=budget_s,
+                    budget_usable_s=usable_s,
+                    predicted_s=minimum_predicted_s,
+                ),
+            )
         return None
-    max_seeds = min(_MEASURED_COST_MAX_SEEDS, len(seeds))
-    for steps in range(_MEASURED_COST_MAX_STEPS, 0, -1):
+    node_count = int(seeds[0].pos.shape[0])
+    base_steps = 24 if node_count >= 300 else 36
+    base_seeds = min(3, len(seeds))
+    base_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
+
+    def build_plan(seed_count: int, steps: int, checkpoints: int) -> W5CostPlan:
+        """Build a wall-denominated plan payload for candidate work bounds.
+
+        Parameters
+        ----------
+        seed_count : int
+            Number of W5 seeds to run.
+        steps : int
+            Optimizer steps per seed.
+        checkpoints : int
+            Honest checkpoints per seed.
+
+        Returns
+        -------
+        W5CostPlan
+            Cost plan with the one-time warmup charged once.
+        """
+        predicted_s = warmup_s + seed_count * (steps * step_s + checkpoints * referee_s)
+        return W5CostPlan(
+            seeds=seed_count,
+            steps=steps,
+            checkpoints=checkpoints,
+            measured_step_s=step_s,
+            warmup_s=warmup_s,
+            referee_s=referee_s,
+            budget_s=budget_s,
+            budget_usable_s=usable_s,
+            predicted_s=predicted_s,
+        )
+
+    base_plan = build_plan(base_seeds, base_steps, base_checkpoints)
+    if base_plan.predicted_s <= usable_s:
+        if config is not None:
+            setattr(config, "_dagua_native_w5_cost_plan", base_plan)
+        return base_plan
+
+    max_seeds = min(_MEASURED_COST_MAX_SEEDS, base_seeds)
+    max_steps = min(_MEASURED_COST_MAX_STEPS, base_steps)
+    for steps in _measured_pressure_step_candidates(max_steps):
         for checkpoints in range(_MEASURED_COST_MAX_CHECKPOINTS, 0, -1):
             for seed_count in range(max_seeds, 0, -1):
-                predicted_s = seed_count * (steps * step_s + checkpoints * referee_s)
-                if predicted_s <= usable_s:
-                    return W5CostPlan(
-                        seeds=seed_count,
-                        steps=steps,
-                        checkpoints=checkpoints,
-                        measured_step_s=step_s,
-                        referee_s=referee_s,
-                        budget_s=budget_s,
-                        predicted_s=predicted_s,
-                    )
+                candidate_plan = build_plan(seed_count, steps, checkpoints)
+                if candidate_plan.predicted_s <= usable_s:
+                    if config is not None:
+                        setattr(config, "_dagua_native_w5_cost_plan", candidate_plan)
+                    return candidate_plan
     return None
 
 
@@ -1324,6 +1451,7 @@ def run_w5_finisher(
     node_count = int(incumbent_pos.shape[0])
     edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
     predicted_skip_reason = w5_predicted_skip_reason(node_count, edge_count, config)
+    cost_plan: Optional[W5CostPlan] = None
     if slice_s is None and predicted_skip_reason != "disabled_by_env":
         predicted_skip_reason = None
     if predicted_skip_reason is not None:
@@ -1427,6 +1555,7 @@ def run_w5_finisher(
             phase_timings_s=tuple(phase_timings),
             viability_counts=dict(viability_counts),
             viability_drop_counts=dict(viability_drop_counts),
+            cost_plan=cost_plan,
         )
 
     if slice_s is None:
@@ -1448,7 +1577,7 @@ def run_w5_finisher(
     use_measured_cost = bool(getattr(config, "_dagua_native_w5_measured_sizing", False))
     kept_seeds = _dedupe_seeds(
         seeds,
-        max_seeds=_MEASURED_COST_MAX_SEEDS if use_measured_cost else 3,
+        max_seeds=3,
     )
     if not kept_seeds:
         return finish(
@@ -1494,11 +1623,12 @@ def run_w5_finisher(
             routed_mode=first_mode,
             slice_s=float(slice_s),
             config=config,
-            started_process=started_process,
+            started_perf=started_perf,
             remaining_entry=remaining_entry,
             honest_axes=incumbent_axes,
         )
         if cost_plan is None:
+            cost_plan = getattr(config, "_dagua_native_w5_cost_plan", None)
             return finish(
                 winner_pos=incumbent_pos,
                 winner_score_pair=incumbent_score_pair,
@@ -1788,6 +1918,14 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
         "spent_s": result.spent_s,
         "remaining_entry_s": result.remaining_entry_s,
         "remaining_exit_s": result.remaining_exit_s,
+        "measured_step_s": (None if result.cost_plan is None else result.cost_plan.measured_step_s),
+        "warmup_s": None if result.cost_plan is None else result.cost_plan.warmup_s,
+        "referee_s": None if result.cost_plan is None else result.cost_plan.referee_s,
+        "budget_usable_s": (None if result.cost_plan is None else result.cost_plan.budget_usable_s),
+        "predicted_s": None if result.cost_plan is None else result.cost_plan.predicted_s,
+        "plan_seeds": None if result.cost_plan is None else result.cost_plan.seeds,
+        "plan_steps": None if result.cost_plan is None else result.cost_plan.steps,
+        "plan_checkpoints": None if result.cost_plan is None else result.cost_plan.checkpoints,
         "phase_timings_s": [
             {
                 "seed": timing.seed,
