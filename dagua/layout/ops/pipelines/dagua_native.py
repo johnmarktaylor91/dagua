@@ -4927,6 +4927,7 @@ def _best_of_polish(
         quick,
     )
 
+    w5_only = polish_battery == "w5_only"
     if polish_battery == "off":
         return base_pos
 
@@ -5077,18 +5078,22 @@ def _best_of_polish(
 
     edge_equalize_candidates: list[
         tuple[str, Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]]
-    ] = [
-        (
-            f"edge_equalize_{iters}_{step:g}",
-            lambda pos, edges, sizes, iters=iters, step=step: _equalize_edges(
-                pos,
-                edges,
-                iters,
-                step,
-            ),
-        )
-        for iters, step in _POLISH_SETTINGS
-    ]
+    ] = (
+        []
+        if w5_only
+        else [
+            (
+                f"edge_equalize_{iters}_{step:g}",
+                lambda pos, edges, sizes, iters=iters, step=step: _equalize_edges(
+                    pos,
+                    edges,
+                    iters,
+                    step,
+                ),
+            )
+            for iters, step in _POLISH_SETTINGS
+        ]
+    )
 
     best_edge_pos = base_pos
     best_edge_score = best_score
@@ -5117,135 +5122,139 @@ def _best_of_polish(
                 Optional[torch.Tensor],
             ],
         ]
-    ] = [
-        (
-            "collinear_dodge_0.10",
-            lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.10),
-        ),
-        (
-            "collinear_dodge_0.15",
-            lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.15),
-        ),
-        (
-            "y_layer_snap",
-            lambda pos, edges, sizes: _y_layer_snap(best_edge_pos, edges, sizes),
-        ),
-        (
-            "orthogonal_align",
-            lambda pos, edges, sizes: _orthogonal_align(best_edge_pos, edges, sizes),
-        ),
-        (
-            "overlap_jitter",
-            lambda pos, edges, sizes: _overlap_jitter(best_edge_pos, edges, sizes),
-        ),
-        (
-            "swap_2opt_anti_crossing",
-            lambda pos, edges, sizes: _swap_2opt_anti_crossing(
-                pos,
-                edges,
-                sizes,
-                score_fn=score,
+    ] = (
+        []
+        if w5_only
+        else [
+            (
+                "collinear_dodge_0.10",
+                lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.10),
             ),
-        ),
-        (
-            "per_layer_x_kmeans",
-            lambda pos, edges, sizes: _per_layer_x_kmeans(pos, edges, sizes),
-        ),
-        (
-            "global_depth_align",
-            lambda pos, edges, sizes: _global_depth_align(
-                base_pos,
-                edges,
-                sizes,
+            (
+                "collinear_dodge_0.15",
+                lambda pos, edges, sizes: _collinear_dodge(base_pos, edges, delta=0.15),
             ),
-        ),
-        (
-            "dot_lattice_lp",
-            lambda pos, edges, sizes: _dot_lattice_lp(
-                base_pos,
-                edges,
-                sizes,
+            (
+                "y_layer_snap",
+                lambda pos, edges, sizes: _y_layer_snap(best_edge_pos, edges, sizes),
             ),
-        ),
-        (
-            "back_edge_relayer_full",
-            lambda pos, edges, sizes: _back_edge_relayer(
-                base_pos,
-                edges,
-                sizes,
-                blend=1.0,
+            (
+                "orthogonal_align",
+                lambda pos, edges, sizes: _orthogonal_align(best_edge_pos, edges, sizes),
             ),
-        ),
-        (
-            "back_edge_relayer_quarter",
-            lambda pos, edges, sizes: _back_edge_relayer(
-                base_pos,
-                edges,
-                sizes,
-                blend=0.25,
+            (
+                "overlap_jitter",
+                lambda pos, edges, sizes: _overlap_jitter(best_edge_pos, edges, sizes),
             ),
-        ),
-        (
-            "back_edge_relayer_half",
-            lambda pos, edges, sizes: _back_edge_relayer(
-                base_pos,
-                edges,
-                sizes,
-                blend=0.5,
+            (
+                "swap_2opt_anti_crossing",
+                lambda pos, edges, sizes: _swap_2opt_anti_crossing(
+                    pos,
+                    edges,
+                    sizes,
+                    score_fn=score,
+                ),
             ),
-        ),
-        (
-            "tutte_cyclic_planar",
-            lambda pos, edges, sizes: _tutte_cyclic_planar(
-                base_pos,
-                edges,
-                sizes,
+            (
+                "per_layer_x_kmeans",
+                lambda pos, edges, sizes: _per_layer_x_kmeans(pos, edges, sizes),
             ),
-        ),
-        (
-            "gap_validated_layer_swaps",
-            lambda pos, edges, sizes: _gap_validated_layer_swaps(
-                base_pos,
-                edges,
-                sizes,
-                score_fn=score,
-                max_candidates=32,
+            (
+                "global_depth_align",
+                lambda pos, edges, sizes: _global_depth_align(
+                    base_pos,
+                    edges,
+                    sizes,
+                ),
             ),
-        ),
-        (
-            "outerplanar_source_fan_spine",
-            lambda pos, edges, sizes: _outerplanar_source_fan_spine(
-                base_pos,
-                edges,
-                sizes,
+            (
+                "dot_lattice_lp",
+                lambda pos, edges, sizes: _dot_lattice_lp(
+                    base_pos,
+                    edges,
+                    sizes,
+                ),
             ),
-        ),
-        (
-            "multi_component_row_major_repack",
-            lambda pos, edges, sizes: _multi_component_row_major_repack(
-                base_pos,
-                edges,
-                sizes,
+            (
+                "back_edge_relayer_full",
+                lambda pos, edges, sizes: _back_edge_relayer(
+                    base_pos,
+                    edges,
+                    sizes,
+                    blend=1.0,
+                ),
             ),
-        ),
-        (
-            "median_transpose_polish",
-            lambda pos, edges, sizes: _median_transpose_polish(
-                base_pos,
-                edges,
-                sizes,
-                score_fn=score,
+            (
+                "back_edge_relayer_quarter",
+                lambda pos, edges, sizes: _back_edge_relayer(
+                    base_pos,
+                    edges,
+                    sizes,
+                    blend=0.25,
+                ),
             ),
-        ),
-        (
-            "lattice_uniform_centered_slots",
-            lambda pos, edges, sizes: _lattice_uniform_centered_slots(
-                base_pos,
-                edges,
-                sizes,
+            (
+                "back_edge_relayer_half",
+                lambda pos, edges, sizes: _back_edge_relayer(
+                    base_pos,
+                    edges,
+                    sizes,
+                    blend=0.5,
+                ),
             ),
-        ),
-    ]
+            (
+                "tutte_cyclic_planar",
+                lambda pos, edges, sizes: _tutte_cyclic_planar(
+                    base_pos,
+                    edges,
+                    sizes,
+                ),
+            ),
+            (
+                "gap_validated_layer_swaps",
+                lambda pos, edges, sizes: _gap_validated_layer_swaps(
+                    base_pos,
+                    edges,
+                    sizes,
+                    score_fn=score,
+                    max_candidates=32,
+                ),
+            ),
+            (
+                "outerplanar_source_fan_spine",
+                lambda pos, edges, sizes: _outerplanar_source_fan_spine(
+                    base_pos,
+                    edges,
+                    sizes,
+                ),
+            ),
+            (
+                "multi_component_row_major_repack",
+                lambda pos, edges, sizes: _multi_component_row_major_repack(
+                    base_pos,
+                    edges,
+                    sizes,
+                ),
+            ),
+            (
+                "median_transpose_polish",
+                lambda pos, edges, sizes: _median_transpose_polish(
+                    base_pos,
+                    edges,
+                    sizes,
+                    score_fn=score,
+                ),
+            ),
+            (
+                "lattice_uniform_centered_slots",
+                lambda pos, edges, sizes: _lattice_uniform_centered_slots(
+                    base_pos,
+                    edges,
+                    sizes,
+                ),
+            ),
+        ]
+    )
     for edge_name, seed_pos in edge_seed_positions:
         polish_candidates.extend(
             [
@@ -5325,7 +5334,7 @@ def _best_of_polish(
                 honest_best_score = candidate_score
                 honest_best_pos = candidate
 
-    if config is not None:
+    if config is not None and not bool(getattr(config, "_dagua_native_defer_w5", False)):
         try:
             from dagua.layout.ops.pipelines.native_finisher import (
                 W5Seed,
@@ -5823,6 +5832,7 @@ def layout_dagua_native_pipeline(
             candidate_config.seed = candidate_seed
             candidate_config.multi_start_k = 1
             setattr(candidate_config, "_dagua_native_multi_start_resolved", True)
+            setattr(candidate_config, "_dagua_native_defer_w5", True)
             candidate_pos = layout_dagua_native_pipeline(
                 edge_index=edge_index,
                 num_nodes=num_nodes,
@@ -5854,6 +5864,30 @@ def layout_dagua_native_pipeline(
                 best_pos = candidate_pos
         if best_pos is None:
             raise RuntimeError("dagua_native multi-start did not produce candidate positions.")
+        if (
+            getattr(effective_config, "edge_equalize_polish", True)
+            and getattr(effective_config, "time_budget_s", None) is None
+            and node_sizes is not None
+            and best_pos.shape[0] >= 4
+            and edge_index.numel() > 0
+        ):
+            # Multistart chooses a second-stage honest winner after each child
+            # solve has polished its own seed. Defer W5 inside those children
+            # and spend the same W5 slice once, against the final multistart
+            # winner, preserving monotonicity against the row's real output.
+            best_pos = _best_of_polish(
+                best_pos,
+                edge_index,
+                node_sizes,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=bool(
+                    getattr(contest_structure, "direction_is_declared", False)
+                ),
+                direction=effective_config.direction,
+                polish_battery="w5_only",
+                config=effective_config,
+            )
         return best_pos
 
     requested_device = device or effective_config.device
