@@ -46,6 +46,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
@@ -257,6 +258,108 @@ def _predicted_undirected_arm_budget_available(
         return True
     required = UNDIRECTED_PREDICTED_COST_MULTIPLIER * max(0.0, float(predicted_cost_s))
     return available > required
+
+
+def _prediction_cpu_elapsed_s(started_process_time_s: float) -> float:
+    """Return elapsed per-process CPU seconds for arm-cost prediction.
+
+    Wall-clock time is still the hard deadline clock everywhere in this
+    route. This helper is intentionally only for predicting the next
+    expensive arm cost, so sibling-worker contention cannot inflate cost
+    estimates and flip the admitted arm set under load.
+
+    Parameters
+    ----------
+    started_process_time_s : float
+        ``time.process_time()`` reading captured before the arm started.
+
+    Returns
+    -------
+    float
+        Non-negative per-process CPU seconds elapsed since the start.
+    """
+    return max(0.0, time.process_time() - float(started_process_time_s))
+
+
+def _emit_undirected_arm_skip_telemetry(
+    *,
+    arm: str,
+    reason: str,
+    config: Optional[LayoutConfig],
+    predicted_cost_s: Optional[float],
+    remaining_s: Optional[float],
+) -> None:
+    """Emit structured telemetry for an undirected arm admission skip.
+
+    Parameters
+    ----------
+    arm : str
+        Stable arm label, such as ``"tsnet_perp30_seed0"``.
+    reason : str
+        Machine-readable skip reason.
+    config : LayoutConfig, optional
+        Config receiving ``_dagua_native_arm_skip_telemetry`` when available.
+    predicted_cost_s : float, optional
+        Predicted arm cost in process CPU seconds. ``None`` when unavailable.
+    remaining_s : float, optional
+        Remaining wall-clock deadline seconds at the skip point.
+
+    Returns
+    -------
+    None
+        Telemetry is logged, printed, optionally stored on ``config``, and
+        appended to the configured JSONL telemetry file.
+    """
+    payload = {
+        "event": "native_undirected_arm_skip",
+        "arm": arm,
+        "reason": reason,
+        "predicted_cost_s": None if predicted_cost_s is None else float(predicted_cost_s),
+        "remaining_s": None if remaining_s is None else float(remaining_s),
+    }
+    if config is not None:
+        existing = list(getattr(config, "_dagua_native_arm_skip_telemetry", []))
+        existing.append(payload)
+        setattr(config, "_dagua_native_arm_skip_telemetry", existing)
+    telemetry_path = os.environ.get("DAGUA_ARM_TELEMETRY_PATH") or os.environ.get(
+        "DAGUA_W5_TELEMETRY_PATH"
+    )
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    print("native_undirected_arm_skip " + json.dumps(payload, sort_keys=True), flush=True)
+    _LOGGER.info("Native undirected arm skip telemetry %s", json.dumps(payload, sort_keys=True))
+
+
+def _record_insufficient_predicted_budget_skip(
+    *,
+    arm: str,
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+) -> None:
+    """Record an expensive-arm skip caused by predicted budget pressure.
+
+    Parameters
+    ----------
+    arm : str
+        Stable skipped arm name.
+    config : LayoutConfig, optional
+        Prepared native configuration.
+    predicted_cost_s : float
+        Current process-time cost prediction for the arm.
+
+    Returns
+    -------
+    None
+        Emits structured skip telemetry.
+    """
+    _emit_undirected_arm_skip_telemetry(
+        arm=arm,
+        reason="insufficient_predicted_budget",
+        config=config,
+        predicted_cost_s=predicted_cost_s,
+        remaining_s=_portfolio_remaining_s(config),
+    )
 
 
 def _is_worker_timeout_exception(exc: Exception) -> bool:
@@ -2211,12 +2314,17 @@ def layout_native_undirected_portfolio(
                     config,
                     fcose_cost_s,
                 ):
+                    _record_insufficient_predicted_budget_skip(
+                        arm=f"fcose_seed{seed_offset}",
+                        config=config,
+                        predicted_cost_s=fcose_cost_s,
+                    )
                     _LOGGER.info(
                         "Skipped fCoSE seed %d: insufficient predicted budget",
                         seed_offset,
                     )
                     break
-                candidate_started = time.perf_counter()
+                candidate_started_process = time.process_time()
                 fcose_pos = layout_fcose_pipeline(
                     edge_index=problem.edge_index,
                     num_nodes=n,
@@ -2229,7 +2337,7 @@ def layout_native_undirected_portfolio(
                 )
                 fcose_runs += 1
                 _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
-                fcose_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                fcose_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
@@ -2258,6 +2366,11 @@ def layout_native_undirected_portfolio(
                         config,
                         tsnet_cost_s,
                     ):
+                        _record_insufficient_predicted_budget_skip(
+                            arm=f"tsnet_perp{perplexity:g}_seed{seed_offset}",
+                            config=config,
+                            predicted_cost_s=tsnet_cost_s,
+                        )
                         _LOGGER.info(
                             "Skipped tsNET perp=%g seed=%d: insufficient predicted budget",
                             perplexity,
@@ -2265,7 +2378,7 @@ def layout_native_undirected_portfolio(
                         )
                         stop_tsnet = True
                         break
-                    candidate_started = time.perf_counter()
+                    candidate_started_process = time.process_time()
                     tsnet_pos = layout_tsnet_pipeline(
                         edge_index=problem.edge_index,
                         num_nodes=n,
@@ -2281,7 +2394,7 @@ def layout_native_undirected_portfolio(
                     _add_challenger(
                         f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
                     )
-                    tsnet_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                    tsnet_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
                 if stop_tsnet:
                     break
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
