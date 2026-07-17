@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import time
+from pathlib import Path
 from typing import Optional
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -28,7 +32,10 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _candidate_refinement_steps,
     _cleanup_variants_for_size,
     _neato_in_contest,
+    _predicted_undirected_arm_budget_available,
+    _prediction_cpu_elapsed_s,
     _project_candidate_prism,
+    _record_insufficient_predicted_budget_skip,
     _repair_flung_isolates,
     _rgg_geometric_seed_candidate,
     _rgg_geometric_seed_enabled,
@@ -1134,3 +1141,125 @@ def test_unshear_orthogonalizes_sheared_grid_edge_families() -> None:
 def test_tsnet_flavors_include_uniform_perplexity_five_candidate() -> None:
     """The standard tsNET family includes default and perplexity-five runs."""
     assert TSNET_PERPLEXITIES == (30.0, 5.0)
+
+
+def test_arm_prediction_cost_uses_process_time_not_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expensive-arm cost prediction uses CPU seconds, not wall seconds."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    monkeypatch.setattr(nu.time, "process_time", lambda: 103.5)
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 999.0)
+
+    assert _prediction_cpu_elapsed_s(100.0) == 3.5
+
+
+def test_unloaded_process_time_prediction_preserves_admission_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When CPU and wall elapsed match, predicted admission is unchanged."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    config = LayoutConfig()
+    started_wall = time.perf_counter()
+    config._dagua_native_deadline_s = started_wall + 15.0
+    monkeypatch.setattr(nu.time, "process_time", lambda: 14.0)
+
+    cpu_cost_s = _prediction_cpu_elapsed_s(10.0)
+
+    assert cpu_cost_s == 4.0
+    assert _predicted_undirected_arm_budget_available(config, cpu_cost_s) is True
+
+
+def test_insufficient_predicted_budget_skip_emits_jsonl_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Predicted-budget arm skips are visible without a logging shim."""
+    telemetry_path = tmp_path / "arm-skips.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 30.0
+
+    _record_insufficient_predicted_budget_skip(
+        arm="tsnet_perp30_seed0",
+        config=config,
+        predicted_cost_s=12.5,
+    )
+
+    stdout = capsys.readouterr().out
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+
+    assert stdout.count("native_undirected_arm_skip ") == 1
+    assert len(records) == 1
+    assert records[0]["event"] == "native_undirected_arm_skip"
+    assert records[0]["arm"] == "tsnet_perp30_seed0"
+    assert records[0]["reason"] == "insufficient_predicted_budget"
+    assert records[0]["predicted_cost_s"] == 12.5
+    assert getattr(config, "_dagua_native_arm_skip_telemetry") == records
+
+
+def test_skipped_predicted_arm_contest_returns_best_computed_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping late expensive arms still returns the best computed finalist."""
+    import importlib
+
+    from dagua.layout.ops.pipelines import native_undirected as nu
+    from dagua.layout.ops.pipelines.native_undirected import layout_native_undirected_portfolio
+    from dagua.layout.ops.state import RuntimeContext, SolveState
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    sfdp = importlib.import_module("dagua.layout.ops.pipelines.sfdp")
+
+    incumbent = torch.zeros((4, 2), dtype=torch.float32)
+    challenger = torch.tensor(
+        [[0.0, 0.0], [80.0, 0.0], [80.0, 80.0], [0.0, 80.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=4, seed=42)
+    config = LayoutConfig(seed=42, device="cpu")
+    config._dagua_native_deadline_s = time.perf_counter() + 300.0
+
+    def fake_run_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the deterministic incumbent without running the router."""
+        del args, kwargs
+        return incumbent
+
+    def fake_sfdp_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite already-computed challenger."""
+        del args, kwargs
+        return challenger
+
+    def fake_score(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        aesthetic_profile: object = None,
+        all_pairs_dist: Optional[object] = None,
+    ) -> float:
+        """Prefer the computed challenger over the incumbent."""
+        del problem, cluster_ids, aesthetic_profile, all_pairs_dist
+        return 10.0 if torch.equal(pos, challenger) else 0.0
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_run_native_problem)
+    monkeypatch.setattr(dagua_native, "_collinear_dodge", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dagua_native, "_unshear_bimodal_edges", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sfdp, "layout_sfdp_pipeline", fake_sfdp_pipeline)
+    monkeypatch.setattr(nu, "_neato_in_contest", lambda *args, **kwargs: False)
+    monkeypatch.setattr(nu, "_stress_points_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nu, "_predicted_undirected_arm_budget_available", lambda *args: False)
+    monkeypatch.setattr(nu, "_proxy_undirected_candidate", fake_score)
+    monkeypatch.setattr(nu, "_score_undirected_candidate_cached", fake_score)
+
+    result = layout_native_undirected_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        config,
+    )
+
+    torch.testing.assert_close(result, challenger)
