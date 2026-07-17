@@ -18,6 +18,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
+    _crossing_edge_pairs,
     _directed_mrtree_enabled,
     _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
@@ -367,6 +368,154 @@ def test_ordering_cost_gate_blocks_dense_medium_graph() -> None:
         rank_to_nodes=rank_to_nodes,
         max_passes=3,
     )
+
+
+def test_ordering_cost_gate_excludes_nudges_from_trial_pair_product() -> None:
+    """Medium cost gating estimates permutation/search work, not nudge trials."""
+    rank_to_nodes = {rank: [rank] for rank in range(130)}
+    rank_to_nodes[0] = [0, 1]
+
+    assert _ordering_cost_admissible(
+        num_nodes=130,
+        edge_count=199,
+        rank_to_nodes=rank_to_nodes,
+        max_passes=3,
+    )
+    assert not _ordering_cost_admissible(
+        num_nodes=130,
+        edge_count=700,
+        rank_to_nodes={0: list(range(65)), 1: list(range(65, 130))},
+        max_passes=3,
+    )
+
+
+def test_ordering_pair_sweep_checks_budget_internally(monkeypatch: object) -> None:
+    """Crossing pair collection exits during large scans when budget expires."""
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    edge_count = 100
+    sources = torch.arange(0, edge_count * 2, 2, dtype=torch.long)
+    targets = sources + 1
+    edge_index = torch.stack([sources, targets])
+    x_values = torch.arange(edge_count * 2, dtype=torch.float32)
+    pos = torch.stack([x_values, torch.zeros_like(x_values)], dim=1)
+    calls = 0
+
+    def fake_segments_cross(*args: object, **kwargs: object) -> bool:
+        """Count segment tests and report no crossings."""
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return False
+
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() - 1.0
+    monkeypatch.setattr(native_directed, "_segments_cross", fake_segments_cross)
+
+    crossings = _crossing_edge_pairs(
+        pos,
+        edge_index,
+        max_pairs=64,
+        config=config,
+        started_at=time.perf_counter(),
+        wall_time_cap_s=10.0,
+    )
+
+    assert crossings == []
+    assert calls < edge_count * (edge_count - 1) // 2
+
+
+def test_directed_ordering_reachable_for_medium_small_band_once(monkeypatch: object) -> None:
+    """A 65..128 node portfolio can reach ordering without a duplicate late pass."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    num_nodes = 100
+    sources: list[int] = []
+    targets: list[int] = []
+    for src in range(num_nodes):
+        for delta in range(1, 4):
+            dst = src + delta
+            if dst < num_nodes and len(sources) < 285:
+                sources.append(src)
+                targets.append(dst)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    y_values = torch.arange(num_nodes, dtype=torch.float32) // 8
+    incumbent = torch.stack([torch.arange(num_nodes, dtype=torch.float32), y_values], dim=1)
+    ordering_calls = 0
+    ordering_passes: list[int] = []
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite incumbent with repeated drawn ranks."""
+        del args, kwargs
+        return incumbent.clone()
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Return incumbent-identical candidates without external solver cost."""
+        del kwargs
+        return incumbent.clone()
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Register cheap incumbent-identical challengers."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        positions[name] = raw_pos
+
+    def fake_rank_ordering(
+        incumbent_pos: torch.Tensor,
+        edge_index_arg: torch.Tensor,
+        max_passes: int = 3,
+        config: Optional[LayoutConfig] = None,
+    ) -> torch.Tensor:
+        """Record that the portfolio reached the ordering arm."""
+        nonlocal ordering_calls
+        del edge_index_arg, config
+        ordering_calls += 1
+        ordering_passes.append(max_passes)
+        assert int(incumbent_pos.shape[0]) == num_nodes
+        return incumbent_pos.clone()
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Keep all candidates tied so the incumbent remains selected."""
+        del args, kwargs
+        return 1.0
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(
+        native_directed,
+        "_rank_local_zero_crossing_swap_candidate",
+        fake_rank_ordering,
+    )
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=torch.full((num_nodes, 2), 60.0),
+    )
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert torch.equal(returned, incumbent)
+    assert ordering_calls == 1
+    assert ordering_passes == [0]
 
 
 def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
