@@ -42,8 +42,15 @@ _PREDICTED_COST_LATE_ENTRY_REMAINING_S = 90.0
 _PREDICTED_COST_RETURN_RESERVE_S = 2.0
 _MEASURED_COST_MAX_SEEDS = 2
 _MEASURED_COST_MAX_CHECKPOINTS = 2
+_MEASURED_COST_TINY_MAX_CHECKPOINTS = 4
+_MEASURED_COST_TINY_REFEREE_S = 0.05
+_MEASURED_COST_TINY_MAX_N = 64
+_MEASURED_COST_TINY_STEPS = 96
+_TINY_ROW_CONTINUATION_CAP_S = 2.0
 _MEASURED_COST_DEFAULT_REFEREE_S = 0.40
 _MEASURED_COST_SURROGATE_STEPS = 4
+_W5_STRESS_MAX_SOURCES = 200
+_W5_STRESS_MAX_PAIRS = 100_000
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
@@ -60,6 +67,9 @@ class W5PhaseTiming:
         Seed family label.
     mode : str
         Routed W5 mode for this seed.
+    pass_id : int
+        Surrogate pass identifier, ``1`` for the existing objective and ``2``
+        for the honest-aligned continuation.
     route_s : float
         Wall-clock seconds spent choosing the route.
     optimize_s : float
@@ -72,6 +82,7 @@ class W5PhaseTiming:
 
     seed: str
     mode: str
+    pass_id: int
     route_s: float
     optimize_s: float
     viability_s: float
@@ -240,6 +251,9 @@ class W5Checkpoint:
         Seed family label.
     mode : str
         Finisher mode.
+    pass_id : int
+        Surrogate pass identifier, ``1`` for the existing objective and ``2``
+        for the honest-aligned continuation.
     step : int
         Optimization step represented by the checkpoint.
     surrogate_delta : float
@@ -254,10 +268,14 @@ class W5Checkpoint:
         Whether this checkpoint cleared the honest W5 accept margin.
     reason : str
         Accept or reject reason.
+    pass_spend_s : float
+        Wall-clock seconds spent in this seed/mode/pass through the checkpoint
+        scoring event.
     """
 
     seed: str
     mode: str
+    pass_id: int
     step: int
     surrogate_delta: float
     honest_delta: float
@@ -265,6 +283,7 @@ class W5Checkpoint:
     honest_score_pair: W5ScorePair
     accepted: bool
     reason: str
+    pass_spend_s: float
 
 
 @dataclass(frozen=True)
@@ -375,6 +394,25 @@ class W5FinisherResult:
     viability_counts: dict[str, int] = field(default_factory=dict)
     viability_drop_counts: dict[str, int] = field(default_factory=dict)
     cost_plan: Optional[W5CostPlan] = None
+
+
+@dataclass(frozen=True)
+class W5StressSample:
+    """Fixed differentiable stress sample for W5 pass 2.
+
+    Parameters
+    ----------
+    sources : torch.Tensor
+        Source node indices with shape ``[P]``.
+    targets : torch.Tensor
+        Target node indices with shape ``[P]``.
+    graph_distances : torch.Tensor
+        Positive graph distances with shape ``[P]``.
+    """
+
+    sources: torch.Tensor
+    targets: torch.Tensor
+    graph_distances: torch.Tensor
 
 
 def is_worker_timeout_like_exception(exc: Exception) -> bool:
@@ -664,6 +702,7 @@ def _finisher_slice_s(config: Optional[LayoutConfig]) -> Optional[float]:
     if wall_remaining is not None and wall_remaining < _ABSOLUTE_DEADLINE_RESERVE_S:
         return None
     remaining = wall_remaining if process_remaining is None else process_remaining
+    assert remaining is not None
     if remaining < _MIN_BENCHMARK_REMAINING_S:
         return None
     wall_available = (
@@ -963,6 +1002,98 @@ def _project_checkpoint_for_viability(
     return projected
 
 
+def _closed_over_all_pairs_dist(score_fn: Callable[[torch.Tensor], W5ScorePair]) -> Optional[Any]:
+    """Return ``all_pairs_dist`` captured by the honest scorer, when present.
+
+    Parameters
+    ----------
+    score_fn : Callable[[torch.Tensor], W5ScorePair]
+        Honest scoring closure built by the terminal native path.
+
+    Returns
+    -------
+    object or None
+        Existing all-pairs distance matrix from the scorer closure. ``None``
+        means pass 2 must omit the stress term rather than compute APSP here.
+    """
+    code = getattr(score_fn, "__code__", None)
+    closure = getattr(score_fn, "__closure__", None)
+    if code is None or closure is None:
+        return None
+    for name, cell in zip(code.co_freevars, closure):
+        if name != "all_pairs_dist":
+            continue
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            return None
+        return value
+    return None
+
+
+def _build_w5_stress_sample(
+    edge_index: torch.Tensor,
+    node_count: int,
+    all_pairs_dist: Optional[Any],
+    device: torch.device,
+) -> Optional[W5StressSample]:
+    """Build a fixed capped stress sample from an existing APSP matrix.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_count : int
+        Number of graph nodes.
+    all_pairs_dist : object, optional
+        Precomputed all-pairs graph distances. No sample is built when this is
+        absent, preserving the no-new-APSP invariant.
+    device : torch.device
+        Device for returned index and target tensors.
+
+    Returns
+    -------
+    W5StressSample or None
+        Deterministic detached stress sample, capped at ``_W5_STRESS_MAX_PAIRS``.
+    """
+    if all_pairs_dist is None or node_count < 2 or edge_index.numel() == 0:
+        return None
+    try:
+        from dagua.metrics import _deterministic_sample_indices, _stratified_graph_pairs
+
+        n_targets = max(1, _W5_STRESS_MAX_PAIRS // _W5_STRESS_MAX_SOURCES)
+        sources, targets, graph_distances = _stratified_graph_pairs(
+            edge_index.detach().to(device="cpu", dtype=torch.long),
+            int(node_count),
+            _W5_STRESS_MAX_SOURCES,
+            n_targets,
+            all_pairs_dist=all_pairs_dist,
+        )
+        if sources.size == 0:
+            return None
+        if sources.size > _W5_STRESS_MAX_PAIRS:
+            keep = _deterministic_sample_indices(int(sources.size), _W5_STRESS_MAX_PAIRS)
+            sources = sources[keep]
+            targets = targets[keep]
+            graph_distances = graph_distances[keep]
+        source_tensor = torch.as_tensor(sources, dtype=torch.long, device=device).detach()
+        target_tensor = torch.as_tensor(targets, dtype=torch.long, device=device).detach()
+        distance_tensor = torch.as_tensor(
+            graph_distances,
+            dtype=torch.float32,
+            device=device,
+        ).detach()
+    except Exception:  # noqa: BLE001 -- pass-2 stress is optional candidate guidance
+        return None
+    if source_tensor.numel() == 0:
+        return None
+    return W5StressSample(
+        sources=source_tensor,
+        targets=target_tensor,
+        graph_distances=distance_tensor.clamp_min(1.0),
+    )
+
+
 def _increment_count(counts: dict[str, int], key: str) -> None:
     """Increment ``key`` in a telemetry count dictionary.
 
@@ -1051,6 +1182,179 @@ def _surrogate_loss(
     return torch.nan_to_num(loss, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
 
 
+def _stress_gain_loss(pos: torch.Tensor, stress_sample: Optional[W5StressSample]) -> torch.Tensor:
+    """Return a scale-fitted sampled stress loss for W5 pass 2.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    stress_sample : W5StressSample, optional
+        Fixed source/target graph-distance sample.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized stress residual. Zero is returned when no fixed
+        sample is available.
+    """
+    if stress_sample is None or stress_sample.sources.numel() == 0:
+        return pos.new_zeros(())
+    geometric = torch.linalg.vector_norm(
+        pos[stress_sample.sources] - pos[stress_sample.targets],
+        dim=1,
+    )
+    targets = stress_sample.graph_distances.to(device=pos.device, dtype=pos.dtype)
+    denominator = torch.dot(targets, targets).clamp_min(1.0e-12)
+    scale = torch.dot(geometric, targets) / denominator
+    reference = scale * targets
+    residual = geometric - reference
+    normalizer = geometric.detach().square().mean().clamp_min(1.0e-12)
+    return residual.square().mean() / normalizer
+
+
+def _edge_length_l1_deviation_loss(pos: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    """Return MAD/mean edge-length deviation matching the honest metric shape.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar relative mean absolute deviation over edge lengths.
+    """
+    if edge_index.numel() == 0:
+        return pos.new_zeros(())
+    lengths = torch.linalg.vector_norm(pos[edge_index[0]] - pos[edge_index[1]], dim=1)
+    mean_length = lengths.mean().clamp_min(1.0e-12)
+    return torch.abs(lengths - mean_length).mean() / mean_length.detach().clamp_min(1.0e-12)
+
+
+def _aligned_surrogate_loss(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    topo_depth: torch.Tensor,
+    mode: str,
+    floors: dict[str, float],
+    stress_sample: Optional[W5StressSample],
+) -> torch.Tensor:
+    """Evaluate the pass-2 W5 objective with honest-aligned additive terms.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Depth tensor with shape ``[N]``.
+    mode : str
+        Routed W5 mode.
+    floors : dict[str, float]
+        Incumbent floor values for barrier terms.
+    stress_sample : W5StressSample, optional
+        Fixed sampled graph-distance pairs for stress guidance.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss to minimize during pass 2.
+    """
+    loss = _surrogate_loss(pos, edge_index, node_sizes, topo_depth, mode, floors)
+    honest_ksm = floors.get("honest_ksm")
+    ksm_headroom = 0.0 if honest_ksm is None else max(0.0, 1.0 - float(honest_ksm))
+    stress_weight = 12.0 + 72.0 * ksm_headroom
+    edge_l1_weight = 6.0
+    loss = (
+        loss
+        + stress_weight * _stress_gain_loss(pos, stress_sample)
+        + edge_l1_weight * _edge_length_l1_deviation_loss(pos, edge_index)
+    )
+    return torch.nan_to_num(loss, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
+
+
+def _checkpoint_steps(desired_steps: int, max_checkpoints: int) -> set[int]:
+    """Return deterministic checkpoint steps for a bounded optimizer pass.
+
+    Parameters
+    ----------
+    desired_steps : int
+        Planned optimizer steps for the pass.
+    max_checkpoints : int
+        Maximum number of checkpoints to score.
+
+    Returns
+    -------
+    set[int]
+        Pass-local step indices to checkpoint.
+    """
+    if max_checkpoints <= 0:
+        return set()
+    if max_checkpoints == 1:
+        return {max(1, int(desired_steps))}
+    return {
+        max(1, min(int(desired_steps), math.ceil(int(desired_steps) * index / max_checkpoints)))
+        for index in range(1, max_checkpoints + 1)
+    }
+
+
+def _pass_loss(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    topo_depth: torch.Tensor,
+    mode: str,
+    floors: dict[str, float],
+    pass_id: int,
+    stress_sample: Optional[W5StressSample],
+) -> torch.Tensor:
+    """Evaluate the selected W5 pass loss.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Depth tensor with shape ``[N]``.
+    mode : str
+        Routed W5 mode.
+    floors : dict[str, float]
+        Incumbent floor values for barrier terms.
+    pass_id : int
+        Surrogate pass identifier.
+    stress_sample : W5StressSample, optional
+        Fixed sampled graph-distance pairs for pass 2.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss for the requested pass.
+    """
+    if pass_id == 1:
+        return _surrogate_loss(pos, edge_index, node_sizes, topo_depth, mode, floors)
+    return _aligned_surrogate_loss(
+        pos,
+        edge_index,
+        node_sizes,
+        topo_depth,
+        mode,
+        floors,
+        stress_sample,
+    )
+
+
 def _optimize_seed(
     seed: W5Seed,
     edge_index: torch.Tensor,
@@ -1062,6 +1366,8 @@ def _optimize_seed(
     max_steps: Optional[int] = None,
     max_checkpoints: int = _MEASURED_COST_MAX_CHECKPOINTS,
     step_timing_hook: Optional[Callable[[int, float], None]] = None,
+    pass_id: int = 1,
+    stress_sample: Optional[W5StressSample] = None,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Run one bounded W5 descent from ``seed``.
 
@@ -1088,6 +1394,11 @@ def _optimize_seed(
     step_timing_hook : Callable[[int, float], None], optional
         Callback receiving each completed step index and wall-clock step
         duration. Used only by measured admission sizing.
+    pass_id : int, default=1
+        Surrogate pass identifier. Pass 1 uses the unchanged objective; pass 2
+        adds honest-aligned stress and L1 edge-length terms.
+    stress_sample : W5StressSample, optional
+        Fixed sampled graph-distance pairs for pass 2.
 
     Returns
     -------
@@ -1111,7 +1422,16 @@ def _optimize_seed(
             floors["honest_flow"] = float(honest_axes.flow)
         if honest_axes.ksm is not None:
             floors["honest_ksm"] = float(honest_axes.ksm)
-    start_loss_tensor = _surrogate_loss(work, edge_index, node_sizes, topo_depth, mode, floors)
+    start_loss_tensor = _pass_loss(
+        work,
+        edge_index,
+        node_sizes,
+        topo_depth,
+        mode,
+        floors,
+        pass_id,
+        stress_sample,
+    )
     start_loss = float(start_loss_tensor.detach().item())
     median_size = float(node_sizes.detach().to(dtype=torch.float32).mean().item())
     lr = max(0.01, min(4.0, 0.04 * median_size))
@@ -1124,12 +1444,7 @@ def _optimize_seed(
     desired_steps = max(1, desired_steps)
     effective_max_steps = desired_steps
     checkpoints: list[tuple[int, torch.Tensor, float]] = []
-    if max_checkpoints <= 0:
-        checkpoint_steps: set[int] = set()
-    elif max_checkpoints == 1:
-        checkpoint_steps = {desired_steps}
-    else:
-        checkpoint_steps = {max(1, desired_steps // 2), desired_steps}
+    checkpoint_steps = _checkpoint_steps(desired_steps, max_checkpoints)
     completed_steps = 0
     for step in range(1, desired_steps + 1):
         if step > effective_max_steps:
@@ -1138,7 +1453,16 @@ def _optimize_seed(
             break
         step_started_perf = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
-        loss = _surrogate_loss(work, edge_index, node_sizes, topo_depth, mode, floors)
+        loss = _pass_loss(
+            work,
+            edge_index,
+            node_sizes,
+            topo_depth,
+            mode,
+            floors,
+            pass_id,
+            stress_sample,
+        )
         if not bool(torch.isfinite(loss).all().item()):
             break
         loss.backward()
@@ -1150,25 +1474,98 @@ def _optimize_seed(
             remaining_step_budget = max(0.0, deadline - time.monotonic())
             steps_that_fit = 1 + int(remaining_step_budget / step_wall_s)
             effective_max_steps = max(1, min(desired_steps, steps_that_fit))
-            if max_checkpoints <= 0:
-                checkpoint_steps = set()
-            elif max_checkpoints == 1:
-                checkpoint_steps = {effective_max_steps}
-            else:
-                checkpoint_steps = {max(1, effective_max_steps // 2), effective_max_steps}
+            checkpoint_steps = _checkpoint_steps(effective_max_steps, max_checkpoints)
         if mode == "x_only":
             with torch.no_grad():
                 work[:, 1] = start_y
         completed_steps = step
         if step in checkpoint_steps:
             checkpoint_pos = work.detach().clone()
-            checkpoint_loss = float(
-                _surrogate_loss(checkpoint_pos, edge_index, node_sizes, topo_depth, mode, floors)
-                .detach()
-                .item()
+            checkpoint_loss_tensor = _pass_loss(
+                checkpoint_pos,
+                edge_index,
+                node_sizes,
+                topo_depth,
+                mode,
+                floors,
+                pass_id,
+                stress_sample,
             )
+            checkpoint_loss = float(checkpoint_loss_tensor.detach().item())
             checkpoints.append((step, checkpoint_pos, checkpoint_loss))
     return work.detach(), completed_steps, start_loss, checkpoints
+
+
+def _run_optimize_seed_pass(
+    seed: W5Seed,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    topo_depth: torch.Tensor,
+    mode: str,
+    deadline: float,
+    honest_axes: Optional[W5HonestAxes],
+    *,
+    max_steps: Optional[int],
+    max_checkpoints: int,
+    pass_id: int,
+    stress_sample: Optional[W5StressSample],
+) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+    """Call the active optimizer with optional pass-2 arguments when supported.
+
+    Parameters
+    ----------
+    seed : W5Seed
+        Warm start for this pass.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Depth tensor with shape ``[N]``.
+    mode : str
+        Routed W5 mode.
+    deadline : float
+        Absolute optimizer deadline.
+    honest_axes : W5HonestAxes, optional
+        Honest incumbent axis scores.
+    max_steps : int, optional
+        Maximum optimizer steps.
+    max_checkpoints : int
+        Maximum pass checkpoints.
+    pass_id : int
+        Surrogate pass identifier.
+    stress_sample : W5StressSample, optional
+        Fixed sampled graph-distance pairs for pass 2.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]
+        Final positions, completed steps, start loss, and checkpoint
+        positions/losses.
+    """
+    optimizer_kwargs: dict[str, Any] = {}
+    parameters = inspect.signature(_optimize_seed).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if max_steps is not None and (accepts_kwargs or "max_steps" in parameters):
+        optimizer_kwargs["max_steps"] = max_steps
+    if accepts_kwargs or "max_checkpoints" in parameters:
+        optimizer_kwargs["max_checkpoints"] = max_checkpoints
+    if accepts_kwargs or "pass_id" in parameters:
+        optimizer_kwargs["pass_id"] = pass_id
+    if accepts_kwargs or "stress_sample" in parameters:
+        optimizer_kwargs["stress_sample"] = stress_sample
+    return _optimize_seed(
+        seed,
+        edge_index,
+        node_sizes,
+        topo_depth,
+        mode,
+        deadline,
+        honest_axes,
+        **optimizer_kwargs,
+    )
 
 
 def _measure_one_surrogate_step_s(
@@ -1323,9 +1720,17 @@ def _measured_cost_plan(
             )
         return None
     node_count = int(seeds[0].pos.shape[0])
-    base_steps = 24 if node_count >= 300 else 36
+    is_tiny_referee = (
+        node_count <= _MEASURED_COST_TINY_MAX_N and referee_s < _MEASURED_COST_TINY_REFEREE_S
+    )
+    base_steps = _MEASURED_COST_TINY_STEPS if is_tiny_referee else (24 if node_count >= 300 else 36)
     base_seeds = min(3, len(seeds))
-    base_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
+    max_checkpoints = (
+        _MEASURED_COST_TINY_MAX_CHECKPOINTS if is_tiny_referee else _MEASURED_COST_MAX_CHECKPOINTS
+    )
+    base_checkpoints = max_checkpoints
+    if is_tiny_referee:
+        usable_s = max(0.0, min(usable_s, _TINY_ROW_CONTINUATION_CAP_S))
 
     def build_plan(seed_count: int, steps: int, checkpoints: int) -> W5CostPlan:
         """Build a wall-denominated plan payload for candidate work bounds.
@@ -1365,7 +1770,7 @@ def _measured_cost_plan(
 
     max_seeds = min(_MEASURED_COST_MAX_SEEDS, base_seeds)
     for steps in range(base_steps, 0, -1):
-        for checkpoints in range(_MEASURED_COST_MAX_CHECKPOINTS, 0, -1):
+        for checkpoints in range(max_checkpoints, 0, -1):
             for seed_count in range(max_seeds, 0, -1):
                 candidate_plan = build_plan(seed_count, steps, checkpoints)
                 if candidate_plan.predicted_s <= usable_s:
@@ -1584,6 +1989,13 @@ def run_w5_finisher(
         int(kept_seeds[0].pos.shape[0]),
         kept_seeds[0].pos.device,
     )
+    all_pairs_dist = _closed_over_all_pairs_dist(score_fn)
+    stress_sample = _build_w5_stress_sample(
+        edge_work,
+        int(kept_seeds[0].pos.shape[0]),
+        all_pairs_dist,
+        kept_seeds[0].pos.device,
+    )
     max_steps: Optional[int] = None
     max_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
     if use_measured_cost:
@@ -1672,144 +2084,178 @@ def run_w5_finisher(
                 deadline_returned = True
                 break
             routed_mode = mode
-            optimize_s = 0.0
-            viability_s = 0.0
-            score_s = 0.0
             accepted_before_mode = len(accepted)
-            try:
-                optimize_started = time.perf_counter()
-                if use_measured_cost:
-                    final_pos, steps, start_loss, scored_points = _optimize_seed(
-                        seed,
+            mode_seed = (
+                W5Seed(f"{seed.name}_incumbent", winner_pos) if accepted_before_mode > 0 else seed
+            )
+            pass_seed = mode_seed
+            for pass_id in (1, 2):
+                if pass_id == 2:
+                    if stress_sample is None:
+                        break
+                    if deadline_returned:
+                        break
+                    if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
+                        config,
+                        remaining_entry,
+                    ):
+                        deadline_returned = True
+                        break
+                    if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
+                        deadline_returned = True
+                        break
+                optimize_s = 0.0
+                viability_s = 0.0
+                score_s = 0.0
+                accepted_before_pass = len(accepted)
+                try:
+                    optimize_started = time.perf_counter()
+                    final_pos, steps, start_loss, scored_points = _run_optimize_seed_pass(
+                        pass_seed,
                         edge_work,
                         size_work,
                         topo_depth,
                         mode,
                         deadline - _FINISHER_SCORE_RESERVE_S,
                         incumbent_axes,
-                        max_steps=max_steps,
+                        max_steps=max_steps if use_measured_cost else None,
                         max_checkpoints=max_checkpoints,
+                        pass_id=pass_id,
+                        stress_sample=stress_sample,
                     )
-                else:
-                    final_pos, steps, start_loss, scored_points = _optimize_seed(
-                        seed,
-                        edge_work,
-                        size_work,
-                        topo_depth,
-                        mode,
-                        deadline - _FINISHER_SCORE_RESERVE_S,
-                        incumbent_axes,
+                    optimize_s = max(0.0, time.perf_counter() - optimize_started)
+                except Exception as exc:  # noqa: BLE001 -- W5 is optional candidate generation
+                    if is_worker_timeout_like_exception(exc):
+                        raise
+                    _LOGGER.warning("W5 finisher seed %s failed", seed.name, exc_info=True)
+                    phase_timings.append(
+                        W5PhaseTiming(
+                            seed=seed.name,
+                            mode=mode,
+                            pass_id=pass_id,
+                            route_s=route_s if ladder_index == 0 and pass_id == 1 else 0.0,
+                            optimize_s=optimize_s,
+                            viability_s=viability_s,
+                            score_s=score_s,
+                        )
                     )
-                optimize_s = max(0.0, time.perf_counter() - optimize_started)
-            except Exception as exc:  # noqa: BLE001 -- W5 is optional candidate generation
-                if is_worker_timeout_like_exception(exc):
-                    raise
-                _LOGGER.warning("W5 finisher seed %s failed", seed.name, exc_info=True)
+                    continue
+                steps_total += steps
+                if not scored_points or scored_points[-1][0] != steps:
+                    final_loss = float(
+                        _pass_loss(
+                            final_pos,
+                            edge_work,
+                            size_work,
+                            topo_depth,
+                            mode,
+                            {},
+                            pass_id,
+                            stress_sample,
+                        )
+                        .detach()
+                        .item()
+                    )
+                    scored_points.append((steps, final_pos, final_loss))
+                for step, checkpoint_pos, checkpoint_loss in scored_points[:max_checkpoints]:
+                    if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
+                        config,
+                        remaining_entry,
+                    ):
+                        deadline_returned = True
+                        break
+                    if time.monotonic() >= deadline:
+                        deadline_returned = True
+                        break
+                    viability_started = time.perf_counter()
+                    checkpoint_overlap = _overlap_count(checkpoint_pos, size_work)
+                    if checkpoint_overlap > incumbent_overlap:
+                        _increment_count(viability_counts, "projected_overlap_candidate")
+                        checkpoint_pos = _project_checkpoint_for_viability(
+                            checkpoint_pos,
+                            size_work,
+                        )
+                        projected_overlap = _overlap_count(checkpoint_pos, size_work)
+                        if projected_overlap <= incumbent_overlap:
+                            _increment_count(viability_counts, "projection_resolved_overlap")
+                    if _is_degenerate(checkpoint_pos, size_work):
+                        _increment_count(viability_counts, "drop_degenerate")
+                        _increment_count(viability_drop_counts, "degenerate")
+                        viability_s += max(0.0, time.perf_counter() - viability_started)
+                        continue
+                    if _overlap_count(checkpoint_pos, size_work) > incumbent_overlap:
+                        _increment_count(viability_counts, "drop_overlap_regressed")
+                        _increment_count(viability_drop_counts, "overlap_regressed")
+                        viability_s += max(0.0, time.perf_counter() - viability_started)
+                        continue
+                    _increment_count(viability_counts, "scored_viable")
+                    viability_s += max(0.0, time.perf_counter() - viability_started)
+                    try:
+                        score_started = time.perf_counter()
+                        score_pos = checkpoint_pos.to(device=edge_index.device, dtype=torch.float32)
+                        honest = score_fn(score_pos)
+                        score_s += max(0.0, time.perf_counter() - score_started)
+                    except Exception as exc:
+                        score_s += max(0.0, time.perf_counter() - score_started)
+                        if is_worker_timeout_like_exception(exc):
+                            raise
+                        _increment_count(viability_counts, "drop_score_exception")
+                        continue
+                    if not math.isfinite(honest.directed) or not math.isfinite(honest.undirected):
+                        _increment_count(viability_counts, "drop_nonfinite_score")
+                        continue
+                    directed_delta = honest.directed - winner_score_pair.directed
+                    undirected_delta = honest.undirected - winner_score_pair.undirected
+                    surrogate_delta = start_loss - checkpoint_loss
+                    is_accepted = w5_dominates(honest, winner_score_pair, float(accept_margin))
+                    reason = "dominates" if is_accepted else "does_not_dominate_both"
+                    checkpoint = W5Checkpoint(
+                        seed=seed.name,
+                        mode=mode,
+                        pass_id=pass_id,
+                        step=int(step),
+                        surrogate_delta=float(surrogate_delta),
+                        honest_delta=float(directed_delta),
+                        undirected_honest_delta=float(undirected_delta),
+                        honest_score_pair=honest,
+                        accepted=is_accepted,
+                        reason=reason,
+                        pass_spend_s=float(optimize_s + viability_s + score_s),
+                    )
+                    checkpoints.append(checkpoint)
+                    if is_accepted:
+                        name = f"w5_p{pass_id}_{mode}_{seed.name}_{step}"
+                        winner_pos = checkpoint_pos.to(
+                            device=incumbent_pos.device,
+                            dtype=incumbent_pos.dtype,
+                        )
+                        winner_score_pair = honest
+                        winner_name = name
+                        accepted_candidate = W5Candidate(
+                            name=name,
+                            pos=winner_pos,
+                            score_pair=honest,
+                            mode=mode,
+                        )
+                        accepted.append(accepted_candidate)
+                    else:
+                        rejected.append(checkpoint)
                 phase_timings.append(
                     W5PhaseTiming(
                         seed=seed.name,
                         mode=mode,
-                        route_s=route_s if ladder_index == 0 else 0.0,
+                        pass_id=pass_id,
+                        route_s=route_s if ladder_index == 0 and pass_id == 1 else 0.0,
                         optimize_s=optimize_s,
                         viability_s=viability_s,
                         score_s=score_s,
                     )
                 )
-                continue
-            steps_total += steps
-            if not scored_points or scored_points[-1][0] != steps:
-                final_loss = float(
-                    _surrogate_loss(final_pos, edge_work, size_work, topo_depth, mode, {})
-                    .detach()
-                    .item()
-                )
-                scored_points.append((steps, final_pos, final_loss))
-            for step, checkpoint_pos, checkpoint_loss in scored_points[:max_checkpoints]:
-                if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
-                    deadline_returned = True
+                pass_seed_pos = winner_pos if len(accepted) > accepted_before_pass else final_pos
+                pass_seed = W5Seed(f"{seed.name}_p{pass_id}", pass_seed_pos)
+                if deadline_returned:
                     break
-                if time.monotonic() >= deadline:
-                    deadline_returned = True
-                    break
-                viability_started = time.perf_counter()
-                checkpoint_overlap = _overlap_count(checkpoint_pos, size_work)
-                if checkpoint_overlap > incumbent_overlap:
-                    _increment_count(viability_counts, "projected_overlap_candidate")
-                    checkpoint_pos = _project_checkpoint_for_viability(checkpoint_pos, size_work)
-                    projected_overlap = _overlap_count(checkpoint_pos, size_work)
-                    if projected_overlap <= incumbent_overlap:
-                        _increment_count(viability_counts, "projection_resolved_overlap")
-                if _is_degenerate(checkpoint_pos, size_work):
-                    _increment_count(viability_counts, "drop_degenerate")
-                    _increment_count(viability_drop_counts, "degenerate")
-                    viability_s += max(0.0, time.perf_counter() - viability_started)
-                    continue
-                if _overlap_count(checkpoint_pos, size_work) > incumbent_overlap:
-                    _increment_count(viability_counts, "drop_overlap_regressed")
-                    _increment_count(viability_drop_counts, "overlap_regressed")
-                    viability_s += max(0.0, time.perf_counter() - viability_started)
-                    continue
-                _increment_count(viability_counts, "scored_viable")
-                viability_s += max(0.0, time.perf_counter() - viability_started)
-                try:
-                    score_started = time.perf_counter()
-                    score_pos = checkpoint_pos.to(device=edge_index.device, dtype=torch.float32)
-                    honest = score_fn(score_pos)
-                    score_s += max(0.0, time.perf_counter() - score_started)
-                except Exception as exc:
-                    score_s += max(0.0, time.perf_counter() - score_started)
-                    if is_worker_timeout_like_exception(exc):
-                        raise
-                    _increment_count(viability_counts, "drop_score_exception")
-                    continue
-                if not math.isfinite(honest.directed) or not math.isfinite(honest.undirected):
-                    _increment_count(viability_counts, "drop_nonfinite_score")
-                    continue
-                directed_delta = honest.directed - winner_score_pair.directed
-                undirected_delta = honest.undirected - winner_score_pair.undirected
-                surrogate_delta = start_loss - checkpoint_loss
-                is_accepted = w5_dominates(honest, winner_score_pair, float(accept_margin))
-                reason = "dominates" if is_accepted else "does_not_dominate_both"
-                checkpoint = W5Checkpoint(
-                    seed=seed.name,
-                    mode=mode,
-                    step=int(step),
-                    surrogate_delta=float(surrogate_delta),
-                    honest_delta=float(directed_delta),
-                    undirected_honest_delta=float(undirected_delta),
-                    honest_score_pair=honest,
-                    accepted=is_accepted,
-                    reason=reason,
-                )
-                checkpoints.append(checkpoint)
-                if is_accepted:
-                    name = f"w5_{mode}_{seed.name}_{step}"
-                    winner_pos = checkpoint_pos.to(
-                        device=incumbent_pos.device,
-                        dtype=incumbent_pos.dtype,
-                    )
-                    winner_score_pair = honest
-                    winner_name = name
-                    accepted_candidate = W5Candidate(
-                        name=name,
-                        pos=winner_pos,
-                        score_pair=honest,
-                        mode=mode,
-                    )
-                    accepted.append(accepted_candidate)
-                else:
-                    rejected.append(checkpoint)
-            phase_timings.append(
-                W5PhaseTiming(
-                    seed=seed.name,
-                    mode=mode,
-                    route_s=route_s if ladder_index == 0 else 0.0,
-                    optimize_s=optimize_s,
-                    viability_s=viability_s,
-                    score_s=score_s,
-                )
-            )
-            if deadline_returned or len(accepted) > accepted_before_mode:
+            if deadline_returned:
                 break
     skipped = None if accepted else ("no_checkpoint_improved" if checkpoints else "no_checkpoint")
     return finish(
@@ -1911,6 +2357,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
             {
                 "seed": timing.seed,
                 "mode": timing.mode,
+                "pass_id": timing.pass_id,
                 "route_s": timing.route_s,
                 "optimize_s": timing.optimize_s,
                 "viability_s": timing.viability_s,
@@ -1929,6 +2376,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
             {
                 "seed": checkpoint.seed,
                 "mode": checkpoint.mode,
+                "pass_id": checkpoint.pass_id,
                 "step": checkpoint.step,
                 "reason": checkpoint.reason,
             }
@@ -1938,6 +2386,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
             {
                 "seed": checkpoint.seed,
                 "mode": checkpoint.mode,
+                "pass_id": checkpoint.pass_id,
                 "step": checkpoint.step,
                 "surrogate_delta": checkpoint.surrogate_delta,
                 "directed_honest_delta": checkpoint.honest_delta,
@@ -1945,6 +2394,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
                 "honest_score_pair": pair_payload(checkpoint.honest_score_pair),
                 "accepted": checkpoint.accepted,
                 "reason": checkpoint.reason,
+                "pass_spend_s": checkpoint.pass_spend_s,
             }
             for checkpoint in result.checkpoints
         ],
