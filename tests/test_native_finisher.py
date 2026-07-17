@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Optional
 
 import pytest
 import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.native_finisher import (
+    W5HonestAxes,
     W5ScorePair,
     W5Seed,
     log_w5_telemetry,
@@ -240,6 +242,133 @@ def test_w5_finisher_rejects_one_sided_composite_win() -> None:
     assert all(checkpoint.reason == "does_not_dominate_both" for checkpoint in result.rejected)
 
 
+def test_w5_routes_directed_mode_from_honest_flow_not_surrogate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A high surrogate flow self-report cannot force x_only routing."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor(
+        [[0.0, 0.0], [0.0, 10.0], [0.0, 20.0], [0.0, 30.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    modes: list[str] = []
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Capture the routed mode and emit one non-dominant checkpoint."""
+        del edge_work, size_work, topo_depth, deadline, honest_axes
+        modes.append(mode)
+        return seed.pos, 1, 1.0, [(1, seed.pos, 1.0)]
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("residual_like", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(9.0, 9.0),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+        incumbent_axes=W5HonestAxes(flow=0.753, depth=1.0, ksm=0.922, edge_length=0.876),
+    )
+
+    assert modes == ["barrier_2d"]
+    assert result.phase_timings_s[0].mode == "barrier_2d"
+    assert result.incumbent_axes is not None
+    assert result.incumbent_axes.flow == pytest.approx(0.753)
+
+
+def test_w5_barrier_flow_gain_improves_honest_flow_and_keeps_ksm_floor() -> None:
+    """Barrier mode raises honest flow without giving away the KSM floor."""
+    import importlib
+
+    from dagua.metrics import directed_flow_score, full
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor(
+        [[0.0, 0.0], [8.0, 0.0], [16.0, 0.0], [24.0, 0.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0)
+    topo_depth = torch.arange(4, dtype=torch.long)
+    start_metrics = full(pos, edge_index, topo_depth=topo_depth, node_sizes=node_sizes)
+    final_pos, steps, _start_loss, _checkpoints = native_finisher._optimize_seed(
+        W5Seed("flow_deficient", pos),
+        edge_index,
+        node_sizes,
+        topo_depth,
+        "barrier_2d",
+        time.monotonic() + 2.0,
+        W5HonestAxes(flow=0.5, depth=0.5, ksm=float(start_metrics["ksm_score"])),
+    )
+    final_metrics = full(final_pos, edge_index, topo_depth=topo_depth, node_sizes=node_sizes)
+    start_flow = directed_flow_score(pos, edge_index)["directed_flow_score"]
+    final_flow = directed_flow_score(final_pos, edge_index)["directed_flow_score"]
+
+    assert steps > 0
+    assert final_flow > start_flow
+    assert float(final_metrics["ksm_score"]) >= float(start_metrics["ksm_score"]) - 0.05
+
+
+def test_w5_mode_ladder_runs_barrier_after_x_only_no_accept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The directed ladder tries barrier_2d after x_only produces no accept."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    modes: list[str] = []
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Capture each ladder mode and emit one rejected checkpoint."""
+        del edge_work, size_work, topo_depth, deadline, honest_axes
+        modes.append(mode)
+        return seed.pos, 1, 2.0, [(1, seed.pos, 1.5)]
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("hierarchical", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(9.0, 9.0),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+        incumbent_axes=W5HonestAxes(flow=0.99, depth=0.99, ksm=0.9, edge_length=0.9),
+    )
+
+    assert modes == ["x_only", "barrier_2d"]
+    assert [timing.mode for timing in result.phase_timings_s] == ["x_only", "barrier_2d"]
+    assert result.accepted == ()
+
+
 def test_w5_projects_overlapping_checkpoint_before_viability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -261,9 +390,10 @@ def test_w5_projects_overlapping_checkpoint_before_viability(
         topo_depth: torch.Tensor,
         mode: str,
         deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return a checkpoint that overlaps until W5 applies projection."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline
+        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
         return overlapping, 1, 2.0, [(1, overlapping, 1.0)]
 
     def score_fn(candidate: torch.Tensor) -> W5ScorePair:
@@ -311,9 +441,10 @@ def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
         topo_depth: torch.Tensor,
         mode: str,
         deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return a checkpoint that stays overlapped under the patched projector."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline
+        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
         return overlapping, 1, 2.0, [(1, overlapping, 1.0)]
 
     def no_op_project(checkpoint_pos: torch.Tensor, size_work: torch.Tensor) -> torch.Tensor:
@@ -381,9 +512,10 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
         topo_depth: torch.Tensor,
         mode: str,
         deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return a worse checkpoint after one completed optimizer step."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline
+        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
         return worse_pos, 1, 1.0, [(1, worse_pos, 2.0)]
 
     def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
@@ -440,9 +572,10 @@ def test_w5_finisher_finish_clamps_non_dominant_winner_to_incumbent(
         topo_depth: torch.Tensor,
         mode: str,
         deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return one scoreable checkpoint that is initially accepted."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline
+        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
         return candidate_pos, 1, 2.0, [(1, candidate_pos, 1.0)]
 
     def fake_w5_dominates(

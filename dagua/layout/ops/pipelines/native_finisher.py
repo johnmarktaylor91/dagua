@@ -91,6 +91,72 @@ class W5ScorePair:
 
 
 @dataclass(frozen=True)
+class W5HonestAxes:
+    """Honest per-axis W5 routing signals from the frozen metrics ruler.
+
+    Parameters
+    ----------
+    flow : float, optional
+        Honest ``directed_flow_score`` in ``[0, 1]`` when available.
+    depth : float, optional
+        Honest ``depth_order_score`` in ``[0, 1]`` when available.
+    ksm : float, optional
+        Honest ``ksm_score`` in ``[0, 1]`` when available.
+    edge_length : float, optional
+        Honest ``edge_length_deviation_score`` in ``[0, 1]`` when available.
+    """
+
+    flow: Optional[float] = None
+    depth: Optional[float] = None
+    ksm: Optional[float] = None
+    edge_length: Optional[float] = None
+
+
+def w5_honest_axes_from_metrics(numeric: dict[str, Any]) -> W5HonestAxes:
+    """Extract route-safe honest axes from a ``full()`` metric dictionary.
+
+    Parameters
+    ----------
+    numeric : dict[str, Any]
+        Metric payload returned by ``dagua.metrics.full``.
+
+    Returns
+    -------
+    W5HonestAxes
+        Finite honest axis scores used by W5 routing and barrier weighting.
+    """
+
+    def finite_float(key: str) -> Optional[float]:
+        """Return a finite float from ``numeric`` or ``None``.
+
+        Parameters
+        ----------
+        key : str
+            Metric key to read.
+
+        Returns
+        -------
+        float or None
+            Finite metric value when present.
+        """
+        value = numeric.get(key)
+        if value is None:
+            return None
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        return result if math.isfinite(result) else None
+
+    return W5HonestAxes(
+        flow=finite_float("directed_flow_score"),
+        depth=finite_float("depth_order_score"),
+        ksm=finite_float("ksm_score"),
+        edge_length=finite_float("edge_length_deviation_score"),
+    )
+
+
+@dataclass(frozen=True)
 class W5Seed:
     """Warm-start position for the W5 finisher.
 
@@ -213,6 +279,8 @@ class W5FinisherResult:
         Whether directedness came from a user/config declaration.
     graph_name : str, optional
         Benchmark graph name when the driver supplied one on the config.
+    incumbent_axes : W5HonestAxes, optional
+        Honest per-axis incumbent scores used to route W5.
     phase_timings_s : tuple[W5PhaseTiming, ...]
         Per-seed route/optimize/viability/score timing records.
     viability_counts : dict[str, int]
@@ -242,6 +310,7 @@ class W5FinisherResult:
     declared_hierarchical: bool = False
     direction_is_declared: bool = False
     graph_name: Optional[str] = None
+    incumbent_axes: Optional[W5HonestAxes] = None
     phase_timings_s: tuple[W5PhaseTiming, ...] = ()
     viability_counts: dict[str, int] = field(default_factory=dict)
     viability_drop_counts: dict[str, int] = field(default_factory=dict)
@@ -658,8 +727,9 @@ def _route_mode(
     is_semantically_directed: bool,
     declared_hierarchical: bool,
     direction_is_declared: bool,
+    honest_axes: Optional[W5HonestAxes] = None,
 ) -> str:
-    """Choose the W5 descent mode from structural/local incumbent signals.
+    """Choose the W5 descent mode from honest incumbent axes.
 
     Parameters
     ----------
@@ -675,6 +745,9 @@ def _route_mode(
         Whether the honest ruler treats the graph as hierarchical.
     direction_is_declared : bool
         Whether semantic direction came from user/config metadata.
+    honest_axes : W5HonestAxes, optional
+        Frozen-ruler incumbent axis scores. When absent, W5 falls back to the
+        old surrogate route for compatibility with direct unit callers.
 
     Returns
     -------
@@ -685,12 +758,42 @@ def _route_mode(
         return "undirected_2d_sampled"
     if not declared_hierarchical:
         return "barrier_2d"
-    flow = float(signed_flow_score_surrogate(seed_pos, edge_index).detach().item())
-    depth = float(depth_order_score_surrogate(seed_pos, topo_depth).detach().item())
+    # The mode decision must use the same honest axes as the accept ruler:
+    # a high surrogate flow self-report cannot route a flow-deficient
+    # incumbent into x_only, where y-motion is frozen and the flow gap is
+    # unreachable. The dominance gate below remains the monotone safety rail.
+    if honest_axes is not None:
+        flow = 0.0 if honest_axes.flow is None else float(honest_axes.flow)
+        depth = 0.0 if honest_axes.depth is None else float(honest_axes.depth)
+    else:
+        flow = float(signed_flow_score_surrogate(seed_pos, edge_index).detach().item())
+        depth = float(depth_order_score_surrogate(seed_pos, topo_depth).detach().item())
     node_count = int(seed_pos.shape[0])
     if flow >= 0.95 and depth >= 0.95 and (node_count <= 64 or node_count >= 250):
         return "x_only"
     return "barrier_2d"
+
+
+def _mode_ladder(mode: str, *, is_semantically_directed: bool) -> tuple[str, ...]:
+    """Return the W5 mode ladder for one seed.
+
+    Parameters
+    ----------
+    mode : str
+        Initially routed mode.
+    is_semantically_directed : bool
+        Whether edge direction has semantic meaning.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Modes to try in order. The second directed pass is only useful for
+        ``x_only`` failures; it gives the same seed y-motion without changing
+        the monotone accept gate.
+    """
+    if is_semantically_directed and mode == "x_only":
+        return ("x_only", "barrier_2d")
+    return (mode,)
 
 
 def _overlap_count(pos: torch.Tensor, node_sizes: torch.Tensor) -> int:
@@ -825,12 +928,15 @@ def _surrogate_loss(
     crossing = soft_crossing_loss(pos, edge_index)
     flow_score = signed_flow_score_surrogate(pos, edge_index)
     depth_score = depth_order_score_surrogate(pos, topo_depth)
+    overlap_loss = overlap_hinge_loss(pos, node_sizes)
+    knn_loss = soft_knn_neighborhood_loss(pos, edge_index)
+    edge_cv_loss = edge_length_cv_loss(pos, edge_index)
     common_scale = 0.75 if mode in {"x_only", "barrier_2d"} else 1.0
     loss = (
         common_scale * 20.0 * crossing
-        + common_scale * 13.0 * overlap_hinge_loss(pos, node_sizes)
-        + common_scale * 12.0 * soft_knn_neighborhood_loss(pos, edge_index)
-        + common_scale * 7.0 * edge_length_cv_loss(pos, edge_index)
+        + common_scale * 13.0 * overlap_loss
+        + common_scale * 12.0 * knn_loss
+        + common_scale * 7.0 * edge_cv_loss
         + common_scale * 5.0 * gabriel_intrusion_loss(pos, edge_index)
         + common_scale * 5.0 * crossing_angle_loss(pos, edge_index)
         + common_scale * 4.0 * angular_resolution_loss(pos, edge_index)
@@ -839,11 +945,22 @@ def _surrogate_loss(
     if mode in {"x_only", "barrier_2d"}:
         loss = loss + 16.0 * (1.0 - flow_score) + 9.0 * (1.0 - depth_score)
     if mode == "barrier_2d":
+        honest_flow = floors.get("honest_flow")
+        flow_headroom = 0.0 if honest_flow is None else max(0.0, 1.0 - float(honest_flow))
+        honest_ksm = floors.get("honest_ksm")
+        ksm_floor_weight = 24.0 if honest_ksm is None else 24.0 + 24.0 * float(honest_ksm)
+        edge_cv_weight = 10.0 + 42.0 * flow_headroom
         loss = (
             loss
+            + (24.0 + 96.0 * flow_headroom) * (1.0 - flow_score)
             + 64.0 * barrier_floor_loss(flow_score, floors.get("flow"))
             + 36.0 * barrier_floor_loss(depth_score, floors.get("depth"))
             + 20.0 * torch.relu(crossing - floors.get("crossing_loss", crossing.detach())).square()
+            + 20.0
+            * torch.relu(overlap_loss - floors.get("overlap_loss", overlap_loss.detach())).square()
+            + ksm_floor_weight
+            * torch.relu(knn_loss - floors.get("knn_loss", knn_loss.detach())).square()
+            + edge_cv_weight * edge_cv_loss
         )
     return torch.nan_to_num(loss, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
 
@@ -855,6 +972,7 @@ def _optimize_seed(
     topo_depth: torch.Tensor,
     mode: str,
     deadline: float,
+    honest_axes: Optional[W5HonestAxes] = None,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Run one bounded W5 descent from ``seed``.
 
@@ -872,6 +990,8 @@ def _optimize_seed(
         Routed W5 mode.
     deadline : float
         Absolute ``time.monotonic()`` deadline for optimizer work.
+    honest_axes : W5HonestAxes, optional
+        Honest incumbent axis scores used to weight barrier-mode gains.
 
     Returns
     -------
@@ -886,7 +1006,15 @@ def _optimize_seed(
         "flow": float(signed_flow_score_surrogate(work, edge_index).detach().item()),
         "depth": float(depth_order_score_surrogate(work, topo_depth).detach().item()),
         "crossing_loss": float(soft_crossing_loss(work, edge_index).detach().item()),
+        "overlap_loss": float(overlap_hinge_loss(work, node_sizes).detach().item()),
+        "knn_loss": float(soft_knn_neighborhood_loss(work, edge_index).detach().item()),
+        "edge_cv_loss": float(edge_length_cv_loss(work, edge_index).detach().item()),
     }
+    if honest_axes is not None:
+        if honest_axes.flow is not None:
+            floors["honest_flow"] = float(honest_axes.flow)
+        if honest_axes.ksm is not None:
+            floors["honest_ksm"] = float(honest_axes.ksm)
     start_loss_tensor = _surrogate_loss(work, edge_index, node_sizes, topo_depth, mode, floors)
     start_loss = float(start_loss_tensor.detach().item())
     median_size = float(node_sizes.detach().to(dtype=torch.float32).mean().item())
@@ -944,6 +1072,7 @@ def run_w5_finisher(
     direction_is_declared: bool = False,
     config: Optional[LayoutConfig] = None,
     accept_margin: float = _W5_ACCEPT_MARGIN,
+    incumbent_axes: Optional[W5HonestAxes] = None,
 ) -> W5FinisherResult:
     """Run the W5 finisher and return the anytime honest winner.
 
@@ -971,6 +1100,9 @@ def run_w5_finisher(
         Prepared native configuration carrying optional benchmark deadline.
     accept_margin : float, default=0.05
         Required improvement over the current winner in both score components.
+    incumbent_axes : W5HonestAxes, optional
+        Honest incumbent axes from the same ``full()`` metrics pass that
+        produced ``incumbent_score_pair``.
 
     Returns
     -------
@@ -1075,6 +1207,7 @@ def run_w5_finisher(
             declared_hierarchical=declared_hierarchical,
             direction_is_declared=direction_is_declared,
             graph_name=_graph_name(config),
+            incumbent_axes=incumbent_axes,
             phase_timings_s=tuple(phase_timings),
             viability_counts=dict(viability_counts),
             viability_drop_counts=dict(viability_drop_counts),
@@ -1149,131 +1282,148 @@ def run_w5_finisher(
             is_semantically_directed=is_semantically_directed,
             declared_hierarchical=declared_hierarchical,
             direction_is_declared=direction_is_declared,
+            honest_axes=incumbent_axes,
         )
         route_s = max(0.0, time.perf_counter() - route_started)
-        routed_mode = mode
-        optimize_s = 0.0
-        viability_s = 0.0
-        score_s = 0.0
-        try:
-            optimize_started = time.perf_counter()
-            final_pos, steps, start_loss, scored_points = _optimize_seed(
-                seed,
-                edge_work,
-                size_work,
-                topo_depth,
-                mode,
-                deadline - _FINISHER_SCORE_RESERVE_S,
-            )
-            optimize_s = max(0.0, time.perf_counter() - optimize_started)
-        except Exception as exc:  # noqa: BLE001 -- W5 is optional candidate generation
-            if is_worker_timeout_like_exception(exc):
-                raise
-            _LOGGER.warning("W5 finisher seed %s failed", seed.name, exc_info=True)
+        for ladder_index, mode in enumerate(
+            _mode_ladder(mode, is_semantically_directed=is_semantically_directed)
+        ):
+            if ladder_index > 0 and _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
+                config,
+                remaining_entry,
+            ):
+                deadline_returned = True
+                break
+            if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
+                deadline_returned = True
+                break
+            routed_mode = mode
+            optimize_s = 0.0
+            viability_s = 0.0
+            score_s = 0.0
+            accepted_before_mode = len(accepted)
+            try:
+                optimize_started = time.perf_counter()
+                final_pos, steps, start_loss, scored_points = _optimize_seed(
+                    seed,
+                    edge_work,
+                    size_work,
+                    topo_depth,
+                    mode,
+                    deadline - _FINISHER_SCORE_RESERVE_S,
+                    incumbent_axes,
+                )
+                optimize_s = max(0.0, time.perf_counter() - optimize_started)
+            except Exception as exc:  # noqa: BLE001 -- W5 is optional candidate generation
+                if is_worker_timeout_like_exception(exc):
+                    raise
+                _LOGGER.warning("W5 finisher seed %s failed", seed.name, exc_info=True)
+                phase_timings.append(
+                    W5PhaseTiming(
+                        seed=seed.name,
+                        mode=mode,
+                        route_s=route_s if ladder_index == 0 else 0.0,
+                        optimize_s=optimize_s,
+                        viability_s=viability_s,
+                        score_s=score_s,
+                    )
+                )
+                continue
+            steps_total += steps
+            if not scored_points or scored_points[-1][0] != steps:
+                final_loss = float(
+                    _surrogate_loss(final_pos, edge_work, size_work, topo_depth, mode, {})
+                    .detach()
+                    .item()
+                )
+                scored_points.append((steps, final_pos, final_loss))
+            for step, checkpoint_pos, checkpoint_loss in scored_points[:2]:
+                if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
+                    deadline_returned = True
+                    break
+                if time.monotonic() >= deadline:
+                    deadline_returned = True
+                    break
+                viability_started = time.perf_counter()
+                checkpoint_overlap = _overlap_count(checkpoint_pos, size_work)
+                if checkpoint_overlap > incumbent_overlap:
+                    _increment_count(viability_counts, "projected_overlap_candidate")
+                    checkpoint_pos = _project_checkpoint_for_viability(checkpoint_pos, size_work)
+                    projected_overlap = _overlap_count(checkpoint_pos, size_work)
+                    if projected_overlap <= incumbent_overlap:
+                        _increment_count(viability_counts, "projection_resolved_overlap")
+                if _is_degenerate(checkpoint_pos, size_work):
+                    _increment_count(viability_counts, "drop_degenerate")
+                    _increment_count(viability_drop_counts, "degenerate")
+                    viability_s += max(0.0, time.perf_counter() - viability_started)
+                    continue
+                if _overlap_count(checkpoint_pos, size_work) > incumbent_overlap:
+                    _increment_count(viability_counts, "drop_overlap_regressed")
+                    _increment_count(viability_drop_counts, "overlap_regressed")
+                    viability_s += max(0.0, time.perf_counter() - viability_started)
+                    continue
+                _increment_count(viability_counts, "scored_viable")
+                viability_s += max(0.0, time.perf_counter() - viability_started)
+                try:
+                    score_started = time.perf_counter()
+                    score_pos = checkpoint_pos.to(device=edge_index.device, dtype=torch.float32)
+                    honest = score_fn(score_pos)
+                    score_s += max(0.0, time.perf_counter() - score_started)
+                except Exception as exc:
+                    score_s += max(0.0, time.perf_counter() - score_started)
+                    if is_worker_timeout_like_exception(exc):
+                        raise
+                    _increment_count(viability_counts, "drop_score_exception")
+                    continue
+                if not math.isfinite(honest.directed) or not math.isfinite(honest.undirected):
+                    _increment_count(viability_counts, "drop_nonfinite_score")
+                    continue
+                directed_delta = honest.directed - winner_score_pair.directed
+                undirected_delta = honest.undirected - winner_score_pair.undirected
+                surrogate_delta = start_loss - checkpoint_loss
+                is_accepted = w5_dominates(honest, winner_score_pair, float(accept_margin))
+                reason = "dominates" if is_accepted else "does_not_dominate_both"
+                checkpoint = W5Checkpoint(
+                    seed=seed.name,
+                    mode=mode,
+                    step=int(step),
+                    surrogate_delta=float(surrogate_delta),
+                    honest_delta=float(directed_delta),
+                    undirected_honest_delta=float(undirected_delta),
+                    honest_score_pair=honest,
+                    accepted=is_accepted,
+                    reason=reason,
+                )
+                checkpoints.append(checkpoint)
+                if is_accepted:
+                    name = f"w5_{mode}_{seed.name}_{step}"
+                    winner_pos = checkpoint_pos.to(
+                        device=incumbent_pos.device,
+                        dtype=incumbent_pos.dtype,
+                    )
+                    winner_score_pair = honest
+                    winner_name = name
+                    accepted_candidate = W5Candidate(
+                        name=name,
+                        pos=winner_pos,
+                        score_pair=honest,
+                        mode=mode,
+                    )
+                    accepted.append(accepted_candidate)
+                else:
+                    rejected.append(checkpoint)
             phase_timings.append(
                 W5PhaseTiming(
                     seed=seed.name,
                     mode=mode,
-                    route_s=route_s,
+                    route_s=route_s if ladder_index == 0 else 0.0,
                     optimize_s=optimize_s,
                     viability_s=viability_s,
                     score_s=score_s,
                 )
             )
-            continue
-        steps_total += steps
-        if not scored_points or scored_points[-1][0] != steps:
-            final_loss = float(
-                _surrogate_loss(final_pos, edge_work, size_work, topo_depth, mode, {})
-                .detach()
-                .item()
-            )
-            scored_points.append((steps, final_pos, final_loss))
-        for step, checkpoint_pos, checkpoint_loss in scored_points[:2]:
-            if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
-                deadline_returned = True
+            if deadline_returned or len(accepted) > accepted_before_mode:
                 break
-            if time.monotonic() >= deadline:
-                deadline_returned = True
-                break
-            viability_started = time.perf_counter()
-            checkpoint_overlap = _overlap_count(checkpoint_pos, size_work)
-            if checkpoint_overlap > incumbent_overlap:
-                _increment_count(viability_counts, "projected_overlap_candidate")
-                checkpoint_pos = _project_checkpoint_for_viability(checkpoint_pos, size_work)
-                projected_overlap = _overlap_count(checkpoint_pos, size_work)
-                if projected_overlap <= incumbent_overlap:
-                    _increment_count(viability_counts, "projection_resolved_overlap")
-            if _is_degenerate(checkpoint_pos, size_work):
-                _increment_count(viability_counts, "drop_degenerate")
-                _increment_count(viability_drop_counts, "degenerate")
-                viability_s += max(0.0, time.perf_counter() - viability_started)
-                continue
-            if _overlap_count(checkpoint_pos, size_work) > incumbent_overlap:
-                _increment_count(viability_counts, "drop_overlap_regressed")
-                _increment_count(viability_drop_counts, "overlap_regressed")
-                viability_s += max(0.0, time.perf_counter() - viability_started)
-                continue
-            _increment_count(viability_counts, "scored_viable")
-            viability_s += max(0.0, time.perf_counter() - viability_started)
-            try:
-                score_started = time.perf_counter()
-                score_pos = checkpoint_pos.to(device=edge_index.device, dtype=torch.float32)
-                honest = score_fn(score_pos)
-                score_s += max(0.0, time.perf_counter() - score_started)
-            except Exception as exc:
-                score_s += max(0.0, time.perf_counter() - score_started)
-                if is_worker_timeout_like_exception(exc):
-                    raise
-                _increment_count(viability_counts, "drop_score_exception")
-                continue
-            if not math.isfinite(honest.directed) or not math.isfinite(honest.undirected):
-                _increment_count(viability_counts, "drop_nonfinite_score")
-                continue
-            directed_delta = honest.directed - winner_score_pair.directed
-            undirected_delta = honest.undirected - winner_score_pair.undirected
-            surrogate_delta = start_loss - checkpoint_loss
-            is_accepted = w5_dominates(honest, winner_score_pair, float(accept_margin))
-            reason = "dominates" if is_accepted else "does_not_dominate_both"
-            checkpoint = W5Checkpoint(
-                seed=seed.name,
-                mode=mode,
-                step=int(step),
-                surrogate_delta=float(surrogate_delta),
-                honest_delta=float(directed_delta),
-                undirected_honest_delta=float(undirected_delta),
-                honest_score_pair=honest,
-                accepted=is_accepted,
-                reason=reason,
-            )
-            checkpoints.append(checkpoint)
-            if is_accepted:
-                name = f"w5_{mode}_{seed.name}_{step}"
-                winner_pos = checkpoint_pos.to(
-                    device=incumbent_pos.device,
-                    dtype=incumbent_pos.dtype,
-                )
-                winner_score_pair = honest
-                winner_name = name
-                accepted_candidate = W5Candidate(
-                    name=name,
-                    pos=winner_pos,
-                    score_pair=honest,
-                    mode=mode,
-                )
-                accepted.append(accepted_candidate)
-            else:
-                rejected.append(checkpoint)
-        phase_timings.append(
-            W5PhaseTiming(
-                seed=seed.name,
-                mode=mode,
-                route_s=route_s,
-                optimize_s=optimize_s,
-                viability_s=viability_s,
-                score_s=score_s,
-            )
-        )
     skipped = None if accepted else ("no_checkpoint_improved" if checkpoints else "no_checkpoint")
     return finish(
         winner_pos=winner_pos,
@@ -1323,6 +1473,28 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
         """
         return {"directed": float(pair.directed), "undirected": float(pair.undirected)}
 
+    def axes_payload(axes: Optional[W5HonestAxes]) -> Optional[dict[str, Optional[float]]]:
+        """Convert honest route axes to a JSON-serializable payload.
+
+        Parameters
+        ----------
+        axes : W5HonestAxes, optional
+            Honest incumbent axes used by the route.
+
+        Returns
+        -------
+        dict[str, float | None] or None
+            JSON-ready axis payload.
+        """
+        if axes is None:
+            return None
+        return {
+            "flow": axes.flow,
+            "depth": axes.depth,
+            "ksm": axes.ksm,
+            "edge_length": axes.edge_length,
+        }
+
     payload = {
         "event": "native_w5_finisher",
         "graph_name": result.graph_name,
@@ -1355,6 +1527,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
         "viability_drop_counts": result.viability_drop_counts,
         "winner_name": result.winner_name,
         "incumbent_score_pair": pair_payload(result.incumbent_score_pair),
+        "incumbent_axes": axes_payload(result.incumbent_axes),
         "winner_score_pair": pair_payload(result.winner_score_pair),
         "accepted": [candidate.name for candidate in result.accepted],
         "rejected": [
@@ -1397,6 +1570,7 @@ __all__ = [
     "W5Candidate",
     "W5Checkpoint",
     "W5FinisherResult",
+    "W5HonestAxes",
     "W5PhaseTiming",
     "W5ScorePair",
     "W5Seed",
@@ -1404,5 +1578,6 @@ __all__ = [
     "log_w5_telemetry",
     "make_w5_skip_result",
     "run_w5_finisher",
+    "w5_honest_axes_from_metrics",
     "w5_dominates",
 ]
