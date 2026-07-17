@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pytest
 import torch
@@ -243,6 +243,165 @@ def test_measured_cost_plan_uses_wall_surrogate_and_restores_small_row_work() ->
     assert small_plan is not None
     assert small_plan.steps == 36
     assert small_plan.seeds == 3
+    assert small_plan.predicted_s == pytest.approx(
+        small_plan.seeds
+        * (
+            small_plan.steps * small_plan.measured_step_s
+            + small_plan.checkpoints * small_plan.referee_s
+        )
+    )
+
+
+def test_measured_surrogate_probe_averages_three_post_warmup_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured admission keeps step one as warmup and averages steps two through four."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    topo_depth = torch.zeros(pos.shape[0], dtype=torch.long)
+    step_times_s = [0.6, 0.2, 0.3, 0.4]
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        depth_work: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        step_timing_hook: Optional[Callable[[int, float], None]] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Emit deterministic per-step timings for the probe measurement."""
+        del edge_work, size_work, depth_work, mode, deadline, honest_axes, max_checkpoints
+        assert max_steps == 4
+        assert step_timing_hook is not None
+        for step, duration_s in enumerate(step_times_s, start=1):
+            step_timing_hook(step, duration_s)
+        return seed.pos, len(step_times_s), 0.0, []
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    measurement = native_finisher._measure_one_surrogate_step_s(
+        W5Seed("probe", pos),
+        edge_index,
+        node_sizes,
+        topo_depth,
+        "undirected_2d_sampled",
+        None,
+        10.0,
+    )
+
+    assert measurement.warmup_s == pytest.approx(0.6)
+    assert measurement.step_s == pytest.approx((0.2 + 0.3 + 0.4) / 3.0)
+
+
+def test_measured_cost_plan_does_not_double_charge_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan that fits the post-probe budget is admitted without charging warmup again."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    topo_depth = torch.zeros(pos.shape[0], dtype=torch.long)
+    config = LayoutConfig()
+    config._dagua_native_total_budget_s = 63.0
+    config._dagua_native_w5_referee_cost_s = 0.2
+    warmup_s = 3.0
+    spent_s = iter([0.0, warmup_s])
+
+    def fake_measure(*args: object) -> object:
+        """Return a noisy warmup that must stay out of forward prediction."""
+        del args
+        return native_finisher.W5StepMeasurement(step_s=0.1, warmup_s=warmup_s)
+
+    def fake_w5_spent_s(config_arg: object, started_perf: Optional[float] = None) -> float:
+        """Charge the probe warmup only when budget is recomputed after measurement."""
+        del config_arg, started_perf
+        return next(spent_s)
+
+    monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+
+    plan = native_finisher._measured_cost_plan(
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        topo_depth=topo_depth,
+        routed_mode="undirected_2d_sampled",
+        slice_s=20.0,
+        config=config,
+        started_perf=0.0,
+        remaining_entry=300.0,
+        honest_axes=None,
+    )
+
+    assert plan is not None
+    assert plan.warmup_s == pytest.approx(warmup_s)
+    assert plan.predicted_s == pytest.approx(
+        plan.seeds * (plan.steps * plan.measured_step_s + plan.checkpoints * plan.referee_s)
+    )
+    assert plan.predicted_s <= plan.budget_usable_s
+    assert plan.predicted_s + plan.warmup_s > plan.budget_usable_s
+
+
+def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pressured small row uses the largest fitting integer step count, not a coarse tier."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.stack(
+        (
+            torch.arange(200, dtype=torch.float32),
+            torch.zeros(200, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    node_sizes = torch.full((200, 2), 2.0)
+    topo_depth = torch.zeros(200, dtype=torch.long)
+    config = LayoutConfig()
+    config._dagua_native_total_budget_s = 57.5
+    config._dagua_native_w5_referee_cost_s = 0.01
+    spent_s = iter([0.0, 0.7])
+
+    def fake_measure(*args: object) -> object:
+        """Return costs where 30 two-checkpoint steps fit but 31 steps do not."""
+        del args
+        return native_finisher.W5StepMeasurement(step_s=0.1, warmup_s=0.7)
+
+    def fake_w5_spent_s(config_arg: object, started_perf: Optional[float] = None) -> float:
+        """Make the recomputed usable budget exactly exercise the partial step gap."""
+        del config_arg, started_perf
+        return next(spent_s)
+
+    monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+
+    plan = native_finisher._measured_cost_plan(
+        seeds=[W5Seed("small", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        topo_depth=topo_depth,
+        routed_mode="undirected_2d_sampled",
+        slice_s=20.0,
+        config=config,
+        started_perf=0.0,
+        remaining_entry=300.0,
+        honest_axes=None,
+    )
+
+    assert plan is not None
+    assert plan.steps == 30
+    assert plan.steps not in {24, 18, 12, 6, 3, 2, 1}
+    assert plan.checkpoints == 2
+    assert plan.predicted_s == pytest.approx(3.02)
 
 
 def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
