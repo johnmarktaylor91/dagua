@@ -44,6 +44,7 @@ DIRECTED_ORDERING_TRIAL_PAIR_CAP = 5_000_000
 DIRECTED_ORDERING_Y_TOLERANCE = 1.0e-4
 DIRECTED_ORDERING_NUDGE_CROSSING_CAP = 64
 DIRECTED_ORDERING_NUDGE_TRIAL_CAP = 256
+DIRECTED_ORDERING_PAIR_BUDGET_CHECK_INTERVAL = 2_000
 DIRECTED_ORDERING_W5_NODE_CAP = 32
 DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
 DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
@@ -985,6 +986,9 @@ def _crossing_edge_pairs(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
     max_pairs: int,
+    config: Optional[LayoutConfig] = None,
+    started_at: Optional[float] = None,
+    wall_time_cap_s: Optional[float] = None,
 ) -> list[tuple[int, int, int, int]]:
     """Return a bounded list of exact crossing edge endpoint ids.
 
@@ -996,21 +1000,36 @@ def _crossing_edge_pairs(
         Edge tensor with shape ``[2, E]``.
     max_pairs : int
         Maximum number of crossing pairs to return.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying an optional benchmark deadline.
+    started_at : float, optional
+        ``time.perf_counter()`` value captured when the ordering arm started.
+    wall_time_cap_s : float, optional
+        Absolute wall-clock cap for this invocation.
 
     Returns
     -------
     list[tuple[int, int, int, int]]
         Crossing pairs as ``(src_a, dst_a, src_b, dst_b)`` endpoint ids.
     """
+    if max_pairs <= 0:
+        return []
     edges = [(int(src), int(dst)) for src, dst in edge_index.t().detach().cpu().tolist()]
     crossings: list[tuple[int, int, int, int]] = []
+    pairs_examined = 0
     for left_idx, (src_a, dst_a) in enumerate(edges):
         for src_b, dst_b in edges[left_idx + 1 :]:
+            pairs_examined += 1
+            if (
+                pairs_examined % DIRECTED_ORDERING_PAIR_BUDGET_CHECK_INTERVAL == 0
+                and not _ordering_budget_available(config, started_at, wall_time_cap_s)
+            ):
+                return crossings
             if len({src_a, dst_a, src_b, dst_b}) < 4:
                 continue
             if _segments_cross(pos[src_a], pos[dst_a], pos[src_b], pos[dst_b]):
                 crossings.append((src_a, dst_a, src_b, dst_b))
-                if len(crossings) >= max(0, int(max_pairs)):
+                if len(crossings) >= int(max_pairs):
                     return crossings
     return crossings
 
@@ -1106,6 +1125,26 @@ def _ordering_wall_time_cap_s(num_nodes: int) -> float:
     return DIRECTED_ORDERING_MEDIUM_WALL_TIME_CAP_S
 
 
+def _ordering_portfolio_max_passes(num_nodes: int) -> int:
+    """Return local-search passes for portfolio ordering admission.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    int
+        Local-search pass count for the portfolio ordering arm.
+    """
+    if DIRECTED_ORDERING_PORTFOLIO_SMALL_NODE_CAP < int(num_nodes) <= DIRECTED_NARROW_SEED_NODE_CAP:
+        # In the restored 65..128 band, pass-heavy local search spends the
+        # small wall cap before the bounded nudge phase can recover dep100.
+        return 0
+    return 3
+
+
 def _ordering_deadline_check_interval(edge_count: int) -> int:
     """Return a trial interval that limits deadline blind windows.
 
@@ -1165,7 +1204,7 @@ def _ordering_trial_estimate(rank_to_nodes: dict[int, list[int]], max_passes: in
             non_adjacent_swaps + reinsertions + neighbor_orders + adjacent_swaps
         )
     if trials > 0:
-        trials += DIRECTED_ORDERING_NUDGE_TRIAL_CAP
+        return trials
     return trials
 
 
@@ -1312,10 +1351,15 @@ def _try_crossing_endpoint_nudges(
     gap = max(1.0, span * 0.05)
     trials = 0
     while trials < DIRECTED_ORDERING_NUDGE_TRIAL_CAP and best_crossings > 0:
+        if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+            return pos, best_crossings
         crossing_pairs = _crossing_edge_pairs(
             pos,
             edge_index,
             max_pairs=DIRECTED_ORDERING_NUDGE_CROSSING_CAP,
+            config=config,
+            started_at=started_at,
+            wall_time_cap_s=wall_time_cap_s,
         )
         best_candidate: Optional[torch.Tensor] = None
         best_trial_crossings = best_crossings
@@ -1732,9 +1776,8 @@ def layout_native_directed_portfolio(
             problem.edge_index,
             n,
         )
-        ordering_portfolio_admissible = (
-            n <= DIRECTED_ORDERING_PORTFOLIO_SMALL_NODE_CAP or n > DIRECTED_NARROW_SEED_NODE_CAP
-        )
+        ordering_portfolio_admissible = n <= DIRECTED_ORDERING_MEDIUM_NODE_CAP
+        ordering_max_passes = _ordering_portfolio_max_passes(n)
         if (
             ordering_portfolio_admissible
             and n <= DIRECTED_ORDERING_MEDIUM_NODE_CAP
@@ -1742,7 +1785,7 @@ def layout_native_directed_portfolio(
                 n,
                 edge_count,
                 ordering_rank_to_nodes,
-                max_passes=3,
+                max_passes=ordering_max_passes,
             )
         ):
             try:
@@ -1751,6 +1794,7 @@ def layout_native_directed_portfolio(
                 candidate = _rank_local_zero_crossing_swap_candidate(
                     incumbent,
                     problem.edge_index,
+                    max_passes=ordering_max_passes,
                     config=config,
                 )
                 candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
@@ -2033,13 +2077,12 @@ def layout_native_directed_portfolio(
         if name != "incumbent" and score > scores[best_name]:
             best_name = name
     best_position = positions[best_name]
-    if _portfolio_has_budget(config, min_remaining_s=2.0):
+    if best_name != "incumbent" and _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
         best_cpu = best_position.detach().to(device="cpu", dtype=torch.float32)
         best_rank_to_nodes = _rank_to_nodes_from_incumbent_y(best_cpu, problem.edge_index, n)
-        ordering_portfolio_admissible = (
-            n <= DIRECTED_ORDERING_PORTFOLIO_SMALL_NODE_CAP or n > DIRECTED_NARROW_SEED_NODE_CAP
-        )
+        ordering_portfolio_admissible = n <= DIRECTED_ORDERING_MEDIUM_NODE_CAP
+        ordering_max_passes = _ordering_portfolio_max_passes(n)
         if (
             ordering_portfolio_admissible
             and n <= DIRECTED_ORDERING_MEDIUM_NODE_CAP
@@ -2047,7 +2090,7 @@ def layout_native_directed_portfolio(
                 n,
                 edge_count,
                 best_rank_to_nodes,
-                max_passes=3,
+                max_passes=ordering_max_passes,
             )
         ):
             try:
@@ -2056,6 +2099,7 @@ def layout_native_directed_portfolio(
                 candidate = _rank_local_zero_crossing_swap_candidate(
                     best_cpu,
                     problem.edge_index,
+                    max_passes=ordering_max_passes,
                     config=config,
                 )
                 candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
