@@ -368,6 +368,64 @@ def _predicted_undirected_arm_budget_available(
     return available > required
 
 
+def _arm_s_full_score_budget_available(
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+) -> bool:
+    """Return whether the one Arm S honest-referee pass may start.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional benchmark deadline.
+    predicted_cost_s : float
+        Estimated process CPU seconds for the single full Arm S score.
+
+    Returns
+    -------
+    bool
+        ``True`` when no deadline is known or remaining budget covers the
+        final full-ruler pass plus the hard return reserve.
+    """
+    return _portfolio_has_budget(config) and _predicted_undirected_arm_budget_available(
+        config,
+        predicted_cost_s,
+    )
+
+
+def _predicted_arm_budget_preserving_arm_s_score(
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+    *,
+    arm_s_pending: bool,
+) -> bool:
+    """Return whether an arm may run while preserving pending Arm S scoring.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional benchmark deadline.
+    predicted_cost_s : float
+        Estimated process CPU seconds for the candidate arm being considered.
+    arm_s_pending : bool
+        Whether one Arm S finalist still needs its honest full-ruler pass.
+
+    Returns
+    -------
+    bool
+        ``True`` when the next arm and any pending Arm S score fit under the
+        existing predicted-budget guard.
+    """
+    if not arm_s_pending:
+        return _predicted_undirected_arm_budget_available(config, predicted_cost_s)
+    from dagua.layout.ops.pipelines.native_arm_s import ARM_S_FULL_REFEREE_PRIOR_S
+
+    return _predicted_undirected_arm_budget_available(
+        config,
+        float(predicted_cost_s) + ARM_S_FULL_REFEREE_PRIOR_S,
+    )
+
+
 def _prediction_cpu_elapsed_s(started_process_time_s: float) -> float:
     """Return elapsed per-process CPU seconds for arm-cost prediction.
 
@@ -1254,6 +1312,52 @@ def _proxy_undirected_candidate(
     if cluster_ids is not None:
         numeric.update(cluster_silhouette_score(cpu_pos, cluster_ids))
     return float(composite_auto(numeric, is_semantically_directed=False))
+
+
+def _restore_proxy_finalist_slots(
+    finalist_names: list[str],
+    challenger_names: list[str],
+    raw_finalist_names: list[str],
+    proxy_slot_count: int,
+    excluded_names: Optional[set[str]] = None,
+) -> list[str]:
+    """Refill proxy shortlist slots after a finalist is removed.
+
+    Parameters
+    ----------
+    finalist_names : list[str]
+        Current finalist names, including ``"incumbent"`` and any raw
+        finalists appended outside the proxy budget.
+    challenger_names : list[str]
+        Full deterministic proxy-ranked challenger order.
+    raw_finalist_names : list[str]
+        Raw finalist names that are always appended after proxy finalists.
+    proxy_slot_count : int
+        Number of non-incumbent proxy shortlist slots to keep filled.
+    excluded_names : set[str], optional
+        Candidate names that must not be restored.
+
+    Returns
+    -------
+    list[str]
+        Finalist names with displaced proxy challengers restored.
+    """
+    excluded = set() if excluded_names is None else set(excluded_names)
+    raw_names = set(raw_finalist_names)
+    proxy_finalists = [
+        name for name in finalist_names if name != "incumbent" and name not in raw_names
+    ]
+    for name in challenger_names:
+        if len(proxy_finalists) >= proxy_slot_count:
+            break
+        if name in excluded or name in proxy_finalists or name in raw_names:
+            continue
+        proxy_finalists.append(name)
+    return [
+        "incumbent",
+        *proxy_finalists,
+        *(name for name in raw_finalist_names if name not in proxy_finalists),
+    ]
 
 
 def _score_undirected_candidate_cached(
@@ -2483,7 +2587,7 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.native_arm_s import (
                 ARM_S_PRIOR_S,
-                build_arm_s_stress_candidates,
+                build_arm_s_stress_finalist,
             )
             from dagua.layout.ops.pipelines.native_guardrails import (
                 build_native_guardrail_plan,
@@ -2493,7 +2597,10 @@ def layout_native_undirected_portfolio(
             arm_s_plan = build_native_guardrail_plan(problem, config, prior_cost_s=ARM_S_PRIOR_S)
             if arm_s_plan.admitted:
                 arm_s_process_started = time.process_time()
-                arm_s_candidates = build_arm_s_stress_candidates(problem)
+                arm_s_finalist, arm_s_candidates, arm_s_proxy_scores = build_arm_s_stress_finalist(
+                    problem,
+                    cluster_ids,
+                )
                 register_native_guardrail_observation(
                     config,
                     candidate="arm_s_stress",
@@ -2501,17 +2608,21 @@ def layout_native_undirected_portfolio(
                     elapsed_s=time.process_time() - arm_s_process_started,
                 )
                 setattr(config, "_dagua_native_arm_s_candidates", arm_s_candidates)
-                for name, payload in arm_s_candidates.items():
+                setattr(config, "_dagua_native_arm_s_proxy_scores", arm_s_proxy_scores)
+                if arm_s_finalist is not None:
+                    name = arm_s_finalist.name
                     degenerate, reason = _candidate_is_degenerate(
-                        payload.positions,
+                        arm_s_finalist.positions,
                         problem.node_sizes,
                         problem.edge_index,
                     )
                     if degenerate:
                         _LOGGER.info("Rejected Arm S candidate %s: %s", name, reason)
-                        continue
-                    positions[name] = payload.positions
-                    arm_s_candidate_names.add(name)
+                    else:
+                        positions[name] = arm_s_finalist.positions
+                        arm_s_candidate_names.add(name)
+                else:
+                    _LOGGER.info("Skipped Arm S stress candidate: no finite proxy finalist")
             else:
                 _LOGGER.info("Skipped Arm S stress candidate: %s", arm_s_plan.skip_reason)
         except Exception as exc:  # noqa: BLE001 -- Arm S failure never sinks the incumbent
@@ -2598,9 +2709,10 @@ def layout_native_undirected_portfolio(
             for seed_offset in range(FCOSE_CONTEST_SEEDS):
                 if not _portfolio_has_budget(
                     config
-                ) or not _predicted_undirected_arm_budget_available(
+                ) or not _predicted_arm_budget_preserving_arm_s_score(
                     config,
                     fcose_cost_s,
+                    arm_s_pending=bool(arm_s_candidate_names),
                 ):
                     _record_insufficient_predicted_budget_skip(
                         arm=f"fcose_seed{seed_offset}",
@@ -2650,9 +2762,10 @@ def layout_native_undirected_portfolio(
                 for seed_offset in range(TSNET_CONTEST_SEEDS):
                     if not _portfolio_has_budget(
                         config
-                    ) or not _predicted_undirected_arm_budget_available(
+                    ) or not _predicted_arm_budget_preserving_arm_s_score(
                         config,
                         tsnet_cost_s,
+                        arm_s_pending=bool(arm_s_candidate_names),
                     ):
                         _record_insufficient_predicted_budget_skip(
                             arm=f"tsnet_perp{perplexity:g}_seed{seed_offset}",
@@ -2858,7 +2971,8 @@ def layout_native_undirected_portfolio(
     # Fidelity raw variants must reach the same referee that scored their
     # reference counterparts. Preserve proxy budgeting for all other
     # challengers, then append every guarded raw variant deterministically.
-    proxy_finalists = challenger_names[: full_score_budget - 1]
+    proxy_slot_count = full_score_budget - 1
+    proxy_finalists = challenger_names[:proxy_slot_count]
     if n >= LARGE_CONTEST_NODE_THRESHOLD and cluster_ids is not None and challenger_names:
         reserved_cluster_name = next(
             (
@@ -2879,6 +2993,34 @@ def layout_native_undirected_portfolio(
     ]
     cluster_score_telemetry = {}
     if problem.clusters:
+        if arm_s_candidate_names:
+            from dagua.layout.ops.pipelines.native_arm_s import ARM_S_FULL_REFEREE_PRIOR_S
+
+            budget_skipped_arm_s_names = {
+                name
+                for name in arm_s_candidate_names
+                if name in finalist_names
+                and not _arm_s_full_score_budget_available(config, ARM_S_FULL_REFEREE_PRIOR_S)
+            }
+            if budget_skipped_arm_s_names:
+                for name in budget_skipped_arm_s_names:
+                    _record_insufficient_predicted_budget_skip(
+                        arm=name,
+                        config=config,
+                        predicted_cost_s=ARM_S_FULL_REFEREE_PRIOR_S,
+                    )
+                    _LOGGER.info("Skipped Arm S candidate %s: insufficient full-score budget", name)
+                finalist_names = [
+                    name for name in finalist_names if name not in budget_skipped_arm_s_names
+                ]
+                finalist_names = _restore_proxy_finalist_slots(
+                    finalist_names,
+                    challenger_names,
+                    raw_finalist_names,
+                    proxy_slot_count,
+                    excluded_names=budget_skipped_arm_s_names,
+                )
+                arm_s_candidate_names.difference_update(budget_skipped_arm_s_names)
         scores = {}
         for name in finalist_names:
             score, score_telemetry = _score_undirected_candidate_payload(
@@ -2933,6 +3075,26 @@ def layout_native_undirected_portfolio(
                 finalist_names = [
                     name for name in finalist_names if name not in rejected_arm_s_names
                 ]
+                finalist_names = _restore_proxy_finalist_slots(
+                    finalist_names,
+                    challenger_names,
+                    raw_finalist_names,
+                    proxy_slot_count,
+                    excluded_names=rejected_arm_s_names,
+                )
+                for name in finalist_names:
+                    if name in scores:
+                        continue
+                    score, score_telemetry = _score_undirected_candidate_payload(
+                        positions[name],
+                        problem,
+                        cluster_ids,
+                        aesthetic_profile,
+                        all_pairs_dist,
+                    )
+                    scores[name] = score
+                    if score_telemetry is not None:
+                        cluster_score_telemetry[name] = score_telemetry
     else:
         scores = {
             name: _score_undirected_candidate_cached(
