@@ -134,6 +134,18 @@ class LayoutProblem:
         Cluster membership mapping.
     cluster_parents : dict[str, str | None] | None
         Cluster hierarchy mapping.
+    cluster_labels : dict[str, str] | None
+        Optional cluster-label text keyed by cluster name.
+    label_positions : Any | None
+        Optional edge-label anchors aligned to ``edge_index``.
+    edge_labels : Any | None
+        Optional edge-label text aligned to ``edge_index``.
+    node_shapes : list[str] | None
+        Optional node-shape names aligned to nodes.
+    edge_label_boxes : torch.Tensor | None
+        Optional edge-label geometry boxes with shape ``[E, 2]``.
+    cluster_label_boxes : dict[str, Any] | None
+        Optional cluster-label geometry payload keyed by cluster name.
     cluster_tree : ClusterTree | None
         Optional precomputed cluster hierarchy. When omitted, callers can use
         :meth:`get_cluster_tree` to lazily construct it from cluster metadata.
@@ -152,6 +164,12 @@ class LayoutProblem:
     direction: str = "BT"
     clusters: Optional[Dict[str, Any]] = None
     cluster_parents: Optional[Dict[str, Optional[str]]] = None
+    cluster_labels: Optional[Dict[str, str]] = None
+    label_positions: Optional[Any] = None
+    edge_labels: Optional[Any] = None
+    node_shapes: Optional[List[str]] = None
+    edge_label_boxes: Optional[torch.Tensor] = None
+    cluster_label_boxes: Optional[Dict[str, Any]] = None
     cluster_tree: Optional[ClusterTree] = None
     structure: Optional[GraphStructure] = None
     flex: Optional[FlexConstraints] = None

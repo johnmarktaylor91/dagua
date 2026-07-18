@@ -5872,6 +5872,12 @@ def layout_dagua_native_pipeline(
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict[str, Any]] = None,
     cluster_parents: Optional[dict[str, Optional[str]]] = None,
+    cluster_labels: Optional[dict[str, str]] = None,
+    label_positions: Optional[Any] = None,
+    edge_labels: Optional[Any] = None,
+    node_shapes: Optional[list[str]] = None,
+    edge_label_boxes: Optional[torch.Tensor] = None,
+    cluster_label_boxes: Optional[dict[str, Any]] = None,
     layer_assignments: Optional[torch.Tensor] = None,
     prebuilt_layer_index: Optional[Any] = None,
     graph_structure: Optional[GraphStructure] = None,
@@ -5903,6 +5909,18 @@ def layout_dagua_native_pipeline(
         Cluster membership metadata.
     cluster_parents : dict[str, str], optional
         Nested-cluster parent metadata.
+    cluster_labels : dict[str, str], optional
+        Cluster-label text keyed by cluster name.
+    label_positions : Any, optional
+        Edge-label anchors aligned to ``edge_index``.
+    edge_labels : Any, optional
+        Edge-label text aligned to ``edge_index``.
+    node_shapes : list[str], optional
+        Node-shape metadata aligned to graph nodes.
+    edge_label_boxes : torch.Tensor, optional
+        Edge-label geometry boxes with shape ``[E, 2]``.
+    cluster_label_boxes : dict[str, Any], optional
+        Cluster-label geometry payload keyed by cluster name.
     layer_assignments : torch.Tensor, optional
         Optional layer assignments with shape ``[N]``.
     prebuilt_layer_index : Any, optional
@@ -6159,6 +6177,12 @@ def layout_dagua_native_pipeline(
                 init_pos=init_pos,
                 clusters=clusters,
                 cluster_parents=cluster_parents,
+                cluster_labels=cluster_labels,
+                label_positions=label_positions,
+                edge_labels=edge_labels,
+                node_shapes=node_shapes,
+                edge_label_boxes=edge_label_boxes,
+                cluster_label_boxes=cluster_label_boxes,
                 layer_assignments=layer_assignments,
                 prebuilt_layer_index=prebuilt_layer_index,
                 graph_structure=graph_structure,
@@ -6270,6 +6294,12 @@ def layout_dagua_native_pipeline(
         direction=prepared_config.direction,
         clusters=clusters,
         cluster_parents=cluster_parents,
+        cluster_labels=cluster_labels,
+        label_positions=label_positions,
+        edge_labels=edge_labels,
+        node_shapes=node_shapes,
+        edge_label_boxes=edge_label_boxes,
+        cluster_label_boxes=cluster_label_boxes,
         structure=getattr(prepared_config, "_dagua_native_structure", None),
         flex=flex_constraints,
         edge_weights=prepared_edge_weights,

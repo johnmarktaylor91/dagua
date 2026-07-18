@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 from typing import Callable, Optional, TypeVar
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -23,12 +24,14 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
     _crossing_edge_pairs,
+    _directed_cluster_candidate_is_dual_admissible,
     _directed_mrtree_enabled,
     _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
     _directed_recombinant_layered_candidates,
     _directed_recombinant_layered_enabled,
     _directed_stress_blend_candidates,
+    _DirectedClusterScoreTelemetry,
     _exact_crossing_count,
     _exact_crossing_count_loop,
     _force_challengers_enabled,
@@ -39,11 +42,86 @@ from dagua.layout.ops.pipelines.native_directed import (
     _register_challenger_variants,
     _restore_projected_rank_order,
     _score_directed_candidate,
+    _score_directed_candidate_referee_payload,
+    _select_directed_winner,
     layout_native_directed_portfolio,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 _T = TypeVar("_T")
+
+
+def test_directed_referee_forwards_extended_cluster_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clustered directed scoring forwards Event-A cluster-ruler metadata."""
+    calls: list[dict[str, object]] = []
+
+    def fake_full(*args: object, **kwargs: object) -> dict[str, float]:
+        """Capture full-ruler kwargs and return deterministic directed scores."""
+        del args
+        calls.append(dict(kwargs))
+        return {
+            "ksm_score": 1.0,
+            "edge_crossing_score": 1.0,
+            "node_occlusion_score": 1.0,
+            "neighborhood_preservation_score": 1.0,
+            "edge_length_deviation_score": 1.0,
+            "gabriel_score": 1.0,
+            "crossing_angle_score": 1.0,
+            "angular_resolution_score": 1.0,
+            "path_continuity_score": 1.0,
+            "cluster_silhouette_score": 1.0,
+            "directed_flow_score": 1.0,
+            "depth_order_score": 1.0,
+            "cluster_exclusion_score": 0.0,
+            "cluster_sibling_overlap_score": 0.0,
+            "cluster_nesting_fidelity_score": 0.0,
+            "cluster_edge_intrusion_score": 0.0,
+            "cluster_label_occlusion_score": 0.0,
+            "cluster_compactness_score": 0.0,
+        }
+
+    monkeypatch.setattr("dagua.metrics.full", fake_full)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.ones((3, 2), dtype=torch.float32),
+        clusters={"group": [0, 1, 2]},
+        cluster_parents={"group": None},
+        cluster_labels={"group": "Group"},
+        label_positions=[None, None],
+        edge_labels=["a", "b"],
+    )
+    score, telemetry = _score_directed_candidate_referee_payload(
+        torch.zeros((3, 2), dtype=torch.float32),
+        problem,
+        torch.zeros((3,), dtype=torch.long),
+    )
+
+    assert calls[0]["clusters"] == problem.clusters
+    assert calls[0]["cluster_parents"] == problem.cluster_parents
+    assert calls[0]["cluster_labels"] == problem.cluster_labels
+    assert calls[0]["label_positions"] == problem.label_positions
+    assert calls[0]["edge_labels"] == problem.edge_labels
+    assert telemetry is not None
+    assert score == telemetry.extended_score
+    assert telemetry.old_score > telemetry.extended_score
+
+
+def test_directed_cluster_dual_ruler_rejects_old_regression() -> None:
+    """Clustered directed challengers must not regress old-ruler score."""
+    incumbent = _DirectedClusterScoreTelemetry(extended_score=80.0, old_score=90.0, metrics={})
+    challenger = _DirectedClusterScoreTelemetry(extended_score=81.0, old_score=89.9, metrics={})
+
+    assert not _directed_cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert (
+        _select_directed_winner(
+            {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
+            {"incumbent": incumbent, "challenger": challenger},
+        )
+        == "incumbent"
+    )
 
 
 def _run_with_watchdog(func: Callable[[], _T], timeout_s: float) -> _T:

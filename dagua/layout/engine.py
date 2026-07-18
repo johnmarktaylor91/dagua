@@ -1161,6 +1161,17 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             kwargs["clusters"] = graph.clusters
         if hasattr(graph, "cluster_parents") and graph.cluster_parents:
             kwargs["cluster_parents"] = graph.cluster_parents
+        if hasattr(graph, "cluster_labels") and graph.cluster_labels:
+            kwargs["cluster_labels"] = graph.cluster_labels
+        if hasattr(graph, "edge_labels") and graph.edge_labels:
+            kwargs["edge_labels"] = graph.edge_labels
+        if hasattr(graph, "last_label_positions") and graph.last_label_positions is not None:
+            kwargs["label_positions"] = graph.last_label_positions
+        if hasattr(graph, "node_styles") and graph.node_styles:
+            kwargs["node_shapes"] = [
+                getattr(graph.get_style_for_node(index), "shape", "rectangle")
+                for index in range(graph.num_nodes)
+            ]
 
         accepted = set(sig.parameters.keys())
         kwargs = {k: v for k, v in kwargs.items() if k in accepted}
@@ -1266,6 +1277,19 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 clusters=graph.clusters if hasattr(graph, "clusters") else None,
                 cluster_parents=(
                     graph.cluster_parents if hasattr(graph, "cluster_parents") else None
+                ),
+                cluster_labels=(graph.cluster_labels if hasattr(graph, "cluster_labels") else None),
+                edge_labels=graph.edge_labels if hasattr(graph, "edge_labels") else None,
+                label_positions=(
+                    graph.last_label_positions if hasattr(graph, "last_label_positions") else None
+                ),
+                node_shapes=(
+                    [
+                        getattr(graph.get_style_for_node(index), "shape", "rectangle")
+                        for index in range(graph.num_nodes)
+                    ]
+                    if hasattr(graph, "node_styles")
+                    else None
                 ),
                 progress_context=ProgressContext(),
                 trace=trace,
@@ -1634,6 +1658,12 @@ def _layout_inner(
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict] = None,
     cluster_parents: Optional[dict] = None,
+    cluster_labels: Optional[dict] = None,
+    label_positions: Optional[Any] = None,
+    edge_labels: Optional[Any] = None,
+    node_shapes: Optional[list[str]] = None,
+    edge_label_boxes: Optional[torch.Tensor] = None,
+    cluster_label_boxes: Optional[dict] = None,
     layer_assignments: Optional[torch.Tensor] = None,
     progress_context: Optional[ProgressContext] = None,
     trace: Optional[object] = None,
@@ -1668,6 +1698,18 @@ def _layout_inner(
         Cluster membership data for cluster losses.
     cluster_parents : dict, optional
         Parent-cluster mapping used by containment/separation losses.
+    cluster_labels : dict, optional
+        Cluster-label text keyed by cluster name.
+    label_positions : Any, optional
+        Edge-label anchors aligned to the edge tensor.
+    edge_labels : Any, optional
+        Edge-label text aligned to the edge tensor.
+    node_shapes : list[str], optional
+        Node-shape metadata aligned to graph nodes.
+    edge_label_boxes : torch.Tensor, optional
+        Edge-label geometry boxes with shape ``[E, 2]``.
+    cluster_label_boxes : dict, optional
+        Cluster-label geometry payload keyed by cluster name.
     layer_assignments : torch.Tensor, optional
         Raw layer assignments shaped ``[N]``.
     progress_context : ProgressContext, optional
@@ -3026,6 +3068,12 @@ def _layout_inner_pipeline(
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict] = None,
     cluster_parents: Optional[dict] = None,
+    cluster_labels: Optional[dict] = None,
+    label_positions: Optional[Any] = None,
+    edge_labels: Optional[Any] = None,
+    node_shapes: Optional[list[str]] = None,
+    edge_label_boxes: Optional[torch.Tensor] = None,
+    cluster_label_boxes: Optional[dict] = None,
     layer_assignments: Optional[torch.Tensor] = None,
     *,
     graph_structure: Optional[GraphStructure] = None,
@@ -3055,6 +3103,18 @@ def _layout_inner_pipeline(
         Cluster membership data for cluster losses.
     cluster_parents : dict, optional
         Parent-cluster mapping used by containment/separation losses.
+    cluster_labels : dict, optional
+        Cluster-label text keyed by cluster name.
+    label_positions : Any, optional
+        Edge-label anchors aligned to the edge tensor.
+    edge_labels : Any, optional
+        Edge-label text aligned to the edge tensor.
+    node_shapes : list[str], optional
+        Node-shape metadata aligned to graph nodes.
+    edge_label_boxes : torch.Tensor, optional
+        Edge-label geometry boxes with shape ``[E, 2]``.
+    cluster_label_boxes : dict, optional
+        Cluster-label geometry payload keyed by cluster name.
     layer_assignments : torch.Tensor, optional
         Raw layer assignments shaped ``[N]``.
     graph_structure : GraphStructure, optional
@@ -3081,6 +3141,12 @@ def _layout_inner_pipeline(
         init_pos=init_pos,
         clusters=clusters,
         cluster_parents=cluster_parents,
+        cluster_labels=cluster_labels,
+        label_positions=label_positions,
+        edge_labels=edge_labels,
+        node_shapes=node_shapes,
+        edge_label_boxes=edge_label_boxes,
+        cluster_label_boxes=cluster_label_boxes,
         layer_assignments=layer_assignments,
         prebuilt_layer_index=prebuilt_layer_index,
         graph_structure=graph_structure,
