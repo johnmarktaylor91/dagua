@@ -173,3 +173,28 @@ def test_box_only_native_pipeline_is_byte_identical_with_shape_metadata(
         node_shapes=["box", "rectangle", "rect", "roundrect"],
     )
     assert torch.equal(with_shapes, without_shapes)
+
+
+def test_default_ellipse_cascade_keeps_native_pipeline_byte_identical(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Default-resolved ellipse styles do not activate shape-aware native math."""
+    monkeypatch.setenv("DAGUA_NATIVE_DISABLE_W5", "1")
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    sizes = torch.full((4, 2), 10.0, dtype=torch.float32)
+    without_shapes = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=sizes,
+        config=LayoutConfig(seed=7, steps=8),
+        device="cpu",
+    )
+    with_default_cascade = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=sizes,
+        config=LayoutConfig(seed=7, steps=8),
+        device="cpu",
+        node_shapes=["ellipse", "ellipse", "ellipse", "ellipse"],
+    )
+    assert torch.equal(with_default_cascade, without_shapes)

@@ -5503,6 +5503,36 @@ def _honest_ruler_flags(structure: GraphStructure) -> tuple[bool, bool]:
     return is_semantically_directed, declared_hierarchical
 
 
+def _resolve_shape_geometry_for_native_layout(
+    node_shapes: Optional[list[str]],
+    num_nodes: int,
+) -> Optional[NativeShapeGeometry]:
+    """Return native shape geometry only for explicit non-default shapes.
+
+    Parameters
+    ----------
+    node_shapes : list[str] or None
+        Shape names forwarded from the graph style cascade.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    NativeShapeGeometry or None
+        Shape descriptors for explicit mixed/non-default shape rows, or
+        ``None`` for the historical unstyled native path.
+    """
+    if node_shapes is None:
+        return None
+    normalized = [
+        str(node_shapes[index]).strip().lower() if index < len(node_shapes) else ""
+        for index in range(num_nodes)
+    ]
+    if normalized and all(shape == "ellipse" for shape in normalized):
+        return None
+    return resolve_native_shape_geometry(node_shapes, num_nodes)
+
+
 def _score_native_result(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -6063,7 +6093,7 @@ def layout_dagua_native_pipeline(
     dot_cluster_fidelity = _is_graphviz_dot_cluster_fidelity_mode(
         getattr(effective_config, "fidelity_mode", None)
     )
-    shape_geometry = resolve_native_shape_geometry(node_shapes, num_nodes)
+    shape_geometry = _resolve_shape_geometry_for_native_layout(node_shapes, num_nodes)
     if _selected_force_pipeline(effective_config) == "legacy_monolith":
         legacy_pos = dagua_native_legacy.layout_dagua_native_pipeline(
             edge_index=edge_index,
