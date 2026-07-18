@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,7 @@ def test_metric_payload_full_forwards_cluster_quality_metadata() -> None:
     assert not skipped
     for name in _CLUSTER_WEIGHTS:
         assert metrics[name] is not None
-        assert float(metrics[name]) == pytest.approx(float(metrics[name]))
+        assert math.isfinite(float(metrics[name]))
     assert score == pytest.approx(composite_auto(metrics))
     assert score != pytest.approx(composite_auto(without_cluster))
 

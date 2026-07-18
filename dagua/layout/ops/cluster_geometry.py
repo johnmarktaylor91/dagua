@@ -600,6 +600,44 @@ def build_cluster_geometry_profile(
             for right_name in names[left_index + 1 :]:
                 sibling_pairs.append((left_name, right_name))
 
+    def sibling_pair_key(
+        pair: tuple[str, str],
+    ) -> tuple[
+        tuple[tuple[int, ...], tuple[int, ...]],
+        tuple[Tuple[float, float, float, float], Tuple[float, float, float, float]],
+    ]:
+        """Return a rename-invariant key for capped sibling-pair sampling.
+
+        Parameters
+        ----------
+        pair : tuple[str, str]
+            Sibling cluster names for one pair.
+
+        Returns
+        -------
+        tuple
+            Pair key based on member node indices and geometry, never cluster
+            name strings.
+        """
+        left_name, right_name = pair
+        left_members = tuple(sorted(boxes[left_name].descendants))
+        right_members = tuple(sorted(boxes[right_name].descendants))
+        member_key = (
+            (left_members, right_members)
+            if left_members <= right_members
+            else (right_members, left_members)
+        )
+        left_bounds = boxes[left_name].bounds
+        right_bounds = boxes[right_name].bounds
+        bounds_key = (
+            (left_bounds, right_bounds)
+            if left_bounds <= right_bounds
+            else (right_bounds, left_bounds)
+        )
+        return member_key, bounds_key
+
+    sibling_pairs.sort(key=sibling_pair_key)
+
     return ClusterGeometryProfile(
         tree=tree,
         cluster_names=tuple(name for name in tree.top_down_order() if name in boxes),

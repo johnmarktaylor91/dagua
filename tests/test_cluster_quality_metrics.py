@@ -197,6 +197,30 @@ def test_cluster_sibling_sampling_is_mapping_order_invariant() -> None:
     )
 
 
+def test_cluster_sibling_sampling_is_rename_invariant_under_cap() -> None:
+    """Capped sibling sampling is stable when cluster lexical ranks change."""
+    node_count = 210
+    generator = torch.Generator().manual_seed(1)
+    positions = torch.randn((node_count, 2), generator=generator) * torch.tensor([40.0, 15.0])
+    positions[:, 0] += torch.sin(torch.arange(node_count, dtype=torch.float32) * 0.37) * 25.0
+    sizes = torch.full((node_count, 2), 20.0)
+    first_clusters = {f"c{index:03d}": [index] for index in range(node_count)}
+    second_clusters = {f"c{node_count - index:03d}": [index] for index in range(node_count)}
+    first_labels = {name: "X" for name in first_clusters}
+    second_labels = {name: "X" for name in second_clusters}
+
+    first = cluster_sibling_overlap_score(
+        positions, sizes, first_clusters, {}, first_labels, pair_cap=2
+    )
+    second = cluster_sibling_overlap_score(
+        positions, sizes, second_clusters, {}, second_labels, pair_cap=2
+    )
+
+    assert first["cluster_sibling_overlap_pairs"] == 2
+    assert second["cluster_sibling_overlap_pairs"] == 2
+    assert second["cluster_sibling_overlap_score"] == first["cluster_sibling_overlap_score"]
+
+
 def test_cluster_intrusion_delta_is_node_count_independent() -> None:
     """A fixed foreign-node and foreign-edge intrusion keeps the same score at scale."""
     base_positions = torch.tensor([[0.0, 0.0], [5.0, 0.0], [2.5, 0.0], [-40.0, 0.0], [40.0, 0.0]])
