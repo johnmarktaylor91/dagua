@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -80,8 +81,11 @@ def test_dispatch_routes_karate_like_feedback_to_common_contest() -> None:
     assert selected == "undirected_portfolio"
 
 
-def test_force_pipeline_legacy_monolith_matches_legacy_module() -> None:
+def test_force_pipeline_legacy_monolith_matches_legacy_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The legacy_monolith escape hatch should preserve sprint-20d output."""
+    monkeypatch.setenv("DAGUA_NATIVE_DISABLE_W5", "1")
     edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 3, 3]], dtype=torch.long)
     node_sizes = torch.full((4, 2), 20.0, dtype=torch.float32)
     config = LayoutConfig(seed=42, steps=5, force_pipeline="legacy_monolith")
