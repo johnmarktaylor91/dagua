@@ -24,7 +24,7 @@ from dagua.eval.competitors.dagua_competitor import DaguaCompetitor
 from dagua.eval.graphs import TestGraph, get_test_graphs
 from dagua.eval.report import generate_benchmark_markdown, generate_report
 from dagua.graph import DaguaGraph
-from dagua.metrics import composite_auto
+from dagua.metrics import _CLUSTER_WEIGHTS, composite_auto
 from dagua.utils import longest_path_layering
 
 
@@ -50,6 +50,39 @@ def test_production_random_dag_routes_to_directed_ruler() -> None:
 
     assert metrics["declared_hierarchical"] is True
     assert score == pytest.approx(composite_auto(metrics, True))
+
+
+def test_metric_payload_full_forwards_cluster_quality_metadata() -> None:
+    """Full benchmark scoring computes finite cluster ruler keys for clustered graphs."""
+    graph = DaguaGraph()
+    for index in range(5):
+        graph.add_node(index)
+    graph.add_edge(3, 4)
+    graph.node_sizes = torch.full((5, 2), 10.0)
+    graph.clusters = {"center": [0, 1], "outer": [0, 1, 2]}
+    graph.cluster_parents = {"center": "outer"}
+    graph.cluster_labels = {"center": "Center", "outer": "Outer"}
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [5.0, 0.0],
+            [2.5, 0.0],
+            [-40.0, 0.0],
+            [40.0, 0.0],
+        ]
+    )
+
+    metrics, score, computed, skipped = _metric_payload(graph, pos, "full")
+    without_cluster = {**metrics, **{name: None for name in _CLUSTER_WEIGHTS}}
+
+    assert "tier2" in computed
+    assert "tier3" in computed
+    assert not skipped
+    for name in _CLUSTER_WEIGHTS:
+        assert metrics[name] is not None
+        assert float(metrics[name]) == pytest.approx(float(metrics[name]))
+    assert score == pytest.approx(composite_auto(metrics))
+    assert score != pytest.approx(composite_auto(without_cluster))
 
 
 @pytest.mark.smoke
