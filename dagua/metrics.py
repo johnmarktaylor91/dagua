@@ -19,10 +19,12 @@ from __future__ import annotations
 import math
 import time as _time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+
+from dagua.layout.ops.cluster_geometry import ClusterGeometryProfile, build_cluster_geometry_profile
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -738,7 +740,16 @@ _COMMON_WEIGHTS: Dict[str, float] = {
     "cluster_silhouette_score": 5.0,
 }
 _DIRECTED_WEIGHTS: Dict[str, float] = {"directed_flow_score": 16.0, "depth_order_score": 9.0}
+_CLUSTER_WEIGHTS: Dict[str, float] = {
+    "cluster_exclusion_score": 2.0,
+    "cluster_sibling_overlap_score": 2.0,
+    "cluster_nesting_fidelity_score": 1.0,
+    "cluster_edge_intrusion_score": 1.0,
+    "cluster_label_occlusion_score": 0.5,
+    "cluster_compactness_score": 0.5,
+}
 _CROSSING_ANGLE_KNEE_RADIANS = math.radians(70.0)
+_CLUSTER_PAIR_SAMPLE_CAP = 20_000
 
 
 def _pav_fitted_values(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -829,17 +840,17 @@ def _stratified_graph_pairs(
     while unseen:
         root = min(unseen)
         stack = [root]
-        component: List[int] = []
+        component_nodes: List[int] = []
         unseen.remove(root)
         while stack:
             node = stack.pop()
-            component.append(node)
+            component_nodes.append(node)
             for offset in range(offsets[node], offsets[node + 1]):
                 neighbor = int(targets[offset])
                 if neighbor in unseen:
                     unseen.remove(neighbor)
                     stack.append(neighbor)
-        components.append(np.asarray(sorted(component), dtype=np.int64))
+        components.append(np.asarray(sorted(component_nodes), dtype=np.int64))
 
     # At least one row per nontrivial component prevents a small component
     # from disappearing under a global evenly-spaced sample.
@@ -2051,6 +2062,658 @@ def cluster_silhouette_score(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Di
     }
 
 
+def _bbox_area(bounds: Tuple[float, float, float, float]) -> float:
+    """Return non-negative area for an axis-aligned bounding box.
+
+    Parameters
+    ----------
+    bounds : tuple[float, float, float, float]
+        Bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    float
+        Non-negative box area.
+    """
+    return max(0.0, bounds[2] - bounds[0]) * max(0.0, bounds[3] - bounds[1])
+
+
+def _bbox_intersection_area(
+    left: Tuple[float, float, float, float],
+    right: Tuple[float, float, float, float],
+    *,
+    tolerance: float = 0.0,
+) -> float:
+    """Return overlap area for two AABBs after optional touch tolerance.
+
+    Parameters
+    ----------
+    left : tuple[float, float, float, float]
+        First bounds as ``(x_min, y_min, x_max, y_max)``.
+    right : tuple[float, float, float, float]
+        Second bounds as ``(x_min, y_min, x_max, y_max)``.
+    tolerance : float, optional
+        Amount of one-dimensional contact ignored on each axis.
+
+    Returns
+    -------
+    float
+        Positive intersection area beyond the tolerance.
+    """
+    width = min(left[2], right[2]) - max(left[0], right[0]) - float(tolerance)
+    height = min(left[3], right[3]) - max(left[1], right[1]) - float(tolerance)
+    return max(0.0, width) * max(0.0, height)
+
+
+def _bbox_contains(
+    outer: Tuple[float, float, float, float],
+    inner: Tuple[float, float, float, float],
+    *,
+    tolerance: float = 1e-9,
+) -> bool:
+    """Return whether ``outer`` encloses ``inner`` within tolerance.
+
+    Parameters
+    ----------
+    outer : tuple[float, float, float, float]
+        Candidate enclosing bounds.
+    inner : tuple[float, float, float, float]
+        Candidate enclosed bounds.
+    tolerance : float, optional
+        Coordinate tolerance for exact-touch numerical noise.
+
+    Returns
+    -------
+    bool
+        ``True`` when every inner side lies inside the outer box.
+    """
+    return (
+        outer[0] <= inner[0] + tolerance
+        and outer[1] <= inner[1] + tolerance
+        and outer[2] >= inner[2] - tolerance
+        and outer[3] >= inner[3] - tolerance
+    )
+
+
+def _segment_aabb_clip_length(
+    start: np.ndarray,
+    end: np.ndarray,
+    bounds: Tuple[float, float, float, float],
+) -> float:
+    """Return segment length inside an AABB interior via Liang-Barsky clipping.
+
+    Parameters
+    ----------
+    start : numpy.ndarray
+        Segment start point with shape ``[2]``.
+    end : numpy.ndarray
+        Segment end point with shape ``[2]``.
+    bounds : tuple[float, float, float, float]
+        Box bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    float
+        Length of the segment portion inside the box. Boundary-only contact has
+        zero length.
+    """
+    delta = end - start
+    t_min = 0.0
+    t_max = 1.0
+    for axis, lower, upper in ((0, bounds[0], bounds[2]), (1, bounds[1], bounds[3])):
+        if abs(float(delta[axis])) <= 1e-12:
+            if start[axis] <= lower or start[axis] >= upper:
+                return 0.0
+            continue
+        inv_delta = 1.0 / float(delta[axis])
+        first = (lower - float(start[axis])) * inv_delta
+        second = (upper - float(start[axis])) * inv_delta
+        enter = min(first, second)
+        leave = max(first, second)
+        t_min = max(t_min, enter)
+        t_max = min(t_max, leave)
+        if t_min >= t_max:
+            return 0.0
+    length = float(np.linalg.norm(delta))
+    if length <= 1e-12:
+        return 0.0
+    return max(0.0, t_max - t_min) * length
+
+
+def _cluster_profile_or_none(
+    pos: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    cluster_labels: Optional[Mapping[str, str]],
+    profile: Optional[ClusterGeometryProfile],
+) -> Optional[ClusterGeometryProfile]:
+    """Return an existing or newly derived cluster geometry profile.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : Optional[torch.Tensor]
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]]
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]]
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]]
+        Explicit cluster labels.
+    profile : Optional[ClusterGeometryProfile]
+        Precomputed geometry profile.
+
+    Returns
+    -------
+    Optional[ClusterGeometryProfile]
+        Cluster geometry profile, or ``None`` when metadata is absent.
+    """
+    if profile is not None:
+        return profile
+    if node_sizes is None or not clusters:
+        return None
+    return build_cluster_geometry_profile(
+        pos,
+        node_sizes,
+        cluster_labels,
+        clusters,
+        cluster_parents,
+    )
+
+
+def cluster_exclusion_score(
+    pos: torch.Tensor,
+    node_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    *,
+    profile: Optional[ClusterGeometryProfile] = None,
+) -> Dict[str, Any]:
+    """Score whether foreign nodes intrude into derived cluster boxes.
+
+    Formula: for each cluster ``K`` and every non-descendant node AABB ``B``,
+    compute ``area(K_box ∩ B) / min(area(K_box), area(B))``; the score is
+    ``1 - mean(clamped_ratio)`` over all tested pairs. Descendant nodes are
+    excluded because membership containment is true by construction.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels.
+    profile : Optional[ClusterGeometryProfile], optional
+        Precomputed read-only cluster profile.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``cluster_exclusion_score`` and diagnostic intrusion count, or
+        ``None`` when no cluster metadata applies.
+    """
+    cluster_profile = _cluster_profile_or_none(
+        pos, node_sizes, clusters, cluster_parents, cluster_labels, profile
+    )
+    if cluster_profile is None:
+        return {"cluster_exclusion_score": None, "cluster_exclusion_intrusions": 0}
+    penalties: List[float] = []
+    intrusions = 0
+    for name in cluster_profile.cluster_names:
+        box = cluster_profile.boxes[name]
+        cluster_area = max(_bbox_area(box.bounds), 1e-12)
+        for node_index, node_bounds in enumerate(cluster_profile.node_bounds):
+            if node_index in box.descendants:
+                continue
+            overlap = _bbox_intersection_area(box.bounds, node_bounds)
+            if overlap <= 0.0:
+                penalties.append(0.0)
+                continue
+            intrusions += 1
+            denominator = max(1e-12, min(cluster_area, _bbox_area(node_bounds)))
+            penalties.append(min(1.0, overlap / denominator))
+    score = 1.0 - float(np.mean(penalties)) if penalties else 1.0
+    return {"cluster_exclusion_score": max(0.0, score), "cluster_exclusion_intrusions": intrusions}
+
+
+def cluster_sibling_overlap_score(
+    pos: torch.Tensor,
+    node_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    *,
+    profile: Optional[ClusterGeometryProfile] = None,
+    pair_cap: int = _CLUSTER_PAIR_SAMPLE_CAP,
+) -> Dict[str, Any]:
+    """Score overlap between same-parent derived cluster boxes.
+
+    Formula: for each same-parent pair ``(A, B)``, compute
+    ``area(A ∩ B) / min(area(A), area(B))`` after a small touch tolerance; the
+    score is ``1 - mean(ratio)``. If pair count exceeds ``pair_cap``, evenly
+    spaced deterministic pair indices are sampled.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels.
+    profile : Optional[ClusterGeometryProfile], optional
+        Precomputed read-only cluster profile.
+    pair_cap : int, optional
+        Maximum deterministic sibling pairs to score.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``cluster_sibling_overlap_score`` and sampled pair count, or ``None``
+        when no cluster metadata applies.
+    """
+    cluster_profile = _cluster_profile_or_none(
+        pos, node_sizes, clusters, cluster_parents, cluster_labels, profile
+    )
+    if cluster_profile is None:
+        return {"cluster_sibling_overlap_score": None, "cluster_sibling_overlap_pairs": 0}
+    sampled = _deterministic_sample_indices(len(cluster_profile.sibling_pairs), pair_cap)
+    penalties: List[float] = []
+    for pair_index in sampled:
+        left_name, right_name = cluster_profile.sibling_pairs[int(pair_index)]
+        left = cluster_profile.boxes[left_name].bounds
+        right = cluster_profile.boxes[right_name].bounds
+        overlap = _bbox_intersection_area(left, right, tolerance=1e-9)
+        denom = max(1e-12, min(_bbox_area(left), _bbox_area(right)))
+        penalties.append(min(1.0, overlap / denom))
+    score = 1.0 - float(np.mean(penalties)) if penalties else 1.0
+    return {
+        "cluster_sibling_overlap_score": max(0.0, score),
+        "cluster_sibling_overlap_pairs": len(sampled),
+    }
+
+
+def cluster_nesting_fidelity_score(
+    pos: torch.Tensor,
+    node_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    *,
+    profile: Optional[ClusterGeometryProfile] = None,
+) -> Dict[str, Any]:
+    """Score whether visual enclosure matches declared nested parents.
+
+    Formula: for every cluster box, find the smallest-area other cluster box
+    that encloses it. A child scores 1 when that minimal enclosing box is its
+    declared parent; a root scores 1 when no other box encloses it. The metric
+    is the mean of those binary fidelities.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels.
+    profile : Optional[ClusterGeometryProfile], optional
+        Precomputed read-only cluster profile.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``cluster_nesting_fidelity_score`` and violation count, or ``None``
+        when no cluster metadata applies.
+    """
+    cluster_profile = _cluster_profile_or_none(
+        pos, node_sizes, clusters, cluster_parents, cluster_labels, profile
+    )
+    if cluster_profile is None:
+        return {"cluster_nesting_fidelity_score": None, "cluster_nesting_violations": 0}
+    matches: List[float] = []
+    violations = 0
+    for name in cluster_profile.cluster_names:
+        bounds = cluster_profile.boxes[name].bounds
+        enclosing = [
+            other_name
+            for other_name in cluster_profile.cluster_names
+            if other_name != name
+            and _bbox_contains(cluster_profile.boxes[other_name].bounds, bounds)
+        ]
+        minimal = min(
+            enclosing,
+            key=lambda other_name: (
+                _bbox_area(cluster_profile.boxes[other_name].bounds),
+                other_name,
+            ),
+            default=None,
+        )
+        expected = cluster_profile.tree.parents[name]
+        match = minimal == expected
+        matches.append(1.0 if match else 0.0)
+        if not match:
+            violations += 1
+    return {
+        "cluster_nesting_fidelity_score": float(np.mean(matches)) if matches else 1.0,
+        "cluster_nesting_violations": violations,
+    }
+
+
+def cluster_edge_intrusion_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    *,
+    profile: Optional[ClusterGeometryProfile] = None,
+) -> Dict[str, Any]:
+    """Score foreign edge segments that pass through cluster interiors.
+
+    Formula: for each cluster ``K`` and each edge with neither endpoint in
+    ``K``'s descendants, clip the segment against ``K``'s padded box and divide
+    inside length by the cluster-box diagonal. The score is
+    ``1 - mean(clamped_normalized_length)``. Incident edges are ignored because
+    they are allowed to enter through the boundary.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels.
+    profile : Optional[ClusterGeometryProfile], optional
+        Precomputed read-only cluster profile.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``cluster_edge_intrusion_score`` and crossing count, or ``None`` when
+        no cluster metadata applies.
+    """
+    cluster_profile = _cluster_profile_or_none(
+        pos, node_sizes, clusters, cluster_parents, cluster_labels, profile
+    )
+    if cluster_profile is None:
+        return {"cluster_edge_intrusion_score": None, "cluster_edge_intrusions": 0}
+    positions = _ensure_cpu(pos).to(dtype=torch.float64).numpy()
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    penalties: List[float] = []
+    intrusions = 0
+    if edges.numel() == 0:
+        return {"cluster_edge_intrusion_score": 1.0, "cluster_edge_intrusions": 0}
+    for name in cluster_profile.cluster_names:
+        box = cluster_profile.boxes[name]
+        bounds = box.bounds
+        diagonal = math.hypot(bounds[2] - bounds[0], bounds[3] - bounds[1])
+        if diagonal <= 1e-12:
+            continue
+        for source, target in edges.t().tolist():
+            if int(source) in box.descendants or int(target) in box.descendants:
+                continue
+            length = _segment_aabb_clip_length(
+                positions[int(source)],
+                positions[int(target)],
+                bounds,
+            )
+            if length > 1e-9:
+                intrusions += 1
+            penalties.append(min(1.0, length / diagonal))
+    score = 1.0 - float(np.mean(penalties)) if penalties else 1.0
+    return {"cluster_edge_intrusion_score": max(0.0, score), "cluster_edge_intrusions": intrusions}
+
+
+def cluster_label_occlusion_score(
+    pos: torch.Tensor,
+    node_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    *,
+    profile: Optional[ClusterGeometryProfile] = None,
+) -> Dict[str, Any]:
+    """Score cluster label bands against visible node and cluster-label AABBs.
+
+    Formula: for every explicit cluster-label band ``L``, compute normalized
+    overlap against node AABBs and every other explicit cluster-label band as
+    ``area(L ∩ B) / min(area(L), area(B))``. The score is ``1 - mean(ratio)``.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels.
+    profile : Optional[ClusterGeometryProfile], optional
+        Precomputed read-only cluster profile.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``cluster_label_occlusion_score`` and occlusion count, or ``None`` when
+        no cluster labels apply.
+    """
+    cluster_profile = _cluster_profile_or_none(
+        pos, node_sizes, clusters, cluster_parents, cluster_labels, profile
+    )
+    if cluster_profile is None:
+        return {"cluster_label_occlusion_score": None, "cluster_label_occlusions": 0}
+    label_boxes = [
+        (name, cluster_profile.boxes[name].label_bounds)
+        for name in cluster_profile.cluster_names
+        if cluster_profile.boxes[name].label_bounds is not None
+    ]
+    if not label_boxes:
+        return {"cluster_label_occlusion_score": None, "cluster_label_occlusions": 0}
+    penalties: List[float] = []
+    occlusions = 0
+    for name, label_bounds_optional in label_boxes:
+        if label_bounds_optional is None:
+            continue
+        label_bounds = label_bounds_optional
+        label_area = max(_bbox_area(label_bounds), 1e-12)
+        for node_index, node_bounds in enumerate(cluster_profile.node_bounds):
+            if node_index in cluster_profile.boxes[name].descendants:
+                continue
+            overlap = _bbox_intersection_area(label_bounds, node_bounds)
+            if overlap > 0.0:
+                occlusions += 1
+            denominator = max(1e-12, min(label_area, _bbox_area(node_bounds)))
+            penalties.append(min(1.0, overlap / denominator))
+        for other_name, other_bounds_optional in label_boxes:
+            if other_name <= name or other_bounds_optional is None:
+                continue
+            overlap = _bbox_intersection_area(label_bounds, other_bounds_optional)
+            if overlap > 0.0:
+                occlusions += 1
+            denom = max(1e-12, min(label_area, _bbox_area(other_bounds_optional)))
+            penalties.append(min(1.0, overlap / denom))
+    score = 1.0 - float(np.mean(penalties)) if penalties else 1.0
+    return {
+        "cluster_label_occlusion_score": max(0.0, score),
+        "cluster_label_occlusions": occlusions,
+    }
+
+
+def cluster_compactness_score(
+    pos: torch.Tensor,
+    node_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    *,
+    profile: Optional[ClusterGeometryProfile] = None,
+) -> Dict[str, Any]:
+    """Score member spread with a saturating no-collapse reward band.
+
+    Formula: for each cluster, compute the member AABB area divided by the sum
+    of member node areas. Ratios up to ``4.0`` receive score ``1``; above that
+    band, score decays as ``4.0 / ratio``. The cluster score is the mean over
+    clusters, so packing tighter than the band receives no extra reward.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels.
+    profile : Optional[ClusterGeometryProfile], optional
+        Precomputed read-only cluster profile.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``cluster_compactness_score`` and mean spread ratio, or ``None`` when
+        no cluster metadata applies.
+    """
+    cluster_profile = _cluster_profile_or_none(
+        pos, node_sizes, clusters, cluster_parents, cluster_labels, profile
+    )
+    if cluster_profile is None:
+        return {"cluster_compactness_score": None, "cluster_compactness_mean_ratio": None}
+    scores: List[float] = []
+    ratios: List[float] = []
+    for name in cluster_profile.cluster_names:
+        box = cluster_profile.boxes[name]
+        member_area = sum(
+            _bbox_area(cluster_profile.node_bounds[index]) for index in box.descendants
+        )
+        if member_area <= 1e-12:
+            continue
+        ratio = _bbox_area(box.inner_bounds) / member_area
+        ratios.append(ratio)
+        scores.append(1.0 if ratio <= 4.0 else max(0.0, min(1.0, 4.0 / ratio)))
+    return {
+        "cluster_compactness_score": float(np.mean(scores)) if scores else 1.0,
+        "cluster_compactness_mean_ratio": float(np.mean(ratios)) if ratios else None,
+    }
+
+
+def cluster_quality_metrics(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """Compute all six cluster-quality metrics from one shared profile.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership metadata.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent metadata.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Flat metric dictionary containing the six cluster-quality scores.
+    """
+    profile = _cluster_profile_or_none(
+        pos,
+        node_sizes,
+        clusters,
+        cluster_parents,
+        cluster_labels,
+        None,
+    )
+    result: Dict[str, Any] = {}
+    result.update(
+        cluster_exclusion_score(
+            pos,
+            node_sizes,
+            clusters,
+            cluster_parents,
+            cluster_labels,
+            profile=profile,
+        )
+    )
+    result.update(
+        cluster_sibling_overlap_score(
+            pos, node_sizes, clusters, cluster_parents, cluster_labels, profile=profile
+        )
+    )
+    result.update(
+        cluster_nesting_fidelity_score(
+            pos, node_sizes, clusters, cluster_parents, cluster_labels, profile=profile
+        )
+    )
+    result.update(
+        cluster_edge_intrusion_score(
+            pos, edge_index, node_sizes, clusters, cluster_parents, cluster_labels, profile=profile
+        )
+    )
+    result.update(
+        cluster_label_occlusion_score(
+            pos,
+            node_sizes,
+            clusters,
+            cluster_parents,
+            cluster_labels,
+            profile=profile,
+        )
+    )
+    result.update(
+        cluster_compactness_score(
+            pos,
+            node_sizes,
+            clusters,
+            cluster_parents,
+            cluster_labels,
+            profile=profile,
+        )
+    )
+    return result
+
+
 def directed_flow_score(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -2565,6 +3228,27 @@ def _renormalized_score(metrics: Dict[str, Any], weights: Dict[str, float]) -> f
     return 100.0 * weighted / total_weight
 
 
+def _has_cluster_quality(metrics: Dict[str, Any]) -> bool:
+    """Return whether any conditional cluster-quality term is applicable.
+
+    Parameters
+    ----------
+    metrics : Dict[str, Any]
+        Metric dictionary that may contain cluster-quality scores.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one new cluster-quality score is present and
+        finite.
+    """
+    for name in _CLUSTER_WEIGHTS:
+        value = metrics.get(name)
+        if value is not None and math.isfinite(float(value)):
+            return True
+    return False
+
+
 def composite_undirected(metrics: Dict[str, Any]) -> float:
     """Compute the frozen ten-term common ruler with applicability renormalization.
 
@@ -2595,7 +3279,10 @@ def composite_undirected(metrics: Dict[str, Any]) -> float:
         ):
             if name in scoring_metrics and scoring_metrics[name] is not None:
                 scoring_metrics[name] = 0.0
-    return _renormalized_score(scoring_metrics, _COMMON_WEIGHTS)
+    if not _has_cluster_quality(scoring_metrics):
+        return _renormalized_score(scoring_metrics, _COMMON_WEIGHTS)
+    combined_weights = {**_COMMON_WEIGHTS, **_CLUSTER_WEIGHTS}
+    return _renormalized_score(scoring_metrics, combined_weights)
 
 
 def composite(metrics: Dict[str, Any]) -> float:
@@ -2625,11 +3312,21 @@ def composite(metrics: Dict[str, Any]) -> float:
         for name, value in metrics.items()
         if name in _DIRECTED_WEIGHTS and value is not None
     }
+    cluster_applicable = {
+        name: value
+        for name, value in metrics.items()
+        if name in _CLUSTER_WEIGHTS and value is not None
+    }
     combined_weights = {
         **{name: 0.75 * weight for name, weight in _COMMON_WEIGHTS.items()},
         **_DIRECTED_WEIGHTS,
     }
-    return _renormalized_score({**common_applicable, **directed_applicable}, combined_weights)
+    if cluster_applicable:
+        combined_weights.update(_CLUSTER_WEIGHTS)
+    return _renormalized_score(
+        {**common_applicable, **directed_applicable, **cluster_applicable},
+        combined_weights,
+    )
 
 
 def composite_auto(
@@ -2915,6 +3612,9 @@ def full(
     declared_hierarchical: bool = False,
     edge_length_targets: Optional[torch.Tensor] = None,
     all_pairs_dist: Optional[np.ndarray] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """All metrics including sampled Tier-2 and DAG-specific Tier-3.
 
@@ -2955,6 +3655,12 @@ def full(
         Declared target edge lengths with shape ``[E]``.
     all_pairs_dist : Optional[numpy.ndarray], optional
         Precomputed unweighted shortest paths with shape ``[N, N]``.
+    clusters : Optional[Mapping[str, Sequence[int]]], optional
+        Cluster membership keyed by cluster name for cluster-quality metrics.
+    cluster_parents : Optional[Mapping[str, Optional[str]]], optional
+        Nested-cluster parent mapping for cluster-quality metrics.
+    cluster_labels : Optional[Mapping[str, str]], optional
+        Explicit cluster labels for label-band occlusion scoring.
 
     Returns
     -------
@@ -3053,6 +3759,9 @@ def full(
     else:
         result["cluster_silhouette_score"] = None
         result["cluster_silhouette"] = None
+    result.update(
+        cluster_quality_metrics(pos, ei, node_sizes, clusters, cluster_parents, cluster_labels)
+    )
 
     if topo_depth is not None:
         result.update(layer_uniformity(pos, topo_depth))
@@ -3197,6 +3906,9 @@ def evaluate(
     )
     direction = graph.direction if hasattr(graph, "direction") else "TB"
     cluster_ids = graph.cluster_ids if hasattr(graph, "cluster_ids") else None
+    clusters = graph.clusters if getattr(graph, "clusters", None) else None
+    cluster_parents = graph.cluster_parents if getattr(graph, "cluster_parents", None) else None
+    cluster_labels = graph.cluster_labels if getattr(graph, "cluster_labels", None) else None
 
     effective_tier = tier
     if effective_tier == "auto":
@@ -3209,6 +3921,9 @@ def evaluate(
             node_sizes=node_sizes,
             cluster_ids=cluster_ids,
             direction=direction,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            cluster_labels=cluster_labels,
         )
     elif effective_tier == "quick":
         result_any = quick(positions, edge_index, node_sizes=node_sizes, direction=direction)
@@ -3803,6 +4518,8 @@ def composite_drawing(
         and any(lp is not None for lp in label_positions)
     )
     if has_labels:
+        assert label_positions is not None
+        assert edge_labels is not None
         lo = label_overlap_count(label_positions, edge_labels, pos, sizes)
         label_overlaps = int(lo["label_overlaps"])
         label_node_overlaps = int(lo["label_node_overlaps"])
