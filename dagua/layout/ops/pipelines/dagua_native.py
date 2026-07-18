@@ -41,6 +41,11 @@ from dagua.layout.ops.pipelines.native_planar import (
     PlanarityFailure,
     build_native_planar_pipeline,
 )
+from dagua.layout.ops.pipelines.native_shape_geometry import (
+    NativeShapeGeometry,
+    resolve_native_shape_geometry,
+    shape_node_bounds,
+)
 from dagua.layout.ops.pipelines.native_stress import build_native_stress_pipeline
 from dagua.layout.ops.pipelines.native_tree import build_native_tree_pipeline
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
@@ -888,6 +893,7 @@ def _dot_cluster_bbox(
     node_sizes: torch.Tensor,
     members: Sequence[int],
     padding: float,
+    node_bounds: Optional[torch.Tensor] = None,
 ) -> tuple[float, float, float, float]:
     """Return a padded node bbox for cluster placement.
 
@@ -901,6 +907,9 @@ def _dot_cluster_bbox(
         Node ids included in the cluster.
     padding : float
         Uniform padding around member boxes.
+    node_bounds : torch.Tensor, optional
+        Pre-derived true-shape bounds with shape ``[N, 4]``. When omitted,
+        the exact legacy node-size AABB calculation is used.
 
     Returns
     -------
@@ -910,9 +919,14 @@ def _dot_cluster_bbox(
     idx = torch.tensor(list(members), dtype=torch.long, device=pos.device)
     if idx.numel() == 0:
         return (0.0, 0.0, 0.0, 0.0)
-    half = node_sizes[idx].to(dtype=pos.dtype, device=pos.device) * 0.5
-    lo = (pos[idx] - half).min(dim=0).values
-    hi = (pos[idx] + half).max(dim=0).values
+    if node_bounds is None:
+        half = node_sizes[idx].to(dtype=pos.dtype, device=pos.device) * 0.5
+        lo = (pos[idx] - half).min(dim=0).values
+        hi = (pos[idx] + half).max(dim=0).values
+    else:
+        bounds = node_bounds.to(dtype=pos.dtype, device=pos.device)[idx]
+        lo = bounds[:, :2].min(dim=0).values
+        hi = bounds[:, 2:].max(dim=0).values
     return (
         float(lo[0].item()) - padding,
         float(lo[1].item()) - padding,
@@ -954,6 +968,7 @@ def _separate_dot_cluster_siblings(
     clusters: Mapping[str, Sequence[int]],
     parents: Mapping[str, Optional[str]],
     padding: float,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Separate sibling cluster boxes along x with Graphviz-like slots.
 
@@ -969,6 +984,8 @@ def _separate_dot_cluster_siblings(
         Normalized parent mapping.
     padding : float
         Padded cluster clearance.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional shape descriptors used to derive true member bounds.
 
     Returns
     -------
@@ -985,13 +1002,26 @@ def _separate_dot_cluster_siblings(
             continue
         siblings.sort(
             key=lambda name: (
-                _dot_cluster_bbox(out, node_sizes, clusters[name], padding)[0],
+                _dot_cluster_bbox(
+                    out,
+                    node_sizes,
+                    clusters[name],
+                    padding,
+                    shape_node_bounds(out, node_sizes, shape_geometry)
+                    if shape_geometry is not None
+                    else None,
+                )[0],
                 name,
             )
         )
         cursor_right: Optional[float] = None
         for name in siblings:
-            bbox = _dot_cluster_bbox(out, node_sizes, clusters[name], padding)
+            node_bounds = (
+                shape_node_bounds(out, node_sizes, shape_geometry)
+                if shape_geometry is not None
+                else None
+            )
+            bbox = _dot_cluster_bbox(out, node_sizes, clusters[name], padding, node_bounds)
             if cursor_right is None:
                 cursor_right = bbox[2]
                 continue
@@ -999,7 +1029,12 @@ def _separate_dot_cluster_siblings(
             dx = max(0.0, needed_left - bbox[0])
             if dx > 0.0:
                 _shift_dot_cluster_members(out, clusters[name], dx)
-                bbox = _dot_cluster_bbox(out, node_sizes, clusters[name], padding)
+                node_bounds = (
+                    shape_node_bounds(out, node_sizes, shape_geometry)
+                    if shape_geometry is not None
+                    else None
+                )
+                bbox = _dot_cluster_bbox(out, node_sizes, clusters[name], padding, node_bounds)
             cursor_right = max(cursor_right, bbox[2])
     return out
 
@@ -1010,6 +1045,7 @@ def _apply_dot_cluster_fidelity_layout(
     node_sizes: torch.Tensor,
     clusters: Optional[Mapping[str, Any]],
     cluster_parents: Optional[Mapping[str, Optional[str]]],
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Apply the Graphviz-dot cluster skeleton layout pass.
 
@@ -1025,6 +1061,8 @@ def _apply_dot_cluster_fidelity_layout(
         Cluster membership metadata.
     cluster_parents : Mapping[str, str | None], optional
         Parent-cluster metadata.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional shape descriptors used for derived cluster envelopes.
 
     Returns
     -------
@@ -1086,6 +1124,7 @@ def _apply_dot_cluster_fidelity_layout(
             normalized_clusters,
             parents,
             clearance,
+            shape_geometry,
         )
     return out - out.mean(dim=0, keepdim=True)
 
@@ -5548,6 +5587,7 @@ def _terminal_w5_polish(
     direction: str,
     clusters: Optional[dict[str, Any]] = None,
     cluster_parents: Optional[dict[str, Optional[str]]] = None,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
     extra_seeds: Optional[Sequence[tuple[str, torch.Tensor]]] = None,
     register_anytime_best: Optional[Callable[[torch.Tensor, str], None]] = None,
 ) -> torch.Tensor:
@@ -5573,6 +5613,8 @@ def _terminal_w5_polish(
         Cluster membership metadata.
     cluster_parents : dict[str, str | None], optional
         Nested-cluster parent metadata.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors for W5 overlap geometry.
     extra_seeds : Sequence[tuple[str, torch.Tensor]], optional
         Route-local warm starts to include after ``final_pos``.
     register_anytime_best : Callable[[torch.Tensor, str], None], optional
@@ -5751,6 +5793,7 @@ def _terminal_w5_polish(
             seeds=seed_bank,
             edge_index=edge_index,
             node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            shape_geometry=shape_geometry,
             score_fn=honest_score,
             is_semantically_directed=is_semantically_directed,
             declared_hierarchical=declared_hierarchical,
@@ -6020,6 +6063,7 @@ def layout_dagua_native_pipeline(
     dot_cluster_fidelity = _is_graphviz_dot_cluster_fidelity_mode(
         getattr(effective_config, "fidelity_mode", None)
     )
+    shape_geometry = resolve_native_shape_geometry(node_shapes, num_nodes)
     if _selected_force_pipeline(effective_config) == "legacy_monolith":
         legacy_pos = dagua_native_legacy.layout_dagua_native_pipeline(
             edge_index=edge_index,
@@ -6045,6 +6089,7 @@ def layout_dagua_native_pipeline(
                 node_sizes,
                 clusters,
                 cluster_parents,
+                shape_geometry,
             )
         if owns_terminal_w5:
             return public_pos(
@@ -6057,6 +6102,7 @@ def layout_dagua_native_pipeline(
                     direction=effective_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    shape_geometry=shape_geometry,
                 )
             )
         return public_pos(legacy_pos)
@@ -6180,6 +6226,7 @@ def layout_dagua_native_pipeline(
                                     node_sizes,
                                     clusters,
                                     cluster_parents,
+                                    shape_geometry,
                                 )
                             if owns_terminal_w5:
                                 return public_pos(
@@ -6192,6 +6239,7 @@ def layout_dagua_native_pipeline(
                                         direction=effective_config.direction,
                                         clusters=clusters,
                                         cluster_parents=cluster_parents,
+                                        shape_geometry=shape_geometry,
                                     )
                                 )
                             return public_pos(stress_pos)
@@ -6271,6 +6319,7 @@ def layout_dagua_native_pipeline(
                     direction=effective_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    shape_geometry=shape_geometry,
                     extra_seeds=w5_seed_positions,
                 )
             )
@@ -6300,6 +6349,8 @@ def layout_dagua_native_pipeline(
         layer_assignments=layer_assignments,
         target_device=target_device,
     )
+    if shape_geometry is not None:
+        shape_geometry = shape_geometry.to(device=target_device, dtype=torch.float32)
     dot_flat_metadata: Optional[_DotFlatMetadata] = None
     if _is_graphviz_dot_flat_fidelity_mode(getattr(effective_config, "fidelity_mode", None)):
         flat_preprocess = _dot_flat_preprocess_edges(
@@ -6556,6 +6607,7 @@ def layout_dagua_native_pipeline(
                     normalized_node_sizes,
                     clusters,
                     cluster_parents,
+                    shape_geometry,
                 )
             if owns_terminal_w5:
                 result = _terminal_w5_polish(
@@ -6567,6 +6619,7 @@ def layout_dagua_native_pipeline(
                     direction=prepared_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    shape_geometry=shape_geometry,
                     register_anytime_best=register_anytime_best,
                 )
             return result
@@ -6580,6 +6633,7 @@ def layout_dagua_native_pipeline(
                 normalized_node_sizes,
                 clusters,
                 cluster_parents,
+                shape_geometry,
             )
         if owns_terminal_w5:
             result = _terminal_w5_polish(
@@ -6591,6 +6645,7 @@ def layout_dagua_native_pipeline(
                 direction=prepared_config.direction,
                 clusters=clusters,
                 cluster_parents=cluster_parents,
+                shape_geometry=shape_geometry,
                 register_anytime_best=register_anytime_best,
             )
         return result
