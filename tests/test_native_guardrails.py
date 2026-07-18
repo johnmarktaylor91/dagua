@@ -10,6 +10,7 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.eval.graphs import TestGraph
 from dagua.graph import DaguaGraph
+from dagua.layout.ops.pipelines.native_arm_s import ARM_S_PRIOR_S
 from dagua.layout.ops.pipelines.native_guardrails import (
     CLUSTER_SKELETON_ONLY,
     INCUMBENT_ONLY,
@@ -226,6 +227,18 @@ def test_deadline_admission_uses_incumbent_only_before_reserve() -> None:
     assert plan.mode == INCUMBENT_ONLY
     assert not plan.admitted
     assert plan.skip_reason == "insufficient_predicted_budget"
+
+
+def test_arm_s_prior_uses_existing_guardrail_admission() -> None:
+    """Arm S's measured prior is admitted by the existing guardrail substrate."""
+    graph = scorer.build_graph_map(["r8_nested_scale_1k_budget"])["r8_nested_scale_1k_budget"]
+    problem = _problem_from_test_graph(graph)
+
+    plan = build_native_guardrail_plan(problem, LayoutConfig(seed=42), prior_cost_s=ARM_S_PRIOR_S)
+
+    assert plan.admitted
+    assert plan.predicted_cost_s == pytest.approx(ARM_S_PRIOR_S * 2.0)
+    assert plan.skip_reason is None
 
 
 def test_observed_cost_updates_only_config_telemetry() -> None:
