@@ -404,6 +404,356 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
     assert plan.predicted_s == pytest.approx(3.02)
 
 
+def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured W5 builds pass-2 stress lazily after the protected pass-1 prefix."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    sample = native_finisher.W5StressSample(
+        sources=torch.tensor([0], dtype=torch.long),
+        targets=torch.tensor([1], dtype=torch.long),
+        graph_distances=torch.tensor([1.0], dtype=torch.float32),
+    )
+    config = LayoutConfig()
+    config._dagua_native_w5_measured_sizing = True
+    events: list[str] = []
+
+    def fake_plan(*args: object, **kwargs: object) -> object:
+        """Record measured planning and admit two seeds with one checkpoint."""
+        del args, kwargs
+        events.append("plan")
+        return native_finisher.W5CostPlan(
+            seeds=2,
+            steps=5,
+            checkpoints=1,
+            measured_step_s=0.01,
+            warmup_s=0.0,
+            referee_s=0.01,
+            budget_s=10.0,
+            budget_usable_s=8.0,
+            predicted_s=0.12,
+        )
+
+    def fake_closed_over_all_pairs_dist(score_fn: object) -> object:
+        """Record the first admitted pass-2 sample dependency lookup."""
+        del score_fn
+        events.append("closed")
+        return object()
+
+    def fake_build_stress_sample(
+        edge_work: torch.Tensor,
+        node_count: int,
+        all_pairs_dist: object,
+        device: torch.device,
+    ) -> object:
+        """Record the lazy sample build and return a fixed sample object."""
+        del edge_work, node_count, all_pairs_dist, device
+        events.append("stress build")
+        return sample
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Record pass order and assert only pass 2 receives the fixed sample."""
+        del edge_work, size_work, topo_depth, mode, deadline, honest_axes, max_checkpoints
+        assert max_steps == 5
+        events.append(f"{seed.name} pass {pass_id}")
+        if pass_id == 1 and "stress build" not in events:
+            assert stress_sample is None
+        if pass_id == 2:
+            assert stress_sample is sample
+        return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
+
+    monkeypatch.setattr(native_finisher, "_measured_cost_plan", fake_plan)
+    monkeypatch.setattr(
+        native_finisher,
+        "_closed_over_all_pairs_dist",
+        fake_closed_over_all_pairs_dist,
+    )
+    monkeypatch.setattr(native_finisher, "_build_w5_stress_sample", fake_build_stress_sample)
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("seed_a", pos), W5Seed("seed_b", pos + 5.0)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(9.0, 9.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        config=config,
+    )
+
+    assert result.cost_plan is not None
+    assert events[:5] == [
+        "plan",
+        "seed_a pass 1",
+        "closed",
+        "stress build",
+        "seed_a_p1 pass 2",
+    ]
+    assert "seed_b pass 1" in events
+    assert "seed_b_p1 pass 2" in events
+    assert events.count("stress build") == 1
+
+
+def test_w5_finisher_does_not_build_stress_sample_when_pass_two_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deadline or cap return after pass 1 must not run pass-2-only prep."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    config = LayoutConfig()
+    config._dagua_native_w5_spent_s = 0.0
+    config._dagua_native_w5_measured_sizing = True
+    events: list[str] = []
+
+    def fake_plan(*args: object, **kwargs: object) -> object:
+        """Admit pass 1 so the later pass-2 budget guard owns the denial."""
+        del args, kwargs
+        events.append("plan")
+        return native_finisher.W5CostPlan(
+            seeds=1,
+            steps=5,
+            checkpoints=1,
+            measured_step_s=0.01,
+            warmup_s=0.0,
+            referee_s=0.01,
+            budget_s=10.0,
+            budget_usable_s=8.0,
+            predicted_s=0.06,
+        )
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Record that only pass 1 ran before cap exhaustion."""
+        del edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del max_steps, max_checkpoints
+        assert pass_id == 1
+        assert stress_sample is None
+        events.append(f"{seed.name} pass {pass_id}")
+        return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
+
+    def fake_w5_spent_s(config_arg: object, started_perf: Optional[float] = None) -> float:
+        """Allow seed entry, then deny the pass-2 admission guard."""
+        del config_arg, started_perf
+        return 0.0 if events != ["plan", "seed_a pass 1"] else 999.0
+
+    def forbidden_build_stress_sample(*args: object, **kwargs: object) -> None:
+        """Fail if denied pass 2 still prepares the stress sample."""
+        del args, kwargs
+        raise AssertionError("pass-2-only stress sample built before admission")
+
+    monkeypatch.setattr(native_finisher, "_measured_cost_plan", fake_plan)
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_build_w5_stress_sample", forbidden_build_stress_sample)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("seed_a", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(9.0, 9.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        config=config,
+    )
+
+    assert events == ["plan", "seed_a pass 1"]
+    assert result.deadline_returned is True
+    assert result.steps == 1
+
+
+def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rgg_500 boundary fixture selects one seed, five steps, and terminal scoring."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.stack(
+        (
+            torch.arange(500, dtype=torch.float32),
+            torch.zeros(500, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    node_sizes = torch.full((500, 2), 2.0)
+    topo_depth = torch.zeros(500, dtype=torch.long)
+    config = LayoutConfig()
+    config._dagua_native_total_budget_s = 50.0
+    config._dagua_native_w5_referee_cost_s = 0.432
+    spent_s = iter([0.0, 0.700])
+
+    def fake_measure(*args: object) -> object:
+        """Use recorded non-tiny costs that make five steps the largest fit."""
+        del args
+        return native_finisher.W5StepMeasurement(step_s=0.100, warmup_s=0.700)
+
+    def fake_w5_spent_s(config_arg: object, started_perf: Optional[float] = None) -> float:
+        """Replay recorded pre/post probe spend for the A3c boundary."""
+        del config_arg, started_perf
+        return next(spent_s)
+
+    monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+
+    plan = native_finisher._measured_cost_plan(
+        seeds=[W5Seed("rgg", pos), W5Seed("rgg_b", pos + 1.0)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        topo_depth=topo_depth,
+        routed_mode="undirected_2d_sampled",
+        slice_s=2.950,
+        config=config,
+        started_perf=0.0,
+        remaining_entry=300.0,
+        honest_axes=None,
+    )
+
+    assert plan is not None
+    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 5, 1)
+    assert plan.referee_s == pytest.approx(0.432)
+    assert plan.budget_usable_s == pytest.approx(0.950)
+    assert plan.predicted_s == pytest.approx(0.932)
+    assert native_finisher._checkpoint_steps(5, 1) == {5}
+
+
+def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiny rows keep raised 96-step work and pass 2 receives the lazy sample."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    topo_depth = torch.zeros(pos.shape[0], dtype=torch.long)
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 300.0
+    config._dagua_native_total_budget_s = 300.0
+    config._dagua_native_w5_referee_cost_s = 0.001
+    config._dagua_native_w5_measured_sizing = True
+    sample = native_finisher.W5StressSample(
+        sources=torch.tensor([0], dtype=torch.long),
+        targets=torch.tensor([1], dtype=torch.long),
+        graph_distances=torch.tensor([1.0], dtype=torch.float32),
+    )
+    pass_two_samples: list[object] = []
+
+    def fake_measure(*args: object) -> object:
+        """Return a tiny-row step cost that admits the raised continuation fixture."""
+        del args
+        return native_finisher.W5StepMeasurement(step_s=0.009, warmup_s=0.0)
+
+    def fake_build_stress_sample(
+        edge_work: torch.Tensor,
+        node_count: int,
+        all_pairs_dist: object,
+        device: torch.device,
+    ) -> object:
+        """Return the fixed sample used to verify pass-2 propagation."""
+        del edge_work, node_count, all_pairs_dist, device
+        return sample
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        depth_work: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Verify the raised plan reaches both optimizer passes unchanged."""
+        del edge_work, size_work, depth_work, mode, deadline, honest_axes
+        assert max_steps == 96
+        assert max_checkpoints == 4
+        if pass_id == 2:
+            pass_two_samples.append(stress_sample)
+        return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
+
+    monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
+    monkeypatch.setattr(native_finisher, "_closed_over_all_pairs_dist", lambda score_fn: object())
+    monkeypatch.setattr(native_finisher, "_build_w5_stress_sample", fake_build_stress_sample)
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    plan = native_finisher._measured_cost_plan(
+        seeds=[
+            W5Seed("tiny_a", pos),
+            W5Seed("tiny_b", pos + 5.0),
+            W5Seed("tiny_c", pos + 10.0),
+        ],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        topo_depth=topo_depth,
+        routed_mode="undirected_2d_sampled",
+        slice_s=20.0,
+        config=config,
+        started_perf=time.perf_counter(),
+        remaining_entry=300.0,
+        honest_axes=None,
+    )
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[
+            W5Seed("tiny_a", pos),
+            W5Seed("tiny_b", pos + 5.0),
+            W5Seed("tiny_c", pos + 10.0),
+        ],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(9.0, 9.0),
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        config=config,
+    )
+
+    assert plan is not None
+    assert (plan.steps, plan.checkpoints) == (96, 4)
+    assert result.cost_plan is not None
+    assert (result.cost_plan.steps, result.cost_plan.checkpoints) == (96, 4)
+    assert pass_two_samples
+    assert all(seen is sample for seen in pass_two_samples)
+
+
 def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
