@@ -660,7 +660,7 @@ def load_legacy_field_rows(
     field_tasks: Sequence[Tuple[str, str, List[str]]],
     graphs: Mapping[str, TestGraph],
     signature: str,
-) -> Tuple[List[Dict[str, Any]], set[Tuple[str, str]]]:
+) -> Tuple[List[Dict[str, Any]], set[Tuple[str, str]], set[Tuple[str, str]]]:
     """Load pinned non-cluster field rows from the old unversioned cache.
 
     Parameters
@@ -676,11 +676,12 @@ def load_legacy_field_rows(
 
     Returns
     -------
-    Tuple[List[Dict[str, Any]], set[Tuple[str, str]]]
-        Reused raw rows and their ``(graph, engine)`` keys.
+    Tuple[List[Dict[str, Any]], set[Tuple[str, str]], set[Tuple[str, str]]]
+        Reused raw rows, their ``(graph, engine)`` keys, and unscoreable legacy keys
+        excluded from fresh scoring.
     """
     if legacy_field_cache is None:
-        return [], set()
+        return [], set(), set()
     cache_hash = sha256_file(legacy_field_cache)
     if cache_hash != LEGACY_FIELD_CACHE_SHA256:
         raise RuntimeError(
@@ -703,21 +704,21 @@ def load_legacy_field_rows(
         raise RuntimeError("legacy field cache coverage does not match scoreable field pairs")
     reused: List[Dict[str, Any]] = []
     reused_keys: set[Tuple[str, str]] = set()
+    skipped_keys: set[Tuple[str, str]] = set()
     for key, row in cache_by_key.items():
         graph_name, engine = key
         test_graph = graphs[graph_name]
         if test_graph.graph.clusters:
             continue
         position_path = cached_path_value(row)
-        if (
-            position_path is None
-            or position_path not in task_paths[key]
-            or not Path(position_path).exists()
+        if position_path is not None and (
+            position_path not in task_paths[key] or not Path(position_path).exists()
         ):
             raise RuntimeError(f"legacy field cache best_path is not scoreable for {key}")
         score = cached_score_value(row)
-        if score is None:
-            raise RuntimeError(f"legacy field cache score is missing for {key}")
+        if position_path is None or score is None:
+            skipped_keys.add(key)
+            continue
         reused.append(
             {
                 "graph": graph_name,
@@ -733,7 +734,7 @@ def load_legacy_field_rows(
             }
         )
         reused_keys.add(key)
-    return reused, reused_keys
+    return reused, reused_keys, skipped_keys
 
 
 def read_raw_cache(
@@ -1175,13 +1176,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     raw_rows = read_raw_cache(args.score_cache, header)
     if raw_rows is None:
-        legacy_rows, reused_keys = load_legacy_field_rows(
+        legacy_rows, reused_keys, skipped_keys = load_legacy_field_rows(
             args.legacy_field_cache, field_tasks, graphs, signature
         )
-        fresh_field_tasks = [task for task in field_tasks if (task[0], task[1]) not in reused_keys]
+        excluded_keys = reused_keys | skipped_keys
+        fresh_field_tasks = [
+            task for task in field_tasks if (task[0], task[1]) not in excluded_keys
+        ]
         print(
             f"[score] scoring field: {len(fresh_field_tasks)} graph-engine pairs "
-            f"({len(legacy_rows)} legacy rows reused)",
+            f"({len(legacy_rows)} legacy rows reused, {len(skipped_keys)} unscoreable skipped)",
             flush=True,
         )
         field_rows = [
