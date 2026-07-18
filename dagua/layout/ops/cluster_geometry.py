@@ -206,6 +206,60 @@ class ClusterPlacementBox:
     label_band_y_extent: Tuple[float, float]
 
 
+@dataclass(frozen=True)
+class ClusterProfileBox:
+    """Derived axis-aligned geometry for one rendered cluster.
+
+    Parameters
+    ----------
+    bounds : tuple[float, float, float, float]
+        Padded cluster box as ``(x_min, y_min, x_max, y_max)``.
+    inner_bounds : tuple[float, float, float, float]
+        Member content bounds before cluster padding and label band.
+    label_bounds : Optional[tuple[float, float, float, float]]
+        Reserved cluster-label band as ``(x_min, y_min, x_max, y_max)``, or
+        ``None`` when no explicit label exists for this cluster.
+    descendants : frozenset[int]
+        Leaf node indices used to derive this cluster box.
+    """
+
+    bounds: Tuple[float, float, float, float]
+    inner_bounds: Tuple[float, float, float, float]
+    label_bounds: Optional[Tuple[float, float, float, float]]
+    descendants: frozenset[int]
+
+
+@dataclass(frozen=True)
+class ClusterGeometryProfile:
+    """Read-only cluster geometry derived from placed nodes.
+
+    Parameters
+    ----------
+    tree : ClusterTree
+        Nested cluster membership tree.
+    cluster_names : tuple[str, ...]
+        Deterministic top-down cluster order.
+    boxes : Mapping[str, ClusterProfileBox]
+        Derived padded boxes, keyed by cluster name.
+    node_bounds : tuple[tuple[float, float, float, float], ...]
+        Node AABBs as ``(x_min, y_min, x_max, y_max)``.
+    sibling_pairs : tuple[tuple[str, str], ...]
+        Same-parent cluster pairs in deterministic order.
+
+    Notes
+    -----
+    Boxes are derived from member positions and sizes via
+    :func:`compute_cluster_placement_bbox`; they are never independent layout
+    variables.
+    """
+
+    tree: ClusterTree
+    cluster_names: Tuple[str, ...]
+    boxes: Mapping[str, ClusterProfileBox]
+    node_bounds: Tuple[Tuple[float, float, float, float], ...]
+    sibling_pairs: Tuple[Tuple[str, str], ...]
+
+
 def compute_cluster_placement_bbox(
     inner_positions: torch.Tensor,
     inner_sizes: torch.Tensor,
@@ -289,6 +343,155 @@ def compute_cluster_placement_bbox(
         anchor_offset=anchor_offset,
         inner_bbox=(x_min, y_min, x_max, y_max),
         label_band_y_extent=(label_band_top, label_band_bottom),
+    )
+
+
+def _estimate_label_metrics(label: str) -> ClusterLabelMetrics:
+    """Estimate label footprint in placement units.
+
+    Parameters
+    ----------
+    label : str
+        Explicit cluster label text.
+
+    Returns
+    -------
+    ClusterLabelMetrics
+        Deterministic approximate label dimensions used for metric geometry.
+    """
+    return ClusterLabelMetrics(label_width_pt=max(8.0, 5.0 * len(label)), label_height_pt=10.0)
+
+
+def build_cluster_geometry_profile(
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    labels: Optional[Mapping[str, str]],
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    *,
+    side_padding_pt: float = 8.0,
+    label_band_pt: float = 26.0,
+) -> Optional[ClusterGeometryProfile]:
+    """Build the shared read-only profile for cluster-quality metrics.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node center positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+    labels : Optional[Mapping[str, str]]
+        Explicit cluster-label text keyed by cluster name. Missing labels do
+        not create label-band occlusion terms.
+    clusters : Optional[Mapping[str, Sequence[int]]]
+        Cluster membership keyed by cluster name.
+    cluster_parents : Optional[Mapping[str, Optional[str]]]
+        Optional nested-cluster parent mapping.
+    side_padding_pt : float, optional
+        Padding used when deriving cluster boxes.
+    label_band_pt : float, optional
+        Reserved top label-band height for explicitly labelled clusters.
+
+    Returns
+    -------
+    Optional[ClusterGeometryProfile]
+        Derived immutable profile, or ``None`` when no valid cluster metadata
+        is available.
+    """
+    if not clusters:
+        return None
+    if positions.ndim != 2 or positions.shape[1] != 2:
+        raise ValueError("positions must have shape [N, 2]")
+    if node_sizes.ndim != 2 or node_sizes.shape[1] != 2:
+        raise ValueError("node_sizes must have shape [N, 2]")
+    if positions.shape[0] != node_sizes.shape[0]:
+        raise ValueError("positions and node_sizes must have matching row counts")
+
+    num_nodes = int(positions.shape[0])
+    valid_clusters: dict[str, Tuple[int, ...]] = {}
+    for name, members in clusters.items():
+        valid_members = tuple(
+            sorted({int(index) for index in members if 0 <= int(index) < num_nodes})
+        )
+        if valid_members:
+            valid_clusters[str(name)] = valid_members
+    if not valid_clusters:
+        return None
+
+    parent_lookup = cluster_parents or {}
+    tree = ClusterTree.from_flat_membership(valid_clusters, parent_lookup)
+    positions_cpu = positions.detach().cpu().to(dtype=torch.float64)
+    sizes_cpu = node_sizes.detach().cpu().to(dtype=torch.float64)
+    half_sizes = sizes_cpu / 2.0
+    node_lower = positions_cpu - half_sizes
+    node_upper = positions_cpu + half_sizes
+    node_bounds = tuple(
+        (
+            float(node_lower[index, 0].item()),
+            float(node_lower[index, 1].item()),
+            float(node_upper[index, 0].item()),
+            float(node_upper[index, 1].item()),
+        )
+        for index in range(num_nodes)
+    )
+
+    boxes: dict[str, ClusterProfileBox] = {}
+    label_lookup = labels or {}
+    for name in tree.top_down_order():
+        descendants = frozenset(
+            index for index in tree.descendants_per_cluster[name] if 0 <= index < num_nodes
+        )
+        if not descendants:
+            continue
+        member_indices = torch.tensor(sorted(descendants), dtype=torch.long)
+        label = str(label_lookup.get(name, ""))
+        label_metrics = _estimate_label_metrics(label) if label else ClusterLabelMetrics(0.0, 0.0)
+        effective_label_band = float(label_band_pt) if label else 0.0
+        placement = compute_cluster_placement_bbox(
+            inner_positions=positions_cpu[member_indices],
+            inner_sizes=sizes_cpu[member_indices],
+            label_metrics=label_metrics,
+            side_padding_pt=float(side_padding_pt),
+            label_band_pt=effective_label_band,
+        )
+        inner_x_min, inner_y_min, inner_x_max, inner_y_max = placement.inner_bbox
+        center_x = (inner_x_min + inner_x_max) / 2.0 + placement.anchor_offset[0]
+        center_y = (inner_y_min + inner_y_max) / 2.0 + placement.anchor_offset[1]
+        half_width = placement.width / 2.0
+        half_height = placement.height / 2.0
+        bounds = (
+            center_x - half_width,
+            center_y - half_height,
+            center_x + half_width,
+            center_y + half_height,
+        )
+        label_bounds = None
+        if label:
+            label_top, label_bottom = placement.label_band_y_extent
+            label_bounds = (bounds[0], label_bottom, bounds[2], label_top)
+        boxes[name] = ClusterProfileBox(
+            bounds=bounds,
+            inner_bounds=placement.inner_bbox,
+            label_bounds=label_bounds,
+            descendants=descendants,
+        )
+
+    sibling_pairs: list[tuple[str, str]] = []
+    parent_groups: dict[Optional[str], list[str]] = {}
+    for name in tree.top_down_order():
+        if name in boxes:
+            parent_groups.setdefault(tree.parents[name], []).append(name)
+    for names in parent_groups.values():
+        for left_index, left_name in enumerate(names):
+            for right_name in names[left_index + 1 :]:
+                sibling_pairs.append((left_name, right_name))
+
+    return ClusterGeometryProfile(
+        tree=tree,
+        cluster_names=tuple(name for name in tree.top_down_order() if name in boxes),
+        boxes=boxes,
+        node_bounds=node_bounds,
+        sibling_pairs=tuple(sibling_pairs),
     )
 
 
