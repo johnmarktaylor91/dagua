@@ -578,9 +578,24 @@ def test_w5_routes_directed_mode_from_honest_flow_not_surrogate(
         mode: str,
         deadline: float,
         honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Capture the routed mode and emit one non-dominant checkpoint."""
-        del edge_work, size_work, topo_depth, deadline, honest_axes
+        del (
+            edge_work,
+            size_work,
+            topo_depth,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+        )
         modes.append(mode)
         return seed.pos, 1, 1.0, [(1, seed.pos, 1.0)]
 
@@ -599,8 +614,9 @@ def test_w5_routes_directed_mode_from_honest_flow_not_surrogate(
         incumbent_axes=W5HonestAxes(flow=0.753, depth=1.0, ksm=0.922, edge_length=0.876),
     )
 
-    assert modes == ["barrier_2d"]
+    assert modes == ["barrier_2d", "barrier_2d"]
     assert result.phase_timings_s[0].mode == "barrier_2d"
+    assert [timing.pass_id for timing in result.phase_timings_s] == [1, 2]
     assert result.incumbent_axes is not None
     assert result.incumbent_axes.flow == pytest.approx(0.753)
 
@@ -656,9 +672,24 @@ def test_w5_mode_ladder_runs_barrier_after_x_only_no_accept(
         mode: str,
         deadline: float,
         honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Capture each ladder mode and emit one rejected checkpoint."""
-        del edge_work, size_work, topo_depth, deadline, honest_axes
+        del (
+            edge_work,
+            size_work,
+            topo_depth,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+        )
         modes.append(mode)
         return seed.pos, 1, 2.0, [(1, seed.pos, 1.5)]
 
@@ -677,8 +708,9 @@ def test_w5_mode_ladder_runs_barrier_after_x_only_no_accept(
         incumbent_axes=W5HonestAxes(flow=0.99, depth=0.99, ksm=0.9, edge_length=0.9),
     )
 
-    assert modes == ["x_only", "barrier_2d"]
-    assert [timing.mode for timing in result.phase_timings_s] == ["x_only", "barrier_2d"]
+    assert modes == ["x_only", "x_only", "barrier_2d", "barrier_2d"]
+    assert [timing.mode for timing in result.phase_timings_s] == modes
+    assert [timing.pass_id for timing in result.phase_timings_s] == [1, 2, 1, 2]
     assert result.accepted == ()
 
 
@@ -704,9 +736,26 @@ def test_w5_projects_overlapping_checkpoint_before_viability(
         mode: str,
         deadline: float,
         honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return a checkpoint that overlaps until W5 applies projection."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del (
+            seed,
+            edge_work,
+            size_work,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+        )
         return overlapping, 1, 2.0, [(1, overlapping, 1.0)]
 
     def score_fn(candidate: torch.Tensor) -> W5ScorePair:
@@ -729,8 +778,9 @@ def test_w5_projects_overlapping_checkpoint_before_viability(
 
     assert scored_candidates
     assert result.accepted
-    assert result.viability_counts["projected_overlap_candidate"] == 1
-    assert result.viability_counts["projection_resolved_overlap"] == 1
+    assert len(scored_candidates) == 2
+    assert result.viability_counts["projected_overlap_candidate"] == 2
+    assert result.viability_counts["projection_resolved_overlap"] == 2
     assert result.viability_drop_counts == {}
 
 
@@ -755,9 +805,26 @@ def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
         mode: str,
         deadline: float,
         honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return a checkpoint that stays overlapped under the patched projector."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del (
+            seed,
+            edge_work,
+            size_work,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+        )
         return overlapping, 1, 2.0, [(1, overlapping, 1.0)]
 
     def no_op_project(checkpoint_pos: torch.Tensor, size_work: torch.Tensor) -> torch.Tensor:
@@ -786,8 +853,8 @@ def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
 
     assert result.checkpoints == ()
     assert result.skipped_reason == "no_checkpoint"
-    assert result.viability_counts["drop_overlap_regressed"] == 1
-    assert result.viability_drop_counts == {"overlap_regressed": 1}
+    assert result.viability_counts["drop_overlap_regressed"] == 2
+    assert result.viability_drop_counts == {"overlap_regressed": 2}
 
 
 def test_w5_late_entry_prediction_uses_process_time_parity(
@@ -835,9 +902,26 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
         mode: str,
         deadline: float,
         honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return a worse checkpoint after one completed optimizer step."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del (
+            seed,
+            edge_work,
+            size_work,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+        )
         return worse_pos, 1, 1.0, [(1, worse_pos, 2.0)]
 
     def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
@@ -895,9 +979,26 @@ def test_w5_finisher_finish_clamps_non_dominant_winner_to_incumbent(
         mode: str,
         deadline: float,
         honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
         """Return one scoreable checkpoint that is initially accepted."""
-        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del (
+            seed,
+            edge_work,
+            size_work,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+        )
         return candidate_pos, 1, 2.0, [(1, candidate_pos, 1.0)]
 
     def fake_w5_dominates(
@@ -928,7 +1029,7 @@ def test_w5_finisher_finish_clamps_non_dominant_winner_to_incumbent(
     capsys.readouterr()
     records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
 
-    assert dominance_calls["count"] == 2
+    assert dominance_calls["count"] == 3
     assert torch.equal(result.winner_pos, pos)
     assert result.winner_score_pair == _pair(10.0, 10.0)
     assert result.winner_name == "incumbent"

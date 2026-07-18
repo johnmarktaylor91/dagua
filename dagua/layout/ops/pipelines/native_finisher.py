@@ -1003,7 +1003,7 @@ def _project_checkpoint_for_viability(
 
 
 def _closed_over_all_pairs_dist(score_fn: Callable[[torch.Tensor], W5ScorePair]) -> Optional[Any]:
-    """Return ``all_pairs_dist`` captured by the honest scorer, when present.
+    """Return ``all_pairs_dist`` transitively captured by the honest scorer.
 
     Parameters
     ----------
@@ -1016,19 +1016,48 @@ def _closed_over_all_pairs_dist(score_fn: Callable[[torch.Tensor], W5ScorePair])
         Existing all-pairs distance matrix from the scorer closure. ``None``
         means pass 2 must omit the stress term rather than compute APSP here.
     """
-    code = getattr(score_fn, "__code__", None)
-    closure = getattr(score_fn, "__closure__", None)
-    if code is None or closure is None:
-        return None
-    for name, cell in zip(code.co_freevars, closure):
-        if name != "all_pairs_dist":
-            continue
-        try:
-            value = cell.cell_contents
-        except ValueError:
+
+    def search_closure(fn: object, visited: set[int]) -> Optional[Any]:
+        """Search one closure chain for the APSP matrix without invoking code.
+
+        Parameters
+        ----------
+        fn : object
+            Candidate function-valued object whose closure may capture
+            ``all_pairs_dist``.
+        visited : set[int]
+            Object identities already scanned, used to guard closure cycles.
+
+        Returns
+        -------
+        object or None
+            Captured APSP matrix when present.
+        """
+        fn_id = id(fn)
+        if fn_id in visited:
             return None
-        return value
-    return None
+        visited.add(fn_id)
+        code = getattr(fn, "__code__", None)
+        closure = getattr(fn, "__closure__", None)
+        if code is None or closure is None:
+            return None
+        function_cells: list[object] = []
+        for name, cell in zip(code.co_freevars, closure):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if name == "all_pairs_dist":
+                return value
+            if callable(value) and getattr(value, "__closure__", None) is not None:
+                function_cells.append(value)
+        for value in function_cells:
+            nested = search_closure(value, visited)
+            if nested is not None:
+                return nested
+        return None
+
+    return search_closure(score_fn, set())
 
 
 def _build_w5_stress_sample(
@@ -1301,7 +1330,9 @@ def _checkpoint_steps(desired_steps: int, max_checkpoints: int) -> set[int]:
     if max_checkpoints == 1:
         return {max(1, int(desired_steps))}
     return {
-        max(1, min(int(desired_steps), math.ceil(int(desired_steps) * index / max_checkpoints)))
+        int(desired_steps)
+        if index == max_checkpoints
+        else max(1, int(desired_steps) * index // max_checkpoints)
         for index in range(1, max_checkpoints + 1)
     }
 
@@ -1438,9 +1469,7 @@ def _optimize_seed(
     optimizer = torch.optim.Adam([work], lr=lr)
     node_count = int(work.shape[0])
     base_desired_steps = 24 if node_count >= 300 else 36
-    desired_steps = (
-        min(base_desired_steps, int(max_steps)) if max_steps is not None else base_desired_steps
-    )
+    desired_steps = int(max_steps) if max_steps is not None else base_desired_steps
     desired_steps = max(1, desired_steps)
     effective_max_steps = desired_steps
     checkpoints: list[tuple[int, torch.Tensor, float]] = []
@@ -1543,19 +1572,6 @@ def _run_optimize_seed_pass(
         Final positions, completed steps, start loss, and checkpoint
         positions/losses.
     """
-    optimizer_kwargs: dict[str, Any] = {}
-    parameters = inspect.signature(_optimize_seed).parameters
-    accepts_kwargs = any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    if max_steps is not None and (accepts_kwargs or "max_steps" in parameters):
-        optimizer_kwargs["max_steps"] = max_steps
-    if accepts_kwargs or "max_checkpoints" in parameters:
-        optimizer_kwargs["max_checkpoints"] = max_checkpoints
-    if accepts_kwargs or "pass_id" in parameters:
-        optimizer_kwargs["pass_id"] = pass_id
-    if accepts_kwargs or "stress_sample" in parameters:
-        optimizer_kwargs["stress_sample"] = stress_sample
     return _optimize_seed(
         seed,
         edge_index,
@@ -1564,7 +1580,10 @@ def _run_optimize_seed_pass(
         mode,
         deadline,
         honest_axes,
-        **optimizer_kwargs,
+        max_steps=max_steps,
+        max_checkpoints=max_checkpoints,
+        pass_id=pass_id,
+        stress_sample=stress_sample,
     )
 
 
@@ -1723,14 +1742,10 @@ def _measured_cost_plan(
     is_tiny_referee = (
         node_count <= _MEASURED_COST_TINY_MAX_N and referee_s < _MEASURED_COST_TINY_REFEREE_S
     )
-    base_steps = _MEASURED_COST_TINY_STEPS if is_tiny_referee else (24 if node_count >= 300 else 36)
+    base_steps = 24 if node_count >= 300 else 36
     base_seeds = min(3, len(seeds))
-    max_checkpoints = (
-        _MEASURED_COST_TINY_MAX_CHECKPOINTS if is_tiny_referee else _MEASURED_COST_MAX_CHECKPOINTS
-    )
-    base_checkpoints = max_checkpoints
-    if is_tiny_referee:
-        usable_s = max(0.0, min(usable_s, _TINY_ROW_CONTINUATION_CAP_S))
+    base_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
+    max_checkpoints = base_checkpoints
 
     def build_plan(seed_count: int, steps: int, checkpoints: int) -> W5CostPlan:
         """Build a wall-denominated plan payload for candidate work bounds.
@@ -1764,6 +1779,19 @@ def _measured_cost_plan(
 
     base_plan = build_plan(base_seeds, base_steps, base_checkpoints)
     if base_plan.predicted_s <= usable_s:
+        if is_tiny_referee:
+            raised_usable_s = min(usable_s, base_plan.predicted_s + _TINY_ROW_CONTINUATION_CAP_S)
+            for steps in range(_MEASURED_COST_TINY_STEPS, base_steps - 1, -1):
+                for checkpoints in range(
+                    _MEASURED_COST_TINY_MAX_CHECKPOINTS,
+                    base_checkpoints - 1,
+                    -1,
+                ):
+                    raised_plan = build_plan(base_seeds, steps, checkpoints)
+                    if raised_plan.predicted_s <= raised_usable_s:
+                        if config is not None:
+                            setattr(config, "_dagua_native_w5_cost_plan", raised_plan)
+                        return raised_plan
         if config is not None:
             setattr(config, "_dagua_native_w5_cost_plan", base_plan)
         return base_plan
@@ -2054,6 +2082,7 @@ def run_w5_finisher(
     incumbent_overlap = _overlap_count(incumbent_pos, size_work)
     deadline_returned = False
     for seed in kept_seeds:
+        seed_accepted_entry = len(accepted)
         if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
             deadline_returned = True
             break
@@ -2084,15 +2113,14 @@ def run_w5_finisher(
                 deadline_returned = True
                 break
             routed_mode = mode
-            accepted_before_mode = len(accepted)
             mode_seed = (
-                W5Seed(f"{seed.name}_incumbent", winner_pos) if accepted_before_mode > 0 else seed
+                W5Seed(f"{seed.name}_incumbent", winner_pos)
+                if len(accepted) > seed_accepted_entry
+                else seed
             )
             pass_seed = mode_seed
             for pass_id in (1, 2):
                 if pass_id == 2:
-                    if stress_sample is None:
-                        break
                     if deadline_returned:
                         break
                     if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
@@ -2107,7 +2135,6 @@ def run_w5_finisher(
                 optimize_s = 0.0
                 viability_s = 0.0
                 score_s = 0.0
-                accepted_before_pass = len(accepted)
                 try:
                     optimize_started = time.perf_counter()
                     final_pos, steps, start_loss, scored_points = _run_optimize_seed_pass(
@@ -2238,6 +2265,10 @@ def run_w5_finisher(
                             mode=mode,
                         )
                         accepted.append(accepted_candidate)
+                        incumbent_overlap = min(
+                            incumbent_overlap,
+                            _overlap_count(winner_pos, size_work),
+                        )
                     else:
                         rejected.append(checkpoint)
                 phase_timings.append(
@@ -2251,7 +2282,7 @@ def run_w5_finisher(
                         score_s=score_s,
                     )
                 )
-                pass_seed_pos = winner_pos if len(accepted) > accepted_before_pass else final_pos
+                pass_seed_pos = winner_pos
                 pass_seed = W5Seed(f"{seed.name}_p{pass_id}", pass_seed_pos)
                 if deadline_returned:
                     break
