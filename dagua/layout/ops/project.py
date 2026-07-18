@@ -15,7 +15,7 @@ from typing import Any, Callable, ClassVar, Optional, Tuple
 
 import torch
 
-from dagua.layout.constraints import project_hard_pins
+from dagua.layout.losses import project_hard_pins
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op

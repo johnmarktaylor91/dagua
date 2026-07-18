@@ -425,7 +425,7 @@ def prepare_flex_data(
     if flex is None:
         return result
 
-    if flex.pins:
+    if getattr(flex, "pins", None):
         indices = []
         targets = []
         weights = []
@@ -465,7 +465,7 @@ def prepare_flex_data(
             result["has_hard_pins"] = any(any(row) for row in hard_mask)
 
     align_groups: list = []
-    for groups, axis in [(flex.align_x, 0), (flex.align_y, 1)]:
+    for groups, axis in [(getattr(flex, "align_x", None), 0), (getattr(flex, "align_y", None), 1)]:
         if groups is None:
             continue
         for group in groups:
@@ -726,9 +726,11 @@ def build_loss_ops(
         losses.append(FanoutDistributionLoss())
     if config.w_back_edge > 0.0:
         losses.append(BackEdgeCompactnessLoss())
-    if config.flex is not None and config.flex.pins:
+    if config.flex is not None and getattr(config.flex, "pins", None):
         losses.append(PositionPinLoss())
-    if config.flex is not None and (config.flex.align_x or config.flex.align_y):
+    if config.flex is not None and (
+        getattr(config.flex, "align_x", None) or getattr(config.flex, "align_y", None)
+    ):
         losses.append(AlignmentLoss())
     if config.flex is not None and config.flex.node_sep is not None:
         losses.append(FlexSpacingLoss())
