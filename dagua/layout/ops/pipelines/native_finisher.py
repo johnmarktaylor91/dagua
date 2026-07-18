@@ -2017,13 +2017,8 @@ def run_w5_finisher(
         int(kept_seeds[0].pos.shape[0]),
         kept_seeds[0].pos.device,
     )
-    all_pairs_dist = _closed_over_all_pairs_dist(score_fn)
-    stress_sample = _build_w5_stress_sample(
-        edge_work,
-        int(kept_seeds[0].pos.shape[0]),
-        all_pairs_dist,
-        kept_seeds[0].pos.device,
-    )
+    stress_sample: Optional[W5StressSample] = None
+    stress_sample_ready = False
     max_steps: Optional[int] = None
     max_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
     if use_measured_cost:
@@ -2132,6 +2127,15 @@ def run_w5_finisher(
                     if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
                         deadline_returned = True
                         break
+                    if not stress_sample_ready:
+                        all_pairs_dist = _closed_over_all_pairs_dist(score_fn)
+                        stress_sample = _build_w5_stress_sample(
+                            edge_work,
+                            int(kept_seeds[0].pos.shape[0]),
+                            all_pairs_dist,
+                            kept_seeds[0].pos.device,
+                        )
+                        stress_sample_ready = True
                 optimize_s = 0.0
                 viability_s = 0.0
                 score_s = 0.0
