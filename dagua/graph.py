@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy as _copy
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union, cast
 
 import torch
 
@@ -272,22 +272,31 @@ class DaguaGraph:
             raise TypeError(f"Unknown configure() option: {key!r}.{hint}")
 
         if node_updates:
-            self.default_node_style = _updated_style_instance(
-                self.default_node_style,
+            self.default_node_style = cast(
                 NodeStyle,
-                node_updates,
+                _updated_style_instance(
+                    self.default_node_style,
+                    NodeStyle,
+                    node_updates,
+                ),
             )
         if edge_updates:
-            self.default_edge_style = _updated_style_instance(
-                self.default_edge_style,
+            self.default_edge_style = cast(
                 EdgeStyle,
-                edge_updates,
+                _updated_style_instance(
+                    self.default_edge_style,
+                    EdgeStyle,
+                    edge_updates,
+                ),
             )
         if cluster_updates:
-            self.default_cluster_style = _updated_style_instance(
-                self.default_cluster_style,
+            self.default_cluster_style = cast(
                 ClusterStyle,
-                cluster_updates,
+                _updated_style_instance(
+                    self.default_cluster_style,
+                    ClusterStyle,
+                    cluster_updates,
+                ),
             )
 
         if node_updates or edge_updates or cluster_updates:
@@ -1285,62 +1294,306 @@ class DaguaGraph:
         result.sort(key=lambda x: -x[0])
         return [s for _, s in result]
 
-    # --- Pin, align, export helpers ---
+    # --- R9 user-intent constraint helpers ---
+
+    @property
+    def constraints(self) -> Any:
+        """Return the graph-owned user-intent constraint set.
+
+        Returns
+        -------
+        ConstraintSet
+            Mutable container of immutable constraint handles.
+        """
+        from dagua.constraints import ConstraintSet
+        from dagua.flex import LayoutFlex
+
+        if self.flex is None:
+            self.flex = LayoutFlex()
+        if self.flex.constraints is None:
+            self.flex.constraints = []
+        if not isinstance(self.flex.constraints, ConstraintSet):
+            self.flex.constraints = ConstraintSet(list(self.flex.constraints))
+        return self.flex.constraints
+
+    def _add_constraint(self, constraint: Any) -> Any:
+        """Append a constraint and invalidate cached layout.
+
+        Parameters
+        ----------
+        constraint : Any
+            Constraint object to append.
+
+        Returns
+        -------
+        Any
+            The immutable constraint handle.
+        """
+        handle = self.constraints.append(constraint)
+        self.invalidate_layout()
+        self._touch()
+        return handle
+
+    def _validate_constraint_selection(self, selection: Any) -> None:
+        """Validate an eager constraint selection.
+
+        Parameters
+        ----------
+        selection : Any
+            User selection.
+
+        Returns
+        -------
+        None
+            Validation only.
+        """
+        from dagua.constraints import validate_eager_selection
+
+        validate_eager_selection(selection, self)
 
     def pin(
         self,
-        node_id: Any,
+        sel: Any,
         x: Optional[float] = None,
         y: Optional[float] = None,
-        weight: float = float("inf"),
-    ) -> None:
-        """Pin a node's position (soft or hard).
+        at: Optional[Any] = None,
+        frame: str = "view",
+        strength: Any = "hard",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Pin selected nodes or pseudo-elements.
 
-        Args:
-            node_id: The node to pin.
-            x: Target x position (None = unconstrained).
-            y: Target y position (None = unconstrained).
-            weight: Constraint strength (inf = hard pin).
+        Parameters
+        ----------
+        sel : Any
+            Node selection to pin.
+        x : float, optional
+            Target x coordinate.
+        y : float, optional
+            Target y coordinate.
+        at : Any, optional
+            Target point selector.
+        frame : str, default="view"
+            Coordinate frame, either ``"view"`` or ``"layout"``.
+        strength : Any, default="hard"
+            Shared strength ladder value.
+        name : str, optional
+            Report name.
+
+        Returns
+        -------
+        Constraint
+            Immutable constraint handle.
         """
-        from dagua.flex import Flex, LayoutFlex
+        from dagua.constraints import Pin
 
-        if self.flex is None:
-            self.flex = LayoutFlex()
-        if self.flex.pins is None:
-            self.flex.pins = {}
+        self._validate_constraint_selection(sel)
+        return self._add_constraint(
+            Pin(sel=sel, x=x, y=y, at=at, frame=frame, strength=strength, name=name)
+        )
 
-        fx = Flex(target=x, weight=weight) if x is not None else None
-        fy = Flex(target=y, weight=weight) if y is not None else None
-        self.flex.pins[node_id] = (fx, fy)
-        self.invalidate_layout()
-        self._touch()
+    def align(
+        self,
+        *sels: Any,
+        axis: str = "x",
+        at: Optional[Any] = None,
+        spacing: Optional[float] = None,
+        strength: Any = "rigid",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Align selections along one coordinate axis.
 
-    def align(self, node_ids: List[Any], axis: str = "x", weight: float = 5.0) -> None:
-        """Align a group of nodes on an axis.
+        Parameters
+        ----------
+        *sels : Any
+            Selections to align. A single list is accepted as a node set.
+        axis : str, default="x"
+            Alignment axis.
+        at : Any, optional
+            Shared coordinate target.
+        spacing : float, optional
+            Distribution spacing along the other axis.
+        strength : Any, default="rigid"
+            Shared strength ladder value.
+        name : str, optional
+            Report name.
 
-        Args:
-            node_ids: Nodes that should share the same x or y coordinate.
-            axis: 'x' (vertical alignment) or 'y' (horizontal alignment).
-            weight: Constraint strength.
+        Returns
+        -------
+        Constraint
+            Immutable constraint handle.
         """
-        from dagua.flex import AlignGroup, LayoutFlex
+        from dagua.constraints import Align
 
-        if self.flex is None:
-            self.flex = LayoutFlex()
+        if len(sels) == 1 and isinstance(sels[0], list):
+            sels = tuple(sels[0])
+        for sel in sels:
+            self._validate_constraint_selection(sel)
+        return self._add_constraint(
+            Align(*sels, axis=axis, at=at, spacing=spacing, strength=strength, name=name)
+        )
 
-        group = AlignGroup(nodes=list(node_ids), weight=weight)
-        if axis == "x":
-            if self.flex.align_x is None:
-                self.flex.align_x = []
-            self.flex.align_x.append(group)
-        elif axis == "y":
-            if self.flex.align_y is None:
-                self.flex.align_y = []
-            self.flex.align_y.append(group)
-        else:
-            raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
-        self.invalidate_layout()
-        self._touch()
+    def order(
+        self,
+        *items: Any,
+        axis: str = "flow",
+        gap: Optional[float] = None,
+        strength: Any = "hard",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Order selections along an axis.
+
+        Parameters
+        ----------
+        *items : Any
+            Ordered selections.
+        axis : str, default="flow"
+            Axis name.
+        gap : float, optional
+            Minimum separation.
+        strength : Any, default="hard"
+            Shared strength ladder value.
+        name : str, optional
+            Report name.
+
+        Returns
+        -------
+        Constraint
+            Immutable constraint handle.
+        """
+        from dagua.constraints import Order
+
+        for item in items:
+            self._validate_constraint_selection(item)
+        return self._add_constraint(Order(*items, axis=axis, gap=gap, strength=strength, name=name))
+
+    def group(
+        self,
+        *sels: Any,
+        padding: Optional[float] = None,
+        strength: Any = "firm",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Keep selections compact as a group."""
+        from dagua.constraints import Group
+
+        for sel in sels:
+            self._validate_constraint_selection(sel)
+        return self._add_constraint(Group(*sels, padding=padding, strength=strength, name=name))
+
+    def separate(
+        self,
+        a: Any,
+        b: Any,
+        gap: Optional[float] = None,
+        axis: Optional[str] = None,
+        side: Optional[str] = None,
+        strength: Any = "firm",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Keep two selections apart."""
+        from dagua.constraints import Separate
+
+        self._validate_constraint_selection(a)
+        self._validate_constraint_selection(b)
+        return self._add_constraint(
+            Separate(a=a, b=b, gap=gap, axis=axis, side=side, strength=strength, name=name)
+        )
+
+    def anchor(
+        self,
+        mapping: Dict[Any, Tuple[float, float]],
+        fit: str = "similarity",
+        projection: Optional[Any] = None,
+        strength: Any = "firm",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Anchor selected nodes to external coordinates."""
+        from dagua.constraints import Anchor
+
+        for node_id in mapping:
+            self._validate_constraint_selection(node_id)
+        return self._add_constraint(
+            Anchor(
+                mapping=dict(mapping),
+                fit=fit,
+                projection=projection,
+                strength=strength,
+                name=name,
+            )
+        )
+
+    def emphasize(
+        self,
+        *path_or_edges: Any,
+        lane: Optional[Any] = None,
+        strength: Any = "firm",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Emphasize a path or edge selection in the layout."""
+        from dagua.constraints import Emphasize
+
+        return self._add_constraint(
+            Emphasize(*path_or_edges, lane=lane, strength=strength, name=name)
+        )
+
+    def focus(
+        self,
+        sel: Any,
+        zoom: float = 1.5,
+        radius: int = 2,
+        at: Optional[Any] = None,
+        strength: Any = "soft",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Focus the layout around a selection."""
+        from dagua.constraints import Focus
+
+        self._validate_constraint_selection(sel)
+        return self._add_constraint(
+            Focus(sel=sel, zoom=zoom, radius=radius, at=at, strength=strength, name=name)
+        )
+
+    def constrain(
+        self,
+        *fns_or_constraints: Any,
+        strength: Any = "firm",
+        name: Optional[str] = None,
+    ) -> Any:
+        """Append prebuilt constraints or wrap callables as custom losses."""
+        from dagua.constraints import Constraint, loss
+
+        last = None
+        for item in fns_or_constraints:
+            constraint = (
+                item if isinstance(item, Constraint) else loss(item, strength=strength, name=name)
+            )
+            last = self._add_constraint(constraint)
+        return last
+
+    def col(self, *sels: Any, **kwargs: Any) -> Any:
+        """Align selections to a vertical column."""
+        return self.align(*sels, axis="x", **kwargs)
+
+    def row(self, *sels: Any, **kwargs: Any) -> Any:
+        """Align selections to a horizontal row."""
+        return self.align(*sels, axis="y", **kwargs)
+
+    def above(self, a: Any, b: Any, **kwargs: Any) -> Any:
+        """Constrain ``a`` above ``b``."""
+        return self.order(a, b, axis="y", **kwargs)
+
+    def below(self, a: Any, b: Any, **kwargs: Any) -> Any:
+        """Constrain ``a`` below ``b``."""
+        return self.order(b, a, axis="y", **kwargs)
+
+    def left_of(self, a: Any, b: Any, **kwargs: Any) -> Any:
+        """Constrain ``a`` left of ``b``."""
+        return self.order(a, b, axis="x", **kwargs)
+
+    def right_of(self, a: Any, b: Any, **kwargs: Any) -> Any:
+        """Constrain ``a`` right of ``b``."""
+        return self.order(b, a, axis="x", **kwargs)
 
     def export_style(self, path: str) -> None:
         """Export this graph's style settings to a YAML/JSON file."""
@@ -1365,7 +1618,7 @@ class DaguaGraph:
         p = Path(path)
         if p.suffix in (".yaml", ".yml"):
             try:
-                import yaml  # type: ignore[import-untyped]
+                import yaml
             except ImportError:
                 raise ImportError("PyYAML required: pip install pyyaml")
             with open(path, "w") as f:

@@ -34,9 +34,9 @@ from dagua.config import PARAM_REGISTRY
 from dagua.edges import place_edge_labels, route_edges
 from dagua.eval.graphs import get_test_graphs
 from dagua.flex import AlignGroup, Flex, LayoutFlex
-from dagua.layout import constraints as constraint_mod
 from dagua.layout import edge_optimization as edge_opt_mod
 from dagua.layout import layout
+from dagua.layout import losses as constraint_mod
 from dagua.metrics import full, quick
 from dagua.render.mpl import (
     _draw_clusters,

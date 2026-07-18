@@ -8,7 +8,9 @@ import pytest
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.layout.constraints import (
+from dagua.layout.engine import EdgeBatchContext, SampledNodeContext, _resolve_execution_mode
+from dagua.layout.layers import LayerIndex, build_layer_index
+from dagua.layout.losses import (
     edge_attraction_loss,
     edge_length_variance_loss,
     edge_straightness_loss,
@@ -16,8 +18,6 @@ from dagua.layout.constraints import (
     repulsion_loss,
     spacing_consistency_loss,
 )
-from dagua.layout.engine import EdgeBatchContext, SampledNodeContext, _resolve_execution_mode
-from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.multilevel import _apply_large_final_level_execution_overrides
 from dagua.layout.subset_gpu import (
     EdgeAccessPattern,
