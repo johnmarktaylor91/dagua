@@ -7,8 +7,8 @@ from typing import List, Optional, Tuple
 import pytest
 import torch
 
-from dagua.layout.constraints import flex_spacing_loss as reference_flex_spacing_loss
 from dagua.layout.layers import build_layer_index
+from dagua.layout.losses import flex_spacing_loss as reference_flex_spacing_loss
 from dagua.layout.ops.base import LossGroup, LossOp
 from dagua.layout.ops.loss_engine import (
     AlignmentLoss,
@@ -1325,7 +1325,7 @@ def test_cluster_loss_cache_is_reused_across_steps_and_invalidated_on_change() -
     must be invalidated when the cluster dict identity changes (e.g. when
     a new layout problem starts in the same SolveState container).
     """
-    from dagua.layout.constraints import _ClusterCache
+    from dagua.layout.losses import _ClusterCache
 
     node_sizes = torch.full((4, 2), 2.0, dtype=torch.float32)
     pos = torch.tensor(

@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from dagua import DaguaGraph, LayoutConfig, draw, layout, render, route_edges
-from dagua.layout.constraints import (
+from dagua.layout.losses import (
     cluster_compactness_loss,
     cluster_containment_loss,
     cluster_separation_loss,

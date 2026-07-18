@@ -20,7 +20,10 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional
+
+if TYPE_CHECKING:
+    from dagua.constraints import Constraint
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,23 @@ class Flex:
         """Hard constraint — enforced via post-step projection."""
         return Flex(target=value, weight=float("inf"))
 
+    @staticmethod
+    def hard(value: float) -> Flex:
+        """Return a hard flex value.
+
+        Parameters
+        ----------
+        value : float
+            Target value.
+
+        Returns
+        -------
+        Flex
+            Hard flex value. This is the preferred alias of
+            :meth:`Flex.locked`.
+        """
+        return Flex.locked(value)
+
     @property
     def is_hard(self) -> bool:
         """Whether this flex value is a hard constraint (infinite weight)."""
@@ -63,9 +83,17 @@ class Flex:
 
 @dataclass
 class AlignGroup:
-    """A group of nodes that should share the same position on one axis."""
+    """Legacy alignment payload used only by archived/pipeline adapters.
 
-    nodes: List[Any]  # node IDs (resolved to indices by the engine)
+    Parameters
+    ----------
+    nodes : list[Any]
+        Node ids or indices.
+    weight : float, default=5.0
+        Alignment weight.
+    """
+
+    nodes: List[Any]
     weight: float = 5.0
 
 
@@ -79,6 +107,4 @@ class LayoutFlex:
 
     node_sep: Optional[Flex] = None
     rank_sep: Optional[Flex] = None
-    pins: Optional[Dict[Any, Tuple[Optional[Flex], Optional[Flex]]]] = None
-    align_x: Optional[List[AlignGroup]] = None  # groups sharing same x
-    align_y: Optional[List[AlignGroup]] = None  # groups sharing same y
+    constraints: Optional[list["Constraint"]] = None

@@ -40,6 +40,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, List, Literal, Optional, Union, cast
@@ -48,12 +49,21 @@ import torch
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from dagua.config import LayoutConfig
-from dagua.layout.constraints import (
+from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
+from dagua.layout.init_placement import init_positions
+from dagua.layout.layers import LayerIndex, build_layer_index
+from dagua.layout.losses import (
     alignment_loss,
     back_edge_compactness_loss,
     cluster_compactness_loss,
     cluster_containment_loss,
     cluster_separation_loss,
+    constraint_anchor_loss,
+    constraint_emphasize_loss,
+    constraint_focus_loss,
+    constraint_group_loss,
+    constraint_order_loss,
+    constraint_separate_loss,
     crossing_loss,
     dag_ordering_loss,
     edge_attraction_loss,
@@ -68,9 +78,6 @@ from dagua.layout.constraints import (
     spacing_consistency_loss,
     warn_legacy_cluster_loss_config,
 )
-from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
-from dagua.layout.init_placement import init_positions
-from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
 from dagua.utils import VRAMBudget, longest_path_layering
 
@@ -1007,6 +1014,94 @@ def _override_for_tree(config: LayoutConfig) -> LayoutConfig:
     return tree_config
 
 
+def _config_or_graph_has_constraints(config: LayoutConfig, graph: Any) -> bool:
+    """Return whether a layout request carries R9 user constraints.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout configuration.
+    graph : Any
+        Graph-like object that may carry graph-scoped flex constraints.
+
+    Returns
+    -------
+    bool
+        ``True`` when graph or config flex contains at least one constraint.
+    """
+    config_flex = getattr(config, "flex", None)
+    graph_flex = getattr(graph, "flex", None)
+    return bool(getattr(config_flex, "constraints", None)) or bool(
+        getattr(graph_flex, "constraints", None)
+    )
+
+
+def _update_graph_constraint_report(graph: Any, pos: torch.Tensor, config: LayoutConfig) -> None:
+    """Attach a lightweight constraint report to the graph constraint set.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object carrying a ``constraints`` property.
+    pos : torch.Tensor
+        Final position tensor with shape ``[N, 2]``.
+    config : LayoutConfig
+        Layout configuration containing the active policy.
+
+    Returns
+    -------
+    None
+        Stores the report on ``graph.constraints`` when constraints exist.
+    """
+    graph_flex = getattr(graph, "flex", None)
+    constraints = list(getattr(graph_flex, "constraints", None) or [])
+    if not constraints:
+        return
+    from dagua.constraints import ConstraintReport, ConstraintResidual, Pin, resolve_node_selection
+
+    rows = []
+    for constraint in constraints:
+        residual = 0.0
+        resolved_count = 0
+        if isinstance(constraint, Pin):
+            try:
+                indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
+            except Exception:
+                indices = []
+            resolved_count = len(indices)
+            axis_residuals = []
+            for index in indices:
+                if constraint.x is not None:
+                    axis_residuals.append(abs(float(pos[index, 0].item()) - float(constraint.x)))
+                if constraint.y is not None:
+                    axis_residuals.append(abs(float(pos[index, 1].item()) - float(constraint.y)))
+            residual = max(axis_residuals, default=0.0)
+        hard_satisfied = (not constraint.is_hard) or residual <= 1e-5
+        rows.append(
+            ConstraintResidual(
+                constraint=constraint,
+                residual=residual,
+                hard_satisfied=hard_satisfied,
+                resolved_count=resolved_count,
+            )
+        )
+    policy = getattr(config, "constraint_policy", "warn")
+    report = ConstraintReport(
+        residuals=rows,
+        policy=policy,
+        outcome="ok" if all(row.hard_satisfied for row in rows) else "violated",
+    )
+    graph.constraints.set_report(report)
+    if report.violations and policy == "strict":
+        from dagua.constraints import ConstraintConflictError
+
+        raise ConstraintConflictError(report.summary())
+    if report.violations and policy == "warn":
+        import warnings
+
+        warnings.warn(report.summary(), RuntimeWarning, stacklevel=2)
+
+
 def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None) -> torch.Tensor:
     """Compute layout positions for all nodes.
 
@@ -1060,7 +1155,13 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             DeprecationWarning,
             stacklevel=2,
         )
-    remapped_from_default = config.algorithm is None and trace is None and config.relax_steps <= 0
+    has_user_constraints = _config_or_graph_has_constraints(config, graph)
+    remapped_from_default = (
+        config.algorithm is None
+        and trace is None
+        and config.relax_steps <= 0
+        and not has_user_constraints
+    )
     # Algorithm=None now enters dagua_native, whose adapter
     # dispatches to tree/layered-DAG/force-directed/hybrid sub-pipelines after
     # classification. The route_flat_to_stress flag remains as a
@@ -1078,6 +1179,18 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         graph_direction = getattr(graph, "direction", None)
         if graph_direction in {"TB", "BT", "LR", "RL"}:
             config.direction = graph_direction
+
+    if config.algorithm is not None and has_user_constraints:
+        import warnings
+
+        warnings.warn(
+            "dagua.layout: R9 constraints currently use the native gradient constraint path; "
+            f"falling back from algorithm={config.algorithm!r}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        config = copy.copy(config)
+        config.algorithm = None
 
     if config.algorithm is not None:
         import inspect
@@ -1158,7 +1271,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             config = _resolve_flex_ids(config, graph)
         if config.flex is None and getattr(graph, "flex", None) is not None:
             config = copy.copy(config)
-            config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
+            config.flex = _resolve_graph_flex(graph.flex, graph)
         kwargs["config"] = config
         if hasattr(graph, "clusters") and graph.clusters:
             kwargs["clusters"] = graph.clusters
@@ -1185,6 +1298,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 pos = pipeline_fn(**kwargs)
                 pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
                 pos = pos.to(dtype=torch.float32)
+                _update_graph_constraint_report(graph, pos, config)
                 graph.cache_layout(pos)
                 return pos
             finally:
@@ -1250,7 +1364,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 import copy as _c
 
                 effective_config = _c.copy(effective_config)
-                effective_config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
+                effective_config.flex = _resolve_graph_flex(graph.flex, graph)
 
             execution_mode = _resolve_execution_mode(effective_config, device, n)
             tensor_device = "cpu" if execution_mode == "subset_gpu" else device
@@ -1332,6 +1446,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         direction = config.direction if config else graph.direction
         pos = _apply_direction(pos, direction)
         pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
+        _update_graph_constraint_report(graph, pos, config)
         graph.cache_layout(pos)
         return pos
     finally:
@@ -2345,6 +2460,116 @@ def _layout_inner(
             )
         )
 
+    if flex_data["order_pairs"]:
+        _order_pairs = flex_data["order_pairs"]
+        loss_fns.append(
+            (
+                "w_constraints",
+                lambda p, ns, li: constraint_order_loss(p, _order_pairs),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
+        )
+
+    if flex_data["separate_pairs"]:
+        _separate_pairs = flex_data["separate_pairs"]
+        loss_fns.append(
+            (
+                "w_constraints",
+                lambda p, ns, li: constraint_separate_loss(p, _separate_pairs),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
+        )
+
+    if flex_data["group_constraints"]:
+        _group_constraints = flex_data["group_constraints"]
+        loss_fns.append(
+            (
+                "w_constraints",
+                lambda p, ns, li: constraint_group_loss(p, _group_constraints),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
+        )
+
+    if flex_data["anchor_constraints"]:
+        _anchor_constraints = flex_data["anchor_constraints"]
+        loss_fns.append(
+            (
+                "w_constraints",
+                lambda p, ns, li: constraint_anchor_loss(p, _anchor_constraints),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
+        )
+
+    if flex_data["emphasize_paths"]:
+        _emphasize_paths = flex_data["emphasize_paths"]
+        loss_fns.append(
+            (
+                "w_constraints",
+                lambda p, ns, li: constraint_emphasize_loss(p, _emphasize_paths),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
+        )
+
+    if flex_data["focus_constraints"]:
+        _focus_constraints = flex_data["focus_constraints"]
+        loss_fns.append(
+            (
+                "w_constraints",
+                lambda p, ns, li: constraint_focus_loss(p, _focus_constraints),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
+        )
+
+    for _custom_constraint in flex_data["custom_losses"]:
+        _ctx = None
+
+        def _custom_loss_fn(
+            p: torch.Tensor,
+            ns: torch.Tensor,
+            li: Optional[LayerIndex],
+            c: Any = _custom_constraint,
+            ctx: Any = _ctx,
+        ) -> torch.Tensor:
+            """Evaluate one user custom loss closure."""
+            del ns, li
+            return c.loss(p, ctx)
+
+        loss_fns.append(
+            (
+                "w_constraints",
+                _custom_loss_fn,
+                False,
+                False,
+                False,
+                False,
+                getattr(_custom_constraint, "access", "global"),
+            )
+        )
+
     if flex_data["flex_node_sep"] is not None:
         _fsep = flex_data["flex_node_sep"]
         _fwt = flex_data["flex_node_sep_weight"]
@@ -2674,6 +2899,7 @@ def _layout_inner(
             "w_pin": 1.0,
             "w_align_flex": 1.0,
             "w_flex_spacing": 1.0,
+            "w_constraints": 1.0,
         }
 
         # Build loss_terms from static functions + current weights
@@ -2964,6 +3190,18 @@ def _layout_inner(
 
         optimizer.step()
 
+        if flex_data["hard_align_groups"] or flex_data["hard_order_pairs"]:
+            _project_hard_vpsc_constraints(
+                pos,
+                flex_data["hard_align_groups"],
+                flex_data["hard_order_pairs"],
+            )
+
+        if flex_data["custom_projectors"]:
+            with torch.no_grad():
+                for custom_constraint in flex_data["custom_projectors"]:
+                    custom_constraint.project(pos, None)
+
         # Hard-pin projection (weight=inf pins snapped to exact positions)
         if flex_data["has_hard_pins"]:
             project_hard_pins(
@@ -3043,6 +3281,23 @@ def _layout_inner(
         iterations=final_proj_iters,
         layer_index=layer_index,
     )
+    if flex_data["hard_align_groups"] or flex_data["hard_order_pairs"]:
+        _project_hard_vpsc_constraints(
+            pos,
+            flex_data["hard_align_groups"],
+            flex_data["hard_order_pairs"],
+        )
+    if flex_data["custom_projectors"]:
+        with torch.no_grad():
+            for custom_constraint in flex_data["custom_projectors"]:
+                custom_constraint.project(pos, None)
+    if flex_data["has_hard_pins"]:
+        project_hard_pins(
+            pos,
+            flex_data["pin_indices"],
+            flex_data["pin_targets"],
+            flex_data["hard_pin_mask"],
+        )
     _vlog(f"projection done in {_time.perf_counter() - _t_proj:.1f}s")
 
     if trace is not None and hasattr(trace, "capture_layout_positions"):
@@ -3561,6 +3816,129 @@ def _adaptive_spacing(
     return base_node_sep * scale, base_rank_sep * scale
 
 
+def _constraint_axis_index(axis: str, direction: str) -> int:
+    """Resolve a constraint axis to a tensor coordinate index.
+
+    Parameters
+    ----------
+    axis : str
+        Raw or semantic axis name.
+    direction : str
+        Layout direction.
+
+    Returns
+    -------
+    int
+        Coordinate index, where x is ``0`` and y is ``1``.
+    """
+    if axis == "x":
+        return 0
+    if axis == "y":
+        return 1
+    if axis == "flow":
+        return 0 if direction in {"LR", "RL"} else 1
+    if axis == "cross":
+        return 1 if direction in {"LR", "RL"} else 0
+    raise ValueError(f"Unknown constraint axis: {axis!r}")
+
+
+def _selection_indices(selection: Any, num_nodes: int) -> List[int]:
+    """Return integer indices from a lowered headless selection.
+
+    Parameters
+    ----------
+    selection : Any
+        Integer, sequence, or tensor of node indices.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[int]
+        Valid node indices.
+    """
+    if isinstance(selection, torch.Tensor):
+        values = [int(value) for value in selection.detach().cpu().flatten().tolist()]
+    elif isinstance(selection, int):
+        values = [int(selection)]
+    elif isinstance(selection, (list, tuple)):
+        values = []
+        for item in selection:
+            values.extend(_selection_indices(item, num_nodes))
+    else:
+        values = []
+    return [value for value in values if 0 <= value < num_nodes]
+
+
+def _selection_tensor(selection: Any, num_nodes: int, device: str) -> torch.Tensor:
+    """Return a device tensor for a lowered headless selection.
+
+    Parameters
+    ----------
+    selection : Any
+        Integer, sequence, or tensor of node indices.
+    num_nodes : int
+        Number of graph nodes.
+    device : str
+        Target tensor device.
+
+    Returns
+    -------
+    torch.Tensor
+        Long tensor of valid node indices.
+    """
+    return torch.tensor(_selection_indices(selection, num_nodes), dtype=torch.long, device=device)
+
+
+def _project_hard_vpsc_constraints(
+    pos: torch.Tensor,
+    hard_align_groups: List[tuple],
+    hard_order_pairs: List[tuple],
+) -> None:
+    """Project hard one-dimensional constraints with VPSC.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Mutable position tensor with shape ``[N, 2]``.
+    hard_align_groups : list[tuple]
+        Alignment payloads as index tensor, weight, and axis.
+    hard_order_pairs : list[tuple]
+        Order payloads as left tensor, right tensor, axis, gap, and weight.
+
+    Returns
+    -------
+    None
+        Mutates ``pos`` in place under ``torch.no_grad``.
+    """
+    from dagua.layout.ops.webcola import solve_vpsc_1d
+
+    if pos.numel() == 0:
+        return
+    with torch.no_grad():
+        for axis in (0, 1):
+            constraints = []
+            for indices, _weight, group_axis in hard_align_groups:
+                if int(group_axis) != axis or indices.numel() < 2:
+                    continue
+                base = int(indices[0].item())
+                for other in indices[1:]:
+                    constraints.append((base, int(other.item()), 0.0, True))
+            for left, right, pair_axis, gap, _weight in hard_order_pairs:
+                if int(pair_axis) != axis or left.numel() == 0 or right.numel() == 0:
+                    continue
+                for left_idx in left:
+                    for right_idx in right:
+                        constraints.append(
+                            (int(left_idx.item()), int(right_idx.item()), float(gap), False)
+                        )
+            if not constraints:
+                continue
+            desired = pos[:, axis].detach().to(device="cpu", dtype=torch.float64).tolist()
+            projected = solve_vpsc_1d(desired, constraints)
+            pos[:, axis] = torch.tensor(projected, dtype=pos.dtype, device=pos.device)
+
+
 def _prepare_flex_data(
     config: LayoutConfig,
     num_nodes: int,
@@ -3571,7 +3949,7 @@ def _prepare_flex_data(
     Returns a dict with pre-computed tensors for pins, alignment groups, and flex spacing.
     All node ID → index resolution happens here (not per-step).
     """
-    result = {
+    result: dict[str, Any] = {
         "has_soft_pins": False,
         "has_hard_pins": False,
         "pin_indices": torch.zeros(0, dtype=torch.long, device=device),
@@ -3580,6 +3958,17 @@ def _prepare_flex_data(
         "soft_pin_mask": torch.zeros(0, 2, dtype=torch.bool, device=device),
         "hard_pin_mask": torch.zeros(0, 2, dtype=torch.bool, device=device),
         "align_groups": [],
+        "hard_align_groups": [],
+        "order_pairs": [],
+        "hard_order_pairs": [],
+        "separate_pairs": [],
+        "group_constraints": [],
+        "anchor_constraints": [],
+        "emphasize_paths": [],
+        "focus_constraints": [],
+        "custom_losses": [],
+        "custom_projectors": [],
+        "hard_contain": [],
         "flex_node_sep": None,
         "flex_node_sep_weight": 0.0,
     }
@@ -3588,66 +3977,158 @@ def _prepare_flex_data(
     if flex is None:
         return result
 
-    # --- Pins ---
-    if flex.pins:
-        indices = []
-        targets = []
-        weights = []
-        soft_mask = []
-        hard_mask = []
+    constraints = list(getattr(flex, "constraints", None) or [])
+    if constraints:
+        from dagua.constraints import (
+            Align,
+            Anchor,
+            Custom,
+            Emphasize,
+            Focus,
+            Group,
+            Order,
+            Pin,
+            Separate,
+        )
 
-        for node_id, (fx, fy) in flex.pins.items():
-            # node_id is already an index (int) in headless mode
-            if isinstance(node_id, int) and 0 <= node_id < num_nodes:
-                idx = node_id
-            else:
-                continue  # Skip unresolvable IDs in headless mode
+        pin_indices: List[int] = []
+        pin_targets: List[List[float]] = []
+        pin_weights: List[List[float]] = []
+        soft_mask: List[List[bool]] = []
+        hard_mask: List[List[bool]] = []
 
-            tx = fx.target if fx is not None else 0.0
-            ty = fy.target if fy is not None else 0.0
-            wx = fx.weight if fx is not None else 0.0
-            wy = fy.weight if fy is not None else 0.0
-            has_x = fx is not None
-            has_y = fy is not None
-            hard_x = bool(has_x and fx is not None and fx.is_hard)
-            hard_y = bool(has_y and fy is not None and fy.is_hard)
-            soft_x = has_x and not hard_x
-            soft_y = has_y and not hard_y
+        for constraint in constraints:
+            if isinstance(constraint, Pin):
+                for idx in _selection_indices(constraint.sel, num_nodes):
+                    has_x = constraint.x is not None
+                    has_y = constraint.y is not None
+                    if not has_x and not has_y:
+                        continue
+                    hard = constraint.is_hard
+                    weight = 0.0 if hard else float(constraint.weight)
+                    pin_indices.append(idx)
+                    target_x = 0.0 if constraint.x is None else float(constraint.x)
+                    target_y = 0.0 if constraint.y is None else float(constraint.y)
+                    pin_targets.append([target_x, target_y])
+                    pin_weights.append([weight if has_x else 0.0, weight if has_y else 0.0])
+                    soft_mask.append([has_x and not hard, has_y and not hard])
+                    hard_mask.append([has_x and hard, has_y and hard])
+            elif isinstance(constraint, Align):
+                axis = _constraint_axis_index(constraint.axis, config.direction)
+                idx_list = []
+                for sel in tuple(constraint.sels):
+                    idx_list.extend(_selection_indices(sel, num_nodes))
+                if len(idx_list) >= 2:
+                    align_payload = (
+                        torch.tensor(idx_list, dtype=torch.long, device=device),
+                        float(constraint.weight),
+                        axis,
+                    )
+                    target = "hard_align_groups" if constraint.is_hard else "align_groups"
+                    result[target].append(align_payload)
+            elif isinstance(constraint, Order):
+                axis = _constraint_axis_index(constraint.axis, config.direction)
+                gap = float(constraint.gap if constraint.gap is not None else 0.0)
+                items = [
+                    _selection_tensor(item, num_nodes, device) for item in tuple(constraint.items)
+                ]
+                for left, right in zip(items, items[1:]):
+                    order_payload = (left, right, axis, gap, float(constraint.weight))
+                    target = "hard_order_pairs" if constraint.is_hard else "order_pairs"
+                    result[target].append(order_payload)
+            elif isinstance(constraint, Separate):
+                a = _selection_tensor(constraint.a, num_nodes, device)
+                b = _selection_tensor(constraint.b, num_nodes, device)
+                gap = float(constraint.gap if constraint.gap is not None else 0.0)
+                separate_axis: Optional[int] = (
+                    _constraint_axis_index(constraint.axis, config.direction)
+                    if constraint.axis
+                    else None
+                )
+                if constraint.is_hard:
+                    side = constraint.side
+                    if side == "auto":
+                        side = "left" if int(a[0].item()) <= int(b[0].item()) else "right"
+                    left, right = (a, b) if side in {"left", "above", "before"} else (b, a)
+                    result["hard_order_pairs"].append(
+                        (left, right, separate_axis or 0, gap, float("inf"))
+                    )
+                else:
+                    result["separate_pairs"].append(
+                        (a, b, separate_axis, gap, float(constraint.weight))
+                    )
+            elif isinstance(constraint, Group):
+                idx_list = []
+                for sel in tuple(constraint.sels):
+                    idx_list.extend(_selection_indices(sel, num_nodes))
+                if len(idx_list) >= 2:
+                    result["group_constraints"].append(
+                        (
+                            torch.tensor(idx_list, dtype=torch.long, device=device),
+                            float(constraint.padding or 0.0),
+                            float(constraint.weight),
+                        )
+                    )
+            elif isinstance(constraint, Anchor):
+                indices: List[int] = []
+                anchor_targets: List[List[float]] = []
+                for node_id, anchor_target in constraint.mapping.items():
+                    resolved = _selection_indices(node_id, num_nodes)
+                    if resolved:
+                        indices.append(resolved[0])
+                        anchor_targets.append([float(anchor_target[0]), float(anchor_target[1])])
+                if indices:
+                    target_tensor = torch.tensor(anchor_targets, dtype=torch.float32, device=device)
+                    if constraint.fit == "fixed":
+                        hard = constraint.is_hard
+                        weight = 0.0 if hard else float(constraint.weight)
+                        for idx, target_pair in zip(indices, anchor_targets):
+                            pin_indices.append(idx)
+                            pin_targets.append(target_pair)
+                            pin_weights.append([weight, weight])
+                            soft_mask.append([not hard, not hard])
+                            hard_mask.append([hard, hard])
+                    elif not constraint.is_hard:
+                        result["anchor_constraints"].append(
+                            (
+                                torch.tensor(indices, dtype=torch.long, device=device),
+                                target_tensor,
+                                float(constraint.weight),
+                            )
+                        )
+            elif isinstance(constraint, Emphasize):
+                for item in tuple(constraint.path_or_edges):
+                    indices = _selection_indices(item, num_nodes)
+                    if len(indices) >= 2:
+                        result["emphasize_paths"].append(
+                            (
+                                torch.tensor(indices, dtype=torch.long, device=device),
+                                float(constraint.weight),
+                            )
+                        )
+            elif isinstance(constraint, Focus):
+                result["focus_constraints"].append(
+                    (
+                        _selection_tensor(constraint.sel, num_nodes, device),
+                        torch.zeros(2, dtype=torch.float32, device=device),
+                        float(constraint.zoom),
+                        float(constraint.weight),
+                    )
+                )
+            elif isinstance(constraint, Custom):
+                if constraint.loss_fn is not None and not constraint.is_hard:
+                    result["custom_losses"].append(constraint)
+                if constraint.project_fn is not None:
+                    result["custom_projectors"].append(constraint)
 
-            indices.append(idx)
-            targets.append([tx, ty])
-            weights.append([wx if not hard_x else 0.0, wy if not hard_y else 0.0])
-            soft_mask.append([soft_x, soft_y])
-            hard_mask.append([hard_x, hard_y])
-
-        if indices:
-            result["pin_indices"] = torch.tensor(indices, dtype=torch.long, device=device)
-            result["pin_targets"] = torch.tensor(targets, dtype=torch.float32, device=device)
-            result["pin_weights"] = torch.tensor(weights, dtype=torch.float32, device=device)
+        if pin_indices:
+            result["pin_indices"] = torch.tensor(pin_indices, dtype=torch.long, device=device)
+            result["pin_targets"] = torch.tensor(pin_targets, dtype=torch.float32, device=device)
+            result["pin_weights"] = torch.tensor(pin_weights, dtype=torch.float32, device=device)
             result["soft_pin_mask"] = torch.tensor(soft_mask, dtype=torch.bool, device=device)
             result["hard_pin_mask"] = torch.tensor(hard_mask, dtype=torch.bool, device=device)
             result["has_soft_pins"] = any(any(row) for row in soft_mask)
             result["has_hard_pins"] = any(any(row) for row in hard_mask)
-
-    # --- Alignment groups ---
-    align_groups = []
-    for groups, axis in [(flex.align_x, 0), (flex.align_y, 1)]:
-        if groups is None:
-            continue
-        for group in groups:
-            idx_list = []
-            for node_id in group.nodes:
-                if isinstance(node_id, int) and 0 <= node_id < num_nodes:
-                    idx_list.append(node_id)
-            if len(idx_list) >= 2:
-                align_groups.append(
-                    (
-                        torch.tensor(idx_list, dtype=torch.long, device=device),
-                        group.weight,
-                        axis,
-                    )
-                )
-    result["align_groups"] = align_groups
 
     # --- Flex spacing ---
     if flex.node_sep is not None:
@@ -3721,14 +4202,14 @@ def _resolve_flex_ids(config: LayoutConfig, graph) -> LayoutConfig:
     """
     if config.flex is None:
         return config
-    return _resolve_config_flex(config, graph._id_to_index)
+    return _resolve_config_flex(config, graph)
 
 
-def _resolve_config_flex(config: LayoutConfig, id_to_index: dict) -> LayoutConfig:
+def _resolve_config_flex(config: LayoutConfig, graph) -> LayoutConfig:
     """Create a config copy with flex node IDs resolved to indices."""
     import copy as _c
 
-    resolved_flex = _resolve_graph_flex(config.flex, id_to_index)
+    resolved_flex = _resolve_graph_flex(config.flex, graph)
     if resolved_flex is config.flex:
         return config
     new_config = _c.copy(config)
@@ -3736,50 +4217,104 @@ def _resolve_config_flex(config: LayoutConfig, id_to_index: dict) -> LayoutConfi
     return new_config
 
 
-def _resolve_graph_flex(flex, id_to_index: dict):
+def _resolve_graph_flex(flex, graph):
     """Resolve node IDs in a LayoutFlex to integer indices."""
-    from dagua.flex import AlignGroup, LayoutFlex
+    from dagua.constraints import (
+        Align,
+        Anchor,
+        Contain,
+        Emphasize,
+        Focus,
+        Group,
+        Order,
+        Pin,
+        Separate,
+        resolve_node_selection,
+    )
+    from dagua.flex import LayoutFlex
 
     changed = False
-
-    # Resolve pins
-    new_pins = None
-    if flex.pins:
-        new_pins = {}
-        for node_id, val in flex.pins.items():
-            if isinstance(node_id, int):
-                new_pins[node_id] = val
-            elif node_id in id_to_index:
-                new_pins[id_to_index[node_id]] = val
-                changed = True
-            # else: skip unresolvable
-
-    # Resolve align groups
-    new_align_x = None
-    if flex.align_x:
-        new_align_x = []
-        for group in flex.align_x:
-            resolved_nodes = []
-            for nid in group.nodes:
-                if isinstance(nid, int):
-                    resolved_nodes.append(nid)
-                elif nid in id_to_index:
-                    resolved_nodes.append(id_to_index[nid])
-                    changed = True
-            new_align_x.append(AlignGroup(nodes=resolved_nodes, weight=group.weight))
-
-    new_align_y = None
-    if flex.align_y:
-        new_align_y = []
-        for group in flex.align_y:
-            resolved_nodes = []
-            for nid in group.nodes:
-                if isinstance(nid, int):
-                    resolved_nodes.append(nid)
-                elif nid in id_to_index:
-                    resolved_nodes.append(id_to_index[nid])
-                    changed = True
-            new_align_y.append(AlignGroup(nodes=resolved_nodes, weight=group.weight))
+    resolved_constraints = []
+    for constraint in list(getattr(flex, "constraints", None) or []):
+        if isinstance(constraint, Pin):
+            resolved = dataclass_replace(
+                constraint,
+                sel=resolve_node_selection(constraint.sel, graph),
+            )
+        elif isinstance(constraint, Align):
+            sels = tuple(resolve_node_selection(sel, graph) for sel in tuple(constraint.sels))
+            resolved = Align(
+                *sels,
+                axis=constraint.axis,
+                at=constraint.at,
+                spacing=constraint.spacing,
+                strength=constraint.strength,
+                name=constraint.name,
+                system=constraint.system,
+                tags=constraint.tags,
+            )
+        elif isinstance(constraint, Order):
+            items = tuple(resolve_node_selection(item, graph) for item in tuple(constraint.items))
+            resolved = Order(
+                *items,
+                axis=constraint.axis,
+                gap=constraint.gap,
+                strength=constraint.strength,
+                name=constraint.name,
+                system=constraint.system,
+                tags=constraint.tags,
+            )
+        elif isinstance(constraint, Group):
+            sels = tuple(resolve_node_selection(sel, graph) for sel in tuple(constraint.sels))
+            resolved = Group(
+                *sels,
+                padding=constraint.padding,
+                strength=constraint.strength,
+                name=constraint.name,
+                system=constraint.system,
+                tags=constraint.tags,
+            )
+        elif isinstance(constraint, Separate):
+            resolved = dataclass_replace(
+                constraint,
+                a=resolve_node_selection(constraint.a, graph),
+                b=resolve_node_selection(constraint.b, graph),
+            )
+        elif isinstance(constraint, Anchor):
+            mapping = {
+                resolve_node_selection(node_id, graph)[0]: target
+                for node_id, target in constraint.mapping.items()
+            }
+            resolved = dataclass_replace(constraint, mapping=mapping)
+        elif isinstance(constraint, Focus):
+            resolved = dataclass_replace(
+                constraint,
+                sel=resolve_node_selection(constraint.sel, graph),
+            )
+        elif isinstance(constraint, Contain):
+            resolved = dataclass_replace(
+                constraint,
+                sel=resolve_node_selection(constraint.sel, graph),
+            )
+        elif isinstance(constraint, Emphasize):
+            resolved_items = []
+            for item in constraint.path_or_edges:
+                try:
+                    resolved_items.append(resolve_node_selection(item, graph))
+                except Exception:
+                    resolved_items.append(item)
+            resolved = Emphasize(
+                *resolved_items,
+                lane=constraint.lane,
+                strength=constraint.strength,
+                name=constraint.name,
+                system=constraint.system,
+                tags=constraint.tags,
+            )
+        else:
+            resolved = constraint
+        resolved_constraints.append(resolved)
+        changed = changed or resolved is not constraint
 
     if not changed:
         return flex
@@ -3787,7 +4322,5 @@ def _resolve_graph_flex(flex, id_to_index: dict):
     return LayoutFlex(
         node_sep=flex.node_sep,
         rank_sep=flex.rank_sep,
-        pins=new_pins if new_pins is not None else flex.pins,
-        align_x=new_align_x if new_align_x is not None else flex.align_x,
-        align_y=new_align_y if new_align_y is not None else flex.align_y,
+        constraints=resolved_constraints,
     )
