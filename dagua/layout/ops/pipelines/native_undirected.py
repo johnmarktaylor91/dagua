@@ -73,6 +73,15 @@ MAX_CONTEST_NODES = 1500
 # below is intentionally governed only by deterministic size schedules.
 DEFAULT_CANDIDATE_BUDGET_S = 25.0
 FULL_REFEREE_TOP_K = 8
+CLUSTER_EXTENDED_SCORE_KEYS = (
+    "cluster_exclusion_score",
+    "cluster_sibling_overlap_score",
+    "cluster_nesting_fidelity_score",
+    "cluster_edge_intrusion_score",
+    "cluster_label_occlusion_score",
+    "cluster_compactness_score",
+)
+CLUSTER_DUAL_ACCEPTANCE_MARGIN = 0.05
 MIN_OPTIONAL_ARM_REMAINING_S = 10.0
 ABSOLUTE_DEADLINE_RESERVE_S = 5.0
 PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
@@ -164,6 +173,66 @@ def _marketplace_family(candidate_name: str) -> str:
         if marker in candidate_name:
             return candidate_name.split(marker, 1)[0]
     return candidate_name
+
+
+@dataclass(frozen=True)
+class _ClusterScoreTelemetry:
+    """Old and extended composites from one clustered full-ruler metric pass.
+
+    Attributes
+    ----------
+    extended_score : float
+        Composite including the six R8 cluster-quality terms.
+    old_score : float
+        Composite after removing only the six R8 cluster-quality terms.
+    metrics : dict[str, float]
+        Numeric metric payload used for scoring.
+    """
+
+    extended_score: float
+    old_score: float
+    metrics: Dict[str, float]
+
+
+def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
+    """Return metrics with only the six R8 cluster-quality terms removed.
+
+    Parameters
+    ----------
+    metrics : dict[str, float]
+        Numeric metrics from ``dagua.metrics.full``.
+
+    Returns
+    -------
+    dict[str, float]
+        Copy of ``metrics`` with the extended cluster-quality keys omitted.
+    """
+    return {key: value for key, value in metrics.items() if key not in CLUSTER_EXTENDED_SCORE_KEYS}
+
+
+def _cluster_candidate_is_dual_admissible(
+    candidate: _ClusterScoreTelemetry,
+    incumbent: _ClusterScoreTelemetry,
+) -> bool:
+    """Return whether a clustered challenger satisfies the dual-ruler rule.
+
+    Parameters
+    ----------
+    candidate : _ClusterScoreTelemetry
+        Candidate extended and old-ruler scores.
+    incumbent : _ClusterScoreTelemetry
+        Incumbent extended and old-ruler scores.
+
+    Returns
+    -------
+    bool
+        ``True`` iff extended improves by the honest margin and old-ruler
+        score does not decrease.
+    """
+    return (
+        candidate.extended_score > incumbent.extended_score + CLUSTER_DUAL_ACCEPTANCE_MARGIN
+        and candidate.old_score >= incumbent.old_score
+    )
 
 
 def _portfolio_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
@@ -1015,6 +1084,43 @@ def _score_undirected_candidate(
     float
         Higher-is-better undirected composite score.
     """
+    return _score_undirected_candidate_payload(
+        pos,
+        problem,
+        cluster_ids,
+        aesthetic_profile,
+        all_pairs_dist,
+    )[0]
+
+
+def _score_undirected_candidate_payload(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    aesthetic_profile: Optional["AestheticProfile"] = None,
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> tuple[float, Optional[_ClusterScoreTelemetry]]:
+    """Score one undirected candidate and return clustered-ruler telemetry.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Problem carrying topology, cluster metadata, and optional label
+        geometry payloads.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids for the cluster-separation term.
+    aesthetic_profile : AestheticProfile, optional
+        Resolved aesthetic-priority profile shared by the contest.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    tuple[float, _ClusterScoreTelemetry | None]
+        Extended score and optional old/extended telemetry for clustered rows.
+    """
     from dagua.metrics import composite_auto, full
 
     metrics = full(
@@ -1027,17 +1133,79 @@ def _score_undirected_candidate(
         ),
         cluster_ids=cluster_ids,
         direction=problem.direction,
+        label_positions=problem.label_positions,
+        edge_labels=problem.edge_labels,
         all_pairs_dist=all_pairs_dist,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+        cluster_labels=problem.cluster_labels,
     )
     numeric = {
         key: float(value) for key, value in metrics.items() if isinstance(value, (int, float))
     }
     if aesthetic_profile is None:
-        return float(composite_auto(numeric, is_semantically_directed=False))
+        score = float(composite_auto(numeric, is_semantically_directed=False))
+        old_score = float(
+            composite_auto(_old_cluster_ruler_metrics(numeric), is_semantically_directed=False)
+        )
+    else:
+        from dagua.layout.aesthetics import reweighted_composite
 
-    from dagua.layout.aesthetics import reweighted_composite
+        score = reweighted_composite(numeric, is_directed=False, profile=aesthetic_profile)
+        old_score = reweighted_composite(
+            _old_cluster_ruler_metrics(numeric),
+            is_directed=False,
+            profile=aesthetic_profile,
+        )
+    telemetry = None
+    if problem.clusters:
+        telemetry = _ClusterScoreTelemetry(
+            extended_score=score,
+            old_score=old_score,
+            metrics=numeric,
+        )
+    return score, telemetry
 
-    return reweighted_composite(numeric, is_directed=False, profile=aesthetic_profile)
+
+def _select_undirected_winner(
+    scores: Dict[str, float],
+    telemetry: Dict[str, _ClusterScoreTelemetry],
+    incumbent_name: str = "incumbent",
+) -> str:
+    """Select an undirected winner while preserving current clustered outputs.
+
+    Parameters
+    ----------
+    scores : dict[str, float]
+        Extended full-referee score per finalist.
+    telemetry : dict[str, _ClusterScoreTelemetry]
+        Clustered old/extended telemetry per finalist. When present, existing
+        candidate families are ranked by the old ruler to keep 4A bit-stable;
+        new cluster families can use ``_cluster_candidate_is_dual_admissible``
+        before entering this contest.
+    incumbent_name : str, default="incumbent"
+        Deterministic incumbent key.
+
+    Returns
+    -------
+    str
+        Winner name. Non-cluster contests retain the existing argmax path.
+    """
+    best_name = incumbent_name
+    incumbent_telemetry = telemetry.get(incumbent_name)
+    for name, score in scores.items():
+        if name == incumbent_name:
+            continue
+        if incumbent_telemetry is not None:
+            candidate_telemetry = telemetry.get(name)
+            best_telemetry = telemetry.get(best_name)
+            if candidate_telemetry is None or best_telemetry is None:
+                continue
+            if candidate_telemetry.old_score > best_telemetry.old_score:
+                best_name = name
+        elif score > scores[best_name]:
+            best_name = name
+    return best_name
 
 
 def _proxy_undirected_candidate(
@@ -1902,20 +2070,33 @@ def _router_v2_large_mini_contest(
         name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
         for name, pos in positions.items()
     }
-    scores = {
-        name: _score_undirected_candidate_cached(
-            pos,
-            problem,
-            cluster_ids,
-            aesthetic_profile,
-            all_pairs_dist,
-        )
-        for name, pos in positions.items()
-    }
+    cluster_score_telemetry: Dict[str, _ClusterScoreTelemetry] = {}
+    if problem.clusters:
+        scores: Dict[str, float] = {}
+        for name, pos in positions.items():
+            score, score_telemetry = _score_undirected_candidate_payload(
+                pos,
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            scores[name] = score
+            if score_telemetry is not None:
+                cluster_score_telemetry[name] = score_telemetry
+    else:
+        scores = {
+            name: _score_undirected_candidate_cached(
+                pos,
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            for name, pos in positions.items()
+        }
     best_name = "incumbent" if "incumbent" in positions else "sfdp_prism"
-    for name, score in scores.items():
-        if name != best_name and score > scores[best_name]:
-            best_name = name
+    best_name = _select_undirected_winner(scores, cluster_score_telemetry, best_name)
     _log_marketplace_telemetry(
         route="undirected_large_mini",
         structural_gate="large_prism_shortlist",
@@ -2625,27 +2806,52 @@ def layout_native_undirected_portfolio(
     # reference counterparts. Preserve proxy budgeting for all other
     # challengers, then append every guarded raw variant deterministically.
     proxy_finalists = challenger_names[: full_score_budget - 1]
+    if n >= LARGE_CONTEST_NODE_THRESHOLD and cluster_ids is not None and challenger_names:
+        reserved_cluster_name = next(
+            (
+                name
+                for name in challenger_names
+                if name not in proxy_finalists
+                and _marketplace_family(name)
+                not in {_marketplace_family(finalist) for finalist in proxy_finalists}
+            ),
+            None,
+        )
+        if reserved_cluster_name is not None:
+            proxy_finalists.append(reserved_cluster_name)
     finalist_names = [
         "incumbent",
         *proxy_finalists,
         *(name for name in raw_finalist_names if name not in proxy_finalists),
     ]
-    scores = {
-        name: _score_undirected_candidate_cached(
-            positions[name],
-            problem,
-            cluster_ids,
-            aesthetic_profile,
-            all_pairs_dist,
-        )
-        for name in finalist_names
-    }
+    cluster_score_telemetry = {}
+    if problem.clusters:
+        scores = {}
+        for name in finalist_names:
+            score, score_telemetry = _score_undirected_candidate_payload(
+                positions[name],
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            scores[name] = score
+            if score_telemetry is not None:
+                cluster_score_telemetry[name] = score_telemetry
+    else:
+        scores = {
+            name: _score_undirected_candidate_cached(
+                positions[name],
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            for name in finalist_names
+        }
 
     # Argmax selection; strict inequality means ties go to the incumbent.
-    best_name = "incumbent"
-    for name, score in scores.items():
-        if name != "incumbent" and score > scores[best_name]:
-            best_name = name
+    best_name = _select_undirected_winner(scores, cluster_score_telemetry)
     _log_marketplace_telemetry(
         route="undirected",
         structural_gate=(

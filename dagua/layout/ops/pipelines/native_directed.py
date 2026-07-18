@@ -23,6 +23,15 @@ if TYPE_CHECKING:
 
 MAX_DIRECTED_CONTEST_NODES = 2000
 DIRECTED_FULL_REFEREE_TOP_K = 6
+CLUSTER_EXTENDED_SCORE_KEYS = (
+    "cluster_exclusion_score",
+    "cluster_sibling_overlap_score",
+    "cluster_nesting_fidelity_score",
+    "cluster_edge_intrusion_score",
+    "cluster_label_occlusion_score",
+    "cluster_compactness_score",
+)
+CLUSTER_DUAL_ACCEPTANCE_MARGIN = 0.05
 DIRECTED_FULL_SCORE_MIN_REMAINING_S = 5.0
 DIRECTED_LARGE_NODE_THRESHOLD = 250
 DIRECTED_LARGE_GRID_MIN_REMAINING_S = 240.0
@@ -79,6 +88,66 @@ class _RecombinantLayeredSpec:
     xcoord: str
 
 
+@dataclass(frozen=True)
+class _DirectedClusterScoreTelemetry:
+    """Old and extended directed composites from one full-ruler metric pass.
+
+    Attributes
+    ----------
+    extended_score : float
+        Directed composite including the six R8 cluster-quality terms.
+    old_score : float
+        Directed composite after removing only those six terms.
+    metrics : dict[str, float]
+        Numeric metric payload used for scoring.
+    """
+
+    extended_score: float
+    old_score: float
+    metrics: Dict[str, float]
+
+
+def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
+    """Return metrics with only the six R8 cluster-quality terms removed.
+
+    Parameters
+    ----------
+    metrics : dict[str, float]
+        Numeric metrics from ``dagua.metrics.full``.
+
+    Returns
+    -------
+    dict[str, float]
+        Copy of ``metrics`` with the extended cluster-quality keys omitted.
+    """
+    return {key: value for key, value in metrics.items() if key not in CLUSTER_EXTENDED_SCORE_KEYS}
+
+
+def _directed_cluster_candidate_is_dual_admissible(
+    candidate: _DirectedClusterScoreTelemetry,
+    incumbent: _DirectedClusterScoreTelemetry,
+) -> bool:
+    """Return whether a clustered directed challenger is admissible.
+
+    Parameters
+    ----------
+    candidate : _DirectedClusterScoreTelemetry
+        Candidate extended and old-ruler scores.
+    incumbent : _DirectedClusterScoreTelemetry
+        Incumbent extended and old-ruler scores.
+
+    Returns
+    -------
+    bool
+        ``True`` iff extended improves by the honest margin and old-ruler
+        score does not decrease.
+    """
+    return (
+        candidate.extended_score > incumbent.extended_score + CLUSTER_DUAL_ACCEPTANCE_MARGIN
+        and candidate.old_score >= incumbent.old_score
+    )
+
+
 def _score_directed_candidate(
     pos: torch.Tensor,
     problem: LayoutProblem,
@@ -103,6 +172,40 @@ def _score_directed_candidate(
     float
         Higher-is-better directed composite score.
     """
+    return _score_directed_candidate_referee_payload(
+        pos,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )[0]
+
+
+def _score_directed_candidate_referee_payload(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> tuple[float, Optional[_DirectedClusterScoreTelemetry]]:
+    """Score a directed finalist and return clustered-ruler telemetry.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed acyclic layout problem with optional cluster and label
+        metadata.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    tuple[float, _DirectedClusterScoreTelemetry | None]
+        Extended directed score and optional old/extended telemetry for
+        clustered rows.
+    """
     from dagua.metrics import composite_auto, full
 
     numeric = full(
@@ -115,10 +218,29 @@ def _score_directed_candidate(
         ),
         cluster_ids=cluster_ids,
         direction=problem.direction,
+        label_positions=problem.label_positions,
+        edge_labels=problem.edge_labels,
         all_pairs_dist=all_pairs_dist,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+        cluster_labels=problem.cluster_labels,
     )
     numeric["declared_hierarchical"] = True
-    return float(composite_auto(numeric, is_semantically_directed=True))
+    numeric_float = {
+        key: float(value) for key, value in numeric.items() if isinstance(value, (int, float))
+    }
+    score = float(composite_auto(numeric_float, is_semantically_directed=True))
+    old_score = float(
+        composite_auto(_old_cluster_ruler_metrics(numeric_float), is_semantically_directed=True)
+    )
+    telemetry = None
+    if problem.clusters:
+        telemetry = _DirectedClusterScoreTelemetry(
+            extended_score=score,
+            old_score=old_score,
+            metrics=numeric_float,
+        )
+    return score, telemetry
 
 
 def _score_directed_candidate_cached(
@@ -224,7 +346,12 @@ def _score_directed_candidate_payload(
         ),
         cluster_ids=cluster_ids,
         direction=problem.direction,
+        label_positions=problem.label_positions,
+        edge_labels=problem.edge_labels,
         all_pairs_dist=all_pairs_dist,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+        cluster_labels=problem.cluster_labels,
     )
     numeric["declared_hierarchical"] = True
     return (
@@ -273,6 +400,45 @@ def _directed_ordering_candidate_dual_dominates(
         all_pairs_dist,
     )
     return w5_dominates(candidate_pair, incumbent_pair), candidate_pair
+
+
+def _select_directed_winner(
+    scores: Dict[str, float],
+    telemetry: Dict[str, _DirectedClusterScoreTelemetry],
+) -> str:
+    """Select a directed winner while preserving current clustered outputs.
+
+    Parameters
+    ----------
+    scores : dict[str, float]
+        Extended full-referee score per finalist.
+    telemetry : dict[str, _DirectedClusterScoreTelemetry]
+        Clustered old/extended telemetry per finalist. When present, existing
+        candidate families are ranked by the old ruler to keep 4A bit-stable;
+        new cluster families can use
+        ``_directed_cluster_candidate_is_dual_admissible`` before entering
+        this contest.
+
+    Returns
+    -------
+    str
+        Winner name. Non-cluster contests retain the existing argmax path.
+    """
+    best_name = "incumbent"
+    incumbent_telemetry = telemetry.get("incumbent")
+    for name, score in scores.items():
+        if name == "incumbent":
+            continue
+        if incumbent_telemetry is not None:
+            candidate_telemetry = telemetry.get(name)
+            best_telemetry = telemetry.get(best_name)
+            if candidate_telemetry is None or best_telemetry is None:
+                continue
+            if candidate_telemetry.old_score > best_telemetry.old_score:
+                best_name = name
+        elif score > scores[best_name]:
+            best_name = name
+    return best_name
 
 
 def _proxy_directed_candidate(
@@ -2383,14 +2549,25 @@ def layout_native_directed_portfolio(
     offsets, targets = _build_csr(cpu_edges, n)
     all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
     cluster_ids = _build_cluster_ids(problem)
-    scores: Dict[str, float] = {
-        "incumbent": _score_directed_candidate_cached(
+    if problem.clusters:
+        incumbent_score, incumbent_score_telemetry = _score_directed_candidate_referee_payload(
             incumbent,
             problem,
             cluster_ids,
             all_pairs_dist,
         )
-    }
+    else:
+        incumbent_score = _score_directed_candidate_cached(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+        incumbent_score_telemetry = None
+    scores: Dict[str, float] = {"incumbent": incumbent_score}
+    cluster_score_telemetry: Dict[str, _DirectedClusterScoreTelemetry] = {}
+    if incumbent_score_telemetry is not None:
+        cluster_score_telemetry["incumbent"] = incumbent_score_telemetry
     ordering_w5_seed: Optional[torch.Tensor] = None
     if n > MAX_DIRECTED_CONTEST_NODES:
         _LOGGER.info(
@@ -2790,19 +2967,49 @@ def layout_native_directed_portfolio(
             for name in challenger_names
             if _directed_candidate_family(name) in admitted_families
         )
+        if cluster_ids is not None:
+            reserved_cluster_name = next(
+                (
+                    name
+                    for name in challenger_names
+                    if name not in finalist_names
+                    and _directed_candidate_family(name)
+                    not in {
+                        _directed_candidate_family(finalist)
+                        for finalist in finalist_names
+                        if finalist != "incumbent"
+                    }
+                ),
+                None,
+            )
+            if reserved_cluster_name is not None:
+                finalist_names.append(reserved_cluster_name)
     for name in finalist_names:
-        if name == "incumbent" or name in scores:
+        if name == "incumbent":
             continue
-        scores[name] = _score_directed_candidate_cached(
+        if not problem.clusters:
+            if name in scores:
+                continue
+            scores[name] = _score_directed_candidate_cached(
+                positions[name],
+                problem,
+                cluster_ids,
+                all_pairs_dist,
+            )
+            continue
+        if name in scores and name in cluster_score_telemetry:
+            continue
+        score, score_telemetry = _score_directed_candidate_referee_payload(
             positions[name],
             problem,
             cluster_ids,
             all_pairs_dist,
         )
-    best_name = "incumbent"
-    for name, score in scores.items():
-        if name != "incumbent" and score > scores[best_name]:
-            best_name = name
+        if name not in scores:
+            scores[name] = score
+        if score_telemetry is not None:
+            cluster_score_telemetry[name] = score_telemetry
+    best_name = _select_directed_winner(scores, cluster_score_telemetry)
     best_position = positions[best_name]
     if best_name != "incumbent" and _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
