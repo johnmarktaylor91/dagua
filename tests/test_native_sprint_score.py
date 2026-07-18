@@ -135,13 +135,14 @@ def test_stale_cached_clustered_row_ignored_and_six_keys_present(
     monkeypatch.setattr(scorer, "full", lambda *args, **kwargs: _cluster_metrics(12.0))
     monkeypatch.setattr(scorer, "composite_auto", _score_from_payload)
 
-    reused, reused_keys = scorer.load_legacy_field_rows(
+    reused, reused_keys, skipped_keys = scorer.load_legacy_field_rows(
         cache_path, [(graph.name, "dagre", [str(pos_path.resolve())])], {graph.name: graph}, "sig"
     )
     row = scorer.score_position(graph, str(pos_path), "dagre", "sig")
 
     assert reused == []
     assert reused_keys == set()
+    assert skipped_keys == set()
     assert row["score_origin"] == "fresh_positions"
     assert all(key in row["metrics"] for key in scorer.CLUSTER_SCORE_KEYS)
 
@@ -176,13 +177,83 @@ def test_noncluster_legacy_accepted_only_under_pinned_guard(
         )
 
     monkeypatch.setattr(scorer, "LEGACY_FIELD_CACHE_SHA256", scorer.sha256_file(cache_path))
-    reused, reused_keys = scorer.load_legacy_field_rows(
+    reused, reused_keys, skipped_keys = scorer.load_legacy_field_rows(
         cache_path, [("plain", "dagre", [str(pos_path.resolve())])], {"plain": graph}, "sig"
     )
 
     assert reused_keys == {("plain", "dagre")}
+    assert skipped_keys == set()
     assert reused[0]["score_origin"] == "legacy_cache_g2_noncluster"
     assert reused[0]["old_composite"] == reused[0]["extended_composite"] == 7.5
+
+
+def test_unscoreable_legacy_field_row_skipped_and_excluded_from_fresh_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy field error row is absent as a competitor and not fresh-scored."""
+    graph = _make_noncluster_graph("plain")
+    pos_path = _position_file(tmp_path, graph)
+    cache_path = tmp_path / "legacy.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "graph": "plain",
+                        "engine": "grip_reimpl",
+                        "best_path": None,
+                        "best_composite": None,
+                        "error": "torch.histc: range of [-nan,-nan] is not finite",
+                    }
+                ]
+            }
+        )
+    )
+    field_tasks = [("plain", "grip_reimpl", [str(pos_path.resolve())])]
+    monkeypatch.setattr(scorer, "LEGACY_FIELD_CACHE_SHA256", scorer.sha256_file(cache_path))
+    monkeypatch.setattr(scorer, "LEGACY_FIELD_CACHE_PAIR_COUNT", 1)
+
+    reused, reused_keys, skipped_keys = scorer.load_legacy_field_rows(
+        cache_path, field_tasks, {"plain": graph}, "sig"
+    )
+    excluded_keys = reused_keys | skipped_keys
+    fresh_field_tasks = [task for task in field_tasks if (task[0], task[1]) not in excluded_keys]
+
+    assert reused == []
+    assert reused_keys == set()
+    assert skipped_keys == {("plain", "grip_reimpl")}
+    assert fresh_field_tasks == []
+
+
+def test_legacy_field_row_with_bad_nonnull_path_still_fails_integrity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy field row with a non-null missing path remains an integrity error."""
+    graph = _make_noncluster_graph("plain")
+    pos_path = _position_file(tmp_path, graph)
+    missing_path = tmp_path / "missing.pt"
+    cache_path = tmp_path / "legacy.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "graph": "plain",
+                        "engine": "dagre",
+                        "best_path": str(missing_path),
+                        "best_composite": None,
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(scorer, "LEGACY_FIELD_CACHE_SHA256", scorer.sha256_file(cache_path))
+    monkeypatch.setattr(scorer, "LEGACY_FIELD_CACHE_PAIR_COUNT", 1)
+
+    with pytest.raises(RuntimeError, match="best_path is not scoreable"):
+        scorer.load_legacy_field_rows(
+            cache_path, [("plain", "dagre", [str(pos_path.resolve())])], {"plain": graph}, "sig"
+        )
 
 
 def test_scoring_signature_mismatch_causes_rescore(tmp_path: Path) -> None:
