@@ -5862,6 +5862,36 @@ def _anytime_fallback_positions(
     return out - out.mean(dim=0, keepdim=True)
 
 
+def _apply_public_direction_frame(pos: torch.Tensor, direction: str) -> torch.Tensor:
+    """Transform canonical TB native coordinates into the public direction.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Canonical TB position tensor with shape ``[N, 2]``.
+    direction : str
+        Public layout direction, one of ``TB``, ``BT``, ``LR``, or ``RL``.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor transformed into the public direction frame. ``TB`` is
+        returned unchanged so existing TB native rows remain byte-identical.
+    """
+    if direction == "TB":
+        return pos
+    result = pos.clone()
+    if direction == "BT":
+        result[:, 1] = -pos[:, 1]
+    elif direction == "LR":
+        result[:, 0] = pos[:, 1]
+        result[:, 1] = pos[:, 0]
+    elif direction == "RL":
+        result[:, 0] = -pos[:, 1]
+        result[:, 1] = pos[:, 0]
+    return result
+
+
 def layout_dagua_native_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -5949,6 +5979,25 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    public_direction = str(getattr(effective_config, "direction", "TB"))
+    if public_direction in {"BT", "LR", "RL"}:
+        effective_config.direction = "TB"
+
+    def public_pos(pos: torch.Tensor) -> torch.Tensor:
+        """Return native positions in the declared public direction.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate-selected canonical TB positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Public-frame positions with the direction transform applied once.
+        """
+        return _apply_public_direction_frame(pos, public_direction)
+
     owns_terminal_w5 = not bool(getattr(effective_config, "_dagua_native_terminal_w5_owner", False))
     if owns_terminal_w5:
         setattr(effective_config, "_dagua_native_terminal_w5_owner", True)
@@ -5998,17 +6047,19 @@ def layout_dagua_native_pipeline(
                 cluster_parents,
             )
         if owns_terminal_w5:
-            return _terminal_w5_polish(
-                legacy_pos,
-                edge_index=edge_index,
-                node_sizes=node_sizes,
-                config=effective_config,
-                structure=graph_structure,
-                direction=effective_config.direction,
-                clusters=clusters,
-                cluster_parents=cluster_parents,
+            return public_pos(
+                _terminal_w5_polish(
+                    legacy_pos,
+                    edge_index=edge_index,
+                    node_sizes=node_sizes,
+                    config=effective_config,
+                    structure=graph_structure,
+                    direction=effective_config.direction,
+                    clusters=clusters,
+                    cluster_parents=cluster_parents,
+                )
             )
-        return legacy_pos
+        return public_pos(legacy_pos)
 
     # Stress route for degenerate-layering cyclic graphs. Ported
     # from the legacy monolith (legacy monolith) which was lost during a
@@ -6067,6 +6118,8 @@ def layout_dagua_native_pipeline(
                             node_sizes=node_sizes,
                             seed=int(stress_seed),
                         )
+                        if isinstance(stress_pos, tuple):
+                            stress_pos = stress_pos[0]
                         if stress_pos.shape[0] > 1:
                             mean_w = (
                                 float(node_sizes[:, 0].mean().item())
@@ -6129,17 +6182,19 @@ def layout_dagua_native_pipeline(
                                     cluster_parents,
                                 )
                             if owns_terminal_w5:
-                                return _terminal_w5_polish(
-                                    stress_pos,
-                                    edge_index=edge_index,
-                                    node_sizes=node_sizes,
-                                    config=effective_config,
-                                    structure=graph_structure,
-                                    direction=effective_config.direction,
-                                    clusters=clusters,
-                                    cluster_parents=cluster_parents,
+                                return public_pos(
+                                    _terminal_w5_polish(
+                                        stress_pos,
+                                        edge_index=edge_index,
+                                        node_sizes=node_sizes,
+                                        config=effective_config,
+                                        structure=graph_structure,
+                                        direction=effective_config.direction,
+                                        clusters=clusters,
+                                        cluster_parents=cluster_parents,
+                                    )
                                 )
-                            return stress_pos
+                            return public_pos(stress_pos)
         except Exception as exc:
             if is_worker_timeout_like_exception(exc):
                 raise
@@ -6206,27 +6261,29 @@ def layout_dagua_native_pipeline(
         if best_pos is None:
             raise RuntimeError("dagua_native multi-start did not produce candidate positions.")
         if owns_terminal_w5:
-            return _terminal_w5_polish(
-                best_pos,
-                edge_index=edge_index,
-                node_sizes=node_sizes,
-                config=effective_config,
-                structure=contest_structure,
-                direction=effective_config.direction,
-                clusters=clusters,
-                cluster_parents=cluster_parents,
-                extra_seeds=w5_seed_positions,
+            return public_pos(
+                _terminal_w5_polish(
+                    best_pos,
+                    edge_index=edge_index,
+                    node_sizes=node_sizes,
+                    config=effective_config,
+                    structure=contest_structure,
+                    direction=effective_config.direction,
+                    clusters=clusters,
+                    cluster_parents=cluster_parents,
+                    extra_seeds=w5_seed_positions,
+                )
             )
-        return best_pos
+        return public_pos(best_pos)
 
     requested_device = device or effective_config.device
     if requested_device == "cuda" and not torch.cuda.is_available():
         requested_device = "cpu"
     target_device = torch.device(requested_device)
     if num_nodes == 0:
-        return torch.zeros((0, 2), dtype=torch.float32, device=target_device)
+        return public_pos(torch.zeros((0, 2), dtype=torch.float32, device=target_device))
     if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32, device=target_device)
+        return public_pos(torch.zeros((1, 2), dtype=torch.float32, device=target_device))
 
     (
         target_device,
@@ -6262,7 +6319,7 @@ def layout_dagua_native_pipeline(
             edge_weights=prepared_edge_weights,
         )
         if dot_position is not None:
-            return dot_position.to(device=target_device, dtype=torch.float32)
+            return public_pos(dot_position.to(device=target_device, dtype=torch.float32))
     resolved_seed = seed if seed is not None else effective_config.seed
     if resolved_seed is not None:
         torch.manual_seed(int(resolved_seed))
@@ -6539,12 +6596,12 @@ def layout_dagua_native_pipeline(
         return result
 
     try:
-        return run_pipeline_body()
+        return public_pos(run_pipeline_body())
     except Exception as exc:
         if is_worker_timeout_like_exception(exc):
             anytime_best = getattr(prepared_config, "_dagua_native_anytime_best", None)
             if anytime_best is not None:
-                return anytime_best.pos.to(device=target_device, dtype=torch.float32)
+                return public_pos(anytime_best.pos.to(device=target_device, dtype=torch.float32))
         raise
 
 
