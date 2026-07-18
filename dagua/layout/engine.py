@@ -1075,6 +1075,9 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
     elif remapped_from_default:
         config = copy.copy(config)
         config.algorithm = "dagua_native"
+        graph_direction = getattr(graph, "direction", None)
+        if graph_direction in {"TB", "BT", "LR", "RL"}:
+            config.direction = graph_direction
 
     if config.algorithm is not None:
         import inspect
@@ -1180,8 +1183,6 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             graph._prepare_for_layout()
             try:
                 pos = pipeline_fn(**kwargs)
-                direction = config.direction if config else getattr(graph, "direction", "TB")
-                pos = _apply_direction(pos, direction)
                 pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
                 pos = pos.to(dtype=torch.float32)
                 graph.cache_layout(pos)
