@@ -24,6 +24,41 @@ _MC_SCALE = 256
 _MIN_QUIT = 8
 
 
+def _validate_unique_rank_entries(ranks: Sequence[Sequence[int]]) -> None:
+    """Reject malformed mincross ranks with duplicate node entries.
+
+    Parameters
+    ----------
+    ranks : sequence of sequence of int
+        Rank inventory passed to Graphviz dot mincross. Each node id must
+        appear in exactly one rank entry.
+
+    Returns
+    -------
+    None
+        Returns when every node id is unique across all ranks.
+
+    Raises
+    ------
+    ValueError
+        Raised when one or more node ids appear more than once.
+    """
+    seen: set[int] = set()
+    duplicates: set[int] = set()
+    for rank in ranks:
+        for node in rank:
+            node_id = int(node)
+            if node_id in seen:
+                duplicates.add(node_id)
+            seen.add(node_id)
+    if duplicates:
+        duplicate_sample = ", ".join(str(node) for node in sorted(duplicates)[:8])
+        raise ValueError(
+            "Graphviz mincross ranks must contain each node exactly once; "
+            f"duplicate node ids: {duplicate_sample}"
+        )
+
+
 if _NUMBA_AVAILABLE:
 
     @njit(cache=True)
@@ -233,6 +268,7 @@ def graphviz_mincross(
         non-reverse transposition.
     """
     base_ranks = [list(rank) for rank in ranks]
+    _validate_unique_rank_entries(base_ranks)
     if not base_ranks:
         return []
 
