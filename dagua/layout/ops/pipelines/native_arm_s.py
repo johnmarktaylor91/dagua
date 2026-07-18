@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Optional
 
 import torch
 
@@ -11,7 +11,8 @@ from dagua.layout.ops.state import LayoutProblem
 from dagua.layout.projection import project_overlaps
 
 ARM_S_CANDIDATE_PREFIX = "arm_s_stress"
-ARM_S_PRIOR_S = 55.0
+ARM_S_PRIOR_S = 90.0
+ARM_S_FULL_REFEREE_PRIOR_S = 55.0
 ARM_S_STRESS_STEPS = 30
 ARM_S_STRESS_SEED = 42
 ARM_S_SCALE_MULTIPLIERS = (1.6, 2.5, 4.0, 10.0)
@@ -68,6 +69,25 @@ class ArmSCandidate:
     scale_multiplier: float
     pre_projection_overlap_count: int
     projection: ArmSProjectionTelemetry
+
+
+@dataclass(frozen=True)
+class ArmSProxyScore:
+    """Cheap Arm S ladder score used before the honest referee.
+
+    Parameters
+    ----------
+    candidate_name : str
+        Stable name of the scale-ladder candidate.
+    score : float
+        Higher-is-better proxy score.
+    overlap_count : int
+        Exact node-box overlap count used as a hard proxy penalty.
+    """
+
+    candidate_name: str
+    score: float
+    overlap_count: int
 
 
 @dataclass(frozen=True)
@@ -289,6 +309,83 @@ def _project_last_mile(
     )
 
 
+def arm_s_proxy_score(
+    candidate: ArmSCandidate,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor] = None,
+) -> ArmSProxyScore:
+    """Score one Arm S scale variant with cheap local metrics.
+
+    Parameters
+    ----------
+    candidate : ArmSCandidate
+        Scale-ladder candidate to proxy-score.
+    problem : LayoutProblem
+        Prepared native layout problem.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids for cheap cluster separation metrics.
+
+    Returns
+    -------
+    ArmSProxyScore
+        Proxy payload. The honest admission still happens later with
+        ``metrics.full``; this score only chooses which scale gets that pass.
+    """
+    if problem.node_sizes is None:
+        return ArmSProxyScore(
+            candidate_name=candidate.name,
+            score=float("-inf"),
+            overlap_count=0,
+        )
+    from dagua.metrics import (
+        cluster_silhouette_score,
+        composite_auto,
+        isotonic_stress,
+        neighborhood_preservation,
+        quick,
+    )
+
+    cpu_pos = candidate.positions.detach().to(device="cpu", dtype=torch.float32)
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    cpu_sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    numeric = quick(
+        cpu_pos,
+        cpu_edges,
+        node_sizes=cpu_sizes,
+        direction=problem.direction,
+        seed=ARM_S_STRESS_SEED,
+    )
+    numeric.update(
+        isotonic_stress(
+            cpu_pos,
+            cpu_edges,
+            int(problem.num_nodes),
+            n_sources=32,
+            n_targets=128,
+        )
+    )
+    numeric.update(
+        neighborhood_preservation(
+            cpu_pos,
+            cpu_edges,
+            int(problem.num_nodes),
+            n_samples=512,
+        )
+    )
+    if cluster_ids is not None:
+        numeric.update(cluster_silhouette_score(cpu_pos, cluster_ids.detach().to(device="cpu")))
+    overlap_count = exact_arm_s_overlap_count(cpu_pos, cpu_sizes)
+    numeric["overlap_count"] = float(overlap_count)
+    proxy = float(composite_auto(numeric, is_semantically_directed=False))
+    if overlap_count:
+        proxy -= 1000.0 * float(overlap_count)
+    return ArmSProxyScore(
+        candidate_name=candidate.name,
+        score=proxy,
+        overlap_count=overlap_count,
+    )
+
+
 def build_arm_s_stress_candidates(problem: LayoutProblem) -> dict[str, ArmSCandidate]:
     """Build cluster-gated Arm S stress-seeded portfolio candidates.
 
@@ -336,6 +433,64 @@ def build_arm_s_stress_candidates(problem: LayoutProblem) -> dict[str, ArmSCandi
             projection=projection,
         )
     return candidates
+
+
+def select_arm_s_proxy_finalist(
+    candidates: Mapping[str, ArmSCandidate],
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor] = None,
+) -> tuple[Optional[ArmSCandidate], dict[str, ArmSProxyScore]]:
+    """Select the single Arm S ladder variant that reaches full scoring.
+
+    Parameters
+    ----------
+    candidates : Mapping[str, ArmSCandidate]
+        Full deterministic scale ladder keyed by candidate name.
+    problem : LayoutProblem
+        Prepared native layout problem.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids for cheap cluster separation metrics.
+
+    Returns
+    -------
+    tuple[ArmSCandidate | None, dict[str, ArmSProxyScore]]
+        The best proxy candidate, or ``None`` when no finite candidate exists,
+        plus proxy telemetry for every evaluated ladder member.
+    """
+    proxy_scores: dict[str, ArmSProxyScore] = {}
+    best: Optional[ArmSCandidate] = None
+    best_score = float("-inf")
+    for name, candidate in candidates.items():
+        score = arm_s_proxy_score(candidate, problem, cluster_ids)
+        proxy_scores[name] = score
+        if score.score > best_score:
+            best = candidate
+            best_score = score.score
+    return best, proxy_scores
+
+
+def build_arm_s_stress_finalist(
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor] = None,
+) -> tuple[Optional[ArmSCandidate], dict[str, ArmSCandidate], dict[str, ArmSProxyScore]]:
+    """Build the Arm S ladder and return only its cheap-proxy finalist.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared native layout problem.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids for cheap cluster separation metrics.
+
+    Returns
+    -------
+    tuple[ArmSCandidate | None, dict[str, ArmSCandidate], dict[str, ArmSProxyScore]]
+        Single finalist selected by the cheap proxy, the complete ladder
+        payload for telemetry, and per-scale proxy scores.
+    """
+    candidates = build_arm_s_stress_candidates(problem)
+    finalist, proxy_scores = select_arm_s_proxy_finalist(candidates, problem, cluster_ids)
+    return finalist, candidates, proxy_scores
 
 
 def evaluate_arm_s_admission(
@@ -387,14 +542,19 @@ def evaluate_arm_s_admission(
 __all__ = [
     "ARM_S_ACCEPTANCE_MARGIN",
     "ARM_S_CANDIDATE_PREFIX",
+    "ARM_S_FULL_REFEREE_PRIOR_S",
     "ARM_S_PRIOR_S",
     "ARM_S_STRICT_WIN_REFERENCE",
     "ArmSAdmissionReport",
     "ArmSCandidate",
     "ArmSProjectionTelemetry",
+    "ArmSProxyScore",
+    "arm_s_proxy_score",
     "bounded_arm_s_overlap_heal",
+    "build_arm_s_stress_finalist",
     "build_arm_s_stress_candidates",
     "calibrate_arm_s_scale",
     "evaluate_arm_s_admission",
     "exact_arm_s_overlap_count",
+    "select_arm_s_proxy_finalist",
 ]

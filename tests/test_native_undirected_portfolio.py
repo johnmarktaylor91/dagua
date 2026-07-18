@@ -26,6 +26,7 @@ from dagua.layout.ops.pipelines.native_arm_s import (
     ArmSCandidate,
     ArmSProjectionTelemetry,
     build_arm_s_stress_candidates,
+    build_arm_s_stress_finalist,
     calibrate_arm_s_scale,
     evaluate_arm_s_admission,
     exact_arm_s_overlap_count,
@@ -39,6 +40,7 @@ from dagua.layout.ops.pipelines.native_undirected import (
     MAX_CONTEST_NODES,
     NEATO_QUALITY_THRESHOLD,
     TSNET_PERPLEXITIES,
+    _arm_s_full_score_budget_available,
     _candidate_is_degenerate,
     _candidate_is_eligible,
     _candidate_refinement_steps,
@@ -48,11 +50,13 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _log_marketplace_telemetry,
     _neato_in_contest,
     _portfolio_has_budget,
+    _predicted_arm_budget_preserving_arm_s_score,
     _predicted_undirected_arm_budget_available,
     _prediction_cpu_elapsed_s,
     _project_candidate_prism,
     _record_insufficient_predicted_budget_skip,
     _repair_flung_isolates,
+    _restore_proxy_finalist_slots,
     _rgg_geometric_seed_candidate,
     _rgg_geometric_seed_enabled,
     _score_undirected_candidate,
@@ -1071,6 +1075,105 @@ def test_arm_s_fake_stress_seed_builds_predeclared_scale_ladder(
         assert payload.positions.shape == (graph.num_nodes, 2)
         assert payload.projection.displacement_ratio <= 0.25
         assert exact_arm_s_overlap_count(payload.positions, problem.node_sizes) == 0
+
+
+def test_arm_s_proxy_prefilter_returns_one_full_score_finalist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arm S builds the full ladder but exposes one proxy-selected finalist."""
+    import importlib
+
+    stress_sgd = importlib.import_module("dagua.layout.ops.pipelines.stress_sgd")
+
+    graph = _clustered_ring_graph(num_nodes=8)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 2.0, dtype=torch.float32),
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        seed=42,
+    )
+    seed = torch.stack(
+        (
+            torch.arange(graph.num_nodes, dtype=torch.float32) * 10.0,
+            torch.zeros(graph.num_nodes, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    calls: list[int] = []
+
+    def fake_stress_seed(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic fake stress seed."""
+        del args, kwargs
+        calls.append(1)
+        return seed
+
+    monkeypatch.setattr(stress_sgd, "layout_stress_sgd_pipeline", fake_stress_seed)
+
+    finalist, ladder, proxy_scores = build_arm_s_stress_finalist(problem)
+
+    assert len(calls) == 1
+    assert len(ladder) == len(ARM_S_SCALE_MULTIPLIERS)
+    assert set(proxy_scores) == set(ladder)
+    assert finalist is not None
+    assert finalist.name in ladder
+
+
+def test_arm_s_full_score_budget_uses_one_referee_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final Arm S score gate uses the single-referee predicted cost."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 120.0
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(nu.time, "process_time", lambda: 10.0)
+
+    assert _arm_s_full_score_budget_available(config, predicted_cost_s=6.0)
+    assert not _arm_s_full_score_budget_available(config, predicted_cost_s=8.0)
+
+
+def test_late_arms_preserve_pending_arm_s_score_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-Arm-S arms must leave room for the pending honest score."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 300.0
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(nu.time, "process_time", lambda: 10.0)
+
+    assert _predicted_arm_budget_preserving_arm_s_score(
+        config,
+        predicted_cost_s=45.0,
+        arm_s_pending=False,
+    )
+    assert not _predicted_arm_budget_preserving_arm_s_score(
+        config,
+        predicted_cost_s=45.0,
+        arm_s_pending=True,
+    )
+
+
+def test_arm_s_rejection_restores_displaced_proxy_challenger() -> None:
+    """Removing Arm S refills its proxy slot with the next challenger."""
+    finalist_names = ["incumbent", "arm_s_stress_k10", "cluster_sfdp"]
+    challenger_names = ["arm_s_stress_k10", "cluster_sfdp", "community_scaffold", "sfdp"]
+
+    restored = _restore_proxy_finalist_slots(
+        finalist_names=["incumbent", "cluster_sfdp"],
+        challenger_names=challenger_names,
+        raw_finalist_names=[],
+        proxy_slot_count=2,
+        excluded_names={"arm_s_stress_k10"},
+    )
+
+    assert "arm_s_stress_k10" not in restored
+    assert restored == ["incumbent", "cluster_sfdp", "community_scaffold"]
+    assert finalist_names[1] == "arm_s_stress_k10"
 
 
 def test_arm_s_named_floor_admission_drops_compactness_floor() -> None:
