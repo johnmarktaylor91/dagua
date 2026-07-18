@@ -481,6 +481,30 @@ def _remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     return float(deadline) - time.perf_counter()
 
 
+def _w5_first_score_epilogue_has_wall_headroom(config: Optional[LayoutConfig]) -> bool:
+    """Return whether one terminal checkpoint score has benchmark wall headroom.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark deadline metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when no benchmark wall deadline exists, or when the measured
+        remaining wall time can fit one referee score with a safety margin.
+    """
+    wall_remaining = _remaining_s(config)
+    if wall_remaining is None:
+        return True
+    referee_s = float(
+        getattr(config, "_dagua_native_w5_referee_cost_s", _MEASURED_COST_DEFAULT_REFEREE_S)
+    )
+    referee_s = max(1.0e-6, referee_s)
+    return wall_remaining > 2.0 * referee_s + 1.0
+
+
 def _stack_graph_name() -> Optional[str]:
     """Return a benchmark graph name discovered from active driver frames.
 
@@ -2076,6 +2100,7 @@ def run_w5_finisher(
     routed_mode = "skip"
     incumbent_overlap = _overlap_count(incumbent_pos, size_work)
     deadline_returned = False
+    first_score_epilogue_attempted = False
     for seed in kept_seeds:
         seed_accepted_entry = len(accepted)
         if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
@@ -2189,15 +2214,34 @@ def run_w5_finisher(
                     )
                     scored_points.append((steps, final_pos, final_loss))
                 for step, checkpoint_pos, checkpoint_loss in scored_points[:max_checkpoints]:
+                    epilogue_scoring = False
                     if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
                         config,
                         remaining_entry,
                     ):
                         deadline_returned = True
-                        break
-                    if time.monotonic() >= deadline:
+                        if (
+                            checkpoints
+                            or first_score_epilogue_attempted
+                            or not scored_points
+                            or not _w5_first_score_epilogue_has_wall_headroom(config)
+                        ):
+                            break
+                        step, checkpoint_pos, checkpoint_loss = scored_points[-1]
+                        first_score_epilogue_attempted = True
+                        epilogue_scoring = True
+                    if not epilogue_scoring and time.monotonic() >= deadline:
                         deadline_returned = True
-                        break
+                        if (
+                            checkpoints
+                            or first_score_epilogue_attempted
+                            or not scored_points
+                            or not _w5_first_score_epilogue_has_wall_headroom(config)
+                        ):
+                            break
+                        step, checkpoint_pos, checkpoint_loss = scored_points[-1]
+                        first_score_epilogue_attempted = True
+                        epilogue_scoring = True
                     viability_started = time.perf_counter()
                     checkpoint_overlap = _overlap_count(checkpoint_pos, size_work)
                     if checkpoint_overlap > incumbent_overlap:
@@ -2213,11 +2257,15 @@ def run_w5_finisher(
                         _increment_count(viability_counts, "drop_degenerate")
                         _increment_count(viability_drop_counts, "degenerate")
                         viability_s += max(0.0, time.perf_counter() - viability_started)
+                        if epilogue_scoring:
+                            break
                         continue
                     if _overlap_count(checkpoint_pos, size_work) > incumbent_overlap:
                         _increment_count(viability_counts, "drop_overlap_regressed")
                         _increment_count(viability_drop_counts, "overlap_regressed")
                         viability_s += max(0.0, time.perf_counter() - viability_started)
+                        if epilogue_scoring:
+                            break
                         continue
                     _increment_count(viability_counts, "scored_viable")
                     viability_s += max(0.0, time.perf_counter() - viability_started)
@@ -2231,9 +2279,13 @@ def run_w5_finisher(
                         if is_worker_timeout_like_exception(exc):
                             raise
                         _increment_count(viability_counts, "drop_score_exception")
+                        if epilogue_scoring:
+                            break
                         continue
                     if not math.isfinite(honest.directed) or not math.isfinite(honest.undirected):
                         _increment_count(viability_counts, "drop_nonfinite_score")
+                        if epilogue_scoring:
+                            break
                         continue
                     directed_delta = honest.directed - winner_score_pair.directed
                     undirected_delta = honest.undirected - winner_score_pair.undirected
@@ -2275,6 +2327,8 @@ def run_w5_finisher(
                         )
                     else:
                         rejected.append(checkpoint)
+                    if epilogue_scoring:
+                        break
                 phase_timings.append(
                     W5PhaseTiming(
                         seed=seed.name,
