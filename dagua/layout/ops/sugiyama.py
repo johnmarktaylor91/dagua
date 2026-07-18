@@ -2750,7 +2750,7 @@ def _barycenter_ordering(
             for source, target in zip(edge_cpu[0].tolist(), edge_cpu[1].tolist())
         ]
         graphviz_seed_order = graphviz_node_order if use_graphviz_node_order else None
-        if graphviz_cluster_members:
+        if graphviz_cluster_members and graphviz_cluster_parents is not None:
             ordered_layers = _graphviz_skeleton_cluster_ordering(
                 ranks=ordered_layers,
                 edges=edge_pairs,
