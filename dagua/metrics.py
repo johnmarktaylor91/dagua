@@ -2223,6 +2223,30 @@ def _cluster_profile_or_none(
     )
 
 
+def _cluster_descendant_names(profile: ClusterGeometryProfile, name: str) -> frozenset[str]:
+    """Return cluster names in ``name``'s strict child subtree.
+
+    Parameters
+    ----------
+    profile : ClusterGeometryProfile
+        Shared cluster geometry and hierarchy profile.
+    name : str
+        Cluster whose descendant clusters should be returned.
+
+    Returns
+    -------
+    frozenset[str]
+        Strict descendant cluster names, excluding ``name`` itself.
+    """
+    descendants: set[str] = set()
+    stack = list(profile.tree.children_per_cluster[name])
+    while stack:
+        child_name = stack.pop()
+        descendants.add(child_name)
+        stack.extend(profile.tree.children_per_cluster[child_name])
+    return frozenset(descendants)
+
+
 def cluster_exclusion_score(
     pos: torch.Tensor,
     node_sizes: Optional[torch.Tensor] = None,
@@ -2234,10 +2258,11 @@ def cluster_exclusion_score(
 ) -> Dict[str, Any]:
     """Score whether foreign nodes intrude into derived cluster boxes.
 
-    Formula: for each cluster ``K`` and every non-descendant node AABB ``B``,
-    compute ``area(K_box ∩ B) / min(area(K_box), area(B))``; the score is
-    ``1 - mean(clamped_ratio)`` over all tested pairs. Descendant nodes are
-    excluded because membership containment is true by construction.
+    Formula: for each cluster ``K``, sum foreign node-AABB intruded area and
+    divide by ``K``'s box area; the score is ``1 - mean(clamped_cluster_ratio)``.
+    Descendant nodes are excluded because membership containment is true by
+    construction. Node labels are not first-class in this substrate, so this
+    metric intentionally scores node AABBs only.
 
     Parameters
     ----------
@@ -2270,16 +2295,15 @@ def cluster_exclusion_score(
     for name in cluster_profile.cluster_names:
         box = cluster_profile.boxes[name]
         cluster_area = max(_bbox_area(box.bounds), 1e-12)
+        intruded_area = 0.0
         for node_index, node_bounds in enumerate(cluster_profile.node_bounds):
             if node_index in box.descendants:
                 continue
             overlap = _bbox_intersection_area(box.bounds, node_bounds)
-            if overlap <= 0.0:
-                penalties.append(0.0)
-                continue
-            intrusions += 1
-            denominator = max(1e-12, min(cluster_area, _bbox_area(node_bounds)))
-            penalties.append(min(1.0, overlap / denominator))
+            if overlap > 0.0:
+                intrusions += 1
+                intruded_area += overlap
+        penalties.append(min(1.0, intruded_area / cluster_area))
     score = 1.0 - float(np.mean(penalties)) if penalties else 1.0
     return {"cluster_exclusion_score": max(0.0, score), "cluster_exclusion_intrusions": intrusions}
 
@@ -2356,10 +2380,10 @@ def cluster_nesting_fidelity_score(
 ) -> Dict[str, Any]:
     """Score whether visual enclosure matches declared nested parents.
 
-    Formula: for every cluster box, find the smallest-area other cluster box
-    that encloses it. A child scores 1 when that minimal enclosing box is its
-    declared parent; a root scores 1 when no other box encloses it. The metric
-    is the mean of those binary fidelities.
+    Formula: for every cluster box, find the smallest-area non-descendant other
+    cluster box that encloses it. A child scores 1 when that minimal enclosing
+    box is its declared parent; a root scores 1 when no other box encloses it.
+    The metric is the mean of those binary fidelities.
 
     Parameters
     ----------
@@ -2391,21 +2415,31 @@ def cluster_nesting_fidelity_score(
     violations = 0
     for name in cluster_profile.cluster_names:
         bounds = cluster_profile.boxes[name].bounds
+        own_descendant_clusters = _cluster_descendant_names(cluster_profile, name)
         enclosing = [
             other_name
             for other_name in cluster_profile.cluster_names
             if other_name != name
+            and other_name not in own_descendant_clusters
             and _bbox_contains(cluster_profile.boxes[other_name].bounds, bounds)
         ]
-        minimal = min(
-            enclosing,
-            key=lambda other_name: (
-                _bbox_area(cluster_profile.boxes[other_name].bounds),
-                other_name,
-            ),
-            default=None,
-        )
         expected = cluster_profile.tree.parents[name]
+        minimal = None
+        if enclosing:
+            minimal_area = min(
+                _bbox_area(cluster_profile.boxes[other_name].bounds) for other_name in enclosing
+            )
+            minimal_candidates = [
+                other_name
+                for other_name in enclosing
+                if math.isclose(
+                    _bbox_area(cluster_profile.boxes[other_name].bounds),
+                    minimal_area,
+                    rel_tol=1.0e-12,
+                    abs_tol=1.0e-9,
+                )
+            ]
+            minimal = expected if expected in minimal_candidates else minimal_candidates[0]
         match = minimal == expected
         matches.append(1.0 if match else 0.0)
         if not match:
@@ -2428,11 +2462,10 @@ def cluster_edge_intrusion_score(
 ) -> Dict[str, Any]:
     """Score foreign edge segments that pass through cluster interiors.
 
-    Formula: for each cluster ``K`` and each edge with neither endpoint in
-    ``K``'s descendants, clip the segment against ``K``'s padded box and divide
-    inside length by the cluster-box diagonal. The score is
-    ``1 - mean(clamped_normalized_length)``. Incident edges are ignored because
-    they are allowed to enter through the boundary.
+    Formula: for each cluster ``K``, clip every foreign edge segment against
+    ``K``'s padded box, sum clipped interior length, and divide by the cluster
+    diagonal. The score is ``1 - mean(clamped_cluster_ratio)``. Incident edges
+    are ignored because they are allowed to enter through the boundary.
 
     Parameters
     ----------
@@ -2474,6 +2507,7 @@ def cluster_edge_intrusion_score(
         diagonal = math.hypot(bounds[2] - bounds[0], bounds[3] - bounds[1])
         if diagonal <= 1e-12:
             continue
+        clipped_length = 0.0
         for source, target in edges.t().tolist():
             if int(source) in box.descendants or int(target) in box.descendants:
                 continue
@@ -2484,7 +2518,8 @@ def cluster_edge_intrusion_score(
             )
             if length > 1e-9:
                 intrusions += 1
-            penalties.append(min(1.0, length / diagonal))
+                clipped_length += length
+        penalties.append(min(1.0, clipped_length / diagonal))
     score = 1.0 - float(np.mean(penalties)) if penalties else 1.0
     return {"cluster_edge_intrusion_score": max(0.0, score), "cluster_edge_intrusions": intrusions}
 
@@ -2578,10 +2613,11 @@ def cluster_compactness_score(
 ) -> Dict[str, Any]:
     """Score member spread with a saturating no-collapse reward band.
 
-    Formula: for each cluster, compute the member AABB area divided by the sum
-    of member node areas. Ratios up to ``4.0`` receive score ``1``; above that
-    band, score decays as ``4.0 / ratio``. The cluster score is the mean over
-    clusters, so packing tighter than the band receives no extra reward.
+    Formula: for each leaf cluster, compute the raw member AABB area divided by
+    the sum of member node areas. Ratios up to ``4.0`` receive score ``1``;
+    above that band, score decays as ``4.0 / ratio``. Non-leaf clusters are
+    skipped so nested padding and child separation are not scored as member
+    spread, and packing tighter than the band receives no extra reward.
 
     Parameters
     ----------
@@ -2612,17 +2648,19 @@ def cluster_compactness_score(
     scores: List[float] = []
     ratios: List[float] = []
     for name in cluster_profile.cluster_names:
+        if cluster_profile.tree.children_per_cluster[name]:
+            continue
         box = cluster_profile.boxes[name]
         member_area = sum(
             _bbox_area(cluster_profile.node_bounds[index]) for index in box.descendants
         )
         if member_area <= 1e-12:
             continue
-        ratio = _bbox_area(box.inner_bounds) / member_area
+        ratio = _bbox_area(box.raw_leaf_bounds) / member_area
         ratios.append(ratio)
         scores.append(1.0 if ratio <= 4.0 else max(0.0, min(1.0, 4.0 / ratio)))
     return {
-        "cluster_compactness_score": float(np.mean(scores)) if scores else 1.0,
+        "cluster_compactness_score": float(np.mean(scores)) if scores else None,
         "cluster_compactness_mean_ratio": float(np.mean(ratios)) if ratios else None,
     }
 
@@ -3265,7 +3303,8 @@ def composite_undirected(metrics: Dict[str, Any]) -> float:
     scoring_metrics = dict(metrics)
     if _is_degenerate_scale(metrics):
         # Geometry-free maxima (no crossings, no Gabriel intrusions, no
-        # crossing angles) are vacuous on a point collapse.
+        # crossing angles) are vacuous on a point collapse. Cluster-quality
+        # clean scores are likewise free when the whole drawing has collapsed.
         for name in (
             "ksm_score",
             "edge_crossing_score",
@@ -3276,6 +3315,12 @@ def composite_undirected(metrics: Dict[str, Any]) -> float:
             "angular_resolution_score",
             "path_continuity_score",
             "cluster_silhouette_score",
+            "cluster_exclusion_score",
+            "cluster_sibling_overlap_score",
+            "cluster_nesting_fidelity_score",
+            "cluster_edge_intrusion_score",
+            "cluster_label_occlusion_score",
+            "cluster_compactness_score",
         ):
             if name in scoring_metrics and scoring_metrics[name] is not None:
                 scoring_metrics[name] = 0.0
@@ -3317,6 +3362,10 @@ def composite(metrics: Dict[str, Any]) -> float:
         for name, value in metrics.items()
         if name in _CLUSTER_WEIGHTS and value is not None
     }
+    if _is_degenerate_scale(metrics):
+        cluster_applicable = {name: 0.0 for name in cluster_applicable}
+    # Directed rows retain the pre-existing 0.75 common-term scaling. The
+    # conditional cluster-quality group enters at full weight when applicable.
     combined_weights = {
         **{name: 0.75 * weight for name, weight in _COMMON_WEIGHTS.items()},
         **_DIRECTED_WEIGHTS,
