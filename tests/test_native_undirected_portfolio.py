@@ -18,6 +18,18 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline_baseline,
     _unshear_bimodal_edges,
 )
+from dagua.layout.ops.pipelines.native_arm_s import (
+    ARM_S_ACCEPTANCE_MARGIN,
+    ARM_S_CANDIDATE_PREFIX,
+    ARM_S_SCALE_MULTIPLIERS,
+    ARM_S_STRICT_WIN_REFERENCE,
+    ArmSCandidate,
+    ArmSProjectionTelemetry,
+    build_arm_s_stress_candidates,
+    calibrate_arm_s_scale,
+    evaluate_arm_s_admission,
+    exact_arm_s_overlap_count,
+)
 from dagua.layout.ops.pipelines.native_undirected import (
     BALANCED_LARGE_REFINEMENT_STEPS,
     BALANCED_SMALL_REFINEMENT_STEPS,
@@ -978,6 +990,118 @@ def test_cluster_aware_sfdp_candidate_none_without_clusters() -> None:
     result = _cluster_aware_sfdp_candidate(problem, LayoutConfig(seed=42), ctx)
 
     assert result is None
+
+
+def test_arm_s_candidate_none_without_clusters() -> None:
+    """Arm S construction is cluster-gated and inert on flat rows."""
+    graph = _ring_with_chords()
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+    )
+
+    result = build_arm_s_stress_candidates(problem)
+
+    assert result == {}
+
+
+def test_arm_s_scale_calibration_targets_median_edge_length() -> None:
+    """Arm S scale calibration uses a deterministic median-edge target."""
+    seed = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.0], [3.0, 0.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 4.0, dtype=torch.float32)
+
+    scaled = calibrate_arm_s_scale(seed, edge_index, node_sizes, multiplier=2.0)
+    lengths = torch.linalg.vector_norm(
+        scaled[edge_index[0]] - scaled[edge_index[1]],
+        dim=1,
+    )
+
+    assert torch.median(lengths).item() == pytest.approx(
+        2.0 * torch.linalg.vector_norm(node_sizes, dim=1).mean().item()
+    )
+
+
+def test_arm_s_fake_stress_seed_builds_predeclared_scale_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arm S reuses one stress seed and emits only predeclared scale variants."""
+    import importlib
+
+    stress_sgd = importlib.import_module("dagua.layout.ops.pipelines.stress_sgd")
+
+    graph = _clustered_ring_graph(num_nodes=6)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 2.0, dtype=torch.float32),
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        seed=42,
+    )
+    seed = torch.stack(
+        (
+            torch.arange(graph.num_nodes, dtype=torch.float32) * 10.0,
+            torch.zeros(graph.num_nodes, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    calls: list[int] = []
+
+    def fake_stress_seed(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic fake stress seed."""
+        del args, kwargs
+        calls.append(1)
+        return seed
+
+    monkeypatch.setattr(stress_sgd, "layout_stress_sgd_pipeline", fake_stress_seed)
+
+    candidates = build_arm_s_stress_candidates(problem)
+
+    assert len(calls) == 1
+    assert tuple(candidates) == tuple(
+        f"{ARM_S_CANDIDATE_PREFIX}_k{multiplier:g}" for multiplier in ARM_S_SCALE_MULTIPLIERS
+    )
+    for payload in candidates.values():
+        assert payload.positions.shape == (graph.num_nodes, 2)
+        assert payload.projection.displacement_ratio <= 0.25
+        assert exact_arm_s_overlap_count(payload.positions, problem.node_sizes) == 0
+
+
+def test_arm_s_named_floor_admission_drops_compactness_floor() -> None:
+    """Arm S admission enforces named floors without a compactness mean floor."""
+    payload = ArmSCandidate(
+        name="arm_s_stress_k10",
+        positions=torch.zeros((2, 2), dtype=torch.float32),
+        scale_multiplier=10.0,
+        pre_projection_overlap_count=0,
+        projection=ArmSProjectionTelemetry(
+            max_displacement=0.0,
+            mean_node_diagonal=10.0,
+            displacement_ratio=0.0,
+        ),
+    )
+    metrics = {
+        "overlap_count": 0.0,
+        "neighborhood_preservation_score": 0.30,
+        "ksm_score": 0.6516,
+        "cluster_nesting_fidelity_score": 0.7353,
+        "cluster_compactness_score": 0.0,
+    }
+
+    report = evaluate_arm_s_admission(
+        payload,
+        metrics,
+        extended_score=ARM_S_STRICT_WIN_REFERENCE + ARM_S_ACCEPTANCE_MARGIN + 0.001,
+    )
+
+    assert report.passed
+    assert report.failures == ()
 
 
 def test_cluster_aware_sfdp_candidate_produces_finite_positions() -> None:

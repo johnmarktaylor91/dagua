@@ -26,6 +26,10 @@ candidate CONTEST instead of betting on one pipeline:
   means "close" (see ``_weighted_similarity_candidate``).
 - Candidate F (r81-P1.5): the native-stress core with target distances scaled
   into the point units used by node boxes (see ``_stress_points_candidate``).
+- Candidate S (R8 Arm S, clustered graphs only): dagua's in-house
+  Stress-SGD seed, deterministic median-edge scale ladder, bounded residual
+  overlap heal, and last-mile projection, admitted only by the exact extended
+  ruler plus named floors.
 
 All candidates are scored with the SAME honest composite the benchmark
 harness uses for undirected rows (``metrics.full`` + ``composite_auto``
@@ -49,7 +53,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -2264,6 +2268,7 @@ def layout_native_undirected_portfolio(
     challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
     raw_finalist_names: list[str] = []
+    arm_s_candidate_names: set[str] = set()
 
     def _add_challenger(
         name: str,
@@ -2468,6 +2473,54 @@ def layout_native_undirected_portfolio(
             cluster_sfdp_pos = None
         if cluster_sfdp_pos is not None:
             _add_challenger("cluster_sfdp", cluster_sfdp_pos)
+
+    # Candidate S (R8 Arm S): stress-seeded additive cluster candidate. It is
+    # built only for clustered rows, admitted through the 8A guardrail plan,
+    # and inserted as an already-healed/projected finalist so the generic
+    # cleanup ladder cannot retune its precommitted scale calibration.
+    if problem.clusters and _portfolio_has_budget(config):
+        arm_s_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_arm_s import (
+                ARM_S_PRIOR_S,
+                build_arm_s_stress_candidates,
+            )
+            from dagua.layout.ops.pipelines.native_guardrails import (
+                build_native_guardrail_plan,
+                register_native_guardrail_observation,
+            )
+
+            arm_s_plan = build_native_guardrail_plan(problem, config, prior_cost_s=ARM_S_PRIOR_S)
+            if arm_s_plan.admitted:
+                arm_s_process_started = time.process_time()
+                arm_s_candidates = build_arm_s_stress_candidates(problem)
+                register_native_guardrail_observation(
+                    config,
+                    candidate="arm_s_stress",
+                    mode=arm_s_plan.mode,
+                    elapsed_s=time.process_time() - arm_s_process_started,
+                )
+                setattr(config, "_dagua_native_arm_s_candidates", arm_s_candidates)
+                for name, payload in arm_s_candidates.items():
+                    degenerate, reason = _candidate_is_degenerate(
+                        payload.positions,
+                        problem.node_sizes,
+                        problem.edge_index,
+                    )
+                    if degenerate:
+                        _LOGGER.info("Rejected Arm S candidate %s: %s", name, reason)
+                        continue
+                    positions[name] = payload.positions
+                    arm_s_candidate_names.add(name)
+            else:
+                _LOGGER.info("Skipped Arm S stress candidate: %s", arm_s_plan.skip_reason)
+        except Exception as exc:  # noqa: BLE001 -- Arm S failure never sinks the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("Arm S stress undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=arm_s seconds=%.3f",
+            time.perf_counter() - arm_s_started,
+        )
 
     # Candidate E (r80-S9 Deliverable 2): weighted-similarity native-stress
     # core, only for problems that carry edge weights. Adds a candidate
@@ -2838,6 +2891,48 @@ def layout_native_undirected_portfolio(
             scores[name] = score
             if score_telemetry is not None:
                 cluster_score_telemetry[name] = score_telemetry
+        if arm_s_candidate_names:
+            from dagua.layout.ops.pipelines.native_arm_s import (
+                ArmSCandidate,
+                evaluate_arm_s_admission,
+            )
+
+            arm_s_candidates = cast(
+                dict[str, ArmSCandidate],
+                getattr(config, "_dagua_native_arm_s_candidates", {}),
+            )
+            incumbent_telemetry = cluster_score_telemetry.get("incumbent")
+            rejected_arm_s_names: set[str] = set()
+            for name in tuple(arm_s_candidate_names):
+                score_telemetry = cluster_score_telemetry.get(name)
+                arm_s_payload: Optional[ArmSCandidate] = arm_s_candidates.get(name)
+                if score_telemetry is None or arm_s_payload is None:
+                    scores.pop(name, None)
+                    rejected_arm_s_names.add(name)
+                    continue
+                report = evaluate_arm_s_admission(
+                    arm_s_payload,
+                    score_telemetry.metrics,
+                    extended_score=score_telemetry.extended_score,
+                )
+                dual_admissible = (
+                    incumbent_telemetry is not None
+                    and _cluster_candidate_is_dual_admissible(score_telemetry, incumbent_telemetry)
+                )
+                if not report.passed or not dual_admissible:
+                    _LOGGER.info(
+                        "Rejected Arm S candidate %s: floors=%s dual=%s",
+                        name,
+                        ",".join(report.failures),
+                        dual_admissible,
+                    )
+                    scores.pop(name, None)
+                    cluster_score_telemetry.pop(name, None)
+                    rejected_arm_s_names.add(name)
+            if rejected_arm_s_names:
+                finalist_names = [
+                    name for name in finalist_names if name not in rejected_arm_s_names
+                ]
     else:
         scores = {
             name: _score_undirected_candidate_cached(
