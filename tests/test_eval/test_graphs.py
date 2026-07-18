@@ -11,10 +11,14 @@ from collections import Counter, defaultdict, deque
 from typing import Callable
 
 import torch
+from _pytest.monkeypatch import MonkeyPatch
 
+from dagua.config import LayoutConfig
 from dagua.eval.graphs import (
     _expanded_structural_graphs,
+    _r8_nested_cluster_graphs,
     _synthetic_graphs,
+    get_test_graphs,
     make_clustered_medium,
     make_complete_bipartite,
     make_compound_dag,
@@ -38,6 +42,7 @@ from dagua.eval.graphs import (
     make_wide_single_layer,
 )
 from dagua.graph import DaguaGraph
+from dagua.layout import layout
 
 
 def _graph_catalog_snapshot_script() -> str:
@@ -149,6 +154,134 @@ def _component_count(edge_index, num_nodes: int) -> int:
                     seen.add(nxt)
                     queue.append(nxt)
     return count
+
+
+R8_NESTED_EXPECTATIONS = {
+    "r8_nested_chain_depth8_directed": {"nested-depth", "directed"},
+    "r8_nested_balanced_3x3x4": {"nested-depth", "fanout", "directed"},
+    "r8_nested_mixed_direct_leaf": {"nested-depth", "fanout", "directed"},
+    "r8_nested_cross_edges_ladder": {"nested-depth", "fanout", "directed"},
+    "r8_nested_edge_labels_compound": {"nested-depth", "mixed-labels", "directed"},
+    "r8_nested_wide_labels_shapes": {
+        "nested-depth",
+        "mixed-labels",
+        "mixed-shapes",
+        "directed",
+    },
+    "r8_nested_undirected_communities_depth3": {
+        "nested-depth",
+        "fanout",
+        "directed-undirected",
+        "undirected",
+    },
+    "r8_nested_sbm_overlap_trap": {"fanout", "directed-undirected", "undirected"},
+    "r8_nested_parent_child_backedges": {"nested-depth", "directed"},
+    "r8_nested_disconnected_forest": {"nested-depth", "fanout", "disconnected", "directed"},
+    "r8_nested_singleton_deep": {"nested-depth", "directed"},
+    "r8_nested_scale_1k_budget": {
+        "nested-depth",
+        "fanout",
+        "mixed-labels",
+        "directed-undirected",
+        "scale",
+    },
+    "r8_nested_lr_direction": {"nested-depth", "mixed-labels", "directed"},
+}
+
+
+def _cluster_depth(graph: DaguaGraph) -> int:
+    """Return maximum cluster nesting depth.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph whose ``clusters`` and ``cluster_parents`` metadata are checked.
+
+    Returns
+    -------
+    int
+        Maximum root-to-leaf cluster depth.
+    """
+    max_depth = 0
+    for cluster_name in graph.clusters:
+        depth = 1
+        parent = graph.cluster_parents.get(cluster_name)
+        while parent is not None:
+            depth += 1
+            parent = graph.cluster_parents.get(parent)
+        max_depth = max(max_depth, depth)
+    return max_depth
+
+
+def _edge_id_pairs(graph: DaguaGraph) -> set[tuple[str, str]]:
+    """Return edge endpoint node identifiers for a graph.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph whose edge tensor should be converted into stable node IDs.
+
+    Returns
+    -------
+    set[tuple[str, str]]
+        Directed endpoint ID pairs.
+    """
+    return {
+        (str(graph._index_to_id[int(source)]), str(graph._index_to_id[int(target)]))
+        for source, target in graph.edge_index.t().tolist()
+    }
+
+
+def test_r8_nested_cluster_corpus_entries_are_registered_and_layoutable(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """R8 adds exactly the canonical nested-cluster rows to the tuning corpus."""
+    monkeypatch.setenv("DAGUA_NATIVE_DISABLE_W5", "1")
+    r8_graphs = {test_graph.name: test_graph for test_graph in _r8_nested_cluster_graphs()}
+    corpus_graphs = {test_graph.name: test_graph for test_graph in get_test_graphs()}
+
+    assert set(r8_graphs) == set(R8_NESTED_EXPECTATIONS)
+    assert set(R8_NESTED_EXPECTATIONS) <= set(corpus_graphs)
+    assert len(corpus_graphs) == 133
+
+    for name, required_tags in R8_NESTED_EXPECTATIONS.items():
+        test_graph = corpus_graphs[name]
+        graph = test_graph.graph
+
+        assert required_tags <= test_graph.tags
+        assert {"r8_nested", "clustered", "synthetic"} <= test_graph.tags
+        assert graph.clusters
+        assert graph.node_sizes is not None
+        assert graph.node_sizes.shape == (graph.num_nodes, 2)
+        assert all(parent in graph.clusters for parent in graph.cluster_parents.values() if parent)
+        assert _cluster_depth(graph) >= (8 if name == "r8_nested_chain_depth8_directed" else 1)
+
+        if name in {"r8_nested_edge_labels_compound", "r8_nested_lr_direction"}:
+            assert graph.cluster_labels
+        if name == "r8_nested_edge_labels_compound":
+            assert any(label is not None for label in graph.edge_labels)
+        if name == "r8_nested_wide_labels_shapes":
+            shapes = {style.shape for style in graph.node_styles if style is not None}
+            assert {"rect", "ellipse", "diamond", "roundrect", "circle"} <= shapes
+            assert any("wide label" in label for label in graph.node_labels)
+        if name == "r8_nested_lr_direction":
+            assert graph.direction == "LR"
+        if name == "r8_nested_scale_1k_budget":
+            assert 950 <= graph.num_nodes <= 1050
+            assert any(cluster.startswith(f"{name}_directed_region_") for cluster in graph.clusters)
+            assert any(
+                cluster.startswith(f"{name}_undirected_region_") for cluster in graph.clusters
+            )
+            edge_pairs = _edge_id_pairs(graph)
+            assert ("d0_l0_0", "d0_l1_0") in edge_pairs
+            assert ("d0_l1_0", "d0_l0_0") not in edge_pairs
+            assert ("u0_0", "u0_1") in edge_pairs
+            assert ("u0_1", "u0_0") in edge_pairs
+
+        config = LayoutConfig(quality="draft", time_budget_s=0.5, device="cpu", seed=42)
+        positions = layout(graph, config)
+        assert positions.shape == (graph.num_nodes, 2)
+        assert torch.isfinite(positions).all()
 
 
 def test_synthetic_graphs_cover_common_and_niche_motifs():
