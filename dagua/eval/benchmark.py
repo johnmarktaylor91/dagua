@@ -907,6 +907,9 @@ def _metric_payload(
         longest_path_layering(edge_index, graph.num_nodes) if edge_index.numel() > 0 else None
     )
     node_sizes = graph.node_sizes if graph.node_sizes is not None else None
+    clusters = graph.clusters if getattr(graph, "clusters", None) else None
+    cluster_parents = graph.cluster_parents if getattr(graph, "cluster_parents", None) else None
+    cluster_labels = graph.cluster_labels if getattr(graph, "cluster_labels", None) else None
 
     metrics: Dict[str, Any]
     computed = ["tier1"]
@@ -929,16 +932,14 @@ def _metric_payload(
             crossing_samples=100_000,
             neighborhood_samples=1_000,
             declared_hierarchical=declared_hierarchical,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            cluster_labels=cluster_labels,
         )
-        metrics.update(
-            compute_all_metrics(
-                pos,
-                edge_index,
-                graph.node_sizes,
-                clusters=graph.clusters,
-                direction=graph.direction,
-            )
+        legacy_metrics = compute_all_metrics(
+            pos, edge_index, graph.node_sizes, direction=graph.direction
         )
+        metrics.update({key: value for key, value in legacy_metrics.items() if key not in metrics})
         metrics["declared_hierarchical"] = declared_hierarchical
         # Full-drawing composites (r80-S6, ADDITIVE): new keys only; nothing
         # here feeds composite()/composite_auto() or the W/T/L pipeline.
@@ -967,11 +968,15 @@ def _metric_payload(
                 pos,
                 edge_index,
                 graph.node_sizes,
-                clusters=graph.clusters,
                 direction=graph.direction,
             )
         )
         metrics["declared_hierarchical"] = declared_hierarchical
+        if clusters is not None:
+            metrics["_cluster_quality_supported"] = False
+            metrics["_cluster_quality_skip_reason"] = (
+                "quick benchmark profile omits cluster-quality metrics"
+            )
         skipped.extend(["tier2", "tier3"])
 
     metrics["aesthetic_score"] = metrics.get("overall_quality", composite(metrics))
@@ -1334,7 +1339,7 @@ def _build_results_payload(
     competitor_signatures = competitor_signatures or {}
     rerun_set = set(rerun_competitors or [])
 
-    payload = (
+    payload: Dict[str, Any] = (
         copy.deepcopy(existing_payload)
         if existing_payload is not None
         else {
@@ -1347,6 +1352,8 @@ def _build_results_payload(
     payload["run_id"] = run_id
     payload["suite"] = suite
     payload["system"] = _system_metadata()
+    if not isinstance(payload.get("graphs"), dict):
+        payload["graphs"] = {}
     _write_progress(
         run_dir,
         suite,
@@ -1358,8 +1365,11 @@ def _build_results_payload(
     )
 
     for bg in graphs:
-        existing_graph = payload["graphs"].get(bg.test_graph.name, {})
-        graph_payload = copy.deepcopy(existing_graph) if existing_graph else _graph_summary(bg)
+        graphs_payload: Dict[str, Any] = payload["graphs"]
+        existing_graph = graphs_payload.get(bg.test_graph.name, {})
+        graph_payload: Dict[str, Any] = (
+            copy.deepcopy(existing_graph) if existing_graph else _graph_summary(bg)
+        )
         graph_payload.update({k: v for k, v in _graph_summary(bg).items() if k != "competitors"})
         graph_payload.setdefault("competitors", {})
         for competitor in competitors:
@@ -1408,7 +1418,7 @@ def _build_results_payload(
                     seed=seed,
                 )
             graph_payload["competitors"][competitor.name] = competitor_result
-            payload["graphs"][bg.test_graph.name] = graph_payload
+            graphs_payload[bg.test_graph.name] = graph_payload
             if checkpoint_each_graph:
                 _save_json_atomic(_partial_results_path(run_dir), payload)
             _write_progress(
@@ -1417,14 +1427,13 @@ def _build_results_payload(
                 run_id,
                 graphs,
                 competitors,
-                payload
-                | {"graphs": payload.get("graphs", {}) | {bg.test_graph.name: graph_payload}},
+                payload | {"graphs": graphs_payload | {bg.test_graph.name: graph_payload}},
                 current_graph=bg.test_graph.name,
                 current_competitor=competitor.name,
                 step="running",
                 last_artifact=graph_payload["competitors"][competitor.name].get("positions_path"),
             )
-        payload["graphs"][bg.test_graph.name] = graph_payload
+        graphs_payload[bg.test_graph.name] = graph_payload
 
     _write_progress(
         run_dir,
@@ -1928,6 +1937,11 @@ def _run_salt_derived_suite(args: argparse.Namespace) -> None:
                     node_sizes=g.node_sizes,
                     direction=g.direction,
                     declared_hierarchical=declared_hierarchical,
+                    clusters=g.clusters if getattr(g, "clusters", None) else None,
+                    cluster_parents=(
+                        g.cluster_parents if getattr(g, "cluster_parents", None) else None
+                    ),
+                    cluster_labels=g.cluster_labels if getattr(g, "cluster_labels", None) else None,
                 )
                 score = composite_auto(m, semantic_direction)
                 profile = "profile_small"
