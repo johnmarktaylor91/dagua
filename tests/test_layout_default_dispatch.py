@@ -17,12 +17,32 @@ from __future__ import annotations
 import warnings
 from unittest.mock import patch
 
+import pytest
+import torch
+
 import dagua
+from dagua.eval.graphs import _make_r8_lr_direction
 from dagua.layout.engine import layout as engine_layout
 from dagua.layout.ops.pipelines import dagua_native as dn_module
+from dagua.layout.ops.pipelines.dagua_native import _apply_public_direction_frame
+from dagua.layout.ops.pipelines.native_directed import _score_directed_candidate
+from dagua.layout.ops.state import LayoutProblem
+from dagua.metrics import quick
 
 
 def _build_chain_graph(n: int = 10) -> dagua.DaguaGraph:
+    """Build a deterministic directed chain graph.
+
+    Parameters
+    ----------
+    n : int, default=10
+        Number of nodes in the chain.
+
+    Returns
+    -------
+    dagua.DaguaGraph
+        Chain graph with edges ``n_i -> n_{i+1}``.
+    """
     g = dagua.DaguaGraph()
     for i in range(n):
         g.add_node(f"n{i}")
@@ -31,12 +51,24 @@ def _build_chain_graph(n: int = 10) -> dagua.DaguaGraph:
     return g
 
 
-def _trace_pipeline_calls():
+def _trace_pipeline_calls() -> tuple[list[dagua.LayoutConfig], object]:
     """Wrap build_dagua_pipeline to record invocations without changing behavior."""
-    calls: list = []
+    calls: list[dagua.LayoutConfig] = []
     original = dn_module.build_dagua_pipeline
 
-    def tracer(config):
+    def tracer(config: dagua.LayoutConfig) -> object:
+        """Record one native pipeline build and return the real pipeline.
+
+        Parameters
+        ----------
+        config : dagua.LayoutConfig
+            Configuration passed to the native pipeline builder.
+
+        Returns
+        -------
+        object
+            Pipeline object returned by the original builder.
+        """
         calls.append(config)
         return original(config)
 
@@ -111,3 +143,87 @@ def test_other_pipeline_algorithm_still_works():
         pos = engine_layout(g, dagua.LayoutConfig(steps=10, seed=42, algorithm="fr"))
     assert pos.shape == (10, 2)
     assert len(calls) == 0, "fr algorithm must NOT route through dagua_native"
+
+
+def test_default_dagua_native_honors_graph_lr_direction_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The R8 LR fixture should return coordinates flowing on the LR axis once."""
+    monkeypatch.setenv("DAGUA_NATIVE_DISABLE_W5", "1")
+    test_graph = _make_r8_lr_direction()
+    graph = test_graph.graph
+    assert graph.node_sizes is not None
+    node_sizes = graph.node_sizes
+    config = dagua.LayoutConfig(device="cpu", seed=42, quality=0.25, cluster_aware=False)
+
+    canonical_tb = dn_module.layout_dagua_native_pipeline(
+        graph.edge_index,
+        graph.num_nodes,
+        node_sizes,
+        config=dagua.LayoutConfig(
+            device="cpu",
+            seed=42,
+            quality=0.25,
+            cluster_aware=False,
+            direction="TB",
+        ),
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        cluster_labels=graph.cluster_labels,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lr_pos = engine_layout(graph, config)
+
+    wrong_frame_metrics = quick(
+        canonical_tb,
+        graph.edge_index,
+        node_sizes=node_sizes,
+        direction="LR",
+        declared_hierarchical=True,
+    )
+    lr_metrics = quick(
+        lr_pos,
+        graph.edge_index,
+        node_sizes=node_sizes,
+        direction="LR",
+        declared_hierarchical=True,
+    )
+
+    assert lr_metrics["directed_flow_score"] == pytest.approx(1.0)
+    assert lr_metrics["depth_order_score"] == pytest.approx(1.0)
+    assert lr_metrics["directed_flow_score"] > wrong_frame_metrics["directed_flow_score"] + 0.3
+    assert lr_metrics["depth_order_score"] > wrong_frame_metrics["depth_order_score"] + 0.7
+    assert torch.equal(lr_pos[:, 0], canonical_tb[:, 1])
+    assert torch.equal(lr_pos[:, 1], canonical_tb[:, 0])
+
+
+def test_directed_candidate_scoring_is_tb_lr_transpose_equivalent() -> None:
+    """Directed candidate scoring should agree after transposing TB into LR."""
+    test_graph = _make_r8_lr_direction()
+    graph = test_graph.graph
+    edge_index = graph.edge_index.detach().to(device="cpu", dtype=torch.long)
+    num_nodes = int(graph.num_nodes)
+    node_sizes = torch.full((num_nodes, 2), 60.0, dtype=torch.float32)
+    index = torch.arange(num_nodes, dtype=torch.float32)
+    canonical_tb = torch.stack((index.remainder(3.0) * 120.0, index * 80.0), dim=1)
+    canonical_tb = canonical_tb - canonical_tb.mean(dim=0, keepdim=True)
+    lr_pos = _apply_public_direction_frame(canonical_tb, "LR")
+
+    tb_problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        direction="TB",
+    )
+    lr_problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        direction="LR",
+    )
+
+    tb_score = _score_directed_candidate(canonical_tb, tb_problem, cluster_ids=None)
+    lr_score = _score_directed_candidate(lr_pos, lr_problem, cluster_ids=None)
+
+    assert lr_score == pytest.approx(tb_score)
