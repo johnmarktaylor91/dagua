@@ -35,7 +35,10 @@ import torch
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from dagua.config import LayoutConfig
-from dagua.layout.constraints import (
+from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
+from dagua.layout.init_placement import init_positions
+from dagua.layout.layers import LayerIndex, build_layer_index
+from dagua.layout.losses import (
     alignment_loss,
     back_edge_compactness_loss,
     cluster_compactness_loss,
@@ -54,9 +57,6 @@ from dagua.layout.constraints import (
     repulsion_loss,
     spacing_consistency_loss,
 )
-from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
-from dagua.layout.init_placement import init_positions
-from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
 from dagua.utils import VRAMBudget, longest_path_layering
 

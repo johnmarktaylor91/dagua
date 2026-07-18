@@ -1969,3 +1969,192 @@ def back_edge_compactness_loss(
     # Horizontal distance for back edges
     del src, tgt
     return dx[back_mask].square().mean()
+
+
+def constraint_order_loss(
+    pos: torch.Tensor,
+    pairs: List[Tuple[torch.Tensor, torch.Tensor, int, float, float]],
+) -> torch.Tensor:
+    """Penalize directed ordering violations for user constraints.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    pairs : list[tuple[torch.Tensor, torch.Tensor, int, float, float]]
+        Order constraints as left/right index tensors, axis, gap, and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized hinge loss.
+    """
+    terms = []
+    for left, right, axis, gap, weight in pairs:
+        if left.numel() == 0 or right.numel() == 0:
+            continue
+        left_coord = pos[left, axis].mean()
+        right_coord = pos[right, axis].mean()
+        terms.append(weight * F.relu(left_coord + gap - right_coord).square())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_separate_loss(
+    pos: torch.Tensor,
+    pairs: List[Tuple[torch.Tensor, torch.Tensor, Optional[int], float, float]],
+) -> torch.Tensor:
+    """Penalize insufficient distance between selected units.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    pairs : list[tuple[torch.Tensor, torch.Tensor, int | None, float, float]]
+        Separate constraints as selections, optional axis, gap, and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized separation loss.
+    """
+    terms = []
+    for left, right, axis, gap, weight in pairs:
+        if left.numel() == 0 or right.numel() == 0:
+            continue
+        a = pos[left].mean(dim=0)
+        b = pos[right].mean(dim=0)
+        if axis is None:
+            dist = (a - b).square().sum().sqrt().clamp(min=1e-6)
+        else:
+            dist = (a[axis] - b[axis]).abs()
+        terms.append(weight * F.relu(gap - dist).square())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_group_loss(
+    pos: torch.Tensor,
+    groups: List[Tuple[torch.Tensor, float, float]],
+) -> torch.Tensor:
+    """Penalize spread inside user-defined groups.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    groups : list[tuple[torch.Tensor, float, float]]
+        Group index tensors with padding and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar compactness loss.
+    """
+    terms = []
+    for indices, padding, weight in groups:
+        if indices.numel() <= 1:
+            continue
+        group_pos = pos[indices]
+        centroid = group_pos.mean(dim=0, keepdim=True)
+        terms.append(weight * (group_pos - centroid).square().sum(dim=1).mean() / (padding + 1.0))
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_anchor_loss(
+    pos: torch.Tensor,
+    anchors: List[Tuple[torch.Tensor, torch.Tensor, float]],
+) -> torch.Tensor:
+    """Penalize deviation from fixed external anchor coordinates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    anchors : list[tuple[torch.Tensor, torch.Tensor, float]]
+        Index tensors, target tensors, and weights.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar anchor loss.
+    """
+    terms = []
+    for indices, targets, weight in anchors:
+        if indices.numel() == 0:
+            continue
+        terms.append(weight * (pos[indices] - targets).square().mean())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_emphasize_loss(
+    pos: torch.Tensor,
+    paths: List[Tuple[torch.Tensor, float]],
+) -> torch.Tensor:
+    """Encourage emphasized paths to be shorter and more collinear.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    paths : list[tuple[torch.Tensor, float]]
+        Ordered path indices and weights.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar path emphasis loss.
+    """
+    terms = []
+    for indices, weight in paths:
+        if indices.numel() <= 2:
+            continue
+        points = pos[indices]
+        deltas = points[1:] - points[:-1]
+        length_term = deltas.square().sum(dim=1).mean()
+        chord = points[-1] - points[0]
+        norm = chord.square().sum().sqrt().clamp(min=1e-6)
+        direction = chord / norm
+        centered = points - points[0]
+        projected = centered @ direction
+        nearest = points[0] + projected.unsqueeze(1) * direction
+        terms.append(weight * (0.01 * length_term + (points - nearest).square().mean()))
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_focus_loss(
+    pos: torch.Tensor,
+    focuses: List[Tuple[torch.Tensor, torch.Tensor, float, float]],
+) -> torch.Tensor:
+    """Pull focused selections toward target points.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    focuses : list[tuple[torch.Tensor, torch.Tensor, float, float]]
+        Selected indices, target point, zoom, and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar focus loss.
+    """
+    terms = []
+    for indices, target, zoom, weight in focuses:
+        if indices.numel() == 0:
+            continue
+        target = target.to(device=pos.device, dtype=pos.dtype)
+        scale = max(float(zoom), 1e-6)
+        terms.append(weight * (pos[indices] - target).square().mean() / scale)
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
