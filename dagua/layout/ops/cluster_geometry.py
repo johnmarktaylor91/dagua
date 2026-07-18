@@ -67,24 +67,22 @@ class ClusterTree:
             Immutable hierarchy with child, root, leaf-only, and descendant
             membership lookup tables.
         """
-        cluster_names = tuple(clusters.keys())
+        cluster_names = tuple(sorted(str(name) for name in clusters))
         declared_members = {
-            name: frozenset(int(index) for index in members) for name, members in clusters.items()
+            str(name): frozenset(int(index) for index in members)
+            for name, members in clusters.items()
         }
-        parents = {
-            name: cluster_parents.get(name) if cluster_parents.get(name) in clusters else None
-            for name in cluster_names
-        }
+        parents = {}
+        for name in cluster_names:
+            parent_name = cluster_parents.get(name)
+            parents[name] = parent_name if parent_name in declared_members else None
         children_lists: dict[str, list[str]] = {name: [] for name in cluster_names}
         for name in cluster_names:
             parent = parents[name]
             if parent is not None:
                 children_lists[parent].append(name)
 
-        children = {
-            name: tuple(child for child in cluster_names if child in children_lists[name])
-            for name in cluster_names
-        }
+        children = {name: tuple(sorted(children_lists[name])) for name in cluster_names}
         expanded_descendants: dict[str, frozenset[int]] = {}
 
         def expand_descendants(name: str) -> frozenset[int]:
@@ -117,7 +115,7 @@ class ClusterTree:
                 child_descendants.update(descendants[child_name])
             leaves[name] = frozenset(declared_members[name].difference(child_descendants))
 
-        roots = tuple(name for name in cluster_names if parents[name] is None)
+        roots = tuple(sorted(name for name in cluster_names if parents[name] is None))
         return cls(
             parents=parents,
             leaves_per_cluster=leaves,
@@ -221,12 +219,15 @@ class ClusterProfileBox:
         ``None`` when no explicit label exists for this cluster.
     descendants : frozenset[int]
         Leaf node indices used to derive this cluster box.
+    raw_leaf_bounds : tuple[float, float, float, float]
+        Descendant leaf-node envelope before nested padding is introduced.
     """
 
     bounds: Tuple[float, float, float, float]
     inner_bounds: Tuple[float, float, float, float]
     label_bounds: Optional[Tuple[float, float, float, float]]
     descendants: frozenset[int]
+    raw_leaf_bounds: Tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -362,6 +363,86 @@ def _estimate_label_metrics(label: str) -> ClusterLabelMetrics:
     return ClusterLabelMetrics(label_width_pt=max(8.0, 5.0 * len(label)), label_height_pt=10.0)
 
 
+def _bounds_from_center_size(
+    center: torch.Tensor, size: torch.Tensor
+) -> Tuple[float, float, float, float]:
+    """Return AABB bounds for a center/size pair.
+
+    Parameters
+    ----------
+    center : torch.Tensor
+        Item center with shape ``[2]``.
+    size : torch.Tensor
+        Item size as ``(width, height)`` with shape ``[2]``.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounds as ``(x_min, y_min, x_max, y_max)``.
+    """
+    half_size = size / 2.0
+    lower = center - half_size
+    upper = center + half_size
+    return (
+        float(lower[0].item()),
+        float(lower[1].item()),
+        float(upper[0].item()),
+        float(upper[1].item()),
+    )
+
+
+def _union_bounds(
+    bounds: Sequence[Tuple[float, float, float, float]],
+) -> Tuple[float, float, float, float]:
+    """Return the union of non-empty AABB bounds.
+
+    Parameters
+    ----------
+    bounds : Sequence[tuple[float, float, float, float]]
+        Bounds to merge.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Merged bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Raises
+    ------
+    ValueError
+        If ``bounds`` is empty.
+    """
+    if not bounds:
+        raise ValueError("cannot union an empty bounds sequence")
+    return (
+        min(bound[0] for bound in bounds),
+        min(bound[1] for bound in bounds),
+        max(bound[2] for bound in bounds),
+        max(bound[3] for bound in bounds),
+    )
+
+
+def _center_size_from_bounds(
+    bounds: Tuple[float, float, float, float],
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Convert AABB bounds to a center/size pseudo-item.
+
+    Parameters
+    ----------
+    bounds : tuple[float, float, float, float]
+        Bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    tuple[tuple[float, float], tuple[float, float]]
+        Center and size tuples compatible with ``compute_cluster_placement_bbox``.
+    """
+    x_min, y_min, x_max, y_max = bounds
+    return (
+        ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0),
+        (max(0.0, x_max - x_min), max(0.0, y_max - y_min)),
+    )
+
+
 def build_cluster_geometry_profile(
     positions: torch.Tensor,
     node_sizes: torch.Tensor,
@@ -409,13 +490,15 @@ def build_cluster_geometry_profile(
 
     num_nodes = int(positions.shape[0])
     valid_clusters: dict[str, Tuple[int, ...]] = {}
+    has_valid_member = False
     for name, members in clusters.items():
         valid_members = tuple(
             sorted({int(index) for index in members if 0 <= int(index) < num_nodes})
         )
         if valid_members:
-            valid_clusters[str(name)] = valid_members
-    if not valid_clusters:
+            has_valid_member = True
+        valid_clusters[str(name)] = valid_members
+    if not has_valid_member:
         return None
 
     parent_lookup = cluster_parents or {}
@@ -437,43 +520,73 @@ def build_cluster_geometry_profile(
 
     boxes: dict[str, ClusterProfileBox] = {}
     label_lookup = labels or {}
-    for name in tree.top_down_order():
+    for name in tree.bottom_up_order():
         descendants = frozenset(
             index for index in tree.descendants_per_cluster[name] if 0 <= index < num_nodes
         )
         if not descendants:
             continue
-        member_indices = torch.tensor(sorted(descendants), dtype=torch.long)
+        direct_leaf_indices = sorted(
+            index for index in tree.leaves_per_cluster[name] if 0 <= index < num_nodes
+        )
+        content_centers: list[tuple[float, float]] = []
+        content_sizes: list[tuple[float, float]] = []
+        for index in direct_leaf_indices:
+            content_centers.append(
+                (
+                    float(positions_cpu[index, 0].item()),
+                    float(positions_cpu[index, 1].item()),
+                )
+            )
+            content_sizes.append(
+                (
+                    float(sizes_cpu[index, 0].item()),
+                    float(sizes_cpu[index, 1].item()),
+                )
+            )
+        for child_name in tree.children_per_cluster[name]:
+            if child_name not in boxes:
+                continue
+            child_center, child_size = _center_size_from_bounds(boxes[child_name].bounds)
+            content_centers.append(child_center)
+            content_sizes.append(child_size)
+        if not content_centers:
+            continue
         label = str(label_lookup.get(name, ""))
         label_metrics = _estimate_label_metrics(label) if label else ClusterLabelMetrics(0.0, 0.0)
         effective_label_band = float(label_band_pt) if label else 0.0
+        inner_positions = torch.tensor(content_centers, dtype=torch.float64)
+        inner_sizes = torch.tensor(content_sizes, dtype=torch.float64)
         placement = compute_cluster_placement_bbox(
-            inner_positions=positions_cpu[member_indices],
-            inner_sizes=sizes_cpu[member_indices],
+            inner_positions=inner_positions,
+            inner_sizes=inner_sizes,
             label_metrics=label_metrics,
             side_padding_pt=float(side_padding_pt),
             label_band_pt=effective_label_band,
         )
         inner_x_min, inner_y_min, inner_x_max, inner_y_max = placement.inner_bbox
-        center_x = (inner_x_min + inner_x_max) / 2.0 + placement.anchor_offset[0]
-        center_y = (inner_y_min + inner_y_max) / 2.0 + placement.anchor_offset[1]
-        half_width = placement.width / 2.0
-        half_height = placement.height / 2.0
         bounds = (
-            center_x - half_width,
-            center_y - half_height,
-            center_x + half_width,
-            center_y + half_height,
+            (inner_x_min + inner_x_max - placement.width) / 2.0,
+            inner_y_min - float(side_padding_pt),
+            (inner_x_min + inner_x_max + placement.width) / 2.0,
+            inner_y_max + float(side_padding_pt) + effective_label_band,
         )
         label_bounds = None
         if label:
             label_top, label_bottom = placement.label_band_y_extent
             label_bounds = (bounds[0], label_bottom, bounds[2], label_top)
+        raw_leaf_bounds = _union_bounds(
+            [
+                _bounds_from_center_size(positions_cpu[index], sizes_cpu[index])
+                for index in sorted(descendants)
+            ]
+        )
         boxes[name] = ClusterProfileBox(
             bounds=bounds,
             inner_bounds=placement.inner_bbox,
             label_bounds=label_bounds,
             descendants=descendants,
+            raw_leaf_bounds=raw_leaf_bounds,
         )
 
     sibling_pairs: list[tuple[str, str]] = []
@@ -482,6 +595,7 @@ def build_cluster_geometry_profile(
         if name in boxes:
             parent_groups.setdefault(tree.parents[name], []).append(name)
     for names in parent_groups.values():
+        names.sort()
         for left_index, left_name in enumerate(names):
             for right_name in names[left_index + 1 :]:
                 sibling_pairs.append((left_name, right_name))
