@@ -14,6 +14,10 @@ from typing import Any, Callable, Optional, Sequence
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.ops.pipelines.native_shape_geometry import (
+    NativeShapeGeometry,
+    pairwise_shape_signed_gap,
+)
 from dagua.layout.ops.pipelines.native_surrogates import (
     angular_resolution_loss,
     barrier_floor_loss,
@@ -945,7 +949,11 @@ def _mode_ladder(mode: str, *, is_semantically_directed: bool) -> tuple[str, ...
     return (mode,)
 
 
-def _overlap_count(pos: torch.Tensor, node_sizes: torch.Tensor) -> int:
+def _overlap_count(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
+) -> int:
     """Count exact overlapping boxes for W5 regression rejection.
 
     Parameters
@@ -954,6 +962,8 @@ def _overlap_count(pos: torch.Tensor, node_sizes: torch.Tensor) -> int:
         Position tensor with shape ``[N, 2]``.
     node_sizes : torch.Tensor
         Node-size tensor with shape ``[N, 2]``.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -962,6 +972,14 @@ def _overlap_count(pos: torch.Tensor, node_sizes: torch.Tensor) -> int:
     """
     if pos.shape[0] <= 1:
         return 0
+    if shape_geometry is not None:
+        gaps = pairwise_shape_signed_gap(
+            pos.detach().to(device="cpu", dtype=torch.float32),
+            node_sizes.detach().to(device="cpu", dtype=torch.float32),
+            shape_geometry.to(device=torch.device("cpu"), dtype=torch.float32),
+            max_nodes=int(pos.shape[0]),
+        )
+        return int((gaps < 0.0).sum().item())
     work_pos = pos.detach().to(device="cpu", dtype=torch.float32)
     work_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
     dx = (work_pos[:, None, 0] - work_pos[None, :, 0]).abs()
@@ -1000,6 +1018,7 @@ def _is_degenerate(pos: torch.Tensor, node_sizes: torch.Tensor) -> bool:
 def _project_checkpoint_for_viability(
     checkpoint_pos: torch.Tensor,
     node_sizes: torch.Tensor,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Return an overlap-projected checkpoint for W5 viability checks.
 
@@ -1009,6 +1028,8 @@ def _project_checkpoint_for_viability(
         Candidate checkpoint positions with shape ``[N, 2]``.
     node_sizes : torch.Tensor
         Node-size tensor with shape ``[N, 2]``.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -1023,7 +1044,64 @@ def _project_checkpoint_for_viability(
         iterations=_W5_PROJECTION_ITERATIONS,
         convergent=True,
     )
+    if shape_geometry is not None:
+        _project_shape_overlaps(projected, sizes, shape_geometry)
     return projected
+
+
+def _project_shape_overlaps(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    shape_geometry: NativeShapeGeometry,
+    *,
+    iterations: int = _W5_PROJECTION_ITERATIONS,
+) -> None:
+    """Resolve true-shape overlaps with deterministic pairwise radial shifts.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Mutable position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    shape_geometry : NativeShapeGeometry
+        Per-node shape descriptors.
+    iterations : int, default=_W5_PROJECTION_ITERATIONS
+        Maximum repair sweeps.
+
+    Returns
+    -------
+    None
+        ``pos`` is modified in place.
+    """
+    if int(pos.shape[0]) < 2:
+        return
+    geometry = shape_geometry.to(device=pos.device, dtype=pos.dtype)
+    for _ in range(iterations):
+        moved = False
+        for left in range(int(pos.shape[0]) - 1):
+            for right in range(left + 1, int(pos.shape[0])):
+                gap = pairwise_shape_signed_gap(
+                    pos[[left, right]],
+                    node_sizes[[left, right]],
+                    NativeShapeGeometry(kind_codes=geometry.kind_codes[[left, right]]),
+                    max_nodes=2,
+                )
+                if gap.numel() == 0 or float(gap[0].item()) >= 0.0:
+                    continue
+                delta = pos[right] - pos[left]
+                distance = torch.linalg.vector_norm(delta).clamp_min(1.0e-6)
+                if float(distance.item()) <= 1.0e-5:
+                    angle = float(left * 92821 + right * 68917) * 0.0001
+                    direction = pos.new_tensor((math.cos(angle), math.sin(angle)))
+                else:
+                    direction = delta / distance
+                shift = direction * ((-gap[0] + 1.0e-4) * 0.5)
+                pos[left] -= shift
+                pos[right] += shift
+                moved = True
+        if not moved:
+            break
 
 
 def _closed_over_all_pairs_dist(score_fn: Callable[[torch.Tensor], W5ScorePair]) -> Optional[Any]:
@@ -1172,6 +1250,7 @@ def _surrogate_loss(
     topo_depth: torch.Tensor,
     mode: str,
     floors: dict[str, float],
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Evaluate the composite-weighted W5 surrogate objective.
 
@@ -1189,6 +1268,8 @@ def _surrogate_loss(
         Routed W5 mode.
     floors : dict[str, float]
         Incumbent floor values for barrier terms.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -1198,7 +1279,7 @@ def _surrogate_loss(
     crossing = soft_crossing_loss(pos, edge_index)
     flow_score = signed_flow_score_surrogate(pos, edge_index)
     depth_score = depth_order_score_surrogate(pos, topo_depth)
-    overlap_loss = overlap_hinge_loss(pos, node_sizes)
+    overlap_loss = overlap_hinge_loss(pos, node_sizes, shape_geometry=shape_geometry)
     knn_loss = soft_knn_neighborhood_loss(pos, edge_index)
     edge_cv_loss = edge_length_cv_loss(pos, edge_index)
     common_scale = 0.75 if mode in {"x_only", "barrier_2d"} else 1.0
@@ -1296,6 +1377,7 @@ def _aligned_surrogate_loss(
     mode: str,
     floors: dict[str, float],
     stress_sample: Optional[W5StressSample],
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Evaluate the pass-2 W5 objective with honest-aligned additive terms.
 
@@ -1315,13 +1397,23 @@ def _aligned_surrogate_loss(
         Incumbent floor values for barrier terms.
     stress_sample : W5StressSample, optional
         Fixed sampled graph-distance pairs for stress guidance.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
     torch.Tensor
         Scalar loss to minimize during pass 2.
     """
-    loss = _surrogate_loss(pos, edge_index, node_sizes, topo_depth, mode, floors)
+    loss = _surrogate_loss(
+        pos,
+        edge_index,
+        node_sizes,
+        topo_depth,
+        mode,
+        floors,
+        shape_geometry,
+    )
     honest_ksm = floors.get("honest_ksm")
     ksm_headroom = 0.0 if honest_ksm is None else max(0.0, 1.0 - float(honest_ksm))
     stress_weight = 12.0 + 72.0 * ksm_headroom
@@ -1370,6 +1462,7 @@ def _pass_loss(
     floors: dict[str, float],
     pass_id: int,
     stress_sample: Optional[W5StressSample],
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Evaluate the selected W5 pass loss.
 
@@ -1391,6 +1484,8 @@ def _pass_loss(
         Surrogate pass identifier.
     stress_sample : W5StressSample, optional
         Fixed sampled graph-distance pairs for pass 2.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -1398,7 +1493,15 @@ def _pass_loss(
         Scalar loss for the requested pass.
     """
     if pass_id == 1:
-        return _surrogate_loss(pos, edge_index, node_sizes, topo_depth, mode, floors)
+        return _surrogate_loss(
+            pos,
+            edge_index,
+            node_sizes,
+            topo_depth,
+            mode,
+            floors,
+            shape_geometry,
+        )
     return _aligned_surrogate_loss(
         pos,
         edge_index,
@@ -1407,6 +1510,7 @@ def _pass_loss(
         mode,
         floors,
         stress_sample,
+        shape_geometry,
     )
 
 
@@ -1423,6 +1527,7 @@ def _optimize_seed(
     step_timing_hook: Optional[Callable[[int, float], None]] = None,
     pass_id: int = 1,
     stress_sample: Optional[W5StressSample] = None,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Run one bounded W5 descent from ``seed``.
 
@@ -1454,6 +1559,8 @@ def _optimize_seed(
         adds honest-aligned stress and L1 edge-length terms.
     stress_sample : W5StressSample, optional
         Fixed sampled graph-distance pairs for pass 2.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -1468,7 +1575,9 @@ def _optimize_seed(
         "flow": float(signed_flow_score_surrogate(work, edge_index).detach().item()),
         "depth": float(depth_order_score_surrogate(work, topo_depth).detach().item()),
         "crossing_loss": float(soft_crossing_loss(work, edge_index).detach().item()),
-        "overlap_loss": float(overlap_hinge_loss(work, node_sizes).detach().item()),
+        "overlap_loss": float(
+            overlap_hinge_loss(work, node_sizes, shape_geometry=shape_geometry).detach().item()
+        ),
         "knn_loss": float(soft_knn_neighborhood_loss(work, edge_index).detach().item()),
         "edge_cv_loss": float(edge_length_cv_loss(work, edge_index).detach().item()),
     }
@@ -1486,6 +1595,7 @@ def _optimize_seed(
         floors,
         pass_id,
         stress_sample,
+        shape_geometry,
     )
     start_loss = float(start_loss_tensor.detach().item())
     median_size = float(node_sizes.detach().to(dtype=torch.float32).mean().item())
@@ -1515,6 +1625,7 @@ def _optimize_seed(
             floors,
             pass_id,
             stress_sample,
+            shape_geometry,
         )
         if not bool(torch.isfinite(loss).all().item()):
             break
@@ -1543,6 +1654,7 @@ def _optimize_seed(
                 floors,
                 pass_id,
                 stress_sample,
+                shape_geometry,
             )
             checkpoint_loss = float(checkpoint_loss_tensor.detach().item())
             checkpoints.append((step, checkpoint_pos, checkpoint_loss))
@@ -1562,6 +1674,7 @@ def _run_optimize_seed_pass(
     max_checkpoints: int,
     pass_id: int,
     stress_sample: Optional[W5StressSample],
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Call the active optimizer with optional pass-2 arguments when supported.
 
@@ -1589,6 +1702,8 @@ def _run_optimize_seed_pass(
         Surrogate pass identifier.
     stress_sample : W5StressSample, optional
         Fixed sampled graph-distance pairs for pass 2.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -1596,6 +1711,20 @@ def _run_optimize_seed_pass(
         Final positions, completed steps, start loss, and checkpoint
         positions/losses.
     """
+    if shape_geometry is None:
+        return _optimize_seed(
+            seed,
+            edge_index,
+            node_sizes,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps=max_steps,
+            max_checkpoints=max_checkpoints,
+            pass_id=pass_id,
+            stress_sample=stress_sample,
+        )
     return _optimize_seed(
         seed,
         edge_index,
@@ -1608,6 +1737,7 @@ def _run_optimize_seed_pass(
         max_checkpoints=max_checkpoints,
         pass_id=pass_id,
         stress_sample=stress_sample,
+        shape_geometry=shape_geometry,
     )
 
 
@@ -1619,6 +1749,7 @@ def _measure_one_surrogate_step_s(
     mode: str,
     honest_axes: Optional[W5HonestAxes],
     measurement_budget_s: float,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> W5StepMeasurement:
     """Measure wall-clock cost for one steady-state W5 surrogate step.
 
@@ -1638,6 +1769,8 @@ def _measure_one_surrogate_step_s(
         Honest incumbent axes used by barrier weighting.
     measurement_budget_s : float
         Wall-clock seconds available for the surrogate probe.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -1646,18 +1779,51 @@ def _measure_one_surrogate_step_s(
         first-step warmup.
     """
     step_times_s: list[float] = []
-    _optimize_seed(
-        seed,
-        edge_index,
-        node_sizes,
-        topo_depth,
-        mode,
-        time.monotonic() + max(1.0e-6, measurement_budget_s),
-        honest_axes,
-        max_steps=_MEASURED_COST_SURROGATE_STEPS,
-        max_checkpoints=0,
-        step_timing_hook=lambda _step, duration_s: step_times_s.append(duration_s),
-    )
+
+    def timing_hook(_step: int, duration_s: float) -> None:
+        """Record one measured optimizer step duration.
+
+        Parameters
+        ----------
+        _step : int
+            Completed step index, unused by the averaging logic.
+        duration_s : float
+            Wall-clock duration for the completed step.
+
+        Returns
+        -------
+        None
+            ``step_times_s`` is appended in place.
+        """
+        step_times_s.append(duration_s)
+
+    if shape_geometry is None:
+        _optimize_seed(
+            seed,
+            edge_index,
+            node_sizes,
+            topo_depth,
+            mode,
+            time.monotonic() + max(1.0e-6, measurement_budget_s),
+            honest_axes,
+            max_steps=_MEASURED_COST_SURROGATE_STEPS,
+            max_checkpoints=0,
+            step_timing_hook=timing_hook,
+        )
+    else:
+        _optimize_seed(
+            seed,
+            edge_index,
+            node_sizes,
+            topo_depth,
+            mode,
+            time.monotonic() + max(1.0e-6, measurement_budget_s),
+            honest_axes,
+            max_steps=_MEASURED_COST_SURROGATE_STEPS,
+            max_checkpoints=0,
+            step_timing_hook=timing_hook,
+            shape_geometry=shape_geometry,
+        )
     if not step_times_s:
         return W5StepMeasurement(step_s=1.0e-6, warmup_s=0.0)
     warmup_s = max(0.0, step_times_s[0])
@@ -1682,6 +1848,7 @@ def _measured_cost_plan(
     started_perf: float,
     remaining_entry: Optional[float],
     honest_axes: Optional[W5HonestAxes],
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> Optional[W5CostPlan]:
     """Return a measured W5 plan that fits the shared wall-clock cap.
 
@@ -1707,6 +1874,8 @@ def _measured_cost_plan(
         Benchmark wall seconds remaining at W5 entry.
     honest_axes : W5HonestAxes, optional
         Honest incumbent axes used by barrier weighting.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
 
     Returns
     -------
@@ -1733,6 +1902,7 @@ def _measured_cost_plan(
         routed_mode,
         honest_axes,
         measurement_budget_s,
+        shape_geometry,
     )
     spend_cap = _w5_spend_cap_s(config, remaining_entry)
     cap_remaining = spend_cap - _w5_spent_s(config, started_perf)
@@ -1846,6 +2016,7 @@ def run_w5_finisher(
     config: Optional[LayoutConfig] = None,
     accept_margin: float = _W5_ACCEPT_MARGIN,
     incumbent_axes: Optional[W5HonestAxes] = None,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> W5FinisherResult:
     """Run the W5 finisher and return the anytime honest winner.
 
@@ -1876,6 +2047,8 @@ def run_w5_finisher(
     incumbent_axes : W5HonestAxes, optional
         Honest incumbent axes from the same ``full()`` metrics pass that
         produced ``incumbent_score_pair``.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors for overlap loss and viability.
 
     Returns
     -------
@@ -2036,6 +2209,11 @@ def run_w5_finisher(
     deadline = time.monotonic() + slice_s
     edge_work = edge_index.detach().to(device=kept_seeds[0].pos.device, dtype=torch.long)
     size_work = node_sizes.detach().to(device=kept_seeds[0].pos.device, dtype=torch.float32)
+    shape_work = (
+        shape_geometry.to(device=kept_seeds[0].pos.device, dtype=torch.float32)
+        if shape_geometry is not None
+        else None
+    )
     topo_depth = _longest_path_depth(
         edge_work,
         int(kept_seeds[0].pos.shape[0]),
@@ -2066,6 +2244,7 @@ def run_w5_finisher(
             started_perf=started_perf,
             remaining_entry=remaining_entry,
             honest_axes=incumbent_axes,
+            shape_geometry=shape_work,
         )
         if cost_plan is None:
             cost_plan = getattr(config, "_dagua_native_w5_cost_plan", None)
@@ -2098,7 +2277,7 @@ def run_w5_finisher(
     viability_drop_counts: dict[str, int] = {}
     steps_total = 0
     routed_mode = "skip"
-    incumbent_overlap = _overlap_count(incumbent_pos, size_work)
+    incumbent_overlap = _overlap_count(incumbent_pos, size_work, shape_work)
     deadline_returned = False
     first_score_epilogue_attempted = False
     for seed in kept_seeds:
@@ -2178,6 +2357,7 @@ def run_w5_finisher(
                         max_checkpoints=max_checkpoints,
                         pass_id=pass_id,
                         stress_sample=stress_sample,
+                        shape_geometry=shape_work,
                     )
                     optimize_s = max(0.0, time.perf_counter() - optimize_started)
                 except Exception as exc:  # noqa: BLE001 -- W5 is optional candidate generation
@@ -2208,6 +2388,7 @@ def run_w5_finisher(
                             {},
                             pass_id,
                             stress_sample,
+                            shape_work,
                         )
                         .detach()
                         .item()
@@ -2243,14 +2424,21 @@ def run_w5_finisher(
                         first_score_epilogue_attempted = True
                         epilogue_scoring = True
                     viability_started = time.perf_counter()
-                    checkpoint_overlap = _overlap_count(checkpoint_pos, size_work)
+                    checkpoint_overlap = _overlap_count(checkpoint_pos, size_work, shape_work)
                     if checkpoint_overlap > incumbent_overlap:
                         _increment_count(viability_counts, "projected_overlap_candidate")
-                        checkpoint_pos = _project_checkpoint_for_viability(
-                            checkpoint_pos,
-                            size_work,
-                        )
-                        projected_overlap = _overlap_count(checkpoint_pos, size_work)
+                        if shape_work is None:
+                            checkpoint_pos = _project_checkpoint_for_viability(
+                                checkpoint_pos,
+                                size_work,
+                            )
+                        else:
+                            checkpoint_pos = _project_checkpoint_for_viability(
+                                checkpoint_pos,
+                                size_work,
+                                shape_work,
+                            )
+                        projected_overlap = _overlap_count(checkpoint_pos, size_work, shape_work)
                         if projected_overlap <= incumbent_overlap:
                             _increment_count(viability_counts, "projection_resolved_overlap")
                     if _is_degenerate(checkpoint_pos, size_work):
@@ -2260,7 +2448,7 @@ def run_w5_finisher(
                         if epilogue_scoring:
                             break
                         continue
-                    if _overlap_count(checkpoint_pos, size_work) > incumbent_overlap:
+                    if _overlap_count(checkpoint_pos, size_work, shape_work) > incumbent_overlap:
                         _increment_count(viability_counts, "drop_overlap_regressed")
                         _increment_count(viability_drop_counts, "overlap_regressed")
                         viability_s += max(0.0, time.perf_counter() - viability_started)
@@ -2323,7 +2511,7 @@ def run_w5_finisher(
                         accepted.append(accepted_candidate)
                         incumbent_overlap = min(
                             incumbent_overlap,
-                            _overlap_count(winner_pos, size_work),
+                            _overlap_count(winner_pos, size_work, shape_work),
                         )
                     else:
                         rejected.append(checkpoint)
