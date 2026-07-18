@@ -1232,6 +1232,201 @@ def test_measured_terminal_w5_bypasses_late_entry_prediction() -> None:
     assert w5_predicted_skip_reason(500, 1470, config) is None
 
 
+def test_w5_first_score_epilogue_scores_terminal_once_with_wall_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The score-loop spend guard scores exactly one terminal checkpoint epilogue."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    early_pos = pos + 1.0
+    terminal_pos = pos + 2.0
+    score_calls: list[torch.Tensor] = []
+    spent_calls = {"count": 0}
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return an early checkpoint plus a better terminal checkpoint."""
+        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del max_steps, max_checkpoints, pass_id, stress_sample
+        return terminal_pos, 7, 10.0, [(3, early_pos, 4.0), (7, terminal_pos, 1.0)]
+
+    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
+        """Trip the spend guard only when checkpoint scoring begins."""
+        del config, started_perf
+        spent_calls["count"] += 1
+        return 0.0 if spent_calls["count"] == 1 else 999.0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Record honest score calls and return a dominating score."""
+        score_calls.append(candidate.detach().cpu())
+        return _pair(2.0, 2.0)
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert len(score_calls) == 1
+    assert torch.equal(score_calls[0], terminal_pos)
+    assert len(result.checkpoints) == 1
+    assert result.checkpoints[0].step == 7
+    assert result.checkpoints[0].accepted is True
+    assert result.deadline_returned is True
+
+
+def test_w5_first_score_epilogue_requires_wall_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first-score epilogue does not fire without benchmark wall headroom."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    terminal_pos = pos + 2.0
+    spent_calls = {"count": 0}
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return a terminal checkpoint that must not be scored."""
+        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del max_steps, max_checkpoints, pass_id, stress_sample
+        return terminal_pos, 7, 10.0, [(7, terminal_pos, 1.0)]
+
+    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
+        """Trip the spend guard only when checkpoint scoring begins."""
+        del config, started_perf
+        spent_calls["count"] += 1
+        return 0.0 if spent_calls["count"] == 1 else 999.0
+
+    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if the no-headroom terminal checkpoint reaches scoring."""
+        del candidate
+        raise AssertionError("first-score epilogue should not run without wall headroom")
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(
+        native_finisher,
+        "_w5_first_score_epilogue_has_wall_headroom",
+        lambda config: False,
+    )
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(0.0, 0.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=forbidden_score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert result.checkpoints == ()
+    assert result.skipped_reason == "no_checkpoint"
+    assert result.deadline_returned is True
+    assert torch.equal(result.winner_pos, pos)
+
+
+def test_w5_first_score_epilogue_never_runs_after_checkpoint_scored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal first checkpoint makes the epilogue a no-op for green rows."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    early_pos = pos + 1.0
+    terminal_pos = pos + 2.0
+    score_calls: list[torch.Tensor] = []
+    spent_calls = {"count": 0}
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return two checkpoints so the second guard could otherwise epilogue."""
+        del seed, edge_work, size_work, topo_depth, mode, deadline, honest_axes
+        del max_steps, max_checkpoints, pass_id, stress_sample
+        return terminal_pos, 7, 10.0, [(3, early_pos, 4.0), (7, terminal_pos, 1.0)]
+
+    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
+        """Allow one normal checkpoint score, then trip the spend guard."""
+        del config, started_perf
+        spent_calls["count"] += 1
+        return 0.0 if spent_calls["count"] <= 2 else 999.0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Record honest score calls and return a non-dominating score."""
+        score_calls.append(candidate.detach().cpu())
+        return _pair(0.0, 0.0)
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert len(score_calls) == 1
+    assert torch.equal(score_calls[0], early_pos)
+    assert len(result.checkpoints) == 1
+    assert result.checkpoints[0].step == 3
+    assert result.deadline_returned is True
+
+
 def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1287,6 +1482,11 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
     monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(
+        native_finisher,
+        "_w5_first_score_epilogue_has_wall_headroom",
+        lambda config: False,
+    )
 
     result = run_w5_finisher(
         incumbent_pos=pos,
