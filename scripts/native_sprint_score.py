@@ -1,34 +1,66 @@
-"""Score native runs vs the full originals field on the frozen r83 honest ruler.
+"""Score native saved positions against field saved positions for R8 Event A.
 
-Reads benchmark ``results.json`` stores directly (field baseline + one or more
-native runs), scores every stored layout with the frozen r83 honest composite
-(``dagua.metrics.composite_auto``), and reports the per-graph best-or-tied
-verdict for the native engine against the best field engine on the shared
-frozen 108-graph corpus.
+The scorer keeps the frozen old-108 corpus as the old table source, optionally
+extends it with the exact 13 R8 nested-cluster graphs, and evaluates saved
+position tensors under two rulers:
 
-The field scoring is cached to ``--field-cache`` so later sprint rounds only
-re-score the native side.
+* old: current metrics with the six R8 cluster terms disabled;
+* extended: current metrics with those terms active.
+
+Legacy field-cache reuse is only allowed for non-cluster graphs under the
+pinned G2 bridge guard. Clustered graphs are always scored from saved positions.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import multiprocessing as mp
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 
 from dagua.eval.benchmark import _declares_hierarchy
 from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_directed
 from dagua.eval.size_policy import set_size_aware_externals
-from dagua.metrics import composite_auto, evaluate
+from dagua.metrics import composite_auto, full
 
 TIE_BAND = 0.5
+RULER_SCHEMA = "r8-cluster-extended-v1"
+RAW_CACHE_FILENAME = "R8_EVENTA_RAW_SCORES_V1.json"
+LEGACY_FIELD_CACHE_SHA256 = (
+    "019c777c64b914e7b402d981378bb6aa4e3216000f5921bbc0184f8f0fe936ee"  # pragma: allowlist secret
+)
+LEGACY_FIELD_CACHE_PAIR_COUNT = 11_163
+CLUSTER_SCORE_KEYS = (
+    "cluster_exclusion_score",
+    "cluster_sibling_overlap_score",
+    "cluster_nesting_fidelity_score",
+    "cluster_edge_intrusion_score",
+    "cluster_label_occlusion_score",
+    "cluster_compactness_score",
+)
+R8_GRAPH_NAMES = (
+    "r8_nested_chain_depth8_directed",
+    "r8_nested_balanced_3x3x4",
+    "r8_nested_mixed_direct_leaf",
+    "r8_nested_cross_edges_ladder",
+    "r8_nested_edge_labels_compound",
+    "r8_nested_wide_labels_shapes",
+    "r8_nested_undirected_communities_depth3",
+    "r8_nested_sbm_overlap_trap",
+    "r8_nested_parent_child_backedges",
+    "r8_nested_disconnected_forest",
+    "r8_nested_singleton_deep",
+    "r8_nested_scale_1k_budget",
+    "r8_nested_lr_direction",
+)
 _CLASSICAL_ENGINES = (
     "dagre",
     "elk_layered",
@@ -42,7 +74,16 @@ _CLASSICAL_ENGINES = (
 _CORPUS_RE = re.compile(
     r"^(?P<graph>.+)__(?P<engine>" + "|".join(_CLASSICAL_ENGINES) + r")(?P<variant>.*)\.pt$"
 )
+_FULL_POLICY = {
+    "profile": "full",
+    "stress_sources": 200,
+    "stress_targets": 1000,
+    "crossing_samples": 1_000_000,
+    "neighborhood_samples": 5000,
+    "cluster_score_keys": CLUSTER_SCORE_KEYS,
+}
 _WORKER_GRAPHS: Dict[str, TestGraph] = {}
+_WORKER_SIGNATURE = ""
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -63,13 +104,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--field-dir",
         type=Path,
         required=True,
-        help="Benchmark output dir of the field baseline (results.json + positions/).",
+        action="append",
+        help="Benchmark output dir of a field baseline store; repeatable.",
     )
     parser.add_argument(
         "--native-dir",
         type=Path,
         required=True,
-        help="Benchmark output dir of the native run to compare (engine 'dagua').",
+        action="append",
+        help="Benchmark output dir of a native run store; repeatable.",
     )
     parser.add_argument(
         "--corpus-positions",
@@ -78,14 +121,65 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Frozen r81 positions dir that defines the shared 108-graph corpus.",
     )
     parser.add_argument(
-        "--field-cache",
+        "--include-r8",
+        action="store_true",
+        help="Append the exact 13 R8 nested-cluster graphs to the extended table.",
+    )
+    parser.add_argument(
+        "--legacy-field-cache",
         type=Path,
         default=None,
-        help="JSON cache of field scores (computed and written when absent).",
+        help="Pinned old field cache, usable only for non-cluster G2 bridge rows.",
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--score-cache",
+        "--field-cache",
+        dest="score_cache",
+        type=Path,
+        default=Path(RAW_CACHE_FILENAME),
+        help="Versioned raw score cache. The deprecated --field-cache alias points here.",
+    )
+    parser.add_argument("--old-output", type=Path, required=True)
+    parser.add_argument("--extended-output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 2) // 2))
     return parser.parse_args(argv)
+
+
+def sha256_file(path: Path) -> str:
+    """Compute a file SHA-256 digest.
+
+    Parameters
+    ----------
+    path : Path
+        File to hash.
+
+    Returns
+    -------
+    str
+        Hex SHA-256 digest.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def canonical_json_hash(payload: Any) -> str:
+    """Hash a JSON-compatible payload with canonical ordering.
+
+    Parameters
+    ----------
+    payload : Any
+        JSON-compatible object.
+
+    Returns
+    -------
+    str
+        Hex SHA-256 digest.
+    """
+    data = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
 def corpus_names(corpus_positions: Path) -> List[str]:
@@ -111,50 +205,120 @@ def corpus_names(corpus_positions: Path) -> List[str]:
     return sorted(names)
 
 
-def load_run_tasks(
-    run_dir: Path, names: Sequence[str], engine_filter: Optional[str] = None
-) -> List[Tuple[str, str, List[str]]]:
-    """Collect scoreable (graph, engine, paths) tasks from a benchmark store.
+def selected_names(corpus_positions: Path, include_r8: bool) -> Tuple[List[str], List[str]]:
+    """Build ordered old and extended graph-name lists.
 
     Parameters
     ----------
-    run_dir : Path
-        Benchmark output dir containing ``results.json`` and ``positions/``.
+    corpus_positions : Path
+        Frozen old-108 corpus positions directory.
+    include_r8 : bool
+        Whether to append the exact R8 graph tuple.
+
+    Returns
+    -------
+    Tuple[List[str], List[str]]
+        Ordered old-108 names and ordered table names.
+    """
+    old_names = corpus_names(corpus_positions)
+    if len(old_names) != 108:
+        raise RuntimeError(f"expected exactly 108 old graph names, found {len(old_names)}")
+    if not include_r8:
+        return old_names, old_names
+    overlap = sorted(set(old_names) & set(R8_GRAPH_NAMES))
+    if overlap:
+        raise RuntimeError(f"R8 graph(s) overlap frozen 108 corpus: {overlap}")
+    extended = [*old_names, *R8_GRAPH_NAMES]
+    if len(set(extended)) != 121:
+        raise RuntimeError(f"expected 121 unique extended graph names, found {len(set(extended))}")
+    return old_names, extended
+
+
+def load_run_tasks(
+    run_dirs: Sequence[Path], names: Sequence[str], engine_filter: Optional[str] = None
+) -> List[Tuple[str, str, List[str]]]:
+    """Collect scoreable ``(graph, engine, position paths)`` tasks.
+
+    Parameters
+    ----------
+    run_dirs : Sequence[Path]
+        Benchmark output dirs containing ``results.json`` and ``positions/``.
     names : Sequence[str]
-        Frozen corpus names to keep.
+        Corpus names to keep.
     engine_filter : Optional[str], optional
         Keep only this engine when set.
 
     Returns
     -------
     List[Tuple[str, str, List[str]]]
-        Graph name, engine name, and absolute tensor paths.
+        Graph name, engine name, and deduplicated absolute tensor paths.
     """
     wanted = set(names)
-    results = json.loads((run_dir / "results.json").read_text())
-    grouped: Dict[Tuple[str, str], List[str]] = defaultdict(list)
-    for record in results.values():
-        if record.get("status") != "ok" or not record.get("positions_file"):
-            continue
-        graph = str(record["graph_name"])
-        engine = str(record["engine_name"])
-        if graph not in wanted:
-            continue
-        if engine_filter is not None and engine != engine_filter:
-            continue
-        path = run_dir / str(record["positions_file"])
-        if path.exists():
-            grouped[(graph, engine)].append(str(path))
+    grouped: Dict[Tuple[str, str], set[str]] = defaultdict(set)
+    for run_dir in run_dirs:
+        results = json.loads((run_dir / "results.json").read_text())
+        for record in results.values():
+            if record.get("status") != "ok" or not record.get("positions_file"):
+                continue
+            graph = str(record["graph_name"])
+            engine = str(record["engine_name"])
+            if graph not in wanted:
+                continue
+            if engine_filter is not None and engine != engine_filter:
+                continue
+            path = (run_dir / str(record["positions_file"])).resolve()
+            if path.exists():
+                grouped[(graph, engine)].add(str(path))
     return [(graph, engine, sorted(paths)) for (graph, engine), paths in sorted(grouped.items())]
 
 
-def build_graph_map(names: Sequence[str]) -> Dict[str, TestGraph]:
-    """Build current corpus graphs and select the frozen names.
+def result_file_hashes(run_dirs: Sequence[Path]) -> Dict[str, str]:
+    """Hash every source ``results.json`` file.
+
+    Parameters
+    ----------
+    run_dirs : Sequence[Path]
+        Benchmark output dirs.
+
+    Returns
+    -------
+    Dict[str, str]
+        Absolute results path to SHA-256 digest.
+    """
+    return {
+        str((run_dir / "results.json").resolve()): sha256_file(run_dir / "results.json")
+        for run_dir in run_dirs
+    }
+
+
+def task_position_hashes(tasks: Sequence[Tuple[str, str, List[str]]]) -> Dict[str, str]:
+    """Hash every candidate position file referenced by score tasks.
+
+    Parameters
+    ----------
+    tasks : Sequence[Tuple[str, str, List[str]]]
+        Score tasks.
+
+    Returns
+    -------
+    Dict[str, str]
+        Absolute position path to SHA-256 digest.
+    """
+    paths = sorted({path for _, _, task_paths in tasks for path in task_paths})
+    return {path: sha256_file(Path(path)) for path in paths}
+
+
+def build_graph_map(
+    names: Sequence[str], r8_names: Sequence[str] = R8_GRAPH_NAMES
+) -> Dict[str, TestGraph]:
+    """Build current corpus graphs and select the requested names.
 
     Parameters
     ----------
     names : Sequence[str]
-        Frozen corpus graph names.
+        Requested graph names.
+    r8_names : Sequence[str], optional
+        R8 graph names that must reconstruct with cluster metadata.
 
     Returns
     -------
@@ -163,35 +327,226 @@ def build_graph_map(names: Sequence[str]) -> Dict[str, TestGraph]:
     """
     wanted = set(names)
     selected = {
-        graph.name: graph for graph in get_test_graphs(max_nodes=500) if graph.name in wanted
+        graph.name: graph for graph in get_test_graphs(max_nodes=1000) if graph.name in wanted
     }
     missing = sorted(wanted - set(selected))
     if missing:
         raise RuntimeError(f"current corpus cannot reconstruct frozen graph(s): {missing}")
+    missing_cluster_r8 = [
+        name for name in r8_names if name in wanted and not selected[name].graph.clusters
+    ]
+    if missing_cluster_r8:
+        raise RuntimeError(f"R8 graph(s) reconstructed without clusters: {missing_cluster_r8}")
     for test_graph in selected.values():
         test_graph.graph.compute_node_sizes()
     return selected
 
 
-def init_worker(graphs: Dict[str, TestGraph]) -> None:
+def graph_hashes(graphs: Mapping[str, TestGraph], names: Sequence[str]) -> Dict[str, str]:
+    """Hash canonical graph JSON for the requested graph names.
+
+    Parameters
+    ----------
+    graphs : Mapping[str, TestGraph]
+        Reconstructed graph map.
+    names : Sequence[str]
+        Ordered graph names.
+
+    Returns
+    -------
+    Dict[str, str]
+        Graph name to canonical JSON digest.
+    """
+    return {name: canonical_json_hash(graphs[name].graph.to_json()) for name in names}
+
+
+def scoring_signature() -> str:
+    """Build the score signature from policy constants and ruler source files.
+
+    Returns
+    -------
+    str
+        Canonical scoring-policy digest.
+    """
+    root = Path(__file__).resolve().parents[1]
+    payload = {
+        "ruler_schema": RULER_SCHEMA,
+        "policy": _FULL_POLICY,
+        "source_hashes": {
+            "dagua/metrics.py": sha256_file(root / "dagua" / "metrics.py"),
+            "dagua/layout/ops/cluster_geometry.py": sha256_file(
+                root / "dagua" / "layout" / "ops" / "cluster_geometry.py"
+            ),
+        },
+    }
+    return canonical_json_hash(payload)
+
+
+def cache_header(
+    old_names: Sequence[str],
+    extended_names: Sequence[str],
+    graphs: Mapping[str, TestGraph],
+    field_dirs: Sequence[Path],
+    native_dirs: Sequence[Path],
+    tasks: Sequence[Tuple[str, str, List[str]]],
+    signature: str,
+) -> Dict[str, Any]:
+    """Create the versioned raw-cache header.
+
+    Parameters
+    ----------
+    old_names : Sequence[str]
+        Ordered frozen old-108 names.
+    extended_names : Sequence[str]
+        Ordered output graph names.
+    graphs : Mapping[str, TestGraph]
+        Reconstructed graph map.
+    field_dirs : Sequence[Path]
+        Field result stores.
+    native_dirs : Sequence[Path]
+        Native result stores.
+    tasks : Sequence[Tuple[str, str, List[str]]]
+        All score tasks represented in the cache.
+    signature : str
+        Current scoring signature.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Header payload.
+    """
+    position_hashes = task_position_hashes(tasks)
+    return {
+        "ruler_schema": RULER_SCHEMA,
+        "scoring_signature": signature,
+        "old_names": list(old_names),
+        "extended_names": list(extended_names),
+        "graph_hashes": graph_hashes(graphs, extended_names),
+        "source_results_hashes": result_file_hashes([*field_dirs, *native_dirs]),
+        "position_file_hashes": position_hashes,
+        "position_file_hash_aggregate": canonical_json_hash(position_hashes),
+    }
+
+
+def init_worker(graphs: Dict[str, TestGraph], signature: str) -> None:
     """Initialize process-local graph state.
 
     Parameters
     ----------
     graphs : Dict[str, TestGraph]
         Reconstructed corpus graphs.
+    signature : str
+        Current scoring signature.
 
     Returns
     -------
     None
     """
-    global _WORKER_GRAPHS
+    global _WORKER_GRAPHS, _WORKER_SIGNATURE
     _WORKER_GRAPHS = graphs
+    _WORKER_SIGNATURE = signature
     torch.set_num_threads(1)
     set_size_aware_externals(True)
 
 
-def score_group(task: Tuple[str, str, List[str]]) -> Dict[str, Any]:
+def normalized_metric_value(value: Any) -> Any:
+    """Convert metric values to JSON-safe scalar/list payloads.
+
+    Parameters
+    ----------
+    value : Any
+        Metric value returned by ``full``.
+
+    Returns
+    -------
+    Any
+        JSON-compatible value.
+    """
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except ValueError:
+            return value
+    return value
+
+
+def normalized_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normalize a metrics dictionary for JSON persistence.
+
+    Parameters
+    ----------
+    metrics : Mapping[str, Any]
+        Raw metric payload.
+
+    Returns
+    -------
+    Dict[str, Any]
+        JSON-compatible metrics dictionary.
+    """
+    return {key: normalized_metric_value(value) for key, value in metrics.items()}
+
+
+def score_position(
+    test_graph: TestGraph, path_string: str, engine: str, signature: str
+) -> Dict[str, Any]:
+    """Score one saved position tensor under old and extended rulers.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Reconstructed graph metadata.
+    path_string : str
+        Saved ``.pt`` position tensor path.
+    engine : str
+        Engine name.
+    signature : str
+        Current scoring signature.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Raw candidate score row.
+    """
+    graph = test_graph.graph
+    positions = torch.load(path_string, map_location="cpu", weights_only=True)
+    expected_shape = (graph.num_nodes, 2)
+    if not isinstance(positions, torch.Tensor) or tuple(positions.shape) != expected_shape:
+        raise ValueError(f"shape {getattr(positions, 'shape', None)} != {expected_shape}")
+    declared = _declares_hierarchy(test_graph)
+    metrics = full(
+        positions.to(dtype=torch.float32),
+        graph.edge_index,
+        node_sizes=graph.node_sizes,
+        cluster_ids=graph.cluster_ids,
+        direction=graph.direction,
+        declared_hierarchical=declared,
+        clusters=graph.clusters or None,
+        cluster_parents=graph.cluster_parents or None,
+        cluster_labels=graph.cluster_labels or None,
+    )
+    metrics["declared_hierarchical"] = declared
+    metrics_payload = normalized_metrics(metrics)
+    extended = float(composite_auto(metrics_payload, is_semantically_directed(test_graph)))
+    old_metrics = dict(metrics_payload)
+    for key in CLUSTER_SCORE_KEYS:
+        old_metrics[key] = None
+    old = float(composite_auto(old_metrics, is_semantically_directed(test_graph)))
+    return {
+        "graph": test_graph.name,
+        "engine": engine,
+        "position_path": path_string,
+        "position_sha256": sha256_file(Path(path_string)),
+        "metrics": metrics_payload,
+        "old_composite": old,
+        "extended_composite": extended,
+        "scoring_signature": signature,
+        "score_origin": "fresh_positions",
+    }
+
+
+def score_group(task: Tuple[str, str, List[str]]) -> List[Dict[str, Any]]:
     """Score every stored layout for one graph-engine pair.
 
     Parameters
@@ -201,43 +556,42 @@ def score_group(task: Tuple[str, str, List[str]]) -> Dict[str, Any]:
 
     Returns
     -------
-    Dict[str, Any]
-        Best honest-composite result for the pair.
+    List[Dict[str, Any]]
+        Candidate rows for the pair, plus error rows when all candidates fail.
     """
     graph_name, engine, paths = task
     test_graph = _WORKER_GRAPHS[graph_name]
-    best_score: Optional[float] = None
-    best_path: Optional[str] = None
+    rows: List[Dict[str, Any]] = []
     errors: List[str] = []
-    expected_shape = (test_graph.graph.num_nodes, 2)
     for path_string in paths:
         try:
-            positions = torch.load(path_string, map_location="cpu", weights_only=True)
-            if not isinstance(positions, torch.Tensor) or tuple(positions.shape) != expected_shape:
-                raise ValueError(f"shape {getattr(positions, 'shape', None)} != {expected_shape}")
-            metrics = evaluate(test_graph.graph, positions.to(dtype=torch.float32), tier="full")
-            metrics["declared_hierarchical"] = _declares_hierarchy(test_graph)
-            score = float(composite_auto(metrics, is_semantically_directed(test_graph)))
+            rows.append(score_position(test_graph, path_string, engine, _WORKER_SIGNATURE))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{path_string}: {type(exc).__name__}: {exc}")
-            continue
-        if best_score is None or score > best_score:
-            best_score = score
-            best_path = path_string
-    return {
-        "graph": graph_name,
-        "engine": engine,
-        "best_composite": best_score,
-        "best_path": best_path,
-        "error_count": len(errors),
-        "errors": errors[:5],
-    }
+    if rows:
+        return rows
+    return [
+        {
+            "graph": graph_name,
+            "engine": engine,
+            "position_path": None,
+            "position_sha256": None,
+            "metrics": {},
+            "old_composite": None,
+            "extended_composite": None,
+            "scoring_signature": _WORKER_SIGNATURE,
+            "score_origin": "fresh_positions_error",
+            "error_count": len(errors),
+            "errors": errors[:5],
+        }
+    ]
 
 
 def score_tasks(
     tasks: List[Tuple[str, str, List[str]]],
     graphs: Dict[str, TestGraph],
     workers: int,
+    signature: str,
 ) -> List[Dict[str, Any]]:
     """Score all tasks with a worker pool.
 
@@ -249,18 +603,185 @@ def score_tasks(
         Reconstructed corpus graphs.
     workers : int
         Process count.
+    signature : str
+        Current scoring signature.
 
     Returns
     -------
     List[Dict[str, Any]]
-        Scored rows.
+        Candidate score rows.
     """
     if workers <= 1:
-        init_worker(graphs)
-        return [score_group(task) for task in tasks]
+        init_worker(graphs, signature)
+        return [row for task in tasks for row in score_group(task)]
     context = mp.get_context("fork")
-    with context.Pool(workers, initializer=init_worker, initargs=(graphs,)) as pool:
-        return list(pool.imap_unordered(score_group, tasks, chunksize=4))
+    with context.Pool(workers, initializer=init_worker, initargs=(graphs, signature)) as pool:
+        return [
+            row for rows in pool.imap_unordered(score_group, tasks, chunksize=4) for row in rows
+        ]
+
+
+def cached_score_value(row: Mapping[str, Any]) -> Optional[float]:
+    """Extract a legacy cache score value.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Legacy cache row.
+
+    Returns
+    -------
+    Optional[float]
+        Score value when present.
+    """
+    value = row.get("best_composite", row.get("composite_score"))
+    return None if value is None else float(value)
+
+
+def cached_path_value(row: Mapping[str, Any]) -> Optional[str]:
+    """Extract a legacy cache best-position path.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Legacy cache row.
+
+    Returns
+    -------
+    Optional[str]
+        Absolute path string when present.
+    """
+    value = row.get("best_path", row.get("position_path"))
+    return None if value is None else str(Path(str(value)).resolve())
+
+
+def load_legacy_field_rows(
+    legacy_field_cache: Optional[Path],
+    field_tasks: Sequence[Tuple[str, str, List[str]]],
+    graphs: Mapping[str, TestGraph],
+    signature: str,
+) -> Tuple[List[Dict[str, Any]], set[Tuple[str, str]]]:
+    """Load pinned non-cluster field rows from the old unversioned cache.
+
+    Parameters
+    ----------
+    legacy_field_cache : Optional[Path]
+        Legacy field-cache path.
+    field_tasks : Sequence[Tuple[str, str, List[str]]]
+        Current field score tasks.
+    graphs : Mapping[str, TestGraph]
+        Reconstructed graph map.
+    signature : str
+        Current scoring signature.
+
+    Returns
+    -------
+    Tuple[List[Dict[str, Any]], set[Tuple[str, str]]]
+        Reused raw rows and their ``(graph, engine)`` keys.
+    """
+    if legacy_field_cache is None:
+        return [], set()
+    cache_hash = sha256_file(legacy_field_cache)
+    if cache_hash != LEGACY_FIELD_CACHE_SHA256:
+        raise RuntimeError(
+            "legacy field cache SHA mismatch: expected "
+            f"{LEGACY_FIELD_CACHE_SHA256}, got {cache_hash}"
+        )
+    payload = json.loads(legacy_field_cache.read_text())
+    rows = payload["rows"] if isinstance(payload, dict) else payload
+    cache_by_key = {(str(row["graph"]), str(row["engine"])): row for row in rows}
+    if len(cache_by_key) != LEGACY_FIELD_CACHE_PAIR_COUNT:
+        raise RuntimeError(
+            f"legacy field cache pair count mismatch: expected "
+            f"{LEGACY_FIELD_CACHE_PAIR_COUNT}, got {len(cache_by_key)}"
+        )
+    task_paths = {
+        (graph, engine): {str(Path(path).resolve()) for path in paths}
+        for graph, engine, paths in field_tasks
+    }
+    if not set(cache_by_key).issubset(set(task_paths)):
+        raise RuntimeError("legacy field cache coverage does not match scoreable field pairs")
+    reused: List[Dict[str, Any]] = []
+    reused_keys: set[Tuple[str, str]] = set()
+    for key, row in cache_by_key.items():
+        graph_name, engine = key
+        test_graph = graphs[graph_name]
+        if test_graph.graph.clusters:
+            continue
+        position_path = cached_path_value(row)
+        if (
+            position_path is None
+            or position_path not in task_paths[key]
+            or not Path(position_path).exists()
+        ):
+            raise RuntimeError(f"legacy field cache best_path is not scoreable for {key}")
+        score = cached_score_value(row)
+        if score is None:
+            raise RuntimeError(f"legacy field cache score is missing for {key}")
+        reused.append(
+            {
+                "graph": graph_name,
+                "engine": engine,
+                "position_path": position_path,
+                "position_sha256": sha256_file(Path(position_path)),
+                "metrics": dict(row.get("metrics", {})),
+                "old_composite": score,
+                "extended_composite": score,
+                "scoring_signature": signature,
+                "score_origin": "legacy_cache_g2_noncluster",
+                "legacy_field_cache_sha256": cache_hash,
+            }
+        )
+        reused_keys.add(key)
+    return reused, reused_keys
+
+
+def read_raw_cache(
+    score_cache: Path, expected_header: Mapping[str, Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """Read a versioned raw cache when every header field matches.
+
+    Parameters
+    ----------
+    score_cache : Path
+        Raw score cache path.
+    expected_header : Mapping[str, Any]
+        Header expected for the current inputs and ruler.
+
+    Returns
+    -------
+    Optional[List[Dict[str, Any]]]
+        Cached rows when valid, otherwise ``None``.
+    """
+    if not score_cache.exists():
+        return None
+    payload = json.loads(score_cache.read_text())
+    if payload.get("header") != dict(expected_header):
+        print("[score] raw cache stale; re-scoring saved positions", flush=True)
+        return None
+    return list(payload["rows"])
+
+
+def write_raw_cache(
+    score_cache: Path, header: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> None:
+    """Write the versioned raw score cache.
+
+    Parameters
+    ----------
+    score_cache : Path
+        Raw score cache path.
+    header : Mapping[str, Any]
+        Cache header.
+    rows : Sequence[Mapping[str, Any]]
+        Raw score rows.
+
+    Returns
+    -------
+    None
+    """
+    score_cache.parent.mkdir(parents=True, exist_ok=True)
+    score_cache.write_text(json.dumps({"header": dict(header), "rows": list(rows)}, indent=1))
 
 
 def classify(delta: float) -> str:
@@ -283,8 +804,346 @@ def classify(delta: float) -> str:
     return "behind"
 
 
+def score_key_for_table(table_kind: str) -> str:
+    """Return the raw-row score key for a table kind.
+
+    Parameters
+    ----------
+    table_kind : str
+        ``"old"`` or ``"extended"``.
+
+    Returns
+    -------
+    str
+        Raw row score key.
+    """
+    if table_kind == "old":
+        return "old_composite"
+    if table_kind == "extended":
+        return "extended_composite"
+    raise ValueError(f"unknown table kind: {table_kind}")
+
+
+def best_rows_by_graph(
+    rows: Iterable[Mapping[str, Any]], score_key: str, engine: Optional[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Select best raw row per graph for one score column.
+
+    Parameters
+    ----------
+    rows : Iterable[Mapping[str, Any]]
+        Candidate raw rows.
+    score_key : str
+        Score column to maximize.
+    engine : Optional[str]
+        Exact engine filter; ``None`` means all non-native field engines.
+
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Best row keyed by graph name.
+    """
+    best: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if row.get(score_key) is None:
+            continue
+        row_engine = str(row["engine"])
+        if engine is not None and row_engine != engine:
+            continue
+        if engine is None and row_engine == "dagua":
+            continue
+        graph_name = str(row["graph"])
+        if graph_name not in best or float(row[score_key]) > float(best[graph_name][score_key]):
+            best[graph_name] = dict(row)
+    return best
+
+
+def cluster_components(row: Optional[Mapping[str, Any]], prefix: str) -> Dict[str, Any]:
+    """Extract prefixed cluster component values from a raw row.
+
+    Parameters
+    ----------
+    row : Optional[Mapping[str, Any]]
+        Raw score row, or ``None``.
+    prefix : str
+        Output key prefix.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Prefixed cluster metric values.
+    """
+    metrics = {} if row is None else dict(row.get("metrics", {}))
+    return {f"{prefix}_{key}": metrics.get(key) for key in CLUSTER_SCORE_KEYS}
+
+
+def build_table(
+    rows: Sequence[Mapping[str, Any]],
+    graphs: Mapping[str, TestGraph],
+    names: Sequence[str],
+    table_kind: str,
+    signature: str,
+    raw_cache_path: Path,
+) -> Dict[str, Any]:
+    """Build one scoreboard table from raw candidate rows.
+
+    Parameters
+    ----------
+    rows : Sequence[Mapping[str, Any]]
+        Raw candidate rows.
+    graphs : Mapping[str, TestGraph]
+        Reconstructed graph map.
+    names : Sequence[str]
+        Ordered graph names for the table.
+    table_kind : str
+        ``"old"`` or ``"extended"``.
+    signature : str
+        Current scoring signature.
+    raw_cache_path : Path
+        Raw score cache path.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Scoreboard JSON payload.
+    """
+    score_key = score_key_for_table(table_kind)
+    native_by_graph = best_rows_by_graph(rows, score_key, engine="dagua")
+    field_by_graph = best_rows_by_graph(rows, score_key, engine=None)
+    per_graph: List[Dict[str, Any]] = []
+    tallies = {"strictly_best": 0, "tied": 0, "behind": 0, "missing": 0}
+    for graph_name in names:
+        native_row = native_by_graph.get(graph_name)
+        field_row = field_by_graph.get(graph_name)
+        if native_row is None or field_row is None:
+            tallies["missing"] += 1
+            per_graph.append(
+                {
+                    "graph": graph_name,
+                    "status": "missing",
+                    "native": None if native_row is None else native_row[score_key],
+                    "field_best": None if field_row is None else field_row[score_key],
+                    "field_best_engine": None if field_row is None else field_row["engine"],
+                    "native_path": None if native_row is None else native_row.get("position_path"),
+                    "field_best_path": (
+                        None if field_row is None else field_row.get("position_path")
+                    ),
+                }
+            )
+            continue
+        delta = float(native_row[score_key]) - float(field_row[score_key])
+        status = classify(delta)
+        tallies[status] += 1
+        test_graph = graphs[graph_name]
+        table_row: Dict[str, Any] = {
+            "graph": graph_name,
+            "family": ",".join(sorted(test_graph.tags)) if test_graph.tags else "",
+            "ruler": ("directed" if is_semantically_directed(test_graph) else "undirected"),
+            "native": float(native_row[score_key]),
+            "field_best": float(field_row[score_key]),
+            "field_best_engine": field_row["engine"],
+            "delta": delta,
+            "status": status,
+            "native_path": native_row.get("position_path"),
+            "field_best_path": field_row.get("position_path"),
+        }
+        if test_graph.graph.clusters:
+            table_row.update(cluster_components(native_row, "native"))
+            table_row.update(cluster_components(field_row, "field_best"))
+        per_graph.append(table_row)
+    best_or_tied = tallies["strictly_best"] + tallies["tied"]
+    return {
+        "ruler_schema": RULER_SCHEMA,
+        "table_kind": table_kind,
+        "corpus_size": len(names),
+        "tie_band": TIE_BAND,
+        "best_or_tied": best_or_tied,
+        "tallies": tallies,
+        "scoring_signature": signature,
+        "raw_cache_path": str(raw_cache_path),
+        "per_graph": per_graph,
+    }
+
+
+def validate_raw_integrity(
+    rows: Sequence[Mapping[str, Any]],
+    graphs: Mapping[str, TestGraph],
+    names: Sequence[str],
+    signature: str,
+) -> None:
+    """Validate mandatory raw-score integrity checks.
+
+    Parameters
+    ----------
+    rows : Sequence[Mapping[str, Any]]
+        Raw candidate rows.
+    graphs : Mapping[str, TestGraph]
+        Reconstructed graph map.
+    names : Sequence[str]
+        Expected graph names.
+    signature : str
+        Current scoring signature.
+
+    Returns
+    -------
+    None
+    """
+    raw_by_graph_engine: Dict[Tuple[str, str], List[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        raw_by_graph_engine[(str(row["graph"]), str(row["engine"]))].append(row)
+        graph = graphs[str(row["graph"])]
+        if graph.graph.clusters:
+            if row.get("score_origin") != "fresh_positions":
+                raise RuntimeError(
+                    f"clustered raw row is not fresh: {row['graph']} {row['engine']}"
+                )
+            if row.get("scoring_signature") != signature:
+                raise RuntimeError(
+                    f"clustered raw row has stale signature: {row['graph']} {row['engine']}"
+                )
+            metrics = dict(row.get("metrics", {}))
+            if metrics.get("_cluster_quality_supported") is False:
+                raise RuntimeError(
+                    f"clustered raw row used unsupported cluster quality: {row['graph']}"
+                )
+            for key in CLUSTER_SCORE_KEYS:
+                if key not in metrics:
+                    raise RuntimeError(
+                        f"clustered raw row missing {key}: {row['graph']} {row['engine']}"
+                    )
+                value = metrics[key]
+                if value is not None and not math.isfinite(float(value)):
+                    raise RuntimeError(f"clustered raw row has non-finite {key}: {row['graph']}")
+            extended = float(composite_auto(metrics, is_semantically_directed(graph)))
+            old_metrics = dict(metrics)
+            for key in CLUSTER_SCORE_KEYS:
+                old_metrics[key] = None
+            old = float(composite_auto(old_metrics, is_semantically_directed(graph)))
+            if not math.isclose(
+                extended, float(row["extended_composite"]), rel_tol=0.0, abs_tol=1e-9
+            ):
+                raise RuntimeError(
+                    f"clustered extended score mismatch: {row['graph']} {row['engine']}"
+                )
+            if not math.isclose(old, float(row["old_composite"]), rel_tol=0.0, abs_tol=1e-9):
+                raise RuntimeError(f"clustered old score mismatch: {row['graph']} {row['engine']}")
+        else:
+            if row.get("old_composite") != row.get("extended_composite"):
+                raise RuntimeError(
+                    f"non-cluster old/extended scores differ: {row['graph']} {row['engine']}"
+                )
+            if row.get("score_origin") == "legacy_cache_g2_noncluster" and (
+                row.get("legacy_field_cache_sha256") != LEGACY_FIELD_CACHE_SHA256
+            ):
+                raise RuntimeError(
+                    f"legacy cache row lacks pinned hash: {row['graph']} {row['engine']}"
+                )
+    for graph_name in names:
+        native_rows = raw_by_graph_engine.get((graph_name, "dagua"), [])
+        field_rows = [
+            row
+            for (row_graph, row_engine), grouped in raw_by_graph_engine.items()
+            if row_graph == graph_name and row_engine != "dagua"
+            for row in grouped
+        ]
+        if not any(row.get("score_origin") == "fresh_positions" for row in native_rows):
+            raise RuntimeError(f"missing fresh native score for {graph_name}")
+        if not any(row.get("extended_composite") is not None for row in field_rows):
+            raise RuntimeError(f"missing usable field score for {graph_name}")
+
+
+def validate_table_integrity(
+    table: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    names: Sequence[str],
+) -> None:
+    """Validate independent field-best computation for a table.
+
+    Parameters
+    ----------
+    table : Mapping[str, Any]
+        Scoreboard table.
+    rows : Sequence[Mapping[str, Any]]
+        Raw candidate rows.
+    names : Sequence[str]
+        Expected graph names.
+
+    Returns
+    -------
+    None
+    """
+    table_rows = list(table["per_graph"])
+    row_names = [str(row["graph"]) for row in table_rows]
+    if len(row_names) != len(names) or set(row_names) != set(names):
+        raise RuntimeError("table graph-name coverage mismatch")
+    score_key = score_key_for_table(str(table["table_kind"]))
+    field_by_graph = best_rows_by_graph(rows, score_key, engine=None)
+    for table_row in table_rows:
+        if table_row["status"] == "missing":
+            continue
+        graph_name = str(table_row["graph"])
+        winner = field_by_graph[graph_name]
+        if not math.isclose(
+            float(table_row["field_best"]), float(winner[score_key]), rel_tol=0.0, abs_tol=1e-12
+        ):
+            raise RuntimeError(f"field_best mismatch for {graph_name}")
+        if table_row["field_best_engine"] != winner["engine"]:
+            raise RuntimeError(f"field_best_engine mismatch for {graph_name}")
+        if table_row["field_best_path"] != winner.get("position_path"):
+            raise RuntimeError(f"field_best_path mismatch for {graph_name}")
+
+
+def validate_outputs(
+    old_table: Mapping[str, Any],
+    extended_table: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    graphs: Mapping[str, TestGraph],
+    old_names: Sequence[str],
+    extended_names: Sequence[str],
+    signature: str,
+) -> None:
+    """Run the recipe's mandatory scorer self-fail checks.
+
+    Parameters
+    ----------
+    old_table : Mapping[str, Any]
+        Old-ruler table.
+    extended_table : Mapping[str, Any]
+        Extended-ruler table.
+    rows : Sequence[Mapping[str, Any]]
+        Raw candidate rows.
+    graphs : Mapping[str, TestGraph]
+        Reconstructed graph map.
+    old_names : Sequence[str]
+        Frozen old-108 names.
+    extended_names : Sequence[str]
+        Extended table names.
+    signature : str
+        Current scoring signature.
+
+    Returns
+    -------
+    None
+    """
+    if len(set(old_names)) != 108:
+        raise RuntimeError(
+            f"old table must have 108 unique frozen names, got {len(set(old_names))}"
+        )
+    if len(set(extended_names)) == 121:
+        new_names = tuple(name for name in extended_names if name not in set(old_names))
+        if new_names != R8_GRAPH_NAMES:
+            raise RuntimeError("extended table R8 names do not match exact recipe tuple")
+    elif extended_names != old_names:
+        raise RuntimeError(
+            f"extended table must have 121 unique names, got {len(set(extended_names))}"
+        )
+    validate_raw_integrity(rows, graphs, extended_names, signature)
+    validate_table_integrity(old_table, rows, old_names)
+    validate_table_integrity(extended_table, rows, extended_names)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Run the native-vs-field honest-ruler comparison.
+    """Run the native-vs-field dual-ruler comparison.
 
     Parameters
     ----------
@@ -297,84 +1156,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         Process exit code.
     """
     args = parse_args(argv)
-    names = corpus_names(args.corpus_positions)
-    graphs = build_graph_map(names)
+    old_names, extended_names = selected_names(args.corpus_positions, args.include_r8)
+    graphs = build_graph_map(extended_names)
+    signature = scoring_signature()
 
-    field_rows: Optional[List[Dict[str, Any]]] = None
-    if args.field_cache is not None and args.field_cache.exists():
-        field_rows = json.loads(args.field_cache.read_text())["rows"]
-        print(f"[score] field cache hit: {len(field_rows)} rows", flush=True)
-    if field_rows is None:
-        field_tasks = load_run_tasks(args.field_dir, names)
-        print(f"[score] scoring field: {len(field_tasks)} graph-engine pairs", flush=True)
-        field_rows = score_tasks(field_tasks, graphs, args.workers)
-        if args.field_cache is not None:
-            args.field_cache.parent.mkdir(parents=True, exist_ok=True)
-            args.field_cache.write_text(json.dumps({"rows": field_rows}, indent=1))
+    field_tasks = load_run_tasks(args.field_dir, extended_names)
+    native_tasks = load_run_tasks(args.native_dir, extended_names, engine_filter="dagua")
+    all_tasks = [*field_tasks, *native_tasks]
+    header = cache_header(
+        old_names,
+        extended_names,
+        graphs,
+        args.field_dir,
+        args.native_dir,
+        all_tasks,
+        signature,
+    )
 
-    native_tasks = load_run_tasks(args.native_dir, names, engine_filter="dagua")
-    print(f"[score] scoring native: {len(native_tasks)} graphs", flush=True)
-    native_rows = score_tasks(native_tasks, graphs, args.workers)
-
-    native_by_graph = {
-        str(row["graph"]): row for row in native_rows if row["best_composite"] is not None
-    }
-    field_by_graph: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for row in field_rows:
-        if row["best_composite"] is not None:
-            field_by_graph[str(row["graph"])].append(row)
-
-    init_worker(graphs)
-    per_graph: List[Dict[str, Any]] = []
-    tallies = {"strictly_best": 0, "tied": 0, "behind": 0, "missing": 0}
-    for graph_name in names:
-        native_row = native_by_graph.get(graph_name)
-        competitors = field_by_graph.get(graph_name, [])
-        if native_row is None or not competitors:
-            tallies["missing"] += 1
-            per_graph.append(
-                {
-                    "graph": graph_name,
-                    "status": "missing",
-                    "native": None if native_row is None else native_row["best_composite"],
-                    "field_count": len(competitors),
-                }
-            )
-            continue
-        winner = max(competitors, key=lambda row: float(row["best_composite"]))
-        delta = float(native_row["best_composite"]) - float(winner["best_composite"])
-        status = classify(delta)
-        tallies[status] += 1
-        test_graph = graphs[graph_name]
-        per_graph.append(
-            {
-                "graph": graph_name,
-                "family": ",".join(sorted(test_graph.tags)) if test_graph.tags else "",
-                "ruler": ("directed" if is_semantically_directed(test_graph) else "undirected"),
-                "native": float(native_row["best_composite"]),
-                "field_best": float(winner["best_composite"]),
-                "field_best_engine": winner["engine"],
-                "delta": delta,
-                "status": status,
-            }
+    raw_rows = read_raw_cache(args.score_cache, header)
+    if raw_rows is None:
+        legacy_rows, reused_keys = load_legacy_field_rows(
+            args.legacy_field_cache, field_tasks, graphs, signature
         )
+        fresh_field_tasks = [task for task in field_tasks if (task[0], task[1]) not in reused_keys]
+        print(
+            f"[score] scoring field: {len(fresh_field_tasks)} graph-engine pairs "
+            f"({len(legacy_rows)} legacy rows reused)",
+            flush=True,
+        )
+        field_rows = [
+            *legacy_rows,
+            *score_tasks(fresh_field_tasks, graphs, args.workers, signature),
+        ]
+        print(f"[score] scoring native: {len(native_tasks)} graph-engine pairs", flush=True)
+        native_rows = score_tasks(native_tasks, graphs, args.workers, signature)
+        raw_rows = [*field_rows, *native_rows]
+        write_raw_cache(args.score_cache, header, raw_rows)
+    else:
+        print(f"[score] raw cache hit: {len(raw_rows)} rows", flush=True)
 
-    best_or_tied = tallies["strictly_best"] + tallies["tied"]
-    summary = {
-        "corpus_size": len(names),
-        "tie_band": TIE_BAND,
-        "best_or_tied": best_or_tied,
-        "tallies": tallies,
-        "native_dir": str(args.native_dir),
-        "field_dir": str(args.field_dir),
-        "per_graph": per_graph,
-    }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(summary, indent=1))
+    old_table = build_table(raw_rows, graphs, old_names, "old", signature, args.score_cache)
+    extended_table = build_table(
+        raw_rows, graphs, extended_names, "extended", signature, args.score_cache
+    )
+    validate_outputs(
+        old_table, extended_table, raw_rows, graphs, old_names, extended_names, signature
+    )
+
+    args.old_output.parent.mkdir(parents=True, exist_ok=True)
+    args.extended_output.parent.mkdir(parents=True, exist_ok=True)
+    args.old_output.write_text(json.dumps(old_table, indent=1))
+    args.extended_output.write_text(json.dumps(extended_table, indent=1))
+
+    old_best = int(old_table["best_or_tied"])
+    extended_best = int(extended_table["best_or_tied"])
     print(
-        f"[score] best-or-tied {best_or_tied}/{len(names)} "
-        f"(best {tallies['strictly_best']}, tied {tallies['tied']}, "
-        f"behind {tallies['behind']}, missing {tallies['missing']})",
+        f"[score] old best-or-tied {old_best}/{len(old_names)}; "
+        f"extended best-or-tied {extended_best}/{len(extended_names)}",
         flush=True,
     )
     return 0
