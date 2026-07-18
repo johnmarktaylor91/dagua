@@ -122,6 +122,15 @@ def test_graphviz_mincross_orders_weak_components_independently() -> None:
     assert ordering == [[2, 0], [3, 1]]
 
 
+def test_graphviz_mincross_rejects_duplicate_rank_entries() -> None:
+    """Fail fast when malformed callers provide duplicate rank membership."""
+    ranks = [[0, 0], [1]]
+    edges = [(0, 1)]
+
+    with pytest.raises(ValueError, match="duplicate node ids: 0"):
+        graphviz_mincross(ranks=ranks, edges=edges)
+
+
 def test_graphviz_cluster_containment_keeps_rank_blocks_contiguous() -> None:
     """Collect same-rank cluster members into one mincross block."""
     ranks = [[0, 1, 2, 3], [4, 5]]

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import importlib
+import signal
 import time
 from types import SimpleNamespace
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.eval.graphs import _make_r8_lr_direction
 from dagua.graph import DaguaGraph
+from dagua.layout import layout
 from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
 from dagua.layout.ops.pipelines.native_directed import (
@@ -39,6 +42,55 @@ from dagua.layout.ops.pipelines.native_directed import (
     layout_native_directed_portfolio,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
+
+_T = TypeVar("_T")
+
+
+def _run_with_watchdog(func: Callable[[], _T], timeout_s: float) -> _T:
+    """Run a callable with a wall-clock alarm in the current process.
+
+    Parameters
+    ----------
+    func : Callable[[], _T]
+        Zero-argument callable to execute.
+    timeout_s : float
+        Maximum runtime in seconds before raising ``TimeoutError``.
+
+    Returns
+    -------
+    _T
+        Value returned by ``func`` before the alarm fires.
+    """
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0.0)
+
+    def handle_timeout(signum: int, frame: object) -> None:
+        """Raise a Python exception when the watchdog alarm fires."""
+        del signum, frame
+        raise TimeoutError(f"operation exceeded {timeout_s:.1f}s watchdog")
+
+    signal.signal(signal.SIGALRM, handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return func()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def test_r8_nested_lr_direction_native_layout_terminates() -> None:
+    """Native directed portfolio returns finite R8 LR positions promptly."""
+    graph = _make_r8_lr_direction().graph
+    graph.compute_node_sizes()
+    config = LayoutConfig(algorithm="dagua_native", seed=42, device="cpu")
+
+    started = time.perf_counter()
+    positions = _run_with_watchdog(lambda: layout(graph, config), timeout_s=20.0)
+    runtime_s = time.perf_counter() - started
+
+    assert positions.shape == (30, 2)
+    assert torch.isfinite(positions).all()
+    assert runtime_s < 20.0
 
 
 def test_semantic_cyclic_graph_routes_to_common_contest() -> None:
