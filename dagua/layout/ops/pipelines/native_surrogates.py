@@ -7,6 +7,11 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from dagua.layout.ops.pipelines.native_shape_geometry import (
+    NativeShapeGeometry,
+    shape_overlap_hinge_loss,
+)
+
 _EPS = 1.0e-6
 
 
@@ -379,6 +384,7 @@ def overlap_hinge_loss(
     *,
     padding: float = 0.0,
     max_nodes: int = 512,
+    shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Penalize overlapping node boxes with a bounded all-pairs hinge.
 
@@ -392,6 +398,9 @@ def overlap_hinge_loss(
         Additional box padding.
     max_nodes : int, default=512
         Deterministic node cap for the all-pairs box check.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box node-shape descriptors. When omitted, this function
+        preserves the exact legacy AABB computation.
 
     Returns
     -------
@@ -401,6 +410,14 @@ def overlap_hinge_loss(
     node_count = int(pos.shape[0])
     if node_count < 2 or node_sizes.numel() == 0:
         return _zero_like_loss(pos)
+    if shape_geometry is not None:
+        return shape_overlap_hinge_loss(
+            pos,
+            node_sizes,
+            shape_geometry,
+            padding=padding,
+            max_nodes=max_nodes,
+        )
     if node_count > max_nodes:
         sample = torch.linspace(
             0,
