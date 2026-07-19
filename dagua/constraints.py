@@ -579,6 +579,18 @@ class Pin(Constraint):
     frame: str = "view"
     strength: StrengthLike = field(default="hard", kw_only=True)
 
+    def __post_init__(self) -> None:
+        """Validate pin options.
+
+        Returns
+        -------
+        None
+            Validation only.
+        """
+        super().__post_init__()
+        if self.frame != "view":
+            raise ConstraintTypeError("Pin.frame values other than 'view' are not implemented yet.")
+
 
 @dataclass(frozen=True, init=False)
 class Align(Constraint):
@@ -608,6 +620,18 @@ class Align(Constraint):
         object.__setattr__(self, "at", at)
         object.__setattr__(self, "spacing", spacing)
         self.__post_init__()
+
+    def __post_init__(self) -> None:
+        """Validate alignment options.
+
+        Returns
+        -------
+        None
+            Validation only.
+        """
+        super().__post_init__()
+        if self.spacing is not None:
+            raise ConstraintTypeError("Align.spacing is not implemented yet.")
 
 
 @dataclass(frozen=True, init=False)
@@ -671,6 +695,26 @@ class Separate(Constraint):
     axis: Optional[str] = None
     side: Optional[str] = None
     strength: StrengthLike = field(default="firm", kw_only=True)
+
+    def __post_init__(self) -> None:
+        """Validate separation options.
+
+        Returns
+        -------
+        None
+            Validation only.
+        """
+        super().__post_init__()
+        if self.side is not None and self.side not in {
+            "auto",
+            "left",
+            "right",
+            "above",
+            "below",
+            "before",
+            "after",
+        }:
+            raise ConstraintTypeError(f"Unknown separate side: {self.side!r}.")
 
     def _validate_hard(self) -> None:
         """Refuse unprojectable symmetric hard separation.
@@ -743,6 +787,18 @@ class Emphasize(Constraint):
         object.__setattr__(self, "lane", lane)
         self.__post_init__()
 
+    def __post_init__(self) -> None:
+        """Validate emphasis options.
+
+        Returns
+        -------
+        None
+            Validation only.
+        """
+        super().__post_init__()
+        if self.lane is not None:
+            raise ConstraintTypeError("Emphasize.lane is not implemented yet.")
+
     def _validate_hard(self) -> None:
         """Refuse unprojectable hard emphasis.
 
@@ -764,6 +820,18 @@ class Focus(Constraint):
     radius: int = 2
     at: Optional[Any] = None
     strength: StrengthLike = field(default="soft", kw_only=True)
+
+    def __post_init__(self) -> None:
+        """Validate focus options.
+
+        Returns
+        -------
+        None
+            Validation only.
+        """
+        super().__post_init__()
+        if self.radius != 2:
+            raise ConstraintTypeError("Focus.radius is not implemented yet.")
 
     def _validate_hard(self) -> None:
         """Refuse unprojectable hard focus.
@@ -1101,10 +1169,16 @@ def constraint_from_dict(data: Mapping[str, Any]) -> Constraint:
             **common,
         )
     if constraint_type == "Custom":
+        custom_strength = common["strength"]
+        if is_hard_strength(custom_strength) and data.get("has_project"):
+            custom_strength = "firm"
         return Custom(
             access=str(data.get("access", "global")),
             over=selection_from_dict(data.get("over")),
-            **common,
+            strength=custom_strength,
+            name=common["name"],
+            system=common["system"],
+            tags=common["tags"],
         )
     raise ConstraintTypeError(f"Unknown serialized constraint type: {constraint_type!r}")
 
@@ -1278,6 +1352,7 @@ class ConstraintResidual:
     residual: float
     hard_satisfied: bool
     resolved_count: int = 0
+    error: Optional[str] = None
 
 
 @dataclass
@@ -1470,6 +1545,7 @@ class ConstraintSet:
                 pos,
                 self._owner_graph,
                 policy=policy,
+                direction=str(getattr(self._owner_graph, "direction", "TB")),
             )
         return self._last_report
 
@@ -1504,6 +1580,7 @@ def build_constraint_report(
     graph: Any,
     *,
     policy: str = "report",
+    direction: str = "TB",
 ) -> ConstraintReport:
     """Build normalized residual rows for constraints at ``pos``.
 
@@ -1518,6 +1595,8 @@ def build_constraint_report(
         are already lowered to integer indices.
     policy : str, default="report"
         Conflict policy label.
+    direction : str, default="TB"
+        View-frame direction used to resolve semantic axes.
 
     Returns
     -------
@@ -1526,10 +1605,17 @@ def build_constraint_report(
     """
     rows = []
     for constraint in constraints:
-        residual, resolved_count = _constraint_residual(constraint, pos, graph)
+        error = None
+        try:
+            residual, resolved_count = _constraint_residual(constraint, pos, graph, direction)
+        except ConstraintError:
+            raise
+        except Exception as exc:
+            residual, resolved_count = (float("inf"), 0)
+            error = f"{type(exc).__name__}: {exc}"
         tolerance = 1e-5 if constraint.is_hard else 1e-3
         hard_satisfied = True
-        if constraint.is_hard or constraint.weight >= STRENGTHS["rigid"]:
+        if constraint.is_hard:
             hard_satisfied = residual <= tolerance
         rows.append(
             ConstraintResidual(
@@ -1537,6 +1623,7 @@ def build_constraint_report(
                 residual=residual,
                 hard_satisfied=hard_satisfied,
                 resolved_count=resolved_count,
+                error=error,
             )
         )
     return ConstraintReport(
@@ -1550,6 +1637,7 @@ def _constraint_residual(
     constraint: Constraint,
     pos: torch.Tensor,
     graph: Any,
+    direction: str = "TB",
 ) -> Tuple[float, int]:
     """Return one normalized residual and resolved element count.
 
@@ -1567,36 +1655,57 @@ def _constraint_residual(
     tuple[float, int]
         Residual in layout units and resolved element count.
     """
-    try:
-        if isinstance(constraint, Pin):
-            return _pin_residual(constraint, pos, graph)
-        if isinstance(constraint, Align):
-            return _align_residual(constraint, pos, graph)
-        if isinstance(constraint, Order):
-            return _order_residual(constraint, pos, graph)
-        if isinstance(constraint, Separate):
-            return _separate_residual(constraint, pos, graph)
-        if isinstance(constraint, Group):
-            return _group_residual(constraint, pos, graph)
-        if isinstance(constraint, Anchor):
-            return _anchor_residual(constraint, pos, graph)
-        if isinstance(constraint, Focus):
-            indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
-            return (0.0, len(indices))
-        if isinstance(constraint, Contain):
-            return _contain_residual(constraint, pos, graph)
-        if isinstance(constraint, Emphasize):
-            count = sum(
-                len(resolve_node_selection(item, graph, allow_empty=True))
-                for item in constraint.path_or_edges
-                if not (isinstance(item, Selector) and item.kind == "edges")
-            )
-            return (0.0, count)
-    except ConstraintError:
-        raise
-    except Exception:
-        return (0.0, 0)
+    if isinstance(constraint, Pin):
+        return _pin_residual(constraint, pos, graph)
+    if isinstance(constraint, Align):
+        return _align_residual(constraint, pos, graph, direction)
+    if isinstance(constraint, Order):
+        return _order_residual(constraint, pos, graph, direction)
+    if isinstance(constraint, Separate):
+        return _separate_residual(constraint, pos, graph, direction)
+    if isinstance(constraint, Group):
+        return _group_residual(constraint, pos, graph)
+    if isinstance(constraint, Anchor):
+        return _anchor_residual(constraint, pos, graph)
+    if isinstance(constraint, Focus):
+        indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
+        return (0.0, len(indices))
+    if isinstance(constraint, Contain):
+        return _contain_residual(constraint, pos, graph)
+    if isinstance(constraint, Emphasize):
+        count = sum(
+            len(resolve_node_selection(item, graph, allow_empty=True))
+            for item in constraint.path_or_edges
+            if not (isinstance(item, Selector) and item.kind == "edges")
+        )
+        return (0.0, count)
     return (0.0, 0)
+
+
+def _axis_index(axis: Optional[str], direction: str) -> int:
+    """Resolve a raw or semantic axis name to a view-frame coordinate index.
+
+    Parameters
+    ----------
+    axis : str, optional
+        Axis name from a constraint.
+    direction : str
+        Layout direction.
+
+    Returns
+    -------
+    int
+        Coordinate index, where x is 0 and y is 1.
+    """
+    if axis == "x":
+        return 0
+    if axis == "y":
+        return 1
+    if axis == "flow":
+        return 0 if direction in {"LR", "RL"} else 1
+    if axis == "cross":
+        return 1 if direction in {"LR", "RL"} else 0
+    return 1
 
 
 def _pin_residual(constraint: Pin, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
@@ -1616,8 +1725,25 @@ def _pin_residual(constraint: Pin, pos: torch.Tensor, graph: Any) -> Tuple[float
     tuple[float, int]
         Max axis residual and selected count.
     """
-    indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
     at_x, at_y = resolve_canvas_point(constraint.at, pos)
+    if isinstance(constraint.sel, Selector) and constraint.sel.kind in {"label", "labels"}:
+        owner_indices = resolve_label_selection(constraint.sel, graph, allow_empty=True)
+        stored = getattr(graph, "_r9_label_positions", {}) or {}
+        residuals = []
+        for owner_index in owner_indices:
+            key = (constraint.sel.kind, repr(constraint.sel.args), int(owner_index))
+            label_x, label_y = stored.get(
+                key,
+                (float(pos[owner_index, 0].item()), float(pos[owner_index, 1].item())),
+            )
+            target_x = constraint.x if constraint.x is not None else at_x
+            target_y = constraint.y if constraint.y is not None else at_y
+            if target_x is not None:
+                residuals.append(abs(float(label_x) - float(target_x)))
+            if target_y is not None:
+                residuals.append(abs(float(label_y) - float(target_y)))
+        return (max(residuals, default=0.0), len(owner_indices))
+    indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
     residuals: List[float] = []
     for index in indices:
         target_x = constraint.x if constraint.x is not None else at_x
@@ -1629,7 +1755,12 @@ def _pin_residual(constraint: Pin, pos: torch.Tensor, graph: Any) -> Tuple[float
     return (max(residuals, default=0.0), len(indices))
 
 
-def _align_residual(constraint: Align, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+def _align_residual(
+    constraint: Align,
+    pos: torch.Tensor,
+    graph: Any,
+    direction: str,
+) -> Tuple[float, int]:
     """Return normalized alignment residual.
 
     Parameters
@@ -1649,7 +1780,7 @@ def _align_residual(constraint: Align, pos: torch.Tensor, graph: Any) -> Tuple[f
     indices = _flatten_resolved_nodes(constraint.sels, graph)
     if len(indices) < 2:
         return (0.0, len(indices))
-    axis = 0 if constraint.axis in {"x", "cross"} else 1
+    axis = _axis_index(constraint.axis, direction)
     coords = pos[indices, axis]
     spread = float((coords.max() - coords.min()).abs().item())
     at_x, at_y = resolve_canvas_point(constraint.at, pos)
@@ -1659,7 +1790,12 @@ def _align_residual(constraint: Align, pos: torch.Tensor, graph: Any) -> Tuple[f
     return (spread, len(indices))
 
 
-def _order_residual(constraint: Order, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+def _order_residual(
+    constraint: Order,
+    pos: torch.Tensor,
+    graph: Any,
+    direction: str,
+) -> Tuple[float, int]:
     """Return normalized ordering residual.
 
     Parameters
@@ -1677,7 +1813,7 @@ def _order_residual(constraint: Order, pos: torch.Tensor, graph: Any) -> Tuple[f
         Max hinge violation and resolved count.
     """
     items = [resolve_node_selection(item, graph, allow_empty=True) for item in constraint.items]
-    axis = 1 if constraint.axis in {"flow", "y"} else 0
+    axis = _axis_index(constraint.axis, direction)
     gap = float(constraint.gap or 0.0)
     residuals = []
     for left, right in zip(items, items[1:]):
@@ -1689,7 +1825,12 @@ def _order_residual(constraint: Order, pos: torch.Tensor, graph: Any) -> Tuple[f
     return (max(residuals, default=0.0), sum(len(item) for item in items))
 
 
-def _separate_residual(constraint: Separate, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+def _separate_residual(
+    constraint: Separate,
+    pos: torch.Tensor,
+    graph: Any,
+    direction: str,
+) -> Tuple[float, int]:
     """Return normalized separation residual.
 
     Parameters
@@ -1717,7 +1858,7 @@ def _separate_residual(constraint: Separate, pos: torch.Tensor, graph: Any) -> T
     if constraint.axis is None:
         dist = float((a - b).square().sum().sqrt().item())
     else:
-        axis = 0 if constraint.axis in {"x", "cross"} else 1
+        axis = _axis_index(constraint.axis, direction)
         dist = abs(float(a[axis].item()) - float(b[axis].item()))
     return (max(0.0, float(constraint.gap or 0.0) - dist), len(left) + len(right))
 
@@ -1858,6 +1999,14 @@ def _contain_residual(constraint: Contain, pos: torch.Tensor, graph: Any) -> Tup
             float(container[:, 1].max().item()) - constraint.padding,
         )
     xmin, ymin, xmax, ymax = bounds
+    if xmin > xmax:
+        midpoint = (xmin + xmax) * 0.5
+        xmin = midpoint
+        xmax = midpoint
+    if ymin > ymax:
+        midpoint = (ymin + ymax) * 0.5
+        ymin = midpoint
+        ymax = midpoint
     residuals = []
     for index in indices:
         x = float(pos[index, 0].item())
@@ -2095,42 +2244,46 @@ def _resolve_edges_selector(
     for pair in selection.args:
         result.extend(resolve_edge_selection(pair, graph, allow_empty=selection.allow_empty))
     filters = selection.kwargs
+    filtered: Optional[set[int]] = set(result) if result else None
     if "between" in filters:
         left_sel, right_sel = filters["between"]
         left = set(resolve_node_selection(left_sel, graph))
         right = set(resolve_node_selection(right_sel, graph))
-        result.extend(
+        matches = {
             edge_idx
             for edge_idx, (src, tgt) in enumerate(edge_pairs)
             if (src in left and tgt in right) or (src in right and tgt in left)
-        )
+        }
+        filtered = matches if filtered is None else filtered.intersection(matches)
     if "where" in filters:
         predicate = filters["where"]
-        result.extend(
+        matches = {
             edge_idx
             for edge_idx, (src, tgt) in enumerate(edge_pairs)
             if predicate((graph._index_to_id[src], graph._index_to_id[tgt]))
-        )
+        }
+        filtered = matches if filtered is None else filtered.intersection(matches)
     source_filter = filters.get("source")
     if source_filter is not None:
         source_idx = resolve_single_node(source_filter, graph)
-        result.extend(
-            edge_idx for edge_idx, (src, _tgt) in enumerate(edge_pairs) if src == source_idx
-        )
+        matches = {edge_idx for edge_idx, (src, _tgt) in enumerate(edge_pairs) if src == source_idx}
+        filtered = matches if filtered is None else filtered.intersection(matches)
     target_filter = filters.get("target")
     if target_filter is not None:
         target_idx = resolve_single_node(target_filter, graph)
-        result.extend(
-            edge_idx for edge_idx, (_src, tgt) in enumerate(edge_pairs) if tgt == target_idx
-        )
+        matches = {edge_idx for edge_idx, (_src, tgt) in enumerate(edge_pairs) if tgt == target_idx}
+        filtered = matches if filtered is None else filtered.intersection(matches)
     edge_types = getattr(graph, "edge_types", [])
     type_filter = filters.get("type")
     if type_filter is not None:
-        result.extend(
+        matches = {
             edge_idx for edge_idx, edge_type in enumerate(edge_types) if edge_type == type_filter
-        )
+        }
+        filtered = matches if filtered is None else filtered.intersection(matches)
     if not selection.args and not filters:
         result.extend(range(len(edge_pairs)))
+    elif filtered is not None:
+        result = [edge_idx for edge_idx in range(len(edge_pairs)) if edge_idx in filtered]
     return _unique_preserving(result)
 
 
@@ -2258,8 +2411,13 @@ def _canvas_extent(pos: Optional[torch.Tensor]) -> Tuple[float, float, float, fl
     xmax = float(detached[:, 0].max().item())
     ymin = float(detached[:, 1].min().item())
     ymax = float(detached[:, 1].max().item())
-    pad = max(50.0, 0.1 * max(xmax - xmin, ymax - ymin, 1.0))
-    return (xmin - pad, ymin - pad, xmax + pad, ymax + pad)
+    if xmax == xmin:
+        xmin -= 0.5
+        xmax += 0.5
+    if ymax == ymin:
+        ymin -= 0.5
+        ymax += 0.5
+    return (xmin, ymin, xmax, ymax)
 
 
 def _as_sequence(value: Any) -> Sequence[Any]:
