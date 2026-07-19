@@ -10,7 +10,6 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
-from dagua.layout.constraints import edge_attraction_loss, edge_straightness_loss
 from dagua.layout.engine import (
     _auto_layout_steps,
     _create_optimizer,
@@ -27,6 +26,7 @@ from dagua.layout.engine import (
 )
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.layers import build_layer_index
+from dagua.layout.losses import edge_attraction_loss, edge_straightness_loss
 from dagua.layout.multilevel import (
     _coarsen_once_streaming,
     _scaled_amortization,

@@ -31,6 +31,7 @@ from dagua.styles import (
 )
 
 if TYPE_CHECKING:
+    from dagua.constraints import Constraint
     from dagua.flex import Flex, LayoutFlex
     from dagua.graph import DaguaGraph
 
@@ -184,83 +185,61 @@ def _dict_to_flex(d: Dict[str, Any]) -> "Flex":
 
 def _dict_to_layout_flex(d: Dict[str, Any]) -> "LayoutFlex":
     """Convert a dict to LayoutFlex."""
-    from dagua.flex import AlignGroup, Flex, LayoutFlex
+    from dagua.constraints import Align, Pin, constraint_from_dict
+    from dagua.flex import LayoutFlex
 
     node_sep = _dict_to_flex(d["node_sep"]) if "node_sep" in d else None
     rank_sep = _dict_to_flex(d["rank_sep"]) if "rank_sep" in d else None
 
-    pins = None
+    constraints: List["Constraint"] = []
     if "pins" in d and isinstance(d["pins"], dict):
-        pins = {}
         for node_id, pin_data in d["pins"].items():
             if isinstance(pin_data, dict):
-                fx = (
-                    Flex(
-                        target=float(pin_data["x"]),
-                        weight=float(pin_data.get("weight", float("inf"))),
+                weight = float(pin_data.get("weight", float("inf")))
+                strength = "hard" if weight == float("inf") else weight
+                constraints.append(
+                    Pin(
+                        node_id,
+                        x=float(pin_data["x"]) if "x" in pin_data else None,
+                        y=float(pin_data["y"]) if "y" in pin_data else None,
+                        strength=strength,
                     )
-                    if "x" in pin_data
-                    else None
                 )
-                fy = (
-                    Flex(
-                        target=float(pin_data["y"]),
-                        weight=float(pin_data.get("weight", float("inf"))),
-                    )
-                    if "y" in pin_data
-                    else None
-                )
-                pins[node_id] = (fx, fy)
 
-    align_x = None
     if "align_x" in d and isinstance(d["align_x"], list):
-        align_x = []
         for group_data in d["align_x"]:
             nodes = group_data.get("nodes", [])
             weight = float(group_data.get("weight", 5.0))
-            align_x.append(AlignGroup(nodes=nodes, weight=weight))
+            constraints.append(Align(*nodes, axis="x", strength=weight))
 
-    align_y = None
     if "align_y" in d and isinstance(d["align_y"], list):
-        align_y = []
         for group_data in d["align_y"]:
             nodes = group_data.get("nodes", [])
             weight = float(group_data.get("weight", 5.0))
-            align_y.append(AlignGroup(nodes=nodes, weight=weight))
+            constraints.append(Align(*nodes, axis="y", strength=weight))
+
+    if "constraints" in d and isinstance(d["constraints"], list):
+        constraints.extend(constraint_from_dict(item) for item in d["constraints"])
 
     return LayoutFlex(
         node_sep=node_sep,
         rank_sep=rank_sep,
-        pins=pins,
-        align_x=align_x,
-        align_y=align_y,
+        constraints=constraints,
     )
 
 
 def _layout_flex_to_dict(flex) -> Dict[str, Any]:
     """Serialize a LayoutFlex to a dict."""
+    from dagua.constraints import constraint_to_dict
+
     result: Dict[str, Any] = {}
     if flex.node_sep is not None:
         result["node_sep"] = {"target": flex.node_sep.target, "weight": flex.node_sep.weight}
     if flex.rank_sep is not None:
         result["rank_sep"] = {"target": flex.rank_sep.target, "weight": flex.rank_sep.weight}
-    if flex.pins:
-        pins_dict = {}
-        for node_id, (fx, fy) in flex.pins.items():
-            pin_data: Dict[str, Any] = {}
-            if fx is not None:
-                pin_data["x"] = fx.target
-                pin_data["weight"] = fx.weight
-            if fy is not None:
-                pin_data["y"] = fy.target
-                if "weight" not in pin_data:
-                    pin_data["weight"] = fy.weight
-            pins_dict[str(node_id)] = pin_data
-        result["pins"] = pins_dict
-    if flex.align_x:
-        result["align_x"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_x]
-    if flex.align_y:
-        result["align_y"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_y]
+    constraints = list(getattr(flex, "constraints", None) or [])
+    if constraints:
+        result["constraints"] = [constraint_to_dict(constraint) for constraint in constraints]
     return result
 
 
@@ -598,7 +577,7 @@ def _style_to_diff_dict(style: Any, defaults: Dict[str, Any]) -> Dict[str, Any]:
 def _ensure_yaml():
     """Import and return the yaml module, with a clear error if missing."""
     try:
-        import yaml  # type: ignore[import-untyped]
+        import yaml
 
         return yaml
     except ImportError:

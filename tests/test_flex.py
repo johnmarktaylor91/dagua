@@ -3,8 +3,9 @@
 import pytest
 import torch
 
+from dagua import C
 from dagua.flex import AlignGroup, Flex, LayoutFlex
-from dagua.layout.constraints import (
+from dagua.layout.losses import (
     alignment_loss,
     position_pin_loss,
     project_hard_pins,
@@ -36,6 +37,10 @@ class TestFlex:
         assert f.weight == float("inf")
         assert f.is_hard
 
+    def test_hard_alias(self):
+        f = Flex.hard(40)
+        assert f == Flex.locked(40)
+
     def test_custom_weight(self):
         f = Flex.soft(30, weight=0.8)
         assert f.weight == 0.8
@@ -62,23 +67,23 @@ class TestLayoutFlex:
         lf = LayoutFlex()
         assert lf.node_sep is None
         assert lf.rank_sep is None
-        assert lf.pins is None
-        assert lf.align_x is None
-        assert lf.align_y is None
+        assert lf.constraints is None
 
     def test_with_all_fields(self):
         lf = LayoutFlex(
             node_sep=Flex.firm(40),
             rank_sep=Flex.soft(60),
-            pins={"input": (Flex.locked(0), Flex.locked(0))},
-            align_x=[AlignGroup(nodes=["a", "b"])],
-            align_y=[AlignGroup(nodes=["c", "d"], weight=3.0)],
+            constraints=[
+                C.Pin("input", x=0, y=0),
+                C.Align("a", "b"),
+                C.Align("c", "d", axis="y", strength=3.0),
+            ],
         )
         assert lf.node_sep.target == 40
         assert lf.rank_sep.weight == 0.5
-        assert lf.pins["input"][0].is_hard
-        assert len(lf.align_x) == 1
-        assert lf.align_y[0].weight == 3.0
+        assert lf.constraints[0].is_hard
+        assert len(lf.constraints) == 3
+        assert lf.constraints[2].weight == 3.0
 
 
 class TestPositionPinLoss:
@@ -239,7 +244,7 @@ class TestFlexIntegration:
         g.add_edge(0, 2)
         g.add_edge(0, 3)
 
-        g.align([1, 2, 3], axis="x", weight=10.0)
+        g.align(1, 2, 3, axis="x", strength="hard")
 
         config = LayoutConfig(steps=100)
         config.flex = g.flex
@@ -248,23 +253,8 @@ class TestFlexIntegration:
 
         pos = layout(g, config)
 
-        # Nodes 1, 2, 3 should have more similar x coordinates than without alignment.
-        # The alignment loss competes with other forces (repulsion, overlap), so we
-        # verify alignment reduced spread rather than demanding perfect alignment.
+        # Nodes 1, 2, 3 should share an exact x coordinate under hard alignment.
         x_vals = [pos[g._id_to_index[i], 0].item() for i in [1, 2, 3]]
         x_spread = max(x_vals) - min(x_vals)
 
-        # Run without alignment for comparison
-        g2 = DaguaGraph()
-        for i in range(4):
-            g2.add_node(i, label=str(i))
-        g2.add_edge(0, 1)
-        g2.add_edge(0, 2)
-        g2.add_edge(0, 3)
-        config2 = LayoutConfig(steps=100)
-        pos2 = layout(g2, config2)
-        x_vals2 = [pos2[i, 0].item() for i in [1, 2, 3]]
-        x_spread2 = max(x_vals2) - min(x_vals2)
-
-        # Alignment should reduce spread (or at least not be wildly larger)
-        assert x_spread <= x_spread2 * 1.5  # allow some tolerance
+        assert x_spread == pytest.approx(0.0, abs=1e-5)

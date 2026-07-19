@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Uni
 import torch
 
 if TYPE_CHECKING:
+    from dagua.constraints import Constraint
     from dagua.flex import LayoutFlex
 
 
@@ -333,6 +334,10 @@ class LayoutConfig:
     # Flex layout constraints (soft targets for spacing, pins, alignment)
     # When present, flex values override the corresponding fixed values.
     flex: Optional["LayoutFlex"] = None
+    constraints: Optional[List["Constraint"]] = None
+    replace_constraints: bool = False
+    constraint_policy: Literal["report", "warn", "strict"] = "warn"
+    cluster_cohesion: float = 1.0
 
     # Edge optimization: gradient descent on bezier control points
     # 0 = auto-scale based on edge count, -1 = skip (zero overhead)
@@ -429,6 +434,16 @@ class LayoutConfig:
 
         if self.time_budget_s is not None and self.time_budget_s <= 0.0:
             raise ValueError("time_budget_s must be positive when provided.")
+        if self.constraint_policy not in {"report", "warn", "strict"}:
+            raise ValueError('constraint_policy must be one of "report", "warn", or "strict".')
+        if self.constraints is not None:
+            from dagua.flex import LayoutFlex
+
+            if self.flex is None:
+                self.flex = LayoutFlex()
+            existing = list(self.flex.constraints or [])
+            incoming = list(self.constraints)
+            self.flex.constraints = incoming if self.replace_constraints else existing + incoming
 
 
 # Registry of all tunable parameters with metadata

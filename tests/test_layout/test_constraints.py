@@ -6,7 +6,8 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.eval.graphs import get_test_graphs
 from dagua.layout import layout
-from dagua.layout.constraints import (
+from dagua.layout.engine import EdgeBatchContext
+from dagua.layout.losses import (
     back_edge_compactness_loss,
     crossing_loss,
     dag_ordering_loss,
@@ -17,7 +18,6 @@ from dagua.layout.constraints import (
     overlap_avoidance_loss,
     repulsion_loss,
 )
-from dagua.layout.engine import EdgeBatchContext
 
 
 def _build_edge_batch_context(pos: torch.Tensor, edge_index: torch.Tensor) -> EdgeBatchContext:
