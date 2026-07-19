@@ -31,6 +31,7 @@ from dagua.styles import (
 )
 
 if TYPE_CHECKING:
+    from dagua.constraints import Constraint
     from dagua.flex import Flex, LayoutFlex
     from dagua.graph import DaguaGraph
 
@@ -184,13 +185,13 @@ def _dict_to_flex(d: Dict[str, Any]) -> "Flex":
 
 def _dict_to_layout_flex(d: Dict[str, Any]) -> "LayoutFlex":
     """Convert a dict to LayoutFlex."""
-    from dagua.constraints import Align, Pin
+    from dagua.constraints import Align, Pin, constraint_from_dict
     from dagua.flex import LayoutFlex
 
     node_sep = _dict_to_flex(d["node_sep"]) if "node_sep" in d else None
     rank_sep = _dict_to_flex(d["rank_sep"]) if "rank_sep" in d else None
 
-    constraints = []
+    constraints: List["Constraint"] = []
     if "pins" in d and isinstance(d["pins"], dict):
         for node_id, pin_data in d["pins"].items():
             if isinstance(pin_data, dict):
@@ -217,6 +218,9 @@ def _dict_to_layout_flex(d: Dict[str, Any]) -> "LayoutFlex":
             weight = float(group_data.get("weight", 5.0))
             constraints.append(Align(*nodes, axis="y", strength=weight))
 
+    if "constraints" in d and isinstance(d["constraints"], list):
+        constraints.extend(constraint_from_dict(item) for item in d["constraints"])
+
     return LayoutFlex(
         node_sep=node_sep,
         rank_sep=rank_sep,
@@ -226,6 +230,8 @@ def _dict_to_layout_flex(d: Dict[str, Any]) -> "LayoutFlex":
 
 def _layout_flex_to_dict(flex) -> Dict[str, Any]:
     """Serialize a LayoutFlex to a dict."""
+    from dagua.constraints import constraint_to_dict
+
     result: Dict[str, Any] = {}
     if flex.node_sep is not None:
         result["node_sep"] = {"target": flex.node_sep.target, "weight": flex.node_sep.weight}
@@ -248,6 +254,9 @@ def _layout_flex_to_dict(flex) -> Dict[str, Any]:
         result["align_x"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_x]
     if getattr(flex, "align_y", None):
         result["align_y"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_y]
+    constraints = list(getattr(flex, "constraints", None) or [])
+    if constraints:
+        result["constraints"] = [constraint_to_dict(constraint) for constraint in constraints]
     return result
 
 
@@ -585,7 +594,7 @@ def _style_to_diff_dict(style: Any, defaults: Dict[str, Any]) -> Dict[str, Any]:
 def _ensure_yaml():
     """Import and return the yaml module, with a clear error if missing."""
     try:
-        import yaml  # type: ignore[import-untyped]
+        import yaml
 
         return yaml
     except ImportError:
