@@ -4590,11 +4590,11 @@ def _prepare_flex_data(
             elif isinstance(constraint, Contain):
                 sel = _selection_tensor(constraint.sel, num_nodes, device)
                 within = _selection_or_canvas_tensor(constraint.within, num_nodes, device)
-                payload = (sel, within, float(constraint.padding), float(constraint.weight))
+                contain_payload = (sel, within, float(constraint.padding), float(constraint.weight))
                 if constraint.is_hard:
-                    result["hard_contain"].append(payload)
+                    result["hard_contain"].append(contain_payload)
                 else:
-                    result["soft_contain"].append(payload)
+                    result["soft_contain"].append(contain_payload)
 
         if pin_indices:
             result["pin_indices"] = torch.tensor(pin_indices, dtype=torch.long, device=device)

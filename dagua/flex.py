@@ -20,7 +20,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from dagua.constraints import Constraint
@@ -107,4 +107,7 @@ class LayoutFlex:
 
     node_sep: Optional[Flex] = None
     rank_sep: Optional[Flex] = None
+    pins: Optional[Dict[Any, Tuple[Optional[Flex], Optional[Flex]]]] = None
+    align_x: Optional[List[AlignGroup]] = None
+    align_y: Optional[List[AlignGroup]] = None
     constraints: Optional[list["Constraint"]] = None
