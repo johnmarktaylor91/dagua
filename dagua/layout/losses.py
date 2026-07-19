@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 import warnings
-from typing import Callable, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -1969,3 +1969,364 @@ def back_edge_compactness_loss(
     # Horizontal distance for back edges
     del src, tgt
     return dx[back_mask].square().mean()
+
+
+def constraint_order_loss(
+    pos: torch.Tensor,
+    pairs: List[Tuple[torch.Tensor, torch.Tensor, int, float, float]],
+) -> torch.Tensor:
+    """Penalize directed ordering violations for user constraints.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    pairs : list[tuple[torch.Tensor, torch.Tensor, int, float, float]]
+        Order constraints as left/right index tensors, axis, gap, and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized hinge loss.
+    """
+    terms = []
+    for left, right, axis, gap, weight in pairs:
+        if left.numel() == 0 or right.numel() == 0:
+            continue
+        left_coord = pos[left, axis].mean()
+        right_coord = pos[right, axis].mean()
+        terms.append(weight * F.relu(left_coord + gap - right_coord).square())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_separate_loss(
+    pos: torch.Tensor,
+    pairs: List[Tuple[torch.Tensor, torch.Tensor, Optional[int], float, float]],
+) -> torch.Tensor:
+    """Penalize insufficient distance between selected units.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    pairs : list[tuple[torch.Tensor, torch.Tensor, int | None, float, float]]
+        Separate constraints as selections, optional axis, gap, and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized separation loss.
+    """
+    terms = []
+    for left, right, axis, gap, weight in pairs:
+        if left.numel() == 0 or right.numel() == 0:
+            continue
+        a = pos[left].mean(dim=0)
+        b = pos[right].mean(dim=0)
+        if axis is None:
+            dist = (a - b).square().sum().clamp(min=1e-12).sqrt()
+        else:
+            dist = (a[axis] - b[axis]).abs()
+        terms.append(weight * F.relu(gap - dist).square())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_group_loss(
+    pos: torch.Tensor,
+    groups: List[Tuple[torch.Tensor, float, float]],
+) -> torch.Tensor:
+    """Penalize spread inside user-defined groups.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    groups : list[tuple[torch.Tensor, float, float]]
+        Group index tensors with padding and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar compactness loss.
+    """
+    terms = []
+    for indices, padding, weight in groups:
+        if indices.numel() <= 1:
+            continue
+        group_pos = pos[indices]
+        centroid = group_pos.mean(dim=0, keepdim=True)
+        terms.append(weight * (group_pos - centroid).square().sum(dim=1).mean() / (padding + 1.0))
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_anchor_loss(
+    pos: torch.Tensor,
+    anchors: List[Tuple[torch.Tensor, torch.Tensor, float, str]],
+) -> torch.Tensor:
+    """Penalize deviation from fixed external anchor coordinates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    anchors : list[tuple[torch.Tensor, torch.Tensor, float, str]]
+        Index tensors, target tensors, weights, and fit modes.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar anchor loss.
+    """
+    terms = []
+    for indices, targets, weight, fit in anchors:
+        if indices.numel() == 0:
+            continue
+        current = pos[indices]
+        targets = targets.to(device=pos.device, dtype=pos.dtype)
+        if fit == "translate":
+            fitted = targets + (
+                current.mean(dim=0, keepdim=True) - targets.mean(dim=0, keepdim=True)
+            )
+        elif fit in {"similarity", "similarity+rotation"} and indices.numel() >= 2:
+            centered_targets = targets - targets.mean(dim=0, keepdim=True)
+            centered_current = current - current.mean(dim=0, keepdim=True)
+            denom = centered_targets.square().sum().clamp(min=1e-12)
+            if fit == "similarity+rotation":
+                covariance = centered_targets.T @ centered_current
+                u_matrix, _singular, vh_matrix = torch.linalg.svd(covariance)
+                rotation = u_matrix @ vh_matrix
+                rotated_targets = centered_targets @ rotation
+                scale = (rotated_targets * centered_current).sum() / denom
+                fitted = rotated_targets * scale + current.mean(dim=0, keepdim=True)
+            else:
+                scale = (centered_targets * centered_current).sum() / denom
+                fitted = centered_targets * scale + current.mean(dim=0, keepdim=True)
+        else:
+            fitted = targets
+        terms.append(weight * (current - fitted).square().mean())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_emphasize_loss(
+    pos: torch.Tensor,
+    paths: List[Tuple[torch.Tensor, float]],
+) -> torch.Tensor:
+    """Encourage emphasized paths to be shorter and more collinear.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    paths : list[tuple[torch.Tensor, float]]
+        Ordered path indices and weights.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar path emphasis loss.
+    """
+    terms = []
+    for indices, weight in paths:
+        if indices.numel() <= 2:
+            continue
+        points = pos[indices]
+        deltas = points[1:] - points[:-1]
+        length_term = deltas.square().sum(dim=1).mean()
+        chord = points[-1] - points[0]
+        norm = chord.square().sum().clamp(min=1e-12).sqrt()
+        direction = chord / norm
+        centered = points - points[0]
+        projected = centered @ direction
+        nearest = points[0] + projected.unsqueeze(1) * direction
+        terms.append(weight * (0.01 * length_term + (points - nearest).square().mean()))
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_focus_loss(
+    pos: torch.Tensor,
+    focuses: List[Tuple[torch.Tensor, torch.Tensor, float, float]],
+) -> torch.Tensor:
+    """Pull focused selections toward target points.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    focuses : list[tuple[torch.Tensor, torch.Tensor, float, float]]
+        Selected indices, target point, zoom, and weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar focus loss.
+    """
+    terms = []
+    for indices, target, zoom, weight in focuses:
+        if indices.numel() == 0:
+            continue
+        target = target.to(device=pos.device, dtype=pos.dtype)
+        scale = max(float(zoom), 1e-6)
+        terms.append(weight * (pos[indices] - target).square().mean() / scale)
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def constraint_contain_loss(
+    pos: torch.Tensor,
+    contains: List[Tuple[torch.Tensor, Any, float, float]],
+) -> torch.Tensor:
+    """Penalize selected points outside their container.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    contains : list[tuple[torch.Tensor, Any, float, float]]
+        Containment payloads as selected indices, container selector, padding,
+        and finite weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized outside-distance loss.
+    """
+    terms = []
+    for indices, within, padding, weight in contains:
+        if indices.numel() == 0:
+            continue
+        xmin, ymin, xmax, ymax = _contain_bounds(pos, within, padding)
+        points = pos[indices]
+        dx = F.relu(xmin - points[:, 0]) + F.relu(points[:, 0] - xmax)
+        dy = F.relu(ymin - points[:, 1]) + F.relu(points[:, 1] - ymax)
+        terms.append(weight * (dx.square() + dy.square()).mean())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def project_hard_contains(
+    pos: torch.Tensor,
+    contains: List[Tuple[torch.Tensor, Any, float, float]],
+) -> None:
+    """Clamp hard containment selections into their derived container.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Mutable position tensor with shape ``[N, 2]``.
+    contains : list[tuple[torch.Tensor, Any, float, float]]
+        Hard containment payloads.
+
+    Returns
+    -------
+    None
+        Mutates ``pos`` in place.
+    """
+    if not contains:
+        return
+    with torch.no_grad():
+        for indices, within, padding, _weight in contains:
+            if indices.numel() == 0:
+                continue
+            xmin, ymin, xmax, ymax = _contain_bounds(pos, within, padding)
+            clamped = pos[indices].clone()
+            clamped[:, 0].clamp_(xmin, xmax)
+            clamped[:, 1].clamp_(ymin, ymax)
+            pos[indices] = clamped
+
+
+def _contain_bounds(
+    pos: torch.Tensor,
+    within: Any,
+    padding: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return containment bounds in layout coordinates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    within : Any
+        Canvas selector or tensor of container node indices.
+    padding : float
+        Interior padding.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ``xmin, ymin, xmax, ymax`` tensors on ``pos.device``.
+    """
+    from dagua.constraints import CanvasSelector, resolve_canvas_point
+
+    pad = torch.as_tensor(float(padding), dtype=pos.dtype, device=pos.device)
+    if isinstance(within, CanvasSelector):
+        left = resolve_canvas_point(within.edge("left"), pos)[0]
+        top = resolve_canvas_point(within.edge("top"), pos)[1]
+        right = resolve_canvas_point(within.edge("right"), pos)[0]
+        bottom = resolve_canvas_point(within.edge("bottom"), pos)[1]
+        if left is None or top is None or right is None or bottom is None:
+            raise ValueError("Canvas containment edges must resolve to concrete bounds.")
+        return _normalize_contain_bounds(
+            torch.as_tensor(float(left), dtype=pos.dtype, device=pos.device) + pad,
+            torch.as_tensor(float(top), dtype=pos.dtype, device=pos.device) + pad,
+            torch.as_tensor(float(right), dtype=pos.dtype, device=pos.device) - pad,
+            torch.as_tensor(float(bottom), dtype=pos.dtype, device=pos.device) - pad,
+        )
+    if isinstance(within, torch.Tensor) and within.numel() > 0:
+        container = pos[within]
+        return _normalize_contain_bounds(
+            container[:, 0].min() + pad,
+            container[:, 1].min() + pad,
+            container[:, 0].max() - pad,
+            container[:, 1].max() - pad,
+        )
+    xmin = pos[:, 0].min() + pad
+    ymin = pos[:, 1].min() + pad
+    xmax = pos[:, 0].max() - pad
+    ymax = pos[:, 1].max() - pad
+    return _normalize_contain_bounds(xmin, ymin, xmax, ymax)
+
+
+def _normalize_contain_bounds(
+    xmin: torch.Tensor,
+    ymin: torch.Tensor,
+    xmax: torch.Tensor,
+    ymax: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return non-inverted containment bounds.
+
+    Parameters
+    ----------
+    xmin : torch.Tensor
+        Minimum x bound.
+    ymin : torch.Tensor
+        Minimum y bound.
+    xmax : torch.Tensor
+        Maximum x bound.
+    ymax : torch.Tensor
+        Maximum y bound.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        Bounds with inverted axes collapsed to their midpoint.
+    """
+    mid_x = (xmin + xmax) * 0.5
+    mid_y = (ymin + ymax) * 0.5
+    return (
+        torch.minimum(xmin, mid_x),
+        torch.minimum(ymin, mid_y),
+        torch.maximum(xmax, mid_x),
+        torch.maximum(ymax, mid_y),
+    )

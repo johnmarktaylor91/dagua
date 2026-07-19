@@ -162,12 +162,12 @@ def _dag_consistency_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> fl
     return float(correct.to(dtype=torch.float32).mean().item())
 
 
-def _quick_directed_composite_score(
+def _honest_undirected_composite_score(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
     node_sizes: Optional[torch.Tensor],
 ) -> float:
-    """Compute the cheap directed composite used by the FR default selector.
+    """Compute the frozen honest ruler used by the FR default selector.
 
     Parameters
     ----------
@@ -181,11 +181,20 @@ def _quick_directed_composite_score(
     Returns
     -------
     float
-        Directed composite score from Tier-1 metrics only.
+        Frozen common-table composite score.
     """
-    from dagua.metrics import composite, quick
+    from dagua.metrics import composite_undirected, full
 
-    return float(composite(quick(pos, edge_index, node_sizes=node_sizes, seed=0)))
+    metrics = full(
+        pos,
+        edge_index,
+        node_sizes=node_sizes,
+        stress_sources=64,
+        stress_targets=256,
+        crossing_samples=100_000,
+        neighborhood_samples=1_000,
+    )
+    return float(composite_undirected(metrics))
 
 
 def _choose_fr_default_layout(
@@ -212,8 +221,7 @@ def _choose_fr_default_layout(
         Maximum allowed drop in TB edge consistency before preserving the
         legacy layout.
     score_drop_tolerance : float, default=1.0e-6
-        Maximum allowed Tier-1 composite drop before preserving the legacy
-        layout.
+        Maximum allowed honest-ruler drop before preserving the legacy layout.
 
     Returns
     -------
@@ -225,8 +233,8 @@ def _choose_fr_default_layout(
     if canonical_dag + dag_drop_tolerance < legacy_dag:
         return legacy_pos
 
-    legacy_score = _quick_directed_composite_score(legacy_pos, edge_index, node_sizes)
-    canonical_score = _quick_directed_composite_score(canonical_pos, edge_index, node_sizes)
+    legacy_score = _honest_undirected_composite_score(legacy_pos, edge_index, node_sizes)
+    canonical_score = _honest_undirected_composite_score(canonical_pos, edge_index, node_sizes)
     if canonical_score + score_drop_tolerance < legacy_score:
         return legacy_pos
     return canonical_pos

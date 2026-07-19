@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import time
+from pathlib import Path
+from typing import Optional
+
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -12,21 +18,52 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline_baseline,
     _unshear_bimodal_edges,
 )
+from dagua.layout.ops.pipelines.native_arm_s import (
+    ARM_S_ACCEPTANCE_MARGIN,
+    ARM_S_CANDIDATE_PREFIX,
+    ARM_S_SCALE_MULTIPLIERS,
+    ARM_S_STRICT_WIN_REFERENCE,
+    ArmSCandidate,
+    ArmSProjectionTelemetry,
+    build_arm_s_stress_candidates,
+    build_arm_s_stress_finalist,
+    calibrate_arm_s_scale,
+    evaluate_arm_s_admission,
+    exact_arm_s_overlap_count,
+)
 from dagua.layout.ops.pipelines.native_undirected import (
     BALANCED_LARGE_REFINEMENT_STEPS,
+    BALANCED_SMALL_REFINEMENT_STEPS,
     DEGENERACY_MAX_ISOLATED_SPREAD_RATIO,
     FULL_REFINEMENT_STEPS,
     LARGE_CONTEST_NODE_THRESHOLD,
     MAX_CONTEST_NODES,
     NEATO_QUALITY_THRESHOLD,
+    TSNET_PERPLEXITIES,
+    _arm_s_full_score_budget_available,
     _candidate_is_degenerate,
     _candidate_is_eligible,
     _candidate_refinement_steps,
     _cleanup_variants_for_size,
+    _cluster_candidate_is_dual_admissible,
+    _ClusterScoreTelemetry,
+    _log_marketplace_telemetry,
     _neato_in_contest,
+    _portfolio_has_budget,
+    _predicted_arm_budget_preserving_arm_s_score,
+    _predicted_undirected_arm_budget_available,
+    _prediction_cpu_elapsed_s,
     _project_candidate_prism,
+    _record_insufficient_predicted_budget_skip,
     _repair_flung_isolates,
+    _restore_proxy_finalist_slots,
+    _rgg_geometric_seed_candidate,
+    _rgg_geometric_seed_enabled,
     _score_undirected_candidate,
+    _score_undirected_candidate_payload,
+    _select_undirected_winner,
+    _small_world_knn_seed_candidate,
+    _small_world_knn_seed_enabled,
     _use_large_prism_shortlist,
 )
 from dagua.layout.ops.state import LayoutProblem
@@ -65,6 +102,77 @@ def _ring_with_chords(num_nodes: int = 10) -> DaguaGraph:
     return graph
 
 
+def test_undirected_referee_forwards_extended_cluster_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clustered undirected scoring forwards Event-A cluster-ruler metadata."""
+    calls: list[dict[str, object]] = []
+
+    def fake_full(*args: object, **kwargs: object) -> dict[str, float]:
+        """Capture full-ruler kwargs and return deterministic metric scores."""
+        del args
+        calls.append(dict(kwargs))
+        return {
+            "ksm_score": 1.0,
+            "edge_crossing_score": 1.0,
+            "node_occlusion_score": 1.0,
+            "neighborhood_preservation_score": 1.0,
+            "edge_length_deviation_score": 1.0,
+            "gabriel_score": 1.0,
+            "crossing_angle_score": 1.0,
+            "angular_resolution_score": 1.0,
+            "path_continuity_score": 1.0,
+            "cluster_silhouette_score": 1.0,
+            "cluster_exclusion_score": 0.0,
+            "cluster_sibling_overlap_score": 0.0,
+            "cluster_nesting_fidelity_score": 0.0,
+            "cluster_edge_intrusion_score": 0.0,
+            "cluster_label_occlusion_score": 0.0,
+            "cluster_compactness_score": 0.0,
+        }
+
+    monkeypatch.setattr("dagua.metrics.full", fake_full)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.ones((3, 2), dtype=torch.float32),
+        clusters={"group": [0, 1, 2]},
+        cluster_parents={"group": None},
+        cluster_labels={"group": "Group"},
+        label_positions=[None, None],
+        edge_labels=["a", "b"],
+    )
+    score, telemetry = _score_undirected_candidate_payload(
+        torch.zeros((3, 2), dtype=torch.float32),
+        problem,
+        torch.zeros((3,), dtype=torch.long),
+    )
+
+    assert calls[0]["clusters"] == problem.clusters
+    assert calls[0]["cluster_parents"] == problem.cluster_parents
+    assert calls[0]["cluster_labels"] == problem.cluster_labels
+    assert calls[0]["label_positions"] == problem.label_positions
+    assert calls[0]["edge_labels"] == problem.edge_labels
+    assert telemetry is not None
+    assert score == telemetry.extended_score
+    assert telemetry.old_score > telemetry.extended_score
+
+
+def test_undirected_cluster_dual_ruler_rejects_old_regression() -> None:
+    """Clustered challengers must improve extended score without old loss."""
+    incumbent = _ClusterScoreTelemetry(extended_score=80.0, old_score=90.0, metrics={})
+    challenger = _ClusterScoreTelemetry(extended_score=81.0, old_score=89.9, metrics={})
+
+    assert not _cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert (
+        _select_undirected_winner(
+            {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
+            {"incumbent": incumbent, "challenger": challenger},
+        )
+        == "incumbent"
+    )
+
+
 def test_declared_undirected_routes_to_portfolio() -> None:
     """A declared-undirected graph selects the portfolio route."""
     graph = _ring_with_chords()
@@ -75,8 +183,8 @@ def test_declared_undirected_routes_to_portfolio() -> None:
     assert _choose_native_pipeline(structure=structure, config=config) == "undirected_portfolio"
 
 
-def test_directed_graph_does_not_route_to_portfolio() -> None:
-    """A directed DAG keeps its baseline route."""
+def test_directed_graph_routes_to_directed_portfolio() -> None:
+    """A directed DAG selects the honest directed-table contest."""
     edges = [(i, i + 1) for i in range(9)] + [(0, 5), (2, 7)]
     graph = DaguaGraph.from_edge_list(edges, num_nodes=10)
     graph.compute_node_sizes()
@@ -86,19 +194,21 @@ def test_directed_graph_does_not_route_to_portfolio() -> None:
     selected = _choose_native_pipeline(structure=structure, config=config)
 
     assert structure.is_semantically_directed is True
-    assert selected != "undirected_portfolio"
+    assert selected == "directed_portfolio"
 
 
-def test_baseline_helper_matches_prior_routing_for_directed() -> None:
-    """The factored baseline helper returns the same route the full chooser picks."""
+def test_suppressed_directed_portfolio_reproduces_baseline_route() -> None:
+    """Suppressed re-entry selects the exact pre-contest incumbent route."""
     edges = [(i, i + 1) for i in range(9)] + [(0, 5), (2, 7)]
     graph = DaguaGraph.from_edge_list(edges, num_nodes=10)
     structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
     config = LayoutConfig(seed=42, device="cpu")
 
-    assert _choose_native_pipeline(
-        structure=structure, config=config
-    ) == _choose_native_pipeline_baseline(structure=structure, config=config)
+    config._dagua_native_suppress_portfolio = True
+
+    assert _choose_native_pipeline(structure=structure, config=config) == (
+        _choose_native_pipeline_baseline(structure=structure, config=config)
+    )
 
 
 def test_forced_pipeline_beats_portfolio_branch() -> None:
@@ -109,6 +219,28 @@ def test_forced_pipeline_beats_portfolio_branch() -> None:
     config.force_pipeline = "stress"
 
     assert _choose_native_pipeline(structure=structure, config=config) == "stress"
+
+
+def test_undirected_portfolio_is_incumbent_monotone() -> None:
+    """The selected winner must not score below the suppressed incumbent."""
+    from dagua.layout import layout
+
+    graph = _ring_with_chords(num_nodes=8)
+    incumbent_config = LayoutConfig(seed=42, device="cpu")
+    incumbent_config._dagua_native_suppress_portfolio = True
+    incumbent_pos = layout(graph, incumbent_config)
+    winner_pos = layout(graph, LayoutConfig(seed=42, device="cpu"))
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        direction=graph.direction,
+    )
+
+    incumbent_score = _score_undirected_candidate(incumbent_pos, problem, None)
+    winner_score = _score_undirected_candidate(winner_pos, problem, None)
+
+    assert winner_score >= incumbent_score
 
 
 def test_degenerate_collapsed_candidate_is_rejected() -> None:
@@ -365,9 +497,56 @@ def test_candidate_refinement_schedule_preserves_high_quality() -> None:
     high = LayoutConfig(seed=42, quality="high")
 
     assert _candidate_refinement_steps(balanced, 150) == FULL_REFINEMENT_STEPS
+    assert BALANCED_SMALL_REFINEMENT_STEPS == 75
     assert _candidate_refinement_steps(balanced, 500) == BALANCED_LARGE_REFINEMENT_STEPS
     assert BALANCED_LARGE_REFINEMENT_STEPS == 10
     assert _candidate_refinement_steps(high, 500) == FULL_REFINEMENT_STEPS
+
+
+def test_small_world_knn_seed_is_finite_and_structurally_gated() -> None:
+    """W4 small-world seed covers sparse cyclic local-neighborhood graphs."""
+    from dagua.eval.graphs import make_small_world
+
+    graph = make_small_world(120, 6, 0.1, seed=42)
+    structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 18.0),
+        structure=structure,
+    )
+    angles = torch.arange(graph.num_nodes, dtype=torch.float32) * (2.0 * torch.pi / graph.num_nodes)
+    incumbent = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1) * 200.0
+
+    candidate = _small_world_knn_seed_candidate(incumbent, problem, steps=4)
+
+    assert _small_world_knn_seed_enabled(problem)
+    assert candidate.shape == incumbent.shape
+    assert bool(torch.isfinite(candidate).all().item())
+    assert not torch.equal(candidate, incumbent)
+
+
+def test_rgg_geometric_seed_is_finite_and_structurally_gated() -> None:
+    """W4 geometric seed covers dense spatial random graphs."""
+    from dagua.eval.graphs import make_random_geometric
+
+    test_graph = make_random_geometric(120, radius=0.18, seed=42)
+    graph = test_graph.graph
+    structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 18.0),
+        structure=structure,
+    )
+
+    candidate = _rgg_geometric_seed_candidate(problem, seed=42, node_sep=18.0)
+
+    assert _rgg_geometric_seed_enabled(problem)
+    assert candidate.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(candidate).all().item())
+    extent = candidate.max(dim=0).values - candidate.min(dim=0).values
+    assert float(extent.min().item()) > 0.0
 
 
 def test_prism_candidate_finishes_residual_overlaps_to_zero() -> None:
@@ -460,6 +639,141 @@ def test_large_shortlist_retains_degree_four_mesh_incumbent() -> None:
 
     assert _use_large_prism_shortlist(mesh_problem) is False
     assert _use_large_prism_shortlist(hub_problem) is True
+
+
+def test_mid_size_prism_shortlist_requires_low_degree_uniformity() -> None:
+    """Mid-size shortcut admits BA-like hubs but excludes Chung-Lu-like hubs."""
+    from types import SimpleNamespace
+
+    n = 120
+    hub_edges = torch.tensor([[0] * 30, list(range(1, 31))], dtype=torch.long)
+    ba_like = LayoutProblem(
+        edge_index=hub_edges,
+        num_nodes=n,
+        structure=SimpleNamespace(degree_uniformity=0.8),
+    )
+    chung_lu_like = LayoutProblem(
+        edge_index=hub_edges,
+        num_nodes=n,
+        structure=SimpleNamespace(degree_uniformity=2.5),
+    )
+
+    assert _use_large_prism_shortlist(ba_like) is True
+    assert _use_large_prism_shortlist(chung_lu_like) is False
+
+
+def test_large_shortlist_runs_before_expensive_incumbent(monkeypatch: object) -> None:
+    """Large non-mesh graphs use the SFDP-PRISM holder before the incumbent."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_undirected import layout_native_undirected_portfolio
+    from dagua.layout.ops.state import RuntimeContext, SolveState
+
+    n = LARGE_CONTEST_NODE_THRESHOLD + 1
+    edge_index = torch.tensor(
+        [[0, 0, 0, 0, 0], [1, 2, 3, 4, 5]],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=n, seed=42)
+    shortcut_pos = torch.stack(
+        (torch.arange(n, dtype=torch.float32), torch.zeros(n, dtype=torch.float32)),
+        dim=1,
+    )
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    calls: list[str] = []
+
+    def fake_shortlist(*args: object, **kwargs: object) -> torch.Tensor:
+        """Record the shortcut and return a finite large-graph candidate."""
+        del args, kwargs
+        calls.append("shortcut")
+        return shortcut_pos
+
+    def fake_mini_contest(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the shortcut candidate without running extra challengers."""
+        del args, kwargs
+        calls.append("mini")
+        return shortcut_pos
+
+    def fail_incumbent(*args: object, **kwargs: object) -> torch.Tensor:
+        """Fail if the expensive incumbent runs before the shortcut."""
+        del args, kwargs
+        raise AssertionError("incumbent ran before large shortlist")
+
+    monkeypatch.setattr(native_undirected, "_large_prism_shortlist_candidate", fake_shortlist)
+    monkeypatch.setattr(native_undirected, "_router_v2_large_mini_contest", fake_mini_contest)
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fail_incumbent)
+
+    result = layout_native_undirected_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(seed=42),
+    )
+
+    assert calls == ["shortcut", "mini"]
+    torch.testing.assert_close(result, shortcut_pos)
+
+
+def test_large_w4_seed_shortcut_uses_shortlist_holder(monkeypatch: object) -> None:
+    """Seed-gated large mini-contests do not pull in the full incumbent."""
+    import importlib
+    from types import SimpleNamespace
+
+    from dagua.layout.ops.pipelines.native_undirected import layout_native_undirected_portfolio
+    from dagua.layout.ops.state import RuntimeContext, SolveState
+
+    n = LARGE_CONTEST_NODE_THRESHOLD + 50
+    edges = []
+    for node in range(n):
+        edges.append((node, (node + 1) % n))
+        edges.append((node, (node + 2) % n))
+        edges.append((node, (node + 5) % n))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    structure = SimpleNamespace(
+        max_degree=6,
+        is_directed_acyclic=False,
+        hub_edge_fraction=0.1,
+        degree_uniformity=0.0,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=n,
+        node_sizes=torch.full((n, 2), 18.0),
+        structure=structure,
+        seed=42,
+    )
+    shortcut_pos = torch.zeros((n, 2), dtype=torch.float32)
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+
+    def fake_shortlist(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite shortcut candidate."""
+        del args, kwargs
+        return shortcut_pos
+
+    def fake_mini_contest(
+        baseline_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        incumbent_pos: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Assert the mini-contest receives only the shortlist holder."""
+        del problem, config
+        torch.testing.assert_close(baseline_pos, shortcut_pos)
+        assert incumbent_pos is None
+        return baseline_pos
+
+    monkeypatch.setattr(native_undirected, "_large_prism_shortlist_candidate", fake_shortlist)
+    monkeypatch.setattr(native_undirected, "_router_v2_large_mini_contest", fake_mini_contest)
+
+    result = layout_native_undirected_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(seed=42),
+    )
+
+    torch.testing.assert_close(result, shortcut_pos)
 
 
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
@@ -680,6 +994,217 @@ def test_cluster_aware_sfdp_candidate_none_without_clusters() -> None:
     result = _cluster_aware_sfdp_candidate(problem, LayoutConfig(seed=42), ctx)
 
     assert result is None
+
+
+def test_arm_s_candidate_none_without_clusters() -> None:
+    """Arm S construction is cluster-gated and inert on flat rows."""
+    graph = _ring_with_chords()
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+    )
+
+    result = build_arm_s_stress_candidates(problem)
+
+    assert result == {}
+
+
+def test_arm_s_scale_calibration_targets_median_edge_length() -> None:
+    """Arm S scale calibration uses a deterministic median-edge target."""
+    seed = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.0], [3.0, 0.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 4.0, dtype=torch.float32)
+
+    scaled = calibrate_arm_s_scale(seed, edge_index, node_sizes, multiplier=2.0)
+    lengths = torch.linalg.vector_norm(
+        scaled[edge_index[0]] - scaled[edge_index[1]],
+        dim=1,
+    )
+
+    assert torch.median(lengths).item() == pytest.approx(
+        2.0 * torch.linalg.vector_norm(node_sizes, dim=1).mean().item()
+    )
+
+
+def test_arm_s_fake_stress_seed_builds_predeclared_scale_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arm S reuses one stress seed and emits only predeclared scale variants."""
+    import importlib
+
+    stress_sgd = importlib.import_module("dagua.layout.ops.pipelines.stress_sgd")
+
+    graph = _clustered_ring_graph(num_nodes=6)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 2.0, dtype=torch.float32),
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        seed=42,
+    )
+    seed = torch.stack(
+        (
+            torch.arange(graph.num_nodes, dtype=torch.float32) * 10.0,
+            torch.zeros(graph.num_nodes, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    calls: list[int] = []
+
+    def fake_stress_seed(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic fake stress seed."""
+        del args, kwargs
+        calls.append(1)
+        return seed
+
+    monkeypatch.setattr(stress_sgd, "layout_stress_sgd_pipeline", fake_stress_seed)
+
+    candidates = build_arm_s_stress_candidates(problem)
+
+    assert len(calls) == 1
+    assert tuple(candidates) == tuple(
+        f"{ARM_S_CANDIDATE_PREFIX}_k{multiplier:g}" for multiplier in ARM_S_SCALE_MULTIPLIERS
+    )
+    for payload in candidates.values():
+        assert payload.positions.shape == (graph.num_nodes, 2)
+        assert payload.projection.displacement_ratio <= 0.25
+        assert exact_arm_s_overlap_count(payload.positions, problem.node_sizes) == 0
+
+
+def test_arm_s_proxy_prefilter_returns_one_full_score_finalist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arm S builds the full ladder but exposes one proxy-selected finalist."""
+    import importlib
+
+    stress_sgd = importlib.import_module("dagua.layout.ops.pipelines.stress_sgd")
+
+    graph = _clustered_ring_graph(num_nodes=8)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=torch.full((graph.num_nodes, 2), 2.0, dtype=torch.float32),
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        seed=42,
+    )
+    seed = torch.stack(
+        (
+            torch.arange(graph.num_nodes, dtype=torch.float32) * 10.0,
+            torch.zeros(graph.num_nodes, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    calls: list[int] = []
+
+    def fake_stress_seed(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic fake stress seed."""
+        del args, kwargs
+        calls.append(1)
+        return seed
+
+    monkeypatch.setattr(stress_sgd, "layout_stress_sgd_pipeline", fake_stress_seed)
+
+    finalist, ladder, proxy_scores = build_arm_s_stress_finalist(problem)
+
+    assert len(calls) == 1
+    assert len(ladder) == len(ARM_S_SCALE_MULTIPLIERS)
+    assert set(proxy_scores) == set(ladder)
+    assert finalist is not None
+    assert finalist.name in ladder
+
+
+def test_arm_s_full_score_budget_uses_one_referee_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final Arm S score gate uses the single-referee predicted cost."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 120.0
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(nu.time, "process_time", lambda: 10.0)
+
+    assert _arm_s_full_score_budget_available(config, predicted_cost_s=6.0)
+    assert not _arm_s_full_score_budget_available(config, predicted_cost_s=8.0)
+
+
+def test_late_arms_preserve_pending_arm_s_score_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-Arm-S arms must leave room for the pending honest score."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 300.0
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(nu.time, "process_time", lambda: 10.0)
+
+    assert _predicted_arm_budget_preserving_arm_s_score(
+        config,
+        predicted_cost_s=45.0,
+        arm_s_pending=False,
+    )
+    assert not _predicted_arm_budget_preserving_arm_s_score(
+        config,
+        predicted_cost_s=45.0,
+        arm_s_pending=True,
+    )
+
+
+def test_arm_s_rejection_restores_displaced_proxy_challenger() -> None:
+    """Removing Arm S refills its proxy slot with the next challenger."""
+    finalist_names = ["incumbent", "arm_s_stress_k10", "cluster_sfdp"]
+    challenger_names = ["arm_s_stress_k10", "cluster_sfdp", "community_scaffold", "sfdp"]
+
+    restored = _restore_proxy_finalist_slots(
+        finalist_names=["incumbent", "cluster_sfdp"],
+        challenger_names=challenger_names,
+        raw_finalist_names=[],
+        proxy_slot_count=2,
+        excluded_names={"arm_s_stress_k10"},
+    )
+
+    assert "arm_s_stress_k10" not in restored
+    assert restored == ["incumbent", "cluster_sfdp", "community_scaffold"]
+    assert finalist_names[1] == "arm_s_stress_k10"
+
+
+def test_arm_s_named_floor_admission_drops_compactness_floor() -> None:
+    """Arm S admission enforces named floors without a compactness mean floor."""
+    payload = ArmSCandidate(
+        name="arm_s_stress_k10",
+        positions=torch.zeros((2, 2), dtype=torch.float32),
+        scale_multiplier=10.0,
+        pre_projection_overlap_count=0,
+        projection=ArmSProjectionTelemetry(
+            max_displacement=0.0,
+            mean_node_diagonal=10.0,
+            displacement_ratio=0.0,
+        ),
+    )
+    metrics = {
+        "overlap_count": 0.0,
+        "neighborhood_preservation_score": 0.30,
+        "ksm_score": 0.6516,
+        "cluster_nesting_fidelity_score": 0.7353,
+        "cluster_compactness_score": 0.0,
+    }
+
+    report = evaluate_arm_s_admission(
+        payload,
+        metrics,
+        extended_score=ARM_S_STRICT_WIN_REFERENCE + ARM_S_ACCEPTANCE_MARGIN + 0.001,
+    )
+
+    assert report.passed
+    assert report.failures == ()
 
 
 def test_cluster_aware_sfdp_candidate_produces_finite_positions() -> None:
@@ -915,3 +1440,166 @@ def test_unshear_orthogonalizes_sheared_grid_edge_families() -> None:
         torch.linalg.vector_norm(horizontal) * torch.linalg.vector_norm(diagonal)
     )
     assert float(torch.abs(cosine).item()) < 1e-5
+
+
+def test_tsnet_flavors_include_uniform_perplexity_five_candidate() -> None:
+    """The standard tsNET family includes default and perplexity-five runs."""
+    assert TSNET_PERPLEXITIES == (30.0, 5.0)
+
+
+def test_arm_prediction_cost_uses_process_time_not_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expensive-arm cost prediction uses CPU seconds, not wall seconds."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    monkeypatch.setattr(nu.time, "process_time", lambda: 103.5)
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 999.0)
+
+    assert _prediction_cpu_elapsed_s(100.0) == 3.5
+
+
+def test_unloaded_process_time_prediction_preserves_admission_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When CPU and wall elapsed match, predicted admission is unchanged."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 115.0
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(nu.time, "process_time", lambda: 14.0)
+
+    cpu_cost_s = _prediction_cpu_elapsed_s(10.0)
+
+    assert cpu_cost_s == 4.0
+    assert _predicted_undirected_arm_budget_available(config, cpu_cost_s) is True
+    assert _portfolio_has_budget(config, min_remaining_s=10.0) is True
+    assert getattr(config, "_dagua_native_process_deadline_s") == 29.0
+
+
+def test_marketplace_telemetry_includes_process_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Marketplace driver telemetry reports route and per-arm CPU totals."""
+    caplog.set_level("INFO")
+    positions = {"incumbent": torch.zeros((2, 2)), "candidate": torch.ones((2, 2))}
+
+    _log_marketplace_telemetry(
+        route="undirected",
+        structural_gate="unit",
+        positions=positions,
+        proxy_scores={"incumbent": 0.0, "candidate": 1.0},
+        full_scores={"incumbent": 0.0, "candidate": 1.0},
+        finalist_names=["incumbent", "candidate"],
+        winner_name="candidate",
+        started_at=10.0,
+        started_process_at=time.process_time(),
+        arm_process_totals={"incumbent": 0.25, "candidate": 0.5},
+    )
+
+    records = [
+        json.loads(record.message.removeprefix("Native marketplace telemetry "))
+        for record in caplog.records
+        if record.message.startswith("Native marketplace telemetry ")
+    ]
+
+    assert records
+    assert "process_time_s" in records[-1]
+    assert {arm["name"]: arm["process_time_s"] for arm in records[-1]["arms"]} == {
+        "candidate": 0.5,
+        "incumbent": 0.25,
+    }
+
+
+def test_insufficient_predicted_budget_skip_emits_jsonl_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Predicted-budget arm skips are visible without a logging shim."""
+    telemetry_path = tmp_path / "arm-skips.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 30.0
+
+    _record_insufficient_predicted_budget_skip(
+        arm="tsnet_perp30_seed0",
+        config=config,
+        predicted_cost_s=12.5,
+    )
+
+    stdout = capsys.readouterr().out
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+
+    assert stdout.count("native_undirected_arm_skip ") == 1
+    assert len(records) == 1
+    assert records[0]["event"] == "native_undirected_arm_skip"
+    assert records[0]["arm"] == "tsnet_perp30_seed0"
+    assert records[0]["reason"] == "insufficient_predicted_budget"
+    assert records[0]["predicted_cost_s"] == 12.5
+    assert getattr(config, "_dagua_native_arm_skip_telemetry") == records
+
+
+def test_skipped_predicted_arm_contest_returns_best_computed_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping late expensive arms still returns the best computed finalist."""
+    import importlib
+
+    from dagua.layout.ops.pipelines import native_undirected as nu
+    from dagua.layout.ops.pipelines.native_undirected import layout_native_undirected_portfolio
+    from dagua.layout.ops.state import RuntimeContext, SolveState
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    sfdp = importlib.import_module("dagua.layout.ops.pipelines.sfdp")
+
+    incumbent = torch.zeros((4, 2), dtype=torch.float32)
+    challenger = torch.tensor(
+        [[0.0, 0.0], [80.0, 0.0], [80.0, 80.0], [0.0, 80.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=4, seed=42)
+    config = LayoutConfig(seed=42, device="cpu")
+    config._dagua_native_deadline_s = time.perf_counter() + 300.0
+
+    def fake_run_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return the deterministic incumbent without running the router."""
+        del args, kwargs
+        return incumbent
+
+    def fake_sfdp_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite already-computed challenger."""
+        del args, kwargs
+        return challenger
+
+    def fake_score(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        aesthetic_profile: object = None,
+        all_pairs_dist: Optional[object] = None,
+    ) -> float:
+        """Prefer the computed challenger over the incumbent."""
+        del problem, cluster_ids, aesthetic_profile, all_pairs_dist
+        return 10.0 if torch.equal(pos, challenger) else 0.0
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_run_native_problem)
+    monkeypatch.setattr(dagua_native, "_collinear_dodge", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dagua_native, "_unshear_bimodal_edges", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sfdp, "layout_sfdp_pipeline", fake_sfdp_pipeline)
+    monkeypatch.setattr(nu, "_neato_in_contest", lambda *args, **kwargs: False)
+    monkeypatch.setattr(nu, "_stress_points_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nu, "_predicted_undirected_arm_budget_available", lambda *args: False)
+    monkeypatch.setattr(nu, "_proxy_undirected_candidate", fake_score)
+    monkeypatch.setattr(nu, "_score_undirected_candidate_cached", fake_score)
+
+    result = layout_native_undirected_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        config,
+    )
+
+    torch.testing.assert_close(result, challenger)

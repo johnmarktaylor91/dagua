@@ -186,8 +186,8 @@ class TestComputeAllMetrics:
         assert q_good > q_bad
 
 
-def test_composite_includes_sampled_stress_weight() -> None:
-    """Directed composite should apply the 10-point sampled-stress term.
+def test_composite_includes_isotonic_stress_weight() -> None:
+    """Directed composite should apply the frozen common KSM weight.
 
     Returns
     -------
@@ -195,30 +195,16 @@ def test_composite_includes_sampled_stress_weight() -> None:
         This test asserts the weighted composite formula with non-trivial
         normalized component values.
     """
-    metric_values = {
-        "dag_consistency": 0.5,
-        "edge_length_cv": 0.25,
-        "depth_spearman_rho": 0.5,
-        "overlap_count": 0,
-        "edge_straightness_mean_deg": 15.0,
-        "crossing_rate": 0.05,
-        "sampled_stress": 0.2,
-        "angular_res_mean_deg": 20.0,
-        "cluster_mean_sep_ratio": 2.5,
-    }
-
-    expected = (
-        22 * 0.5
-        + 18 * 0.75
-        + 13 * 0.5
-        + 8
-        + 9 * (1.0 - 15.0 / 45.0)
-        + 9 * (1.0 - 0.05 * 10)
-        + 10 * (1.0 - 0.2)
-        + 5 * (20.0 / 40.0)
-        + 6 * (2.5 / 5.0)
+    metric_values = {name: 0.5 for name in metrics_module._COMMON_WEIGHTS}
+    metric_values.update(
+        {
+            "ksm_score": 0.8,
+            "directed_flow_score": 0.5,
+            "depth_order_score": 0.5,
+            "declared_hierarchical": True,
+        }
     )
-
+    expected = 0.75 * (25 * 0.8 + 75 * 0.5) + 16 * 0.5 + 9 * 0.5
     assert composite(metric_values) == pytest.approx(expected)
 
 
@@ -387,6 +373,51 @@ class TestLayoutSimilarityAndEvaluate:
         )
         assert neighborhood_cached == pytest.approx(neighborhood_direct)
 
+    def test_full_scores_identical_with_precomputed_all_pairs(self) -> None:
+        """``full`` should be score-identical with or without an APSP cache.
+
+        Returns
+        -------
+        None
+            This test compares the frozen metric payload except wall-clock
+            timing, which is intentionally not part of scoring.
+        """
+        torch.manual_seed(17)
+        pos = torch.randn(9, 2)
+        edge_index = torch.tensor(
+            [[0, 1, 2, 3, 4, 5, 6, 7, 0], [1, 2, 3, 4, 5, 6, 7, 8, 8]],
+            dtype=torch.long,
+        )
+        csr_offsets, csr_targets = _build_csr(edge_index, 9)
+        all_pairs = _all_pairs_unweighted(csr_offsets, csr_targets, 9, max_dist=9)
+
+        direct = full(
+            pos,
+            edge_index,
+            stress_sources=5,
+            stress_targets=5,
+            crossing_samples=20,
+            neighborhood_samples=5,
+        )
+        cached = full(
+            pos,
+            edge_index,
+            stress_sources=5,
+            stress_targets=5,
+            crossing_samples=20,
+            neighborhood_samples=5,
+            all_pairs_dist=all_pairs,
+        )
+
+        for key, direct_value in direct.items():
+            if key == "_compute_time_seconds":
+                continue
+            cached_value = cached[key]
+            if isinstance(direct_value, float):
+                assert cached_value == pytest.approx(direct_value), key
+            else:
+                assert cached_value == direct_value, key
+
     def test_full_reuses_one_all_pairs_distance_matrix(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -447,4 +478,4 @@ class TestLayoutSimilarityAndEvaluate:
             neighborhood_samples=4,
         )
 
-        assert calls == 1
+        assert calls == 0

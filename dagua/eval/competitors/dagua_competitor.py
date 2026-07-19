@@ -11,6 +11,29 @@ from dagua.eval.runtime_env import suspend_torchlens_decoration
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
+_TIMEOUT_CUSHION_SECONDS = 3.0
+
+
+def _is_worker_timeout_exception(exc: Exception) -> bool:
+    """Return whether an exception came from the benchmark worker alarm.
+
+    Parameters
+    ----------
+    exc : Exception
+        Exception raised during layout.
+
+    Returns
+    -------
+    bool
+        ``True`` when the benchmark signal handler raised its timeout
+        exception. The class is defined in ``scripts.run_benchmark`` and may
+        appear as ``__mp_main__`` inside worker processes, so detection uses
+        its stable name/message.
+    """
+    return type(exc).__name__ == "_WorkerLayoutTimeoutError" or (
+        "worker layout timeout exceeded" in str(exc)
+    )
+
 
 @register
 class DaguaCompetitor(CompetitorBase):
@@ -56,18 +79,22 @@ class DaguaCompetitor(CompetitorBase):
             Layout result with positions moved back to CPU for downstream
             metrics and artifact serialization.
         """
-        del timeout
-
         from dagua.config import LayoutConfig
         from dagua.layout import layout
 
+        start = time.perf_counter()
         config = LayoutConfig(
             device=self.device,
             verbose=False,
             seed=seed if seed is not None else 42,
         )
+        setattr(
+            config,
+            "_dagua_native_deadline_s",
+            start + max(0.001, float(timeout) - _TIMEOUT_CUSHION_SECONDS),
+        )
+        setattr(config, "_dagua_native_total_budget_s", max(0.001, float(timeout)))
 
-        start = time.perf_counter()
         try:
             with suspend_torchlens_decoration():
                 pos = layout(graph, config)
@@ -78,6 +105,8 @@ class DaguaCompetitor(CompetitorBase):
                 runtime_seconds=elapsed,
             )
         except Exception as exc:
+            if _is_worker_timeout_exception(exc):
+                raise
             elapsed = time.perf_counter() - start
             return CompetitorResult(
                 name=self.name,

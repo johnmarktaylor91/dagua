@@ -1,6 +1,8 @@
 """Regression tests for Sugiyama igraph-fidelity edge cases."""
 
+import hashlib
 import importlib
+from typing import Any
 
 import pytest
 import torch
@@ -8,6 +10,7 @@ import torch
 from dagua.eval.competitors.classic_competitor import _apply_sugiyama_graphviz_metadata
 from dagua.eval.graphs import (
     _make_hexagonal_lattice_graph,
+    _make_r8_lr_direction,
     make_clustered_medium,
     make_real_karate_graph,
 )
@@ -22,6 +25,7 @@ from dagua.layout.ops.sugiyama import (
     _graphviz_contain_cluster_ordering,
     _graphviz_layer_assignments,
     _graphviz_preserves_plain_exact_tree_x,
+    _graphviz_reverse_equal_cluster_twins,
     _graphviz_skeleton_cluster_ordering,
     _graphviz_x_coordinate_assignment,
     _GraphvizXEdgeKind,
@@ -130,6 +134,38 @@ def _moe_router_sparse_edge_index() -> torch.Tensor:
     ]
     graph = DaguaGraph.from_edge_list(edges)
     return graph.edge_index.detach().cpu().to(dtype=torch.long)
+
+
+def _moe_router_sparse_cluster_graph() -> DaguaGraph:
+    """Return the certified 9-node MoE graph with its expert cluster.
+
+    Returns
+    -------
+    DaguaGraph
+        MoE router graph matching the certified typed cluster inventory used
+        by the classic Graphviz competitor.
+    """
+    edges = [
+        ("input", "embed"),
+        ("embed", "router"),
+        ("router", "expert_0"),
+        ("router", "expert_3"),
+        ("embed", "expert_1"),
+        ("embed", "expert_2"),
+        ("expert_0", "combine"),
+        ("expert_1", "combine"),
+        ("expert_2", "combine"),
+        ("expert_3", "combine"),
+        ("combine", "output"),
+    ]
+    graph = DaguaGraph.from_edge_list(edges)
+    node_by_label = {label: index for index, label in enumerate(graph.node_labels)}
+    graph.add_cluster(
+        "experts",
+        [node_by_label[f"expert_{index}"] for index in range(4)],
+        label="Experts",
+    )
+    return graph
 
 
 def _hub_skip_superfan_edge_index() -> torch.Tensor:
@@ -560,6 +596,134 @@ def test_sugiyama_graphviz_fidelity_uses_dot_x_assignment() -> None:
         ]
     )
     assert torch.allclose(positions, expected, atol=1e-4)
+
+
+def test_graphviz_leaf_cluster_tie_reverses_structural_twins() -> None:
+    """Match dot's local reverse-median tie for equal cluster alternatives."""
+    layers = [[0], [1], [2, 3], [4]]
+    edge_index = torch.tensor([[0, 1, 1, 2, 3], [1, 2, 3, 4, 4]], dtype=torch.long)
+
+    ordered = _graphviz_reverse_equal_cluster_twins(
+        layers=layers,
+        edge_index=edge_index,
+        cluster_members={"twins": (2, 3)},
+    )
+
+    assert ordered[2] == [3, 2]
+
+
+def test_corrected_dot_x_skips_cluster_skeleton_without_parent_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use ordinary mincross for membership-only corrected cluster tie-breaks."""
+    sugiyama = importlib.import_module("dagua.layout.ops.sugiyama")
+    graph = _make_r8_lr_direction().graph
+    calls = {"mincross": 0, "tie_break": 0}
+    original_mincross = sugiyama.graphviz_mincross
+    original_tie_break = sugiyama._graphviz_reverse_equal_cluster_twins
+
+    def fail_skeleton_if_parentless(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Reject the malformed membership-only skeleton activation."""
+        if kwargs.get("graphviz_cluster_parents") is None:
+            raise AssertionError("cluster skeleton called without parent map")
+        return []
+
+    def counting_mincross(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Count ordinary mincross calls while preserving implementation behavior."""
+        calls["mincross"] += 1
+        return original_mincross(*args, **kwargs)
+
+    def counting_tie_break(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Count cluster tie-break calls while preserving implementation behavior."""
+        calls["tie_break"] += 1
+        return original_tie_break(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sugiyama,
+        "_graphviz_skeleton_cluster_ordering",
+        fail_skeleton_if_parentless,
+    )
+    monkeypatch.setattr(sugiyama, "graphviz_mincross", counting_mincross)
+    monkeypatch.setattr(sugiyama, "_graphviz_reverse_equal_cluster_twins", counting_tie_break)
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        graphviz_apply_cluster_constraints=True,
+        graphviz_corrected_dot_x=True,
+        fidelity_mode="graphviz",
+        seed=42,
+    )
+
+    assert isinstance(positions, torch.Tensor)
+    assert calls["mincross"] >= 1
+    assert calls["tie_break"] == 1
+
+
+def test_certified_cluster_skeleton_positions_are_byte_exact() -> None:
+    """Pin faithful cluster-skeleton output bytes against the pre-fix baseline."""
+    graph = _moe_router_sparse_cluster_graph()
+    extra_kwargs: dict[str, object] = {}
+    _apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=extra_kwargs)
+
+    positions = layout_sugiyama_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        barycenter_passes=24,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        **extra_kwargs,
+    )
+    repeated = layout_sugiyama_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        barycenter_passes=24,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        **extra_kwargs,
+    )
+    position_bytes = positions.detach().cpu().contiguous().numpy().tobytes()
+    expected_sha256 = "".join(
+        (
+            "3d26c4af",
+            "c860e2d8",
+            "b2691ec2",
+            "6c39530a",
+            "529b0955",
+            "632b6d4c",
+            "03efbd28",
+            "74b2df61",
+        )
+    )
+
+    assert extra_kwargs["graphviz_enable_cluster_skeleton"] is True
+    assert torch.equal(positions, repeated)
+    assert hashlib.sha256(position_bytes).hexdigest() == expected_sha256
+
+
+def test_graphviz_x_assignment_can_preserve_point_units() -> None:
+    """The corrected typed simplex should not normalize x to rank separation."""
+    positions = _graphviz_x_coordinate_assignment(
+        layers=[[0, 1]],
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_weights=None,
+        node_sizes=torch.full((2, 2), 44.0),
+        num_nodes=2,
+        num_original_nodes=2,
+        rank_sep=72.0,
+        node_sep=18.0,
+        output_device=torch.device("cpu"),
+        preserve_point_units=True,
+    )
+
+    assert abs(float(positions[1, 0] - positions[0, 0])) == 62.0
 
 
 def test_sugiyama_graphviz_edge_labels_double_rank_minlen() -> None:

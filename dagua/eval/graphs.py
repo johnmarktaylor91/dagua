@@ -66,17 +66,22 @@ def get_test_graphs(
 def _declare_semantic_direction(graphs: List[TestGraph]) -> None:
     """Set ``graph.is_semantically_directed`` from corpus tags, in one place.
 
-    A real user with a known-undirected graph would declare it via
-    ``DaguaGraph.is_semantically_directed = False`` so layout routing can see
-    it (rather than relying on heuristic inference). The corpus mirrors that:
-    single source of truth is ``is_semantically_directed()`` -- the same
-    oracle the benchmark harness uses for scoring -- so declaration and
-    scoring never disagree. Directed graphs are left with the default
-    ``None`` (heuristic inference decides).
+    The corpus oracle is also the frozen ruler's routing input. Declaring both
+    outcomes prevents layout-time topology inference from sending a directed
+    DAG to a different contest than the scorer.
+
+    Parameters
+    ----------
+    graphs : List[TestGraph]
+        Corpus graphs whose layout-routing hints are updated in place.
+
+    Returns
+    -------
+    None
+        Graph metadata is updated in place.
     """
     for test_graph in graphs:
-        if not is_semantically_directed(test_graph):
-            test_graph.graph.is_semantically_directed = False
+        test_graph.graph.is_semantically_directed = is_semantically_directed(test_graph)
 
 
 def is_semantically_directed(test_graph: TestGraph) -> bool:
@@ -108,6 +113,7 @@ def _build_all_test_graphs() -> List[TestGraph]:
     graphs.extend(_synthetic_graphs())
     graphs.extend(_torchlens_graphs())
     graphs.extend(_r79_extension_graphs())
+    graphs.extend(_r8_nested_cluster_graphs())
     graphs.append(_make_weighted_chain())
     graphs.append(_make_weighted_clusters())
     graphs.append(make_weighted_karate_graph())
@@ -951,6 +957,714 @@ def _make_r79_directed_scc_graph(
         source="synthetic",
         expected_challenges="Cycle handling when large SCCs interact with acyclic tails",
     )
+
+
+def _add_path_edges(graph: DaguaGraph, nodes: Sequence[str]) -> None:
+    """Add directed path edges through a node sequence.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph receiving the edges.
+    nodes : Sequence[str]
+        Ordered node identifiers to connect as adjacent pairs.
+
+    Returns
+    -------
+    None
+        The graph is mutated in place.
+    """
+    for source, target in zip(nodes, nodes[1:]):
+        graph.add_edge(source, target)
+
+
+def _add_reciprocal_edge(graph: DaguaGraph, source: str, target: str) -> None:
+    """Add paired directed edges for an undirected corpus relationship.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph receiving the edges.
+    source : str
+        First endpoint.
+    target : str
+        Second endpoint.
+
+    Returns
+    -------
+    None
+        The graph is mutated in place.
+    """
+    graph.add_edge(source, target)
+    graph.add_edge(target, source)
+
+
+def _r8_test_graph(
+    name: str,
+    graph: DaguaGraph,
+    tags: Set[str],
+    description: str,
+    expected_challenges: str,
+) -> TestGraph:
+    """Finalize an R8 nested-cluster graph for the tuning corpus.
+
+    Parameters
+    ----------
+    name : str
+        Benchmark graph name.
+    graph : DaguaGraph
+        Constructed graph with cluster metadata.
+    tags : Set[str]
+        R8-specific tags.
+    description : str
+        Human-readable graph description.
+    expected_challenges : str
+        Intended layout stressors.
+
+    Returns
+    -------
+    TestGraph
+        Finalized nested-cluster tuning-corpus graph.
+    """
+    return TestGraph(
+        name=name,
+        graph=_finalize_generated_graph(graph),
+        tags={"r8_nested", "clustered", "synthetic"} | tags,
+        description=description,
+        source="synthetic",
+        expected_challenges=expected_challenges,
+    )
+
+
+def _make_r8_chain_depth8() -> TestGraph:
+    """Build an eight-deep nested-cluster directed chain.
+
+    Returns
+    -------
+    TestGraph
+        Deep nested chain fixture.
+    """
+    name = "r8_nested_chain_depth8_directed"
+    graph = DaguaGraph()
+    nodes = [f"chain_{idx:02d}" for idx in range(18)]
+    for node in nodes:
+        graph.add_node(node, label=node)
+    _add_path_edges(graph, nodes)
+    for idx in range(0, 14, 3):
+        graph.add_edge(nodes[idx], nodes[idx + 4])
+    for depth in range(8):
+        graph.add_cluster(
+            f"{name}_level_{depth}",
+            nodes[depth : 18 - depth],
+            label=f"Depth {depth + 1}",
+            parent=f"{name}_level_{depth - 1}" if depth else None,
+        )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "directed"},
+        "Eight-deep nested cluster chain with a single source-to-sink flow",
+        "Deep containment, long edges, and label bands in a skinny hierarchy",
+    )
+
+
+def _make_r8_balanced_3x3x4() -> TestGraph:
+    """Build a balanced 3x3x4 fanout nested DAG.
+
+    Returns
+    -------
+    TestGraph
+        Balanced fanout nested-cluster fixture.
+    """
+    name = "r8_nested_balanced_3x3x4"
+    graph = DaguaGraph()
+    groups: list[list[list[str]]] = []
+    for top_idx in range(3):
+        top_groups: list[list[str]] = []
+        for sub_idx in range(3):
+            nodes = [f"b{top_idx}_{sub_idx}_{leaf_idx}" for leaf_idx in range(4)]
+            top_groups.append(nodes)
+            for node in nodes:
+                graph.add_node(node, label=node)
+            _add_path_edges(graph, nodes)
+        groups.append(top_groups)
+    for top_idx, top_groups in enumerate(groups):
+        for sub_idx in range(2):
+            graph.add_edge(top_groups[sub_idx][-1], top_groups[sub_idx + 1][0])
+        if top_idx < 2:
+            graph.add_edge(top_groups[-1][-1], groups[top_idx + 1][0][0])
+    root_members = [node for top_groups in groups for group in top_groups for node in group]
+    graph.add_cluster(f"{name}_root", root_members, label="Balanced Root")
+    for top_idx, top_groups in enumerate(groups):
+        top_name = f"{name}_top_{top_idx}"
+        top_members = [node for group in top_groups for node in group]
+        graph.add_cluster(top_name, top_members, label=f"Top {top_idx}", parent=f"{name}_root")
+        for sub_idx, nodes in enumerate(top_groups):
+            graph.add_cluster(
+                f"{top_name}_sub_{sub_idx}",
+                nodes,
+                label=f"Sub {top_idx}.{sub_idx}",
+                parent=top_name,
+            )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "fanout", "directed"},
+        "Balanced 3x3x4 nested cluster DAG",
+        "Uniform fanout, sibling ordering, and nested containment",
+    )
+
+
+def _make_r8_mixed_direct_leaf() -> TestGraph:
+    """Build a parent cluster mixing direct leaves and child clusters.
+
+    Returns
+    -------
+    TestGraph
+        Mixed direct-leaf nested fixture.
+    """
+    name = "r8_nested_mixed_direct_leaf"
+    graph = DaguaGraph()
+    direct = [f"direct_{idx}" for idx in range(6)]
+    left = [f"left_{idx}" for idx in range(6)]
+    right = [f"right_{idx}" for idx in range(6)]
+    tail = [f"tail_{idx}" for idx in range(4)]
+    for node in direct + left + right + tail:
+        graph.add_node(node, label=node)
+    for nodes in (direct, left, right, tail):
+        _add_path_edges(graph, nodes)
+    for idx in range(6):
+        graph.add_edge(direct[idx], left[idx])
+        graph.add_edge(direct[idx], right[5 - idx])
+    graph.add_edge(left[-1], tail[0])
+    graph.add_edge(right[-1], tail[0])
+    graph.add_cluster(f"{name}_parent", direct + left + right, label="Mixed Parent")
+    graph.add_cluster(f"{name}_direct_band", direct, label="Direct Leaves", parent=f"{name}_parent")
+    graph.add_cluster(f"{name}_left_child", left, label="Left Child", parent=f"{name}_parent")
+    graph.add_cluster(f"{name}_right_child", right, label="Right Child", parent=f"{name}_parent")
+    graph.add_cluster(f"{name}_tail", tail, label="External Tail")
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "fanout", "directed"},
+        "Parent cluster with direct leaves and child clusters on adjacent ranks",
+        "Mixed membership levels and rank-local containment",
+    )
+
+
+def _make_r8_cross_edges_ladder() -> TestGraph:
+    """Build two nested trees connected by cross-cluster ladder edges.
+
+    Returns
+    -------
+    TestGraph
+        Cross-edge ladder fixture.
+    """
+    name = "r8_nested_cross_edges_ladder"
+    graph = DaguaGraph()
+    sides: dict[str, list[list[str]]] = {}
+    for side in ("left", "right"):
+        sides[side] = []
+        for rail in range(2):
+            nodes = [f"{side}_{rail}_{idx}" for idx in range(8)]
+            sides[side].append(nodes)
+            for node in nodes:
+                graph.add_node(node, label=node)
+            _add_path_edges(graph, nodes)
+    for idx in range(8):
+        graph.add_edge(sides["left"][0][idx], sides["right"][0][idx])
+        graph.add_edge(sides["left"][1][idx], sides["right"][1][idx])
+    for idx in range(0, 6, 2):
+        graph.add_edge(sides["left"][0][idx], sides["right"][1][idx + 2])
+        graph.add_edge(sides["right"][0][idx], sides["left"][1][idx + 2])
+    all_members = [node for chains in sides.values() for chain in chains for node in chain]
+    graph.add_cluster(f"{name}_root", all_members, label="Cross Ladder Root")
+    for side, chains in sides.items():
+        side_name = f"{name}_{side}"
+        side_members = [node for chain in chains for node in chain]
+        graph.add_cluster(
+            side_name,
+            side_members,
+            label=f"{side.title()} Tree",
+            parent=f"{name}_root",
+        )
+        for rail, nodes in enumerate(chains):
+            graph.add_cluster(
+                f"{side_name}_rail_{rail}",
+                nodes,
+                label=f"{side.title()} Rail {rail}",
+                parent=side_name,
+            )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "fanout", "directed"},
+        "Two nested trees with ladder and skip cross-cluster edges",
+        "Cross-cluster routing, skip edges, and sibling separation",
+    )
+
+
+def _make_r8_edge_labels_compound() -> TestGraph:
+    """Build nested compound clusters with labels on multiple edge classes.
+
+    Returns
+    -------
+    TestGraph
+        Edge-label compound fixture.
+    """
+    name = "r8_nested_edge_labels_compound"
+    graph = DaguaGraph()
+    stages: list[list[str]] = []
+    for stage in range(3):
+        nodes = [f"stage_{stage}_{idx}" for idx in range(6)]
+        stages.append(nodes)
+        for node in nodes:
+            graph.add_node(node, label=node)
+        for idx in range(5):
+            graph.add_edge(nodes[idx], nodes[idx + 1], label=f"intra {stage}.{idx}")
+    for stage in range(2):
+        for idx in range(3):
+            graph.add_edge(
+                stages[stage][idx * 2],
+                stages[stage + 1][idx * 2 + 1],
+                label=f"handoff {stage}.{idx}",
+            )
+    graph.add_edge(stages[0][0], stages[2][-1], label="bypass alpha to omega")
+    graph.add_edge(stages[0][3], stages[2][1], label="bypass midlane")
+    all_members = [node for nodes in stages for node in nodes]
+    graph.add_cluster(f"{name}_root", all_members, label="Compound Labeled Root")
+    for stage, nodes in enumerate(stages):
+        graph.add_cluster(
+            f"{name}_stage_{stage}",
+            nodes,
+            label=f"Labeled Stage {stage}",
+            parent=f"{name}_root",
+        )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "mixed-labels", "directed"},
+        "Nested compound DAG with labels on intra-cluster, inter-cluster, and bypass edges",
+        "Edge-label placement around nested containment and long bypasses",
+    )
+
+
+def _make_r8_wide_labels_shapes() -> TestGraph:
+    """Build nested clusters with long labels and mixed node shapes.
+
+    Returns
+    -------
+    TestGraph
+        Mixed-shape and wide-label fixture.
+    """
+    name = "r8_nested_wide_labels_shapes"
+    graph = DaguaGraph()
+    shapes = ["rect", "ellipse", "diamond", "roundrect", "circle"]
+    groups: list[list[str]] = []
+    for group_idx in range(3):
+        nodes: list[str] = []
+        for node_idx in range(5):
+            node = f"shape_{group_idx}_{node_idx}"
+            label = f"wide label group {group_idx} node {node_idx} with containment pressure"
+            graph.add_node(
+                node,
+                label=label,
+                style=NodeStyle(shape=shapes[(group_idx + node_idx) % len(shapes)]),
+            )
+            nodes.append(node)
+        groups.append(nodes)
+        _add_path_edges(graph, nodes)
+    for group_idx in range(2):
+        graph.add_edge(groups[group_idx][-1], groups[group_idx + 1][0])
+        graph.add_edge(groups[group_idx][1], groups[group_idx + 1][3])
+    all_members = [node for group in groups for node in group]
+    graph.add_cluster(f"{name}_root", all_members, label="Wide Label Shape Root")
+    for group_idx, nodes in enumerate(groups):
+        graph.add_cluster(
+            f"{name}_group_{group_idx}",
+            nodes,
+            label=f"Shape Group {group_idx}",
+            parent=f"{name}_root",
+        )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "mixed-labels", "mixed-shapes", "directed"},
+        "Nested clusters containing mixed node shapes and long labels",
+        "Shape-aware containment, label measuring, and cluster padding",
+    )
+
+
+def _make_r8_undirected_communities_depth3() -> TestGraph:
+    """Build reciprocal-edge nested communities with three cluster levels.
+
+    Returns
+    -------
+    TestGraph
+        Undirected nested-community fixture.
+    """
+    name = "r8_nested_undirected_communities_depth3"
+    graph = DaguaGraph()
+    families: list[list[list[str]]] = []
+    for family in range(2):
+        groups: list[list[str]] = []
+        for community in range(3):
+            nodes = [f"u{family}_{community}_{idx}" for idx in range(5)]
+            groups.append(nodes)
+            for node in nodes:
+                graph.add_node(node, label=node)
+            for idx in range(5):
+                _add_reciprocal_edge(graph, nodes[idx], nodes[(idx + 1) % 5])
+            _add_reciprocal_edge(graph, nodes[0], nodes[2])
+        families.append(groups)
+    for family in range(2):
+        for community in range(2):
+            _add_reciprocal_edge(
+                graph,
+                families[family][community][0],
+                families[family][community + 1][0],
+            )
+    _add_reciprocal_edge(graph, families[0][2][-1], families[1][0][0])
+    all_members = [node for groups in families for nodes in groups for node in nodes]
+    graph.add_cluster(f"{name}_root", all_members, label="Undirected Community Root")
+    for family, groups in enumerate(families):
+        family_name = f"{name}_family_{family}"
+        family_members = [node for nodes in groups for node in nodes]
+        graph.add_cluster(
+            family_name,
+            family_members,
+            label=f"Family {family}",
+            parent=f"{name}_root",
+        )
+        for community, nodes in enumerate(groups):
+            graph.add_cluster(
+                f"{family_name}_community_{community}",
+                nodes,
+                label=f"Community {family}.{community}",
+                parent=family_name,
+            )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "fanout", "directed-undirected", "undirected"},
+        "Undirected reciprocal-edge community graph with three cluster levels",
+        "Force-directed nested containment and reciprocal-edge community structure",
+    )
+
+
+def _make_r8_sbm_overlap_trap() -> TestGraph:
+    """Build an SBM-style nested graph with adversarial bridge pressure.
+
+    Returns
+    -------
+    TestGraph
+        SBM overlap-trap fixture.
+    """
+    name = "r8_nested_sbm_overlap_trap"
+    graph = DaguaGraph()
+    blocks: list[list[str]] = []
+    for block in range(4):
+        nodes = [f"sbm_{block}_{idx}" for idx in range(8)]
+        blocks.append(nodes)
+        for node in nodes:
+            graph.add_node(node, label=node)
+        for idx in range(8):
+            _add_reciprocal_edge(graph, nodes[idx], nodes[(idx + 1) % 8])
+        for idx in range(0, 8, 2):
+            _add_reciprocal_edge(graph, nodes[idx], nodes[(idx + 3) % 8])
+    for idx in range(8):
+        _add_reciprocal_edge(graph, blocks[0][idx], blocks[2][idx])
+        _add_reciprocal_edge(graph, blocks[1][idx], blocks[3][7 - idx])
+    for block in range(3):
+        _add_reciprocal_edge(graph, blocks[block][0], blocks[block + 1][4])
+    all_members = [node for block in blocks for node in block]
+    graph.add_cluster(f"{name}_root", all_members, label="SBM Trap Root")
+    for block, nodes in enumerate(blocks):
+        graph.add_cluster(
+            f"{name}_block_{block}",
+            nodes,
+            label=f"SBM Block {block}",
+            parent=f"{name}_root",
+        )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"fanout", "directed-undirected", "undirected"},
+        "SBM-style communities with bridge patterns that tempt overlapping boxes",
+        "Adversarial community interleaving and cluster overlap avoidance",
+    )
+
+
+def _make_r8_parent_child_backedges() -> TestGraph:
+    """Build nested directed levels with parent-child backedges.
+
+    Returns
+    -------
+    TestGraph
+        Parent-child backedge fixture.
+    """
+    name = "r8_nested_parent_child_backedges"
+    graph = DaguaGraph()
+    levels: list[list[str]] = []
+    for level in range(4):
+        nodes = [f"pc_{level}_{idx}" for idx in range(6)]
+        levels.append(nodes)
+        for node in nodes:
+            graph.add_node(node, label=node)
+        _add_path_edges(graph, nodes)
+    for level in range(3):
+        for idx in range(6):
+            graph.add_edge(levels[level][idx], levels[level + 1][idx])
+    graph.add_edge(levels[3][1], levels[1][4])
+    graph.add_edge(levels[2][5], levels[0][2])
+    graph.add_edge(levels[3][4], levels[2][0])
+    all_members = [node for nodes in levels for node in nodes]
+    graph.add_cluster(f"{name}_root", all_members, label="Backedge Root")
+    graph.add_cluster(
+        f"{name}_parent",
+        levels[0] + levels[1] + levels[2],
+        label="Parent",
+        parent=f"{name}_root",
+    )
+    graph.add_cluster(f"{name}_child_a", levels[1], label="Child A", parent=f"{name}_parent")
+    graph.add_cluster(f"{name}_child_b", levels[2], label="Child B", parent=f"{name}_parent")
+    graph.add_cluster(
+        f"{name}_external",
+        levels[3],
+        label="External Backedge Source",
+        parent=f"{name}_root",
+    )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "directed"},
+        "Directed nested graph with legal feedback edges crossing parent and child levels",
+        "Cycle handling, backedge marking, and multi-level cluster routing",
+    )
+
+
+def _make_r8_disconnected_forest() -> TestGraph:
+    """Build disconnected nested cluster trees plus unclustered islands.
+
+    Returns
+    -------
+    TestGraph
+        Disconnected forest fixture.
+    """
+    name = "r8_nested_disconnected_forest"
+    graph = DaguaGraph()
+    for tree in range(3):
+        nodes = [f"forest_{tree}_{idx}" for idx in range(7)]
+        for node in nodes:
+            graph.add_node(node, label=node)
+        for idx in range(1, 7):
+            graph.add_edge(nodes[(idx - 1) // 2], nodes[idx])
+        root_cluster = f"{name}_tree_{tree}"
+        graph.add_cluster(root_cluster, nodes, label=f"Tree {tree}")
+        graph.add_cluster(
+            f"{root_cluster}_left",
+            nodes[1:4],
+            label=f"Tree {tree} Left",
+            parent=root_cluster,
+        )
+        graph.add_cluster(
+            f"{root_cluster}_right",
+            nodes[4:7],
+            label=f"Tree {tree} Right",
+            parent=root_cluster,
+        )
+    for island in range(3):
+        graph.add_node(f"island_{island}", label=f"island_{island}")
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "fanout", "disconnected", "directed"},
+        "Multiple disconnected cluster trees plus unclustered singleton islands",
+        "Component packing with nested clusters and isolated nodes",
+    )
+
+
+def _make_r8_singleton_deep() -> TestGraph:
+    """Build a degenerate deep chain of singleton child clusters.
+
+    Returns
+    -------
+    TestGraph
+        Deep singleton nested fixture.
+    """
+    name = "r8_nested_singleton_deep"
+    graph = DaguaGraph()
+    spine = [f"single_{idx}" for idx in range(9)]
+    side = [f"side_{idx}" for idx in range(5)]
+    for node in spine + side:
+        graph.add_node(node, label=node)
+    _add_path_edges(graph, spine)
+    for idx, node in enumerate(side):
+        graph.add_edge(spine[idx + 2], node)
+    graph.add_cluster(f"{name}_root", spine + side, label="Singleton Root")
+    parent = f"{name}_root"
+    for idx, node in enumerate(spine[:8]):
+        cluster_name = f"{name}_singleton_{idx}"
+        graph.add_cluster(cluster_name, [node], label=f"Singleton {idx}", parent=parent)
+        parent = cluster_name
+    graph.add_cluster(
+        f"{name}_normal_side",
+        side,
+        label="Normal Side Cluster",
+        parent=f"{name}_root",
+    )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "directed"},
+        "Degenerate deep singleton chain mixed with a normal side cluster",
+        "Singleton containment, minimum cluster boxes, and degenerate depth",
+    )
+
+
+def _make_r8_scale_1k_budget() -> TestGraph:
+    """Build a 1k-node hybrid with directed and undirected clustered regions.
+
+    Returns
+    -------
+    TestGraph
+        Scale fixture containing both layered-DAG and force-community regions.
+    """
+    name = "r8_nested_scale_1k_budget"
+    graph = DaguaGraph()
+    directed_regions: list[list[list[str]]] = []
+    undirected_regions: list[list[str]] = []
+    for region in range(4):
+        layers: list[list[str]] = []
+        for layer in range(6):
+            nodes = [f"d{region}_l{layer}_{idx}" for idx in range(20)]
+            layers.append(nodes)
+            for node in nodes:
+                graph.add_node(node, label=f"directed region {region} layer {layer} node {node}")
+        for layer in range(5):
+            for idx in range(20):
+                graph.add_edge(layers[layer][idx], layers[layer + 1][idx])
+                if idx + 1 < 20:
+                    graph.add_edge(layers[layer][idx], layers[layer + 1][idx + 1])
+        directed_regions.append(layers)
+    for region in range(4):
+        nodes = [f"u{region}_{idx}" for idx in range(130)]
+        undirected_regions.append(nodes)
+        for node in nodes:
+            graph.add_node(node, label=f"undirected community {region} node {node}")
+        for idx in range(130):
+            _add_reciprocal_edge(graph, nodes[idx], nodes[(idx + 1) % 130])
+            if idx % 5 == 0:
+                _add_reciprocal_edge(graph, nodes[idx], nodes[(idx + 17) % 130])
+    directed_all = [node for layers in directed_regions for layer in layers for node in layer]
+    undirected_all = [node for nodes in undirected_regions for node in nodes]
+    graph.add_cluster(f"{name}_directed_root", directed_all, label="Directed Budget Region")
+    for region, layers in enumerate(directed_regions):
+        region_name = f"{name}_directed_region_{region}"
+        region_members = [node for layer in layers for node in layer]
+        graph.add_cluster(
+            region_name,
+            region_members,
+            label=f"Directed Region {region}",
+            parent=f"{name}_directed_root",
+        )
+        for layer, nodes in enumerate(layers):
+            graph.add_cluster(
+                f"{region_name}_layer_{layer}",
+                nodes,
+                label=f"D{region} Layer {layer}",
+                parent=region_name,
+            )
+    graph.add_cluster(f"{name}_undirected_root", undirected_all, label="Undirected Budget Region")
+    for region, nodes in enumerate(undirected_regions):
+        graph.add_cluster(
+            f"{name}_undirected_region_{region}",
+            nodes,
+            label=f"Undirected Region {region}",
+            parent=f"{name}_undirected_root",
+        )
+    for region in range(3):
+        graph.add_edge(directed_regions[region][-1][-1], directed_regions[region + 1][0][0])
+        _add_reciprocal_edge(
+            graph,
+            undirected_regions[region][0],
+            undirected_regions[region + 1][65],
+        )
+    graph.add_edge(directed_regions[-1][-1][-1], undirected_regions[0][0])
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "fanout", "mixed-labels", "directed-undirected", "scale"},
+        "One-thousand-node hybrid with directed clustered layers and undirected communities",
+        "Both layered and force cluster budget gates at nested scale",
+    )
+
+
+def _make_r8_lr_direction() -> TestGraph:
+    """Build a small LR-directed nested graph with depth-three clusters.
+
+    Returns
+    -------
+    TestGraph
+        LR direction-dependency fixture.
+    """
+    name = "r8_nested_lr_direction"
+    graph = DaguaGraph(direction="LR")
+    branches: list[list[str]] = []
+    for branch in range(3):
+        nodes = [f"lr_{branch}_{idx}" for idx in range(10)]
+        branches.append(nodes)
+        for node in nodes:
+            graph.add_node(node, label=f"LR branch {branch} node {node}")
+        _add_path_edges(graph, nodes)
+    for idx in range(0, 10, 2):
+        graph.add_edge(branches[0][idx], branches[1][idx])
+        graph.add_edge(branches[1][idx], branches[2][idx])
+    graph.add_edge(branches[0][1], branches[2][8])
+    graph.add_edge(branches[2][2], branches[1][7])
+    all_members = [node for branch in branches for node in branch]
+    graph.add_cluster(f"{name}_root", all_members, label="LR Root Label Band")
+    for branch, nodes in enumerate(branches):
+        branch_name = f"{name}_branch_{branch}"
+        graph.add_cluster(branch_name, nodes, label=f"LR Branch {branch}", parent=f"{name}_root")
+        graph.add_cluster(
+            f"{branch_name}_inner",
+            nodes[2:8],
+            label=f"LR Inner {branch}",
+            parent=branch_name,
+        )
+    return _r8_test_graph(
+        name,
+        graph,
+        {"nested-depth", "mixed-labels", "directed"},
+        "LR-directed nested clustered graph with depth-three label bands",
+        "LR-specific cluster label bands and x/y barrier geometry",
+    )
+
+
+def _r8_nested_cluster_graphs() -> List[TestGraph]:
+    """Build the R8 nested-cluster extension graphs for the tuning corpus.
+
+    Returns
+    -------
+    List[TestGraph]
+        Thirteen deterministic nested-cluster graphs added in R8.
+    """
+    return [
+        _make_r8_chain_depth8(),
+        _make_r8_balanced_3x3x4(),
+        _make_r8_mixed_direct_leaf(),
+        _make_r8_cross_edges_ladder(),
+        _make_r8_edge_labels_compound(),
+        _make_r8_wide_labels_shapes(),
+        _make_r8_undirected_communities_depth3(),
+        _make_r8_sbm_overlap_trap(),
+        _make_r8_parent_child_backedges(),
+        _make_r8_disconnected_forest(),
+        _make_r8_singleton_deep(),
+        _make_r8_scale_1k_budget(),
+        _make_r8_lr_direction(),
+    ]
 
 
 def _r79_extension_graphs() -> List[TestGraph]:
@@ -3480,7 +4194,7 @@ def _make_scale_grid_test_graph(n: int, seed: int = 42) -> TestGraph:
 
 
 @overload
-def make_grid(rows: int, seed: int = 42) -> TestGraph: ...
+def make_grid(rows: int, *, seed: int = 42) -> TestGraph: ...
 
 
 @overload
