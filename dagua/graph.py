@@ -36,6 +36,101 @@ _DTYPE_NAME_TO_TORCH = {
 
 _CLUSTER_PREFIX = "cluster_"
 
+_GRAPHVIZ_ARROW_BASE_DIMS: Dict[str, Tuple[float, float]] = {
+    "box": (11.3137, 11.3137),
+    "crow": (10.0070, 10.4637),
+    "diamond": (12.0000, 8.0000),
+    "open": (10.0070, 10.4637),
+    "tee": (10.1980, 3.9223),
+    "vee": (10.0070, 10.4637),
+}
+_GRAPHVIZ_ARROW_SIDE_DIMS: Dict[str, Tuple[float, float]] = {
+    "box": (8.9443, 7.1554),
+    "crow": (10.3382, 4.5000),
+    "diamond": (11.8947, 4.7579),
+    "inv": (10.3382, 4.0000),
+    "normal": (10.3382, 4.0000),
+    "tee": (5.3852, 3.7139),
+    "vee": (10.3382, 4.5000),
+}
+_GRAPHVIZ_ARROW_PRIMITIVES: Tuple[str, ...] = (
+    "normal",
+    "diamond",
+    "crow",
+    "open",
+    "box",
+    "tee",
+    "vee",
+    "inv",
+)
+
+
+def _first_graphviz_arrow_primitive(spec: str) -> Tuple[str, str]:
+    """Return the first Graphviz arrow primitive and side modifier.
+
+    Parameters
+    ----------
+    spec : str
+        Graphviz ``arrowhead`` token, possibly with ``o`` fill and ``l``/``r``
+        side modifiers or additional compound primitives.
+
+    Returns
+    -------
+    tuple[str, str]
+        Primitive name and side modifier (``"both"``, ``"left"``, or
+        ``"right"``).
+    """
+    normalized = spec.strip().strip('"').lower()
+    if normalized in {"", "none", "dot", "odot", "circle"}:
+        return normalized, "both"
+    if normalized == "open":
+        return normalized, "both"
+    if normalized.startswith("o"):
+        normalized = normalized[1:]
+
+    side = "both"
+    if normalized.startswith("l"):
+        side = "left"
+        normalized = normalized[1:]
+    elif normalized.startswith("r"):
+        side = "right"
+        normalized = normalized[1:]
+
+    if normalized.startswith("crows_foot_"):
+        return "crow", side
+    for primitive in _GRAPHVIZ_ARROW_PRIMITIVES:
+        if normalized.startswith(primitive):
+            return primitive, side
+    return normalized, side
+
+
+def _graphviz_arrow_dimensions(spec: str, arrowsize: float) -> Optional[Tuple[float, float]]:
+    """Return Graphviz 7.0.5 arrow dimensions for a strict-theme edge.
+
+    Parameters
+    ----------
+    spec : str
+        Native Graphviz arrowhead token.
+    arrowsize : float
+        Graphviz ``arrowsize`` multiplier.
+
+    Returns
+    -------
+    tuple[float, float] | None
+        ``(length_pt, width_pt)`` when the primitive has a measured Graphviz
+        size override, otherwise ``None`` to preserve the theme default.
+    """
+    primitive, side = _first_graphviz_arrow_primitive(spec)
+    dims = (
+        _GRAPHVIZ_ARROW_SIDE_DIMS.get(primitive)
+        if side != "both"
+        else _GRAPHVIZ_ARROW_BASE_DIMS.get(primitive)
+    )
+    if dims is None:
+        return None
+    scale = max(float(arrowsize), 0.0)
+    return dims[0] * scale, dims[1] * scale
+
 
 def _updated_style_instance(
     current_style: Optional[Union[NodeStyle, EdgeStyle, ClusterStyle]],
@@ -1018,6 +1113,7 @@ class DaguaGraph:
                 label_format=style.label_format,
                 text_rotation=style.text_rotation,
                 compact_shape_factors=compact_shape_factors,
+                graphviz_ellipse_min_height=style.min_height,
             )
             # Auto-sized nodes treat min_width/min_height as Graphviz-style
             # floors. Existing fixed-size overflow policies keep their cap
@@ -1094,6 +1190,7 @@ class DaguaGraph:
                         label_format=style.label_format,
                         text_rotation=style.text_rotation,
                         compact_shape_factors=compact_shape_factors,
+                        graphviz_ellipse_min_height=style.min_height,
                     )
                     if expand_w > w:
                         w = expand_w
@@ -1183,15 +1280,21 @@ class DaguaGraph:
         if not isinstance(attrs, dict):
             return style
         arrowsize = attrs.get("arrowsize")
-        if arrowsize is None:
-            return style
+        arrowhead = attrs.get("arrowhead", style.arrow)
         try:
-            return dataclass_replace(
-                style,
-                arrowsize=max(float(str(arrowsize).strip('"')), 0.0),
-            )
+            if arrowsize is not None:
+                resolved_arrowsize = max(float(str(arrowsize).strip('"')), 0.0)
+            else:
+                resolved_arrowsize = style.arrowsize
         except ValueError:
             return style
+        replacements: Dict[str, Any] = {"arrowsize": resolved_arrowsize}
+        if arrowhead is not None:
+            dimensions = _graphviz_arrow_dimensions(str(arrowhead), resolved_arrowsize)
+            if dimensions is not None:
+                replacements["arrow_length"] = dimensions[0]
+                replacements["arrow_width"] = dimensions[1]
+        return dataclass_replace(style, **replacements)
 
     def get_style_for_edge(self, idx: int) -> EdgeStyle:
         """Get effective style for an edge via 5-level cascade.

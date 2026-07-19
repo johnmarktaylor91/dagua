@@ -13,11 +13,24 @@ from numpy.typing import NDArray
 FloatArray = NDArray[np.float64]
 CornerRadius = Union[float, Tuple[float, float, float, float]]
 ELLIPSE_KAPPA = 0.5522847498
-# Increased to ``0.45`` so the folded corner remains legible after downscaling
-# and thin strokes still separate the fold line from the outer outline.
-NOTE_FOLD_SIZE_RATIO = 0.45
+GRAPHVIZ_BIO_DETAIL = 6.0
+GRAPHVIZ_BIO_ARROW_LENGTH = 12.0
+GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH = 18.0
+GRAPHVIZ_BIO_PROMOTER_STEM_FRACTION = 0.25
+GRAPHVIZ_BIO_PROMOTER_ARROW_FRACTION = 0.625
+GRAPHVIZ_INVTRAPEZIUM_INSET_RATIO = 29.95 / 144.0
+GRAPHVIZ_COMPONENT_DETAIL = 4.0
+GRAPHVIZ_FOLDER_TAB_HEIGHT = 4.0
+GRAPHVIZ_FOLDER_TAB_WIDTH = 27.0
+GRAPHVIZ_M_CIRCLE_CHORD_RATIO = 0.75
+GRAPHVIZ_M_CORNER_MARK_LENGTH = 12.0
+GRAPHVIZ_NOTE_FOLD_SIZE = 6.0
+GRAPHVIZ_OCTAGON_PERIPHERY_GAP = 4.0
+GRAPHVIZ_TAB_HEIGHT = 4.0
+GRAPHVIZ_TAB_WIDTH = 12.0
 SEMICIRCLE_DEFAULT_CURVATURE = 1.0
 SEMICIRCLE_MIN_CURVATURE = 1e-6
+ROUNDED_POLYGON_RADIUS_FRACTION = 0.18
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,9 @@ class ShapeSpec:
     aspect_ratio : float | None, default=None
         Optional shape-specific aspect ratio hint. Semicircle variants use
         this to tune their dome curvature while keeping the flat edge fixed.
+    polygon_points : list[tuple[float, float]] | None, default=None
+        Custom polygon vertices in Cytoscape's centered unit coordinates,
+        where each axis spans ``-1`` to ``1`` across the node box.
     """
 
     center_x: float
@@ -51,6 +67,7 @@ class ShapeSpec:
     shape: str
     corner_radius: CornerRadius = 0.0
     aspect_ratio: Optional[float] = None
+    polygon_points: Optional[List[Tuple[float, float]]] = None
 
 
 def scale_corner_radius(corner_radius: CornerRadius, scale: float) -> CornerRadius:
@@ -265,6 +282,87 @@ def star_vertices(center_x: float, center_y: float, width: float, height: float)
     return np.asarray(points, dtype=np.float64)
 
 
+def graphviz_octagon_vertices(spec: ShapeSpec, offset: float = 0.0) -> FloatArray:
+    """Return Graphviz octagon vertices with an optional outward offset.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Base octagon bounds in data units.
+    offset : float, default=0.0
+        Perpendicular outward distance from every base edge.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clockwise vertices with shape ``[8, 2]``.
+    """
+
+    x = float(spec.center_x)
+    y = float(spec.center_y)
+    width = float(spec.width)
+    height = float(spec.height)
+    corner_ratio = 1.0 - 1.0 / np.sqrt(2.0)
+    corner_x = width * corner_ratio
+    corner_y = height * corner_ratio
+    left = x - width / 2.0
+    right = x + width / 2.0
+    bottom = y - height / 2.0
+    top = y + height / 2.0
+    vertices = np.array(
+        [
+            [left + corner_x, top],
+            [right - corner_x, top],
+            [right, top - corner_y],
+            [right, bottom + corner_y],
+            [right - corner_x, bottom],
+            [left + corner_x, bottom],
+            [left, bottom + corner_y],
+            [left, top - corner_y],
+        ],
+        dtype=np.float64,
+    )
+    if offset <= 0.0:
+        return vertices
+
+    offset_vertices: List[FloatArray] = []
+    for index, point in enumerate(vertices):
+        previous_point = vertices[(index - 1) % len(vertices)]
+        next_point = vertices[(index + 1) % len(vertices)]
+        incoming = point - previous_point
+        outgoing = next_point - point
+        incoming_normal = _normalize_vector(np.array([-incoming[1], incoming[0]]))
+        outgoing_normal = _normalize_vector(np.array([-outgoing[1], outgoing[0]]))
+        shifted_incoming = point + incoming_normal * offset
+        shifted_outgoing = point + outgoing_normal * offset
+        matrix = np.column_stack([incoming, -outgoing])
+        if abs(float(np.linalg.det(matrix))) <= np.finfo(np.float64).eps:
+            offset_vertices.append((shifted_incoming + shifted_outgoing) / 2.0)
+            continue
+        parameters = np.linalg.solve(matrix, shifted_outgoing - shifted_incoming)
+        offset_vertices.append(shifted_incoming + incoming * parameters[0])
+    return np.vstack(offset_vertices)
+
+
+def graphviz_octagon_path(spec: ShapeSpec, offset: float = 0.0) -> Path:
+    """Return a Graphviz octagon path at one periphery offset.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Base octagon bounds in data units.
+    offset : float, default=0.0
+        Perpendicular outward distance from every base edge.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed octagon path.
+    """
+
+    return closed_path_from_vertices(graphviz_octagon_vertices(spec, offset))
+
+
 def polygon_vertices(spec: ShapeSpec) -> FloatArray:
     """Return polygon vertices for polygonal node shapes.
 
@@ -288,7 +386,19 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
     y = float(spec.center_y)
     width = float(spec.width)
     height = float(spec.height)
-    if spec.shape == "diamond":
+    if spec.shape == "polygon":
+        if spec.polygon_points is None or len(spec.polygon_points) < 3:
+            raise ValueError("Custom polygon shapes require at least three polygon_points.")
+        unit_points = np.asarray(spec.polygon_points, dtype=np.float64)
+        if unit_points.ndim != 2 or unit_points.shape[1] != 2:
+            raise ValueError("polygon_points must contain two-coordinate vertices.")
+        return np.column_stack(
+            (
+                x + unit_points[:, 0] * width / 2.0,
+                y + unit_points[:, 1] * height / 2.0,
+            )
+        )
+    if spec.shape in {"diamond", "Mdiamond"}:
         return np.array(
             [
                 [x, y + height / 2.0],
@@ -298,14 +408,50 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
             ],
             dtype=np.float64,
         )
+    if spec.shape == "Msquare":
+        side = max(width, height)
+        half_side = side / 2.0
+        return np.array(
+            [
+                [x - half_side, y + half_side],
+                [x + half_side, y + half_side],
+                [x + half_side, y - half_side],
+                [x - half_side, y - half_side],
+            ],
+            dtype=np.float64,
+        )
     if spec.shape == "triangle":
         return triangle_vertices(x, y, width, height)
     if spec.shape == "hexagon":
         return regular_polygon_vertices(6, x, y, width, height)
     if spec.shape == "pentagon":
         return regular_polygon_vertices(5, x, y, width, height)
+    if spec.shape in {"house", "invhouse"}:
+        # Graphviz normalizes the regular pentagon horizontally to the node
+        # box while retaining its regular-polygon vertical coordinates.
+        shoulder_y = height * 0.1545084972
+        base_y = -height * 0.4045084972
+        vertices = np.array(
+            [
+                [x, y + height / 2.0],
+                [x + width / 2.0, y + shoulder_y],
+                [x + width / 2.0, y + base_y],
+                [x - width / 2.0, y + base_y],
+                [x - width / 2.0, y + shoulder_y],
+            ],
+            dtype=np.float64,
+        )
+        if spec.shape == "invhouse":
+            vertices[:, 1] = 2.0 * y - vertices[:, 1]
+        return vertices
     if spec.shape == "octagon":
         return regular_polygon_vertices(8, x, y, width, height, rotation=np.pi / 8.0)
+    if spec.shape in {"doubleoctagon", "tripleoctagon"}:
+        periphery_count = 2 if spec.shape == "doubleoctagon" else 3
+        return graphviz_octagon_vertices(
+            spec,
+            GRAPHVIZ_OCTAGON_PERIPHERY_GAP * (periphery_count - 1),
+        )
     if spec.shape == "star":
         return star_vertices(x, y, width, height)
     if spec.shape == "parallelogram":
@@ -331,6 +477,169 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
                 [x + width / 2.0 - inset, y + height / 2.0],
                 [x + width / 2.0, y - height / 2.0],
                 [x - width / 2.0, y - height / 2.0],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "invtrapezium":
+        # Graphviz 7.0.5 normalizes its regular four-sided polygon to this
+        # horizontal inset (29.95 points for a 144-point-wide node).
+        inset = width * GRAPHVIZ_INVTRAPEZIUM_INSET_RATIO
+        return np.array(
+            [
+                [x - width / 2.0 + inset, y - height / 2.0],
+                [x + width / 2.0 - inset, y - height / 2.0],
+                [x + width / 2.0, y + height / 2.0],
+                [x - width / 2.0, y + height / 2.0],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "promoter":
+        detail = GRAPHVIZ_BIO_DETAIL
+        arrow_base_x = x - width / 2.0 + width * GRAPHVIZ_BIO_PROMOTER_ARROW_FRACTION
+        stem_x = x - width / 2.0 + width * GRAPHVIZ_BIO_PROMOTER_STEM_FRACTION
+        return np.array(
+            [
+                [arrow_base_x, y + 3.0 * detail],
+                [stem_x, y + 3.0 * detail],
+                [stem_x, y],
+                [stem_x + detail, y],
+                [stem_x + detail, y + 2.0 * detail],
+                [arrow_base_x, y + 2.0 * detail],
+                [arrow_base_x, y + 1.5 * detail],
+                [arrow_base_x + GRAPHVIZ_BIO_ARROW_LENGTH, y + 2.5 * detail],
+                [arrow_base_x, y + 3.5 * detail],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "cds":
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        return np.array(
+            [
+                [right - GRAPHVIZ_BIO_ARROW_LENGTH, top - detail],
+                [left, top - detail],
+                [left, bottom + detail],
+                [right - GRAPHVIZ_BIO_ARROW_LENGTH, bottom + detail],
+                [right, y],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "terminator":
+        detail = GRAPHVIZ_BIO_DETAIL
+        half_detail = detail / 2.0
+        return np.array(
+            [
+                [x + half_detail, y],
+                [x + half_detail, y + detail],
+                [x + 1.5 * detail, y + detail],
+                [x + 1.5 * detail, y + 2.0 * detail],
+                [x - 1.5 * detail, y + 2.0 * detail],
+                [x - 1.5 * detail, y + detail],
+                [x - half_detail, y + detail],
+                [x - half_detail, y],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape in {"ribosite", "proteasesite"}:
+        half_detail = GRAPHVIZ_BIO_DETAIL / 2.0
+        quarter_detail = GRAPHVIZ_BIO_DETAIL / 4.0
+        base_y = y + GRAPHVIZ_BIO_DETAIL
+        return np.array(
+            [
+                [x + half_detail, base_y],
+                [x + half_detail, base_y + quarter_detail],
+                [x + quarter_detail, base_y + half_detail],
+                [x + half_detail, base_y + 3.0 * quarter_detail],
+                [x + half_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x + quarter_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x, base_y + 3.0 * quarter_detail],
+                [x - quarter_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x - half_detail, base_y + GRAPHVIZ_BIO_DETAIL],
+                [x - half_detail, base_y + 3.0 * quarter_detail],
+                [x - quarter_detail, base_y + half_detail],
+                [x - half_detail, base_y + quarter_detail],
+                [x - half_detail, base_y],
+                [x - quarter_detail, base_y],
+                [x, base_y + quarter_detail],
+                [x + quarter_detail, base_y],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape in {"rpromoter", "rarrow"}:
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        arrow_base_x = right - GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH
+        if spec.shape == "rpromoter":
+            vertices = [
+                [arrow_base_x, top - detail],
+                [left, top - detail],
+                [left, bottom],
+                [left + GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH, bottom],
+                [left + GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH, bottom + detail],
+                [arrow_base_x, bottom + detail],
+                [arrow_base_x, bottom],
+                [right, y],
+                [arrow_base_x, top],
+            ]
+        else:
+            vertices = [
+                [arrow_base_x, top - detail],
+                [left, top - detail],
+                [left, bottom + detail],
+                [arrow_base_x, bottom + detail],
+                [arrow_base_x, bottom],
+                [right, y],
+                [arrow_base_x, top],
+            ]
+        return np.asarray(vertices, dtype=np.float64)
+    if spec.shape == "larrow":
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        arrow_base_x = left + GRAPHVIZ_BIO_BLOCK_ARROW_LENGTH
+        return np.array(
+            [
+                [right, top - detail],
+                [arrow_base_x, top - detail],
+                [arrow_base_x, top],
+                [left, y],
+                [arrow_base_x, bottom],
+                [arrow_base_x, bottom + detail],
+                [right, bottom + detail],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "insulator":
+        half_size = GRAPHVIZ_BIO_DETAIL
+        return np.array(
+            [
+                [x + half_size, y + half_size],
+                [x + half_size, y - half_size],
+                [x - half_size, y - half_size],
+                [x - half_size, y + half_size],
+            ],
+            dtype=np.float64,
+        )
+    if spec.shape == "signature":
+        detail = GRAPHVIZ_BIO_DETAIL
+        left = x - width / 2.0
+        right = x + width / 2.0
+        bottom = y - height / 2.0
+        top = y + height / 2.0
+        return np.array(
+            [
+                [right, top - detail],
+                [left, top - detail],
+                [left, bottom + detail],
+                [right, bottom + detail],
             ],
             dtype=np.float64,
         )
@@ -368,6 +677,48 @@ def arrow_path(spec: ShapeSpec) -> Path:
     return closed_path_from_vertices(polygon_vertices(spec))
 
 
+def assembly_path(spec: ShapeSpec) -> Path:
+    """Return Graphviz's two-bar synthetic-biology assembly symbol.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Compound path containing the two closed rectangular bars.
+    """
+
+    half_width = 2.0 * GRAPHVIZ_BIO_DETAIL
+    half_height = GRAPHVIZ_BIO_DETAIL / 2.0
+    center_offset = 0.75 * GRAPHVIZ_BIO_DETAIL
+    upper = closed_path_from_vertices(
+        np.array(
+            [
+                [spec.center_x - half_width, spec.center_y + center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y + center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y + center_offset + half_height],
+                [spec.center_x - half_width, spec.center_y + center_offset + half_height],
+            ],
+            dtype=np.float64,
+        )
+    )
+    lower = closed_path_from_vertices(
+        np.array(
+            [
+                [spec.center_x - half_width, spec.center_y - center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y - center_offset - half_height],
+                [spec.center_x + half_width, spec.center_y - center_offset + half_height],
+                [spec.center_x - half_width, spec.center_y - center_offset + half_height],
+            ],
+            dtype=np.float64,
+        )
+    )
+    return Path.make_compound_path(upper, lower)
+
+
 def closed_path_from_vertices(vertices: FloatArray) -> Path:
     """Build a closed linear path from polygon vertices.
 
@@ -387,6 +738,55 @@ def closed_path_from_vertices(vertices: FloatArray) -> Path:
     closed_vertices = np.vstack([vertices, vertices[0:1]])
     codes = [Path.MOVETO] + [Path.LINETO] * (closed_vertices.shape[0] - 2) + [Path.CLOSEPOLY]
     return Path(closed_vertices, codes)
+
+
+def rounded_polygon_path(vertices: FloatArray, radius: float) -> Path:
+    """Build a closed polygon path with quadratic curves at every corner.
+
+    Parameters
+    ----------
+    vertices : numpy.ndarray
+        Polygon corners with shape ``[N, 2]``.
+    radius : float
+        Distance from each corner to the curve endpoints in data units.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed path containing one quadratic curve per polygon corner.
+    """
+
+    if vertices.shape[0] < 3:
+        raise ValueError("A rounded polygon requires at least three vertices.")
+
+    safe_radius = max(float(radius), 0.0)
+    incoming_points: List[FloatArray] = []
+    outgoing_points: List[FloatArray] = []
+    for index, vertex in enumerate(vertices):
+        previous_vertex = vertices[(index - 1) % vertices.shape[0]]
+        next_vertex = vertices[(index + 1) % vertices.shape[0]]
+        incoming = vertex - previous_vertex
+        outgoing = next_vertex - vertex
+        incoming_length = float(np.linalg.norm(incoming))
+        outgoing_length = float(np.linalg.norm(outgoing))
+        corner_radius = min(safe_radius, incoming_length / 2.0, outgoing_length / 2.0)
+        incoming_unit = incoming / max(incoming_length, np.finfo(np.float64).eps)
+        outgoing_unit = outgoing / max(outgoing_length, np.finfo(np.float64).eps)
+        incoming_points.append(vertex - incoming_unit * corner_radius)
+        outgoing_points.append(vertex + outgoing_unit * corner_radius)
+
+    path_vertices: List[FloatArray] = [incoming_points[0]]
+    codes: List[int] = [Path.MOVETO]
+    for index, vertex in enumerate(vertices):
+        path_vertices.extend([vertex, outgoing_points[index]])
+        codes.extend([Path.CURVE3, Path.CURVE3])
+        next_index = (index + 1) % vertices.shape[0]
+        if next_index != 0:
+            path_vertices.append(incoming_points[next_index])
+            codes.append(Path.LINETO)
+    path_vertices.append(incoming_points[0])
+    codes.append(Path.CLOSEPOLY)
+    return Path(np.asarray(path_vertices, dtype=np.float64), codes)
 
 
 def open_path_from_vertices(vertices: FloatArray) -> Path:
@@ -1062,10 +1462,8 @@ def tab_path(spec: ShapeSpec) -> Path:
     right = spec.center_x + half_width
     bottom = spec.center_y - half_height
     top = spec.center_y + half_height
-    # Tuned from ``0.30 / 0.20`` so the tab survives small-card rendering and
-    # reads as a folder tab instead of a tiny notch.
-    tab_width = spec.width * 0.38
-    tab_height = spec.height * 0.28
+    tab_width = min(GRAPHVIZ_TAB_WIDTH, spec.width)
+    tab_height = min(GRAPHVIZ_TAB_HEIGHT, spec.height / 2.0)
     vertices = np.array(
         [
             [left, bottom],
@@ -1091,7 +1489,7 @@ def note_path(spec: ShapeSpec) -> Path:
     Returns
     -------
     matplotlib.path.Path
-        Compound path with an outer outline and inner fold line.
+        Closed note silhouette. The renderer draws the interior fold lines.
     """
 
     half_width = spec.width / 2.0
@@ -1100,8 +1498,7 @@ def note_path(spec: ShapeSpec) -> Path:
     right = spec.center_x + half_width
     bottom = spec.center_y - half_height
     top = spec.center_y + half_height
-    # Oversize the fold slightly so it survives thin strokes and card downscaling.
-    fold = min(half_width, half_height) * NOTE_FOLD_SIZE_RATIO
+    fold = min(GRAPHVIZ_NOTE_FOLD_SIZE, half_width, half_height)
     outer = closed_path_from_vertices(
         np.array(
             [
@@ -1114,17 +1511,84 @@ def note_path(spec: ShapeSpec) -> Path:
             dtype=np.float64,
         )
     )
-    fold_line = open_path_from_vertices(
+    return outer
+
+
+def folder_path(spec: ShapeSpec) -> Path:
+    """Return Graphviz's rectangular folder with a raised right tab.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed folder silhouette.
+    """
+
+    left = spec.center_x - spec.width / 2.0
+    right = spec.center_x + spec.width / 2.0
+    bottom = spec.center_y - spec.height / 2.0
+    top = spec.center_y + spec.height / 2.0
+    tab_width = min(GRAPHVIZ_FOLDER_TAB_WIDTH, spec.width)
+    tab_height = min(GRAPHVIZ_FOLDER_TAB_HEIGHT, spec.height / 2.0)
+    slope_width = min(3.0, tab_width / 2.0)
+    return closed_path_from_vertices(
         np.array(
             [
-                [right - fold, top],
-                [right - fold, top - fold],
-                [right, top - fold],
+                [left, bottom],
+                [right, bottom],
+                [right, top],
+                [right - slope_width, top + tab_height],
+                [right - tab_width + slope_width, top + tab_height],
+                [right - tab_width, top],
+                [left, top],
             ],
             dtype=np.float64,
         )
     )
-    return Path.make_compound_path(outer, fold_line)
+
+
+def component_path(spec: ShapeSpec) -> Path:
+    """Return Graphviz's component box with two left-side lugs.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed component silhouette.
+    """
+
+    left = spec.center_x - spec.width / 2.0
+    right = spec.center_x + spec.width / 2.0
+    bottom = spec.center_y - spec.height / 2.0
+    top = spec.center_y + spec.height / 2.0
+    detail = min(GRAPHVIZ_COMPONENT_DETAIL, spec.height / 8.0, spec.width / 4.0)
+    return closed_path_from_vertices(
+        np.array(
+            [
+                [left, top],
+                [right, top],
+                [right, bottom],
+                [left, bottom],
+                [left, bottom + detail],
+                [left - detail, bottom + detail],
+                [left - detail, bottom + 2.0 * detail],
+                [left, bottom + 2.0 * detail],
+                [left, top - 2.0 * detail],
+                [left - detail, top - 2.0 * detail],
+                [left - detail, top - detail],
+                [left, top - detail],
+            ],
+            dtype=np.float64,
+        )
+    )
 
 
 def document_path(spec: ShapeSpec) -> Path:
@@ -1278,6 +1742,27 @@ def build_shape_path(spec: ShapeSpec) -> Path:
     """
 
     shape = spec.shape
+    rounded_polygon_bases = {
+        "round_triangle": "triangle",
+        "round_diamond": "diamond",
+        "round_pentagon": "pentagon",
+        "round_hexagon": "hexagon",
+        "round_octagon": "octagon",
+    }
+    if shape in rounded_polygon_bases:
+        base_spec = ShapeSpec(
+            center_x=spec.center_x,
+            center_y=spec.center_y,
+            width=spec.width,
+            height=spec.height,
+            shape=rounded_polygon_bases[shape],
+            corner_radius=0.0,
+            aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
+        )
+        radius = min(max(float(spec.width), 0.0), max(float(spec.height), 0.0))
+        radius *= ROUNDED_POLYGON_RADIUS_FRACTION
+        return rounded_polygon_path(polygon_vertices(base_spec), radius)
     if shape == "roundrect":
         return roundrect_path(spec)
     if shape == "rect":
@@ -1291,6 +1776,9 @@ def build_shape_path(spec: ShapeSpec) -> Path:
     if shape == "ellipse":
         return extract_patch_path(Ellipse((spec.center_x, spec.center_y), spec.width, spec.height))
     if shape == "circle":
+        diameter = max(spec.width, spec.height)
+        return extract_patch_path(Circle((spec.center_x, spec.center_y), diameter / 2.0))
+    if shape == "Mcircle":
         diameter = max(spec.width, spec.height)
         return extract_patch_path(Circle((spec.center_x, spec.center_y), diameter / 2.0))
     if shape == "cylinder":
@@ -1311,6 +1799,10 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return semicircle_path(spec, "right")
     if shape == "tab":
         return tab_path(spec)
+    if shape == "folder":
+        return folder_path(spec)
+    if shape == "component":
+        return component_path(spec)
     if shape == "note":
         return note_path(spec)
     if shape == "document":
@@ -1319,12 +1811,44 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return box3d_path(spec)
     if shape == "arrow":
         return arrow_path(spec)
+    if shape == "polygon":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "assembly":
+        return assembly_path(spec)
+    if shape == "promoter":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "cds":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "terminator":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "ribosite":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "proteasesite":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "rpromoter":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "rarrow":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "larrow":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "insulator":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "signature":
+        return closed_path_from_vertices(polygon_vertices(spec))
+    if shape == "invtrapezium":
+        return closed_path_from_vertices(polygon_vertices(spec))
     if shape in {
         "diamond",
+        "Mdiamond",
+        "Msquare",
         "triangle",
+        "house",
+        "invhouse",
         "hexagon",
         "pentagon",
         "octagon",
+        "doubleoctagon",
+        "tripleoctagon",
         "star",
         "parallelogram",
         "trapezoid",
@@ -1338,6 +1862,7 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         shape="roundrect",
         corner_radius=spec.corner_radius,
         aspect_ratio=spec.aspect_ratio,
+        polygon_points=spec.polygon_points,
     )
     return build_shape_path(fallback)
 

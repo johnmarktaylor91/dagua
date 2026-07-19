@@ -37,6 +37,7 @@ from dagua.render.edges.arrowheads import (
     ARROWHEAD_ALIASES,
     ARROWHEAD_REGISTRY,
     available_arrowheads,
+    graphviz_arrow_fill_mode,
 )
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle, get_theme
 
@@ -153,11 +154,8 @@ assert len(ARROWHEAD_COMPOUND_SAMPLES) >= 12
 # special shapes such as point/plaintext). dagua's currently-supported
 # shapes map onto a subset of these names (see _DAGUA_SHAPE_TO_GRAPHVIZ);
 # the JMT-gate default cut line (FINAL_DESIGN.md section 13, item 2)
-# recommends implementing ~12-16 common gap shapes and waiving the
-# SynBio/exotic tier as out_of_scope. This module renders the gap and
-# waived shapes as PLACEHOLDER nodes (dagua-side falls back to "rect"); it
-# does not implement new shape drawing code -- that is separate follow-up
-# work, not part of Lane D's calibration-suite/atlas surgery.
+# originally recommended waiving the SynBio/exotic tier. Those sampled
+# shapes are now implemented and included in DAGUA_SHAPE_TO_GRAPHVIZ.
 GV_SHAPE_CATALOG: Tuple[str, ...] = (
     "box",
     "polygon",
@@ -241,44 +239,38 @@ DAGUA_SHAPE_TO_GRAPHVIZ: Dict[str, str] = {
     "trapezoid": "trapezium",
     "box3d": "box3d",
     "double_circle": "doublecircle",
+    "house": "house",
+    "invhouse": "invhouse",
+    "folder": "folder",
+    "tab": "tab",
+    "component": "component",
+    "note": "note",
+    "Msquare": "Msquare",
+    "Mdiamond": "Mdiamond",
+    "Mcircle": "Mcircle",
+    "doubleoctagon": "doubleoctagon",
+    "tripleoctagon": "tripleoctagon",
+    "promoter": "promoter",
+    "cds": "cds",
+    "terminator": "terminator",
+    "ribosite": "ribosite",
+    "proteasesite": "proteasesite",
+    "rpromoter": "rpromoter",
+    "rarrow": "rarrow",
+    "larrow": "larrow",
+    "assembly": "assembly",
+    "insulator": "insulator",
+    "signature": "signature",
+    "invtrapezium": "invtrapezium",
 }
 
-# JMT-gate recommended default cut line (FINAL_DESIGN.md section 13, item
-# 2): common shapes worth implementing next. "cylinder" and "box3d" are
-# already supported (see DAGUA_SHAPE_TO_GRAPHVIZ) so they are excluded here;
-# the remainder render as gap placeholders.
-GV_SHAPE_GAP_COMMON: Tuple[str, ...] = (
-    "house",
-    "invhouse",
-    "folder",
-    "tab",
-    "component",
-    "note",
-    "Msquare",
-    "Mdiamond",
-    "Mcircle",
-    "doubleoctagon",
-    "tripleoctagon",
-)
+# Common Graphviz shapes not yet implemented by Dagua. The visual-parity-v2
+# shape pass completed this bucket, so it remains as an explicit empty gate.
+GV_SHAPE_GAP_COMMON: Tuple[str, ...] = ()
 
-# A representative SAMPLE of the SynBio/exotic tier recommended for
-# out_of_scope waiver. This is illustrative, not the authoritative waiver
-# list -- the exhaustive enumeration and waiver bookkeeping belongs to Lane
-# C's scripts.visual_parity.coverage + reference_specs/gv_attr_triage.json.
-GV_SHAPE_WAIVED_SAMPLE: Tuple[str, ...] = (
-    "promoter",
-    "cds",
-    "terminator",
-    "ribosite",
-    "proteasesite",
-    "rpromoter",
-    "rarrow",
-    "larrow",
-    "assembly",
-    "insulator",
-    "signature",
-    "invtrapezium",
-)
+# The former representative SynBio/exotic waiver sample is fully implemented,
+# so this explicit gate remains empty.
+GV_SHAPE_WAIVED_SAMPLE: Tuple[str, ...] = ()
 
 DOT_ALLOWED_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:+"
 CLUSTER_NAME_SANITIZER = re.compile(r"[^0-9A-Za-z_]")
@@ -662,7 +654,7 @@ def _make_arrow_types() -> Tuple[DaguaGraph, str]:
         graph.add_node(target, label="target")
         edge_style = EdgeStyle(
             arrow=arrow,
-            arrow_fill="hollow" if arrow in {"circle", "open"} else "filled",
+            arrow_fill=graphviz_arrow_fill_mode(arrow),
             width=1.2,
             label_font_size=10.0,
         )
@@ -811,9 +803,7 @@ def _make_arrowhead_atlas() -> Tuple[DaguaGraph, str]:
             graph.add_node(target, label="")
             edge_style = EdgeStyle(
                 arrow=spec,
-                arrow_fill="hollow"
-                if spec.startswith("o") or spec in {"circle", "open"}
-                else "filled",
+                arrow_fill=graphviz_arrow_fill_mode(spec),
                 width=1.1,
             )
             _add_edge_with_graphviz_attrs(
@@ -833,15 +823,11 @@ def _make_arrowhead_atlas() -> Tuple[DaguaGraph, str]:
 
 
 def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
-    """Create the labeled shape atlas: supported, gap, and waived-sample shapes.
+    """Create the labeled shape atlas for supported and outstanding shapes.
 
-    Dagua-supported shapes render through dagua's real shape drawers. Gap
-    and waived shapes render as PLACEHOLDER nodes on the dagua side (a plain
-    "rect" fallback labeled with the missing shape name) while the graphviz
-    side renders the true reference shape, so the atlas documents coverage
-    without implementing new shape-drawing code (out of scope for this
-    surgery). See GV_SHAPE_GAP_COMMON / GV_SHAPE_WAIVED_SAMPLE for
-    provenance.
+    Dagua-supported shapes render through dagua's real shape drawers. Any
+    remaining gap or waived shapes render as placeholder rectangles while
+    the Graphviz side renders their reference geometry.
 
     Returns
     -------
@@ -863,8 +849,6 @@ def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
                 dagua_shape = shape_name
                 label = shape_name
                 gv_attrs = _graphviz_shape_attrs(NodeStyle(shape=dagua_shape))
-                if dagua_shape == "double_circle":
-                    gv_attrs = {"shape": "doublecircle"}
             else:
                 dagua_shape = "rect"
                 label = f"GAP: {shape_name}"
@@ -878,6 +862,330 @@ def _make_shape_atlas() -> Tuple[DaguaGraph, str]:
             label=f"{bucket_name} ({len(shape_names)})",
         )
     return graph, "Shape Atlas"
+
+
+def _make_fill_atlas() -> Tuple[DaguaGraph, str]:
+    """Create a grid covering Graphviz's complete node fill-style vocabulary.
+
+    Returns
+    -------
+    tuple[DaguaGraph, str]
+        Graph and display title. Invisible vertical chains arrange the
+        disconnected fill samples as four stable atlas columns.
+    """
+
+    graph = DaguaGraph(direction="TB")
+    primary = "#F28E2B"
+    secondary = "#4E79A7"
+    tertiary = "#59A14F"
+    specs: Tuple[Tuple[str, str, NodeStyle, Dict[str, str]], ...] = (
+        (
+            "solid",
+            "solid filled",
+            NodeStyle(fill=primary),
+            {"shape": "ellipse", "style": "filled", "fillcolor": primary},
+        ),
+        *tuple(
+            (
+                f"linear_{angle}",
+                f"linear {angle}°",
+                NodeStyle(
+                    fill=primary,
+                    gradient="linear",
+                    gradient_color=secondary,
+                    gradient_angle=float(angle),
+                ),
+                {
+                    "shape": "ellipse",
+                    "style": "filled",
+                    "fillcolor": f"{primary}:{secondary}",
+                    "gradientangle": str(angle),
+                },
+            )
+            for angle in (0, 45, 90, 135, 270)
+        ),
+        *tuple(
+            (
+                f"radial_{angle}",
+                "radial centered" if angle == 0 else f"radial focus {angle}°",
+                NodeStyle(
+                    fill=primary,
+                    gradient="radial",
+                    gradient_color=secondary,
+                    gradient_angle=float(angle),
+                ),
+                {
+                    "shape": "ellipse",
+                    "style": "radial",
+                    "fillcolor": f"{primary}:{secondary}",
+                    "gradientangle": str(angle),
+                },
+            )
+            for angle in (0, 45)
+        ),
+        (
+            "striped_2",
+            "striped 2 equal",
+            NodeStyle(
+                shape="rect",
+                fill=primary,
+                fill_pattern="striped",
+                fill_pattern_colors=[primary, secondary],
+                fill_pattern_values=[1.0, 1.0],
+            ),
+            {
+                "shape": "box",
+                "style": "striped",
+                "fillcolor": f"{primary}:{secondary}",
+            },
+        ),
+        (
+            "striped_3_weighted",
+            "striped 3 weighted",
+            NodeStyle(
+                shape="rect",
+                fill=primary,
+                fill_pattern="striped",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[2.0, 3.0, 5.0],
+            ),
+            {
+                "shape": "box",
+                "style": "striped",
+                "fillcolor": f"{primary};0.2:{secondary};0.3:{tertiary};0.5",
+            },
+        ),
+        (
+            "wedged_ellipse_equal",
+            "wedged ellipse equal",
+            NodeStyle(
+                fill=primary,
+                fill_pattern="pie",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[1.0, 1.0, 1.0],
+            ),
+            {
+                "shape": "ellipse",
+                "style": "wedged",
+                "fillcolor": f"{primary}:{secondary}:{tertiary}",
+            },
+        ),
+        (
+            "wedged_ellipse_weighted",
+            "wedged ellipse weighted",
+            NodeStyle(
+                fill=primary,
+                fill_pattern="pie",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[2.0, 3.0, 5.0],
+            ),
+            {
+                "shape": "ellipse",
+                "style": "wedged",
+                "fillcolor": f"{primary};0.2:{secondary};0.3:{tertiary};0.5",
+            },
+        ),
+        (
+            "wedged_circle_weighted",
+            "wedged circle weighted",
+            NodeStyle(
+                shape="circle",
+                fill=primary,
+                fill_pattern="pie",
+                fill_pattern_colors=[primary, secondary, tertiary],
+                fill_pattern_values=[2.0, 3.0, 5.0],
+            ),
+            {
+                "shape": "circle",
+                "style": "wedged",
+                "fillcolor": f"{primary};0.2:{secondary};0.3:{tertiary};0.5",
+            },
+        ),
+    )
+    columns: List[List[str]] = [[], [], [], []]
+    for index, (node_id, label, style, graphviz_attrs) in enumerate(specs):
+        node_index = graph.add_node(node_id, label=label, style=style)
+        _set_graphviz_node_attrs(graph, node_index, graphviz_attrs)
+        columns[index % len(columns)].append(node_id)
+
+    for column in columns:
+        for source, target in zip(column, column[1:]):
+            edge_index = graph.add_edge(
+                source,
+                target,
+                style=EdgeStyle(arrow="none", opacity=0.0),
+            )
+            _set_graphviz_edge_attrs(
+                graph,
+                edge_index,
+                {"style": "invis", "arrowhead": "none"},
+            )
+    return graph, "Fill Pattern Atlas"
+
+
+def _make_compose_stress() -> Tuple[DaguaGraph, str]:
+    """Create pathological combinations of Graphviz-compatible cosmetics.
+
+    Every node combines a non-trivial shape, patterned fill, double border,
+    and long multiline label.  Gradient and stripe angles exercise rotated
+    fill composition without relying on Graphviz-unsupported text rotation.
+
+    Returns
+    -------
+    tuple[DaguaGraph, str]
+        Graph and display title.
+    """
+
+    graph = DaguaGraph(direction="TB")
+    node_specs: Tuple[Tuple[str, str, str, Tuple[str, ...], float], ...] = (
+        ("folder", "folder", "gradient", ("#DCEBFF", "#8CB8E8"), 25.0),
+        ("note", "note", "striped", ("#FFF2B8", "#F6C85F", "#F28E2B"), 35.0),
+        ("component", "component", "pie", ("#B8E0D2", "#7BC8A4", "#4A9D78"), 0.0),
+        ("cylinder", "cylinder", "gradient", ("#E8D9F5", "#A77BC7"), 90.0),
+        ("mdiamond", "Mdiamond", "striped", ("#FFD9D6", "#EE8A82"), 55.0),
+        ("doubleoctagon", "doubleoctagon", "pie", ("#DDECCF", "#A7CF85", "#6AA84F"), 20.0),
+    )
+    node_ids: List[str] = []
+    for index, (node_id, shape, pattern, colors, angle) in enumerate(node_specs):
+        label = (
+            f"{shape} composition stress\n"
+            f"long secondary label line {index + 1}\n"
+            "pattern + double border"
+        )
+        style = NodeStyle(
+            shape=shape,
+            fill=colors[0],
+            stroke="#334155",
+            stroke_width=1.0,
+            border_count=2,
+            fill_pattern=pattern,
+            fill_pattern_colors=list(colors),
+            fill_pattern_values=[3.0, 2.0, 1.0] if pattern == "pie" else None,
+            fill_pattern_angle=angle,
+            gradient="linear" if pattern == "gradient" else "none",
+            gradient_color=colors[1],
+            gradient_angle=angle,
+            font_size=10.0,
+        )
+        node_index = graph.add_node(node_id, label=label, style=style)
+        if pattern == "gradient":
+            fillcolor = f"{colors[0]}:{colors[1]}"
+            graphviz_style = "filled"
+        elif pattern == "striped":
+            stripe_weight = 1.0 / len(colors)
+            fillcolor = ":".join(f"{color};{stripe_weight:.3f}" for color in colors)
+            graphviz_style = "striped"
+        else:
+            pie_weights = (0.5, 0.333, 0.167)
+            fillcolor = ":".join(
+                f"{color};{weight:.3f}" for color, weight in zip(colors, pie_weights)
+            )
+            graphviz_style = "wedged"
+        _set_graphviz_node_attrs(
+            graph,
+            node_index,
+            {
+                "shape": DAGUA_SHAPE_TO_GRAPHVIZ[shape],
+                "style": graphviz_style,
+                "fillcolor": fillcolor,
+                "color": style.stroke,
+                "penwidth": f"{style.stroke_width:.2f}",
+                "peripheries": "2",
+                "gradientangle": f"{angle:.1f}",
+            },
+        )
+        node_ids.append(node_id)
+
+    edge_specs: Tuple[Tuple[str, str, str, str, str, str], ...] = (
+        ("folder", "note", "oldiamond", "dashed", "#B42318", "open diamond + dash"),
+        (
+            "note",
+            "component",
+            "lteeoldiamond",
+            "dotted",
+            "#1D4ED8",
+            "left tee + open diamond",
+        ),
+        ("component", "cylinder", "rveeodot", "dashed", "#047857", "right vee + dot"),
+        ("cylinder", "mdiamond", "olboxrnormal", "dotted", "#7E22CE", "stacked halves"),
+        ("mdiamond", "doubleoctagon", "oldiamond", "dashed", "#C2410C", "forward compound"),
+        ("doubleoctagon", "note", "lteeoldiamond", "dotted", "#0F766E", "back edge"),
+        ("component", "component", "oldiamond", "dashed", "#9F1239", "self loop"),
+    )
+    for source, target, arrow, line_style, color, label in edge_specs:
+        edge_style = EdgeStyle(
+            arrow=arrow,
+            arrow_fill=graphviz_arrow_fill_mode(arrow),
+            style=line_style,
+            color=color,
+            width=1.2,
+            label_font_size=8.0,
+        )
+        _add_edge_with_graphviz_attrs(
+            graph,
+            source,
+            target,
+            label=label,
+            style=edge_style,
+            graphviz_attrs={
+                "arrowhead": arrow,
+                "style": line_style,
+                "color": color,
+                "penwidth": "1.20",
+            },
+        )
+
+    graph.add_cluster(
+        "cluster_inner",
+        node_ids[2:4],
+        label="Inner patterned processing",
+        parent="cluster_pipeline",
+        style=ClusterStyle(
+            fill="#E8F3EC",
+            stroke="#4F7A5C",
+            stroke_width=1.0,
+            opacity=1.0,
+            fill_opacity=1.0,
+        ),
+    )
+    graph.add_cluster(
+        "cluster_pipeline",
+        node_ids[1:5],
+        label="Nested composition pipeline",
+        parent="cluster_system",
+        style=ClusterStyle(
+            fill="#EEF2FF",
+            stroke="#5965A8",
+            stroke_width=1.0,
+            opacity=1.0,
+            fill_opacity=1.0,
+        ),
+    )
+    graph.add_cluster(
+        "cluster_system",
+        node_ids,
+        label="Pathological cosmetic composition",
+        style=ClusterStyle(
+            fill="#FFF8E8",
+            stroke="#9A6B2F",
+            stroke_width=1.0,
+            opacity=1.0,
+            fill_opacity=1.0,
+        ),
+    )
+    for name in ("cluster_inner", "cluster_pipeline", "cluster_system"):
+        style = graph.cluster_styles[name]
+        _set_graphviz_cluster_attrs(
+            graph,
+            name,
+            {
+                "style": "filled",
+                "fillcolor": style.fill,
+                "color": style.stroke,
+                "penwidth": f"{style.stroke_width:.2f}",
+            },
+        )
+    return graph, "Compose Stress"
 
 
 def _make_spline_stress() -> Tuple[DaguaGraph, str]:
@@ -1150,6 +1458,8 @@ def _custom_graph_cases() -> List[GraphCase]:
         _make_cluster_showcase,
         _make_arrowhead_atlas,
         _make_shape_atlas,
+        _make_fill_atlas,
+        _make_compose_stress,
         _make_spline_stress,
         _make_cluster_nest_deep,
         _make_mixed_styles,
@@ -1409,17 +1719,23 @@ def _node_override_attrs(graph: DaguaGraph, index: int) -> Dict[str, str]:
         attrs.update(_graphviz_shape_attrs(style))
     if style.fill != default_style.fill:
         attrs.setdefault("fillcolor", style.fill)
-        attrs["style"] = _graphviz_style_tokens(style=style.stroke_dash, filled=True, rounded=False)
+        attrs.setdefault(
+            "style",
+            _graphviz_style_tokens(style=style.stroke_dash, filled=True, rounded=False),
+        )
     if style.stroke != default_style.stroke:
         attrs.setdefault("color", style.stroke)
     if style.stroke_width != default_style.stroke_width:
         attrs.setdefault("penwidth", f"{style.stroke_width:.2f}")
     if style.stroke_dash != default_style.stroke_dash:
         existing_style = attrs.get("style")
-        attrs["style"] = _graphviz_style_tokens(
-            style=style.stroke_dash,
-            filled="fillcolor" in attrs or bool(existing_style and "filled" in existing_style),
-            rounded=style.shape == "roundrect",
+        attrs.setdefault(
+            "style",
+            _graphviz_style_tokens(
+                style=style.stroke_dash,
+                filled="fillcolor" in attrs or bool(existing_style and "filled" in existing_style),
+                rounded=style.shape == "roundrect",
+            ),
         )
     if style.font_family != default_style.font_family:
         attrs.setdefault("fontname", style.font_family)

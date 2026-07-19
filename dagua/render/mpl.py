@@ -35,13 +35,14 @@ from dagua.edges import (
     preferred_edge_label_position,
     route_edges,
 )
-from dagua.layout.ops.cluster_geometry import (
-    ClusterLabelMetrics,
-    ClusterPlacementBox,
-    compute_cluster_placement_bbox,
-)
 from dagua.render._backend import _render_via_cairosvg, stroke_width_scale_for
 from dagua.render.borders import (
+    GRAPHVIZ_COMPONENT_DETAIL,
+    GRAPHVIZ_M_CIRCLE_CHORD_RATIO,
+    GRAPHVIZ_M_CORNER_MARK_LENGTH,
+    GRAPHVIZ_NOTE_FOLD_SIZE,
+    GRAPHVIZ_OCTAGON_PERIPHERY_GAP,
+    GRAPHVIZ_TAB_WIDTH,
     ShapeSpec,
     add_corner_radius,
     add_filled_collections,
@@ -49,13 +50,14 @@ from dagua.render.borders import (
     build_shape_path,
     clamp_border_width,
     dash_ribbon_paths,
+    graphviz_octagon_path,
     inset_shape_path,
     make_clip_proxy,
     scale_corner_radius,
 )
 from dagua.render.crossings import EdgeCrossing, detect_crossings
 from dagua.render.edges import CubicBezier as RenderBezier
-from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
+from dagua.render.edges import DaguaEdge, DaguaEdgeCollection, place_edge_label
 from dagua.render.edges.collection import MIN_TAPER_WIDTH
 from dagua.render.edges.dashes import dash_curve, parse_dash_pattern
 from dagua.render.edges.geometry import (
@@ -129,9 +131,6 @@ _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18
 _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
-_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE = 1.18
-_GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP = 3.0
-_GRAPHVIZ_STRICT_MIN_OVAL_ASPECT = 1.50
 _GRAPHVIZ_STRICT_EDGE_WIDTH_RENDER_MULTIPLIER = 1.5
 _GRAPHVIZ_STRICT_CLUSTER_HORIZONTAL_SEPARATION_POINTS = 18.0
 _GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS = 4.0
@@ -1127,12 +1126,6 @@ def _cluster_style_for_render(graph: Any, cluster_name: str) -> ClusterStyle:
         Render-local cluster style. The graph's stored style is not mutated.
     """
     style = graph.get_style_for_cluster(cluster_name)
-    if _is_graphviz_strict_render(graph) and not str(getattr(style, "label_background", "")):
-        style = replace(
-            style,
-            label_background="@background",
-            label_background_opacity=1.0,
-        )
     background_color = str(graph.graph_style.background_color)
     if not _should_auto_contrast(graph, background_color):
         return style
@@ -1524,26 +1517,25 @@ def _expand_bounds_for_external_labels(
         offset = float(style.external_label_offset)
         position = _normalize_external_label_position(style.external_label_position)
 
-        if position == "top":
-            anchor_y = cy + half_height + offset
-            x_min = min(x_min, cx - label_width / 2.0)
-            x_max = max(x_max, cx + label_width / 2.0)
-            y_max = max(y_max, anchor_y + label_height)
-        elif position == "left":
-            anchor_x = cx - half_width - offset
-            x_min = min(x_min, anchor_x - label_width)
-            y_min = min(y_min, cy - label_height / 2.0)
-            y_max = max(y_max, cy + label_height / 2.0)
-        elif position == "right":
-            anchor_x = cx + half_width + offset
-            x_max = max(x_max, anchor_x + label_width)
-            y_min = min(y_min, cy - label_height / 2.0)
-            y_max = max(y_max, cy + label_height / 2.0)
-        else:
-            anchor_y = cy - half_height - offset
-            x_min = min(x_min, cx - label_width / 2.0)
-            x_max = max(x_max, cx + label_width / 2.0)
-            y_min = min(y_min, anchor_y - label_height)
+        text_x, text_y, ha, va = _external_label_anchor(
+            cx, cy, half_width, half_height, offset, position
+        )
+        label_x_min = text_x - label_width if ha == "right" else text_x
+        if ha == "center":
+            label_x_min = text_x - label_width / 2.0
+        label_x_max = text_x + label_width if ha == "left" else text_x
+        if ha == "center":
+            label_x_max = text_x + label_width / 2.0
+        label_y_min = text_y - label_height if va == "top" else text_y
+        if va == "center":
+            label_y_min = text_y - label_height / 2.0
+        label_y_max = text_y + label_height if va == "bottom" else text_y
+        if va == "center":
+            label_y_max = text_y + label_height / 2.0
+        x_min = min(x_min, label_x_min)
+        x_max = max(x_max, label_x_max)
+        y_min = min(y_min, label_y_min)
+        y_max = max(y_max, label_y_max)
 
     return x_min, x_max, y_min, y_max
 
@@ -1939,6 +1931,7 @@ def render(
 
     figure_dpi = render_dpi if canvas_fit_margin is None else None
     fig, ax = _new_figure_axes(figsize, backend=backend, dpi=figure_dpi)
+    setattr(ax, "_dagua_render_theme_name", _render_theme_name(graph))
     fig.patch.set_facecolor(bg)
     fig.patch.set_alpha(1.0)
     ax.set_facecolor(bg)
@@ -2062,7 +2055,11 @@ def render(
             svg_hover_map,
         )
 
-    if canvas_fit_margin is None and figsize != natural_figsize:
+    if (
+        canvas_fit_margin is None
+        and figsize != natural_figsize
+        and not _is_graphviz_strict_render(graph)
+    ):
         fig.tight_layout()
 
     if output:
@@ -2209,6 +2206,8 @@ def _edge_linestyle(style: Any) -> Any:
     Any
         Matplotlib linestyle string or dash tuple.
     """
+    if getattr(style, "line_dash_pattern", None) is not None:
+        return (0, tuple(float(value) for value in style.line_dash_pattern))
     if style.style == "dashed":
         return (0, _GRAPHVIZ_DASH_PATTERN)
     if style.style == "dotted":
@@ -2401,6 +2400,54 @@ def _build_node_patch(
             linestyle=linestyle,
             zorder=zorder,
         )
+    if shape in {
+        "round_triangle",
+        "round_diamond",
+        "round_pentagon",
+        "round_hexagon",
+        "round_octagon",
+        "house",
+        "invhouse",
+        "invtrapezium",
+        "folder",
+        "tab",
+        "component",
+        "note",
+        "Msquare",
+        "Mdiamond",
+        "Mcircle",
+        "doubleoctagon",
+        "tripleoctagon",
+        "promoter",
+        "cds",
+        "terminator",
+        "ribosite",
+        "proteasesite",
+        "rpromoter",
+        "rarrow",
+        "larrow",
+        "assembly",
+        "insulator",
+        "signature",
+    }:
+        return PathPatch(
+            build_shape_path(
+                ShapeSpec(
+                    center_x=x,
+                    center_y=y,
+                    width=w,
+                    height=h,
+                    shape=shape,
+                    corner_radius=0.0,
+                    aspect_ratio=getattr(style, "aspect_ratio", None),
+                )
+            ),
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
     if shape == "ellipse":
         return Ellipse(
             (x, y),
@@ -2464,7 +2511,7 @@ def _build_node_patch(
             linestyle=linestyle,
             zorder=zorder,
         )
-    if shape == "triangle":
+    if shape in {"triangle", "round_triangle"}:
         vertices = _triangle_vertices(x, y, w, h)
         return Polygon(
             vertices,
@@ -2732,6 +2779,146 @@ def _draw_node_shape_extras(
     zorder : float
         Artist z-order.
     """
+    graphviz_detail_paths: List[Any] = []
+    from matplotlib.path import Path as MplPath
+
+    if style.shape == "tab":
+        left = x - w / 2.0
+        top = y + h / 2.0
+        tab_width = min(GRAPHVIZ_TAB_WIDTH, w)
+        graphviz_detail_paths.append(
+            MplPath(np.array([[left, top], [left + tab_width, top]], dtype=np.float64))
+        )
+    elif style.shape == "component":
+        left = x - w / 2.0
+        bottom = y - h / 2.0
+        top = y + h / 2.0
+        detail = min(GRAPHVIZ_COMPONENT_DETAIL, h / 8.0, w / 4.0)
+        graphviz_detail_paths.extend(
+            [
+                MplPath(
+                    np.array(
+                        [
+                            [left, top - detail],
+                            [left + detail, top - detail],
+                            [left + detail, top - 2.0 * detail],
+                            [left, top - 2.0 * detail],
+                        ],
+                        dtype=np.float64,
+                    )
+                ),
+                MplPath(
+                    np.array(
+                        [
+                            [left, bottom + 2.0 * detail],
+                            [left + detail, bottom + 2.0 * detail],
+                            [left + detail, bottom + detail],
+                            [left, bottom + detail],
+                        ],
+                        dtype=np.float64,
+                    )
+                ),
+            ]
+        )
+    elif style.shape == "note":
+        right = x + w / 2.0
+        top = y + h / 2.0
+        fold = min(GRAPHVIZ_NOTE_FOLD_SIZE, w / 2.0, h / 2.0)
+        graphviz_detail_paths.append(
+            MplPath(
+                np.array(
+                    [
+                        [right - fold, top],
+                        [right - fold, top - fold],
+                        [right, top - fold],
+                    ],
+                    dtype=np.float64,
+                )
+            )
+        )
+    elif style.shape == "Msquare":
+        side = max(w, h)
+        half_side = side / 2.0
+        left = x - half_side
+        right = x + half_side
+        bottom = y - half_side
+        top = y + half_side
+        mark = min(GRAPHVIZ_M_CORNER_MARK_LENGTH, side / 4.0)
+        mark_vertices = (
+            ((left + mark, top), (left, top - mark)),
+            ((left, bottom + mark), (left + mark, bottom)),
+            ((right - mark, bottom), (right, bottom + mark)),
+            ((right, top - mark), (right - mark, top)),
+        )
+        graphviz_detail_paths.extend(
+            MplPath(np.asarray(vertices, dtype=np.float64)) for vertices in mark_vertices
+        )
+    elif style.shape == "Mdiamond":
+        corners = np.array(
+            [
+                [x, y + h / 2.0],
+                [x + w / 2.0, y],
+                [x, y - h / 2.0],
+                [x - w / 2.0, y],
+            ],
+            dtype=np.float64,
+        )
+        for index, corner in enumerate(corners):
+            previous_corner = corners[(index - 1) % len(corners)]
+            next_corner = corners[(index + 1) % len(corners)]
+            previous_direction = previous_corner - corner
+            next_direction = next_corner - corner
+            previous_length = max(float(np.linalg.norm(previous_direction)), 1.0)
+            next_length = max(float(np.linalg.norm(next_direction)), 1.0)
+            mark_length = min(
+                GRAPHVIZ_M_CORNER_MARK_LENGTH,
+                previous_length / 2.0,
+                next_length / 2.0,
+            )
+            graphviz_detail_paths.append(
+                MplPath(
+                    np.vstack(
+                        [
+                            corner + previous_direction * (mark_length / previous_length),
+                            corner + next_direction * (mark_length / next_length),
+                        ]
+                    )
+                )
+            )
+    elif style.shape == "Mcircle":
+        radius = max(w, h) / 2.0
+        chord_y = radius * GRAPHVIZ_M_CIRCLE_CHORD_RATIO
+        chord_x = radius * math.sqrt(1.0 - GRAPHVIZ_M_CIRCLE_CHORD_RATIO**2)
+        graphviz_detail_paths.extend(
+            [
+                MplPath(np.array([[x - chord_x, y + chord_y], [x + chord_x, y + chord_y]])),
+                MplPath(np.array([[x - chord_x, y - chord_y], [x + chord_x, y - chord_y]])),
+            ]
+        )
+    elif style.shape in {"doubleoctagon", "tripleoctagon"}:
+        inner_ring_count = 1 if style.shape == "doubleoctagon" else 2
+        for ring_index in range(inner_ring_count):
+            graphviz_detail_paths.append(
+                graphviz_octagon_path(
+                    ShapeSpec(center_x=x, center_y=y, width=w, height=h, shape="octagon"),
+                    offset=GRAPHVIZ_OCTAGON_PERIPHERY_GAP * ring_index,
+                )
+            )
+
+    if graphviz_detail_paths:
+        for detail_path in graphviz_detail_paths:
+            _draw_display_point_path_stroke(
+                ax,
+                detail_path,
+                edgecolor,
+                max(float(style.stroke_width), 0.0),
+                zorder=zorder,
+                linestyle=_display_point_linestyle(style.stroke_dash, style.stroke_dash_pattern),
+                capstyle=str(getattr(style, "stroke_cap", "butt")),
+                joinstyle=str(getattr(style, "stroke_join", "miter")),
+            )
+        return
+
     if style.shape == "box3d":
         # Overlay darker tints on the top and right extrusion faces so the
         # 3D illusion reads at a glance.
@@ -2899,7 +3086,31 @@ def _draw_gradient_fill(
     xx, yy = np.meshgrid(grid, grid)
 
     if style.gradient == "radial":
-        data = np.clip(np.power(np.sqrt(xx**2 + yy**2), 0.7), 0.0, 1.0)
+        gradient_angle = float(style.gradient_angle) % 360.0
+        if abs(gradient_angle) <= 1e-9:
+            focus_x = 0.0
+            focus_y = 0.0
+        else:
+            angle = np.deg2rad(gradient_angle)
+            focus_x = float(np.cos(angle))
+            focus_y = float(np.sin(angle))
+        dx = xx - focus_x
+        dy = yy - focus_y
+        ray_norm_sq = dx**2 + dy**2
+        focus_dot_ray = focus_x * dx + focus_y * dy
+        # Graphviz emits an SVG radial gradient with a 75% object-bbox
+        # radius. In this [-1, 1] raster that is a radius of 1.5. Solve each
+        # focal ray's intersection with that circle to reproduce SVG focal
+        # gradients, including non-zero gradientangle values.
+        radius = 1.5
+        discriminant = np.maximum(
+            focus_dot_ray**2 - ray_norm_sq * (focus_x**2 + focus_y**2 - radius**2),
+            0.0,
+        )
+        denominator = np.maximum(ray_norm_sq, 1e-12)
+        end_scale = (-focus_dot_ray + np.sqrt(discriminant)) / denominator
+        data = np.where(ray_norm_sq <= 1e-12, 0.0, 1.0 / np.maximum(end_scale, 1e-12))
+        data = np.clip(data, 0.0, 1.0)
     else:
         angle = np.deg2rad(style.gradient_angle)
         projection = xx * np.cos(angle) + yy * np.sin(angle)
@@ -2913,7 +3124,7 @@ def _draw_gradient_fill(
         origin="lower",
         cmap=cmap,
         interpolation="bicubic",
-        alpha=float(style.opacity) * float(alpha_multiplier),
+        alpha=_node_fill_alpha(style) * float(alpha_multiplier),
         zorder=zorder,
         aspect="auto",
     )
@@ -2936,6 +3147,25 @@ def _pattern_fill_colors(style: Any) -> List[str]:
     if style.fill_pattern_colors:
         return list(style.fill_pattern_colors)
     return [str(style.fill), darken_hex(str(style.fill), 0.18)]
+
+
+def _node_fill_alpha(style: Any) -> float:
+    """Return the effective opacity for node fill layers.
+
+    Parameters
+    ----------
+    style : Any
+        Node style exposing overall and fill-only opacity values.
+
+    Returns
+    -------
+    float
+        Product of overall and fill-only opacity, clamped to ``[0, 1]``.
+    """
+
+    overall_opacity = float(getattr(style, "opacity", 1.0))
+    fill_opacity = float(getattr(style, "fill_opacity", 1.0))
+    return min(max(overall_opacity * fill_opacity, 0.0), 1.0)
 
 
 def _hatched_overlay_color(style: Any) -> str:
@@ -3004,18 +3234,22 @@ def _draw_striped_fill(
     projection_range = max(float(np.max(projection)) - projection_min, 1e-9)
     normalized = (projection - projection_min) / projection_range
     palette_count = max(len(colors), 1)
-    stripe_count = max(palette_count * 8, 8)
-    bands = np.mod((normalized * stripe_count).astype(int), palette_count)
-    # Inset the image extent so anti-aliasing bleed at the clip
-    # boundary stays inside the node outline.
-    inset = min(w, h) * 0.03
+    raw_values = list(getattr(style, "fill_pattern_values", None) or [])
+    if len(raw_values) != palette_count or sum(max(float(value), 0.0) for value in raw_values) <= 0:
+        weights = np.full(palette_count, 1.0 / palette_count)
+    else:
+        positive_values = np.asarray([max(float(value), 0.0) for value in raw_values])
+        weights = positive_values / float(np.sum(positive_values))
+    boundaries = np.cumsum(weights)
+    bands = np.searchsorted(boundaries, normalized, side="right")
+    bands = np.clip(bands, 0, palette_count - 1)
     image = ax.imshow(
         bands,
-        extent=(x - w / 2.0 + inset, x + w / 2.0 - inset, y - h / 2.0 + inset, y + h / 2.0 - inset),
+        extent=(x - w / 2.0, x + w / 2.0, y - h / 2.0, y + h / 2.0),
         origin="lower",
         cmap=ListedColormap(colors),
         interpolation="nearest",
-        alpha=style.opacity,
+        alpha=_node_fill_alpha(style),
         zorder=1.95,
         aspect="auto",
         vmin=0,
@@ -3058,7 +3292,7 @@ def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) 
 
     hole_fraction = min(max(float(getattr(style, "fill_pattern_hole", 0.0)), 0.0), 0.99)
     wedge_width = None if hole_fraction <= 0.0 else 1.0 - hole_fraction
-    current_angle = 90.0 - float(getattr(style, "fill_pattern_angle", 0.0))
+    current_angle = -float(getattr(style, "fill_pattern_angle", 0.0))
     pie_transform = (
         Affine2D()
         .scale(radius_x, radius_y)
@@ -3073,8 +3307,8 @@ def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) 
         wedge_kwargs: Dict[str, Any] = {
             "center": (0.0, 0.0),
             "r": 1.0,
-            "theta1": current_angle - sweep,
-            "theta2": current_angle,
+            "theta1": current_angle,
+            "theta2": current_angle + sweep,
         }
         if wedge_width is not None:
             wedge_kwargs["width"] = wedge_width
@@ -3084,13 +3318,14 @@ def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) 
         wedge = PathPatch(
             wedge_path,
             facecolor=colors[index % len(colors)],
-            edgecolor="none",
-            alpha=float(style.opacity),
+            edgecolor=str(getattr(style, "stroke", "#000000")),
+            linewidth=0.5,
+            alpha=_node_fill_alpha(style),
             zorder=2.01,
         )
         wedge.set_clip_path(clip_patch)
         ax.add_patch(wedge)
-        current_angle -= sweep
+        current_angle += sweep
 
 
 def _draw_node_fill(
@@ -3143,7 +3378,7 @@ def _draw_node_fill(
             )
             ax.add_patch(fill_patch)
         _draw_pie_fill(ax, shape_spec, style, clip_patch)
-        if style.gradient != "none" and style.opacity > 0.0:
+        if style.gradient != "none" and _node_fill_alpha(style) > 0.0:
             # Pie wedges fully cover the base fill, so the gradient must be
             # layered afterward to remain visible in combo renders.
             _draw_gradient_fill(
@@ -3176,12 +3411,12 @@ def _draw_node_fill(
             edgecolor=_hatched_overlay_color(style),
             linewidth=_MIN_HATCH_LINEWIDTH_POINTS,
             hatch=_HATCH_PATTERN,
-            alpha=style.opacity,
+            alpha=_node_fill_alpha(style),
             zorder=2.01,
         )
         ax.add_patch(hatch_patch)
         return
-    if style.gradient != "none" and style.opacity > 0.0:
+    if style.gradient != "none" and _node_fill_alpha(style) > 0.0:
         _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
         return
 
@@ -3247,6 +3482,63 @@ def _draw_node_border_path(
         zorder=2.06,
     )
     ax.add_patch(patch)
+
+
+def _draw_node_outline(
+    ax: Any,
+    node_index: int,
+    shape_spec: ShapeSpec,
+    style: Any,
+    border_width: float,
+    border_position: str,
+    display_scale: float,
+) -> None:
+    """Draw a Cytoscape-style stroke outside a node's visible border.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the outline.
+    node_index : int
+        Node index used to identify the outline artist.
+    shape_spec : ShapeSpec
+        Base node geometry in data coordinates.
+    style : Any
+        Node style exposing outline color, width, offset, and style.
+    border_width : float
+        Visible node-border width in data coordinates.
+    border_position : str
+        Node-border placement mode.
+    display_scale : float
+        Point-to-data conversion factor.
+
+    Returns
+    -------
+    None
+        Adds an outline patch to ``ax`` when its width is positive.
+    """
+
+    outline_width = max(float(getattr(style, "outline_width", 0.0)), 0.0)
+    if outline_width <= 0.0:
+        return
+
+    border_outset_factors = {"inside": 0.0, "center": 0.5, "outside": 1.0}
+    border_outset = border_width * border_outset_factors.get(border_position, 0.5)
+    outline_gap = max(float(getattr(style, "outline_offset", 0.0)), 0.0) * display_scale
+    outline_half_width = outline_width * display_scale / 2.0
+    centerline_outset = border_outset + outline_gap + outline_half_width
+    outline_path = build_shape_path(_expanded_shape_spec(shape_spec, centerline_outset))
+    outline_color = str(getattr(style, "outline_color", "") or style.stroke)
+    _draw_display_point_path_stroke(
+        ax,
+        outline_path,
+        outline_color,
+        outline_width,
+        zorder=2.07,
+        linestyle=_display_point_linestyle(getattr(style, "outline_style", "solid"), None),
+        joinstyle="round",
+        gid=f"dagua-node-outline-{node_index}",
+    )
 
 
 def _requires_custom_node_rendering(style: Any) -> bool:
@@ -3536,6 +3828,7 @@ def _offset_custom_edge_collection_terminals(
         edge = prepared.edge
         head_result = prepared.head_result
         tail_result = prepared.tail_result
+        source_result = prepared.source_result
 
         if head_result is not None and edge.target_node is not None:
             shifted_tip = _offset_edge_terminal_point(
@@ -3561,11 +3854,24 @@ def _offset_custom_edge_collection_terminals(
             dy = shifted_tip[1] - float(prepared.lane_curve.p0[1])
             tail_result = _translate_arrowhead_result(tail_result, dx, dy)
 
+        if source_result is not None and edge.source_node is not None:
+            shifted_tip = _offset_edge_terminal_point(
+                graph,
+                positions,
+                int(edge.source_node),
+                (float(prepared.lane_curve.p0[0]), float(prepared.lane_curve.p0[1])),
+                stroke_scale,
+            )
+            dx = shifted_tip[0] - float(prepared.lane_curve.p0[0])
+            dy = shifted_tip[1] - float(prepared.lane_curve.p0[1])
+            source_result = _translate_arrowhead_result(source_result, dx, dy)
+
         updated_prepared_edges.append(
             replace(
                 prepared,
                 head_result=head_result,
                 tail_result=tail_result,
+                source_result=source_result,
             )
         )
 
@@ -3578,18 +3884,90 @@ def _normalize_external_label_position(position: str) -> str:
     Parameters
     ----------
     position : str
-        Requested label side.
+        Requested label position. Underscores and legacy four-way names are
+        accepted as aliases.
 
     Returns
     -------
     str
-        One of ``"top"``, ``"bottom"``, ``"left"``, or ``"right"``. Invalid
-        values fall back to ``"bottom"``.
+        One of the nine row-column positions. Invalid values fall back to
+        ``"bottom-center"``.
     """
     normalized_position = str(position).replace("_", "-")
-    if normalized_position in {"top", "bottom", "left", "right"}:
+    aliases = {
+        "top": "top-center",
+        "bottom": "bottom-center",
+        "left": "center-left",
+        "right": "center-right",
+        "middle-left": "center-left",
+        "middle-right": "center-right",
+    }
+    normalized_position = aliases.get(normalized_position, normalized_position)
+    if normalized_position in {
+        "top-left",
+        "top-center",
+        "top-right",
+        "center-left",
+        "center",
+        "center-right",
+        "bottom-left",
+        "bottom-center",
+        "bottom-right",
+    }:
         return normalized_position
-    return "bottom"
+    return "bottom-center"
+
+
+def _external_label_anchor(
+    center_x: float,
+    center_y: float,
+    half_width: float,
+    half_height: float,
+    offset: float,
+    position: str,
+) -> Tuple[float, float, str, str]:
+    """Return the anchor and alignment for a nine-position external label.
+
+    Parameters
+    ----------
+    center_x : float
+        Node center x-coordinate.
+    center_y : float
+        Node center y-coordinate.
+    half_width : float
+        Half of the node width.
+    half_height : float
+        Half of the node height.
+    offset : float
+        Clearance outside the selected node sides.
+    position : str
+        Normalized nine-position label token.
+
+    Returns
+    -------
+    tuple[float, float, str, str]
+        Text x/y anchor followed by Matplotlib horizontal and vertical
+        alignment values.
+    """
+
+    row, separator, column = position.partition("-")
+    if not separator:
+        row = column = "center"
+
+    if column == "left":
+        text_x, horizontal_alignment = center_x - half_width - offset, "right"
+    elif column == "right":
+        text_x, horizontal_alignment = center_x + half_width + offset, "left"
+    else:
+        text_x, horizontal_alignment = center_x, "center"
+
+    if row == "top":
+        text_y, vertical_alignment = center_y + half_height + offset, "bottom"
+    elif row == "bottom":
+        text_y, vertical_alignment = center_y - half_height - offset, "top"
+    else:
+        text_y, vertical_alignment = center_y, "center"
+    return text_x, text_y, horizontal_alignment, vertical_alignment
 
 
 def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
@@ -3618,54 +3996,7 @@ def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
         shape=spec.shape,
         corner_radius=add_corner_radius(spec.corner_radius, delta),
         aspect_ratio=spec.aspect_ratio,
-    )
-
-
-def _graphviz_strict_ellipse_shape_spec(spec: ShapeSpec, style: NodeStyle) -> ShapeSpec:
-    """Return a Graphviz-style visual ellipse spec for strict rendering.
-
-    Parameters
-    ----------
-    spec : ShapeSpec
-        Node outline spec computed from the graph's node-size tensor.
-    style : NodeStyle
-        Effective node style for the same node.
-
-    Returns
-    -------
-    ShapeSpec
-        Ellipse spec with a uniform Graphviz-style circumscription multiplier
-        when the node is an ellipse or circle.
-    """
-    if str(style.shape) not in {"ellipse", "circle"}:
-        return spec
-    aspect = max(float(spec.width), float(spec.height)) / max(
-        min(float(spec.width), float(spec.height)),
-        1e-9,
-    )
-    aspect_blend = min(1.0, _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP / max(aspect, 1e-9))
-    scale = 1.0 + (_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE - 1.0) * aspect_blend
-    adjusted_width = float(spec.width) * scale
-    base_height = float(spec.height)
-    if float(spec.width) > float(spec.height) and aspect > _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP:
-        min_height = float(style.min_height) if style.min_height is not None else 0.0
-        base_height = min(base_height, max(min_height, float(spec.height) / aspect))
-    adjusted_height = base_height * scale
-    if str(style.shape) == "ellipse" and adjusted_width <= 70.0:
-        adjusted_width = max(
-            adjusted_width,
-            adjusted_height * _GRAPHVIZ_STRICT_MIN_OVAL_ASPECT,
-        )
-    if str(style.shape) == "circle":
-        adjusted_width = adjusted_height = max(adjusted_width, adjusted_height)
-    return ShapeSpec(
-        center_x=spec.center_x,
-        center_y=spec.center_y,
-        width=adjusted_width,
-        height=adjusted_height,
-        shape=spec.shape,
-        corner_radius=spec.corner_radius,
-        aspect_ratio=spec.aspect_ratio,
+        polygon_points=spec.polygon_points,
     )
 
 
@@ -3702,17 +4033,14 @@ def _graphviz_strict_terminal_point(
     if str(style.shape) not in {"ellipse", "circle"}:
         return curve.p0 if terminal == "source" else curve.p1
 
-    visual_spec = _graphviz_strict_ellipse_shape_spec(
-        ShapeSpec(
-            center_x=float(center[0]),
-            center_y=float(center[1]),
-            width=float(size[0]),
-            height=float(size[1]),
-            shape=str(style.shape),
-            corner_radius=0.0,
-            aspect_ratio=style.aspect_ratio,
-        ),
-        style,
+    visual_spec = ShapeSpec(
+        center_x=float(center[0]),
+        center_y=float(center[1]),
+        width=float(size[0]),
+        height=float(size[1]),
+        shape=str(style.shape),
+        corner_radius=0.0,
+        aspect_ratio=style.aspect_ratio,
     )
     original_terminal = curve.p0 if terminal == "source" else curve.p1
     center_point = np.asarray(center, dtype=float)
@@ -4159,12 +4487,85 @@ def _draw_display_point_text(
         zorder=spec.zorder,
         bbox=bbox,
     )
+    if spec.outline and spec.outline_width > 0.0:
+        import matplotlib.patheffects as path_effects
+
+        artist.set_path_effects(
+            [
+                path_effects.withStroke(
+                    linewidth=float(spec.outline_width) * 2.0,
+                    foreground=spec.outline_color,
+                ),
+                path_effects.Normal(),
+            ]
+        )
     if spec.clip_patch is not None:
         artist.set_clip_path(spec.clip_patch)
     if spec.gid is not None:
         artist.set_gid(spec.gid)
         _register_svg_hover_text(svg_hover_map, spec.gid, spec.text)
     return artist
+
+
+def _text_shadow_specs(spec: DaguaText, style: Any, display_scale: float) -> List[DaguaText]:
+    """Return layered label copies approximating a Cytoscape text shadow.
+
+    Parameters
+    ----------
+    spec : DaguaText
+        Foreground label specification.
+    style : Any
+        Node style exposing text-shadow properties.
+    display_scale : float
+        Point-to-data conversion factor for offsets and blur radius.
+
+    Returns
+    -------
+    list[DaguaText]
+        Shadow specifications ordered from outer blur samples to the center.
+    """
+
+    from matplotlib.colors import to_rgba
+
+    shadow_color = str(getattr(style, "text_shadow_color", ""))
+    if shadow_color == "":
+        return []
+    red, green, blue, color_alpha = to_rgba(shadow_color)
+    if color_alpha <= 0.0:
+        return []
+
+    offset_x, offset_y = getattr(style, "text_shadow_offset", (0.0, 0.0))
+    blur_points = max(float(getattr(style, "text_shadow_blur", 0.0)), 0.0)
+    samples: List[Tuple[float, float]] = [(0.0, 0.0)]
+    if blur_points > 0.0:
+        ring_count = min(max(int(math.ceil(blur_points)), 2), 4)
+        for ring_index in range(ring_count, 0, -1):
+            radius = blur_points * float(ring_index) / float(ring_count)
+            for angle_index in range(8):
+                angle = 2.0 * math.pi * float(angle_index) / 8.0
+                samples.append((radius * math.cos(angle), radius * math.sin(angle)))
+
+    # Distribute authored opacity across blur samples. Dividing by the square
+    # root made overlapping glyph copies compound into a near-opaque smudge.
+    layer_alpha = color_alpha if len(samples) == 1 else color_alpha / float(len(samples))
+    shadow_specs: List[DaguaText] = []
+    for layer_index, (blur_x, blur_y) in enumerate(samples):
+        shadow_specs.append(
+            replace(
+                spec,
+                x=spec.x + (float(offset_x) + blur_x) * display_scale,
+                y=spec.y + (float(offset_y) + blur_y) * display_scale,
+                font_color=(red, green, blue),
+                alpha=layer_alpha,
+                outline=False,
+                background=None,
+                underline=False,
+                strikethrough=False,
+                zorder=spec.zorder - 0.05,
+                gid=(f"{spec.gid}-shadow-{layer_index}" if spec.gid is not None else None),
+            )
+        )
+    return shadow_specs
 
 
 def _register_svg_hover_text(
@@ -4495,12 +4896,42 @@ class _ClusterRenderBox:
     ----------
     bbox : tuple[float, float, float, float]
         Rendered cluster bounds as ``(x_min, y_min, x_max, y_max)``.
-    padding : float
-        Effective cluster padding in render data units.
+    paddings : tuple[float, float, float, float]
+        Effective ``(top, right, bottom, left)`` paddings in render data units.
     """
 
     bbox: Tuple[float, float, float, float]
-    padding: float
+    paddings: Tuple[float, float, float, float]
+
+
+def _cluster_side_paddings(style: ClusterStyle, depth: int) -> Tuple[float, float, float, float]:
+    """Return effective top, right, bottom, and left cluster paddings.
+
+    Parameters
+    ----------
+    style : ClusterStyle
+        Cluster style with a shared padding and optional side overrides.
+    depth : int
+        Cluster nesting depth used for the shared-padding depth adjustment.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Effective ``(top, right, bottom, left)`` paddings. Explicit side values
+        replace the depth-adjusted shared padding on their corresponding side.
+    """
+
+    depth_step = float(getattr(style, "depth_padding_step", -3.0))
+    shared = max(float(style.padding) + int(depth) * depth_step, 0.0)
+    return tuple(
+        shared if value is None else max(float(value), 0.0)
+        for value in (
+            style.padding_top,
+            style.padding_right,
+            style.padding_bottom,
+            style.padding_left,
+        )
+    )
 
 
 def _graphviz_strict_cluster_top_cap(
@@ -4611,12 +5042,12 @@ def _compute_cluster_y_maxes(
 
         style = _cluster_style_for_render(graph, name)
         depth = cluster_depths.get(name, 0)
-        padding = float(style.padding)
+        padding_top, _, padding_bottom, _ = _cluster_side_paddings(style, 0)
         label_text = graph.cluster_labels.get(name, name)
         member_pos = pos[indices]
         member_sizes = sizes[indices]
         raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max())
-        raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()) - padding
+        raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()) - padding_bottom
 
         for child_name, parent_name in cluster_parents.items():
             if parent_name == name and child_name in cluster_y_maxes:
@@ -4647,77 +5078,9 @@ def _compute_cluster_y_maxes(
             if _cluster_label_expands_top(str(style.label_position))
             else 0.0
         )
-        bbox = _cluster_bbox_from_inner_bounds(
-            x_min=float((member_pos[:, 0] - member_sizes[:, 0] / 2).min()),
-            y_min=float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()),
-            x_max=float((member_pos[:, 0] + member_sizes[:, 0] / 2).max()),
-            y_max=raw_y_max,
-            label_width=0.0,
-            label_height=label_height,
-            padding=padding,
-            label_band=label_band,
-        )
-        if _cluster_label_expands_top(str(style.label_position)):
-            cluster_y_maxes[name] = bbox.label_band_y_extent[0]
-        else:
-            cluster_y_maxes[name] = bbox.inner_bbox[3] + padding
+        cluster_y_maxes[name] = raw_y_max + padding_top + label_band
 
     return cluster_y_maxes
-
-
-def _cluster_bbox_from_inner_bounds(
-    x_min: float,
-    y_min: float,
-    x_max: float,
-    y_max: float,
-    label_width: float,
-    label_height: float,
-    padding: float,
-    label_band: float,
-) -> ClusterPlacementBox:
-    """Return shared cluster geometry for precomputed render bounds.
-
-    Parameters
-    ----------
-    x_min : float
-        Inner content left bound.
-    y_min : float
-        Inner content bottom bound.
-    x_max : float
-        Inner content right bound.
-    y_max : float
-        Inner content top bound.
-    label_width : float
-        Measured label width in render data units.
-    label_height : float
-        Measured label height in render data units.
-    padding : float
-        Cluster side padding in render data units.
-    label_band : float
-        Top label band to reserve in render data units.
-
-    Returns
-    -------
-    ClusterPlacementBox
-        Shared bbox helper result for the supplied render bounds.
-    """
-    inner_width = max(float(x_max) - float(x_min), 0.0)
-    inner_height = max(float(y_max) - float(y_min), 0.0)
-    inner_positions = torch.tensor(
-        [[float(x_min) + inner_width / 2.0, float(y_min) + inner_height / 2.0]],
-        dtype=torch.float64,
-    )
-    inner_sizes = torch.tensor([[inner_width, inner_height]], dtype=torch.float64)
-    return compute_cluster_placement_bbox(
-        inner_positions=inner_positions,
-        inner_sizes=inner_sizes,
-        label_metrics=ClusterLabelMetrics(
-            label_width_pt=float(label_width),
-            label_height_pt=float(label_height),
-        ),
-        side_padding_pt=float(padding),
-        label_band_pt=float(label_band),
-    )
 
 
 def _cluster_min_render_height(
@@ -4834,25 +5197,32 @@ def _compute_cluster_render_bboxes(
 
         style = _cluster_style_for_render(graph, name)
         depth = cluster_depths.get(name, 0)
-        depth_padding_step = getattr(style, "depth_padding_step", -3.0)
-        padding = max(float(style.padding) + depth * float(depth_padding_step), 5.0)
+        padding_top, padding_right, padding_bottom, padding_left = _cluster_side_paddings(
+            style, depth
+        )
+        padding_top = max(padding_top, 5.0) if style.padding_top is None else padding_top
+        padding_right = max(padding_right, 5.0) if style.padding_right is None else padding_right
+        padding_bottom = (
+            max(padding_bottom, 5.0) if style.padding_bottom is None else padding_bottom
+        )
+        padding_left = max(padding_left, 5.0) if style.padding_left is None else padding_left
         member_pos = pos[indices]
         member_sizes = sizes[indices]
 
-        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
-        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
+        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding_left)
+        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding_right)
         base_x_min = x_min
         base_x_max = x_max
         y_min = float(
             cluster_y_mins.get(
                 name,
-                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
+                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding_bottom,
             )
         )
         y_max = float(
             cluster_y_maxes.get(
                 name,
-                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
+                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding_top,
             )
         )
 
@@ -4915,7 +5285,7 @@ def _compute_cluster_render_bboxes(
 
         boxes[name] = _ClusterRenderBox(
             bbox=(float(x_min), float(y_min), float(x_max), float(y_max)),
-            padding=float(padding),
+            paddings=(padding_top, padding_right, padding_bottom, padding_left),
         )
 
     for child_name in reversed(ordered_clusters):
@@ -4926,15 +5296,16 @@ def _compute_cluster_render_bboxes(
             continue
         px_min, py_min, px_max, py_max = parent.bbox
         cx_min, cy_min, cx_max, cy_max = child.bbox
-        containment_padding = max(min(parent.padding, child.padding), 1e-6)
+        parent_top, parent_right, parent_bottom, parent_left = parent.paddings
+        child_top, child_right, child_bottom, child_left = child.paddings
         boxes[parent_name] = _ClusterRenderBox(
             bbox=(
-                min(px_min, cx_min - containment_padding),
-                min(py_min, cy_min - containment_padding),
-                max(px_max, cx_max + containment_padding),
-                max(py_max, cy_max + containment_padding),
+                min(px_min, cx_min - max(min(parent_left, child_left), 1e-6)),
+                min(py_min, cy_min - max(min(parent_bottom, child_bottom), 1e-6)),
+                max(px_max, cx_max + max(min(parent_right, child_right), 1e-6)),
+                max(py_max, cy_max + max(min(parent_top, child_top), 1e-6)),
             ),
-            padding=parent.padding,
+            paddings=parent.paddings,
         )
 
     return boxes
@@ -4986,11 +5357,11 @@ def _compute_cluster_y_mins(
 
         style = _cluster_style_for_render(graph, name)
         depth = cluster_depths.get(name, 0)
-        padding = float(style.padding)
+        padding_top, _, padding_bottom, _ = _cluster_side_paddings(style, 0)
         label_text = graph.cluster_labels.get(name, name)
         member_pos = pos[indices]
         member_sizes = sizes[indices]
-        raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()) + padding
+        raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()) + padding_top
         raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min())
 
         for child_name, parent_name in cluster_parents.items():
@@ -5022,20 +5393,7 @@ def _compute_cluster_y_mins(
             if _cluster_label_expands_bottom(str(style.label_position))
             else 0.0
         )
-        bbox = _cluster_bbox_from_inner_bounds(
-            x_min=float((member_pos[:, 0] - member_sizes[:, 0] / 2).min()),
-            y_min=raw_y_min,
-            x_max=float((member_pos[:, 0] + member_sizes[:, 0] / 2).max()),
-            y_max=float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()),
-            label_width=0.0,
-            label_height=label_height,
-            padding=padding,
-            label_band=label_band,
-        )
-        if _cluster_label_expands_bottom(str(style.label_position)):
-            cluster_y_mins[name] = bbox.inner_bbox[1] - padding - label_band
-        else:
-            cluster_y_mins[name] = bbox.inner_bbox[1] - padding
+        cluster_y_mins[name] = raw_y_min - padding_bottom - label_band
 
     return cluster_y_mins
 
@@ -5372,21 +5730,28 @@ def _draw_nodes(
             shape=str(style.shape),
             corner_radius=corner_radius,
             aspect_ratio=style.aspect_ratio,
+            polygon_points=style.polygon_points,
         )
-        if _is_graphviz_strict_render(graph):
-            shape_spec = _graphviz_strict_ellipse_shape_spec(shape_spec, style)
         outer_path = build_shape_path(shape_spec)
         fill_path = _node_fill_path(shape_spec, outer_path, border_width, border_position)
 
         if style.shadow:
             _draw_shadow(ax, x, y, w, h, scaled_style, corner_radius)
 
-        facecolor = to_rgba(style.fill, style.opacity)
+        facecolor = to_rgba(style.fill, _node_fill_alpha(style))
         edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
         # For non-convex shapes (star), clip text to the bounding
         # rectangle instead of the shape path so glyphs aren't cut by
         # interior concavities.
-        _NONCONVEX_SHAPES = {"star"}
+        _NONCONVEX_SHAPES = {
+            "star",
+            "promoter",
+            "terminator",
+            "ribosite",
+            "proteasesite",
+            "assembly",
+            "insulator",
+        }
         if style.shape in _NONCONVEX_SHAPES:
             from matplotlib.path import Path as MplPath
 
@@ -5488,7 +5853,7 @@ def _draw_nodes(
             if style.gradient == "none":
                 fill_paths.append(fill_path)
                 fill_colors.append(facecolor)
-            elif style.opacity > 0.0:
+            elif _node_fill_alpha(style) > 0.0:
                 _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
 
             _draw_image_node(ax, shape_spec, style, image_clip_patch)
@@ -5589,6 +5954,21 @@ def _draw_nodes(
                     border_paths.extend(ribbons)
                     border_colors.extend([edgecolor] * len(ribbons))
 
+        effective_border_width = (
+            max(float(stroke_override), 0.0) * display_scale
+            if stroke_override is not None
+            else border_width
+        )
+        _draw_node_outline(
+            ax,
+            i,
+            shape_spec,
+            style,
+            effective_border_width,
+            border_position,
+            display_scale,
+        )
+
         clip_patches.append(clip_patch)
         _set_svg_hover(clip_patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
         if bool(getattr(style, "bevel", False)) and (
@@ -5651,6 +6031,7 @@ def _draw_shadow(
         shape=str(style.shape),
         corner_radius=corner_radius,
         aspect_ratio=getattr(style, "aspect_ratio", None),
+        polygon_points=getattr(style, "polygon_points", None),
     )
     for idx in range(steps, 0, -1):
         scale = 1.0 + (0.01 * style.shadow_blur * idx)
@@ -5663,6 +6044,7 @@ def _draw_shadow(
             shape=base_shape_spec.shape,
             corner_radius=scale_corner_radius(base_shape_spec.corner_radius, scale),
             aspect_ratio=base_shape_spec.aspect_ratio,
+            polygon_points=base_shape_spec.polygon_points,
         )
         shadow = PathPatch(
             build_shape_path(shadow_spec),
@@ -6027,9 +6409,19 @@ def _edge_width_data_units(ax: Any, width_points: float) -> float:
     -------
     float
         Width in data units.
+
+    Notes
+    -----
+    ``graphviz_strict`` uses the same calibrated point scale as node and
+    cluster borders and intentionally bypasses the general visibility floor.
     """
     if float(width_points) <= 0.0:
         return 0.0
+    if str(getattr(ax, "_dagua_render_theme_name", "")) == "graphviz_strict":
+        # Strict edges and node borders both represent Graphviz penwidth in
+        # points. Use the border calibration here so a 1pt ribbon carries the
+        # same rendered ink weight as a 1pt node outline.
+        return max(float(width_points) * _effective_stroke_scale(ax), 1e-6)
     width_x = _points_to_data_units(ax, width_points, "x")
     width_y = _points_to_data_units(ax, width_points, "y")
     width = min(width_x, width_y)
@@ -6051,8 +6443,11 @@ def _minimum_visible_edge_width_data_units(ax: Any) -> float:
     Returns
     -------
     float
-        Data-coordinate width corresponding to ``_MIN_VISIBLE_STROKE_POINTS``.
+        Data-coordinate width corresponding to ``_MIN_VISIBLE_STROKE_POINTS``,
+        or zero for ``graphviz_strict`` where nominal penwidth is authoritative.
     """
+    if str(getattr(ax, "_dagua_render_theme_name", "")) == "graphviz_strict":
+        return 0.0
     return _compute_display_scale(ax) * _MIN_VISIBLE_STROKE_POINTS
 
 
@@ -8392,6 +8787,7 @@ def _build_custom_edge_collection(
     # single_edge) get the same arrowhead silhouette as panels with long edges
     # (pipeline, colors_showcase).
     disable_curve_length_clamp = _is_graphviz_strict_render(graph)
+    display_scale = _compute_display_scale(ax)
     edges: List[DaguaEdge] = []
     for e_idx, curve in enumerate(curves):
         style = _edge_style_for_render(graph, e_idx)
@@ -8425,6 +8821,17 @@ def _build_custom_edge_collection(
         label = graph.edge_labels[e_idx] if e_idx < len(graph.edge_labels) else None
         arrowhead = str(style.arrow)
         tail_arrow = str(style.tail_arrow)
+        source_arrow = str(getattr(style, "source_arrow", "none"))
+        mid_arrow = str(getattr(style, "mid_arrow", "none"))
+        line_dash_pattern = getattr(style, "line_dash_pattern", None)
+        edge_linestyle = (
+            tuple(float(value) * display_scale for value in line_dash_pattern)
+            if line_dash_pattern is not None
+            else style.style
+        )
+        line_wave = bool(getattr(style, "line_wave", False))
+        line_wave_amplitude = float(getattr(style, "line_wave_amplitude", 4.0)) * display_scale
+        line_wave_wavelength = float(getattr(style, "line_wave_wavelength", 16.0)) * display_scale
         if (
             str(getattr(graph, "direction", "")).upper() == "BT"
             and arrowhead == "none"
@@ -8459,7 +8866,10 @@ def _build_custom_edge_collection(
                         taper_width_end=taper_width_end,
                         color=str(style.color or "#8C8C8C"),
                         alpha=float(style.opacity if style.opacity is not None else 0.7),
-                        linestyle=style.style,
+                        linestyle=edge_linestyle,
+                        line_wave=line_wave,
+                        line_wave_amplitude=line_wave_amplitude,
+                        line_wave_wavelength=line_wave_wavelength,
                         arrowhead="none",
                         tail_arrow="none",
                         stroke_width=body_width,
@@ -8486,9 +8896,11 @@ def _build_custom_edge_collection(
                     width=body_width,
                     color=str(style.color or "#8C8C8C"),
                     alpha=float(style.opacity if style.opacity is not None else 0.7),
-                    linestyle=style.style,
+                    linestyle=edge_linestyle,
                     arrowhead=arrowhead,
                     tail_arrow=tail_arrow,
+                    source_arrow=source_arrow,
+                    mid_arrow=mid_arrow,
                     arrowhead_length=head_length,
                     arrowhead_width=head_width,
                     tail_arrow_length=tail_length,
@@ -8499,13 +8911,18 @@ def _build_custom_edge_collection(
                     label=label,
                     label_position=float(style.label_position),
                     label_offset=float(style.label_offset),
-                    label_rotate=False,
+                    label_rotate=bool(getattr(style, "label_autorotate", False)),
                     label_side=str(style.label_side),
                     label_font_size=float(style.label_font_size),
                     label_font_color=str(style.label_font_color),
                     label_background=str(style.label_background),
                     label_font_family=str(style.label_font_family),
                     label_font_weight=str(style.label_font_weight),
+                    label_outline_color=str(getattr(style, "text_outline_color", "")),
+                    label_outline_width=float(getattr(style, "text_outline_width", 0.0)),
+                    line_wave=line_wave,
+                    line_wave_amplitude=line_wave_amplitude,
+                    line_wave_wavelength=line_wave_wavelength,
                     group_key=(e_idx, -1),
                     source_node=src_idx,
                     target_node=tgt_idx,
@@ -8533,9 +8950,11 @@ def _build_custom_edge_collection(
                 taper_width_end=taper_width_end,
                 color=str(style.color or "#8C8C8C"),
                 alpha=float(style.opacity if style.opacity is not None else 0.7),
-                linestyle=style.style,
+                linestyle=edge_linestyle,
                 arrowhead=arrowhead,
                 tail_arrow=tail_arrow,
+                source_arrow=source_arrow,
+                mid_arrow=mid_arrow,
                 arrowhead_length=head_length,
                 arrowhead_width=head_width,
                 tail_arrow_length=tail_length,
@@ -8546,13 +8965,18 @@ def _build_custom_edge_collection(
                 label=label,
                 label_position=float(style.label_position),
                 label_offset=float(style.label_offset),
-                label_rotate=False,
+                label_rotate=bool(getattr(style, "label_autorotate", False)),
                 label_side=str(style.label_side),
                 label_font_size=float(style.label_font_size),
                 label_font_color=str(style.label_font_color),
                 label_background=str(style.label_background),
                 label_font_family=str(style.label_font_family),
                 label_font_weight=str(style.label_font_weight),
+                label_outline_color=str(getattr(style, "text_outline_color", "")),
+                label_outline_width=float(getattr(style, "text_outline_width", 0.0)),
+                line_wave=line_wave,
+                line_wave_amplitude=line_wave_amplitude,
+                line_wave_wavelength=line_wave_wavelength,
                 group_key=(src_idx, tgt_idx),
                 source_node=src_idx,
                 target_node=tgt_idx,
@@ -8654,6 +9078,7 @@ def _draw_node_labels(
     display_scale = _compute_display_scale(ax)
     density_font_factor = max(float(density_size_factor), _DENSITY_LABEL_FONT_FLOOR)
     clip_patch_seq: Sequence[Any] = clip_patches or []
+    shadow_specs: List[DaguaText] = []
     specs: List[DaguaText] = []
 
     for i in range(graph.num_nodes):
@@ -8732,64 +9157,19 @@ def _draw_node_labels(
         text_bg_corner_radius = style.text_background_corner_radius
 
         if font_size_override is not None:
-            _draw_display_point_text(
-                ax,
-                DaguaText(
-                    x=text_x,
-                    y=text_y,
-                    text=label,
-                    font_size=font_size_points,
-                    font_family=_text_font_family(style),
-                    font_weight=font_weight,
-                    font_style=style.font_style,
-                    font_color=style.font_color,
-                    alpha=1.0,
-                    ha=style.text_align,
-                    va=style.text_valign,
-                    rotation=float(style.text_rotation),
-                    background=text_bg,
-                    background_alpha=text_bg_alpha,
-                    background_padding=style.text_background_padding,
-                    background_corner_radius=text_bg_corner_radius,
-                    clip_patch=clip_patch if style.overflow_policy != "overflow" else None,
-                    clip_on=style.overflow_policy != "overflow",
-                    zorder=3.0,
-                    gid=f"dagua-node-label-{i}",
-                ),
-                svg_hover_map,
-            )
-            continue
-
-        specs.append(
-            DaguaText(
+            label_spec = DaguaText(
                 x=text_x,
                 y=text_y,
                 text=label,
-                # ``render_text`` multiplies by display_scale to recover data units.
-                font_size=(
-                    font_size_points
-                    if font_size_override is not None
-                    else _effective_font_size_points(font_size_data, display_scale)
-                ),
+                font_size=font_size_points,
                 font_family=_text_font_family(style),
                 font_weight=font_weight,
                 font_style=style.font_style,
                 font_color=style.font_color,
-                alpha=1.0,
+                alpha=min(max(float(style.text_opacity), 0.0), 1.0),
                 ha=style.text_align,
                 va=style.text_valign,
                 rotation=float(style.text_rotation),
-                rich=is_rich,
-                line_spacing=1.2,
-                secondary_scale=secondary,
-                max_width=max_width,
-                min_font_size=style.min_font_size,
-                text_wrap=style.text_wrap,
-                text_max_width=text_max_width,
-                text_transform=style.text_transform,
-                outline=style.text_outline,
-                outline_color=style.text_outline_color,
-                outline_width=style.text_outline_width,
                 background=text_bg,
                 background_alpha=text_bg_alpha,
                 background_padding=style.text_background_padding,
@@ -8799,9 +9179,53 @@ def _draw_node_labels(
                 zorder=3.0,
                 gid=f"dagua-node-label-{i}",
             )
-        )
+            for shadow_spec in _text_shadow_specs(label_spec, style, display_scale):
+                _draw_display_point_text(ax, shadow_spec, svg_hover_map)
+            _draw_display_point_text(ax, label_spec, svg_hover_map)
+            continue
 
-    render_text(ax, specs, display_scale, svg_hover_map)
+        label_spec = DaguaText(
+            x=text_x,
+            y=text_y,
+            text=label,
+            # ``render_text`` multiplies by display_scale to recover data units.
+            font_size=(
+                font_size_points
+                if font_size_override is not None
+                else _effective_font_size_points(font_size_data, display_scale)
+            ),
+            font_family=_text_font_family(style),
+            font_weight=font_weight,
+            font_style=style.font_style,
+            font_color=style.font_color,
+            alpha=min(max(float(style.text_opacity), 0.0), 1.0),
+            ha=style.text_align,
+            va=style.text_valign,
+            rotation=float(style.text_rotation),
+            rich=is_rich,
+            line_spacing=1.2,
+            secondary_scale=secondary,
+            max_width=max_width,
+            min_font_size=style.min_font_size,
+            text_wrap=style.text_wrap,
+            text_max_width=text_max_width,
+            text_transform=style.text_transform,
+            outline=style.text_outline,
+            outline_color=style.text_outline_color,
+            outline_width=style.text_outline_width,
+            background=text_bg,
+            background_alpha=text_bg_alpha,
+            background_padding=style.text_background_padding,
+            background_corner_radius=text_bg_corner_radius,
+            clip_patch=clip_patch if style.overflow_policy != "overflow" else None,
+            clip_on=style.overflow_policy != "overflow",
+            zorder=3.0,
+            gid=f"dagua-node-label-{i}",
+        )
+        shadow_specs.extend(_text_shadow_specs(label_spec, style, display_scale))
+        specs.append(label_spec)
+
+    render_text(ax, [*shadow_specs, *specs], display_scale, svg_hover_map)
 
 
 def _draw_external_labels(
@@ -8825,6 +9249,11 @@ def _draw_external_labels(
         Node sizes with shape ``[N, 2]``.
     svg_hover_map : dict[str, str], optional
         SVG hover text accumulator.
+
+    Returns
+    -------
+    None
+        Adds external-label artists to ``ax``.
     """
     display_scale = _compute_display_scale(ax)
     specs: List[DaguaText] = []
@@ -8850,26 +9279,9 @@ def _draw_external_labels(
             font_weight=font_weight,
         )
 
-        if position == "top":
-            text_x = cx
-            text_y = cy + half_height + offset
-            ha = "center"
-            va = "bottom"
-        elif position == "left":
-            text_x = cx - half_width - offset
-            text_y = cy
-            ha = "right"
-            va = "center"
-        elif position == "right":
-            text_x = cx + half_width + offset
-            text_y = cy
-            ha = "left"
-            va = "center"
-        else:
-            text_x = cx
-            text_y = cy - half_height - offset
-            ha = "center"
-            va = "top"
+        text_x, text_y, ha, va = _external_label_anchor(
+            cx, cy, half_width, half_height, offset, position
+        )
 
         specs.append(
             DaguaText(
@@ -9501,6 +9913,9 @@ def _append_endpoint_edge_label_specs(
                 font_family=str(style.label_font_family or RESOLVED_FONT),
                 font_weight=str(style.label_font_weight),
                 font_color=str(style.label_font_color),
+                outline=bool(style.text_outline_color and style.text_outline_width > 0.0),
+                outline_color=str(style.text_outline_color or "#FFFFFF"),
+                outline_width=float(style.text_outline_width),
                 ha="center",
                 va="center",
                 background=style.label_background if style.label_background else None,
@@ -9701,6 +10116,9 @@ def _draw_edge_labels(
                 font_family=str(style.label_font_family or RESOLVED_FONT),
                 font_weight=str(style.label_font_weight),
                 font_color=str(style.label_font_color),
+                outline=bool(style.text_outline_color and style.text_outline_width > 0.0),
+                outline_color=str(style.text_outline_color or "#FFFFFF"),
+                outline_width=float(style.text_outline_width),
                 ha="center",
                 va="center",
                 rotation=placement.angle_degrees if prepared.edge.label_rotate else 0.0,
@@ -9782,6 +10200,19 @@ def _draw_edge_labels(
                 font_family=str(style.label_font_family or RESOLVED_FONT),
                 font_weight=str(style.label_font_weight),
                 font_color=str(style.label_font_color),
+                rotation=(
+                    place_edge_label(
+                        _curve_to_render_bezier(curve),
+                        label_position=float(style.label_position),
+                        label_offset=0.0,
+                        label_rotate=True,
+                    ).angle_degrees
+                    if bool(getattr(style, "label_autorotate", False))
+                    else 0.0
+                ),
+                outline=bool(style.text_outline_color and style.text_outline_width > 0.0),
+                outline_color=str(style.text_outline_color or "#FFFFFF"),
+                outline_width=float(style.text_outline_width),
                 ha="center",
                 va="center",
                 background=style.label_background if style.label_background else None,

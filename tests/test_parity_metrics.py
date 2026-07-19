@@ -10,8 +10,12 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import pytest
+import torch
 
-from dagua.render.mpl import density_aware_size_factor
+from dagua.render.mpl import _density_scaled_node_sizes, density_aware_size_factor
+from dagua.styles import GRAPHVIZ_STRICT_THEME
+from scripts import graphviz_theme_comparison as gthc
+from scripts import parity_metrics as pmetrics
 from scripts.visual_parity.io import read_ledger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +112,177 @@ def test_density_aware_size_factor_matches_graphviz_fixture_density() -> None:
     assert density_aware_size_factor(2, 400.0) == pytest.approx(1.0)
     assert density_aware_size_factor(5, 400.0) < 1.0
     assert density_aware_size_factor(20, 400.0) == pytest.approx(0.25)
+
+
+def test_graphviz_strict_render_preserves_computed_node_floor() -> None:
+    """Graphviz-strict rendering should not shrink computed node dimensions."""
+
+    computed_sizes = torch.tensor([[54.0, 36.0]] * 3, dtype=torch.float32)
+
+    rendered_sizes, factor = _density_scaled_node_sizes(
+        computed_sizes,
+        node_count=3,
+        layout_extent_pt=144.0,
+        enabled=GRAPHVIZ_STRICT_THEME.graph_style.density_aware_node_shrink,
+    )
+
+    assert factor == pytest.approx(1.0)
+    assert torch.equal(rendered_sizes, computed_sizes)
+
+
+def test_empty_label_node_skips_font_metric_features() -> None:
+    """Empty-label nodes should not contribute text-only parity features."""
+
+    ref = pmetrics.ReferenceNode(
+        node_id="n0",
+        label="",
+        ellipse_rx=27.0,
+        ellipse_ry=18.0,
+        font_size_pt=0.0,
+        font_family="",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+    cand = pmetrics.CandidateNode(
+        node_id="n0",
+        label="",
+        ellipse_rx=27.0,
+        ellipse_ry=18.0,
+        font_size_pt=14.0,
+        font_family="Times,serif",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+
+    deltas = pmetrics._flatten_node_deltas("n0", ref, cand, pmetrics.V2_TOLERANCE)
+    panel = pmetrics.PanelReport(slug="empty", in_tolerance=True)
+    panel.nodes.append(deltas)
+    pmetrics.augment_panel_v2(
+        panel,
+        pmetrics.ReferenceGraph(bg_color="white", margin=0.0, nodes=[ref]),
+        pmetrics.CandidateGraph(bg_color="white", margin=0.0, nodes=[cand]),
+        svg_text="<svg></svg>",
+        tolerance=pmetrics.V2_TOLERANCE,
+        dot_text="",
+        case_id="empty",
+        source_hash="",
+    )
+
+    assert "font_size_pt" not in panel.nodes[0]
+    assert "font_family" not in panel.nodes[0]
+    assert "label_glyph_extent_pt" not in panel.nodes[0]
+
+
+def test_labeled_node_keeps_font_metric_features() -> None:
+    """Labeled nodes should continue to compare font and glyph metrics."""
+
+    ref = pmetrics.ReferenceNode(
+        node_id="n0",
+        label="A",
+        ellipse_rx=27.0,
+        ellipse_ry=18.0,
+        font_size_pt=14.0,
+        font_family="Times,serif",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+    cand = pmetrics.CandidateNode(
+        node_id="n0",
+        label="A",
+        ellipse_rx=27.0,
+        ellipse_ry=18.0,
+        font_size_pt=14.0,
+        font_family="Times,serif",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+
+    deltas = pmetrics._flatten_node_deltas("n0", ref, cand, pmetrics.V2_TOLERANCE)
+    panel = pmetrics.PanelReport(slug="labeled", in_tolerance=True)
+    panel.nodes.append(deltas)
+    pmetrics.augment_panel_v2(
+        panel,
+        pmetrics.ReferenceGraph(bg_color="white", margin=0.0, nodes=[ref]),
+        pmetrics.CandidateGraph(bg_color="white", margin=0.0, nodes=[cand]),
+        svg_text="<svg></svg>",
+        tolerance=pmetrics.V2_TOLERANCE,
+        dot_text="",
+        case_id="labeled",
+        source_hash="",
+    )
+
+    assert panel.nodes[0]["font_size_pt"]["in_tolerance"] is True
+    assert panel.nodes[0]["font_family"]["in_tolerance"] is True
+    assert panel.nodes[0]["label_glyph_extent_pt"]["in_tolerance"] is True
+
+
+def test_known_graphviz_font_stack_residual_has_per_node_waiver() -> None:
+    """The 10pt Fallback width residual should carry its narrow waiver."""
+    ref = pmetrics.ReferenceNode(
+        node_id="n3",
+        label="Fallback",
+        ellipse_rx=30.72,
+        ellipse_ry=18.0,
+        font_size_pt=10.0,
+        font_family="Times,serif",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+    cand = pmetrics.CandidateNode(
+        node_id="n3",
+        label="Fallback",
+        ellipse_rx=29.68885,
+        ellipse_ry=18.0,
+        font_size_pt=10.0,
+        font_family="Times,serif",
+        node_fill="none",
+        node_stroke="black",
+        node_stroke_width_pt=1.0,
+    )
+    panel = pmetrics.PanelReport(slug="mixed_styles", in_tolerance=True)
+    panel.nodes.append(pmetrics._flatten_node_deltas("n3", ref, cand, pmetrics.V2_TOLERANCE))
+
+    pmetrics.augment_panel_v2(
+        panel,
+        pmetrics.ReferenceGraph(bg_color="white", margin=0.0, nodes=[ref]),
+        pmetrics.CandidateGraph(bg_color="white", margin=0.0, nodes=[cand]),
+        svg_text="<svg></svg>",
+        tolerance=pmetrics.V2_TOLERANCE,
+        dot_text="",
+        case_id="mixed_styles",
+        source_hash="",
+    )
+
+    width_delta = panel.nodes[0]["node_autosize_w_pt"]
+    assert width_delta["in_tolerance"] is False
+    assert width_delta["waiver"]["scope"] == "mixed_styles.n3.node_autosize_w_pt"
+    assert "Pango/CoreText" in width_delta["waiver"]["reason"]
+
+
+@pytest.mark.skipif(shutil.which("dot") is None, reason="Graphviz dot is required")
+def test_fill_atlas_declarations_match_graphviz_svg() -> None:
+    """Every fill-atlas node should match its SVG-declared mechanism."""
+
+    graph, _ = gthc._make_fill_atlas()
+    reference = pmetrics.extract_reference_fill_declarations(pmetrics.render_reference_svg(graph))
+    candidate = pmetrics.extract_candidate_features(graph).fill_declarations
+
+    assert len(reference) == graph.num_nodes
+    assert {declaration.pattern for declaration in reference.values()} == {
+        "solid",
+        "linear",
+        "radial",
+        "striped",
+        "wedged",
+    }
+    for node_id, target in reference.items():
+        deltas = pmetrics._fill_declaration_deltas(target, candidate[node_id])
+        assert not pmetrics._flag_out_of_tolerance(deltas), node_id
 
 
 def test_ledger_locked_feature_missing_is_failure(tmp_path: Path) -> None:

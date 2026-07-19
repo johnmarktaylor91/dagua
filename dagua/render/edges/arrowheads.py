@@ -46,6 +46,16 @@ CROWS_FOOT_MANY_OPTIONAL_TRIM_RATIO = 0.75
 TRIANGLE_TEE_TRIANGLE_LENGTH_RATIO = 0.6
 TRIANGLE_TEE_BAR_HALF_WIDTH_RATIO = 1.1
 TRIANGLE_TEE_TRIM_PADDING_RATIO = 0.05
+GRAPHVIZ_OPEN_FILL_MODIFIERS = {"e", "o"}
+GRAPHVIZ_POLYGON_PRIMITIVES = {
+    "box",
+    "crow",
+    "diamond",
+    "inv",
+    "normal",
+    "tee",
+    "vee",
+}
 
 
 @dataclass(frozen=True)
@@ -539,9 +549,8 @@ def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
 
     Notes
     -----
-    This remains registered for compound compatibility, but Graphviz 8's
-    named ``open`` arrow is resolved as a filled polygon by
-    :func:`parse_arrowhead_spec`.
+    This remains registered for compound compatibility. The named ``open``
+    arrow resolves to the same clean stroked vee geometry.
     """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
@@ -634,7 +643,11 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
     code but ``_resolve_fill`` then re-routed it to the stroked pass,
     producing a hollow chevron that mismatched dot's filled silhouette
     (audit P6). Round 17 removes the ``stroke_only`` flag so the filled
-    notched triangle renders as authored.
+    notched triangle renders as authored. (Re-affirmed 2026-07-16: a
+    later showcase pass reverted this to open on a VLM over-read; the
+    graphviz-correct silhouette is FILLED per the cited dot SVG, so the
+    filled form is restored. Genuinely-open arrows use the ``open``
+    marker, which is separately registered stroke_only.)
     """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
@@ -1055,6 +1068,45 @@ def _none(length: float, width: float, body_width: float) -> ArrowheadResult:
     )
 
 
+def _cross(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a compact Mermaid-style X marker at the endpoint.
+
+    Parameters
+    ----------
+    length : float
+        Marker extent along the edge direction.
+    width : float
+        Marker extent perpendicular to the edge direction.
+    body_width : float
+        Ribbon body width at the marker.
+
+    Returns
+    -------
+    ArrowheadResult
+        Two stroked diagonal paths forming an X on the body side of the tip.
+    """
+    marker_length = max(
+        length * 0.42,
+        min(body_width * 2.0, length * 0.5),
+        FLOAT_EPSILON,
+    )
+    half_width = max(
+        width * 0.21,
+        min(body_width, width * 0.25),
+        FLOAT_EPSILON,
+    )
+    # Local +x points back into the edge body. Keeping the full marker in
+    # x >= 0 anchors it at the terminal without painting across the node fill.
+    ascending = _local_path([(0.0, -half_width), (marker_length, half_width)], closed=False)
+    descending = _local_path([(0.0, half_width), (marker_length, -half_width)], closed=False)
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[ascending, descending],
+        trim_contour=_local_trim_contour(marker_length, max(body_width, FLOAT_EPSILON)),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
 ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "normal": PrimitiveSpec("normal", _triangle),
     "inv": PrimitiveSpec("inv", _inverted_triangle),
@@ -1062,12 +1114,6 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "dot": PrimitiveSpec("dot", _dot),
     "diamond": PrimitiveSpec("diamond", _diamond),
     "box": PrimitiveSpec("box", _box),
-    # Round 17 F4: tee, bar, and vee match native Graphviz semantics --
-    # all three emit FILLED polygons in dot's reference SVG output.
-    # Removing stroke_only routes their authored filled geometry through
-    # the fill pass instead of being re-routed as outlines by
-    # _resolve_fill, which had the prior renderer drawing hollow
-    # chevrons (vee) and stroked lines (tee).
     "tee": PrimitiveSpec("tee", _tee),
     "bar": PrimitiveSpec("bar", _tee),
     "vee": PrimitiveSpec("vee", _vee),
@@ -1104,6 +1150,7 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "fancy": PrimitiveSpec("fancy", _fancy),
     "wedge": PrimitiveSpec("wedge", _wedge),
     "bracket": PrimitiveSpec("bracket", _bracket, stroke_only=True),
+    "cross": PrimitiveSpec("cross", _cross, stroke_only=True),
     "none": PrimitiveSpec("none", _none),
 }
 
@@ -1146,7 +1193,7 @@ def _parse_one(spec: str, start: int) -> Tuple[ParsedPrimitive, int]:
     open_fill = False
     side = "both"
     index = start
-    if index < len(spec) and spec[index] == "o":
+    if index < len(spec) and spec[index] in GRAPHVIZ_OPEN_FILL_MODIFIERS:
         open_fill = True
         index += 1
     if index < len(spec) and spec[index] in {"l", "r"}:
@@ -1173,7 +1220,7 @@ def parse_arrowhead_spec(spec: str) -> List[ParsedPrimitive]:
     """
     normalized = ARROWHEAD_ALIASES.get(spec, spec)
     if normalized == "open":
-        return [ParsedPrimitive(shape="open", open_fill=False, side="both")]
+        return [ParsedPrimitive(shape="vee", open_fill=False, side="both")]
     if normalized in {"odot", "obox", "odiamond"}:
         return [ParsedPrimitive(shape=normalized[1:], open_fill=True, side="both")]
     if normalized == "none":
@@ -1187,6 +1234,34 @@ def parse_arrowhead_spec(spec: str) -> List[ParsedPrimitive]:
     if index != len(normalized):
         raise ValueError(f"Could not fully parse arrowhead spec {spec!r}.")
     return primitives
+
+
+def graphviz_arrow_fill_mode(spec: str) -> str:
+    """Return Graphviz's polygon fill mode for an arrowhead specification.
+
+    Parameters
+    ----------
+    spec : str
+        Graphviz-style arrowhead string.
+
+    Returns
+    -------
+    str
+        ``"filled"`` or ``"hollow"`` for the first polygon-emitting
+        primitive in the specification.
+
+    Notes
+    -----
+    Graphviz's ``o`` and ``e`` modifiers hollow only the primitive they
+    prefix. The parity extractor records fill from the first SVG polygon, so
+    non-polygon primitives such as ``dot`` and ``curve`` are skipped here; for
+    example, ``odotinv`` is classified from ``inv`` and remains filled.
+    """
+    for primitive in parse_arrowhead_spec(spec):
+        if primitive.shape not in GRAPHVIZ_POLYGON_PRIMITIVES:
+            continue
+        return "hollow" if primitive.open_fill else "filled"
+    return "filled"
 
 
 def _translated_path(path: Path, dx: float) -> Path:
@@ -1278,8 +1353,8 @@ def build_arrowhead(
     body_width : float | None, default=None
         Ribbon body width at the arrowhead junction in data units.
     fill_mode : str, default="filled"
-        Either ``"filled"`` or ``"hollow"``. The named Graphviz 8 ``open``
-        arrow ignores this and remains filled.
+        Either ``"filled"`` or ``"hollow"``. Stroke-only markers such as
+        ``vee`` and the named ``open`` alias remain open.
 
     Returns
     -------

@@ -1,0 +1,23 @@
+{
+  "run": "visual_parity_v2",
+  "probed_at": "2026-07-16",
+  "primary": "gpt-5.6-sol",
+  "secondary": "claude-opus-4-8",
+  "ceiling_arbiter": "claude-fable-5",
+  "convergence_auditors": ["gpt-5.6-sol", "claude-opus-4-8"],
+  "termination_policy": "Per cosmetic element, DONE requires BOTH: (1) numeric parity threshold met (ratcheted %), AND (2) Fable 5 confirms visually matched -- identical or no further improvement. Fable invoked only at element ceiling to conserve its scarce budget.",
+  "calibration_probe": {
+    "probe_dir": "eval_output/visual_parity_v2/model_probe",
+    "defect_count": 6,
+    "control_count": 2,
+    "results": {
+      "gpt-5.6-sol": {"score": "8/8", "defects_caught": 6, "controls_passed": 2, "notes": "perfect; accurate diagnosis including cluster-border-missing"},
+      "claude-opus-4-8": {"score": "7/8", "defects_caught": 6, "controls_passed": 1, "notes": "caught all defects incl. both mandatory (invisible_edge_stem, truncated_label); false-positived antialiased_residual control at LOW/0.6 (over-reads subtle edge/AA residuals); attributed cluster_border defect to edge routing"}
+    }
+  },
+  "invocation": {
+    "gpt-5.6-sol": "codex exec --model gpt-5.6-sol --skip-git-repo-check --sandbox read-only -i <imgs...> < prompt.md",
+    "claude-opus-4-8": "Agent subagent model=opus; Reads image files directly",
+    "claude-fable-5": "Agent subagent model=fable; ceiling gate only"
+  }
+}

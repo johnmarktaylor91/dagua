@@ -1,0 +1,1099 @@
+{
+ "verdict": "FAIL",
+ "findings": [
+  {
+   "id": "f1",
+   "pair": "tiny_graph",
+   "category": "typography",
+   "element": "node text",
+   "description": "Dagua node labels are substantially smaller than Graphviz despite matching text content.",
+   "measurement": "glyph height ~10-12 px versus ~21-23 px, approximately 48% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py font-size mapping and dagua/utils.py text metrics"
+  },
+  {
+   "id": "f2",
+   "pair": "tiny_graph",
+   "category": "node geometry",
+   "element": "three ellipse nodes",
+   "description": "Dagua ellipses are much smaller and vertically flatter than the Graphviz nodes.",
+   "measurement": "typical ellipse ~40x23 px versus ~90x58 px; width ~56% smaller and height ~60% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py node dimensions and text-driven sizing"
+  },
+  {
+   "id": "f3",
+   "pair": "tiny_graph",
+   "category": "arrowheads",
+   "element": "two normal arrowheads",
+   "description": "Dagua arrowheads are shorter and narrower than the Graphviz triangles.",
+   "measurement": "approximately 9x14 px versus 13x18 px, ~25-30% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.94,
+   "likely_code_area": "dagua/render/svg.py marker geometry"
+  },
+  {
+   "id": "f4",
+   "pair": "tiny_graph",
+   "category": "canvas",
+   "element": "overall graph footprint",
+   "description": "Dagua uses far less of its half-canvas, especially horizontally.",
+   "measurement": "content width ~41 px versus ~91 px and total height ~256 px versus ~300 px",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "layout-to-render coordinate scaling and SVG viewport normalization"
+  },
+  {
+   "id": "f5",
+   "pair": "shape_atlas",
+   "category": "typography",
+   "element": "shape labels",
+   "description": "Dagua labels are reduced to near-microtext relative to the Graphviz labels.",
+   "measurement": "typical glyph height approximately 45-60% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.96,
+   "likely_code_area": "dagua/render/svg.py font-size mapping"
+  },
+  {
+   "id": "f6",
+   "pair": "shape_atlas",
+   "category": "node geometry",
+   "element": "shape primitive atlas",
+   "description": "Dagua compresses the shape envelopes so strongly that several distinct primitives become tiny icon-like silhouettes rather than Graphviz-sized nodes.",
+   "measurement": "common shape widths ~50-70% smaller; several narrow primitives are only ~4-8 px wide",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.97,
+   "likely_code_area": "dagua/render/svg.py shape sizing and per-shape geometry"
+  },
+  {
+   "id": "f7",
+   "pair": "shape_atlas",
+   "category": "canvas",
+   "element": "atlas groups",
+   "description": "Dagua leaves substantially more unused vertical and horizontal space inside the atlas group boxes because rendered shapes are underscaled.",
+   "measurement": "occupied shape height typically ~35-55% of the corresponding Graphviz group height",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "MED",
+   "confidence": 0.93,
+   "likely_code_area": "atlas layout normalization and SVG coordinate scaling"
+  },
+  {
+   "id": "f8",
+   "pair": "arrowhead_atlas",
+   "category": "typography",
+   "element": "arrowhead sample labels",
+   "description": "Dagua sample labels are materially smaller and less legible than the Graphviz labels.",
+   "measurement": "glyph height approximately 50-65% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.96,
+   "likely_code_area": "dagua/render/svg.py font-size mapping"
+  },
+  {
+   "id": "f9",
+   "pair": "arrowhead_atlas",
+   "category": "node geometry",
+   "element": "source and target sample nodes",
+   "description": "Dagua shrinks the endpoint nodes from visible ellipses into very small marks.",
+   "measurement": "endpoint height ~3-6 px versus ~11-15 px, approximately 55-75% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.97,
+   "likely_code_area": "dagua/render/svg.py node sizing"
+  },
+  {
+   "id": "f10",
+   "pair": "arrowhead_atlas",
+   "category": "arrowheads",
+   "element": "primitive and compound arrowheads",
+   "description": "Dagua arrowheads are too small for open, filled, and compound variants to retain Graphviz's visible primitive distinctions.",
+   "measurement": "most primitives occupy ~1-4 px versus ~3-8 px; roughly 40-65% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.95,
+   "likely_code_area": "dagua/render/svg.py arrow marker scale, fill mode, and compound spacing"
+  },
+  {
+   "id": "f11",
+   "pair": "arrowhead_atlas",
+   "category": "canvas",
+   "element": "atlas samples",
+   "description": "The Dagua samples occupy a much smaller fraction of each boxed atlas row than the Graphviz samples.",
+   "measurement": "occupied vertical extent approximately 35-50% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "MED",
+   "confidence": 0.92,
+   "likely_code_area": "layout-to-render scale normalization"
+  },
+  {
+   "id": "f12",
+   "pair": "edge_styles_showcase",
+   "category": "typography",
+   "element": "node labels",
+   "description": "Dagua node text is about half the Graphviz size.",
+   "measurement": "glyph height ~10-12 px versus ~21-23 px, approximately 48% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py node font mapping"
+  },
+  {
+   "id": "f13",
+   "pair": "edge_styles_showcase",
+   "category": "node geometry",
+   "element": "all ellipse nodes",
+   "description": "Dagua ellipses are dramatically smaller and flatter than Graphviz's nodes.",
+   "measurement": "typical width ~45-65 px versus ~115-135 px and height ~16-20 px versus ~55-62 px",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py text padding and node dimensions"
+  },
+  {
+   "id": "f14",
+   "pair": "edge_styles_showcase",
+   "category": "typography",
+   "element": "edge-label font family",
+   "description": "Dagua edge labels use a sans-serif face while the Graphviz reference uses a Times-like serif face.",
+   "measurement": "categorical family mismatch visible on all four edge labels",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/styles.py font inheritance and dagua/render/svg.py edge-label CSS"
+  },
+  {
+   "id": "f15",
+   "pair": "edge_styles_showcase",
+   "category": "strokes/borders",
+   "element": "nominal edge widths",
+   "description": "Dagua's ordinary and thin stems are too heavy in absolute pixels.",
+   "measurement": "nominal stems ~3 px versus ~1.5 px; approximately 1.8-2.0x too thick",
+   "direction": "dagua_too_large",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.97,
+   "likely_code_area": "dagua/render/svg.py stroke-width conversion"
+  },
+  {
+   "id": "f16",
+   "pair": "edge_styles_showcase",
+   "category": "strokes/borders",
+   "element": "dotted edges",
+   "description": "Dagua's dot spacing is much more open than Graphviz's dotted pattern.",
+   "measurement": "center-to-center pitch ~10-12 px versus ~4-6 px, approximately 2x larger",
+   "direction": "dagua_too_large",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.96,
+   "likely_code_area": "dagua/edges/dashes.py or SVG stroke-dasharray conversion"
+  },
+  {
+   "id": "f17",
+   "pair": "edge_styles_showcase",
+   "category": "labels",
+   "element": "edge labels",
+   "description": "Dagua edge labels dominate the underscaled graph and are displaced from the corresponding stem midpoints.",
+   "measurement": "label-to-stem offsets differ by roughly 20-55 px; labels are near reference size while nodes are ~50-65% smaller",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "MED",
+   "confidence": 0.94,
+   "likely_code_area": "dagua/edges.py edge-label placement"
+  },
+  {
+   "id": "f18",
+   "pair": "edge_styles_showcase",
+   "category": "canvas",
+   "element": "overall graph footprint",
+   "description": "Dagua compresses the graph into a much narrower footprint while retaining nearly the full vertical run.",
+   "measurement": "occupied width ~620 px versus ~710 px after half-panel normalization, with individual nodes ~50-65% narrower",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "MED",
+   "confidence": 0.91,
+   "likely_code_area": "layout coordinate normalization"
+  },
+  {
+   "id": "f19",
+   "pair": "colors_showcase",
+   "category": "typography",
+   "element": "six node labels",
+   "description": "Dagua text is substantially smaller than the Graphviz labels.",
+   "measurement": "glyph height ~13-15 px versus ~21-23 px, approximately 35-40% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py font-size mapping"
+  },
+  {
+   "id": "f20",
+   "pair": "colors_showcase",
+   "category": "node geometry",
+   "element": "colored ellipse nodes",
+   "description": "Dagua nodes are far smaller and much flatter while preserving roughly the same center positions.",
+   "measurement": "typical node ~44-56x15-18 px versus ~90-120x58-61 px; height ~70% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py node sizing and padding"
+  },
+  {
+   "id": "f21",
+   "pair": "colors_showcase",
+   "category": "strokes/borders",
+   "element": "vertical edge stems",
+   "description": "Dagua stems are heavier than Graphviz's lines.",
+   "measurement": "approximately 3 px versus 1.5-2 px, ~50-90% thicker",
+   "direction": "dagua_too_large",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.96,
+   "likely_code_area": "dagua/render/svg.py stroke-width conversion"
+  },
+  {
+   "id": "f22",
+   "pair": "colors_showcase",
+   "category": "arrowheads",
+   "element": "five normal arrowheads",
+   "description": "Dagua arrowheads are modestly smaller than Graphviz's triangles.",
+   "measurement": "roughly 15-25% shorter and narrower",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "LOW",
+   "confidence": 0.9,
+   "likely_code_area": "dagua/render/svg.py marker geometry"
+  },
+  {
+   "id": "f23",
+   "pair": "colors_showcase",
+   "category": "canvas",
+   "element": "overall graph footprint",
+   "description": "Dagua's colored chain occupies less than half the reference width.",
+   "measurement": "node footprint ~44-56 px wide versus ~90-120 px, approximately 50-55% narrower",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "layout-to-render scaling"
+  },
+  {
+   "id": "f24",
+   "pair": "cluster_showcase",
+   "category": "typography",
+   "element": "node labels",
+   "description": "Dagua cluster-member labels are much smaller than Graphviz's node labels.",
+   "measurement": "glyph height ~8-11 px versus ~20-23 px, approximately 50-60% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py node fonts"
+  },
+  {
+   "id": "f25",
+   "pair": "cluster_showcase",
+   "category": "typography",
+   "element": "cluster titles",
+   "description": "Dagua cluster titles use a sans-serif face rather than Graphviz's serif face.",
+   "measurement": "categorical family mismatch across Tiny, Medium, Large, Outer, and Nested titles",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/styles.py cluster font inheritance and dagua/render/svg.py"
+  },
+  {
+   "id": "f26",
+   "pair": "cluster_showcase",
+   "category": "node geometry",
+   "element": "cluster-member nodes",
+   "description": "Dagua member ellipses are reduced to thin capsules instead of Graphviz-sized ellipses.",
+   "measurement": "typical height ~15-20 px versus ~54-62 px, approximately 65-72% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py node sizing"
+  },
+  {
+   "id": "f27",
+   "pair": "cluster_showcase",
+   "category": "clusters",
+   "element": "Tiny, Medium, and Large cluster boxes",
+   "description": "Dagua cluster widths do not track Graphviz's content-driven widths and are disproportionately narrow.",
+   "measurement": "Tiny width ~60 px versus ~151 px; Medium ~70 px versus ~184 px; Large ~168 px versus ~335 px",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "cluster bounds calculation and layout cluster constraints"
+  },
+  {
+   "id": "f28",
+   "pair": "cluster_showcase",
+   "category": "strokes/borders",
+   "element": "inter-cluster edges",
+   "description": "Dagua's long edges are about twice as heavy as the reference edges.",
+   "measurement": "approximately 3 px versus 1.5 px",
+   "direction": "dagua_too_large",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.97,
+   "likely_code_area": "dagua/render/svg.py stroke-width conversion"
+  },
+  {
+   "id": "f29",
+   "pair": "cluster_showcase",
+   "category": "edges",
+   "element": "cross-cluster routing",
+   "description": "Dagua replaces multiple curved or carefully offset Graphviz routes with long straight diagonals that cross cluster borders and title regions.",
+   "measurement": "route displacement commonly ~80-250 px; at least three long edges cross different regions than the reference",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/routing.py and cluster-aware edge routing"
+  },
+  {
+   "id": "f30",
+   "pair": "cluster_showcase",
+   "category": "labels",
+   "element": "Large Cluster title region",
+   "description": "A long Dagua cross-cluster edge passes through the large-cluster title area, reducing label clearance absent in Graphviz.",
+   "measurement": "stem intersects the title band over roughly 80-120 px",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.98,
+   "likely_code_area": "cluster title padding and obstacle-aware routing"
+  },
+  {
+   "id": "f31",
+   "pair": "label_variety",
+   "category": "typography",
+   "element": "node text",
+   "description": "Dagua labels are materially smaller than Graphviz's labels across short, long, and multiline cases.",
+   "measurement": "glyph height ~12-15 px versus ~21-23 px, approximately 35-45% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py font-size mapping"
+  },
+  {
+   "id": "f32",
+   "pair": "label_variety",
+   "category": "node geometry",
+   "element": "ellipse nodes",
+   "description": "Dagua nodes are vertically flattened and substantially smaller than the Graphviz envelopes.",
+   "measurement": "short-node height ~17-20 px versus ~58-61 px; approximately 65-70% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py text padding and node sizing"
+  },
+  {
+   "id": "f33",
+   "pair": "label_variety",
+   "category": "labels",
+   "element": "long final node label",
+   "description": "Dagua clips or truncates both ends of the longest label while Graphviz renders the complete string.",
+   "measurement": "approximately 3-5 leading characters and 2-4 trailing characters are not legible",
+   "direction": "dagua_missing",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/utils.py text measurement and SVG text clipping"
+  },
+  {
+   "id": "f34",
+   "pair": "label_variety",
+   "category": "labels",
+   "element": "attention_block label",
+   "description": "Dagua provides almost no horizontal padding around the long single-line label, with glyphs crowding the ellipse boundary.",
+   "measurement": "~1-3 px side clearance versus ~30-45 px in Graphviz",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/render/svg.py node label padding"
+  },
+  {
+   "id": "f35",
+   "pair": "label_variety",
+   "category": "strokes/borders",
+   "element": "edge stems",
+   "description": "Dagua's edge lines are heavier than Graphviz's despite the much smaller nodes.",
+   "measurement": "approximately 3 px versus 1.5 px, about 2x too thick",
+   "direction": "dagua_too_large",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.97,
+   "likely_code_area": "dagua/render/svg.py stroke-width conversion"
+  },
+  {
+   "id": "f36",
+   "pair": "spline_stress",
+   "category": "typography",
+   "element": "node labels",
+   "description": "Dagua node labels are substantially smaller than Graphviz's labels.",
+   "measurement": "glyph height ~10-12 px versus ~20-22 px, approximately 45-50% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py font mapping"
+  },
+  {
+   "id": "f37",
+   "pair": "spline_stress",
+   "category": "node geometry",
+   "element": "all ellipse nodes",
+   "description": "Dagua nodes are much smaller and flatter than the Graphviz nodes.",
+   "measurement": "typical height ~17-20 px versus ~56-62 px, approximately 65-70% smaller",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py node sizing"
+  },
+  {
+   "id": "f38",
+   "pair": "spline_stress",
+   "category": "edges",
+   "element": "stage 1 self-loop",
+   "description": "The Graphviz black self-loop at stage 1 is absent from the Dagua panel.",
+   "measurement": "one complete loop of approximately 55x45 px is missing",
+   "direction": "dagua_missing",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/routing.py self-loop generation"
+  },
+  {
+   "id": "f39",
+   "pair": "spline_stress",
+   "category": "edges",
+   "element": "green stage 3 self-loop",
+   "description": "Dagua reduces the green loop to a short bent fragment rather than a closed return loop around stage 3.",
+   "measurement": "visible route length ~35-45 px versus ~85-100 px; roughly 55% shorter",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/routing.py self-loop control points"
+  },
+  {
+   "id": "f40",
+   "pair": "spline_stress",
+   "category": "edges",
+   "element": "stage 2 to flat b route",
+   "description": "Dagua's long black route terminates far from the flat-b node and lacks Graphviz's curved approach.",
+   "measurement": "terminal gap roughly 75-100 px from the target boundary",
+   "direction": "dagua_missing",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/routing.py endpoint trimming and spline construction"
+  },
+  {
+   "id": "f41",
+   "pair": "spline_stress",
+   "category": "edges",
+   "element": "red dashed back-edges",
+   "description": "Dagua renders the red returns as near-straight dashed tracks with offset endpoints instead of Graphviz's broad curved splines.",
+   "measurement": "lateral path deviation roughly 40-130 px; arrow tips land ~20-40 px from the reference-relative contact points",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/routing.py spline control-point generation"
+  },
+  {
+   "id": "f42",
+   "pair": "spline_stress",
+   "category": "strokes/borders",
+   "element": "black and colored edge stems",
+   "description": "Dagua edges are substantially heavier than the Graphviz strokes.",
+   "measurement": "black stems ~3 px versus ~1.5 px; red dashes ~4 px versus ~2 px",
+   "direction": "dagua_too_large",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "MED",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/render/svg.py stroke-width conversion"
+  },
+  {
+   "id": "f43",
+   "pair": "spline_stress",
+   "category": "arrowheads",
+   "element": "blue flat-a to flat-b arrowhead",
+   "description": "The Dagua blue arrowhead is detached well above the target rather than contacting the node boundary.",
+   "measurement": "tip-to-target gap ~35-45 px versus approximately 0-2 px in Graphviz",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/routing.py endpoint trim and SVG marker placement"
+  },
+  {
+   "id": "f44",
+   "pair": "mixed_styles",
+   "category": "typography",
+   "element": "node labels",
+   "description": "Dagua node text is significantly smaller than Graphviz's text; Review also appears relatively heavier.",
+   "measurement": "glyph height approximately 40-55% smaller; Review weight visually about one step heavier",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/styles.py font properties and dagua/render/svg.py"
+  },
+  {
+   "id": "f45",
+   "pair": "mixed_styles",
+   "category": "node geometry",
+   "element": "Start, Process, Review, Done, and Fallback nodes",
+   "description": "Dagua nodes are severely undersized and vertically flattened.",
+   "measurement": "Start ~36x20 px versus ~91x59 px; Review ~45x18 px versus ~126x61 px",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/render/svg.py node sizing and padding"
+  },
+  {
+   "id": "f46",
+   "pair": "mixed_styles",
+   "category": "edges",
+   "element": "four styled branch edges",
+   "description": "Graphviz's curved branch routes become mostly straight Dagua segments, changing label association and visual flow.",
+   "measurement": "mid-route displacement typically ~30-85 px; curvature is effectively reduced to zero on several branches",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.99,
+   "likely_code_area": "dagua/routing.py spline generation"
+  },
+  {
+   "id": "f47",
+   "pair": "mixed_styles",
+   "category": "labels",
+   "element": "edge labels",
+   "description": "Dagua edge labels use a sans-serif face and sit farther from their associated stems than Graphviz's serif labels.",
+   "measurement": "label-to-stem displacement differs by ~25-60 px across needs sign-off, approved, rework, and retry",
+   "direction": "other",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "HIGH",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/edges.py label placement and dagua/render/svg.py font inheritance"
+  },
+  {
+   "id": "f48",
+   "pair": "mixed_styles",
+   "category": "strokes/borders",
+   "element": "solid, dashed, and dotted branch edges",
+   "description": "Dagua stems are too thick and its dash/dot cadence is more open than Graphviz's.",
+   "measurement": "stems ~3 px versus ~1.5 px; dash or dot pitch approximately 1.5-2x larger",
+   "direction": "dagua_too_large",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "fixable_theme_or_render",
+   "severity": "HIGH",
+   "confidence": 0.98,
+   "likely_code_area": "dagua/render/svg.py stroke widths and dagua/edges/dashes.py"
+  },
+  {
+   "id": "f49",
+   "pair": "mixed_styles",
+   "category": "canvas",
+   "element": "overall graph footprint",
+   "description": "Dagua's graph is horizontally compressed and centered into a narrower region.",
+   "measurement": "occupied width ~207 px versus ~300 px, approximately 31% narrower",
+   "direction": "dagua_too_small",
+   "finding_class": "real_cosmetic_gap",
+   "actionability": "needs_layout_or_routing_scope",
+   "severity": "MED",
+   "confidence": 0.98,
+   "likely_code_area": "layout coordinate normalization"
+  }
+ ],
+ "inspection_log": [
+  {
+   "pair": "tiny_graph",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "strokes/borders",
+   "status": "clean"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "arrowheads",
+   "status": "finding"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "edges",
+   "status": "clean"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "labels",
+   "status": "clean"
+  },
+  {
+   "pair": "tiny_graph",
+   "category": "canvas",
+   "status": "finding"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "strokes/borders",
+   "status": "clean"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "arrowheads",
+   "status": "clean"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "edges",
+   "status": "clean"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "labels",
+   "status": "clean"
+  },
+  {
+   "pair": "shape_atlas",
+   "category": "canvas",
+   "status": "finding"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "strokes/borders",
+   "status": "clean"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "arrowheads",
+   "status": "finding"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "edges",
+   "status": "clean"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "labels",
+   "status": "clean"
+  },
+  {
+   "pair": "arrowhead_atlas",
+   "category": "canvas",
+   "status": "finding"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "strokes/borders",
+   "status": "finding"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "arrowheads",
+   "status": "clean"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "edges",
+   "status": "clean"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "labels",
+   "status": "finding"
+  },
+  {
+   "pair": "edge_styles_showcase",
+   "category": "canvas",
+   "status": "finding"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "strokes/borders",
+   "status": "finding"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "arrowheads",
+   "status": "finding"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "edges",
+   "status": "clean"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "labels",
+   "status": "clean"
+  },
+  {
+   "pair": "colors_showcase",
+   "category": "canvas",
+   "status": "finding"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "strokes/borders",
+   "status": "finding"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "arrowheads",
+   "status": "clean"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "edges",
+   "status": "finding"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "clusters",
+   "status": "finding"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "labels",
+   "status": "finding"
+  },
+  {
+   "pair": "cluster_showcase",
+   "category": "canvas",
+   "status": "clean"
+  },
+  {
+   "pair": "label_variety",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "label_variety",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "label_variety",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "label_variety",
+   "category": "strokes/borders",
+   "status": "finding"
+  },
+  {
+   "pair": "label_variety",
+   "category": "arrowheads",
+   "status": "clean"
+  },
+  {
+   "pair": "label_variety",
+   "category": "edges",
+   "status": "clean"
+  },
+  {
+   "pair": "label_variety",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "label_variety",
+   "category": "labels",
+   "status": "finding"
+  },
+  {
+   "pair": "label_variety",
+   "category": "canvas",
+   "status": "clean"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "strokes/borders",
+   "status": "finding"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "arrowheads",
+   "status": "finding"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "edges",
+   "status": "finding"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "labels",
+   "status": "clean"
+  },
+  {
+   "pair": "spline_stress",
+   "category": "canvas",
+   "status": "clean"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "typography",
+   "status": "finding"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "node geometry",
+   "status": "finding"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "fills",
+   "status": "clean"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "strokes/borders",
+   "status": "finding"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "arrowheads",
+   "status": "clean"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "edges",
+   "status": "finding"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "clusters",
+   "status": "clean"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "labels",
+   "status": "finding"
+  },
+  {
+   "pair": "mixed_styles",
+   "category": "canvas",
+   "status": "finding"
+  }
+ ],
+ "summary": "The baseline fails decisively: Dagua systematically underscales node geometry and node typography while rendering many edge strokes too heavily, producing a severe internal scale inconsistency. Routing parity is also far from baseline in the cluster, spline, and mixed-style panels, including missing or malformed self-loops, detached endpoints, straightened splines, cluster-title crossings, and clipped long labels."
+}
