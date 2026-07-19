@@ -46,7 +46,7 @@ not Graph objects. See `dagua/layout/AGENTS.md` for module-level detail.
 - `edge_optimization.py` — Post-layout edge-aware position refinement.
 
 **Composable ops system (`dagua/layout/ops/`):**
-268 registered primitives across 34 modules. Each op is a pure function decorated with
+378 registered ops across ~70 modules (as of 2026-07-19; verify `len(OP_REGISTRY)`). Each op is a pure function decorated with
 `@register_op`. Ops share state via `SolveState` (9 typed fields: pos, edge_index, N, E,
 adj, graph_data, rng, extras, optimizer).
 
@@ -57,16 +57,17 @@ adj, graph_data, rng, extras, optimizer).
 - Per-algorithm op files: `drl.py`, `fmmm.py`, `gem.py`, `lgl.py`, `neulay.py`, etc.
 
 **Algorithm pipelines (`dagua/layout/ops/pipelines/`):**
-23 algorithms built purely by composing registered ops — no inline functions, no archive
-imports. `PIPELINE_REGISTRY` maps algorithm names to pipeline functions. Each pipeline
-accepts a `SolveState` and returns final positions.
+112 pipelines (as of 2026-07-19; verify `len(PIPELINE_REGISTRY)`) built purely by composing
+registered ops — no inline functions, no archive imports. `PIPELINE_REGISTRY` maps algorithm
+names to pipeline functions. Each pipeline accepts a `SolveState` and returns final positions.
 
-Available algorithms: fr, kk, fa2, stress_sgd, stress_majorization, sfdp, umap, tsnet,
-sugiyama, spectral, classical_mds, pivot_mds, drl, gem, graphopt, lgl, linlog, fmmm,
-davidson_harel, maxent_stress, neulay, sgd2_multi, reingold_tilford.
+Covers the classic families (fr, kk, fa2, stress_sgd/majorization, sfdp, umap, tsnet, sugiyama,
+spectral, mds variants, drl, gem, fmmm, ...) PLUS full in-house reimplementations of dagre, the
+ELK family (elk_layered/mrtree/stress/force/radial/lp), tidy, d3dag, webcola, cose/cise, and the
+native_* family. See `PIPELINE_REGISTRY` for the authoritative list.
 
 **Archive (`dagua/layout/_archive/`):**
-Frozen monolithic reimplementations of all 23 algorithms. Reference-only -- used as
+Frozen monolithic reimplementations of the classic algorithms (27 files in `_archive/classic/`). Reference-only -- used as
 test oracles for pipeline fidelity validation. Not imported by production code.
 
 ### `dagua/render/` — Output Backends
@@ -76,9 +77,11 @@ Three independent renderers, no shared state. See `dagua/render/CLAUDE.md`.
 - `svg.py` — Direct SVG string output, zero deps, Jupyter-friendly.
 - `graphviz.py` — Neato `-n2` passthrough (use dagua positions with Graphviz rendering).
 
-### `dagua/routing.py` — Edge Routing
-Bezier control point computation. Heuristic approach (not yet differentiable). Handles
-straight, curved, and back-edge routing.
+### Edge routing — `dagua/edges.py` (`route_edges()`) + `dagua/layout/edge_optimization.py`
+Route modes: straight | ortho | bezier (`dagua/edges.py`: `route_edges()` + `_compute_straight`/
+`_compute_ortho`/`_compute_taxi`/`_compute_bezier`). Optimization-aware refinement lives in
+`layout/edge_optimization.py` and `layout/ops/edge_route.py`. Shape-clipped to node boundaries;
+handles back-edges. (NOTE: the old `dagua/routing.py` no longer exists.)
 
 ### `dagua/edges.py` — Edge Pipeline
 Edge label placement and edge routing orchestration. Called between layout and render.
@@ -98,8 +101,9 @@ Strictly typed (mypy strict mode).
 
 ### `dagua/eval/` — Evaluation System
 Benchmark runner, multi-engine comparison, report generation, hyperparameter sweep,
-visual audit, aesthetic evaluation. 6 competitor engine adapters (graphviz×4, elk, dagre,
-networkx×2, igraph×3). 30+ reference graphs in `dagua/graphs/`.
+visual audit, aesthetic evaluation. ~39 competitor engine adapters in `dagua/eval/competitors/`
+(graphviz, elk, dagre, igraph, cytoscape, d3dag, d3force, ogdf, gephi, sgd2, umap, tsne, ...) --
+every one paired with an in-house reimpl via the competitor->reimpl coverage gate. Reference graphs in `dagua/eval/graphs.py`.
 
 ### `dagua/animation.py` — Cinematic Exports
 `animate()` (optimization process), `tour()` (camera keyframe animation),
@@ -163,13 +167,13 @@ graph.py  (imports styles, elements, utils, config, flex, defaults)
 layout/engine.py  (imports constraints, projection, schedule -- nothing else from dagua)
     |   dispatches to:
     |
-layout/ops/  (268 ops -- imports NOTHING from dagua; pure torch + stdlib)
+layout/ops/  (378 ops -- imports NOTHING from dagua; pure torch + stdlib)
     |   composed into:
-layout/ops/pipelines/  (23 algorithms -- imports only from ops/)
+layout/ops/pipelines/  (112 pipelines -- imports only from ops/)
     |
 layout/_archive/  (frozen monoliths -- reference only, not imported by production)
     |
-routing.py  (post-layout, imports elements for edge types)
+edges.py::route_edges  (post-layout, imports elements for edge types)
     |
 edges.py  (imports routing, elements)
     |
