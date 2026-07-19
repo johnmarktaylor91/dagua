@@ -156,3 +156,99 @@ def test_constraints_polish_explicit_pipeline_algorithm() -> None:
     pos = dagua.layout(graph, LayoutConfig(algorithm="fr", steps=2, device="cpu"))
 
     assert torch.allclose(pos[0], torch.tensor([123.0, -45.0]), atol=0.0)
+
+
+def test_constraints_round_trip_through_graph_json() -> None:
+    """Built-in constraints serialize and load through graph JSON."""
+    graph = _tiny_graph()
+    graph.pin("a", x=1.0, y=2.0, name="origin")
+    graph.constrain(C.Contain(["b", "c"], within=C.canvas, padding=3.0, strength="hard"))
+
+    data = dagua.graph_to_json(graph)
+    loaded = dagua.graph_from_json(data)
+
+    assert len(loaded.constraints) == 2
+    assert loaded.constraints[0].name == "origin"
+    assert isinstance(loaded.constraints[1], C.Contain)
+
+
+def test_canonical_one_liner_example_runs() -> None:
+    """The canonical Tier 0/1 one-liner example executes."""
+    graph = DaguaGraph()
+    for node_id in ("input", "search", "reason", "safety", "extract", "transform", "load"):
+        graph.add_node(node_id)
+    graph.add_edge("extract", "transform")
+    graph.add_edge("transform", "load")
+
+    graph.pin("input", 0, 0)
+    graph.row("search", "reason", "safety")
+    graph.order("extract", "transform", "load")
+    graph.separate("search", "load", gap=20)
+    pos = dagua.layout(graph, LayoutConfig(steps=2, device="cpu"))
+
+    assert pos.shape == (7, 2)
+
+
+def test_canonical_mid_level_example_runs() -> None:
+    """The canonical selector-rich service-map example executes."""
+    graph = DaguaGraph()
+    for dc in ("nyc", "chi", "sf"):
+        for role in ("lb0", "app0", "db0"):
+            graph.add_node(f"{dc}/{role}")
+        graph.add_edge(f"{dc}/lb0", f"{dc}/app0")
+        graph.add_edge(f"{dc}/app0", f"{dc}/db0")
+    graph.add_node("legend")
+    graph.add_edge("nyc/lb0", "chi/lb0", label="failover")
+
+    graph.anchor({"nyc/lb0": (-74.0, 40.7), "chi/lb0": (-87.6, 41.9), "sf/lb0": (-122.4, 37.8)})
+    for dc in ("nyc", "chi", "sf"):
+        graph.order(
+            C.where(lambda node_id, d=dc: str(node_id).startswith(f"{d}/lb")),
+            C.where(lambda node_id, d=dc: str(node_id).startswith(f"{d}/app")),
+            C.where(lambda node_id, d=dc: str(node_id).startswith(f"{d}/db")),
+            axis="flow",
+        )
+    graph.emphasize("nyc/lb0", "chi/lb0", "chi/app0")
+    graph.pin("legend", at=C.canvas.fraction(0.95, 0.05))
+    graph.separate(C.labels(edges=True), C.canvas.edge("bottom"), gap=20)
+    pos = dagua.layout(graph, LayoutConfig(steps=2, device="cpu", constraint_policy="report"))
+
+    assert pos.shape == (10, 2)
+    assert "constraints" in graph.constraints.report().summary()
+
+
+def test_canonical_power_user_escape_hatch_runs() -> None:
+    """The canonical headless power-user escape hatches execute."""
+    graph = DaguaGraph()
+    for node_id in ("core", "s0", "s1", "legend", "scale"):
+        graph.add_node(node_id)
+    for spoke in ("s0", "s1"):
+        graph.add_edge("core", spoke)
+    graph.add_cluster("pay", ["s0"])
+    graph.add_cluster("search", ["s1"])
+
+    def snap_core(pos: torch.Tensor, ctx: C.ConstraintContext) -> None:
+        """Snap the core node exactly to the origin."""
+        idx = ctx.idx("core")
+        pos[idx] = torch.zeros(2, dtype=pos.dtype, device=pos.device)
+
+    cfg = LayoutConfig(
+        algorithm="stress_sgd",
+        steps=2,
+        device="cpu",
+        constraints=[
+            C.Pin("core", x=0, y=0),
+            C.project(snap_core, name="snap-core"),
+            C.Separate(C.cluster("pay"), C.cluster("search"), gap=12).rigid(),
+            C.Contain(["legend", "scale"], within=C.canvas, padding=12),
+            C.loss(
+                lambda pos, ctx: pos[ctx.indices(["s0", "s1"]), 0].var(),
+                strength="soft",
+                name="leaf-spread",
+            ),
+        ],
+        constraint_policy="report",
+    )
+    pos = dagua.layout(graph, cfg)
+
+    assert torch.allclose(pos[0], torch.zeros(2), atol=0.0)

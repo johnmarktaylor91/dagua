@@ -894,6 +894,285 @@ def project(fn: ProjectFn, *, name: Optional[str] = None) -> Custom:
     return Custom(project_fn=fn, strength="hard", name=name)
 
 
+def constraint_to_dict(constraint: Constraint) -> Dict[str, Any]:
+    """Serialize a constraint to a stable JSON-compatible dictionary.
+
+    Parameters
+    ----------
+    constraint : Constraint
+        Constraint object.
+
+    Returns
+    -------
+    dict[str, Any]
+        Serialized representation. Custom callable code is intentionally not
+        included.
+    """
+    base: Dict[str, Any] = {
+        "type": type(constraint).__name__,
+        "strength": constraint.strength,
+        "name": constraint.name,
+        "system": constraint.system,
+        "tags": list(constraint.tags),
+    }
+    if isinstance(constraint, Pin):
+        base.update(
+            {
+                "sel": selection_to_dict(constraint.sel),
+                "x": constraint.x,
+                "y": constraint.y,
+                "at": selection_to_dict(constraint.at),
+                "frame": constraint.frame,
+            }
+        )
+    elif isinstance(constraint, Align):
+        base.update(
+            {
+                "sels": [selection_to_dict(sel) for sel in constraint.sels],
+                "axis": constraint.axis,
+                "at": selection_to_dict(constraint.at),
+                "spacing": constraint.spacing,
+            }
+        )
+    elif isinstance(constraint, Order):
+        base.update(
+            {
+                "items": [selection_to_dict(item) for item in constraint.items],
+                "axis": constraint.axis,
+                "gap": constraint.gap,
+            }
+        )
+    elif isinstance(constraint, Group):
+        base.update(
+            {
+                "sels": [selection_to_dict(sel) for sel in constraint.sels],
+                "padding": constraint.padding,
+            }
+        )
+    elif isinstance(constraint, Separate):
+        base.update(
+            {
+                "a": selection_to_dict(constraint.a),
+                "b": selection_to_dict(constraint.b),
+                "gap": constraint.gap,
+                "axis": constraint.axis,
+                "side": constraint.side,
+            }
+        )
+    elif isinstance(constraint, Anchor):
+        base.update(
+            {
+                "mapping": [
+                    [selection_to_dict(node_id), [float(target[0]), float(target[1])]]
+                    for node_id, target in constraint.mapping.items()
+                ],
+                "fit": constraint.fit,
+                "projection": constraint.projection,
+            }
+        )
+    elif isinstance(constraint, Emphasize):
+        base.update(
+            {
+                "path_or_edges": [selection_to_dict(item) for item in constraint.path_or_edges],
+                "lane": constraint.lane,
+            }
+        )
+    elif isinstance(constraint, Focus):
+        base.update(
+            {
+                "sel": selection_to_dict(constraint.sel),
+                "zoom": constraint.zoom,
+                "radius": constraint.radius,
+                "at": selection_to_dict(constraint.at),
+            }
+        )
+    elif isinstance(constraint, Contain):
+        base.update(
+            {
+                "sel": selection_to_dict(constraint.sel),
+                "within": selection_to_dict(constraint.within),
+                "padding": constraint.padding,
+            }
+        )
+    elif isinstance(constraint, Custom):
+        base.update(
+            {
+                "custom": True,
+                "callable_name": constraint.name,
+                "code_included": False,
+                "access": constraint.access,
+                "over": selection_to_dict(constraint.over),
+                "has_loss": constraint.loss_fn is not None,
+                "has_project": constraint.project_fn is not None,
+            }
+        )
+    return {key: value for key, value in base.items() if value is not None}
+
+
+def constraint_from_dict(data: Mapping[str, Any]) -> Constraint:
+    """Deserialize a built-in constraint from a stable dictionary.
+
+    Parameters
+    ----------
+    data : mapping[str, Any]
+        Serialized constraint dictionary.
+
+    Returns
+    -------
+    Constraint
+        Reconstructed immutable constraint.
+    """
+    common = {
+        "strength": data.get("strength", "firm"),
+        "name": data.get("name"),
+        "system": bool(data.get("system", False)),
+        "tags": tuple(data.get("tags", ())),
+    }
+    constraint_type = str(data["type"])
+    if constraint_type == "Pin":
+        return Pin(
+            sel=selection_from_dict(data.get("sel")),
+            x=data.get("x"),
+            y=data.get("y"),
+            at=selection_from_dict(data.get("at")),
+            frame=str(data.get("frame", "view")),
+            **common,
+        )
+    if constraint_type == "Align":
+        return Align(
+            *(selection_from_dict(sel) for sel in data.get("sels", [])),
+            axis=str(data.get("axis", "x")),
+            at=selection_from_dict(data.get("at")),
+            spacing=data.get("spacing"),
+            **common,
+        )
+    if constraint_type == "Order":
+        return Order(
+            *(selection_from_dict(item) for item in data.get("items", [])),
+            axis=str(data.get("axis", "flow")),
+            gap=data.get("gap"),
+            **common,
+        )
+    if constraint_type == "Group":
+        return Group(
+            *(selection_from_dict(sel) for sel in data.get("sels", [])),
+            padding=data.get("padding"),
+            **common,
+        )
+    if constraint_type == "Separate":
+        return Separate(
+            a=selection_from_dict(data.get("a")),
+            b=selection_from_dict(data.get("b")),
+            gap=data.get("gap"),
+            axis=data.get("axis"),
+            side=data.get("side"),
+            **common,
+        )
+    if constraint_type == "Anchor":
+        mapping = {
+            selection_from_dict(item[0]): (float(item[1][0]), float(item[1][1]))
+            for item in data.get("mapping", [])
+        }
+        return Anchor(
+            mapping=mapping,
+            fit=str(data.get("fit", "similarity")),
+            projection=data.get("projection"),
+            **common,
+        )
+    if constraint_type == "Emphasize":
+        return Emphasize(
+            *(selection_from_dict(item) for item in data.get("path_or_edges", [])),
+            lane=data.get("lane"),
+            **common,
+        )
+    if constraint_type == "Focus":
+        return Focus(
+            sel=selection_from_dict(data.get("sel")),
+            zoom=float(data.get("zoom", 1.5)),
+            radius=int(data.get("radius", 2)),
+            at=selection_from_dict(data.get("at")),
+            **common,
+        )
+    if constraint_type == "Contain":
+        return Contain(
+            sel=selection_from_dict(data.get("sel")),
+            within=selection_from_dict(data.get("within")),
+            padding=float(data.get("padding", 0.0)),
+            **common,
+        )
+    if constraint_type == "Custom":
+        return Custom(
+            access=str(data.get("access", "global")),
+            over=selection_from_dict(data.get("over")),
+            **common,
+        )
+    raise ConstraintTypeError(f"Unknown serialized constraint type: {constraint_type!r}")
+
+
+def selection_to_dict(selection: Any) -> Any:
+    """Serialize a selector or plain selection value.
+
+    Parameters
+    ----------
+    selection : Any
+        Selection payload.
+
+    Returns
+    -------
+    Any
+        JSON-compatible selection payload.
+    """
+    if selection is None:
+        return None
+    if isinstance(selection, CanvasSelector):
+        return {"selector": "canvas", "target": selection.target, "values": list(selection.values)}
+    if isinstance(selection, Selector):
+        return {
+            "selector": selection.kind,
+            "args": [selection_to_dict(arg) for arg in selection.args],
+            "kwargs": {key: selection_to_dict(value) for key, value in selection.kwargs.items()},
+            "allow_empty": selection.allow_empty,
+            "staged": selection.staged,
+        }
+    if isinstance(selection, tuple):
+        return {"tuple": [selection_to_dict(item) for item in selection]}
+    if isinstance(selection, list):
+        return [selection_to_dict(item) for item in selection]
+    return selection
+
+
+def selection_from_dict(data: Any) -> Any:
+    """Deserialize a selection payload.
+
+    Parameters
+    ----------
+    data : Any
+        Serialized selection payload.
+
+    Returns
+    -------
+    Any
+        Selection value.
+    """
+    if not isinstance(data, dict):
+        if isinstance(data, list):
+            return [selection_from_dict(item) for item in data]
+        return data
+    if "tuple" in data:
+        return tuple(selection_from_dict(item) for item in data["tuple"])
+    if data.get("selector") == "canvas":
+        return CanvasSelector(str(data.get("target", "canvas")), tuple(data.get("values", ())))
+    if "selector" in data:
+        return Selector(
+            str(data["selector"]),
+            tuple(selection_from_dict(arg) for arg in data.get("args", ())),
+            {key: selection_from_dict(value) for key, value in data.get("kwargs", {}).items()},
+            bool(data.get("allow_empty", False)),
+            bool(data.get("staged", False)),
+        )
+    return data
+
+
 @dataclass
 class ConstraintContext:
     """Read-only adapter exposed to custom constraints and reports."""
@@ -1428,6 +1707,8 @@ def _separate_residual(constraint: Separate, pos: torch.Tensor, graph: Any) -> T
         Distance shortfall and resolved count.
     """
     left = resolve_node_selection(constraint.a, graph, allow_empty=True)
+    if isinstance(constraint.b, CanvasSelector):
+        return _separate_canvas_residual(left, constraint.b, constraint.gap, pos)
     right = resolve_node_selection(constraint.b, graph, allow_empty=True)
     if not left or not right:
         return (0.0, len(left) + len(right))
@@ -1439,6 +1720,44 @@ def _separate_residual(constraint: Separate, pos: torch.Tensor, graph: Any) -> T
         axis = 0 if constraint.axis in {"x", "cross"} else 1
         dist = abs(float(a[axis].item()) - float(b[axis].item()))
     return (max(0.0, float(constraint.gap or 0.0) - dist), len(left) + len(right))
+
+
+def _separate_canvas_residual(
+    indices: List[int],
+    canvas_target: CanvasSelector,
+    gap: Optional[float],
+    pos: torch.Tensor,
+) -> Tuple[float, int]:
+    """Return separation residual against a canvas edge.
+
+    Parameters
+    ----------
+    indices : list[int]
+        Selected node indices.
+    canvas_target : CanvasSelector
+        Canvas edge selector.
+    gap : float, optional
+        Required margin.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[float, int]
+        Max margin shortfall and selected count.
+    """
+    if not indices:
+        return (0.0, 0)
+    target_x, target_y = resolve_canvas_point(canvas_target, pos)
+    margin = float(gap or 0.0)
+    residuals: List[float] = []
+    if target_x is not None:
+        distances = (pos[indices, 0] - float(target_x)).abs()
+        residuals.append(float(torch.relu(margin - distances).max().item()))
+    if target_y is not None:
+        distances = (pos[indices, 1] - float(target_y)).abs()
+        residuals.append(float(torch.relu(margin - distances).max().item()))
+    return (max(residuals, default=0.0), len(indices))
 
 
 def _group_residual(constraint: Group, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
