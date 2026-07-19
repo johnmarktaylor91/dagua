@@ -39,6 +39,10 @@ class ConstraintReferenceError(ConstraintError, KeyError):
     """Raised when an eager selector references an unknown graph element."""
 
 
+class ConstraintStagedError(ConstraintTypeError):
+    """Raised when a fixed API surface has intentionally staged lowering."""
+
+
 class ConstraintConflictError(ConstraintError, RuntimeError):
     """Raised when hard constraints are jointly infeasible under strict policy."""
 
@@ -946,10 +950,8 @@ class ConstraintContext:
         torch.Tensor
             Long tensor of selected edge indices.
         """
-        del selection
-        if self.edge_index is None:
-            return torch.zeros(0, dtype=torch.long)
-        return torch.arange(self.edge_index.shape[1], dtype=torch.long)
+        resolved = resolve_edge_selection(selection, self.graph)
+        return torch.tensor(resolved, dtype=torch.long)
 
     def label_indices(self, selection: Any) -> torch.Tensor:
         """Resolve label selections.
@@ -964,8 +966,8 @@ class ConstraintContext:
         torch.Tensor
             Empty tensor until label lowering is promoted into the engine.
         """
-        del selection
-        return torch.zeros(0, dtype=torch.long)
+        resolved = resolve_label_selection(selection, self.graph)
+        return torch.tensor(resolved, dtype=torch.long)
 
     @property
     def extent(self) -> Optional[Tuple[float, float, float, float]]:
@@ -1229,6 +1231,11 @@ def resolve_node_selection(selection: Any, graph: Any, *, allow_empty: bool = Fa
             out.extend(resolve_node_selection(sel, graph, allow_empty=allow_empty))
         return _unique_preserving(out)
     if isinstance(selection, Selector):
+        if selection.staged or selection.kind in {"port", "ports"}:
+            raise ConstraintStagedError(
+                "Port constraint lowering is staged to the edge-routing sprint; "
+                "the C.port/C.ports API is fixed, but it cannot be lowered yet."
+            )
         if selection.kind == "cluster":
             name = selection.args[0]
             if name not in graph.clusters:
@@ -1251,7 +1258,22 @@ def resolve_node_selection(selection: Any, graph: Any, *, allow_empty: bool = Fa
         if selection.kind == "path":
             result = [resolve_single_node(node_id, graph) for node_id in selection.args]
             return _checked_nonempty(result, selection.allow_empty or allow_empty, "path selector")
-        raise ConstraintTypeError(f"{selection.kind!r} selectors cannot be resolved as nodes yet.")
+        if selection.kind == "label":
+            result = resolve_label_selection(selection, graph)
+            return _checked_nonempty(result, selection.allow_empty or allow_empty, "label selector")
+        if selection.kind == "labels":
+            result = resolve_label_selection(selection, graph)
+            return _checked_nonempty(
+                result,
+                selection.allow_empty or allow_empty,
+                "labels selector",
+            )
+        if selection.kind == "edges":
+            raise ConstraintTypeError(
+                "edge selectors cannot be used where node-like points are required; "
+                "use emphasize(), separate(), or C.loss(..., over=C.edges(...))."
+            )
+        raise ConstraintTypeError(f"{selection.kind!r} selectors cannot be resolved as nodes.")
     if isinstance(selection, (list, tuple)) and not _is_graph_node_id(selection, graph):
         result = [resolve_single_node(item, graph) for item in selection]
         return _checked_nonempty(result, allow_empty, "node list")
@@ -1296,8 +1318,14 @@ def validate_eager_selection(selection: Any, graph: Any) -> None:
         Validation only.
     """
     if isinstance(selection, Selector):
+        if selection.staged or selection.kind in {"port", "ports"}:
+            return
         if selection.kind in {"path"}:
             resolve_node_selection(selection, graph)
+        elif selection.kind == "edges" and selection.args:
+            resolve_edge_selection(selection, graph)
+        elif selection.kind == "label":
+            resolve_label_selection(selection, graph)
         return
     if isinstance(selection, CanvasSelector):
         return
@@ -1306,6 +1334,243 @@ def validate_eager_selection(selection: Any, graph: Any) -> None:
             validate_eager_selection(item, graph)
         return
     resolve_single_node(selection, graph)
+
+
+def resolve_edge_selection(selection: Any, graph: Any, *, allow_empty: bool = False) -> List[int]:
+    """Resolve an edge selection against a graph object.
+
+    Parameters
+    ----------
+    selection : Any
+        Edge selector, explicit edge pair, or ``None`` for all edges.
+    graph : Any
+        DaguaGraph-like object with ``edge_index`` and edge metadata.
+    allow_empty : bool, default=False
+        Whether an empty result is accepted.
+
+    Returns
+    -------
+    list[int]
+        Packed edge indices.
+    """
+    if graph is None:
+        return []
+    edge_index = getattr(graph, "edge_index", None)
+    if edge_index is None:
+        return []
+    edge_pairs = [
+        (int(edge_index[0, edge_idx].item()), int(edge_index[1, edge_idx].item()))
+        for edge_idx in range(int(edge_index.shape[1]))
+    ]
+    if selection is None:
+        return list(range(len(edge_pairs)))
+    if isinstance(selection, Selector):
+        if selection.kind != "edges":
+            raise ConstraintTypeError(f"{selection.kind!r} selectors cannot be resolved as edges.")
+        result = _resolve_edges_selector(selection, graph, edge_pairs)
+        return _checked_nonempty(
+            result,
+            selection.allow_empty or allow_empty,
+            "edges() selector",
+        )
+    if isinstance(selection, tuple) and len(selection) == 2:
+        src = resolve_single_node(selection[0], graph)
+        tgt = resolve_single_node(selection[1], graph)
+        result = [idx for idx, pair in enumerate(edge_pairs) if pair == (src, tgt)]
+        return _checked_nonempty(result, allow_empty, f"edge {(selection[0], selection[1])!r}")
+    raise ConstraintTypeError("Edges must be selected with C.edges(...).")
+
+
+def _resolve_edges_selector(
+    selection: Selector,
+    graph: Any,
+    edge_pairs: List[Tuple[int, int]],
+) -> List[int]:
+    """Resolve a ``C.edges`` selector payload.
+
+    Parameters
+    ----------
+    selection : Selector
+        Edge selector.
+    graph : Any
+        DaguaGraph-like object.
+    edge_pairs : list[tuple[int, int]]
+        Packed source/target index pairs.
+
+    Returns
+    -------
+    list[int]
+        Matching edge indices.
+    """
+    result: List[int] = []
+    for pair in selection.args:
+        result.extend(resolve_edge_selection(pair, graph, allow_empty=selection.allow_empty))
+    filters = selection.kwargs
+    if "between" in filters:
+        left_sel, right_sel = filters["between"]
+        left = set(resolve_node_selection(left_sel, graph))
+        right = set(resolve_node_selection(right_sel, graph))
+        result.extend(
+            edge_idx
+            for edge_idx, (src, tgt) in enumerate(edge_pairs)
+            if (src in left and tgt in right) or (src in right and tgt in left)
+        )
+    if "where" in filters:
+        predicate = filters["where"]
+        result.extend(
+            edge_idx
+            for edge_idx, (src, tgt) in enumerate(edge_pairs)
+            if predicate((graph._index_to_id[src], graph._index_to_id[tgt]))
+        )
+    source_filter = filters.get("source")
+    if source_filter is not None:
+        source_idx = resolve_single_node(source_filter, graph)
+        result.extend(
+            edge_idx for edge_idx, (src, _tgt) in enumerate(edge_pairs) if src == source_idx
+        )
+    target_filter = filters.get("target")
+    if target_filter is not None:
+        target_idx = resolve_single_node(target_filter, graph)
+        result.extend(
+            edge_idx for edge_idx, (_src, tgt) in enumerate(edge_pairs) if tgt == target_idx
+        )
+    edge_types = getattr(graph, "edge_types", [])
+    type_filter = filters.get("type")
+    if type_filter is not None:
+        result.extend(
+            edge_idx for edge_idx, edge_type in enumerate(edge_types) if edge_type == type_filter
+        )
+    if not selection.args and not filters:
+        result.extend(range(len(edge_pairs)))
+    return _unique_preserving(result)
+
+
+def resolve_label_selection(selection: Any, graph: Any, *, allow_empty: bool = False) -> List[int]:
+    """Resolve label selectors to owner node indices.
+
+    Parameters
+    ----------
+    selection : Any
+        ``C.label`` or ``C.labels`` selector.
+    graph : Any
+        DaguaGraph-like object.
+    allow_empty : bool, default=False
+        Whether an empty result is accepted.
+
+    Returns
+    -------
+    list[int]
+        Owner node indices for label satellites.
+    """
+    if not isinstance(selection, Selector):
+        return resolve_node_selection(selection, graph, allow_empty=allow_empty)
+    if selection.kind == "label":
+        owner = selection.args[0]
+        if isinstance(owner, Selector) and owner.kind == "edges":
+            edge_ids = resolve_edge_selection(owner, graph, allow_empty=allow_empty)
+            edge_index = graph.edge_index
+            return _unique_preserving(
+                [int(edge_index[0, edge_idx].item()) for edge_idx in edge_ids]
+            )
+        return resolve_node_selection(owner, graph, allow_empty=allow_empty)
+    if selection.kind == "labels":
+        owner = selection.args[0]
+        if selection.kwargs.get("edges", False):
+            edge_sel = owner if owner is not None else edges(allow_empty=allow_empty)
+            edge_ids = resolve_edge_selection(edge_sel, graph, allow_empty=allow_empty)
+            edge_index = graph.edge_index
+            result = [int(edge_index[0, edge_idx].item()) for edge_idx in edge_ids]
+            return _checked_nonempty(
+                _unique_preserving(result),
+                selection.allow_empty or allow_empty,
+                "edge labels selector",
+            )
+        if owner is None:
+            labelled = [
+                idx
+                for idx, label_text in enumerate(getattr(graph, "node_labels", []))
+                if label_text is not None
+            ]
+            return _checked_nonempty(
+                labelled,
+                selection.allow_empty or allow_empty,
+                "labels selector",
+            )
+        return resolve_node_selection(
+            owner,
+            graph,
+            allow_empty=selection.allow_empty or allow_empty,
+        )
+    raise ConstraintTypeError(f"{selection.kind!r} selectors cannot be resolved as labels.")
+
+
+def resolve_canvas_point(
+    target: Any,
+    pos: Optional[torch.Tensor] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Resolve a canvas pseudo-element to a deterministic view-frame point.
+
+    Parameters
+    ----------
+    target : Any
+        Canvas selector or raw ``(x, y)`` tuple.
+    pos : torch.Tensor, optional
+        Current positions used to derive an extent when available.
+
+    Returns
+    -------
+    tuple[float | None, float | None]
+        Point coordinates. ``None`` denotes an axis-specific canvas line.
+    """
+    if isinstance(target, CanvasSelector):
+        xmin, ymin, xmax, ymax = _canvas_extent(pos)
+        if target.target in {"canvas", "center"}:
+            return ((xmin + xmax) * 0.5, (ymin + ymax) * 0.5)
+        if target.target == "fraction":
+            fx, fy = target.values
+            return (xmin + (xmax - xmin) * float(fx), ymin + (ymax - ymin) * float(fy))
+        if target.target == "corner":
+            corner_name = str(target.values[0]).lower()
+            x = xmax if "e" in corner_name else xmin
+            y = ymax if "s" in corner_name else ymin
+            return (x, y)
+        if target.target == "edge":
+            side = str(target.values[0]).lower()
+            if side in {"top", "north", "n"}:
+                return (None, ymin)
+            if side in {"bottom", "south", "s"}:
+                return (None, ymax)
+            if side in {"left", "west", "w"}:
+                return (xmin, None)
+            if side in {"right", "east", "e"}:
+                return (xmax, None)
+    if isinstance(target, tuple) and len(target) == 2:
+        return (float(target[0]), float(target[1]))
+    return (None, None)
+
+
+def _canvas_extent(pos: Optional[torch.Tensor]) -> Tuple[float, float, float, float]:
+    """Return a stable canvas extent derived from positions when possible.
+
+    Parameters
+    ----------
+    pos : torch.Tensor, optional
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        ``(xmin, ymin, xmax, ymax)`` with a minimum useful size.
+    """
+    if pos is None or pos.numel() == 0:
+        return (-500.0, -500.0, 500.0, 500.0)
+    detached = pos.detach()
+    xmin = float(detached[:, 0].min().item())
+    xmax = float(detached[:, 0].max().item())
+    ymin = float(detached[:, 1].min().item())
+    ymax = float(detached[:, 1].max().item())
+    pad = max(50.0, 0.1 * max(xmax - xmin, ymax - ymin, 1.0))
+    return (xmin - pad, ymin - pad, xmax + pad, ymax + pad)
 
 
 def _as_sequence(value: Any) -> Sequence[Any]:

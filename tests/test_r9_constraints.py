@@ -9,7 +9,7 @@ import torch
 
 import dagua
 from dagua import C, DaguaGraph, LayoutConfig
-from dagua.constraints import ConstraintTypeError, resolve_node_selection
+from dagua.constraints import ConstraintStagedError, ConstraintTypeError, resolve_node_selection
 
 
 def _tiny_graph() -> DaguaGraph:
@@ -93,3 +93,29 @@ def test_no_constraints_identity_with_empty_constraint_list() -> None:
     empty_pos = dagua.layout(with_empty, config)
 
     assert torch.equal(plain_pos, empty_pos)
+
+
+def test_element_selectors_lower_for_edges_labels_canvas_and_contain() -> None:
+    """R9 element selectors lower through the current tensor engine."""
+    graph = _tiny_graph()
+    graph.edge_types[0] = "critical"
+
+    graph.emphasize(C.edges(source="a", type="critical"))
+    graph.pin(C.label("a"), at=C.canvas.center)
+    graph.align(C.labels(["b", "c"]), at=C.canvas.edge("top"), axis="y")
+    graph.constrain(C.Contain(["a", "b"], within=C.canvas, padding=4, strength="hard"))
+
+    pos = dagua.layout(graph, LayoutConfig(steps=2, device="cpu"))
+
+    assert pos.shape == (3, 2)
+    report = graph.constraints.report()
+    assert len(report.residuals) == 4
+
+
+def test_port_constraints_raise_staged_error_on_lowering() -> None:
+    """Port selectors are API-fixed but lowering is explicitly staged."""
+    graph = _tiny_graph()
+    graph.pin(C.port("a", "east"))
+
+    with pytest.raises(ConstraintStagedError, match="staged to the edge-routing sprint"):
+        dagua.layout(graph, LayoutConfig(steps=1, device="cpu"))

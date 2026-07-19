@@ -59,6 +59,7 @@ from dagua.layout.losses import (
     cluster_containment_loss,
     cluster_separation_loss,
     constraint_anchor_loss,
+    constraint_contain_loss,
     constraint_emphasize_loss,
     constraint_focus_loss,
     constraint_group_loss,
@@ -73,6 +74,7 @@ from dagua.layout.losses import (
     flex_spacing_loss,
     overlap_avoidance_loss,
     position_pin_loss,
+    project_hard_contains,
     project_hard_pins,
     repulsion_loss,
     spacing_consistency_loss,
@@ -2544,8 +2546,31 @@ def _layout_inner(
             )
         )
 
+    if flex_data["soft_contain"]:
+        _soft_contain = flex_data["soft_contain"]
+        loss_fns.append(
+            (
+                "w_constraints",
+                lambda p, ns, li: constraint_contain_loss(p, _soft_contain),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
+        )
+
     for _custom_constraint in flex_data["custom_losses"]:
-        _ctx = None
+        from dagua.constraints import ConstraintContext
+
+        context_graph = flex_data["context_graph"]
+        _ctx = ConstraintContext(
+            graph=context_graph,
+            node_id_to_index=dict(getattr(context_graph, "_id_to_index", {})),
+            edge_index=edge_index.detach().cpu(),
+            node_sizes=node_sizes.detach().cpu() if node_sizes is not None else None,
+            direction=config.direction,
+        )
 
         def _custom_loss_fn(
             p: torch.Tensor,
@@ -3190,6 +3215,9 @@ def _layout_inner(
 
         optimizer.step()
 
+        if flex_data["hard_contain"]:
+            project_hard_contains(pos, flex_data["hard_contain"])
+
         if flex_data["hard_align_groups"] or flex_data["hard_order_pairs"]:
             _project_hard_vpsc_constraints(
                 pos,
@@ -3198,9 +3226,18 @@ def _layout_inner(
             )
 
         if flex_data["custom_projectors"]:
+            from dagua.constraints import ConstraintContext
+
+            _project_ctx = ConstraintContext(
+                graph=flex_data["context_graph"],
+                node_id_to_index=dict(getattr(flex_data["context_graph"], "_id_to_index", {})),
+                edge_index=edge_index.detach().cpu(),
+                node_sizes=node_sizes.detach().cpu() if node_sizes is not None else None,
+                direction=config.direction,
+            )
             with torch.no_grad():
                 for custom_constraint in flex_data["custom_projectors"]:
-                    custom_constraint.project(pos, None)
+                    custom_constraint.project(pos, _project_ctx)
 
         # Hard-pin projection (weight=inf pins snapped to exact positions)
         if flex_data["has_hard_pins"]:
@@ -3281,6 +3318,9 @@ def _layout_inner(
         iterations=final_proj_iters,
         layer_index=layer_index,
     )
+    if flex_data["hard_contain"]:
+        project_hard_contains(pos, flex_data["hard_contain"])
+
     if flex_data["hard_align_groups"] or flex_data["hard_order_pairs"]:
         _project_hard_vpsc_constraints(
             pos,
@@ -3288,9 +3328,18 @@ def _layout_inner(
             flex_data["hard_order_pairs"],
         )
     if flex_data["custom_projectors"]:
+        from dagua.constraints import ConstraintContext
+
+        _project_ctx = ConstraintContext(
+            graph=flex_data["context_graph"],
+            node_id_to_index=dict(getattr(flex_data["context_graph"], "_id_to_index", {})),
+            edge_index=edge_index.detach().cpu(),
+            node_sizes=node_sizes.detach().cpu() if node_sizes is not None else None,
+            direction=config.direction,
+        )
         with torch.no_grad():
             for custom_constraint in flex_data["custom_projectors"]:
-                custom_constraint.project(pos, None)
+                custom_constraint.project(pos, _project_ctx)
     if flex_data["has_hard_pins"]:
         project_hard_pins(
             pos,
@@ -3861,7 +3910,9 @@ def _selection_indices(selection: Any, num_nodes: int) -> List[int]:
         values = [int(value) for value in selection.detach().cpu().flatten().tolist()]
     elif isinstance(selection, int):
         values = [int(selection)]
-    elif isinstance(selection, (list, tuple)):
+    elif isinstance(selection, (list, tuple)) and not (
+        len(selection) == 2 and all(isinstance(item, float) for item in selection)
+    ):
         values = []
         for item in selection:
             values.extend(_selection_indices(item, num_nodes))
@@ -3888,6 +3939,30 @@ def _selection_tensor(selection: Any, num_nodes: int, device: str) -> torch.Tens
         Long tensor of valid node indices.
     """
     return torch.tensor(_selection_indices(selection, num_nodes), dtype=torch.long, device=device)
+
+
+def _selection_or_canvas_tensor(selection: Any, num_nodes: int, device: str) -> Any:
+    """Return node indices while preserving typed canvas selectors.
+
+    Parameters
+    ----------
+    selection : Any
+        Lowered node selection or canvas pseudo-element.
+    num_nodes : int
+        Number of graph nodes.
+    device : str
+        Target tensor device.
+
+    Returns
+    -------
+    Any
+        Long tensor for node selections, otherwise the canvas selector.
+    """
+    from dagua.constraints import CanvasSelector
+
+    if isinstance(selection, CanvasSelector):
+        return selection
+    return _selection_tensor(selection, num_nodes, device)
 
 
 def _project_hard_vpsc_constraints(
@@ -3969,6 +4044,8 @@ def _prepare_flex_data(
         "custom_losses": [],
         "custom_projectors": [],
         "hard_contain": [],
+        "soft_contain": [],
+        "context_graph": None,
         "flex_node_sep": None,
         "flex_node_sep_weight": 0.0,
     }
@@ -3976,12 +4053,15 @@ def _prepare_flex_data(
     flex = config.flex
     if flex is None:
         return result
+    context_graph = getattr(flex, "_constraint_context_graph", None)
+    result["context_graph"] = context_graph
 
     constraints = list(getattr(flex, "constraints", None) or [])
     if constraints:
         from dagua.constraints import (
             Align,
             Anchor,
+            Contain,
             Custom,
             Emphasize,
             Focus,
@@ -3999,33 +4079,55 @@ def _prepare_flex_data(
 
         for constraint in constraints:
             if isinstance(constraint, Pin):
+                from dagua.constraints import resolve_canvas_point
+
+                at_x, at_y = resolve_canvas_point(constraint.at)
                 for idx in _selection_indices(constraint.sel, num_nodes):
-                    has_x = constraint.x is not None
-                    has_y = constraint.y is not None
+                    target_x_value = constraint.x if constraint.x is not None else at_x
+                    target_y_value = constraint.y if constraint.y is not None else at_y
+                    has_x = target_x_value is not None
+                    has_y = target_y_value is not None
                     if not has_x and not has_y:
                         continue
                     hard = constraint.is_hard
                     weight = 0.0 if hard else float(constraint.weight)
                     pin_indices.append(idx)
-                    target_x = 0.0 if constraint.x is None else float(constraint.x)
-                    target_y = 0.0 if constraint.y is None else float(constraint.y)
+                    target_x = 0.0 if target_x_value is None else float(target_x_value)
+                    target_y = 0.0 if target_y_value is None else float(target_y_value)
                     pin_targets.append([target_x, target_y])
                     pin_weights.append([weight if has_x else 0.0, weight if has_y else 0.0])
                     soft_mask.append([has_x and not hard, has_y and not hard])
                     hard_mask.append([has_x and hard, has_y and hard])
             elif isinstance(constraint, Align):
+                from dagua.constraints import resolve_canvas_point
+
                 axis = _constraint_axis_index(constraint.axis, config.direction)
                 idx_list = []
                 for sel in tuple(constraint.sels):
                     idx_list.extend(_selection_indices(sel, num_nodes))
+                at_x, at_y = resolve_canvas_point(constraint.at)
+                at_value = at_x if axis == 0 else at_y
+                if at_value is not None and idx_list:
+                    hard = constraint.is_hard
+                    weight = 0.0 if hard else float(constraint.weight)
+                    for idx in idx_list:
+                        target = [0.0, 0.0]
+                        target[axis] = float(at_value)
+                        mask = [False, False]
+                        mask[axis] = True
+                        pin_indices.append(idx)
+                        pin_targets.append(target)
+                        pin_weights.append([weight if mask[0] else 0.0, weight if mask[1] else 0.0])
+                        soft_mask.append([mask[0] and not hard, mask[1] and not hard])
+                        hard_mask.append([mask[0] and hard, mask[1] and hard])
                 if len(idx_list) >= 2:
                     align_payload = (
                         torch.tensor(idx_list, dtype=torch.long, device=device),
                         float(constraint.weight),
                         axis,
                     )
-                    target = "hard_align_groups" if constraint.is_hard else "align_groups"
-                    result[target].append(align_payload)
+                    bucket = "hard_align_groups" if constraint.is_hard else "align_groups"
+                    result[bucket].append(align_payload)
             elif isinstance(constraint, Order):
                 axis = _constraint_axis_index(constraint.axis, config.direction)
                 gap = float(constraint.gap if constraint.gap is not None else 0.0)
@@ -4034,11 +4136,13 @@ def _prepare_flex_data(
                 ]
                 for left, right in zip(items, items[1:]):
                     order_payload = (left, right, axis, gap, float(constraint.weight))
-                    target = "hard_order_pairs" if constraint.is_hard else "order_pairs"
-                    result[target].append(order_payload)
+                    bucket = "hard_order_pairs" if constraint.is_hard else "order_pairs"
+                    result[bucket].append(order_payload)
             elif isinstance(constraint, Separate):
                 a = _selection_tensor(constraint.a, num_nodes, device)
                 b = _selection_tensor(constraint.b, num_nodes, device)
+                if a.numel() == 0 or b.numel() == 0:
+                    continue
                 gap = float(constraint.gap if constraint.gap is not None else 0.0)
                 separate_axis: Optional[int] = (
                     _constraint_axis_index(constraint.axis, config.direction)
@@ -4107,10 +4211,20 @@ def _prepare_flex_data(
                             )
                         )
             elif isinstance(constraint, Focus):
+                from dagua.constraints import resolve_canvas_point
+
+                at_x, at_y = resolve_canvas_point(constraint.at)
                 result["focus_constraints"].append(
                     (
                         _selection_tensor(constraint.sel, num_nodes, device),
-                        torch.zeros(2, dtype=torch.float32, device=device),
+                        torch.tensor(
+                            [
+                                0.0 if at_x is None else float(at_x),
+                                0.0 if at_y is None else float(at_y),
+                            ],
+                            dtype=torch.float32,
+                            device=device,
+                        ),
                         float(constraint.zoom),
                         float(constraint.weight),
                     )
@@ -4120,6 +4234,14 @@ def _prepare_flex_data(
                     result["custom_losses"].append(constraint)
                 if constraint.project_fn is not None:
                     result["custom_projectors"].append(constraint)
+            elif isinstance(constraint, Contain):
+                sel = _selection_tensor(constraint.sel, num_nodes, device)
+                within = _selection_or_canvas_tensor(constraint.within, num_nodes, device)
+                payload = (sel, within, float(constraint.padding), float(constraint.weight))
+                if constraint.is_hard:
+                    result["hard_contain"].append(payload)
+                else:
+                    result["soft_contain"].append(payload)
 
         if pin_indices:
             result["pin_indices"] = torch.tensor(pin_indices, dtype=torch.long, device=device)
@@ -4211,10 +4333,49 @@ def _resolve_config_flex(config: LayoutConfig, graph) -> LayoutConfig:
 
     resolved_flex = _resolve_graph_flex(config.flex, graph)
     if resolved_flex is config.flex:
+        setattr(config.flex, "_constraint_context_graph", graph)
         return config
     new_config = _c.copy(config)
     new_config.flex = resolved_flex
+    setattr(new_config.flex, "_constraint_context_graph", graph)
     return new_config
+
+
+def _resolve_constraint_point_selection(selection: Any, graph: Any) -> Any:
+    """Resolve node-like constraint selections while preserving canvas targets.
+
+    Parameters
+    ----------
+    selection : Any
+        User selection from a constraint object.
+    graph : Any
+        DaguaGraph-like object.
+
+    Returns
+    -------
+    Any
+        Node index list or typed canvas selector.
+    """
+    from dagua.constraints import (
+        CanvasSelector,
+        Selector,
+        resolve_edge_selection,
+        resolve_label_selection,
+        resolve_node_selection,
+    )
+
+    if isinstance(selection, CanvasSelector):
+        return selection
+    if isinstance(selection, Selector) and selection.kind in {"label", "labels"}:
+        return resolve_label_selection(selection, graph)
+    if isinstance(selection, Selector) and selection.kind == "edges":
+        edge_index = graph.edge_index
+        endpoints: List[int] = []
+        for edge_id in resolve_edge_selection(selection, graph):
+            endpoints.append(int(edge_index[0, edge_id].item()))
+            endpoints.append(int(edge_index[1, edge_id].item()))
+        return sorted(set(endpoints))
+    return resolve_node_selection(selection, graph)
 
 
 def _resolve_graph_flex(flex, graph):
@@ -4222,13 +4383,16 @@ def _resolve_graph_flex(flex, graph):
     from dagua.constraints import (
         Align,
         Anchor,
+        CanvasSelector,
         Contain,
         Emphasize,
         Focus,
         Group,
         Order,
         Pin,
+        Selector,
         Separate,
+        resolve_edge_selection,
         resolve_node_selection,
     )
     from dagua.flex import LayoutFlex
@@ -4277,8 +4441,8 @@ def _resolve_graph_flex(flex, graph):
         elif isinstance(constraint, Separate):
             resolved = dataclass_replace(
                 constraint,
-                a=resolve_node_selection(constraint.a, graph),
-                b=resolve_node_selection(constraint.b, graph),
+                a=_resolve_constraint_point_selection(constraint.a, graph),
+                b=_resolve_constraint_point_selection(constraint.b, graph),
             )
         elif isinstance(constraint, Anchor):
             mapping = {
@@ -4289,18 +4453,33 @@ def _resolve_graph_flex(flex, graph):
         elif isinstance(constraint, Focus):
             resolved = dataclass_replace(
                 constraint,
-                sel=resolve_node_selection(constraint.sel, graph),
+                sel=_resolve_constraint_point_selection(constraint.sel, graph),
             )
         elif isinstance(constraint, Contain):
             resolved = dataclass_replace(
                 constraint,
-                sel=resolve_node_selection(constraint.sel, graph),
+                sel=_resolve_constraint_point_selection(constraint.sel, graph),
+                within=(
+                    constraint.within
+                    if isinstance(constraint.within, CanvasSelector)
+                    else _resolve_constraint_point_selection(constraint.within, graph)
+                ),
             )
         elif isinstance(constraint, Emphasize):
             resolved_items = []
             for item in constraint.path_or_edges:
                 try:
-                    resolved_items.append(resolve_node_selection(item, graph))
+                    if isinstance(item, Selector) and item.kind == "edges":
+                        edge_index = graph.edge_index
+                        for edge_id in resolve_edge_selection(item, graph):
+                            resolved_items.append(
+                                [
+                                    int(edge_index[0, edge_id].item()),
+                                    int(edge_index[1, edge_id].item()),
+                                ]
+                            )
+                    else:
+                        resolved_items.append(resolve_node_selection(item, graph))
                 except Exception:
                     resolved_items.append(item)
             resolved = Emphasize(
@@ -4317,10 +4496,13 @@ def _resolve_graph_flex(flex, graph):
         changed = changed or resolved is not constraint
 
     if not changed:
+        setattr(flex, "_constraint_context_graph", graph)
         return flex
 
-    return LayoutFlex(
+    resolved_flex = LayoutFlex(
         node_sep=flex.node_sep,
         rank_sep=flex.rank_sep,
         constraints=resolved_constraints,
     )
+    setattr(resolved_flex, "_constraint_context_graph", graph)
+    return resolved_flex
