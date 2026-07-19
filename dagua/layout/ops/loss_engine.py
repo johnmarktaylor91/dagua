@@ -13,7 +13,7 @@ from typing import Any, ClassVar, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from dagua.layout.constraints import (
+from dagua.layout.losses import (
     _ClusterCache,
     alignment_loss,
     back_edge_compactness_loss,
