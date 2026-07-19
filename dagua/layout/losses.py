@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 import warnings
-from typing import Callable, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -2158,3 +2158,117 @@ def constraint_focus_loss(
     if not terms:
         return torch.zeros((), device=pos.device, dtype=pos.dtype)
     return torch.stack(terms).mean()
+
+
+def constraint_contain_loss(
+    pos: torch.Tensor,
+    contains: List[Tuple[torch.Tensor, Any, float, float]],
+) -> torch.Tensor:
+    """Penalize selected points outside their container.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    contains : list[tuple[torch.Tensor, Any, float, float]]
+        Containment payloads as selected indices, container selector, padding,
+        and finite weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized outside-distance loss.
+    """
+    terms = []
+    for indices, within, padding, weight in contains:
+        if indices.numel() == 0:
+            continue
+        xmin, ymin, xmax, ymax = _contain_bounds(pos, within, padding)
+        points = pos[indices]
+        dx = F.relu(xmin - points[:, 0]) + F.relu(points[:, 0] - xmax)
+        dy = F.relu(ymin - points[:, 1]) + F.relu(points[:, 1] - ymax)
+        terms.append(weight * (dx.square() + dy.square()).mean())
+    if not terms:
+        return torch.zeros((), device=pos.device, dtype=pos.dtype)
+    return torch.stack(terms).mean()
+
+
+def project_hard_contains(
+    pos: torch.Tensor,
+    contains: List[Tuple[torch.Tensor, Any, float, float]],
+) -> None:
+    """Clamp hard containment selections into their derived container.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Mutable position tensor with shape ``[N, 2]``.
+    contains : list[tuple[torch.Tensor, Any, float, float]]
+        Hard containment payloads.
+
+    Returns
+    -------
+    None
+        Mutates ``pos`` in place.
+    """
+    if not contains:
+        return
+    with torch.no_grad():
+        for indices, within, padding, _weight in contains:
+            if indices.numel() == 0:
+                continue
+            xmin, ymin, xmax, ymax = _contain_bounds(pos, within, padding)
+            pos[indices, 0].clamp_(xmin, xmax)
+            pos[indices, 1].clamp_(ymin, ymax)
+
+
+def _contain_bounds(
+    pos: torch.Tensor,
+    within: Any,
+    padding: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return containment bounds in layout coordinates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    within : Any
+        Canvas selector or tensor of container node indices.
+    padding : float
+        Interior padding.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ``xmin, ymin, xmax, ymax`` tensors on ``pos.device``.
+    """
+    from dagua.constraints import CanvasSelector, resolve_canvas_point
+
+    pad = torch.as_tensor(float(padding), dtype=pos.dtype, device=pos.device)
+    if isinstance(within, CanvasSelector):
+        left = resolve_canvas_point(within.edge("left"), pos)[0]
+        top = resolve_canvas_point(within.edge("top"), pos)[1]
+        right = resolve_canvas_point(within.edge("right"), pos)[0]
+        bottom = resolve_canvas_point(within.edge("bottom"), pos)[1]
+        if left is None or top is None or right is None or bottom is None:
+            raise ValueError("Canvas containment edges must resolve to concrete bounds.")
+        return (
+            torch.as_tensor(float(left), dtype=pos.dtype, device=pos.device) + pad,
+            torch.as_tensor(float(top), dtype=pos.dtype, device=pos.device) + pad,
+            torch.as_tensor(float(right), dtype=pos.dtype, device=pos.device) - pad,
+            torch.as_tensor(float(bottom), dtype=pos.dtype, device=pos.device) - pad,
+        )
+    if isinstance(within, torch.Tensor) and within.numel() > 0:
+        container = pos[within]
+        return (
+            container[:, 0].min() + pad,
+            container[:, 1].min() + pad,
+            container[:, 0].max() - pad,
+            container[:, 1].max() - pad,
+        )
+    xmin = pos[:, 0].min() + pad
+    ymin = pos[:, 1].min() + pad
+    xmax = pos[:, 0].max() - pad
+    ymax = pos[:, 1].max() - pad
+    return xmin, ymin, xmax, ymax
