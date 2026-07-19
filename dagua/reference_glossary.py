@@ -29,6 +29,7 @@ import torch
 
 import dagua as dagua_api
 from dagua import DaguaGraph, LayoutConfig
+from dagua import constraints as C
 from dagua.animation import AnimationConfig, PosterConfig, TourConfig
 from dagua.config import PARAM_REGISTRY
 from dagua.edges import place_edge_labels, route_edges
@@ -424,8 +425,10 @@ def _visual_flex(path: Path, steps: int) -> None:
         edge_opt_steps=-1,
         seed=42,
         flex=LayoutFlex(
-            pins={"in": (Flex.locked(0), Flex.locked(0))},
-            align_y=[AlignGroup(["a", "b"], weight=5.0)],
+            constraints=[
+                C.Pin("in", x=0.0, y=0.0),
+                C.Align("a", "b", axis="y", strength=5.0),
+            ],
             rank_sep=Flex.firm(80),
         ),
     )

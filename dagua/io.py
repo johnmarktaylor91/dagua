@@ -237,23 +237,6 @@ def _layout_flex_to_dict(flex) -> Dict[str, Any]:
         result["node_sep"] = {"target": flex.node_sep.target, "weight": flex.node_sep.weight}
     if flex.rank_sep is not None:
         result["rank_sep"] = {"target": flex.rank_sep.target, "weight": flex.rank_sep.weight}
-    if getattr(flex, "pins", None):
-        pins_dict = {}
-        for node_id, (fx, fy) in flex.pins.items():
-            pin_data: Dict[str, Any] = {}
-            if fx is not None:
-                pin_data["x"] = fx.target
-                pin_data["weight"] = fx.weight
-            if fy is not None:
-                pin_data["y"] = fy.target
-                if "weight" not in pin_data:
-                    pin_data["weight"] = fy.weight
-            pins_dict[str(node_id)] = pin_data
-        result["pins"] = pins_dict
-    if getattr(flex, "align_x", None):
-        result["align_x"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_x]
-    if getattr(flex, "align_y", None):
-        result["align_y"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_y]
     constraints = list(getattr(flex, "constraints", None) or [])
     if constraints:
         result["constraints"] = [constraint_to_dict(constraint) for constraint in constraints]

@@ -2026,7 +2026,7 @@ def constraint_separate_loss(
         a = pos[left].mean(dim=0)
         b = pos[right].mean(dim=0)
         if axis is None:
-            dist = (a - b).square().sum().sqrt().clamp(min=1e-6)
+            dist = (a - b).square().sum().clamp(min=1e-12).sqrt()
         else:
             dist = (a[axis] - b[axis]).abs()
         terms.append(weight * F.relu(gap - dist).square())
@@ -2067,7 +2067,7 @@ def constraint_group_loss(
 
 def constraint_anchor_loss(
     pos: torch.Tensor,
-    anchors: List[Tuple[torch.Tensor, torch.Tensor, float]],
+    anchors: List[Tuple[torch.Tensor, torch.Tensor, float, str]],
 ) -> torch.Tensor:
     """Penalize deviation from fixed external anchor coordinates.
 
@@ -2075,8 +2075,8 @@ def constraint_anchor_loss(
     ----------
     pos : torch.Tensor
         Position tensor with shape ``[N, 2]``.
-    anchors : list[tuple[torch.Tensor, torch.Tensor, float]]
-        Index tensors, target tensors, and weights.
+    anchors : list[tuple[torch.Tensor, torch.Tensor, float, str]]
+        Index tensors, target tensors, weights, and fit modes.
 
     Returns
     -------
@@ -2084,10 +2084,32 @@ def constraint_anchor_loss(
         Scalar anchor loss.
     """
     terms = []
-    for indices, targets, weight in anchors:
+    for indices, targets, weight, fit in anchors:
         if indices.numel() == 0:
             continue
-        terms.append(weight * (pos[indices] - targets).square().mean())
+        current = pos[indices]
+        targets = targets.to(device=pos.device, dtype=pos.dtype)
+        if fit == "translate":
+            fitted = targets + (
+                current.mean(dim=0, keepdim=True) - targets.mean(dim=0, keepdim=True)
+            )
+        elif fit in {"similarity", "similarity+rotation"} and indices.numel() >= 2:
+            centered_targets = targets - targets.mean(dim=0, keepdim=True)
+            centered_current = current - current.mean(dim=0, keepdim=True)
+            denom = centered_targets.square().sum().clamp(min=1e-12)
+            if fit == "similarity+rotation":
+                covariance = centered_targets.T @ centered_current
+                u_matrix, _singular, vh_matrix = torch.linalg.svd(covariance)
+                rotation = u_matrix @ vh_matrix
+                rotated_targets = centered_targets @ rotation
+                scale = (rotated_targets * centered_current).sum() / denom
+                fitted = rotated_targets * scale + current.mean(dim=0, keepdim=True)
+            else:
+                scale = (centered_targets * centered_current).sum() / denom
+                fitted = centered_targets * scale + current.mean(dim=0, keepdim=True)
+        else:
+            fitted = targets
+        terms.append(weight * (current - fitted).square().mean())
     if not terms:
         return torch.zeros((), device=pos.device, dtype=pos.dtype)
     return torch.stack(terms).mean()
@@ -2119,7 +2141,7 @@ def constraint_emphasize_loss(
         deltas = points[1:] - points[:-1]
         length_term = deltas.square().sum(dim=1).mean()
         chord = points[-1] - points[0]
-        norm = chord.square().sum().sqrt().clamp(min=1e-6)
+        norm = chord.square().sum().clamp(min=1e-12).sqrt()
         direction = chord / norm
         centered = points - points[0]
         projected = centered @ direction
@@ -2218,8 +2240,10 @@ def project_hard_contains(
             if indices.numel() == 0:
                 continue
             xmin, ymin, xmax, ymax = _contain_bounds(pos, within, padding)
-            pos[indices, 0].clamp_(xmin, xmax)
-            pos[indices, 1].clamp_(ymin, ymax)
+            clamped = pos[indices].clone()
+            clamped[:, 0].clamp_(xmin, xmax)
+            clamped[:, 1].clamp_(ymin, ymax)
+            pos[indices] = clamped
 
 
 def _contain_bounds(
@@ -2253,7 +2277,7 @@ def _contain_bounds(
         bottom = resolve_canvas_point(within.edge("bottom"), pos)[1]
         if left is None or top is None or right is None or bottom is None:
             raise ValueError("Canvas containment edges must resolve to concrete bounds.")
-        return (
+        return _normalize_contain_bounds(
             torch.as_tensor(float(left), dtype=pos.dtype, device=pos.device) + pad,
             torch.as_tensor(float(top), dtype=pos.dtype, device=pos.device) + pad,
             torch.as_tensor(float(right), dtype=pos.dtype, device=pos.device) - pad,
@@ -2261,7 +2285,7 @@ def _contain_bounds(
         )
     if isinstance(within, torch.Tensor) and within.numel() > 0:
         container = pos[within]
-        return (
+        return _normalize_contain_bounds(
             container[:, 0].min() + pad,
             container[:, 1].min() + pad,
             container[:, 0].max() - pad,
@@ -2271,4 +2295,38 @@ def _contain_bounds(
     ymin = pos[:, 1].min() + pad
     xmax = pos[:, 0].max() - pad
     ymax = pos[:, 1].max() - pad
-    return xmin, ymin, xmax, ymax
+    return _normalize_contain_bounds(xmin, ymin, xmax, ymax)
+
+
+def _normalize_contain_bounds(
+    xmin: torch.Tensor,
+    ymin: torch.Tensor,
+    xmax: torch.Tensor,
+    ymax: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return non-inverted containment bounds.
+
+    Parameters
+    ----------
+    xmin : torch.Tensor
+        Minimum x bound.
+    ymin : torch.Tensor
+        Minimum y bound.
+    xmax : torch.Tensor
+        Maximum x bound.
+    ymax : torch.Tensor
+        Maximum y bound.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        Bounds with inverted axes collapsed to their midpoint.
+    """
+    mid_x = (xmin + xmax) * 0.5
+    mid_y = (ymin + ymax) * 0.5
+    return (
+        torch.minimum(xmin, mid_x),
+        torch.minimum(ymin, mid_y),
+        torch.maximum(xmax, mid_x),
+        torch.maximum(ymax, mid_y),
+    )
