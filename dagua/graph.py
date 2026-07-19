@@ -1352,6 +1352,33 @@ class DaguaGraph:
 
         validate_eager_selection(selection, self)
 
+    def _reject_constraint_selector_kinds(
+        self,
+        verb: str,
+        selection: Any,
+        rejected: set[str],
+    ) -> None:
+        """Raise when a verb receives an unsupported selector kind.
+
+        Parameters
+        ----------
+        verb : str
+            Constraint verb name.
+        selection : Any
+            User selection.
+        rejected : set[str]
+            Selector kinds unsupported by this verb.
+
+        Returns
+        -------
+        None
+            Validation only.
+        """
+        from dagua.constraints import ConstraintTypeError, Selector
+
+        if isinstance(selection, Selector) and selection.kind in rejected:
+            raise ConstraintTypeError(f"{verb}() does not support C.{selection.kind} selections.")
+
     def pin(
         self,
         sel: Any,
@@ -1388,6 +1415,7 @@ class DaguaGraph:
         """
         from dagua.constraints import Pin
 
+        self._reject_constraint_selector_kinds("pin", sel, {"path"})
         self._validate_constraint_selection(sel)
         return self._add_constraint(
             Pin(sel=sel, x=x, y=y, at=at, frame=frame, strength=strength, name=name)
@@ -1429,6 +1457,7 @@ class DaguaGraph:
         if len(sels) == 1 and isinstance(sels[0], list):
             sels = tuple(sels[0])
         for sel in sels:
+            self._reject_constraint_selector_kinds("align", sel, {"edges", "path"})
             self._validate_constraint_selection(sel)
         return self._add_constraint(
             Align(*sels, axis=axis, at=at, spacing=spacing, strength=strength, name=name)
@@ -1465,6 +1494,7 @@ class DaguaGraph:
         from dagua.constraints import Order
 
         for item in items:
+            self._reject_constraint_selector_kinds("order", item, {"edges", "label", "labels"})
             self._validate_constraint_selection(item)
         return self._add_constraint(Order(*items, axis=axis, gap=gap, strength=strength, name=name))
 
