@@ -301,6 +301,14 @@ def _polygon_vertices(shape: str, half_size: Point) -> np.ndarray:
     numpy.ndarray
         Vertices with shape ``[N, 2]``, wound counter-clockwise.
     """
+    rounded_polygon_bases = {
+        "round_triangle": "triangle",
+        "round_diamond": "diamond",
+        "round_pentagon": "pentagon",
+        "round_hexagon": "hexagon",
+        "round_octagon": "octagon",
+    }
+    shape = rounded_polygon_bases.get(shape, shape)
     hw = float(half_size[0])
     hh = float(half_size[1])
     if shape == "diamond":
@@ -401,12 +409,12 @@ def _ray_segment_intersection(
         Ray parameter at the intersection, or ``None``.
     """
     segment = b - a
-    denominator = float(np.cross(direction, segment))
+    denominator = float(direction[0] * segment[1] - direction[1] * segment[0])
     if abs(denominator) <= FLOAT_EPSILON:
         return None
     delta = a - origin
-    t = float(np.cross(delta, segment) / denominator)
-    u = float(np.cross(delta, direction) / denominator)
+    t = float((delta[0] * segment[1] - delta[1] * segment[0]) / denominator)
+    u = float((delta[0] * direction[1] - delta[1] * direction[0]) / denominator)
     if t < -FLOAT_EPSILON or u < -FLOAT_EPSILON or u > 1.0 + FLOAT_EPSILON:
         return None
     return t

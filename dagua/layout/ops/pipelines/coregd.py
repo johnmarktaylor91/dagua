@@ -13,16 +13,41 @@ from typing import Any, Optional, Union
 import numpy as np
 import torch
 from scipy.spatial import Delaunay, QhullError
-from torch_cluster import knn
-from torch_geometric.data import Data
-from torch_geometric.nn import GATv2Conv, MessagePassing, radius_graph
-from torch_geometric.utils import get_laplacian, to_scipy_sparse_matrix, to_undirected
+
+try:
+    from torch_cluster import knn
+    from torch_geometric.data import Data
+    from torch_geometric.nn import GATv2Conv, MessagePassing, radius_graph
+    from torch_geometric.utils import get_laplacian, to_scipy_sparse_matrix, to_undirected
+
+    _PYG_AVAILABLE = True
+    _PYG_IMPORT_ERROR: Optional[ImportError] = None
+except ImportError as exc:  # PyTorch Geometric stack is an optional heavy dependency
+    # Keep ``import dagua`` working when torch-geometric / torch-cluster are absent
+    # (design principle #1: PyTorch is the only required dependency). The coregd
+    # pipeline raises a clear error at call time via ``_require_pyg()`` below.
+    _PYG_AVAILABLE = False
+    _PYG_IMPORT_ERROR = exc
+    MessagePassing = object  # type: ignore[assignment,misc]
+    knn = Data = GATv2Conv = radius_graph = None  # type: ignore[assignment]
+    get_laplacian = to_scipy_sparse_matrix = to_undirected = None  # type: ignore[assignment]
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.native_stress_ml import (
     NativeStressMLConfig,
     layout_native_stress_ml_pipeline,
 )
+
+
+def _require_pyg() -> None:
+    """Raise a clear error if the optional PyTorch Geometric stack is missing."""
+    if not _PYG_AVAILABLE:
+        raise ImportError(
+            "The 'coregd' layout pipeline requires the optional PyTorch Geometric "
+            "stack. Install it with: pip install torch-geometric torch-cluster "
+            f"(original import error: {_PYG_IMPORT_ERROR})"
+        )
+
 
 _DEFAULT_HIDDEN_DIMENSION = 64
 _DEFAULT_HIDDEN_STATE_FACTOR = 4.0
@@ -1086,6 +1111,7 @@ def layout_coregd_pipeline(
     torch.Tensor
         Position tensor with shape ``[N, 2]``.
     """
+    _require_pyg()
     del fidelity_dtype
     resolved = _resolve_coregd_config(
         config,

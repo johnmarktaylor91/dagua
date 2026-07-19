@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import torch
 
+_APPROACH_RECLIP_COSINE_THRESHOLD = math.cos(math.radians(15.0))
+
 
 @dataclass
 class BezierCurve:
@@ -1004,6 +1006,20 @@ def route_edges(
             accepted_poly = _curve_polyline_samples(curve, sample_count=_REFEREE_SAMPLES)
             accepted_bbox = _poly_bbox(accepted_poly)
 
+        if graph is not None:
+            curve = _clip_curve_terminals_to_approach(
+                curve,
+                int(s),
+                int(t),
+                x_coords,
+                y_coords,
+                widths,
+                heights,
+                graph,
+            )
+            accepted_poly = _curve_polyline_samples(curve, sample_count=_REFEREE_SAMPLES)
+            accepted_bbox = _poly_bbox(accepted_poly)
+
         routed_polylines.append(accepted_poly)
         routed_bboxes.append(accepted_bbox)
         curves.append(curve)
@@ -1105,7 +1121,16 @@ def _adjust_port_for_shape(
         )
         return float(hit[0]), float(hit[1])
 
-    if shape == "diamond":
+    rounded_polygon_bases = {
+        "round_triangle": "triangle",
+        "round_diamond": "diamond",
+        "round_pentagon": "pentagon",
+        "round_hexagon": "hexagon",
+        "round_octagon": "octagon",
+    }
+    boundary_shape = rounded_polygon_bases.get(shape, shape)
+
+    if boundary_shape == "diamond":
         # Diamond edges: 4 sides connecting top/right/bottom/left
         # Project port onto nearest diamond edge
         dx = port_x - cx
@@ -1137,7 +1162,7 @@ def _adjust_port_for_shape(
     }
     # Non-convex shapes where arrowheads can enter concavities.
     _CONCAVE_SHAPES = {"star"}
-    if shape in _POLYGON_SHAPES:
+    if boundary_shape in _POLYGON_SHAPES:
         from dagua.render.edges.intersection import ray_polygon_intersection
 
         dx = port_x - cx
@@ -1148,7 +1173,7 @@ def _adjust_port_for_shape(
         hit = ray_polygon_intersection(
             center=[cx, cy],
             half_size=[w / 2, h / 2],
-            shape=shape,
+            shape=boundary_shape,
             ray_origin=[cx, cy],
             ray_direction=[dx, dy],
         )
@@ -1165,6 +1190,183 @@ def _adjust_port_for_shape(
         return hx, hy
 
     return port_x, port_y
+
+
+def _clip_curve_terminals_to_approach(
+    curve: BezierCurve,
+    source_index: int,
+    target_index: int,
+    x_coords: Sequence[float],
+    y_coords: Sequence[float],
+    widths: Sequence[float],
+    heights: Sequence[float],
+    graph: Any,
+) -> BezierCurve:
+    """Reclip shallow terminal approaches to the actual node silhouette.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Routed cubic whose endpoints currently use direction-selected ports.
+    source_index : int
+        Source node index.
+    target_index : int
+        Target node index.
+    x_coords, y_coords : sequence[float]
+        Node-center coordinates.
+    widths, heights : sequence[float]
+        Node dimensions.
+    graph : Any
+        Graph providing effective node styles.
+
+    Returns
+    -------
+    BezierCurve
+        Curve whose mismatched terminals intersect the silhouette along the
+        local approach direction. Already-aligned terminals are unchanged.
+
+    Notes
+    -----
+    Directional ports are useful for normal layered edges, but a nearly
+    horizontal edge in a top-to-bottom graph can approach a node side while
+    retaining a top or bottom port. The angular gate preserves clean existing
+    routes exactly and only reclips visibly mismatched approaches.
+    """
+    if curve.waypoints is not None or source_index == target_index:
+        return curve
+
+    from dagua.render.edges.intersection import intersect_node_boundary
+
+    supported_shapes = {
+        "rect",
+        "roundrect",
+        "ellipse",
+        "circle",
+        "double_circle",
+        "semicircle",
+        "semicircle_up",
+        "semicircle_down",
+        "semicircle_left",
+        "semicircle_right",
+        "arrow",
+        "diamond",
+        "triangle",
+        "hexagon",
+        "pentagon",
+        "octagon",
+        "parallelogram",
+        "trapezoid",
+        "star",
+    }
+
+    source_center = (float(x_coords[source_index]), float(y_coords[source_index]))
+    target_center = (float(x_coords[target_index]), float(y_coords[target_index]))
+    source_style = graph.get_style_for_node(source_index)
+    target_style = graph.get_style_for_node(target_index)
+
+    def clipped_terminal(
+        endpoint: Tuple[float, float],
+        control: Tuple[float, float],
+        center: Tuple[float, float],
+        opposite_center: Tuple[float, float],
+        size: Tuple[float, float],
+        style: Any,
+    ) -> Tuple[float, float]:
+        """Return an approach-aligned boundary point when mismatched.
+
+        Parameters
+        ----------
+        endpoint : tuple[float, float]
+            Existing direction-selected boundary point.
+        control : tuple[float, float]
+            Adjacent cubic control point.
+        center : tuple[float, float]
+            Center of the terminal node.
+        opposite_center : tuple[float, float]
+            Center of the node at the other end of the edge.
+        size : tuple[float, float]
+            Width and height of the terminal node.
+        style : Any
+            Effective terminal-node style.
+
+        Returns
+        -------
+        tuple[float, float]
+            Existing endpoint when aligned, otherwise the reclipped point.
+        """
+        radial = (endpoint[0] - center[0], endpoint[1] - center[1])
+        approach = (control[0] - endpoint[0], control[1] - endpoint[1])
+        coarse_approach = (
+            opposite_center[0] - center[0],
+            opposite_center[1] - center[1],
+        )
+        approach_length = math.hypot(*approach)
+        if approach_length <= 1e-9 or (
+            approach[0] * coarse_approach[0] + approach[1] * coarse_approach[1] < 0.0
+        ):
+            # Overshooting cubics can put the adjacent control point on the
+            # node side of the endpoint. The center chord is the stable
+            # body-facing direction in that case.
+            approach = coarse_approach
+            approach_length = math.hypot(*approach)
+        radial_length = math.hypot(*radial)
+        if radial_length <= 1e-9 or approach_length <= 1e-9:
+            return endpoint
+        cosine = (radial[0] * approach[0] + radial[1] * approach[1]) / (
+            radial_length * approach_length
+        )
+        if cosine >= _APPROACH_RECLIP_COSINE_THRESHOLD:
+            return endpoint
+
+        shape = str(getattr(style, "shape", "rect"))
+        rounded_polygon_bases = {
+            "round_triangle": "triangle",
+            "round_diamond": "diamond",
+            "round_pentagon": "pentagon",
+            "round_hexagon": "hexagon",
+            "round_octagon": "octagon",
+        }
+        boundary_shape = rounded_polygon_bases.get(shape, shape)
+        if boundary_shape not in supported_shapes:
+            return endpoint
+        hit = intersect_node_boundary(
+            center=center,
+            half_size=(size[0] / 2.0, size[1] / 2.0),
+            shape=boundary_shape,
+            corner_radius=float(getattr(style, "corner_radius", 0.0)),
+            ray_origin=center,
+            ray_direction=approach,
+            aspect_ratio=getattr(style, "aspect_ratio", None),
+        )
+        return float(hit[0]), float(hit[1])
+
+    source = clipped_terminal(
+        curve.p0,
+        curve.cp1,
+        source_center,
+        target_center,
+        (float(widths[source_index]), float(heights[source_index])),
+        source_style,
+    )
+    target = clipped_terminal(
+        curve.p1,
+        curve.cp2,
+        target_center,
+        source_center,
+        (float(widths[target_index]), float(heights[target_index])),
+        target_style,
+    )
+    source_control = source if curve.cp1 == curve.p0 else curve.cp1
+    target_control = target if curve.cp2 == curve.p1 else curve.cp2
+    return BezierCurve(
+        p0=source,
+        cp1=source_control,
+        cp2=target_control,
+        p1=target,
+        routing=curve.routing,
+        direction=curve.direction,
+        step_fraction=curve.step_fraction,
+    )
 
 
 def _compute_curve(

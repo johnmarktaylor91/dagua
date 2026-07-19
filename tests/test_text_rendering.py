@@ -32,7 +32,12 @@ from dagua.render.text import (
     text_to_glyphs,
     underline_path,
 )
-from dagua.render.text.paths import _cached_font_metrics, _cached_glyph_data
+from dagua.render.text.paths import (
+    _cached_font_metrics,
+    _cached_glyph_data,
+    _fc_match_font_path,
+    _find_font_path,
+)
 from dagua.styles import RESOLVED_FONT, NodeStyle
 from dagua.utils import compute_node_size, measure_text
 
@@ -1252,6 +1257,87 @@ def test_cache_float_drift() -> None:
     get_font_metrics(1.00009, font_family="DejaVu Sans")
     after = _cached_font_metrics.cache_info().hits
     assert after > before
+
+
+def test_find_font_path_prefers_fontconfig_after_missing_termes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fontconfig must resolve compound Times families before matplotlib fallback."""
+    paths = importlib.import_module("dagua.render.text.paths")
+    _find_font_path.cache_clear()
+    monkeypatch.setattr(paths, "_tex_gyre_termes_font_path", lambda *_args: None)
+    monkeypatch.setattr(paths, "_fc_match_font_path", lambda *_args: "/fonts/Times.ttc")
+    monkeypatch.setattr(
+        paths,
+        "findfont",
+        lambda *_args, **_kwargs: pytest.fail("matplotlib fallback should not run"),
+    )
+
+    try:
+        assert _find_font_path("Times,serif", "regular", "normal") == "/fonts/Times.ttc"
+    finally:
+        _find_font_path.cache_clear()
+
+
+def test_fc_match_font_path_builds_normalized_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fontconfig requests must normalize weight and slant for Graphviz parity."""
+    paths = importlib.import_module("dagua.render.text.paths")
+    calls: list[list[str]] = []
+
+    class _Result:
+        """Minimal successful subprocess result for the fontconfig test."""
+
+        stdout = " /fonts/Times Bold Italic.ttc\n"
+
+    def fake_run(command: list[str], **_kwargs: Any) -> _Result:
+        """Capture the fontconfig command and return a deterministic path."""
+        calls.append(command)
+        return _Result()
+
+    _fc_match_font_path.cache_clear()
+    monkeypatch.setattr(paths.shutil, "which", lambda _command: "/usr/bin/fc-match")
+    monkeypatch.setattr(paths.subprocess, "run", fake_run)
+
+    try:
+        assert _fc_match_font_path("Times,serif", "700", "italic") == "/fonts/Times Bold Italic.ttc"
+        assert calls == [
+            [
+                "/usr/bin/fc-match",
+                "-f",
+                "%{file}",
+                "Times,serif:weight=bold:slant=italic",
+            ]
+        ]
+    finally:
+        _fc_match_font_path.cache_clear()
+
+
+def test_measure_text_uses_fontconfig_for_times_when_termes_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact measurement must use the same fontconfig face as rendering."""
+    paths = importlib.import_module("dagua.render.text.paths")
+    utils = importlib.import_module("dagua.utils")
+    matched_families: list[str] = []
+
+    def fake_fc_match(font_family: str, _font_weight: str, _font_style: str) -> str:
+        """Record the requested family and return an installed test font."""
+        matched_families.append(font_family)
+        return str(matplotlib.font_manager.findfont("DejaVu Sans"))
+
+    utils._measure_text_exact_cached.cache_clear()
+    monkeypatch.setattr(utils, "_tex_gyre_termes_font_path", lambda *_args: None)
+    monkeypatch.setattr(paths, "_fc_match_font_path", fake_fc_match)
+
+    try:
+        width, height = utils._measure_text_exact_cached(
+            "Graphviz", "Times,serif", 14.0, "regular", "normal"
+        )
+        assert width > 0.0
+        assert height >= 14.0
+        assert matched_families == ["Times,serif"]
+    finally:
+        utils._measure_text_exact_cached.cache_clear()
 
 
 def test_measure_text_multiline() -> None:

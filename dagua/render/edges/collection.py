@@ -8,13 +8,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from dagua.render.edges.arrowheads import ArrowheadResult, arrowhead_back_point, build_arrowhead
-from dagua.render.edges.dashes import DashPattern, DashSegment, dash_curve
+from dagua.render.edges.dashes import DashPattern, DashSegment, dash_curve, parse_dash_pattern
 from dagua.render.edges.geometry import (
     FLOAT_EPSILON,
     CubicBezier,
     build_arc_length_table,
     mean_curve_width,
     offset_cubic_control_points,
+    point_tangent_at_fraction,
     sample_curve,
     subcurve,
     t_at_arc_length,
@@ -161,6 +162,10 @@ class DaguaEdge:
         Head arrow spec.
     tail_arrow : str, default="none"
         Tail arrow spec.
+    source_arrow : str, default="none"
+        Cytoscape source-arrow marker at the source endpoint.
+    mid_arrow : str, default="none"
+        Cytoscape mid-target-arrow marker directed toward the target.
     arrowhead_length : float | None, default=None
         Head arrow length in data units.
     arrowhead_width : float | None, default=None
@@ -195,6 +200,16 @@ class DaguaEdge:
         Font family override.
     label_font_weight : str, default="regular"
         Font weight override.
+    label_outline_color : str, default=""
+        Edge-label halo color. Empty disables the halo.
+    label_outline_width : float, default=0.0
+        Edge-label halo width in display points.
+    line_wave : bool, default=False
+        Whether to displace the centerline sinusoidally.
+    line_wave_amplitude : float, default=0.0
+        Perpendicular wave amplitude in data units.
+    line_wave_wavelength : float, default=16.0
+        Wave wavelength measured along the curve in data units.
     group_key : tuple[int, int] | None, default=None
         Parallel-edge grouping key.
     source_node : int | None, default=None
@@ -229,6 +244,8 @@ class DaguaEdge:
     linestyle: DashPattern = "solid"
     arrowhead: str = "normal"
     tail_arrow: str = "none"
+    source_arrow: str = "none"
+    mid_arrow: str = "none"
     arrowhead_length: Optional[float] = None
     arrowhead_width: Optional[float] = None
     tail_arrow_length: Optional[float] = None
@@ -246,6 +263,11 @@ class DaguaEdge:
     label_background: str = "#FAFAFA"
     label_font_family: str = ""
     label_font_weight: str = "regular"
+    label_outline_color: str = ""
+    label_outline_width: float = 0.0
+    line_wave: bool = False
+    line_wave_amplitude: float = 0.0
+    line_wave_wavelength: float = 16.0
     group_key: Optional[Tuple[int, int]] = None
     source_node: Optional[int] = None
     target_node: Optional[int] = None
@@ -365,6 +387,8 @@ class PreparedEdge:
     body_curve: Optional[CubicBezier]
     head_result: Optional[ArrowheadResult]
     tail_result: Optional[ArrowheadResult]
+    source_result: Optional[ArrowheadResult]
+    mid_result: Optional[ArrowheadResult]
 
 
 def choose_rendering_tier(num_edges: int) -> RenderTier:
@@ -441,6 +465,226 @@ def _curve_length(curve: CubicBezier) -> float:
     return build_arc_length_table(curve).total_length
 
 
+def _displaced_wave_point(
+    curve: CubicBezier,
+    fraction: float,
+    amplitude: float,
+    wavelength: float,
+) -> np.ndarray:
+    """Evaluate one point on a sinusoidally displaced curve.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Undistorted edge centerline.
+    fraction : float
+        Arc-length fraction on ``[0, 1]``.
+    amplitude : float
+        Perpendicular sinusoid amplitude in data units.
+    wavelength : float
+        Sinusoid wavelength along the curve in data units.
+
+    Returns
+    -------
+    numpy.ndarray
+        Displaced point with shape ``[2]``.
+    """
+    curve_length = _curve_length(curve)
+    point, tangent, _ = point_tangent_at_fraction(curve, fraction)
+    tangent_length = vector_norm(tangent)
+    if tangent_length <= FLOAT_EPSILON:
+        tangent = curve.p1 - curve.p0
+        tangent_length = vector_norm(tangent)
+    if tangent_length <= FLOAT_EPSILON:
+        normal = np.array([0.0, 1.0], dtype=np.float64)
+    else:
+        normal = np.array([-float(tangent[1]), float(tangent[0])], dtype=np.float64)
+        normal /= tangent_length
+    safe_wavelength = max(float(wavelength), FLOAT_EPSILON)
+    cycle_count = max(int(round(curve_length / safe_wavelength)), 1)
+    # Whole cycles keep both terminals seated exactly on their node boundaries
+    # while preserving the requested wavelength as closely as the finite edge
+    # length permits.
+    phase = 2.0 * np.pi * cycle_count * fraction
+    return np.asarray(point, dtype=np.float64) + normal * float(amplitude) * np.sin(phase)
+
+
+def _wave_point_tangent(
+    curve: CubicBezier,
+    fraction: float,
+    amplitude: float,
+    wavelength: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return a point and forward tangent on a sinusoidally displaced curve.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Undistorted edge centerline.
+    fraction : float
+        Arc-length fraction on ``[0, 1]``.
+    amplitude : float
+        Perpendicular sinusoid amplitude in data units.
+    wavelength : float
+        Sinusoid wavelength along the curve in data units.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        Wavy point and forward tangent, each with shape ``[2]``.
+    """
+    curve_length = _curve_length(curve)
+
+    clamped_fraction = min(max(float(fraction), 0.0), 1.0)
+    delta = min(1e-3, 0.25 / max(curve_length, 1.0))
+    lower = max(0.0, clamped_fraction - delta)
+    upper = min(1.0, clamped_fraction + delta)
+    point = _displaced_wave_point(curve, clamped_fraction, amplitude, wavelength)
+    tangent = _displaced_wave_point(curve, upper, amplitude, wavelength) - _displaced_wave_point(
+        curve, lower, amplitude, wavelength
+    )
+    if vector_norm(tangent) <= FLOAT_EPSILON:
+        _base_point, tangent, _t = point_tangent_at_fraction(curve, clamped_fraction)
+    return point, np.asarray(tangent, dtype=np.float64)
+
+
+def sample_wavy_curve(
+    curve: CubicBezier,
+    amplitude: float,
+    wavelength: float,
+) -> np.ndarray:
+    """Sample a sinusoid displaced perpendicular to a cubic edge path.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Undistorted edge centerline.
+    amplitude : float
+        Perpendicular sinusoid amplitude in data units.
+    wavelength : float
+        Sinusoid wavelength along the curve in data units.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sampled wavy centerline with shape ``[N, 2]``.
+    """
+    curve_length = _curve_length(curve)
+    safe_wavelength = max(float(wavelength), FLOAT_EPSILON)
+    cycle_count = curve_length / safe_wavelength
+    sample_count = min(max(int(np.ceil(cycle_count * 16.0)) + 1, 48), 2048)
+    return np.vstack(
+        [
+            _wave_point_tangent(curve, fraction, amplitude, safe_wavelength)[0]
+            for fraction in np.linspace(0.0, 1.0, sample_count)
+        ]
+    )
+
+
+def _point_at_polyline_distance(
+    points: np.ndarray, cumulative: np.ndarray, distance: float
+) -> np.ndarray:
+    """Interpolate a point at a distance along a sampled polyline.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Polyline vertices with shape ``[N, 2]``.
+    cumulative : numpy.ndarray
+        Cumulative arc distances with shape ``[N]``.
+    distance : float
+        Requested distance along the polyline.
+
+    Returns
+    -------
+    numpy.ndarray
+        Interpolated point with shape ``[2]``.
+    """
+    clamped = min(max(float(distance), 0.0), float(cumulative[-1]))
+    index = int(np.searchsorted(cumulative, clamped, side="right") - 1)
+    index = min(max(index, 0), len(points) - 2)
+    span = float(cumulative[index + 1] - cumulative[index])
+    if span <= FLOAT_EPSILON:
+        return np.asarray(points[index], dtype=np.float64)
+    ratio = (clamped - float(cumulative[index])) / span
+    return points[index] + (points[index + 1] - points[index]) * ratio
+
+
+def _dash_polyline(points: np.ndarray, pattern: DashPattern, width: float) -> List[np.ndarray]:
+    """Split a sampled polyline into visible dash polylines.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Polyline vertices with shape ``[N, 2]``.
+    pattern : str | Sequence[float]
+        Edge dash pattern.
+    width : float
+        Render width used to scale named patterns.
+
+    Returns
+    -------
+    list[numpy.ndarray]
+        Visible polyline pieces, each with shape ``[M, 2]``.
+    """
+    resolved = parse_dash_pattern(pattern, width)
+    if not resolved:
+        return [points]
+    lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    cumulative = np.concatenate([np.array([0.0]), np.cumsum(lengths)])
+    total_length = float(cumulative[-1])
+    visible: List[np.ndarray] = []
+    cursor = 0.0
+    pattern_index = 0
+    while cursor < total_length - FLOAT_EPSILON:
+        stop = min(cursor + resolved[pattern_index % len(resolved)], total_length)
+        if pattern_index % 2 == 0 and stop > cursor:
+            interior = points[(cumulative > cursor) & (cumulative < stop)]
+            visible.append(
+                np.vstack(
+                    [
+                        _point_at_polyline_distance(points, cumulative, cursor),
+                        interior,
+                        _point_at_polyline_distance(points, cumulative, stop),
+                    ]
+                )
+            )
+        cursor = stop
+        pattern_index += 1
+    return visible
+
+
+def _polyline_ribbon_path(points: np.ndarray, width: float) -> Any:
+    """Build a closed constant-width ribbon around a sampled polyline.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Centerline vertices with shape ``[N, 2]``.
+    width : float
+        Full ribbon width in data units.
+
+    Returns
+    -------
+    Any
+        Closed matplotlib path around the polyline.
+    """
+    from matplotlib.path import Path
+
+    tangents = np.gradient(points, axis=0)
+    normals = np.column_stack((-tangents[:, 1], tangents[:, 0]))
+    magnitudes = np.linalg.norm(normals, axis=1)
+    valid = magnitudes > FLOAT_EPSILON
+    normals[valid] /= magnitudes[valid, None]
+    normals[~valid] = np.array([0.0, 1.0])
+    offset = normals * (float(width) * 0.5)
+    upper = points + offset
+    lower = points - offset
+    vertices = np.vstack([upper, lower[::-1], upper[0]])
+    codes = [Path.MOVETO] + [Path.LINETO] * (vertices.shape[0] - 2) + [Path.CLOSEPOLY]
+    return Path(vertices, codes)
+
+
 def _is_degenerate_curve(curve: CubicBezier) -> bool:
     """Return whether a curve has no visible span.
 
@@ -474,6 +718,7 @@ def _coincident_endpoint_loop(edge: DaguaEdge) -> CubicBezier:
     terminal_extent = max(
         edge.resolved_arrow_length() if edge.arrowhead != "none" else 0.0,
         edge.resolved_tail_arrow_length() if edge.tail_arrow != "none" else 0.0,
+        edge.resolved_tail_arrow_length() if edge.source_arrow != "none" else 0.0,
     )
     loop_radius = max(
         ZERO_LENGTH_LOOP_FLOOR,
@@ -687,6 +932,8 @@ def _label_margin_fraction(edge: DaguaEdge, curve_length: float) -> float:
     if edge.arrowhead != "none":
         terminal_extent = max(terminal_extent, edge.resolved_arrow_length())
     if edge.tail_arrow != "none":
+        terminal_extent = max(terminal_extent, edge.resolved_tail_arrow_length())
+    if edge.source_arrow != "none":
         terminal_extent = max(terminal_extent, edge.resolved_tail_arrow_length())
     if terminal_extent <= FLOAT_EPSILON:
         return LABEL_TERMINAL_MARGIN_FLOOR
@@ -1128,7 +1375,13 @@ def _apply_terminal_density_rules(edges: Sequence[DaguaEdge]) -> List[DaguaEdge]
 
 def _trimmed_body_curve(
     edge: DaguaEdge, curve: CubicBezier
-) -> Tuple[Optional[CubicBezier], Optional[ArrowheadResult], Optional[ArrowheadResult]]:
+) -> Tuple[
+    Optional[CubicBezier],
+    Optional[ArrowheadResult],
+    Optional[ArrowheadResult],
+    Optional[ArrowheadResult],
+    Optional[ArrowheadResult],
+]:
     """Trim a centerline to leave room for arrowheads.
 
     Parameters
@@ -1140,17 +1393,37 @@ def _trimmed_body_curve(
 
     Returns
     -------
-    tuple[CubicBezier | None, ArrowheadResult | None, ArrowheadResult | None]
-        Trimmed body curve, head result, and tail result.
+    tuple[CubicBezier | None, ArrowheadResult | None, ArrowheadResult | None,
+    ArrowheadResult | None, ArrowheadResult | None]
+        Trimmed body curve plus target, tail, source, and midpoint markers.
     """
     head_result: Optional[ArrowheadResult] = None
     tail_result: Optional[ArrowheadResult] = None
+    source_result: Optional[ArrowheadResult] = None
+    mid_result: Optional[ArrowheadResult] = None
     body_curve = edge.body_curve or curve
     table = build_arc_length_table(body_curve)
     has_head = edge.arrowhead != "none"
-    has_tail = edge.tail_arrow != "none"
-    has_both_terminals = has_head and has_tail
+    has_source = edge.source_arrow != "none"
+    # Cytoscape's source marker and Graphviz's legacy tail marker share the
+    # same terminal. The explicitly authored source marker takes precedence
+    # so two different primitives never paint on top of one another.
+    has_tail = edge.tail_arrow != "none" and not has_source
+    has_both_terminals = has_head and (has_tail or has_source)
     render_width = _edge_render_width(edge)
+
+    if edge.line_wave:
+        head_tip, head_forward_tangent = _wave_point_tangent(
+            curve, 1.0, edge.line_wave_amplitude, edge.line_wave_wavelength
+        )
+        source_tip, source_forward_tangent = _wave_point_tangent(
+            curve, 0.0, edge.line_wave_amplitude, edge.line_wave_wavelength
+        )
+    else:
+        head_tip = curve.p1
+        head_forward_tangent = -_head_body_direction(curve)
+        source_tip = curve.p0
+        source_forward_tangent = _tail_body_direction(curve)
 
     if has_head:
         head_length, head_width = _terminal_dimensions(
@@ -1161,8 +1434,8 @@ def _trimmed_body_curve(
         )
         head_result = build_arrowhead(
             edge.arrowhead,
-            tip=curve.p1,
-            tangent=_head_body_direction(curve),
+            tip=head_tip,
+            tangent=-head_forward_tangent,
             length=head_length,
             width=head_width,
             body_width=render_width,
@@ -1177,10 +1450,42 @@ def _trimmed_body_curve(
         )
         tail_result = build_arrowhead(
             edge.tail_arrow,
-            tip=curve.p0,
-            tangent=_tail_body_direction(curve),
+            tip=source_tip,
+            tangent=source_forward_tangent,
             length=tail_length,
             width=tail_width,
+            body_width=render_width,
+            fill_mode=edge.arrow_fill,
+        )
+    if has_source:
+        source_length, source_width = _terminal_dimensions(
+            edge,
+            curve_length=table.total_length,
+            terminal="tail",
+            has_both_terminals=has_both_terminals,
+        )
+        source_result = build_arrowhead(
+            edge.source_arrow,
+            tip=source_tip,
+            tangent=source_forward_tangent,
+            length=source_length,
+            width=source_width,
+            body_width=render_width,
+            fill_mode=edge.arrow_fill,
+        )
+    if edge.mid_arrow != "none":
+        if edge.line_wave:
+            mid_tip, mid_forward_tangent = _wave_point_tangent(
+                curve, 0.5, edge.line_wave_amplitude, edge.line_wave_wavelength
+            )
+        else:
+            mid_tip, mid_forward_tangent, _mid_t = point_tangent_at_fraction(curve, 0.5)
+        mid_result = build_arrowhead(
+            edge.mid_arrow,
+            tip=mid_tip,
+            tangent=-mid_forward_tangent,
+            length=edge.resolved_arrow_length(),
+            width=edge.resolved_arrow_width(),
             body_width=render_width,
             fill_mode=edge.arrow_fill,
         )
@@ -1192,6 +1497,11 @@ def _trimmed_body_curve(
             start_trim = min(
                 vector_norm(arrowhead_back_point(tail_result) - curve.p0), table.total_length
             )
+    if source_result is not None and edge.body_clip_terminal not in {"tail", "both"}:
+        start_trim = max(
+            start_trim,
+            min(vector_norm(arrowhead_back_point(source_result) - curve.p0), table.total_length),
+        )
     if head_result is not None and edge.body_clip_terminal not in {"head", "both"}:
         end_trim = max(
             table.total_length - vector_norm(arrowhead_back_point(head_result) - body_curve.p1),
@@ -1199,7 +1509,7 @@ def _trimmed_body_curve(
         )
 
     if end_trim - start_trim <= render_width:
-        return None, head_result, tail_result
+        return None, head_result, tail_result, source_result, mid_result
 
     start_t = t_at_arc_length(table, start_trim)
     end_t = t_at_arc_length(table, end_trim)
@@ -1221,7 +1531,15 @@ def _trimmed_body_curve(
             trim_t=start_t,
             stroke_width_scale=tail_result.stroke_width_scale,
         )
-    return trimmed, head_result, tail_result
+    if source_result is not None:
+        source_result = ArrowheadResult(
+            filled_paths=source_result.filled_paths,
+            stroked_paths=source_result.stroked_paths,
+            trim_contour=source_result.trim_contour,
+            trim_t=start_t,
+            stroke_width_scale=source_result.stroke_width_scale,
+        )
+    return trimmed, head_result, tail_result, source_result, mid_result
 
 
 def _group_edges(edges: Sequence[DaguaEdge]) -> Dict[Tuple[int, int], List[DaguaEdge]]:
@@ -1339,9 +1657,13 @@ class DaguaEdgeCollection:
                 body_curve=body_curve,
                 head_result=head_result,
                 tail_result=tail_result,
+                source_result=source_result,
+                mid_result=mid_result,
             )
             for edge in self.edges
-            for body_curve, head_result, tail_result in [_trimmed_body_curve(edge, edge.curve)]
+            for body_curve, head_result, tail_result, source_result, mid_result in [
+                _trimmed_body_curve(edge, edge.curve)
+            ]
         ]
 
     def render(
@@ -1407,6 +1729,24 @@ class DaguaEdgeCollection:
                 continue
             edge = prepared.edge
             render_width = _edge_render_width(edge)
+            if edge.line_wave:
+                wave_points = sample_wavy_curve(
+                    prepared.body_curve,
+                    edge.line_wave_amplitude,
+                    edge.line_wave_wavelength,
+                )
+                wave_segments = _dash_polyline(wave_points, edge.linestyle, render_width)
+                for wave_segment in wave_segments:
+                    if self.tier in {"lines", "bundled"}:
+                        line_segments.append(wave_segment)
+                        line_widths.append(edge.stroke_width)
+                        line_colors.append(to_rgba(edge.color, edge.alpha))
+                    else:
+                        body_paths.append(
+                            PathPatch(_polyline_ribbon_path(wave_segment, render_width))
+                        )
+                        body_colors.append(to_rgba(edge.color, edge.alpha))
+                continue
             if edge.uses_taper():
                 body_paths.append(
                     PathPatch(
@@ -1517,13 +1857,21 @@ class DaguaEdgeCollection:
 
         for prepared in self.prepared_edges:
             edge = prepared.edge
-            arrow_color = edge.arrow_color or edge.color
             # Boost arrowhead alpha at low opacity so heads remain readable
             # (matches matplotlib behavior where arrowheads stay more opaque)
             head_alpha = min(edge.alpha + 0.15, 1.0) if edge.alpha < 0.5 else edge.alpha
-            for result in (prepared.head_result, prepared.tail_result):
+            for result, marker in (
+                (prepared.head_result, edge.arrowhead),
+                (prepared.tail_result, edge.tail_arrow),
+                (prepared.source_result, edge.source_arrow),
+                (prepared.mid_result, edge.mid_arrow),
+            ):
                 if result is None:
                     continue
+                # Cross markers are line-terminal decorations, so their stroke
+                # follows the edge body rather than becoming an independently
+                # colored glyph over the connected node.
+                arrow_color = edge.color if marker == "cross" else edge.arrow_color or edge.color
                 for path in result.filled_paths:
                     filled_patches.append(PathPatch(path))
                     filled_colors.append(to_rgba(arrow_color, head_alpha))
@@ -1577,10 +1925,27 @@ class DaguaEdgeCollection:
             curve_length = _curve_length(reference_curve)
             label_margin = _label_margin_fraction(edge, curve_length)
             label_position = min(max(edge.label_position, label_margin), 1.0 - label_margin)
+            label_curve = reference_curve
+            resolved_label_position = label_position
+            if edge.line_wave:
+                wave_point, wave_tangent = _wave_point_tangent(
+                    reference_curve,
+                    label_position,
+                    edge.line_wave_amplitude,
+                    edge.line_wave_wavelength,
+                )
+                tangent_unit = wave_tangent / max(vector_norm(wave_tangent), FLOAT_EPSILON)
+                label_curve = CubicBezier.from_points(
+                    wave_point - tangent_unit,
+                    wave_point - tangent_unit * 0.5,
+                    wave_point + tangent_unit * 0.5,
+                    wave_point + tangent_unit,
+                )
+                resolved_label_position = 0.5
             placements.append(
                 place_edge_label(
-                    reference_curve,
-                    label_position=label_position,
+                    label_curve,
+                    label_position=resolved_label_position,
                     label_offset=_label_offset(edge),
                     label_rotate=edge.label_rotate,
                     label_side=edge.label_side,
@@ -1633,6 +1998,9 @@ class DaguaEdgeCollection:
                     font_family=edge.label_font_family,
                     font_weight=edge.label_font_weight,
                     font_color=edge.label_font_color,
+                    outline=bool(edge.label_outline_color and edge.label_outline_width > 0.0),
+                    outline_color=edge.label_outline_color or "#FFFFFF",
+                    outline_width=edge.label_outline_width,
                     ha="center",
                     va="center",
                     rotation=placement.angle_degrees if edge.label_rotate else 0.0,

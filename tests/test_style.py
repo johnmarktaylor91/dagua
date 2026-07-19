@@ -22,7 +22,36 @@ from dagua.styles import (
     NodeStyle,
     Theme,
     darken_hex,
+    resolve_color_scheme,
 )
+
+
+def test_graphviz_colorscheme_resolves_one_based_brewer_indices() -> None:
+    """Resolve indexed node and edge colors through their selected schemes.
+
+    Returns
+    -------
+    None
+        The standard ColorBrewer values are asserted in place.
+    """
+
+    assert resolve_color_scheme("7", "oranges9") == "#d94801"
+    assert NodeStyle(color_scheme="oranges9", fill="7").fill == "#d94801"
+    assert EdgeStyle(color_scheme="blues9", color="9").color == "#08306b"
+
+
+def test_graphviz_colorscheme_leaves_named_and_invalid_colors_unchanged() -> None:
+    """Preserve ordinary colors and unsupported indices without coercion.
+
+    Returns
+    -------
+    None
+        Non-indexed fallback semantics are asserted in place.
+    """
+
+    assert resolve_color_scheme("red", "oranges9") == "red"
+    assert resolve_color_scheme("10", "oranges9") == "10"
+    assert resolve_color_scheme("7", "unknown9") == "7"
 
 
 @pytest.mark.smoke
@@ -62,6 +91,55 @@ class TestNodeStyleNewFields:
             "semicircle_left",
             "semicircle_right",
         }.issubset(set(NODE_SHAPE_NAMES))
+
+    def test_cytoscape_node_cosmetic_defaults(self) -> None:
+        """Verify Cytoscape-compatible cosmetics remain opt-in by default.
+
+        Returns
+        -------
+        None
+            This test asserts the public ``NodeStyle`` defaults.
+        """
+
+        style = NodeStyle()
+
+        assert style.fill_opacity == 1.0
+        assert style.text_opacity == 1.0
+        assert style.outline_color == ""
+        assert style.outline_width == 0.0
+        assert style.outline_offset == 0.0
+        assert style.outline_style == "solid"
+        assert style.text_shadow_color == ""
+        assert style.text_shadow_offset == (0.0, 0.0)
+        assert style.text_shadow_blur == 0.0
+
+    def test_shape_name_registry_includes_rounded_polygons(self) -> None:
+        """Verify all Cytoscape rounded-polygon names are public.
+
+        Returns
+        -------
+        None
+            This test asserts the node-shape registry contents.
+        """
+
+        assert {
+            "round_triangle",
+            "round_diamond",
+            "round_pentagon",
+            "round_hexagon",
+            "round_octagon",
+        }.issubset(set(NODE_SHAPE_NAMES))
+
+    def test_shape_name_registry_includes_custom_polygon(self) -> None:
+        """Expose the Cytoscape custom polygon through the public registry.
+
+        Returns
+        -------
+        None
+            The custom polygon name is asserted in place.
+        """
+
+        assert "polygon" in NODE_SHAPE_NAMES
 
 
 @pytest.mark.smoke
@@ -300,15 +378,16 @@ def test_graphviz_strict_theme_loads() -> None:
     assert back_edge_style.label_font_size == pytest.approx(14.0)
     assert back_edge_style.curvature == pytest.approx(0.2)
 
-    assert theme.cluster_style.fill == "#FFFFFF"
+    assert theme.cluster_style.fill == ""  # graphviz clusters default to no fill (parity-verified)
     assert theme.cluster_style.stroke == "#000000"
     assert theme.cluster_style.stroke_width == pytest.approx(1.0)
     assert theme.cluster_style.font_size == 14.0
     assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "Times,serif"
     assert theme.cluster_style.label_position == "top-center"
-    assert theme.cluster_style.label_background == "@background"
-    assert theme.cluster_style.label_background_opacity == pytest.approx(1.0)
+    # FLAG: verify cluster label background against Graphviz.
+    assert theme.cluster_style.label_background == ""
+    assert theme.cluster_style.label_background_opacity == pytest.approx(0.0)
     assert theme.cluster_style.label_background_padding == (6.0, 4.0)
     assert theme.cluster_style.opacity == pytest.approx(1.0)
     assert theme.cluster_style.fill_opacity == pytest.approx(0.0)

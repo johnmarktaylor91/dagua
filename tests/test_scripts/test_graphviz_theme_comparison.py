@@ -174,19 +174,70 @@ def test_registry_arrow_types_replaces_hard_coded_tuple() -> None:
     assert not hasattr(graphviz_theme_comparison, "ARROW_TYPES")
 
 
-def test_shape_atlas_covers_supported_gap_and_waived_buckets() -> None:
-    """The shape atlas should render supported, gap, and waived-sample buckets."""
+def test_shape_atlas_covers_all_supported_shapes_without_placeholders() -> None:
+    """The shape atlas should render every implemented shape directly."""
 
     graph, title = graphviz_theme_comparison._make_shape_atlas()
 
     assert title == "Shape Atlas"
     labels = graph.node_labels
     assert any(label == "ellipse" for label in labels)
-    assert any(label.startswith("GAP: ") for label in labels)
+    assert "promoter" in labels
+    assert "invtrapezium" in labels
+    assert not any(label.startswith("GAP: ") for label in labels)
     gap_labels = {label.removeprefix("GAP: ") for label in labels if label.startswith("GAP: ")}
     assert gap_labels == set(graphviz_theme_comparison.GV_SHAPE_GAP_COMMON) | set(
         graphviz_theme_comparison.GV_SHAPE_WAIVED_SAMPLE
     )
+
+
+def test_fill_atlas_covers_graphviz_fill_variants_and_dot_declarations() -> None:
+    """The fill atlas should declare every supported Graphviz fill mechanism."""
+
+    graph, title = graphviz_theme_comparison._make_fill_atlas()
+    dot_source = graphviz_theme_comparison.graph_to_dot(graph)
+
+    assert title == "Fill Pattern Atlas"
+    assert graph.num_nodes == 13
+    for angle in (0, 45, 90, 135, 270):
+        assert f"gradientangle={angle}" in dot_source
+    assert "style=radial" in dot_source
+    assert "style=striped" in dot_source
+    assert "style=wedged" in dot_source
+    assert "shape=circle" in dot_source
+    assert 'fillcolor="#F28E2B;0.2:#4E79A7;0.3:#59A14F;0.5"' in dot_source
+
+
+def test_compose_stress_stacks_cosmetics_and_nested_structures() -> None:
+    """The composition panel should combine cosmetics rather than isolate them."""
+
+    graph, title = graphviz_theme_comparison._make_compose_stress()
+
+    assert title == "Compose Stress"
+    assert graph.num_nodes == 6
+    assert len(graph.cluster_labels) == 3
+    assert len(graph.cluster_parents) == 2
+    assert all(style is not None and style.border_count == 2 for style in graph.node_styles)
+    assert {style.fill_pattern for style in graph.node_styles if style is not None} == {
+        "gradient",
+        "striped",
+        "pie",
+    }
+    assert any(source == target for source, target in graph.edge_index.T.tolist())
+    assert any(
+        source > target for source, target in graph.edge_index.T.tolist() if source != target
+    )
+
+
+def test_compose_stress_dot_preserves_explicit_pattern_styles() -> None:
+    """Explicit Graphviz striped and wedged styles must survive style synthesis."""
+
+    graph, _ = graphviz_theme_comparison._make_compose_stress()
+    dot_source = graphviz_theme_comparison.graph_to_dot(graph)
+
+    assert "style=striped" in dot_source
+    assert "style=wedged" in dot_source
+    assert "peripheries=2" in dot_source
 
 
 def test_spline_stress_scene_has_back_edges_flat_edge_and_self_loops() -> None:

@@ -96,11 +96,11 @@ def _line_intersection(
         Intersection point, or ``None`` for nearly parallel lines.
     """
 
-    denominator = float(np.cross(direction_a, direction_b))
+    denominator = float(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
     if abs(denominator) <= FLOAT_EPSILON:
         return None
     delta = point_b - point_a
-    scale = float(np.cross(delta, direction_b) / denominator)
+    scale = float((delta[0] * direction_b[1] - delta[1] * direction_b[0]) / denominator)
     return point_a + direction_a * scale
 
 
@@ -272,6 +272,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             shape=spec.shape,
             corner_radius=add_corner_radius(spec.corner_radius, -inset),
             aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
         )
         return build_shape_path(inner_spec)
     if spec.shape in {
@@ -292,6 +293,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             shape=spec.shape,
             corner_radius=spec.corner_radius,
             aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
         )
         return build_shape_path(inner_spec)
     try:
@@ -307,6 +309,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             shape=spec.shape,
             corner_radius=spec.corner_radius,
             aspect_ratio=spec.aspect_ratio,
+            polygon_points=spec.polygon_points,
         )
         return build_shape_path(inner_spec)
     if spec.shape == "star":
