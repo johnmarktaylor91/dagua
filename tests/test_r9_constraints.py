@@ -146,3 +146,13 @@ def test_strict_constraint_policy_raises_for_hard_violation() -> None:
 
     with pytest.raises(ConstraintConflictError):
         dagua.layout(graph, LayoutConfig(steps=1, device="cpu", constraint_policy="strict"))
+
+
+def test_constraints_polish_explicit_pipeline_algorithm() -> None:
+    """R9 constraints apply after explicit non-default pipeline algorithms."""
+    graph = _tiny_graph()
+    graph.pin("a", x=123.0, y=-45.0)
+
+    pos = dagua.layout(graph, LayoutConfig(algorithm="fr", steps=2, device="cpu"))
+
+    assert torch.allclose(pos[0], torch.tensor([123.0, -45.0]), atol=0.0)
