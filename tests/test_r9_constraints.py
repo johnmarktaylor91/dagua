@@ -16,7 +16,11 @@ from dagua.constraints import (
     resolve_edge_selection,
     resolve_node_selection,
 )
-from dagua.layout.losses import constraint_emphasize_loss, constraint_separate_loss
+from dagua.layout.losses import (
+    constraint_anchor_loss,
+    constraint_emphasize_loss,
+    constraint_separate_loss,
+)
 
 
 def _tiny_graph() -> DaguaGraph:
@@ -334,11 +338,25 @@ def test_constraint_losses_have_finite_gradients_at_coincident_points() -> None:
 def test_anchor_similarity_preserves_shape_and_fixed_anchor_is_exact() -> None:
     """Default anchors fit by similarity while fixed anchors remain absolute."""
     graph = _tiny_graph()
+    reference = torch.tensor([[-74.0, 40.7], [-87.6, 41.9], [-122.4, 37.8]])
     graph.anchor({"a": (-74.0, 40.7), "b": (-87.6, 41.9), "c": (-122.4, 37.8)})
     pos = dagua.layout(graph, LayoutConfig(algorithm="fr", steps=10, device="cpu"))
 
     assert torch.isfinite(pos).all()
     assert float(torch.pdist(pos).max().item()) > 0.0
+    indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    translated_scaled = reference * 3.0 + torch.tensor([250.0, -80.0])
+    similarity_loss = constraint_anchor_loss(
+        translated_scaled,
+        [(indices, reference, 1.0, "similarity")],
+    )
+    raw_loss = constraint_anchor_loss(
+        translated_scaled,
+        [(indices, reference, 1.0, "fixed")],
+    )
+
+    assert similarity_loss.item() == pytest.approx(0.0, abs=1.0e-10)
+    assert raw_loss.item() > 1.0
 
     fixed = _tiny_graph()
     fixed.anchor({"a": (7.0, 8.0)}, fit="fixed", strength="hard")

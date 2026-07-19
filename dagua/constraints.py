@@ -1744,15 +1744,15 @@ def _pin_residual(constraint: Pin, pos: torch.Tensor, graph: Any) -> Tuple[float
                 residuals.append(abs(float(label_y) - float(target_y)))
         return (max(residuals, default=0.0), len(owner_indices))
     indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
-    residuals: List[float] = []
+    node_residuals: List[float] = []
     for index in indices:
         target_x = constraint.x if constraint.x is not None else at_x
         target_y = constraint.y if constraint.y is not None else at_y
         if target_x is not None:
-            residuals.append(abs(float(pos[index, 0].item()) - float(target_x)))
+            node_residuals.append(abs(float(pos[index, 0].item()) - float(target_x)))
         if target_y is not None:
-            residuals.append(abs(float(pos[index, 1].item()) - float(target_y)))
-    return (max(residuals, default=0.0), len(indices))
+            node_residuals.append(abs(float(pos[index, 1].item()) - float(target_y)))
+    return (max(node_residuals, default=0.0), len(indices))
 
 
 def _align_residual(
