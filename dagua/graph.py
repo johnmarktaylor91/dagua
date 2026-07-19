@@ -1314,6 +1314,7 @@ class DaguaGraph:
             self.flex.constraints = []
         if not isinstance(self.flex.constraints, ConstraintSet):
             self.flex.constraints = ConstraintSet(list(self.flex.constraints))
+        self.flex.constraints._owner_graph = self
         return self.flex.constraints
 
     def _add_constraint(self, constraint: Any) -> Any:

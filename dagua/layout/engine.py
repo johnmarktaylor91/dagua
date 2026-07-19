@@ -1059,40 +1059,10 @@ def _update_graph_constraint_report(graph: Any, pos: torch.Tensor, config: Layou
     constraints = list(getattr(graph_flex, "constraints", None) or [])
     if not constraints:
         return
-    from dagua.constraints import ConstraintReport, ConstraintResidual, Pin, resolve_node_selection
-
-    rows = []
-    for constraint in constraints:
-        residual = 0.0
-        resolved_count = 0
-        if isinstance(constraint, Pin):
-            try:
-                indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
-            except Exception:
-                indices = []
-            resolved_count = len(indices)
-            axis_residuals = []
-            for index in indices:
-                if constraint.x is not None:
-                    axis_residuals.append(abs(float(pos[index, 0].item()) - float(constraint.x)))
-                if constraint.y is not None:
-                    axis_residuals.append(abs(float(pos[index, 1].item()) - float(constraint.y)))
-            residual = max(axis_residuals, default=0.0)
-        hard_satisfied = (not constraint.is_hard) or residual <= 1e-5
-        rows.append(
-            ConstraintResidual(
-                constraint=constraint,
-                residual=residual,
-                hard_satisfied=hard_satisfied,
-                resolved_count=resolved_count,
-            )
-        )
     policy = getattr(config, "constraint_policy", "warn")
-    report = ConstraintReport(
-        residuals=rows,
-        policy=policy,
-        outcome="ok" if all(row.hard_satisfied for row in rows) else "violated",
-    )
+    from dagua.constraints import build_constraint_report
+
+    report = build_constraint_report(constraints, pos, graph, policy=policy)
     graph.constraints.set_report(report)
     if report.violations and policy == "strict":
         from dagua.constraints import ConstraintConflictError
