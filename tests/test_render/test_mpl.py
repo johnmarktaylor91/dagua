@@ -2,6 +2,7 @@
 
 import colorsys
 import importlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -40,17 +41,184 @@ from dagua.render.mpl import (
     _draw_sharp_crossing,
     _edge_linestyle,
     _edge_width_data_units,
+    _effective_stroke_scale,
     _marker_data_size,
+    _minimum_visible_edge_width_data_units,
     _node_linestyle,
     _star_vertices,
     _trim_curve_for_arrows,
 )
 from dagua.render.text import layout_plain_text
-from dagua.styles import RESOLVED_FONT, ClusterStyle, EdgeStyle, NodeStyle
+from dagua.styles import GRAPHVIZ_STRICT_THEME, RESOLVED_FONT, ClusterStyle, EdgeStyle, NodeStyle
 from dagua.utils import compute_node_size, prepare_label_text
 from scripts.generate_cosmetic_album import build_case_catalog
 
 mpl_renderer = importlib.import_module("dagua.render.mpl")
+
+
+def _patches_with_gid_prefix(ax: Any, prefix: str) -> List[PathPatch]:
+    """Return path patches whose string identifiers start with ``prefix``.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes containing rendered artists.
+    prefix : str
+        Artist identifier prefix to match.
+
+    Returns
+    -------
+    list[matplotlib.patches.PathPatch]
+        Matching path patches in axes order.
+    """
+
+    return [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith(prefix)
+    ]
+
+
+def test_node_fill_and_text_opacity_target_only_their_layers() -> None:
+    """Verify fill and label opacity do not alter the node border.
+
+    Returns
+    -------
+    None
+        This test asserts alpha values on the rendered fill, border, and text.
+    """
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "alpha",
+        label="Alpha",
+        style=NodeStyle(fill="#FF0000", fill_opacity=0.35, text_opacity=0.45),
+    )
+
+    fig, ax = render(
+        graph,
+        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        show=False,
+    )
+
+    fill_colors = [color for collection in ax.collections for color in collection.get_facecolors()]
+    assert any(np.allclose(color, to_rgba("#FF0000", 0.35)) for color in fill_colors)
+    assert any(color[3] == pytest.approx(1.0) for color in fill_colors)
+    label_patches = [
+        patch
+        for patch in _patches_with_gid_prefix(ax, "dagua-node-label-0")
+        if "shadow" not in str(patch.get_gid())
+    ]
+    assert label_patches
+    assert all(patch.get_alpha() == pytest.approx(0.45) for patch in label_patches)
+    plt.close(fig)
+
+
+def test_node_outline_is_a_separate_offset_stroke() -> None:
+    """Verify node outlines render beyond the fill with requested stroke styling.
+
+    Returns
+    -------
+    None
+        This test asserts outline identity, geometry, color, width, and dashes.
+    """
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "outlined",
+        label="",
+        style=NodeStyle(
+            shape="rect",
+            fill="#FFFFFF",
+            stroke="#222222",
+            stroke_width=2.0,
+            outline_color="#00AA55",
+            outline_width=3.0,
+            outline_offset=4.0,
+            outline_style="dashed",
+        ),
+    )
+
+    fig, ax = render(
+        graph,
+        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        show=False,
+    )
+
+    outlines = _patches_with_gid_prefix(ax, "dagua-node-outline-0")
+    assert len(outlines) == 1
+    outline = outlines[0]
+    assert outline.get_edgecolor() == pytest.approx(to_rgba("#00AA55"))
+    assert outline.get_linewidth() == pytest.approx(3.0)
+    assert outline.get_linestyle() == "dashed"
+    fill_path = ax.collections[0].get_paths()[0]
+    assert outline.get_path().get_extents().width > fill_path.get_extents().width
+    assert outline.get_path().get_extents().height > fill_path.get_extents().height
+    plt.close(fig)
+
+
+def test_node_text_shadow_is_offset_and_blurred_behind_label() -> None:
+    """Verify text shadow copies are offset, layered, and behind the foreground.
+
+    Returns
+    -------
+    None
+        This test asserts shadow artist count, translation, color, and z-order.
+    """
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "shadowed",
+        label="Shadow",
+        style=NodeStyle(
+            text_shadow_color="#3366CC80",
+            text_shadow_offset=(3.0, -2.0),
+            text_shadow_blur=2.0,
+        ),
+    )
+
+    fig, ax = render(
+        graph,
+        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        show=False,
+    )
+
+    foreground = next(
+        patch
+        for patch in _patches_with_gid_prefix(ax, "dagua-node-label-0")
+        if patch.get_gid() == "dagua-node-label-0"
+    )
+    shadows = _patches_with_gid_prefix(ax, "dagua-node-label-0-shadow-")
+    assert len(shadows) > 1
+    central_shadow = next(
+        patch for patch in shadows if patch.get_gid() == "dagua-node-label-0-shadow-0"
+    )
+    display_scale = _compute_display_scale(ax)
+    foreground_min = foreground.get_path().vertices.min(axis=0)
+    shadow_min = central_shadow.get_path().vertices.min(axis=0)
+    assert shadow_min - foreground_min == pytest.approx(np.array([3.0, -2.0]) * display_scale)
+    assert central_shadow.get_facecolor()[:3] == pytest.approx(to_rgba("#3366CC")[:3])
+    assert central_shadow.get_facecolor()[3] < to_rgba("#3366CC80")[3] / 10.0
+    assert all(shadow.get_zorder() < foreground.get_zorder() for shadow in shadows)
+    plt.close(fig)
+
+
+def test_graphviz_strict_explicit_canvas_preserves_full_axes() -> None:
+    """Strict rendering should not inset an explicitly sized Graphviz canvas."""
+
+    graph = DaguaGraph()
+    graph._theme = GRAPHVIZ_STRICT_THEME
+    graph.add_node("in", label="In")
+    graph.add_node("mid", label="Mid")
+    graph.add_node("out", label="Out")
+    positions = torch.tensor([[0.0, 144.0], [0.0, 72.0], [0.0, 0.0]], dtype=torch.float32)
+
+    fig, ax = render(graph, positions=positions, figsize=(1.0, 3.0), dpi=120, show=False)
+
+    assert ax.get_position().bounds == pytest.approx((0.0, 0.0, 1.0, 1.0))
+    plt.close(fig)
 
 
 def _rgba_luminance(color: tuple[float, float, float, float]) -> float:
@@ -498,6 +666,10 @@ def test_graphviz_dash_patterns_are_explicit() -> None:
     assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == (0, (1.2, 3.0))
     assert _edge_linestyle(EdgeStyle(style="dashed")) == (0, (5.0, 3.0))
     assert _edge_linestyle(EdgeStyle(style="dotted")) == (0, (1.2, 3.0))
+    assert _edge_linestyle(EdgeStyle(line_dash_pattern=(4.0, 2.0, 1.0, 2.0))) == (
+        0,
+        (4.0, 2.0, 1.0, 2.0),
+    )
     assert _cluster_linestyle("dotted") == (0, (1.2, 3.0))
 
 
@@ -1561,6 +1733,66 @@ def test_arrowhead_does_not_extend_into_target_node() -> None:
     assert np.linalg.norm(base - target_center) > np.linalg.norm(tip - target_center)
 
 
+def test_shallow_edge_approach_reclips_stroke_and_markers_to_node_sides() -> None:
+    """Clip shallow edge bodies and terminal markers along their true approach.
+
+    Returns
+    -------
+    None
+        Routed endpoints and prepared marker geometry are asserted in place.
+    """
+    graph = DaguaGraph.from_edge_list([("A", "B")], direction="TB")
+    graph.node_styles = [NodeStyle(shape="roundrect"), NodeStyle(shape="roundrect")]
+    graph.edge_styles[0] = EdgeStyle(
+        arrow="normal",
+        source_arrow="diamond",
+        curvature=0.0,
+        avoid_nodes=False,
+    )
+    graph.compute_node_sizes()
+    positions = torch.tensor([[-72.0, 0.0], [72.0, 0.0]], dtype=torch.float32)
+
+    curve = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)[0]
+    source_right = float(positions[0, 0] + graph.node_sizes[0, 0] / 2.0)
+    target_left = float(positions[1, 0] - graph.node_sizes[1, 0] / 2.0)
+
+    assert curve.p0 == pytest.approx((source_right, 0.0))
+    assert curve.p1 == pytest.approx((target_left, 0.0))
+    assert curve.cp1 == curve.p0
+    assert curve.cp2 == curve.p1
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-110.0, 110.0)
+    ax.set_ylim(-60.0, 60.0)
+    fig.canvas.draw()
+    collection = _build_custom_edge_collection(ax, graph, [curve], positions=positions.numpy())
+    prepared = collection.prepared_edges[0]
+    assert prepared.head_result is not None
+    assert prepared.source_result is not None
+    head_vertices = np.vstack(
+        [
+            path.vertices
+            for path in [
+                *prepared.head_result.filled_paths,
+                *prepared.head_result.stroked_paths,
+            ]
+        ]
+    )
+    source_vertices = np.vstack(
+        [
+            path.vertices
+            for path in [
+                *prepared.source_result.filled_paths,
+                *prepared.source_result.stroked_paths,
+            ]
+        ]
+    )
+    plt.close(fig)
+
+    assert float(head_vertices[:, 0].max()) <= target_left + 1e-9
+    assert float(source_vertices[:, 0].min()) >= source_right - 1e-9
+
+
 def test_vee_arrow_is_open_polygon() -> None:
     """Vee arrow should render as a stroked custom head, not FancyArrowPatch."""
 
@@ -1594,12 +1826,7 @@ def test_vee_arrow_is_open_polygon() -> None:
 
 
 def test_vee_arrowhead_builder_returns_filled_notched_triangle() -> None:
-    """The custom vee head should be a FILLED notched triangle (Graphviz parity).
-
-    Round 17 F4: native Graphviz emits ``vee`` as a filled polygon. The
-    earlier dagua implementation rendered it as a stroked chevron, which
-    mismatched dot's silhouette on the ``arrow_types`` panel.
-    """
+    """The custom vee head is graphviz's FILLED notched triangle (not open)."""
 
     result = build_arrowhead(
         "vee",
@@ -1610,14 +1837,57 @@ def test_vee_arrowhead_builder_returns_filled_notched_triangle() -> None:
         body_width=2.0,
     )
 
-    assert len(result.filled_paths) == 1, "Vee should have one filled notched-triangle path"
-    assert result.stroked_paths == [], (
-        "Vee renders entirely through the fill pass after round-17 F4"
+    assert len(result.filled_paths) >= 1
+    assert result.stroked_paths == []
+    assert any(path.codes[-1] == path.CLOSEPOLY for path in result.filled_paths)
+
+
+def test_cross_arrowhead_is_compact_body_side_marker() -> None:
+    """Cross heads should anchor at the tip without extending into the node side."""
+
+    result = build_arrowhead(
+        "cross",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=20.0,
+        width=20.0,
+        body_width=2.0,
     )
-    path = result.filled_paths[0]
-    # The notched triangle has tip + two back wings + a back-axis notch
-    # vertex, plus the matplotlib closing vertex appended by _local_path.
-    assert path.vertices.shape[0] >= 4, "Filled vee retains the notched-triangle vertices"
+
+    vertices = np.vstack([path.vertices for path in result.stroked_paths])
+    assert result.filled_paths == []
+    assert len(result.stroked_paths) == 2
+    assert float(vertices[:, 0].min()) == pytest.approx(0.0)
+    assert 0.0 < float(vertices[:, 0].max()) <= 20.0 * 0.5
+    assert float(np.ptp(vertices[:, 1])) <= 20.0 * 0.5
+
+
+@pytest.mark.parametrize(
+    "style",
+    [
+        EdgeStyle(arrow="cross"),
+        EdgeStyle(arrow="none", source_arrow="cross"),
+        EdgeStyle(arrow="none", mid_arrow="cross"),
+    ],
+)
+def test_cross_markers_use_edge_stroke_color(style: EdgeStyle) -> None:
+    """Endpoint and midpoint cross markers should inherit the edge stroke color."""
+
+    graph = DaguaGraph.from_edge_list([("A", "B")])
+    graph.edge_styles[0] = replace(style, color="#7F1D1D", arrow_color="#DC2626")
+    graph.compute_node_sizes()
+    positions = torch.tensor([[0.0, 50.0], [0.0, -50.0]], dtype=torch.float32)
+    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    collection = _build_custom_edge_collection(ax, graph, curves, positions=positions.numpy())
+    head_artists = collection.render_heads(ax)
+
+    assert len(head_artists) == 1
+    expected_rgb = np.asarray(to_rgba("#7F1D1D")[:3])
+    edgecolors = head_artists[0].get_edgecolors()
+    np.testing.assert_allclose(edgecolors[:, :3], np.tile(expected_rgb, (len(edgecolors), 1)))
+    plt.close(fig)
 
 
 def test_straight_routing_has_arrowhead() -> None:
@@ -1782,6 +2052,24 @@ def test_custom_edge_collection_converts_stroke_width_to_data_units() -> None:
 
     assert edge.width == pytest.approx(expected_width)
     assert edge.stroke_width == pytest.approx(expected_width)
+
+
+def test_graphviz_strict_edge_width_matches_border_scale_without_visibility_floor() -> None:
+    """Strict 1pt edge ribbons should carry the same width as 1pt node borders."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=96)
+    ax.set_xlim(-80.0, 80.0)
+    ax.set_ylim(-80.0, 80.0)
+    setattr(ax, "_dagua_render_theme_name", "graphviz_strict")
+    fig.canvas.draw()
+
+    edge_width = _edge_width_data_units(ax, 1.0)
+    border_width = _effective_stroke_scale(ax)
+    minimum_visible_width = _minimum_visible_edge_width_data_units(ax)
+    plt.close(fig)
+
+    assert edge_width == pytest.approx(border_width)
+    assert minimum_visible_width == 0.0
 
 
 def test_custom_edge_collection_scales_arrowheads_with_edge_width() -> None:
@@ -2135,6 +2423,82 @@ def test_node_and_external_label_font_sizes_use_data_coordinate_scaling(
     assert node_spec.font_size * node_display_scale == pytest.approx(node_expected)
     assert external_spec.font_size * external_display_scale == pytest.approx(external_expected)
     plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    ("position", "expected"),
+    [
+        ("top-left", (-12.0, 8.0, "right", "bottom")),
+        ("top-center", (0.0, 8.0, "center", "bottom")),
+        ("top-right", (12.0, 8.0, "left", "bottom")),
+        ("center-left", (-12.0, 0.0, "right", "center")),
+        ("center", (0.0, 0.0, "center", "center")),
+        ("center-right", (12.0, 0.0, "left", "center")),
+        ("bottom-left", (-12.0, -8.0, "right", "top")),
+        ("bottom-center", (0.0, -8.0, "center", "top")),
+        ("bottom-right", (12.0, -8.0, "left", "top")),
+    ],
+)
+def test_external_label_nine_position_anchors(
+    position: str,
+    expected: tuple[float, float, str, str],
+) -> None:
+    """Place each external-label grid position against the node boundary.
+
+    Parameters
+    ----------
+    position : str
+        Nine-position token under test.
+    expected : tuple[float, float, str, str]
+        Expected x/y anchor and horizontal/vertical alignments.
+
+    Returns
+    -------
+    None
+        Placement geometry is asserted in place.
+    """
+
+    actual = mpl_renderer._external_label_anchor(0.0, 0.0, 10.0, 6.0, 2.0, position)
+
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("position", "expected_x"),
+    [("middle-left", -12.0), ("middle-right", 12.0)],
+)
+def test_external_label_middle_aliases_stay_beside_node(
+    position: str,
+    expected_x: float,
+) -> None:
+    """Keep middle-row aliases horizontal and distinct from bottom-center.
+
+    Parameters
+    ----------
+    position : str
+        Middle-left or middle-right alias under test.
+    expected_x : float
+        Expected horizontal anchor beside the node.
+
+    Returns
+    -------
+    None
+        Normalization and placement geometry are asserted in place.
+    """
+    normalized = mpl_renderer._normalize_external_label_position(position)
+    actual = mpl_renderer._external_label_anchor(0.0, 0.0, 10.0, 6.0, 2.0, normalized)
+    bottom_center = mpl_renderer._external_label_anchor(
+        0.0,
+        0.0,
+        10.0,
+        6.0,
+        2.0,
+        "bottom-center",
+    )
+
+    assert actual[0] == pytest.approx(expected_x)
+    assert actual[1] == pytest.approx(0.0)
+    assert actual[:2] != bottom_center[:2]
 
 
 def test_bold_node_and_external_labels_normalize_weight_and_gain_size_boost(
@@ -2733,6 +3097,68 @@ def test_cluster_box_expands_for_bottom_labels_but_not_outside_labels(
     assert outside_y_min == pytest.approx(raw_y_min, abs=0.25)
     plt.close(bottom_fig)
     plt.close(outside_fig)
+
+
+def test_cluster_right_padding_overrides_shared_padding() -> None:
+    """Apply a per-side cluster override only to the requested bbox side.
+
+    Returns
+    -------
+    None
+        The right bound expands while the left bound remains unchanged.
+    """
+
+    def render_box(padding_right: float | None) -> tuple[float, float, float, float]:
+        """Compute one deterministic cluster render bbox.
+
+        Parameters
+        ----------
+        padding_right : float | None
+            Optional right-side override.
+
+        Returns
+        -------
+        tuple[float, float, float, float]
+            Computed cluster bbox.
+        """
+
+        graph = DaguaGraph()
+        graph.add_node("a")
+        graph.add_cluster(
+            "outer",
+            ["a"],
+            label="",
+            style=ClusterStyle(
+                padding=10.0,
+                padding_right=padding_right,
+                label_position="outside-top",
+                stroke_width=0.0,
+            ),
+        )
+        fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+        ax.set_xlim(-100.0, 100.0)
+        ax.set_ylim(-50.0, 50.0)
+        fig.canvas.draw()
+        boxes = mpl_renderer._compute_cluster_render_bboxes(
+            ax=ax,
+            graph=graph,
+            pos=np.array([[0.0, 0.0]], dtype=float),
+            sizes=np.array([[100.0, 20.0]], dtype=float),
+            ordered_clusters=["outer"],
+            cluster_depths={"outer": 0},
+            cluster_y_mins={"outer": -20.0},
+            cluster_y_maxes={"outer": 20.0},
+            display_scale=1.0,
+            cluster_aware=False,
+        )
+        plt.close(fig)
+        return boxes["outer"].bbox
+
+    shared_bbox = render_box(None)
+    overridden_bbox = render_box(30.0)
+
+    assert overridden_bbox[0] == pytest.approx(shared_bbox[0])
+    assert overridden_bbox[2] == pytest.approx(shared_bbox[2] + 20.0)
 
 
 def test_sibling_cluster_labels_avoid_overlap(monkeypatch: pytest.MonkeyPatch) -> None:

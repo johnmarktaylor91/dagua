@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal, Optional, Tuple
@@ -123,8 +125,7 @@ def _resolve_font_family(font_family: str) -> str:
     """
     requested_family = font_family or RESOLVED_FONT
     normalized_family = str(requested_family).strip().lower().replace(" ", "")
-    # Map dot's SVG-declared aliases to the physical TeXGyreTermes face.
-    if normalized_family in {"texgyretermes", "times-roman", "times,serif", "times"}:
+    if normalized_family == "texgyretermes":
         return "TeXGyreTermes"
     return requested_family
 
@@ -235,6 +236,49 @@ def _normalize_font_style(font_style: str) -> Literal["normal", "italic", "obliq
     return "normal"
 
 
+@lru_cache(maxsize=1024)
+def _fc_match_font_path(
+    font_family: str,
+    font_weight: str,
+    font_style: str,
+) -> Optional[str]:
+    """Resolve a font request with the system fontconfig matcher.
+
+    Parameters
+    ----------
+    font_family : str
+        Requested font family pattern.
+    font_weight : str
+        Requested weight token.
+    font_style : str
+        Requested style token.
+
+    Returns
+    -------
+    str | None
+        Font file selected by ``fc-match``, or ``None`` when fontconfig is
+        unavailable or cannot resolve the request.
+    """
+    fc_match = shutil.which("fc-match")
+    if fc_match is None:
+        return None
+
+    weight = "bold" if _normalize_font_weight(font_weight) == "bold" else "regular"
+    slant = "italic" if _normalize_font_style(font_style) == "italic" else "roman"
+    pattern = f"{font_family}:weight={weight}:slant={slant}"
+    try:
+        result = subprocess.run(
+            [fc_match, "-f", "%{file}", pattern],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    matched_path = result.stdout.strip()
+    return matched_path or None
+
+
 def _empty_path() -> Path:
     """Return a reusable empty path instance.
 
@@ -294,6 +338,9 @@ def _find_font_path(
     """
     if str(font_family).strip().lower().replace(" ", "") in _TEX_GYRE_TERMES_FAMILY_ALIASES:
         matched_path = _tex_gyre_termes_font_path(font_weight, font_style)
+        if matched_path is not None:
+            return matched_path
+        matched_path = _fc_match_font_path(font_family, font_weight, font_style)
         if matched_path is not None:
             return matched_path
     try:
