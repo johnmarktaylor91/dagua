@@ -854,6 +854,31 @@ def scaled_timeout(global_timeout: float, num_nodes: int) -> float:
     return max(MIN_TIMEOUT_SECONDS, global_timeout * size_ratio)
 
 
+def effective_timeout(global_timeout: float, num_nodes: int, engine_name: str) -> float:
+    """Return the per-work-item timeout for one engine and graph.
+
+    Parameters
+    ----------
+    global_timeout : float
+        The ``--timeout`` value from the CLI.
+    num_nodes : int
+        Number of nodes in the graph.
+    engine_name : str
+        Benchmark engine name.
+
+    Returns
+    -------
+    float
+        Timeout in seconds. Native dagua keeps the full requested worker
+        budget because its incumbent-monotone contest can legitimately spend
+        more than the small-graph scaled timeout while still satisfying the
+        sprint gate's explicit ``--timeout`` limit.
+    """
+    if engine_name == "dagua":
+        return global_timeout
+    return scaled_timeout(global_timeout, num_nodes)
+
+
 def graph_summary(test_graph: Any) -> GraphSummary:
     """Extract stable metadata from a ``TestGraph`` instance.
 
@@ -2520,7 +2545,11 @@ def main() -> int:
                     graph_completion_counts[summary.name] += 1
                     continue
 
-                graph_timeout = scaled_timeout(float(args.timeout), summary.num_nodes)
+                graph_timeout = effective_timeout(
+                    float(args.timeout),
+                    summary.num_nodes,
+                    competitor.name,
+                )
                 cap = engine_timeout_cap(competitor.name)
                 timeout_seconds = min(graph_timeout, cap) if cap is not None else graph_timeout
                 work_items.append(

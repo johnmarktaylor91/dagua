@@ -27,7 +27,6 @@ from dagua.layout.aesthetics import apply_loss_multipliers, resolve_aesthetic_pr
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.ops.base import LossOp
 from dagua.layout.ops.loss_engine import (
-    AlignmentLoss,
     BackEdgeCompactnessLoss,
     ClusterCompactnessLoss,
     ClusterContainmentLoss,
@@ -44,7 +43,6 @@ from dagua.layout.ops.loss_engine import (
     FlexSpacingLoss,
     OverlapAvoidanceLoss,
     OverlapAvoidanceLossConfig,
-    PositionPinLoss,
     RepulsionLoss,
     RepulsionLossConfig,
     SpacingConsistencyLoss,
@@ -403,11 +401,24 @@ def prepare_flex_data(
     num_nodes: int,
     device: str,
 ) -> dict:
-    """Extract flex constraints from config into tensor form.
+    """Extract surviving scalar flex data for pipeline adapters.
 
-    Returns a dict with pre-computed tensors for pins, alignment groups,
-    and flex spacing. All node-ID to index resolution happens here.
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout configuration.
+    num_nodes : int
+        Number of graph nodes, retained for the stable helper signature.
+    device : str
+        Tensor device string.
+
+    Returns
+    -------
+    dict
+        Empty pin/alignment tensors plus scalar flex spacing. R9 constraints
+        are lowered by the engine-side constraint path, not this adapter.
     """
+    _ = num_nodes
     result = {
         "has_soft_pins": False,
         "has_hard_pins": False,
@@ -424,64 +435,6 @@ def prepare_flex_data(
     flex = config.flex
     if flex is None:
         return result
-
-    if flex.pins:
-        indices = []
-        targets = []
-        weights = []
-        soft_mask = []
-        hard_mask = []
-
-        for node_id, (fx, fy) in flex.pins.items():
-            if isinstance(node_id, int) and 0 <= node_id < num_nodes:
-                idx = node_id
-            else:
-                continue
-
-            tx = fx.target if fx is not None else 0.0
-            ty = fy.target if fy is not None else 0.0
-            wx = fx.weight if fx is not None else 0.0
-            wy = fy.weight if fy is not None else 0.0
-            has_x = fx is not None
-            has_y = fy is not None
-            hard_x = bool(has_x and fx is not None and fx.is_hard)
-            hard_y = bool(has_y and fy is not None and fy.is_hard)
-            soft_x = has_x and not hard_x
-            soft_y = has_y and not hard_y
-
-            indices.append(idx)
-            targets.append([tx, ty])
-            weights.append([wx if not hard_x else 0.0, wy if not hard_y else 0.0])
-            soft_mask.append([soft_x, soft_y])
-            hard_mask.append([hard_x, hard_y])
-
-        if indices:
-            result["pin_indices"] = torch.tensor(indices, dtype=torch.long, device=device)
-            result["pin_targets"] = torch.tensor(targets, dtype=torch.float32, device=device)
-            result["pin_weights"] = torch.tensor(weights, dtype=torch.float32, device=device)
-            result["soft_pin_mask"] = torch.tensor(soft_mask, dtype=torch.bool, device=device)
-            result["hard_pin_mask"] = torch.tensor(hard_mask, dtype=torch.bool, device=device)
-            result["has_soft_pins"] = any(any(row) for row in soft_mask)
-            result["has_hard_pins"] = any(any(row) for row in hard_mask)
-
-    align_groups: list = []
-    for groups, axis in [(flex.align_x, 0), (flex.align_y, 1)]:
-        if groups is None:
-            continue
-        for group in groups:
-            idx_list = []
-            for node_id in group.nodes:
-                if isinstance(node_id, int) and 0 <= node_id < num_nodes:
-                    idx_list.append(node_id)
-            if len(idx_list) >= 2:
-                align_groups.append(
-                    (
-                        torch.tensor(idx_list, dtype=torch.long, device=device),
-                        group.weight,
-                        axis,
-                    )
-                )
-    result["align_groups"] = align_groups
 
     if flex.node_sep is not None:
         result["flex_node_sep"] = flex.node_sep.target
@@ -726,10 +679,6 @@ def build_loss_ops(
         losses.append(FanoutDistributionLoss())
     if config.w_back_edge > 0.0:
         losses.append(BackEdgeCompactnessLoss())
-    if config.flex is not None and config.flex.pins:
-        losses.append(PositionPinLoss())
-    if config.flex is not None and (config.flex.align_x or config.flex.align_y):
-        losses.append(AlignmentLoss())
     if config.flex is not None and config.flex.node_sep is not None:
         losses.append(FlexSpacingLoss())
     # Sprint 15: pivot-approximated stress loss (opt-in via w_stress>0).

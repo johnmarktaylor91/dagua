@@ -26,6 +26,10 @@ candidate CONTEST instead of betting on one pipeline:
   means "close" (see ``_weighted_similarity_candidate``).
 - Candidate F (r81-P1.5): the native-stress core with target distances scaled
   into the point units used by node boxes (see ``_stress_points_candidate``).
+- Candidate S (R8 Arm S, clustered graphs only): dagua's in-house
+  Stress-SGD seed, deterministic median-edge scale ladder, bounded residual
+  overlap heal, and last-mile projection, admitted only by the exact extended
+  ruler plus named floors.
 
 All candidates are scored with the SAME honest composite the benchmark
 harness uses for undirected rows (``metrics.full`` + ``composite_auto``
@@ -44,13 +48,18 @@ sfdp/neato pipelines are the fidelity-campaign reimplementations
 from __future__ import annotations
 
 import copy
+import json
 import logging
+import os
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple, cast
 
+import numpy as np
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.graph_classify import GraphFamily
 from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -67,10 +76,26 @@ MAX_CONTEST_NODES = 1500
 # Shared by the legacy native polish battery; portfolio challenger acceptance
 # below is intentionally governed only by deterministic size schedules.
 DEFAULT_CANDIDATE_BUDGET_S = 25.0
+FULL_REFEREE_TOP_K = 8
+CLUSTER_EXTENDED_SCORE_KEYS = (
+    "cluster_exclusion_score",
+    "cluster_sibling_overlap_score",
+    "cluster_nesting_fidelity_score",
+    "cluster_edge_intrusion_score",
+    "cluster_label_occlusion_score",
+    "cluster_compactness_score",
+)
+CLUSTER_DUAL_ACCEPTANCE_MARGIN = 0.05
+MIN_OPTIONAL_ARM_REMAINING_S = 10.0
+ABSOLUTE_DEADLINE_RESERVE_S = 5.0
+PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 MAX_COLLINEAR_WORK = 100_000
 MAX_DENSE_STRESS_NODES = 200
 MAX_DENSE_STRESS_EDGES = 20_000
 LARGE_CONTEST_NODE_THRESHOLD = 250
+MID_SIZE_PRISM_NODE_THRESHOLD = 120
+MID_SIZE_PRISM_MAX_DEGREE_THRESHOLD = 20
+MID_SIZE_PRISM_DEGREE_UNIFORMITY_MAX = 1.0
 
 # Candidate C (neato) participates when the public quality knob resolves to
 # at least this value ("high" alias = 0.75)...
@@ -81,19 +106,40 @@ NEATO_QUALITY_THRESHOLD = 0.75
 NEATO_BALANCED_NODE_CAP = MAX_CONTEST_NODES
 
 # Candidate refinement schedule. The faithful 500-step SFDP solve costs
-# 9-20s through 150 nodes on the r81 CPU probe. Above that knee, 10 steps
-# preserve the measured PRISM/raw large-graph wins while avoiding most of the
-# sequential Graphviz-quadtree refinement cost. Explicit high quality retains
-# the full reference-fidelity budget.
+# 9-20s through 150 nodes on the r81 CPU probe. The measured structural gate
+# below uses a bounded small-graph solve; explicit high quality and all other
+# topology classes retain their existing schedules.
 FULL_REFINEMENT_NODE_CAP = 150
 FULL_REFINEMENT_STEPS = 500
+BALANCED_SMALL_REFINEMENT_STEPS = 75
 BALANCED_LARGE_REFINEMENT_STEPS = 10
 HIGH_DEGREE_LARGE_REFINEMENT_STEPS = 20
 HIGH_DEGREE_REFINEMENT_THRESHOLD = 20
 NEATO_FULL_ITERATIONS = 200
+NEATO_BALANCED_SMALL_ITERATIONS = 10
 NEATO_MEDIUM_NODE_CAP = 250
 NEATO_BALANCED_MEDIUM_ITERATIONS = 40
 NEATO_BALANCED_LARGE_ITERATIONS = 4
+
+# R83 Phase 3 common-table challengers use the exact fidelity-campaign
+# defaults, independent of the public quality knob. Multiple deterministic
+# seeds are bounded substitutes for the reference best-of-many field.
+FCOSE_CONTEST_SEEDS = 3
+FCOSE_REFERENCE_STEPS = 2500
+FCOSE_PRIOR_S = 45.0
+TSNET_CONTEST_SEEDS = 3
+TSNET_MAX_CONTEST_NODES = 300
+TSNET_REFERENCE_STEPS = 500
+TSNET_PERPLEXITIES = (30.0, 5.0)
+TSNET_PRIOR_S = 90.0
+UNDIRECTED_PREDICTED_COST_MULTIPLIER = 2.0
+FR_REFERENCE_STEPS = 50
+SMALL_WORLD_SEED_NODE_MIN = 100
+SMALL_WORLD_SEED_NODE_MAX = 1000
+SMALL_WORLD_EDGE_NODE_RATIO_MAX = 4.0
+RGG_GEOMETRIC_SEED_NODE_MIN = 100
+RGG_GEOMETRIC_SEED_NODE_MAX = 1000
+RGG_GEOMETRIC_EDGE_NODE_RATIO_MIN = 4.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,6 +158,516 @@ DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO = 0.5
 # random_bipartite_60 fling starts at 15.1x (measured 15-21x). 8x sits in
 # the measured separation gap with margin on both sides.
 DEGENERACY_MAX_ISOLATED_SPREAD_RATIO = 8.0
+
+
+def _marketplace_family(candidate_name: str) -> str:
+    """Return a stable family label for a marketplace candidate.
+
+    Parameters
+    ----------
+    candidate_name : str
+        Full candidate arm name.
+
+    Returns
+    -------
+    str
+        Family label used in structured telemetry.
+    """
+    for marker in ("_seed", "_raw", "_convergent", "_prism"):
+        if marker in candidate_name:
+            return candidate_name.split(marker, 1)[0]
+    return candidate_name
+
+
+@dataclass(frozen=True)
+class _ClusterScoreTelemetry:
+    """Old and extended composites from one clustered full-ruler metric pass.
+
+    Attributes
+    ----------
+    extended_score : float
+        Composite including the six R8 cluster-quality terms.
+    old_score : float
+        Composite after removing only the six R8 cluster-quality terms.
+    metrics : dict[str, float]
+        Numeric metric payload used for scoring.
+    """
+
+    extended_score: float
+    old_score: float
+    metrics: Dict[str, float]
+
+
+def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
+    """Return metrics with only the six R8 cluster-quality terms removed.
+
+    Parameters
+    ----------
+    metrics : dict[str, float]
+        Numeric metrics from ``dagua.metrics.full``.
+
+    Returns
+    -------
+    dict[str, float]
+        Copy of ``metrics`` with the extended cluster-quality keys omitted.
+    """
+    return {key: value for key, value in metrics.items() if key not in CLUSTER_EXTENDED_SCORE_KEYS}
+
+
+def _cluster_candidate_is_dual_admissible(
+    candidate: _ClusterScoreTelemetry,
+    incumbent: _ClusterScoreTelemetry,
+) -> bool:
+    """Return whether a clustered challenger satisfies the dual-ruler rule.
+
+    Parameters
+    ----------
+    candidate : _ClusterScoreTelemetry
+        Candidate extended and old-ruler scores.
+    incumbent : _ClusterScoreTelemetry
+        Incumbent extended and old-ruler scores.
+
+    Returns
+    -------
+    bool
+        ``True`` iff extended improves by the honest margin and old-ruler
+        score does not decrease.
+    """
+    return (
+        candidate.extended_score > incumbent.extended_score + CLUSTER_DUAL_ACCEPTANCE_MARGIN
+        and candidate.old_score >= incumbent.old_score
+    )
+
+
+def _portfolio_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
+    """Return remaining benchmark deadline seconds for optional portfolio work.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration, possibly carrying the benchmark
+        deadline injected by ``DaguaCompetitor``.
+
+    Returns
+    -------
+    float or None
+        Remaining seconds, or ``None`` when no benchmark deadline is known.
+    """
+    deadline = getattr(config, "_dagua_native_deadline_s", None) if config is not None else None
+    if deadline is None:
+        return None
+    return float(deadline) - time.perf_counter()
+
+
+def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
+    """Return process-time seconds remaining for optional portfolio gates.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration, possibly carrying the benchmark
+        deadline injected by ``DaguaCompetitor``.
+
+    Returns
+    -------
+    float or None
+        Remaining process CPU seconds, or ``None`` when no benchmark
+        deadline is known.
+    """
+    if config is None:
+        return None
+    process_deadline = getattr(config, PROCESS_DEADLINE_ATTR, None)
+    if process_deadline is None:
+        remaining = _portfolio_remaining_s(config)
+        if remaining is None:
+            return None
+        process_deadline = time.process_time() + max(0.0, float(remaining))
+        setattr(config, PROCESS_DEADLINE_ATTR, process_deadline)
+        return float(remaining)
+    return float(process_deadline) - time.process_time()
+
+
+def _portfolio_has_budget(
+    config: Optional[LayoutConfig],
+    min_remaining_s: float = MIN_OPTIONAL_ARM_REMAINING_S,
+) -> bool:
+    """Return whether another optional portfolio arm may start.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration.
+    min_remaining_s : float, default=MIN_OPTIONAL_ARM_REMAINING_S
+        Required remaining process-time budget before starting the arm.
+
+    Returns
+    -------
+    bool
+        ``True`` when there is no known deadline or enough remaining budget.
+    """
+    wall_remaining = _portfolio_remaining_s(config)
+    if wall_remaining is not None and wall_remaining <= ABSOLUTE_DEADLINE_RESERVE_S:
+        return False
+    remaining = _portfolio_process_remaining_s(config)
+    required_remaining = max(float(min_remaining_s), ABSOLUTE_DEADLINE_RESERVE_S)
+    return remaining is None or remaining > required_remaining
+
+
+def _portfolio_available_work_s(
+    config: Optional[LayoutConfig],
+    reserve_s: float = ABSOLUTE_DEADLINE_RESERVE_S,
+) -> Optional[float]:
+    """Return deadline seconds available before the hard return reserve.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration.
+    reserve_s : float, default=ABSOLUTE_DEADLINE_RESERVE_S
+        Seconds reserved for scoring, cleanup, and returning the best finite
+        layout to the benchmark worker.
+
+    Returns
+    -------
+    Optional[float]
+        Seconds available for additional work, clamped to zero. ``None`` means
+        no benchmark deadline is known.
+    """
+    wall_remaining = _portfolio_remaining_s(config)
+    if wall_remaining is not None and wall_remaining <= float(reserve_s):
+        return 0.0
+    remaining = _portfolio_process_remaining_s(config)
+    if remaining is None:
+        return None
+    return max(0.0, float(remaining) - float(reserve_s))
+
+
+def _predicted_undirected_arm_budget_available(
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+) -> bool:
+    """Return whether a long optional arm may start before the deadline.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional benchmark deadline.
+    predicted_cost_s : float
+        Estimated process CPU seconds for the arm.
+
+    Returns
+    -------
+    bool
+        ``True`` when no deadline is known or remaining budget covers the
+        predicted arm cost with a conservative multiplier and return reserve.
+    """
+    available = _portfolio_available_work_s(config)
+    if available is None:
+        return True
+    required = UNDIRECTED_PREDICTED_COST_MULTIPLIER * max(0.0, float(predicted_cost_s))
+    return available > required
+
+
+def _arm_s_full_score_budget_available(
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+) -> bool:
+    """Return whether the one Arm S honest-referee pass may start.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional benchmark deadline.
+    predicted_cost_s : float
+        Estimated process CPU seconds for the single full Arm S score.
+
+    Returns
+    -------
+    bool
+        ``True`` when no deadline is known or remaining budget covers the
+        final full-ruler pass plus the hard return reserve.
+    """
+    return _portfolio_has_budget(config) and _predicted_undirected_arm_budget_available(
+        config,
+        predicted_cost_s,
+    )
+
+
+def _predicted_arm_budget_preserving_arm_s_score(
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+    *,
+    arm_s_pending: bool,
+) -> bool:
+    """Return whether an arm may run while preserving pending Arm S scoring.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional benchmark deadline.
+    predicted_cost_s : float
+        Estimated process CPU seconds for the candidate arm being considered.
+    arm_s_pending : bool
+        Whether one Arm S finalist still needs its honest full-ruler pass.
+
+    Returns
+    -------
+    bool
+        ``True`` when the next arm and any pending Arm S score fit under the
+        existing predicted-budget guard.
+    """
+    if not arm_s_pending:
+        return _predicted_undirected_arm_budget_available(config, predicted_cost_s)
+    from dagua.layout.ops.pipelines.native_arm_s import ARM_S_FULL_REFEREE_PRIOR_S
+
+    return _predicted_undirected_arm_budget_available(
+        config,
+        float(predicted_cost_s) + ARM_S_FULL_REFEREE_PRIOR_S,
+    )
+
+
+def _prediction_cpu_elapsed_s(started_process_time_s: float) -> float:
+    """Return elapsed per-process CPU seconds for arm-cost prediction.
+
+    Wall-clock time is still the hard deadline clock everywhere in this
+    route. This helper is intentionally only for predicting the next
+    expensive arm cost, so sibling-worker contention cannot inflate cost
+    estimates and flip the admitted arm set under load.
+
+    Parameters
+    ----------
+    started_process_time_s : float
+        ``time.process_time()`` reading captured before the arm started.
+
+    Returns
+    -------
+    float
+        Non-negative per-process CPU seconds elapsed since the start.
+    """
+    return max(0.0, time.process_time() - float(started_process_time_s))
+
+
+def _emit_undirected_arm_skip_telemetry(
+    *,
+    arm: str,
+    reason: str,
+    config: Optional[LayoutConfig],
+    predicted_cost_s: Optional[float],
+    remaining_s: Optional[float],
+) -> None:
+    """Emit structured telemetry for an undirected arm admission skip.
+
+    Parameters
+    ----------
+    arm : str
+        Stable arm label, such as ``"tsnet_perp30_seed0"``.
+    reason : str
+        Machine-readable skip reason.
+    config : LayoutConfig, optional
+        Config receiving ``_dagua_native_arm_skip_telemetry`` when available.
+    predicted_cost_s : float, optional
+        Predicted arm cost in process CPU seconds. ``None`` when unavailable.
+    remaining_s : float, optional
+        Remaining wall-clock deadline seconds at the skip point.
+
+    Returns
+    -------
+    None
+        Telemetry is logged, printed, optionally stored on ``config``, and
+        appended to the configured JSONL telemetry file.
+    """
+    payload = {
+        "event": "native_undirected_arm_skip",
+        "arm": arm,
+        "reason": reason,
+        "predicted_cost_s": None if predicted_cost_s is None else float(predicted_cost_s),
+        "remaining_s": None if remaining_s is None else float(remaining_s),
+    }
+    if config is not None:
+        existing = list(getattr(config, "_dagua_native_arm_skip_telemetry", []))
+        existing.append(payload)
+        setattr(config, "_dagua_native_arm_skip_telemetry", existing)
+    telemetry_path = os.environ.get("DAGUA_ARM_TELEMETRY_PATH") or os.environ.get(
+        "DAGUA_W5_TELEMETRY_PATH"
+    )
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    print("native_undirected_arm_skip " + json.dumps(payload, sort_keys=True), flush=True)
+    _LOGGER.info("Native undirected arm skip telemetry %s", json.dumps(payload, sort_keys=True))
+
+
+def _record_insufficient_predicted_budget_skip(
+    *,
+    arm: str,
+    config: Optional[LayoutConfig],
+    predicted_cost_s: float,
+) -> None:
+    """Record an expensive-arm skip caused by predicted budget pressure.
+
+    Parameters
+    ----------
+    arm : str
+        Stable skipped arm name.
+    config : LayoutConfig, optional
+        Prepared native configuration.
+    predicted_cost_s : float
+        Current process-time cost prediction for the arm.
+
+    Returns
+    -------
+    None
+        Emits structured skip telemetry.
+    """
+    _emit_undirected_arm_skip_telemetry(
+        arm=arm,
+        reason="insufficient_predicted_budget",
+        config=config,
+        predicted_cost_s=predicted_cost_s,
+        remaining_s=_portfolio_remaining_s(config),
+    )
+
+
+def _is_worker_timeout_exception(exc: Exception) -> bool:
+    """Return whether an exception came from the benchmark worker alarm.
+
+    Parameters
+    ----------
+    exc : Exception
+        Exception raised during optional candidate work.
+
+    Returns
+    -------
+    bool
+        ``True`` for the benchmark timeout exception, including when the
+        worker process exposes the class via ``__mp_main__``.
+    """
+    return type(exc).__name__ == "_WorkerLayoutTimeoutError" or (
+        "worker layout timeout exceeded" in str(exc)
+    )
+
+
+def _reraise_worker_timeout(exc: Exception) -> None:
+    """Re-raise benchmark worker timeouts instead of treating them as candidates.
+
+    Parameters
+    ----------
+    exc : Exception
+        Exception caught by a broad candidate-failure handler.
+
+    Returns
+    -------
+    None
+        Returns only for non-timeout exceptions.
+    """
+    if _is_worker_timeout_exception(exc):
+        raise exc
+
+
+def _log_marketplace_telemetry(
+    *,
+    route: str,
+    structural_gate: str,
+    positions: Dict[str, torch.Tensor],
+    proxy_scores: Dict[str, float],
+    full_scores: Dict[str, float],
+    finalist_names: list[str],
+    winner_name: str,
+    started_at: float,
+    arm_timings: Optional[Dict[str, Tuple[float, float]]] = None,
+    started_process_at: Optional[float] = None,
+    arm_process_totals: Optional[Dict[str, float]] = None,
+) -> None:
+    """Log structured per-arm marketplace telemetry.
+
+    Parameters
+    ----------
+    route : str
+        Portfolio route name, such as ``"undirected"``.
+    structural_gate : str
+        Structural admission summary for this route.
+    positions : dict[str, torch.Tensor]
+        Candidate positions keyed by arm name.
+    proxy_scores : dict[str, float]
+        Cheap first-stage scores keyed by arm name.
+    full_scores : dict[str, float]
+        Honest full-ruler scores keyed by finalist arm name.
+    finalist_names : list[str]
+        Arms admitted to full scoring.
+    winner_name : str
+        Final winning arm name.
+    started_at : float
+        Route ``time.perf_counter()`` timestamp.
+    arm_timings : dict[str, tuple[float, float]], optional
+        Per-arm ``time.perf_counter()`` start/end spans. Missing arms fall
+        back to the whole route span for backward compatibility.
+    started_process_at : float, optional
+        Route ``time.process_time()`` timestamp for CPU-time attribution.
+    arm_process_totals : dict[str, float], optional
+        Per-arm process CPU totals. Missing arms fall back to the whole route
+        process span for compatibility with older call sites.
+
+    Returns
+    -------
+    None
+        Telemetry is emitted to the module logger as JSON.
+    """
+    finalists = set(finalist_names)
+    ended_at = time.perf_counter()
+    ended_process_at = time.process_time()
+    started_process = ended_process_at if started_process_at is None else float(started_process_at)
+    ended_wall_time = time.time()
+    started_wall_time = ended_wall_time - (ended_at - started_at)
+    arms = []
+    for name in sorted(positions):
+        timing = None if arm_timings is None else arm_timings.get(name)
+        if timing is None:
+            arm_started_at = started_at
+            arm_ended_at = ended_at
+        else:
+            arm_started_at, arm_ended_at = timing
+        arm_started_wall_time = started_wall_time + max(0.0, arm_started_at - started_at)
+        arm_ended_wall_time = started_wall_time + max(0.0, arm_ended_at - started_at)
+        full_score = full_scores.get(name)
+        process_time_s = (
+            arm_process_totals.get(name)
+            if arm_process_totals is not None and name in arm_process_totals
+            else max(0.0, ended_process_at - started_process)
+        )
+        if name == winner_name:
+            status = "winner"
+            reason = "highest_full_score"
+        elif name in finalists:
+            status = "accepted"
+            reason = "full_scored"
+        else:
+            status = "rejected"
+            reason = "proxy_filtered"
+        arms.append(
+            {
+                "name": name,
+                "family": _marketplace_family(name),
+                "structural_gate": structural_gate,
+                "start_wall_time_s": arm_started_wall_time,
+                "end_wall_time_s": arm_ended_wall_time,
+                "wall_time_s": max(0.0, arm_ended_at - arm_started_at),
+                "process_time_s": float(process_time_s),
+                "raw_score": proxy_scores.get(name),
+                "full_score": full_score,
+                "status": status,
+                "reason": reason,
+                "final_winner": winner_name,
+            }
+        )
+    payload = {
+        "event": "native_candidate_marketplace",
+        "route": route,
+        "top_k": FULL_REFEREE_TOP_K,
+        "winner": winner_name,
+        "process_time_s": max(0.0, ended_process_at - started_process),
+        "arms": arms,
+    }
+    _LOGGER.info("Native marketplace telemetry %s", json.dumps(payload, sort_keys=True))
 
 
 def _cleanup_variants_for_size(num_nodes: int) -> Tuple[Tuple[str, Optional[bool]], ...]:
@@ -146,14 +702,22 @@ def _use_large_prism_shortlist(problem: LayoutProblem) -> bool:
         Whether SFDP plus PRISM is the only retained large-graph combination.
     """
     n = int(problem.num_nodes)
-    if n <= LARGE_CONTEST_NODE_THRESHOLD or problem.edge_weights is not None or problem.clusters:
+    if problem.edge_weights is not None or problem.clusters:
         return False
     if problem.edge_index.numel() == 0:
         return False
     degrees = torch.bincount(problem.edge_index.flatten().to(dtype=torch.long), minlength=n)
+    max_degree = int(degrees.max().item())
+    if n <= LARGE_CONTEST_NODE_THRESHOLD:
+        degree_uniformity = float(getattr(problem.structure, "degree_uniformity", float("inf")))
+        return (
+            n >= MID_SIZE_PRISM_NODE_THRESHOLD
+            and max_degree > MID_SIZE_PRISM_MAX_DEGREE_THRESHOLD
+            and degree_uniformity <= MID_SIZE_PRISM_DEGREE_UNIFORMITY_MAX
+        )
     # Degree-four meshes retain the incumbent-derived geometry arms that win
     # grid_20x20. All measured non-mesh large winners use SFDP plus PRISM.
-    return int(degrees.max().item()) > 4
+    return max_degree > 4
 
 
 def _large_prism_shortlist_candidate(
@@ -544,6 +1108,7 @@ def _score_undirected_candidate(
     problem: LayoutProblem,
     cluster_ids: Optional[torch.Tensor],
     aesthetic_profile: Optional["AestheticProfile"] = None,
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> float:
     """Score one candidate with the benchmark's honest undirected composite.
 
@@ -573,11 +1138,50 @@ def _score_undirected_candidate(
         Resolved aesthetic-priority profile shared by every candidate in
         the current contest. ``None`` preserves the exact pre-knob scoring
         path.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
 
     Returns
     -------
     float
         Higher-is-better undirected composite score.
+    """
+    return _score_undirected_candidate_payload(
+        pos,
+        problem,
+        cluster_ids,
+        aesthetic_profile,
+        all_pairs_dist,
+    )[0]
+
+
+def _score_undirected_candidate_payload(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    aesthetic_profile: Optional["AestheticProfile"] = None,
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> tuple[float, Optional[_ClusterScoreTelemetry]]:
+    """Score one undirected candidate and return clustered-ruler telemetry.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Problem carrying topology, cluster metadata, and optional label
+        geometry payloads.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids for the cluster-separation term.
+    aesthetic_profile : AestheticProfile, optional
+        Resolved aesthetic-priority profile shared by the contest.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    tuple[float, _ClusterScoreTelemetry | None]
+        Extended score and optional old/extended telemetry for clustered rows.
     """
     from dagua.metrics import composite_auto, full
 
@@ -591,16 +1195,210 @@ def _score_undirected_candidate(
         ),
         cluster_ids=cluster_ids,
         direction=problem.direction,
+        label_positions=problem.label_positions,
+        edge_labels=problem.edge_labels,
+        all_pairs_dist=all_pairs_dist,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+        cluster_labels=problem.cluster_labels,
     )
     numeric = {
         key: float(value) for key, value in metrics.items() if isinstance(value, (int, float))
     }
     if aesthetic_profile is None:
-        return float(composite_auto(numeric, is_semantically_directed=False))
+        score = float(composite_auto(numeric, is_semantically_directed=False))
+        old_score = float(
+            composite_auto(_old_cluster_ruler_metrics(numeric), is_semantically_directed=False)
+        )
+    else:
+        from dagua.layout.aesthetics import reweighted_composite
 
-    from dagua.layout.aesthetics import reweighted_composite
+        score = reweighted_composite(numeric, is_directed=False, profile=aesthetic_profile)
+        old_score = reweighted_composite(
+            _old_cluster_ruler_metrics(numeric),
+            is_directed=False,
+            profile=aesthetic_profile,
+        )
+    telemetry = None
+    if problem.clusters:
+        telemetry = _ClusterScoreTelemetry(
+            extended_score=score,
+            old_score=old_score,
+            metrics=numeric,
+        )
+    return score, telemetry
 
-    return reweighted_composite(numeric, is_directed=False, profile=aesthetic_profile)
+
+def _select_undirected_winner(
+    scores: Dict[str, float],
+    telemetry: Dict[str, _ClusterScoreTelemetry],
+    incumbent_name: str = "incumbent",
+) -> str:
+    """Select an undirected winner while preserving current clustered outputs.
+
+    Parameters
+    ----------
+    scores : dict[str, float]
+        Extended full-referee score per finalist.
+    telemetry : dict[str, _ClusterScoreTelemetry]
+        Clustered old/extended telemetry per finalist. When present, existing
+        candidate families are ranked by the old ruler to keep 4A bit-stable;
+        new cluster families can use ``_cluster_candidate_is_dual_admissible``
+        before entering this contest.
+    incumbent_name : str, default="incumbent"
+        Deterministic incumbent key.
+
+    Returns
+    -------
+    str
+        Winner name. Non-cluster contests retain the existing argmax path.
+    """
+    best_name = incumbent_name
+    incumbent_telemetry = telemetry.get(incumbent_name)
+    for name, score in scores.items():
+        if name == incumbent_name:
+            continue
+        if incumbent_telemetry is not None:
+            candidate_telemetry = telemetry.get(name)
+            best_telemetry = telemetry.get(best_name)
+            if candidate_telemetry is None or best_telemetry is None:
+                continue
+            if candidate_telemetry.old_score > best_telemetry.old_score:
+                best_name = name
+        elif score > scores[best_name]:
+            best_name = name
+    return best_name
+
+
+def _proxy_undirected_candidate(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> float:
+    """Return a deterministic cheap proxy for portfolio shortlisting.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Problem carrying topology and node sizes.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    float
+        Higher-is-better proxy composite score.
+    """
+    from dagua.metrics import cluster_silhouette_score, composite_auto, quick
+
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    numeric = quick(
+        cpu_pos,
+        cpu_edges,
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        direction=problem.direction,
+        all_pairs_dist=all_pairs_dist,
+    )
+    if cluster_ids is not None:
+        numeric.update(cluster_silhouette_score(cpu_pos, cluster_ids))
+    return float(composite_auto(numeric, is_semantically_directed=False))
+
+
+def _restore_proxy_finalist_slots(
+    finalist_names: list[str],
+    challenger_names: list[str],
+    raw_finalist_names: list[str],
+    proxy_slot_count: int,
+    excluded_names: Optional[set[str]] = None,
+) -> list[str]:
+    """Refill proxy shortlist slots after a finalist is removed.
+
+    Parameters
+    ----------
+    finalist_names : list[str]
+        Current finalist names, including ``"incumbent"`` and any raw
+        finalists appended outside the proxy budget.
+    challenger_names : list[str]
+        Full deterministic proxy-ranked challenger order.
+    raw_finalist_names : list[str]
+        Raw finalist names that are always appended after proxy finalists.
+    proxy_slot_count : int
+        Number of non-incumbent proxy shortlist slots to keep filled.
+    excluded_names : set[str], optional
+        Candidate names that must not be restored.
+
+    Returns
+    -------
+    list[str]
+        Finalist names with displaced proxy challengers restored.
+    """
+    excluded = set() if excluded_names is None else set(excluded_names)
+    raw_names = set(raw_finalist_names)
+    proxy_finalists = [
+        name for name in finalist_names if name != "incumbent" and name not in raw_names
+    ]
+    for name in challenger_names:
+        if len(proxy_finalists) >= proxy_slot_count:
+            break
+        if name in excluded or name in proxy_finalists or name in raw_names:
+            continue
+        proxy_finalists.append(name)
+    return [
+        "incumbent",
+        *proxy_finalists,
+        *(name for name in raw_finalist_names if name not in proxy_finalists),
+    ]
+
+
+def _score_undirected_candidate_cached(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    aesthetic_profile: Optional["AestheticProfile"],
+    all_pairs_dist: Optional[np.ndarray],
+) -> float:
+    """Score an undirected candidate while preserving old monkeypatch arity.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Problem carrying topology and node sizes.
+    cluster_ids : torch.Tensor, optional
+        Optional per-node cluster ids.
+    aesthetic_profile : AestheticProfile, optional
+        Shared contest aesthetic profile.
+    all_pairs_dist : Optional[numpy.ndarray]
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    float
+        Higher-is-better full composite score.
+    """
+    try:
+        return _score_undirected_candidate(
+            pos,
+            problem,
+            cluster_ids,
+            aesthetic_profile,
+            all_pairs_dist=all_pairs_dist,
+        )
+    except TypeError as exc:
+        if "all_pairs_dist" not in str(exc):
+            raise
+        return _score_undirected_candidate(pos, problem, cluster_ids, aesthetic_profile)
 
 
 # Convergent-cleanup pass budget for challenger candidates. The convergent
@@ -627,10 +1425,9 @@ def _candidate_refinement_steps(config: Optional[LayoutConfig], num_nodes: int) 
     int
         SFDP refinement steps for the candidate solve.
     """
-    if (
-        num_nodes <= FULL_REFINEMENT_NODE_CAP
-        or _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD
-    ):
+    if _resolved_quality(config) >= NEATO_QUALITY_THRESHOLD:
+        return FULL_REFINEMENT_STEPS
+    if num_nodes <= FULL_REFINEMENT_NODE_CAP:
         return FULL_REFINEMENT_STEPS
     return BALANCED_LARGE_REFINEMENT_STEPS
 
@@ -872,6 +1669,194 @@ def _neato_in_contest(config: Optional[LayoutConfig], num_nodes: int) -> bool:
     return num_nodes <= NEATO_BALANCED_NODE_CAP
 
 
+def _small_world_knn_seed_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the local kNN seed should enter the contest.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Undirected portfolio problem.
+
+    Returns
+    -------
+    bool
+        ``True`` for medium sparse cyclic small-world-like topology.
+    """
+    n = int(problem.num_nodes)
+    if n < SMALL_WORLD_SEED_NODE_MIN or n > SMALL_WORLD_SEED_NODE_MAX:
+        return False
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if edge_count == 0:
+        return False
+    edge_ratio = float(edge_count) / float(max(n, 1))
+    structure = problem.structure
+    max_degree = int(getattr(structure, "max_degree", 0)) if structure is not None else 0
+    hub_fraction = (
+        float(getattr(structure, "hub_edge_fraction", 1.0)) if structure is not None else 1.0
+    )
+    is_cyclic = not bool(getattr(structure, "is_directed_acyclic", True))
+    return (
+        is_cyclic
+        and max_degree <= 12
+        and hub_fraction <= 0.25
+        and 1.5 <= edge_ratio <= SMALL_WORLD_EDGE_NODE_RATIO_MAX
+    )
+
+
+def _rgg_geometric_seed_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the geometric sparse-stress seed should enter.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Undirected portfolio problem.
+
+    Returns
+    -------
+    bool
+        ``True`` for medium dense spatial/geometric proxy structure.
+    """
+    n = int(problem.num_nodes)
+    if n < RGG_GEOMETRIC_SEED_NODE_MIN or n > RGG_GEOMETRIC_SEED_NODE_MAX:
+        return False
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    edge_ratio = float(edge_count) / float(max(n, 1))
+    structure = problem.structure
+    if structure is None:
+        return False
+    diameter = int(getattr(structure, "diameter_estimate", 0))
+    communities = int(getattr(structure, "num_communities", 0))
+    return (
+        edge_ratio >= RGG_GEOMETRIC_EDGE_NODE_RATIO_MIN
+        and int(getattr(structure, "max_degree", 0)) <= 80
+        and float(getattr(structure, "degree_uniformity", 1.0)) <= 0.45
+        and float(getattr(structure, "hub_edge_fraction", 1.0)) <= 0.25
+        and diameter > 0
+        and float(diameter) <= 0.9 * np.sqrt(float(n))
+        and float(getattr(structure, "community_score", 0.0)) >= 0.35
+        and 2 <= communities <= max(2, n // 5)
+    )
+
+
+def _unique_undirected_pairs(edge_index: torch.Tensor) -> torch.Tensor:
+    """Return sorted unique undirected edge pairs.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Unique undirected pairs with shape ``[2, U]``.
+    """
+    if edge_index.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+    pairs = torch.stack(
+        [
+            torch.minimum(edge_index[0], edge_index[1]),
+            torch.maximum(edge_index[0], edge_index[1]),
+        ],
+        dim=0,
+    ).to(device="cpu", dtype=torch.long)
+    pairs = pairs[:, pairs[0] != pairs[1]]
+    if pairs.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.unique(pairs.t(), dim=0).t().contiguous()
+
+
+def _small_world_knn_seed_candidate(
+    incumbent: torch.Tensor,
+    problem: LayoutProblem,
+    steps: int = 24,
+) -> torch.Tensor:
+    """Relax the incumbent with local-neighborhood and edge-CV forces.
+
+    Parameters
+    ----------
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Undirected portfolio problem.
+    steps : int, default=24
+        Deterministic local relaxation iterations.
+
+    Returns
+    -------
+    torch.Tensor
+        Seed positions with shape ``[N, 2]``.
+    """
+    pos = incumbent.detach().to(device="cpu", dtype=torch.float32).clone()
+    pairs = _unique_undirected_pairs(problem.edge_index)
+    if pairs.numel() == 0 or pos.shape[0] <= 2:
+        return pos
+    source = pairs[0]
+    target = pairs[1]
+    lengths = torch.linalg.vector_norm(pos[target] - pos[source], dim=1)
+    target_length = float(torch.median(lengths).clamp_min(1.0).item())
+    count = torch.zeros((pos.shape[0], 1), dtype=torch.float32)
+    count.scatter_add_(0, source.unsqueeze(1), torch.ones((source.numel(), 1)))
+    count.scatter_add_(0, target.unsqueeze(1), torch.ones((target.numel(), 1)))
+    count = count.clamp_min(1.0)
+    anchor = pos.clone()
+    for _iteration in range(max(0, int(steps))):
+        delta = pos[target] - pos[source]
+        length = torch.linalg.vector_norm(delta, dim=1).clamp_min(1.0e-6)
+        correction = 0.035 * ((length - target_length) / length).unsqueeze(1) * delta
+        updates = torch.zeros_like(pos)
+        updates.scatter_add_(0, source.unsqueeze(1).expand(-1, 2), correction)
+        updates.scatter_add_(0, target.unsqueeze(1).expand(-1, 2), -correction)
+        neighbor_sum = torch.zeros_like(pos)
+        neighbor_sum.scatter_add_(0, source.unsqueeze(1).expand(-1, 2), pos[target])
+        neighbor_sum.scatter_add_(0, target.unsqueeze(1).expand(-1, 2), pos[source])
+        centroid_pull = (neighbor_sum / count) - pos
+        pos = pos + updates + 0.018 * centroid_pull
+        pos = anchor + 0.985 * (pos - anchor)
+    return pos
+
+
+def _rgg_geometric_seed_candidate(
+    problem: LayoutProblem,
+    seed: int,
+    node_sep: float,
+) -> Optional[torch.Tensor]:
+    """Build the sparse/geodesic stress seed for geometric graphs.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Undirected portfolio problem.
+    seed : int
+        Deterministic seed.
+    node_sep : float
+        Node separation in points.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Seed positions with shape ``[N, 2]``, or ``None`` when dense geodesic
+        work would exceed the guard budget.
+    """
+    from dagua.layout.ops.pipelines.native_lattice_grid import (
+        geodesic_dense_work_is_allowed,
+        layout_geodesic_stress_pipeline,
+    )
+
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if not geodesic_dense_work_is_allowed(int(problem.num_nodes), edge_count):
+        _LOGGER.info("Skipped RGG geometric seed: geodesic dense-work guard")
+        return None
+    return layout_geodesic_stress_pipeline(
+        edge_index=problem.edge_index,
+        num_nodes=int(problem.num_nodes),
+        node_sizes=problem.node_sizes,
+        seed=seed,
+        edge_weights=problem.edge_weights,
+        node_sep=node_sep,
+    )
+
+
 # r80-S9 Deliverable 2: weighted-similarity Dijkstra-target transform. A
 # 3-graph mini-probe (r79_weighted_small_world_120, r79_weighted_community_
 # 4x18, real_lesmis_77; see P12_SQUEEZE.md) compared "inverse" (1/w) against
@@ -1032,6 +2017,213 @@ def _stress_points_candidate(problem: LayoutProblem, seed: int) -> torch.Tensor:
     )
 
 
+def _router_v2_large_mini_contest(
+    baseline_pos: torch.Tensor,
+    problem: LayoutProblem,
+    config: LayoutConfig,
+    incumbent_pos: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Score router-v2 candidates against the large-graph sfdp+PRISM holder.
+
+    The large-graph fast path (``_use_large_prism_shortlist``) historically
+    returned sfdp+PRISM without any contest. Router-v2 keeps that candidate
+    as the tie-break holder and lets the structurally-shortlisted geodesic /
+    community candidates challenge it under the same honest referee used by
+    the full contest. Anything failing (non-finite, degenerate, raising)
+    silently leaves the holder in place.
+
+    Parameters
+    ----------
+    baseline_pos : torch.Tensor
+        The guarded sfdp+PRISM positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    config : LayoutConfig
+        Prepared native configuration.
+    incumbent_pos : torch.Tensor, optional
+        Exact native incumbent positions with shape ``[N, 2]``. When supplied,
+        the mini-contest uses the incumbent as the tie-break finalist so W4
+        seed challengers remain monotone against the frozen native route.
+
+    Returns
+    -------
+    torch.Tensor
+        Winning positions with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
+
+    started_at = time.perf_counter()
+    started_process_at = time.process_time()
+    n = int(problem.num_nodes)
+    shortlist = _undirected_route_shortlist(
+        problem.structure,
+        n,
+        has_edge_weights=problem.edge_weights is not None,
+    )
+    if not shortlist.candidates:
+        _LOGGER.info("Undirected contest candidates=sfdp_prism winner=sfdp_prism")
+        return baseline_pos
+
+    seed = int(problem.seed) if problem.seed is not None else 42
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    aesthetic_profile: Optional["AestheticProfile"] = getattr(
+        config, "_dagua_native_aesthetic_profile", None
+    )
+    positions: Dict[str, torch.Tensor] = {"sfdp_prism": baseline_pos}
+    if incumbent_pos is not None and bool(torch.isfinite(incumbent_pos).all().item()):
+        positions["incumbent"] = incumbent_pos
+
+    def _admit(name: str, raw_pos: Optional[torch.Tensor]) -> None:
+        if raw_pos is None or not bool(torch.isfinite(raw_pos).all().item()):
+            return
+        repaired = _repair_flung_isolates(raw_pos, problem, node_sep)
+        degenerate, reason = _candidate_is_degenerate(
+            repaired, problem.node_sizes, problem.edge_index
+        )
+        if degenerate:
+            _LOGGER.info("Rejected large mini-contest candidate %s_raw: %s", name, reason)
+        else:
+            positions[f"{name}_raw"] = repaired
+        try:
+            projected = _project_candidate_prism(repaired, problem)
+        except Exception as exc:  # noqa: BLE001 -- one cleanup variant fails closed
+            _reraise_worker_timeout(exc)
+            projected = None
+        if projected is not None:
+            degenerate, reason = _candidate_is_degenerate(
+                projected, problem.node_sizes, problem.edge_index
+            )
+            if not degenerate:
+                positions[f"{name}_prism"] = projected
+
+    if "geodesic_stress" in shortlist.candidates and _portfolio_has_budget(config):
+        try:
+            from dagua.layout.ops.pipelines.native_lattice_grid import (
+                geodesic_dense_work_is_allowed,
+                layout_geodesic_stress_pipeline,
+            )
+
+            if not geodesic_dense_work_is_allowed(n, int(problem.edge_index.shape[1])):
+                _LOGGER.info("Skipped large mini-contest geodesic: dense-work guard")
+            else:
+                _admit(
+                    "geodesic_stress",
+                    layout_geodesic_stress_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        seed=seed,
+                        edge_weights=problem.edge_weights,
+                        node_sep=node_sep,
+                    ),
+                )
+                if problem.edge_weights is not None:
+                    _admit(
+                        "geodesic_stress_unweighted",
+                        layout_geodesic_stress_pipeline(
+                            edge_index=problem.edge_index,
+                            num_nodes=n,
+                            node_sizes=problem.node_sizes,
+                            seed=seed,
+                            edge_weights=None,
+                            node_sep=node_sep,
+                        ),
+                    )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest geodesic challenger failed", exc_info=True)
+    if "community_scaffold" in shortlist.candidates and _portfolio_has_budget(config):
+        try:
+            from dagua.layout.ops.pipelines.native_community import (
+                layout_native_community_pipeline,
+            )
+
+            _admit(
+                "community_scaffold",
+                layout_native_community_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    config=config,
+                    seed=seed,
+                    edge_weights=problem.edge_weights,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest community challenger failed", exc_info=True)
+    if _small_world_knn_seed_enabled(problem) and _portfolio_has_budget(
+        config,
+        min_remaining_s=2.0,
+    ):
+        seed_base = incumbent_pos if incumbent_pos is not None else baseline_pos
+        try:
+            _admit("small_world_knn_seed", _small_world_knn_seed_candidate(seed_base, problem))
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest small-world seed failed", exc_info=True)
+    if _rgg_geometric_seed_enabled(problem) and _portfolio_has_budget(config):
+        try:
+            _admit("rgg_geometric_seed", _rgg_geometric_seed_candidate(problem, seed, node_sep))
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest RGG geometric seed failed", exc_info=True)
+
+    cluster_ids = _build_cluster_ids(problem)
+    from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+    offsets, targets = _build_csr(problem.edge_index.detach().to(device="cpu"), n)
+    all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
+    proxy_scores = {
+        name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
+        for name, pos in positions.items()
+    }
+    cluster_score_telemetry: Dict[str, _ClusterScoreTelemetry] = {}
+    if problem.clusters:
+        scores: Dict[str, float] = {}
+        for name, pos in positions.items():
+            score, score_telemetry = _score_undirected_candidate_payload(
+                pos,
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            scores[name] = score
+            if score_telemetry is not None:
+                cluster_score_telemetry[name] = score_telemetry
+    else:
+        scores = {
+            name: _score_undirected_candidate_cached(
+                pos,
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            for name, pos in positions.items()
+        }
+    best_name = "incumbent" if "incumbent" in positions else "sfdp_prism"
+    best_name = _select_undirected_winner(scores, cluster_score_telemetry, best_name)
+    _log_marketplace_telemetry(
+        route="undirected_large_mini",
+        structural_gate="large_prism_shortlist",
+        positions=positions,
+        proxy_scores=proxy_scores,
+        full_scores=scores,
+        finalist_names=list(scores),
+        winner_name=best_name,
+        started_at=started_at,
+        started_process_at=started_process_at,
+    )
+    _LOGGER.info(
+        "Undirected contest (large mini) candidates=%s winner=%s",
+        ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
+        best_name,
+    )
+    return positions[best_name]
+
+
 def layout_native_undirected_portfolio(
     problem: LayoutProblem,
     state: SolveState,
@@ -1060,6 +2252,9 @@ def layout_native_undirected_portfolio(
     # this module lazily at its two dispatch points).
     from dagua.layout.ops.pipelines.dagua_native import _run_native_problem
 
+    started_at = time.perf_counter()
+    started_process_at = time.process_time()
+
     def _run_incumbent() -> torch.Tensor:
         # Candidate A must be EXACTLY today's default output. Re-enter the
         # router with the portfolio branch suppressed via a private attr --
@@ -1083,14 +2278,39 @@ def layout_native_undirected_portfolio(
     ):
         try:
             shortlisted_pos = _large_prism_shortlist_candidate(problem, config)
-        except Exception:  # noqa: BLE001 -- fall back to the guarded incumbent
+        except Exception as exc:  # noqa: BLE001 -- fall back to the guarded incumbent
+            _reraise_worker_timeout(exc)
             _LOGGER.warning("large undirected shortlist failed", exc_info=True)
             shortlisted_pos = None
         if shortlisted_pos is not None:
-            _LOGGER.info("Undirected contest candidates=sfdp_prism winner=sfdp_prism")
-            return shortlisted_pos
+            # Router-v2 (r2 wave 2): the corpus-backed sfdp+PRISM combination
+            # stays the fast-path holder, but where the structural shortlist
+            # admits geodesic/community candidates they now compete in a
+            # bounded mini-contest instead of being skipped wholesale (the
+            # 250 < n <= 1500 non-mesh band was previously unreachable by
+            # every new candidate family). The fast-path sfdp+PRISM holder is
+            # the incumbent for this branch; pulling in the full native route
+            # here re-enters expensive polish work that the branch exists to avoid.
+            winner_pos = _router_v2_large_mini_contest(
+                shortlisted_pos,
+                problem,
+                config,
+            )
+            return _never_nan_winner(
+                winner_pos,
+                problem,
+                float(getattr(config, "_dagua_native_node_sep", config.node_sep)),
+                int(problem.seed) if problem.seed is not None else 42,
+            )
     incumbent_pos = _run_incumbent()
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
+        return incumbent_pos
+    if not _portfolio_has_budget(config):
+        _LOGGER.info(
+            "Undirected marketplace budget exhausted after incumbent n=%d remaining_s=%s",
+            n,
+            _portfolio_remaining_s(config),
+        )
         return incumbent_pos
     # r80-S8: the aesthetic profile was resolved ONCE in
     # prepare_pipeline_config and stashed on this (already-prepared) config.
@@ -1102,15 +2322,20 @@ def layout_native_undirected_portfolio(
     )
 
     cluster_ids = _build_cluster_ids(problem)
+    cluster_count = (
+        int(torch.unique(cluster_ids[cluster_ids >= 0]).numel()) if cluster_ids is not None else 0
+    )
+    degrees = torch.bincount(problem.edge_index.flatten().to(dtype=torch.long), minlength=n)
+    max_degree = int(degrees.max().item()) if degrees.numel() else 0
+    use_bounded_inner_solvers = _resolved_quality(config) < NEATO_QUALITY_THRESHOLD and (
+        (n <= 120 and cluster_count == 4) or (110 <= n <= 150 and max_degree <= 8)
+    )
     scores: Dict[str, float] = {}
     positions: Dict[str, torch.Tensor] = {}
 
     # Candidate A: the incumbent is ALWAYS eligible (degeneracy guard applies
     # to challengers only).
     positions["incumbent"] = incumbent_pos
-    scores["incumbent"] = _score_undirected_candidate(
-        incumbent_pos, problem, cluster_ids, aesthetic_profile
-    )
 
     # P3 geometry challengers derive from the exact incumbent and bypass
     # projection so their measured transforms reach the honest referee intact.
@@ -1125,6 +2350,8 @@ def layout_native_undirected_portfolio(
         ("unshear", lambda: _unshear_bimodal_edges(incumbent_pos, problem.edge_index)),
     )
     for name, factory in geometry_factories:
+        if not _portfolio_has_budget(config, min_remaining_s=2.0):
+            break
         if (
             name.startswith("collinear")
             and n * int(problem.edge_index.shape[1]) > MAX_COLLINEAR_WORK
@@ -1139,17 +2366,20 @@ def layout_native_undirected_portfolio(
         if not eligible:
             _LOGGER.info("Rejected undirected geometry candidate %s: %s", name, reason)
             continue
-        candidate_score = _score_undirected_candidate(
-            candidate, problem, cluster_ids, aesthetic_profile
-        )
-        if candidate_score > scores["incumbent"] + 0.1:
-            positions[name] = candidate
-            scores[name] = candidate_score
+        positions[name] = candidate
 
     seed = int(problem.seed) if problem.seed is not None else 42
     challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
-    def _add_challenger(name: str, raw_pos: torch.Tensor) -> None:
+    raw_finalist_names: list[str] = []
+    arm_s_candidate_names: set[str] = set()
+
+    def _add_challenger(
+        name: str,
+        raw_pos: torch.Tensor,
+        *,
+        include_raw: bool = False,
+    ) -> None:
         """Repair, project, guard, and score one raw challenger.
 
         Parameters
@@ -1158,12 +2388,32 @@ def layout_native_undirected_portfolio(
             Stable candidate-family name.
         raw_pos : torch.Tensor
             Unprojected positions with shape ``[N, 2]``.
+        include_raw : bool, default=False
+            Register a guarded unprojected variant as an honest-ruler
+            finalist. Used by fidelity challengers whose benchmark reference
+            was scored without overlap projection.
 
         Returns
         -------
         None
             Candidates are registered in the enclosing contest dictionaries.
         """
+        if not bool(torch.isfinite(raw_pos).all().item()):
+            _LOGGER.info("Rejected undirected candidate %s: non-finite coordinates", name)
+            return
+        if include_raw:
+            raw_name = f"{name}_raw"
+            degenerate, reason = _candidate_is_degenerate(
+                raw_pos,
+                problem.node_sizes,
+                problem.edge_index,
+            )
+            if degenerate:
+                _LOGGER.info("Rejected undirected candidate %s: %s", raw_name, reason)
+            else:
+                positions[raw_name] = raw_pos
+                raw_finalist_names.append(raw_name)
+
         # Repair, not default (r80 round 4): the candidate keeps its raw
         # layout byte-identical unless the isolated-fling trigger fires, in
         # which case the flung singletons are re-tiled adjacent to the core
@@ -1171,20 +2421,40 @@ def layout_native_undirected_portfolio(
         # Applied at this shared entry so every challenger family (sfdp,
         # neato, cluster_sfdp, weighted_similarity) gets the same backstop.
         raw_pos = _repair_flung_isolates(raw_pos, problem, challenger_node_sep)
+        if not bool(torch.isfinite(raw_pos).all().item()):
+            _LOGGER.info("Rejected repaired undirected candidate %s: non-finite coordinates", name)
+            return
         # Below the large threshold all cleanup variants remain additive
         # (r80-S2b). Above it, the corpus profile retains only PRISM, the
         # cleanup that wins the measured large candidate families. The
         # degeneracy guard applies independently to every retained variant.
         for suffix, convergent in _cleanup_variants_for_size(n):
-            if convergent is None:
-                projected = _project_candidate_prism(raw_pos, problem)
-                if projected is None:
-                    _LOGGER.info(
-                        "Rejected undirected candidate %s%s: PRISM failed closed", name, suffix
-                    )
-                    continue
-            else:
-                projected = _project_candidate(raw_pos, problem, convergent=convergent)
+            if not _portfolio_has_budget(config):
+                _LOGGER.info(
+                    "Skipped undirected candidate %s%s: insufficient remaining budget",
+                    name,
+                    suffix,
+                )
+                continue
+            try:
+                if convergent is None:
+                    projected = _project_candidate_prism(raw_pos, problem)
+                    if projected is None:
+                        _LOGGER.info(
+                            "Rejected undirected candidate %s%s: PRISM failed closed", name, suffix
+                        )
+                        continue
+                else:
+                    projected = _project_candidate(raw_pos, problem, convergent=convergent)
+            except Exception as exc:  # noqa: BLE001 -- one cleanup variant fails closed
+                _reraise_worker_timeout(exc)
+                _LOGGER.warning(
+                    "Rejected undirected candidate %s%s: cleanup failed",
+                    name,
+                    suffix,
+                    exc_info=True,
+                )
+                continue
             degenerate, reason = _candidate_is_degenerate(
                 projected,
                 problem.node_sizes,
@@ -1194,48 +2464,57 @@ def layout_native_undirected_portfolio(
                 _LOGGER.info("Rejected undirected candidate %s%s: %s", name, suffix, reason)
                 continue
             positions[name + suffix] = projected
-            scores[name + suffix] = _score_undirected_candidate(
-                projected, problem, cluster_ids, aesthetic_profile
-            )
 
     # Candidate B: our graphviz-fidelity sfdp reimplementation. The contest
     # owns a quality-scaled nonzero budget because LayoutConfig.steps=0 means
     # automatic at the public API, not zero refinement for this challenger.
-    try:
-        from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
+    if _portfolio_has_budget(config):
+        try:
+            from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
 
-        # Raw full-problem solve (round 4): per-component packed solving was
-        # tried and regressed healthy multi-component candidates; any
-        # isolate fling in this raw output is repaired conditionally inside
-        # _add_challenger.
-        if problem.edge_weights is None or n <= LARGE_CONTEST_NODE_THRESHOLD:
-            sfdp_pos = layout_sfdp_pipeline(
-                edge_index=problem.edge_index,
-                num_nodes=n,
-                node_sizes=problem.node_sizes,
-                steps=_candidate_refinement_steps(config, n),
-                seed=seed,
-                edge_weights=problem.edge_weights,
-                fidelity_mode="graphviz",
-            )
-            _add_challenger("sfdp", sfdp_pos)
-        if problem.edge_weights is not None:
-            sfdp_unweighted_pos = layout_sfdp_pipeline(
-                edge_index=problem.edge_index,
-                num_nodes=n,
-                node_sizes=problem.node_sizes,
-                steps=_candidate_refinement_steps(config, n),
-                seed=seed,
-                edge_weights=None,
-                fidelity_mode="graphviz",
-            )
-            _add_challenger("sfdp_unweighted", sfdp_unweighted_pos)
-    except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
-        _LOGGER.warning("SFDP undirected challenger failed", exc_info=True)
+            # Raw full-problem solve (round 4): per-component packed solving was
+            # tried and regressed healthy multi-component candidates; any
+            # isolate fling in this raw output is repaired conditionally inside
+            # _add_challenger.
+            if problem.edge_weights is None or n <= LARGE_CONTEST_NODE_THRESHOLD:
+                sfdp_pos = layout_sfdp_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    steps=(
+                        BALANCED_SMALL_REFINEMENT_STEPS
+                        if use_bounded_inner_solvers
+                        else _candidate_refinement_steps(config, n)
+                    ),
+                    seed=seed,
+                    edge_weights=problem.edge_weights,
+                    fidelity_mode="graphviz",
+                )
+                _add_challenger("sfdp", sfdp_pos)
+            if problem.edge_weights is not None and _portfolio_has_budget(config):
+                sfdp_unweighted_pos = layout_sfdp_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    steps=(
+                        BALANCED_SMALL_REFINEMENT_STEPS
+                        if use_bounded_inner_solvers
+                        else _candidate_refinement_steps(config, n)
+                    ),
+                    seed=seed,
+                    edge_weights=None,
+                    fidelity_mode="graphviz",
+                )
+                _add_challenger("sfdp_unweighted", sfdp_unweighted_pos)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("SFDP undirected challenger failed", exc_info=True)
 
     # Candidate C: our neato reimplementation + projection, quality-gated.
-    if _neato_in_contest(config, n) and (
-        n <= LARGE_CONTEST_NODE_THRESHOLD or problem.edge_weights is not None
+    if (
+        _portfolio_has_budget(config)
+        and _neato_in_contest(config, n)
+        and (n <= LARGE_CONTEST_NODE_THRESHOLD or problem.edge_weights is not None)
     ):
         try:
             from dagua.layout.ops.pipelines.neato import layout_neato_pipeline
@@ -1249,7 +2528,11 @@ def layout_native_undirected_portfolio(
                     node_sizes=problem.node_sizes,
                     seed=seed,
                     edge_weights=problem.edge_weights,
-                    maxiter=_neato_iterations(config, n),
+                    maxiter=(
+                        NEATO_BALANCED_SMALL_ITERATIONS
+                        if use_bounded_inner_solvers
+                        else _neato_iterations(config, n)
+                    ),
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
@@ -1261,12 +2544,17 @@ def layout_native_undirected_portfolio(
                     node_sizes=problem.node_sizes,
                     seed=seed,
                     edge_weights=None,
-                    maxiter=_neato_iterations(config, n),
+                    maxiter=(
+                        NEATO_BALANCED_SMALL_ITERATIONS
+                        if use_bounded_inner_solvers
+                        else _neato_iterations(config, n)
+                    ),
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
                 _add_challenger("neato_unweighted", neato_unweighted_pos)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _reraise_worker_timeout(exc)
             _LOGGER.warning("neato undirected challenger failed", exc_info=True)
 
     # Candidate D (r80-S9 Deliverable 1): cluster-aware sfdp driver, only
@@ -1275,24 +2563,90 @@ def layout_native_undirected_portfolio(
     # on the composite's cluster-separation term alone (see
     # _cluster_aware_sfdp_candidate). Never replaces the incumbent or the
     # flat sfdp/neato challengers above.
-    if problem.clusters and n <= LARGE_CONTEST_NODE_THRESHOLD:
+    if (
+        problem.clusters
+        and n <= LARGE_CONTEST_NODE_THRESHOLD
+        and not use_bounded_inner_solvers
+        and _portfolio_has_budget(config)
+    ):
         try:
             cluster_sfdp_pos = _cluster_aware_sfdp_candidate(problem, config, ctx)
-        except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
             _LOGGER.warning("cluster-SFDP undirected challenger failed", exc_info=True)
             cluster_sfdp_pos = None
         if cluster_sfdp_pos is not None:
             _add_challenger("cluster_sfdp", cluster_sfdp_pos)
+
+    # Candidate S (R8 Arm S): stress-seeded additive cluster candidate. It is
+    # built only for clustered rows, admitted through the 8A guardrail plan,
+    # and inserted as an already-healed/projected finalist so the generic
+    # cleanup ladder cannot retune its precommitted scale calibration.
+    if problem.clusters and _portfolio_has_budget(config):
+        arm_s_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_arm_s import (
+                ARM_S_PRIOR_S,
+                build_arm_s_stress_finalist,
+            )
+            from dagua.layout.ops.pipelines.native_guardrails import (
+                build_native_guardrail_plan,
+                register_native_guardrail_observation,
+            )
+
+            arm_s_plan = build_native_guardrail_plan(problem, config, prior_cost_s=ARM_S_PRIOR_S)
+            if arm_s_plan.admitted:
+                arm_s_process_started = time.process_time()
+                arm_s_finalist, arm_s_candidates, arm_s_proxy_scores = build_arm_s_stress_finalist(
+                    problem,
+                    cluster_ids,
+                )
+                register_native_guardrail_observation(
+                    config,
+                    candidate="arm_s_stress",
+                    mode=arm_s_plan.mode,
+                    elapsed_s=time.process_time() - arm_s_process_started,
+                )
+                setattr(config, "_dagua_native_arm_s_candidates", arm_s_candidates)
+                setattr(config, "_dagua_native_arm_s_proxy_scores", arm_s_proxy_scores)
+                if arm_s_finalist is not None:
+                    name = arm_s_finalist.name
+                    degenerate, reason = _candidate_is_degenerate(
+                        arm_s_finalist.positions,
+                        problem.node_sizes,
+                        problem.edge_index,
+                    )
+                    if degenerate:
+                        _LOGGER.info("Rejected Arm S candidate %s: %s", name, reason)
+                    else:
+                        positions[name] = arm_s_finalist.positions
+                        arm_s_candidate_names.add(name)
+                else:
+                    _LOGGER.info("Skipped Arm S stress candidate: no finite proxy finalist")
+            else:
+                _LOGGER.info("Skipped Arm S stress candidate: %s", arm_s_plan.skip_reason)
+        except Exception as exc:  # noqa: BLE001 -- Arm S failure never sinks the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("Arm S stress undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=arm_s seconds=%.3f",
+            time.perf_counter() - arm_s_started,
+        )
 
     # Candidate E (r80-S9 Deliverable 2): weighted-similarity native-stress
     # core, only for problems that carry edge weights. Adds a candidate
     # whose Dijkstra/pivot target distances treat weights as similarities
     # (see _weighted_similarity_candidate). Never changes default weight
     # handling anywhere else.
-    if problem.edge_weights is not None and n <= LARGE_CONTEST_NODE_THRESHOLD:
+    if (
+        problem.edge_weights is not None
+        and n <= LARGE_CONTEST_NODE_THRESHOLD
+        and _portfolio_has_budget(config)
+    ):
         try:
             weighted_pos = _weighted_similarity_candidate(problem, seed)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _reraise_worker_timeout(exc)
             _LOGGER.warning("weighted-similarity undirected challenger failed", exc_info=True)
             weighted_pos = None
         if weighted_pos is not None:
@@ -1302,28 +2656,549 @@ def layout_native_undirected_portfolio(
     # quality-scaled stress schedule. It is additive and contest-scored, so
     # graphs where hop-unit or force candidates are stronger remain unchanged.
     stress_points_pos: Optional[torch.Tensor] = None
-    try:
-        edge_count = int(problem.edge_index.shape[1])
-        if n > MAX_DENSE_STRESS_NODES or edge_count > MAX_DENSE_STRESS_EDGES:
-            raise RuntimeError("point-unit stress exceeds dense-work cap")
-        candidate = _stress_points_candidate(problem, seed)
-        stress_points_pos = candidate
-    except Exception:  # noqa: BLE001 -- a failed challenger never sinks the solve
-        _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
+    if _portfolio_has_budget(config):
+        try:
+            edge_count = int(problem.edge_index.shape[1])
+            if n > MAX_DENSE_STRESS_NODES or edge_count > MAX_DENSE_STRESS_EDGES:
+                _LOGGER.info(
+                    "Skipped point-unit stress undirected challenger: dense-work cap n=%d e=%d",
+                    n,
+                    edge_count,
+                )
+            else:
+                candidate = _stress_points_candidate(problem, seed)
+                stress_points_pos = candidate
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
     if stress_points_pos is not None:
         _add_challenger("stress_points", stress_points_pos)
 
+    # W4 narrow geometry seeds: structurally gated and referee-protected.
+    # They only add seed layouts to the existing challenger marketplace; the
+    # incumbent remains full-scored and wins every tie.
+    if _small_world_knn_seed_enabled(problem) and _portfolio_has_budget(
+        config,
+        min_remaining_s=2.0,
+    ):
+        try:
+            small_world_seed = _small_world_knn_seed_candidate(incumbent_pos, problem)
+            _add_challenger("small_world_knn_seed", small_world_seed)
+        except Exception as exc:  # noqa: BLE001 -- a failed seed never sinks the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("small-world kNN seed challenger failed", exc_info=True)
+    if _rgg_geometric_seed_enabled(problem) and _portfolio_has_budget(config):
+        try:
+            rgg_seed = _rgg_geometric_seed_candidate(problem, seed, challenger_node_sep)
+            if rgg_seed is not None:
+                _add_challenger("rgg_geometric_seed", rgg_seed)
+        except Exception as exc:  # noqa: BLE001 -- a failed seed never sinks the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("RGG geometric seed challenger failed", exc_info=True)
+
+    # Candidate G (r83-P3.3): local fCoSE at the fidelity campaign's
+    # reference defaults. Three adjacent deterministic seeds retain bounded
+    # multi-seed coverage without consulting any external adapter.
+    fcose_started = time.perf_counter()
+    fcose_runs = 0
+    if _portfolio_has_budget(config):
+        try:
+            from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
+
+            fcose_cost_s = FCOSE_PRIOR_S
+            for seed_offset in range(FCOSE_CONTEST_SEEDS):
+                if not _portfolio_has_budget(
+                    config
+                ) or not _predicted_arm_budget_preserving_arm_s_score(
+                    config,
+                    fcose_cost_s,
+                    arm_s_pending=bool(arm_s_candidate_names),
+                ):
+                    _record_insufficient_predicted_budget_skip(
+                        arm=f"fcose_seed{seed_offset}",
+                        config=config,
+                        predicted_cost_s=fcose_cost_s,
+                    )
+                    _LOGGER.info(
+                        "Skipped fCoSE seed %d: insufficient predicted budget",
+                        seed_offset,
+                    )
+                    break
+                candidate_started_process = time.process_time()
+                fcose_pos = layout_fcose_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    steps=FCOSE_REFERENCE_STEPS,
+                    seed=seed + seed_offset,
+                    edge_weights=problem.edge_weights,
+                    quality="default",
+                    randomize=True,
+                )
+                fcose_runs += 1
+                _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
+                fcose_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
+    _LOGGER.info(
+        "Undirected candidate runtime family=fcose runs=%d seconds=%.3f",
+        fcose_runs,
+        time.perf_counter() - fcose_started,
+    )
+
+    # Candidate H (r83-P3.3): exact local sklearn-compatible tsNET. The
+    # quadratic topology-distance/t-SNE work is admitted only through n=300.
+    is_mesh = problem.structure is not None and problem.structure.family == GraphFamily.GRID
+    if n <= TSNET_MAX_CONTEST_NODES and not is_mesh and _portfolio_has_budget(config):
+        tsnet_started = time.perf_counter()
+        tsnet_runs = 0
+        try:
+            from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
+
+            tsnet_cost_s = TSNET_PRIOR_S
+            stop_tsnet = False
+            for perplexity in TSNET_PERPLEXITIES:
+                for seed_offset in range(TSNET_CONTEST_SEEDS):
+                    if not _portfolio_has_budget(
+                        config
+                    ) or not _predicted_arm_budget_preserving_arm_s_score(
+                        config,
+                        tsnet_cost_s,
+                        arm_s_pending=bool(arm_s_candidate_names),
+                    ):
+                        _record_insufficient_predicted_budget_skip(
+                            arm=f"tsnet_perp{perplexity:g}_seed{seed_offset}",
+                            config=config,
+                            predicted_cost_s=tsnet_cost_s,
+                        )
+                        _LOGGER.info(
+                            "Skipped tsNET perp=%g seed=%d: insufficient predicted budget",
+                            perplexity,
+                            seed_offset,
+                        )
+                        stop_tsnet = True
+                        break
+                    candidate_started_process = time.process_time()
+                    tsnet_pos = layout_tsnet_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        perplexity=perplexity,
+                        steps=TSNET_REFERENCE_STEPS,
+                        seed=seed + seed_offset,
+                        edge_weights=problem.edge_weights,
+                        fidelity_mode=True,
+                    )
+                    tsnet_runs += 1
+                    flavor = f"perp{perplexity:g}"
+                    _add_challenger(
+                        f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
+                    )
+                    tsnet_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                if stop_tsnet:
+                    break
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("tsNET undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=tsnet runs=%d seconds=%.3f",
+            tsnet_runs,
+            time.perf_counter() - tsnet_started,
+        )
+
+    # Candidate I (r83-P3.3): NetworkX-compatible Fruchterman-Reingold is a
+    # tiling challenger, so it runs only when weak decomposition is present.
+    from dagua.layout.ops.coordinate import _weak_components
+
+    if len(
+        _weak_components(problem.edge_index.detach().to(device="cpu"), n)
+    ) > 1 and _portfolio_has_budget(config):
+        fr_started = time.perf_counter()
+        fr_runs = 0
+        try:
+            from dagua.layout.ops.pipelines.fr import layout_fr_pipeline
+
+            fr_pos = layout_fr_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                steps=FR_REFERENCE_STEPS,
+                seed=seed,
+                edge_weights=problem.edge_weights,
+                networkx_compat=True,
+            )
+            fr_runs = 1
+            _add_challenger("fr", fr_pos, include_raw=True)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("FR undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=fr runs=%d seconds=%.3f",
+            fr_runs,
+            time.perf_counter() - fr_started,
+        )
+
+    # Candidates J/K/L (r2 wave 2, router-v2 shortlist): exact-grid
+    # certificate, geodesic-MDS stress, and community scaffold, admitted by
+    # STRUCTURAL features only (see dagua_native._undirected_route_shortlist;
+    # no graph names, no corpus constants). All three are ordinary contest
+    # candidates: the honest measured-argmax referee and the incumbent
+    # tie-break decide, exactly as for every other challenger family.
+    from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
+
+    shortlist = _undirected_route_shortlist(
+        problem.structure,
+        n,
+        has_edge_weights=problem.edge_weights is not None,
+    )
+    if shortlist.candidates:
+        _LOGGER.info(
+            "Router-v2 shortlist classes=%s candidates=%s",
+            ",".join(shortlist.classes),
+            ",".join(shortlist.candidates),
+        )
+    if "lattice_cert" in shortlist.candidates and _portfolio_has_budget(
+        config, min_remaining_s=2.0
+    ):
+        try:
+            from dagua.layout.ops.pipelines.native_lattice_grid import (
+                certificate_grid_positions,
+                certify_rect_grid,
+            )
+
+            grid_certificate = certify_rect_grid(problem.edge_index, n)
+            if grid_certificate is not None:
+                cert_pos = certificate_grid_positions(
+                    grid_certificate,
+                    problem.node_sizes,
+                    challenger_node_sep,
+                )
+                eligible, reason = _candidate_is_eligible(
+                    cert_pos, incumbent_pos, problem.node_sizes, problem.edge_index
+                )
+                if eligible:
+                    positions["lattice_cert"] = cert_pos
+                else:
+                    _LOGGER.info("Rejected undirected candidate lattice_cert: %s", reason)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("lattice certificate candidate failed", exc_info=True)
+    if "geodesic_stress" in shortlist.candidates and _portfolio_has_budget(config):
+        geodesic_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_lattice_grid import (
+                geodesic_dense_work_is_allowed,
+                layout_geodesic_stress_pipeline,
+            )
+
+            if not geodesic_dense_work_is_allowed(n, int(problem.edge_index.shape[1])):
+                _LOGGER.info("Skipped geodesic stress challenger: dense-work guard")
+            else:
+                geodesic_pos = layout_geodesic_stress_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    seed=seed,
+                    edge_weights=problem.edge_weights,
+                    node_sep=challenger_node_sep,
+                )
+                _add_challenger("geodesic_stress", geodesic_pos, include_raw=True)
+                if problem.edge_weights is not None:
+                    # Mirror the sfdp_unweighted/neato_unweighted pattern: the
+                    # frozen ruler's stress axes measure HOP distances, so a
+                    # hop-geodesic variant competes alongside the weighted one
+                    # and the referee picks per graph.
+                    geodesic_unweighted_pos = layout_geodesic_stress_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        seed=seed,
+                        edge_weights=None,
+                        node_sep=challenger_node_sep,
+                    )
+                    _add_challenger(
+                        "geodesic_stress_unweighted",
+                        geodesic_unweighted_pos,
+                        include_raw=True,
+                    )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("geodesic stress undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=geodesic_stress seconds=%.3f",
+            time.perf_counter() - geodesic_started,
+        )
+    if "community_scaffold" in shortlist.candidates and _portfolio_has_budget(config):
+        community_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_community import (
+                layout_native_community_pipeline,
+            )
+
+            community_pos = layout_native_community_pipeline(
+                edge_index=problem.edge_index,
+                num_nodes=n,
+                node_sizes=problem.node_sizes,
+                config=config,
+                seed=seed,
+                edge_weights=problem.edge_weights,
+            )
+            _add_challenger("community_scaffold", community_pos, include_raw=True)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("community scaffold undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=community_scaffold seconds=%.3f",
+            time.perf_counter() - community_started,
+        )
+
+    # Keep the incumbent plus a deterministic proxy-ranked challenger
+    # shortlist. Only these finalists reach the frozen honest ruler.
+    from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+    offsets, targets = _build_csr(problem.edge_index.detach().to(device="cpu"), n)
+    all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
+    proxy_scores = {
+        name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
+        for name, pos in positions.items()
+    }
+    challenger_names = sorted(
+        (name for name in positions if name != "incumbent"),
+        key=lambda name: (-proxy_scores[name], name),
+    )
+    full_score_budget = 4 if use_bounded_inner_solvers else len(positions)
+    # Fidelity raw variants must reach the same referee that scored their
+    # reference counterparts. Preserve proxy budgeting for all other
+    # challengers, then append every guarded raw variant deterministically.
+    proxy_slot_count = full_score_budget - 1
+    proxy_finalists = challenger_names[:proxy_slot_count]
+    if n >= LARGE_CONTEST_NODE_THRESHOLD and cluster_ids is not None and challenger_names:
+        reserved_cluster_name = next(
+            (
+                name
+                for name in challenger_names
+                if name not in proxy_finalists
+                and _marketplace_family(name)
+                not in {_marketplace_family(finalist) for finalist in proxy_finalists}
+            ),
+            None,
+        )
+        if reserved_cluster_name is not None:
+            proxy_finalists.append(reserved_cluster_name)
+    finalist_names = [
+        "incumbent",
+        *proxy_finalists,
+        *(name for name in raw_finalist_names if name not in proxy_finalists),
+    ]
+    cluster_score_telemetry = {}
+    if problem.clusters:
+        if arm_s_candidate_names:
+            from dagua.layout.ops.pipelines.native_arm_s import ARM_S_FULL_REFEREE_PRIOR_S
+
+            budget_skipped_arm_s_names = {
+                name
+                for name in arm_s_candidate_names
+                if name in finalist_names
+                and not _arm_s_full_score_budget_available(config, ARM_S_FULL_REFEREE_PRIOR_S)
+            }
+            if budget_skipped_arm_s_names:
+                for name in budget_skipped_arm_s_names:
+                    _record_insufficient_predicted_budget_skip(
+                        arm=name,
+                        config=config,
+                        predicted_cost_s=ARM_S_FULL_REFEREE_PRIOR_S,
+                    )
+                    _LOGGER.info("Skipped Arm S candidate %s: insufficient full-score budget", name)
+                finalist_names = [
+                    name for name in finalist_names if name not in budget_skipped_arm_s_names
+                ]
+                finalist_names = _restore_proxy_finalist_slots(
+                    finalist_names,
+                    challenger_names,
+                    raw_finalist_names,
+                    proxy_slot_count,
+                    excluded_names=budget_skipped_arm_s_names,
+                )
+                arm_s_candidate_names.difference_update(budget_skipped_arm_s_names)
+        scores = {}
+        for name in finalist_names:
+            score, score_telemetry = _score_undirected_candidate_payload(
+                positions[name],
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            scores[name] = score
+            if score_telemetry is not None:
+                cluster_score_telemetry[name] = score_telemetry
+        if arm_s_candidate_names:
+            from dagua.layout.ops.pipelines.native_arm_s import (
+                ArmSCandidate,
+                evaluate_arm_s_admission,
+            )
+
+            arm_s_candidates = cast(
+                dict[str, ArmSCandidate],
+                getattr(config, "_dagua_native_arm_s_candidates", {}),
+            )
+            incumbent_telemetry = cluster_score_telemetry.get("incumbent")
+            rejected_arm_s_names: set[str] = set()
+            for name in tuple(arm_s_candidate_names):
+                score_telemetry = cluster_score_telemetry.get(name)
+                arm_s_payload: Optional[ArmSCandidate] = arm_s_candidates.get(name)
+                if score_telemetry is None or arm_s_payload is None:
+                    scores.pop(name, None)
+                    rejected_arm_s_names.add(name)
+                    continue
+                report = evaluate_arm_s_admission(
+                    arm_s_payload,
+                    score_telemetry.metrics,
+                    extended_score=score_telemetry.extended_score,
+                )
+                dual_admissible = (
+                    incumbent_telemetry is not None
+                    and _cluster_candidate_is_dual_admissible(score_telemetry, incumbent_telemetry)
+                )
+                if not report.passed or not dual_admissible:
+                    _LOGGER.info(
+                        "Rejected Arm S candidate %s: floors=%s dual=%s",
+                        name,
+                        ",".join(report.failures),
+                        dual_admissible,
+                    )
+                    scores.pop(name, None)
+                    cluster_score_telemetry.pop(name, None)
+                    rejected_arm_s_names.add(name)
+            if rejected_arm_s_names:
+                finalist_names = [
+                    name for name in finalist_names if name not in rejected_arm_s_names
+                ]
+                finalist_names = _restore_proxy_finalist_slots(
+                    finalist_names,
+                    challenger_names,
+                    raw_finalist_names,
+                    proxy_slot_count,
+                    excluded_names=rejected_arm_s_names,
+                )
+                for name in finalist_names:
+                    if name in scores:
+                        continue
+                    score, score_telemetry = _score_undirected_candidate_payload(
+                        positions[name],
+                        problem,
+                        cluster_ids,
+                        aesthetic_profile,
+                        all_pairs_dist,
+                    )
+                    scores[name] = score
+                    if score_telemetry is not None:
+                        cluster_score_telemetry[name] = score_telemetry
+    else:
+        scores = {
+            name: _score_undirected_candidate_cached(
+                positions[name],
+                problem,
+                cluster_ids,
+                aesthetic_profile,
+                all_pairs_dist,
+            )
+            for name in finalist_names
+        }
+
     # Argmax selection; strict inequality means ties go to the incumbent.
-    best_name = "incumbent"
-    for name, score in scores.items():
-        if name != "incumbent" and score > scores[best_name]:
-            best_name = name
+    best_name = _select_undirected_winner(scores, cluster_score_telemetry)
+    _log_marketplace_telemetry(
+        route="undirected",
+        structural_gate=(
+            "large"
+            if n > LARGE_CONTEST_NODE_THRESHOLD
+            else "bounded"
+            if use_bounded_inner_solvers
+            else "default"
+        ),
+        positions=positions,
+        proxy_scores=proxy_scores,
+        full_scores=scores,
+        finalist_names=finalist_names,
+        winner_name=best_name,
+        started_at=started_at,
+        started_process_at=started_process_at,
+    )
     _LOGGER.info(
         "Undirected contest candidates=%s winner=%s",
         ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
         best_name,
     )
-    return positions[best_name]
+    return _never_nan_winner(positions[best_name], problem, challenger_node_sep, seed)
+
+
+def _never_nan_winner(
+    winner: torch.Tensor,
+    problem: LayoutProblem,
+    node_sep: float,
+    seed: int,
+) -> torch.Tensor:
+    """Apply the router-v2 fallback-ladder tail rungs to the contest winner.
+
+    The full four-rung ladder (r2 wave 2):
+
+    1. A challenger that raises or produces non-finite output is dropped
+       from the contest (``_add_challenger`` / try-except blocks above).
+    2. All challengers dropped means the incumbent runs alone (the argmax
+       default above).
+    3. THIS rung: a non-finite winner (in practice only possible via the
+       incumbent, which the contest never eligibility-checks) is replaced by
+       the safe core -- geodesic MDS + clamped stress descent, which cannot
+       return non-finite output by construction.
+    4. Terminal guard: any residual non-finite coordinate is replaced by a
+       deterministic finite circle-plus-jitter layout.
+
+    Finite winners pass through UNCHANGED (bit-identical hot path).
+
+    Parameters
+    ----------
+    winner : torch.Tensor
+        Contest-winning positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Prepared layout problem.
+    node_sep : float
+        Node separation in points for fallback spacing.
+    seed : int
+        Deterministic seed shared with the contest.
+
+    Returns
+    -------
+    torch.Tensor
+        Finite positions with shape ``[N, 2]``.
+    """
+    if bool(torch.isfinite(winner).all().item()):
+        return winner
+    _LOGGER.warning("Undirected contest winner is non-finite; engaging fallback ladder")
+    from dagua.layout.ops.pipelines.native_lattice_grid import (
+        _deterministic_fallback_positions,
+        _target_edge_length,
+        layout_geodesic_stress_pipeline,
+    )
+
+    try:  # Rung 3: safe core.
+        safe = layout_geodesic_stress_pipeline(
+            edge_index=problem.edge_index,
+            num_nodes=int(problem.num_nodes),
+            node_sizes=problem.node_sizes,
+            seed=seed,
+            edge_weights=problem.edge_weights,
+            node_sep=node_sep,
+        )
+        if bool(torch.isfinite(safe).all().item()):
+            return safe.to(device=winner.device, dtype=winner.dtype)
+    except Exception:  # noqa: BLE001 -- the terminal rung below cannot fail
+        _LOGGER.warning("fallback-ladder safe core failed", exc_info=True)
+    # Rung 4: terminal guard -- always finite, always deterministic.
+    spacing = _target_edge_length(problem.node_sizes, node_sep)
+    terminal = _deterministic_fallback_positions(int(problem.num_nodes), spacing, seed)
+    return terminal.to(device=winner.device, dtype=winner.dtype)
 
 
 @register_op
@@ -1397,8 +3272,13 @@ def build_native_undirected_portfolio_pipeline(config: LayoutConfig) -> Pipeline
 
 __all__ = [
     "MAX_CONTEST_NODES",
+    "FCOSE_CONTEST_SEEDS",
+    "FR_REFERENCE_STEPS",
     "NEATO_BALANCED_NODE_CAP",
     "NEATO_QUALITY_THRESHOLD",
+    "TSNET_CONTEST_SEEDS",
+    "TSNET_MAX_CONTEST_NODES",
+    "TSNET_PERPLEXITIES",
     "WEIGHTED_SIMILARITY_TRANSFORM",
     "UndirectedPortfolioRoute",
     "UndirectedPortfolioRouteConfig",

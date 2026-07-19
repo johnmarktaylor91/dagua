@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -44,17 +45,8 @@ def test_classifier_exposes_dispatch_fields_for_cyclic_graph() -> None:
     assert result.has_dominant_component
 
 
-def test_dispatch_routes_force_directed_family_to_force_pipeline() -> None:
-    """FORCE_DIRECTED + high cyclicity should select the force sub-pipeline.
-
-    Sprint-20g tightened the auto-route gate from ``cyclicity_ratio > 0.3``
-    to ``cyclicity_ratio > 0.5`` after benchmarking found force_directed
-    losing to layered_dag/hybrid on every cyclic candidate at the lower
-    threshold (recurrent_feedback_cell, kitchen_sink_*, parallel_cycles).
-    The strict gate keeps the force_directed branch reachable by its
-    intended target (densely-cyclic non-hierarchical graphs) while
-    excluding mostly-DAG graphs with sparse back-edges.
-    """
+def test_dispatch_routes_force_directed_family_to_common_contest() -> None:
+    """A densely cyclic digraph follows the ruler into the common contest."""
     structure = GraphStructure(
         family=GraphFamily.FORCE_DIRECTED,
         num_components=1,
@@ -68,11 +60,11 @@ def test_dispatch_routes_force_directed_family_to_force_pipeline() -> None:
 
     selected = _choose_native_pipeline(structure, LayoutConfig())
 
-    assert selected == "force_directed"
+    assert selected == "undirected_portfolio"
 
 
-def test_dispatch_routes_karate_like_feedback_to_hybrid() -> None:
-    """Low-feedback cyclic directed graphs should select the hybrid path."""
+def test_dispatch_routes_karate_like_feedback_to_common_contest() -> None:
+    """A sparse-feedback digraph follows the ruler into the common contest."""
     structure = GraphStructure(
         family=GraphFamily.HYBRID,
         num_components=1,
@@ -86,11 +78,14 @@ def test_dispatch_routes_karate_like_feedback_to_hybrid() -> None:
 
     selected = _choose_native_pipeline(structure, LayoutConfig())
 
-    assert selected == "hybrid"
+    assert selected == "undirected_portfolio"
 
 
-def test_force_pipeline_legacy_monolith_matches_legacy_module() -> None:
+def test_force_pipeline_legacy_monolith_matches_legacy_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The legacy_monolith escape hatch should preserve sprint-20d output."""
+    monkeypatch.setenv("DAGUA_NATIVE_DISABLE_W5", "1")
     edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 3, 3]], dtype=torch.long)
     node_sizes = torch.full((4, 2), 20.0, dtype=torch.float32)
     config = LayoutConfig(seed=42, steps=5, force_pipeline="legacy_monolith")
@@ -143,16 +138,27 @@ def test_force_pipeline_planar_runs_planar_pipeline_not_layered_fallback() -> No
     assert not torch.equal(planar_pos, layered_pos)
 
 
-def test_declared_undirected_hexagonal_lattice_keeps_layered_polish_route() -> None:
-    """Declared-undirected lattice DAGs should keep the layered polish route.
+def test_declared_undirected_mesh_lattice_enters_common_contest() -> None:
+    """Mesh-strong declared-undirected lattice DAGs enter the common contest.
+
+    Router-v2 (native-sprint r2 wave 2) supersedes the r80-era exclusion that
+    kept every lattice-tagged declared-undirected DAG on the layered baseline
+    route: when the structural mesh features fire (near-constant degree, no
+    hub tail, sqrt-N diameter), the graph re-enters the undirected portfolio
+    contest. This is monotone-safe because the contest's candidate A IS the
+    layered baseline route (including its polish battery) and ties go to the
+    incumbent -- the property the old exclusion protected is preserved by
+    construction, while stress-family candidates get a chance to win where
+    the frozen common-table ruler says they are better.
 
     Returns
     -------
     None
-        This test asserts that semantic-undirected metadata does not route a
-        lattice-like DAG into the undirected portfolio contest.
+        This test asserts the mesh-strong lattice DAG routes to the
+        undirected portfolio while the incumbent guarantee holds.
     """
     from dagua.eval.graphs import get_test_graphs
+    from dagua.layout.ops.pipelines.dagua_native import _mesh_features_strong
 
     graph = next(t.graph for t in get_test_graphs() if t.name == "hexagonal_lattice_42")
     structure = classify_graph(graph.edge_index, graph.num_nodes, graph=graph)
@@ -162,7 +168,13 @@ def test_declared_undirected_hexagonal_lattice_keeps_layered_polish_route() -> N
     assert structure.is_semantically_directed is False
     assert structure.direction_is_declared is True
     assert "lattice_like" in structure.topology_tags
-    assert _choose_native_pipeline(structure, config) == "layered_dag"
+    assert _mesh_features_strong(structure, graph.num_nodes)
+    assert _choose_native_pipeline(structure, config) == "undirected_portfolio"
+
+    # The old exclusion still protects lattice-tagged DAGs whose mesh
+    # features do NOT fire (unknown node count keeps the gate closed).
+    weak_config = LayoutConfig(seed=42)
+    assert _choose_native_pipeline(structure, weak_config) == "layered_dag"
 
 
 def test_native_default_hexagonal_lattice_polish_score_stays_high() -> None:

@@ -13,6 +13,8 @@ if "PYTORCH_CUDA_ALLOC_CONF" not in _os.environ:
 from dataclasses import replace
 from typing import Any, Optional, Tuple
 
+from dagua import constraints as C
+from dagua import constraints as constraints
 from dagua.animation import (
     AnimationConfig,
     AnimationResult,
@@ -25,6 +27,7 @@ from dagua.animation import (
     tour,
 )
 from dagua.config import LayoutConfig
+from dagua.constraints import Constraint
 from dagua.defaults import (
     configure,
     defaults,
@@ -232,6 +235,9 @@ __all__ = [
     "GRAPHVIZ_MATCH_NODE_STYLES",
     "GRAPHVIZ_STRICT_THEME",
     # Flex system
+    "C",
+    "constraints",
+    "Constraint",
     "Flex",
     "LayoutFlex",
     "AlignGroup",

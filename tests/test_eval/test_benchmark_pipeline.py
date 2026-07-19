@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ from dagua.eval.benchmark import (
     BenchmarkResult,
     _build_results_payload,
     _competitor_signature,
+    _declares_hierarchy,
+    _metric_payload,
     benchmark_run_status,
     get_rare_suite_graphs,
     get_standard_suite_graphs,
@@ -19,9 +22,68 @@ from dagua.eval.benchmark import (
 )
 from dagua.eval.competitors import get_available_competitors
 from dagua.eval.competitors.dagua_competitor import DaguaCompetitor
-from dagua.eval.graphs import TestGraph
+from dagua.eval.graphs import TestGraph, get_test_graphs
 from dagua.eval.report import generate_benchmark_markdown, generate_report
 from dagua.graph import DaguaGraph
+from dagua.metrics import _CLUSTER_WEIGHTS, composite_auto
+from dagua.utils import longest_path_layering
+
+
+def test_production_random_dag_routes_to_directed_ruler() -> None:
+    """Corpus DAG metadata reaches the directed composite without an override."""
+    test_graph = next(graph for graph in get_test_graphs() if graph.name == "random_dag_200")
+    graph = test_graph.graph
+    graph.compute_node_sizes()
+    ranks = torch.tensor(
+        longest_path_layering(graph.edge_index, graph.num_nodes), dtype=torch.float32
+    )
+    pos = torch.stack((torch.arange(graph.num_nodes, dtype=torch.float32), ranks), dim=1)
+
+    assert _declares_hierarchy(test_graph)
+    assert graph.is_semantically_directed is True
+    metrics, score, _, _ = _metric_payload(
+        graph,
+        pos,
+        "quick",
+        declared_hierarchical=_declares_hierarchy(test_graph),
+        semantically_directed=True,
+    )
+
+    assert metrics["declared_hierarchical"] is True
+    assert score == pytest.approx(composite_auto(metrics, True))
+
+
+def test_metric_payload_full_forwards_cluster_quality_metadata() -> None:
+    """Full benchmark scoring computes finite cluster ruler keys for clustered graphs."""
+    graph = DaguaGraph()
+    for index in range(5):
+        graph.add_node(index)
+    graph.add_edge(3, 4)
+    graph.node_sizes = torch.full((5, 2), 10.0)
+    graph.clusters = {"center": [0, 1], "outer": [0, 1, 2]}
+    graph.cluster_parents = {"center": "outer"}
+    graph.cluster_labels = {"center": "Center", "outer": "Outer"}
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [5.0, 0.0],
+            [2.5, 0.0],
+            [-40.0, 0.0],
+            [40.0, 0.0],
+        ]
+    )
+
+    metrics, score, computed, skipped = _metric_payload(graph, pos, "full")
+    without_cluster = {**metrics, **{name: None for name in _CLUSTER_WEIGHTS}}
+
+    assert "tier2" in computed
+    assert "tier3" in computed
+    assert not skipped
+    for name in _CLUSTER_WEIGHTS:
+        assert metrics[name] is not None
+        assert math.isfinite(float(metrics[name]))
+    assert score == pytest.approx(composite_auto(metrics))
+    assert score != pytest.approx(composite_auto(without_cluster))
 
 
 @pytest.mark.smoke

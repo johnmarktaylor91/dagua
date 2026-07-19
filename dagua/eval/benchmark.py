@@ -44,13 +44,14 @@ from dagua.eval.competitors.base import CompetitorBase
 from dagua.eval.graphs import (
     TestGraph,
     get_test_graphs,
+    is_semantically_directed,
     make_chain,
     make_random_dag,
     make_sparse_layered,
     make_tree,
     make_wide_dag,
 )
-from dagua.metrics import composite, compute_all_metrics, full, quick
+from dagua.metrics import composite, composite_auto, compute_all_metrics, full, quick
 from dagua.utils import longest_path_layering
 
 DEFAULT_OUTPUT_DIR = "eval_output"
@@ -873,12 +874,42 @@ def _metric_payload(
     compute_level: str,
     native_routes: Optional[List[Any]] = None,
     native_edge_label_positions: Optional[List[Any]] = None,
+    *,
+    declared_hierarchical: bool = False,
+    semantically_directed: Optional[bool] = None,
 ) -> Tuple[Dict[str, Any], float, List[str], List[str]]:
+    """Compute the benchmark ruler payload with semantic routing metadata.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph being scored.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    compute_level : str
+        ``full`` for the small preset or ``quick`` for the sampled large preset.
+    native_routes : Optional[List[Any]], optional
+        Competitor-provided routed edge geometry.
+    native_edge_label_positions : Optional[List[Any]], optional
+        Competitor-provided edge-label positions.
+    declared_hierarchical : bool, optional
+        Whether DAG, rank, or layered corpus metadata declares hierarchy.
+    semantically_directed : Optional[bool], optional
+        Whether stored edge direction has domain meaning.
+
+    Returns
+    -------
+    Tuple[Dict[str, Any], float, List[str], List[str]]
+        Metrics, composite score, computed tiers, and skipped tiers.
+    """
     edge_index = graph.edge_index
     topo_depth = (
         longest_path_layering(edge_index, graph.num_nodes) if edge_index.numel() > 0 else None
     )
     node_sizes = graph.node_sizes if graph.node_sizes is not None else None
+    clusters = graph.clusters if getattr(graph, "clusters", None) else None
+    cluster_parents = graph.cluster_parents if getattr(graph, "cluster_parents", None) else None
+    cluster_labels = graph.cluster_labels if getattr(graph, "cluster_labels", None) else None
 
     metrics: Dict[str, Any]
     computed = ["tier1"]
@@ -900,16 +931,16 @@ def _metric_payload(
             stress_targets=250,
             crossing_samples=100_000,
             neighborhood_samples=1_000,
+            declared_hierarchical=declared_hierarchical,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            cluster_labels=cluster_labels,
         )
-        metrics.update(
-            compute_all_metrics(
-                pos,
-                edge_index,
-                graph.node_sizes,
-                clusters=graph.clusters,
-                direction=graph.direction,
-            )
+        legacy_metrics = compute_all_metrics(
+            pos, edge_index, graph.node_sizes, direction=graph.direction
         )
+        metrics.update({key: value for key, value in legacy_metrics.items() if key not in metrics})
+        metrics["declared_hierarchical"] = declared_hierarchical
         # Full-drawing composites (r80-S6, ADDITIVE): new keys only; nothing
         # here feeds composite()/composite_auto() or the W/T/L pipeline.
         metrics.update(
@@ -930,22 +961,61 @@ def _metric_payload(
             topo_depth=topo_depth,
             node_sizes=node_sizes,
             direction=graph.direction,
+            declared_hierarchical=declared_hierarchical,
         )
         metrics.update(
             compute_all_metrics(
                 pos,
                 edge_index,
                 graph.node_sizes,
-                clusters=graph.clusters,
                 direction=graph.direction,
             )
         )
+        metrics["declared_hierarchical"] = declared_hierarchical
+        if clusters is not None:
+            metrics["_cluster_quality_supported"] = False
+            metrics["_cluster_quality_skip_reason"] = (
+                "quick benchmark profile omits cluster-quality metrics"
+            )
         skipped.extend(["tier2", "tier3"])
 
     metrics["aesthetic_score"] = metrics.get("overall_quality", composite(metrics))
     metrics["anti_patterns"] = _style_anti_patterns(metrics)
-    comp_score = float(metrics.get("composite_score", composite(metrics)))
+    comp_score = float(composite_auto(metrics, semantically_directed))
+    metrics["composite_score"] = comp_score
     return metrics, comp_score, computed, skipped
+
+
+def _declares_hierarchy(test_graph: TestGraph) -> bool:
+    """Whether a graph qualifies for the directed/hierarchy scoring table.
+
+    A graph qualifies iff it is semantically directed AND acyclic (a DAG).
+    Acyclicity is COMPUTED from the edge set (cycle detection), not inferred
+    from fragile name/tag/description markers. This means feedforward NN traces
+    (transformer/resnet/inception) correctly qualify for flow + depth-order
+    scoring, and cyclic graphs (SCC/feedback) correctly fall through to the
+    common table even when their description mentions e.g. "DAG-like tails".
+
+    r83 architect decision (2026-07-11): for scoring, any semantically directed
+    acyclic graph has a genuine flow-fidelity quality axis, so it earns the
+    directed table; cycles get no upwardness tax. Supersedes the earlier
+    metadata-marker predicate, which false-positived 3 cyclic corpus graphs (a
+    " dag" substring match on "DAG-like tails") and false-negatived ~42 acyclic
+    NN-trace DAGs that carried no hierarchy marker. See R83_RULER_FINAL.md.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Corpus graph and its stable name, tags, and description.
+
+    Returns
+    -------
+    bool
+        True for semantically directed acyclic graphs (DAGs).
+    """
+    if not is_semantically_directed(test_graph):
+        return False
+    return not test_graph.graph.has_cycles
 
 
 def _style_anti_patterns(metrics: Dict[str, Any]) -> List[str]:
@@ -1166,6 +1236,8 @@ def _run_one_competitor(
         compute_level,
         native_routes=result.routes,
         native_edge_label_positions=result.edge_label_positions,
+        declared_hierarchical=_declares_hierarchy(bg.test_graph),
+        semantically_directed=is_semantically_directed(bg.test_graph),
     )
     rel_positions = Path("positions") / f"{bg.test_graph.name}__{competitor.name}.pt"
     torch.save(result.pos.detach().cpu(), run_dir / rel_positions)
@@ -1267,7 +1339,7 @@ def _build_results_payload(
     competitor_signatures = competitor_signatures or {}
     rerun_set = set(rerun_competitors or [])
 
-    payload = (
+    payload: Dict[str, Any] = (
         copy.deepcopy(existing_payload)
         if existing_payload is not None
         else {
@@ -1280,6 +1352,8 @@ def _build_results_payload(
     payload["run_id"] = run_id
     payload["suite"] = suite
     payload["system"] = _system_metadata()
+    if not isinstance(payload.get("graphs"), dict):
+        payload["graphs"] = {}
     _write_progress(
         run_dir,
         suite,
@@ -1291,8 +1365,11 @@ def _build_results_payload(
     )
 
     for bg in graphs:
-        existing_graph = payload["graphs"].get(bg.test_graph.name, {})
-        graph_payload = copy.deepcopy(existing_graph) if existing_graph else _graph_summary(bg)
+        graphs_payload: Dict[str, Any] = payload["graphs"]
+        existing_graph = graphs_payload.get(bg.test_graph.name, {})
+        graph_payload: Dict[str, Any] = (
+            copy.deepcopy(existing_graph) if existing_graph else _graph_summary(bg)
+        )
         graph_payload.update({k: v for k, v in _graph_summary(bg).items() if k != "competitors"})
         graph_payload.setdefault("competitors", {})
         for competitor in competitors:
@@ -1341,7 +1418,7 @@ def _build_results_payload(
                     seed=seed,
                 )
             graph_payload["competitors"][competitor.name] = competitor_result
-            payload["graphs"][bg.test_graph.name] = graph_payload
+            graphs_payload[bg.test_graph.name] = graph_payload
             if checkpoint_each_graph:
                 _save_json_atomic(_partial_results_path(run_dir), payload)
             _write_progress(
@@ -1350,14 +1427,13 @@ def _build_results_payload(
                 run_id,
                 graphs,
                 competitors,
-                payload
-                | {"graphs": payload.get("graphs", {}) | {bg.test_graph.name: graph_payload}},
+                payload | {"graphs": graphs_payload | {bg.test_graph.name: graph_payload}},
                 current_graph=bg.test_graph.name,
                 current_competitor=competitor.name,
                 step="running",
                 last_artifact=graph_payload["competitors"][competitor.name].get("positions_path"),
             )
-        payload["graphs"][bg.test_graph.name] = graph_payload
+        graphs_payload[bg.test_graph.name] = graph_payload
 
     _write_progress(
         run_dir,
@@ -1825,7 +1901,7 @@ def _run_salt_derived_suite(args: argparse.Namespace) -> None:
         make_rolling_suite,
     )
     from dagua.layout.engine import layout as engine_layout
-    from dagua.metrics import composite, composite_large, full, quick
+    from dagua.metrics import composite_auto, full, quick
 
     salt_path = Path(args.salt_path) if args.salt_path else None
 
@@ -1852,13 +1928,33 @@ def _run_salt_derived_suite(args: argparse.Namespace) -> None:
         try:
             pos = engine_layout(g, LayoutConfig(seed=42))
             wall = time.perf_counter() - t0
+            declared_hierarchical = _declares_hierarchy(tg)
+            semantic_direction = is_semantically_directed(tg)
             if n <= 2000:
-                m = full(pos, g.edge_index, node_sizes=g.node_sizes)
-                score = composite(m)
+                m = full(
+                    pos,
+                    g.edge_index,
+                    node_sizes=g.node_sizes,
+                    direction=g.direction,
+                    declared_hierarchical=declared_hierarchical,
+                    clusters=g.clusters if getattr(g, "clusters", None) else None,
+                    cluster_parents=(
+                        g.cluster_parents if getattr(g, "cluster_parents", None) else None
+                    ),
+                    cluster_labels=g.cluster_labels if getattr(g, "cluster_labels", None) else None,
+                )
+                score = composite_auto(m, semantic_direction)
                 profile = "profile_small"
             else:
-                m = quick(pos, g.edge_index, node_sizes=g.node_sizes)
-                score = composite_large(m)
+                m = quick(
+                    pos,
+                    g.edge_index,
+                    node_sizes=g.node_sizes,
+                    direction=g.direction,
+                    seed=0,
+                    declared_hierarchical=declared_hierarchical,
+                )
+                score = composite_auto(m, semantic_direction)
                 profile = "profile_large"
             error = None
         except Exception as e:

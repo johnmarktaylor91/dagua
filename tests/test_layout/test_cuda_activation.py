@@ -11,11 +11,6 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
-from dagua.layout.constraints import (
-    edge_attraction_loss,
-    edge_length_variance_loss,
-    edge_straightness_loss,
-)
 from dagua.layout.engine import (
     EdgeBatchContext,
     SampledNodeContext,
@@ -25,6 +20,11 @@ from dagua.layout.engine import (
     _resolve_execution_mode,
 )
 from dagua.layout.layers import LayerIndex, build_layer_index
+from dagua.layout.losses import (
+    edge_attraction_loss,
+    edge_length_variance_loss,
+    edge_straightness_loss,
+)
 from dagua.layout.multilevel import _auto_cpu_edge_batch_size, coarsen_once
 from dagua.layout.ops.pipelines.dagua_native import _should_lattice_uniform_centered_slots
 from dagua.layout.projection import project_overlaps

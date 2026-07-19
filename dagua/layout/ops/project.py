@@ -15,17 +15,17 @@ from typing import Any, Callable, ClassVar, Optional, Tuple
 
 import torch
 
-from dagua.layout.constraints import project_hard_pins
+from dagua.layout.losses import project_hard_pins
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
 from dagua.metrics import (
-    composite_auto,
-    count_overlaps_detailed,
-    dag_consistency,
-    edge_length_cv,
-    sampled_crossing_rate,
+    composite_undirected,
+    edge_crossing_score,
+    edge_length_deviation_score,
+    isotonic_stress,
+    node_occlusion_score,
 )
 
 _MIN_MOVEMENT_NORM = 1.0e-12
@@ -366,11 +366,10 @@ def _overlap_gate_proxy_composite(
     node_sizes : torch.Tensor
         Node-size tensor shaped ``[N, 2]``.
     direction : str
-        Layout direction (``"TB"``, ``"BT"``, ``"LR"``, or ``"RL"``) used for
-        the directed ``dag_consistency`` term.
+        Layout direction retained for API compatibility.
     is_semantically_directed : bool
-        Whether to score with ``composite`` (directed, includes
-        ``dag_consistency``) or ``composite_undirected``.
+        Semantic direction retained for API compatibility. Projection quality
+        uses common geometry because this local gate has no declared rank metadata.
 
     Returns
     -------
@@ -381,23 +380,27 @@ def _overlap_gate_proxy_composite(
     edge_index_cpu = edge_index.detach().cpu()
     node_sizes_cpu = node_sizes.detach().cpu()
 
-    overlap = count_overlaps_detailed(pos_cpu, node_sizes_cpu, seed=_GATE_METRIC_SEED)
-    crossings = sampled_crossing_rate(
-        pos_cpu,
-        edge_index_cpu,
-        n_samples=_GATE_CROSSING_SAMPLES,
-        seed=_GATE_METRIC_SEED,
+    del direction, is_semantically_directed
+    proxy_metrics = {}
+    proxy_metrics.update(node_occlusion_score(pos_cpu, node_sizes_cpu, seed=_GATE_METRIC_SEED))
+    proxy_metrics.update(
+        edge_crossing_score(
+            pos_cpu,
+            edge_index_cpu,
+            n_samples=_GATE_CROSSING_SAMPLES,
+            seed=_GATE_METRIC_SEED,
+        )
     )
-    cv = edge_length_cv(pos_cpu, edge_index_cpu)
-
-    proxy_metrics = {
-        "overlap_count": overlap["overlap_count"],
-        "crossing_rate": crossings["crossing_rate"],
-        "edge_length_cv": cv["edge_length_cv"],
-    }
-    if is_semantically_directed:
-        proxy_metrics.update(dag_consistency(pos_cpu, edge_index_cpu, direction=direction))
-    return composite_auto(proxy_metrics, is_semantically_directed=is_semantically_directed)
+    proxy_metrics.update(edge_length_deviation_score(pos_cpu, edge_index_cpu))
+    proxy_metrics.update(
+        isotonic_stress(
+            pos_cpu,
+            edge_index_cpu,
+            n_sources=min(32, int(pos_cpu.shape[0])),
+            n_targets=min(64, int(pos_cpu.shape[0])),
+        )
+    )
+    return composite_undirected(proxy_metrics)
 
 
 @dataclass(frozen=True)
