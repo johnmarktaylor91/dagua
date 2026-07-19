@@ -1039,6 +1039,7 @@ class ConstraintSet:
 
     _items: List[Constraint] = field(default_factory=list)
     _last_report: ConstraintReport = field(default_factory=ConstraintReport)
+    _owner_graph: Any = None
 
     def __iter__(self) -> Iterator[Constraint]:
         """Iterate over constraints in insertion order.
@@ -1163,14 +1164,34 @@ class ConstraintSet:
         wanted = set(tags)
         return [constraint for constraint in self._items if wanted.intersection(constraint.tags)]
 
-    def report(self) -> ConstraintReport:
+    def report(
+        self,
+        pos: Optional[torch.Tensor] = None,
+        *,
+        policy: str = "report",
+    ) -> ConstraintReport:
         """Return the most recent constraint report.
+
+        Parameters
+        ----------
+        pos : torch.Tensor, optional
+            Position tensor with shape ``[N, 2]``. When provided, a fresh
+            report is computed against the owning graph.
+        policy : str, default="report"
+            Policy label stored on freshly computed reports.
 
         Returns
         -------
         ConstraintReport
             Last report object.
         """
+        if pos is not None:
+            self._last_report = build_constraint_report(
+                self._items,
+                pos,
+                self._owner_graph,
+                policy=policy,
+            )
         return self._last_report
 
     def set_report(self, report: ConstraintReport) -> None:
@@ -1196,6 +1217,355 @@ class ConstraintSet:
             Constraint handles.
         """
         return list(self._items)
+
+
+def build_constraint_report(
+    constraints: Sequence[Constraint],
+    pos: torch.Tensor,
+    graph: Any,
+    *,
+    policy: str = "report",
+) -> ConstraintReport:
+    """Build normalized residual rows for constraints at ``pos``.
+
+    Parameters
+    ----------
+    constraints : sequence[Constraint]
+        Constraint objects to evaluate.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph used to resolve lazy selectors. May be ``None`` when selections
+        are already lowered to integer indices.
+    policy : str, default="report"
+        Conflict policy label.
+
+    Returns
+    -------
+    ConstraintReport
+        Residual report with hard/rigid violations marked.
+    """
+    rows = []
+    for constraint in constraints:
+        residual, resolved_count = _constraint_residual(constraint, pos, graph)
+        tolerance = 1e-5 if constraint.is_hard else 1e-3
+        hard_satisfied = True
+        if constraint.is_hard or constraint.weight >= STRENGTHS["rigid"]:
+            hard_satisfied = residual <= tolerance
+        rows.append(
+            ConstraintResidual(
+                constraint=constraint,
+                residual=residual,
+                hard_satisfied=hard_satisfied,
+                resolved_count=resolved_count,
+            )
+        )
+    return ConstraintReport(
+        residuals=rows,
+        policy=policy,
+        outcome="ok" if all(row.hard_satisfied for row in rows) else "violated",
+    )
+
+
+def _constraint_residual(
+    constraint: Constraint,
+    pos: torch.Tensor,
+    graph: Any,
+) -> Tuple[float, int]:
+    """Return one normalized residual and resolved element count.
+
+    Parameters
+    ----------
+    constraint : Constraint
+        Constraint object.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Optional graph for lazy selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Residual in layout units and resolved element count.
+    """
+    try:
+        if isinstance(constraint, Pin):
+            return _pin_residual(constraint, pos, graph)
+        if isinstance(constraint, Align):
+            return _align_residual(constraint, pos, graph)
+        if isinstance(constraint, Order):
+            return _order_residual(constraint, pos, graph)
+        if isinstance(constraint, Separate):
+            return _separate_residual(constraint, pos, graph)
+        if isinstance(constraint, Group):
+            return _group_residual(constraint, pos, graph)
+        if isinstance(constraint, Anchor):
+            return _anchor_residual(constraint, pos, graph)
+        if isinstance(constraint, Focus):
+            indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
+            return (0.0, len(indices))
+        if isinstance(constraint, Contain):
+            return _contain_residual(constraint, pos, graph)
+        if isinstance(constraint, Emphasize):
+            count = sum(
+                len(resolve_node_selection(item, graph, allow_empty=True))
+                for item in constraint.path_or_edges
+                if not (isinstance(item, Selector) and item.kind == "edges")
+            )
+            return (0.0, count)
+    except ConstraintError:
+        raise
+    except Exception:
+        return (0.0, 0)
+    return (0.0, 0)
+
+
+def _pin_residual(constraint: Pin, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+    """Return normalized pin residual.
+
+    Parameters
+    ----------
+    constraint : Pin
+        Pin constraint.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Max axis residual and selected count.
+    """
+    indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
+    at_x, at_y = resolve_canvas_point(constraint.at, pos)
+    residuals: List[float] = []
+    for index in indices:
+        target_x = constraint.x if constraint.x is not None else at_x
+        target_y = constraint.y if constraint.y is not None else at_y
+        if target_x is not None:
+            residuals.append(abs(float(pos[index, 0].item()) - float(target_x)))
+        if target_y is not None:
+            residuals.append(abs(float(pos[index, 1].item()) - float(target_y)))
+    return (max(residuals, default=0.0), len(indices))
+
+
+def _align_residual(constraint: Align, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+    """Return normalized alignment residual.
+
+    Parameters
+    ----------
+    constraint : Align
+        Alignment constraint.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Coordinate spread or target residual and selected count.
+    """
+    indices = _flatten_resolved_nodes(constraint.sels, graph)
+    if len(indices) < 2:
+        return (0.0, len(indices))
+    axis = 0 if constraint.axis in {"x", "cross"} else 1
+    coords = pos[indices, axis]
+    spread = float((coords.max() - coords.min()).abs().item())
+    at_x, at_y = resolve_canvas_point(constraint.at, pos)
+    at_value = at_x if axis == 0 else at_y
+    if at_value is not None:
+        spread = max(spread, float((coords - float(at_value)).abs().max().item()))
+    return (spread, len(indices))
+
+
+def _order_residual(constraint: Order, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+    """Return normalized ordering residual.
+
+    Parameters
+    ----------
+    constraint : Order
+        Order constraint.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Max hinge violation and resolved count.
+    """
+    items = [resolve_node_selection(item, graph, allow_empty=True) for item in constraint.items]
+    axis = 1 if constraint.axis in {"flow", "y"} else 0
+    gap = float(constraint.gap or 0.0)
+    residuals = []
+    for left, right in zip(items, items[1:]):
+        if not left or not right:
+            continue
+        left_coord = float(pos[left, axis].mean().item())
+        right_coord = float(pos[right, axis].mean().item())
+        residuals.append(max(0.0, left_coord + gap - right_coord))
+    return (max(residuals, default=0.0), sum(len(item) for item in items))
+
+
+def _separate_residual(constraint: Separate, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+    """Return normalized separation residual.
+
+    Parameters
+    ----------
+    constraint : Separate
+        Separation constraint.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Distance shortfall and resolved count.
+    """
+    left = resolve_node_selection(constraint.a, graph, allow_empty=True)
+    right = resolve_node_selection(constraint.b, graph, allow_empty=True)
+    if not left or not right:
+        return (0.0, len(left) + len(right))
+    a = pos[left].mean(dim=0)
+    b = pos[right].mean(dim=0)
+    if constraint.axis is None:
+        dist = float((a - b).square().sum().sqrt().item())
+    else:
+        axis = 0 if constraint.axis in {"x", "cross"} else 1
+        dist = abs(float(a[axis].item()) - float(b[axis].item()))
+    return (max(0.0, float(constraint.gap or 0.0) - dist), len(left) + len(right))
+
+
+def _group_residual(constraint: Group, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+    """Return normalized group spread residual.
+
+    Parameters
+    ----------
+    constraint : Group
+        Group constraint.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Mean distance from centroid and resolved count.
+    """
+    indices = _flatten_resolved_nodes(constraint.sels, graph)
+    if len(indices) < 2:
+        return (0.0, len(indices))
+    points = pos[indices]
+    centroid = points.mean(dim=0, keepdim=True)
+    residual = float((points - centroid).square().sum(dim=1).sqrt().mean().item())
+    return (residual, len(indices))
+
+
+def _anchor_residual(constraint: Anchor, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+    """Return normalized fixed-anchor residual.
+
+    Parameters
+    ----------
+    constraint : Anchor
+        Anchor constraint.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Mean target distance and resolved count.
+    """
+    residuals = []
+    for node_id, target in constraint.mapping.items():
+        indices = resolve_node_selection(node_id, graph, allow_empty=True)
+        if not indices:
+            continue
+        delta = pos[indices[0]] - torch.tensor(target, dtype=pos.dtype, device=pos.device)
+        residuals.append(float(delta.square().sum().sqrt().item()))
+    return (max(residuals, default=0.0), len(residuals))
+
+
+def _contain_residual(constraint: Contain, pos: torch.Tensor, graph: Any) -> Tuple[float, int]:
+    """Return normalized containment residual.
+
+    Parameters
+    ----------
+    constraint : Contain
+        Containment constraint.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    tuple[float, int]
+        Max outside distance and selected count.
+    """
+    indices = resolve_node_selection(constraint.sel, graph, allow_empty=True)
+    if not indices:
+        return (0.0, 0)
+    if isinstance(constraint.within, CanvasSelector):
+        left = resolve_canvas_point(constraint.within.edge("left"), pos)[0]
+        top = resolve_canvas_point(constraint.within.edge("top"), pos)[1]
+        right = resolve_canvas_point(constraint.within.edge("right"), pos)[0]
+        bottom = resolve_canvas_point(constraint.within.edge("bottom"), pos)[1]
+        if left is None or top is None or right is None or bottom is None:
+            return (0.0, len(indices))
+        bounds = (
+            float(left) + constraint.padding,
+            float(top) + constraint.padding,
+            float(right) - constraint.padding,
+            float(bottom) - constraint.padding,
+        )
+    else:
+        within = resolve_node_selection(constraint.within, graph, allow_empty=True)
+        if not within:
+            return (0.0, len(indices))
+        container = pos[within]
+        bounds = (
+            float(container[:, 0].min().item()) + constraint.padding,
+            float(container[:, 1].min().item()) + constraint.padding,
+            float(container[:, 0].max().item()) - constraint.padding,
+            float(container[:, 1].max().item()) - constraint.padding,
+        )
+    xmin, ymin, xmax, ymax = bounds
+    residuals = []
+    for index in indices:
+        x = float(pos[index, 0].item())
+        y = float(pos[index, 1].item())
+        residuals.append(max(0.0, xmin - x, x - xmax, ymin - y, y - ymax))
+    return (max(residuals, default=0.0), len(indices))
+
+
+def _flatten_resolved_nodes(selections: Sequence[Any], graph: Any) -> List[int]:
+    """Resolve and flatten node selections.
+
+    Parameters
+    ----------
+    selections : sequence[Any]
+        Selections to flatten.
+    graph : Any
+        Graph for selector resolution.
+
+    Returns
+    -------
+    list[int]
+        Unique node indices in first-seen order.
+    """
+    indices: List[int] = []
+    for selection in selections:
+        indices.extend(resolve_node_selection(selection, graph, allow_empty=True))
+    return _unique_preserving(indices)
 
 
 def resolve_node_selection(selection: Any, graph: Any, *, allow_empty: bool = False) -> List[int]:

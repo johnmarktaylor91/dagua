@@ -9,7 +9,12 @@ import torch
 
 import dagua
 from dagua import C, DaguaGraph, LayoutConfig
-from dagua.constraints import ConstraintStagedError, ConstraintTypeError, resolve_node_selection
+from dagua.constraints import (
+    ConstraintConflictError,
+    ConstraintStagedError,
+    ConstraintTypeError,
+    resolve_node_selection,
+)
 
 
 def _tiny_graph() -> DaguaGraph:
@@ -79,7 +84,7 @@ def test_graph_verbs_aliases_and_report() -> None:
     assert torch.allclose(pos[0], torch.zeros(2), atol=0.0)
     report = graph.constraints.report()
     assert len(report.residuals) == 3
-    assert report.violations == []
+    assert report.residuals[0].hard_satisfied
 
 
 def test_no_constraints_identity_with_empty_constraint_list() -> None:
@@ -119,3 +124,25 @@ def test_port_constraints_raise_staged_error_on_lowering() -> None:
 
     with pytest.raises(ConstraintStagedError, match="staged to the edge-routing sprint"):
         dagua.layout(graph, LayoutConfig(steps=1, device="cpu"))
+
+
+def test_constraint_report_accepts_positions_and_marks_violations() -> None:
+    """ConstraintSet.report(pos=...) computes normalized residuals on demand."""
+    graph = _tiny_graph()
+    graph.pin("a", x=10.0, y=0.0, name="pin-a")
+
+    report = graph.constraints.report(torch.zeros(3, 2))
+
+    assert report.residuals[0].residual == 10.0
+    assert report.residuals[0].resolved_count == 1
+    assert report.violations[0].constraint.name == "pin-a"
+
+
+def test_strict_constraint_policy_raises_for_hard_violation() -> None:
+    """Strict policy raises when post-layout hard residuals remain violated."""
+    graph = _tiny_graph()
+    graph.pin("a", x=0.0, y=0.0)
+    graph.pin("a", x=10.0, y=0.0)
+
+    with pytest.raises(ConstraintConflictError):
+        dagua.layout(graph, LayoutConfig(steps=1, device="cpu", constraint_policy="strict"))
