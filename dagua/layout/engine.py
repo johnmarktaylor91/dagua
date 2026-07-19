@@ -1074,6 +1074,181 @@ def _update_graph_constraint_report(graph: Any, pos: torch.Tensor, config: Layou
         warnings.warn(report.summary(), RuntimeWarning, stacklevel=2)
 
 
+def _apply_constrained_polish(
+    pos: torch.Tensor,
+    graph: Any,
+    config: LayoutConfig,
+) -> torch.Tensor:
+    """Polish pipeline output with R9 constraint losses.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Pipeline output positions with shape ``[N, 2]``.
+    graph : Any
+        Graph carrying topology, node sizes, and graph-owned constraints.
+    config : LayoutConfig
+        Layout configuration with optional constraint overlays.
+
+    Returns
+    -------
+    torch.Tensor
+        Polished positions. Unconstrained layouts are returned byte-identical.
+    """
+    if not _config_or_graph_has_constraints(config, graph):
+        return pos
+    effective_config = _resolve_flex_ids(config, graph)
+    if effective_config.flex is None and getattr(graph, "flex", None) is not None:
+        effective_config = copy.copy(effective_config)
+        effective_config.flex = _resolve_graph_flex(graph.flex, graph)
+    if effective_config.flex is None:
+        return pos
+
+    device = str(pos.device)
+    graph.compute_node_sizes()
+    edge_index = graph.edge_index.to(device)
+    node_sizes = graph.node_sizes.to(device)
+    flex_data = _prepare_flex_data(
+        effective_config,
+        graph.num_nodes,
+        device,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+    )
+    if not _flex_data_has_constraints(flex_data):
+        return pos
+
+    anchor = pos.detach().clone().to(device=device, dtype=torch.float32)
+    polished = anchor.clone().detach().requires_grad_(True)
+    steps = max(5, min(50, int(effective_config.steps or 20)))
+    optimizer = torch.optim.Adam([polished], lr=max(float(effective_config.lr), 0.01))
+    for _step in range(steps):
+        optimizer.zero_grad()
+        loss = (polished - anchor).square().mean() * 10.0
+        loss = loss + _constraint_loss_from_flex_data(polished, flex_data)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_([polished], max_norm=100.0)
+        optimizer.step()
+        _project_hard_constraints_from_flex_data(polished, flex_data)
+    polished = polished.detach()
+    _project_hard_constraints_from_flex_data(polished, flex_data)
+    return polished.to(dtype=pos.dtype, device=pos.device)
+
+
+def _flex_data_has_constraints(flex_data: dict[str, Any]) -> bool:
+    """Return whether lowered flex data contains any R9 constraints.
+
+    Parameters
+    ----------
+    flex_data : dict[str, Any]
+        Lowered constraint payloads.
+
+    Returns
+    -------
+    bool
+        ``True`` when a constraint payload is present.
+    """
+    keys = (
+        "has_soft_pins",
+        "has_hard_pins",
+        "align_groups",
+        "hard_align_groups",
+        "order_pairs",
+        "hard_order_pairs",
+        "separate_pairs",
+        "group_constraints",
+        "anchor_constraints",
+        "emphasize_paths",
+        "focus_constraints",
+        "soft_contain",
+        "hard_contain",
+        "custom_losses",
+        "custom_projectors",
+    )
+    return any(bool(flex_data[key]) for key in keys)
+
+
+def _constraint_loss_from_flex_data(pos: torch.Tensor, flex_data: dict[str, Any]) -> torch.Tensor:
+    """Evaluate finite R9 constraint losses from lowered payloads.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    flex_data : dict[str, Any]
+        Lowered constraint payloads.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss tensor.
+    """
+    loss = torch.zeros((), device=pos.device, dtype=pos.dtype)
+    if flex_data["has_soft_pins"]:
+        loss = loss + position_pin_loss(
+            pos,
+            flex_data["pin_indices"],
+            flex_data["pin_targets"],
+            flex_data["pin_weights"],
+            flex_data["soft_pin_mask"],
+        )
+    if flex_data["align_groups"]:
+        loss = loss + alignment_loss(pos, flex_data["align_groups"])
+    if flex_data["order_pairs"]:
+        loss = loss + constraint_order_loss(pos, flex_data["order_pairs"])
+    if flex_data["separate_pairs"]:
+        loss = loss + constraint_separate_loss(pos, flex_data["separate_pairs"])
+    if flex_data["group_constraints"]:
+        loss = loss + constraint_group_loss(pos, flex_data["group_constraints"])
+    if flex_data["anchor_constraints"]:
+        loss = loss + constraint_anchor_loss(pos, flex_data["anchor_constraints"])
+    if flex_data["emphasize_paths"]:
+        loss = loss + constraint_emphasize_loss(pos, flex_data["emphasize_paths"])
+    if flex_data["focus_constraints"]:
+        loss = loss + constraint_focus_loss(pos, flex_data["focus_constraints"])
+    if flex_data["soft_contain"]:
+        loss = loss + constraint_contain_loss(pos, flex_data["soft_contain"])
+    for custom_constraint in flex_data["custom_losses"]:
+        loss = loss + custom_constraint.loss(pos, flex_data["constraint_context"])
+    return loss
+
+
+def _project_hard_constraints_from_flex_data(pos: torch.Tensor, flex_data: dict[str, Any]) -> None:
+    """Run hard R9 projections in the documented order.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Mutable position tensor with shape ``[N, 2]``.
+    flex_data : dict[str, Any]
+        Lowered constraint payloads.
+
+    Returns
+    -------
+    None
+        Mutates ``pos`` in place.
+    """
+    if flex_data["hard_contain"]:
+        project_hard_contains(pos, flex_data["hard_contain"])
+    if flex_data["hard_align_groups"] or flex_data["hard_order_pairs"]:
+        _project_hard_vpsc_constraints(
+            pos,
+            flex_data["hard_align_groups"],
+            flex_data["hard_order_pairs"],
+        )
+    if flex_data["custom_projectors"]:
+        with torch.no_grad():
+            for custom_constraint in flex_data["custom_projectors"]:
+                custom_constraint.project(pos, flex_data["constraint_context"])
+    if flex_data["has_hard_pins"]:
+        project_hard_pins(
+            pos,
+            flex_data["pin_indices"],
+            flex_data["pin_targets"],
+            flex_data["hard_pin_mask"],
+        )
+
+
 def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None) -> torch.Tensor:
     """Compute layout positions for all nodes.
 
@@ -1151,18 +1326,6 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         graph_direction = getattr(graph, "direction", None)
         if graph_direction in {"TB", "BT", "LR", "RL"}:
             config.direction = graph_direction
-
-    if config.algorithm is not None and has_user_constraints:
-        import warnings
-
-        warnings.warn(
-            "dagua.layout: R9 constraints currently use the native gradient constraint path; "
-            f"falling back from algorithm={config.algorithm!r}.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        config = copy.copy(config)
-        config.algorithm = None
 
     if config.algorithm is not None:
         import inspect
@@ -1268,6 +1431,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             graph._prepare_for_layout()
             try:
                 pos = pipeline_fn(**kwargs)
+                pos = _apply_constrained_polish(pos, graph, config)
                 pos = _project_final_hard_pins(pos, getattr(config, "flex", None))
                 pos = pos.to(dtype=torch.float32)
                 _update_graph_constraint_report(graph, pos, config)
@@ -1279,9 +1443,13 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         if isinstance(result, tuple):
             pos, *rest = result
             if isinstance(pos, torch.Tensor):
+                pos = _apply_constrained_polish(pos, graph, config)
+                _update_graph_constraint_report(graph, pos, config)
                 return (pos.to(dtype=torch.float32), *rest)
             return result
-        return result.to(dtype=torch.float32)
+        pos = _apply_constrained_polish(result, graph, config)
+        _update_graph_constraint_report(graph, pos, config)
+        return pos.to(dtype=torch.float32)
 
     # Ensure node sizes are computed
     graph.compute_node_sizes()
@@ -2399,7 +2567,13 @@ def _layout_inner(
         )
 
     # --- Flex constraints: pins, alignment, flex spacing ---
-    flex_data = _prepare_flex_data(config, n, resident_device)
+    flex_data = _prepare_flex_data(
+        config,
+        n,
+        resident_device,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+    )
 
     if flex_data["has_soft_pins"]:
         _pin_idx = flex_data["pin_indices"]
@@ -2531,16 +2705,7 @@ def _layout_inner(
         )
 
     for _custom_constraint in flex_data["custom_losses"]:
-        from dagua.constraints import ConstraintContext
-
-        context_graph = flex_data["context_graph"]
-        _ctx = ConstraintContext(
-            graph=context_graph,
-            node_id_to_index=dict(getattr(context_graph, "_id_to_index", {})),
-            edge_index=edge_index.detach().cpu(),
-            node_sizes=node_sizes.detach().cpu() if node_sizes is not None else None,
-            direction=config.direction,
-        )
+        _ctx = flex_data["constraint_context"]
 
         def _custom_loss_fn(
             p: torch.Tensor,
@@ -3196,15 +3361,7 @@ def _layout_inner(
             )
 
         if flex_data["custom_projectors"]:
-            from dagua.constraints import ConstraintContext
-
-            _project_ctx = ConstraintContext(
-                graph=flex_data["context_graph"],
-                node_id_to_index=dict(getattr(flex_data["context_graph"], "_id_to_index", {})),
-                edge_index=edge_index.detach().cpu(),
-                node_sizes=node_sizes.detach().cpu() if node_sizes is not None else None,
-                direction=config.direction,
-            )
+            _project_ctx = flex_data["constraint_context"]
             with torch.no_grad():
                 for custom_constraint in flex_data["custom_projectors"]:
                     custom_constraint.project(pos, _project_ctx)
@@ -3298,15 +3455,7 @@ def _layout_inner(
             flex_data["hard_order_pairs"],
         )
     if flex_data["custom_projectors"]:
-        from dagua.constraints import ConstraintContext
-
-        _project_ctx = ConstraintContext(
-            graph=flex_data["context_graph"],
-            node_id_to_index=dict(getattr(flex_data["context_graph"], "_id_to_index", {})),
-            edge_index=edge_index.detach().cpu(),
-            node_sizes=node_sizes.detach().cpu() if node_sizes is not None else None,
-            direction=config.direction,
-        )
+        _project_ctx = flex_data["constraint_context"]
         with torch.no_grad():
             for custom_constraint in flex_data["custom_projectors"]:
                 custom_constraint.project(pos, _project_ctx)
@@ -3988,6 +4137,9 @@ def _prepare_flex_data(
     config: LayoutConfig,
     num_nodes: int,
     device: str,
+    *,
+    edge_index: Optional[torch.Tensor] = None,
+    node_sizes: Optional[torch.Tensor] = None,
 ) -> dict:
     """Extract flex constraints from config into tensor form for the optimization loop.
 
@@ -4016,6 +4168,7 @@ def _prepare_flex_data(
         "hard_contain": [],
         "soft_contain": [],
         "context_graph": None,
+        "constraint_context": None,
         "flex_node_sep": None,
         "flex_node_sep_weight": 0.0,
     }
@@ -4025,6 +4178,15 @@ def _prepare_flex_data(
         return result
     context_graph = getattr(flex, "_constraint_context_graph", None)
     result["context_graph"] = context_graph
+    from dagua.constraints import ConstraintContext
+
+    result["constraint_context"] = ConstraintContext(
+        graph=context_graph,
+        node_id_to_index=dict(getattr(context_graph, "_id_to_index", {})),
+        edge_index=edge_index.detach().cpu() if edge_index is not None else None,
+        node_sizes=node_sizes.detach().cpu() if node_sizes is not None else None,
+        direction=config.direction,
+    )
 
     constraints = list(getattr(flex, "constraints", None) or [])
     if constraints:
