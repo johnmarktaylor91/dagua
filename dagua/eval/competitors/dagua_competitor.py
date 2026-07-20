@@ -81,8 +81,10 @@ class DaguaCompetitor(CompetitorBase):
         """
         from dagua.config import LayoutConfig
         from dagua.layout import layout
+        from dagua.layout.ops.pipelines.native_budget import install_process_budget
 
         start = time.perf_counter()
+        budget_s = max(0.001, float(timeout))
         config = LayoutConfig(
             device=self.device,
             verbose=False,
@@ -93,7 +95,7 @@ class DaguaCompetitor(CompetitorBase):
             "_dagua_native_deadline_s",
             start + max(0.001, float(timeout) - _TIMEOUT_CUSHION_SECONDS),
         )
-        setattr(config, "_dagua_native_total_budget_s", max(0.001, float(timeout)))
+        install_process_budget(config, budget_s)
 
         try:
             with suspend_torchlens_decoration():
