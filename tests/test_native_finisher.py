@@ -463,6 +463,21 @@ def test_tiny_measured_cost_plan_uses_deterministic_budget_units(
     assert plans[0].referee_s == pytest.approx(plans[1].referee_s)
 
 
+def test_tiny_w5_deterministic_costs_use_installed_ledger() -> None:
+    """Competitor-installed ledgers enable tiny-row deterministic W5 sizing."""
+    from dagua.layout.ops.pipelines.native_budget import (
+        PROCESS_DEADLINE_ATTR,
+        install_budget_ledger,
+    )
+    from dagua.layout.ops.pipelines.native_finisher import _use_tiny_row_deterministic_w5_costs
+
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=300.0, return_reserve_dwu=5.0)
+
+    assert _use_tiny_row_deterministic_w5_costs(config, 10) is True
+    assert not hasattr(config, PROCESS_DEADLINE_ATTR)
+
+
 def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

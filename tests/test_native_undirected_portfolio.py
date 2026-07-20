@@ -1487,6 +1487,19 @@ def test_no_deadline_portfolio_budget_behavior_is_unchanged() -> None:
     assert not hasattr(config, "_dagua_native_process_deadline_s")
 
 
+def test_predebited_arm_s_full_score_ignores_modeled_remaining() -> None:
+    """A predebited Arm-S full score can only be blocked by the wall reserve."""
+    from dagua.layout.ops.pipelines.native_budget import LEDGER_ATTR, install_budget_ledger
+
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=10.0, return_reserve_dwu=5.0)
+    getattr(config, LEDGER_ATTR).spent_dwu = 4.0
+    setattr(config, "_dagua_native_arm_s_full_score_predebited", True)
+
+    assert _portfolio_has_budget(config, min_remaining_s=0.0) is False
+    assert _arm_s_full_score_budget_available(config, predicted_cost_s=10_000.0) is True
+
+
 def test_loaded_wall_time_does_not_change_predicted_arm_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
