@@ -20,7 +20,8 @@ from typing import Any, Mapping, Optional, Sequence
 
 RUNTIME_RE = re.compile(
     r"(?P<scope>Undirected|Directed)\s+candidate\s+runtime\s+"
-    r"family=(?P<family>[A-Za-z0-9_.:-]+)\s+seconds=(?P<seconds>[0-9.]+)"
+    r"family=(?P<family>[A-Za-z0-9_.:-]+).*?"
+    r"(?:cpu_seconds|seconds)=(?P<seconds>[0-9.]+)"
 )
 DEFAULT_ENVELOPE_FACTORS: dict[str, float] = {
     "fcose": 2.0,

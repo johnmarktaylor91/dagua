@@ -628,6 +628,35 @@ def _native_device_class(config: Optional[LayoutConfig]) -> str:
     return "cuda" if device.startswith("cuda") else "cpu"
 
 
+def _directed_flat_arm_cost(
+    problem: LayoutProblem,
+    config: Optional[LayoutConfig],
+    family: str,
+) -> NativeWorkCost:
+    """Return table-backed modeled cost for one directed candidate group.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem being solved.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+    family : str
+        Frozen directed cost-model family name.
+
+    Returns
+    -------
+    NativeWorkCost
+        Modeled work package derived from ``FROZEN_COST_TABLE``.
+    """
+    return estimate_native_work_cost(
+        problem,
+        family,
+        {"volume": 1.0},
+        _native_device_class(config),
+    )
+
+
 def _prediction_cpu_elapsed_s(started_process_time_s: float) -> float:
     """Return per-process CPU seconds elapsed for arm-cost prediction.
 
@@ -649,7 +678,7 @@ def _directed_opaque_arm_cost(
     config: Optional[LayoutConfig],
     prior_s: float,
 ) -> NativeWorkCost:
-    """Return a deterministic placeholder cost for a directed challenger arm.
+    """Return table-backed cost for a legacy directed challenger arm.
 
     Parameters
     ----------
@@ -658,27 +687,17 @@ def _directed_opaque_arm_cost(
     config : LayoutConfig, optional
         Prepared native configuration carrying a device string.
     prior_s : float
-        Structural prior seconds for this directed arm family.
+        Legacy structural prior seconds. The calibrated C1 table owns the
+        charge; this value is retained in metadata for residual replay.
 
     Returns
     -------
     NativeWorkCost
         Modeled work package used for ledger admission.
     """
-    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.ndim >= 2 else 0
-    device_class = _native_device_class(config)
-    return NativeWorkCost(
-        family="opaque",
-        generation_dwu=max(0.0, float(prior_s)),
-        reserved_score_dwu=0.0,
-        metadata={
-            "num_nodes": int(problem.num_nodes),
-            "num_edges": edge_count,
-            "device_class": device_class,
-            "prior_s": max(0.0, float(prior_s)),
-        },
-        device_class=device_class,
-    )
+    cost = _directed_flat_arm_cost(problem, config, "directed_sugiyama")
+    cost.metadata["legacy_prior_s"] = max(0.0, float(prior_s))
+    return cost
 
 
 def _directed_recombinant_layered_enabled(problem: LayoutProblem) -> bool:
@@ -1221,10 +1240,11 @@ def _directed_recombinant_layered_candidates(
     candidates: dict[str, torch.Tensor] = {}
     predicted_cost = estimate_native_work_cost(
         problem,
-        "opaque",
-        {"volume": DIRECTED_RECOMBINANT_PRIOR_S},
+        "directed_recombinant",
+        {"volume": 1.0},
         _native_device_class(config),
     )
+    predicted_cost.metadata["legacy_prior_s"] = DIRECTED_RECOMBINANT_PRIOR_S
     predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
     for spec in _recombinant_layered_specs():
         if len(candidates) >= DIRECTED_RECOMBINANT_MAX_CANDIDATES:
@@ -2656,69 +2676,104 @@ def layout_native_directed_portfolio(
     incumbent_pair: Optional["W5ScorePair"] = None
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         try:
-            node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
-            candidate_started = time.perf_counter()
-            for name, candidate in _directed_pivot_mds_candidates(
-                problem,
-                incumbent,
-                node_sep,
-                seed,
-            ).items():
-                _register_challenger_variants(
-                    name,
-                    candidate,
+            pivot_cost = _directed_flat_arm_cost(problem, config, "directed_pivot_mds")
+            pivot_cost_s = pivot_cost.generation_dwu + pivot_cost.reserved_score_dwu
+            if _predicted_arm_budget_available(config, pivot_cost_s) and admit_native_work(
+                config,
+                pivot_cost,
+                "optional_directed_pivot_mds_package",
+            ):
+                node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+                candidate_started = time.perf_counter()
+                for name, candidate in _directed_pivot_mds_candidates(
                     problem,
-                    config,
-                    positions,
-                    arm_timings=arm_timings,
-                    timing_span=(candidate_started, time.perf_counter()),
-                )
+                    incumbent,
+                    node_sep,
+                    seed,
+                ).items():
+                    _register_challenger_variants(
+                        name,
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+            else:
+                _LOGGER.info("Skipped directed PivotMDS: insufficient predicted budget")
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed PivotMDS challenger failed", exc_info=True)
     if _portfolio_has_budget(config, min_remaining_s=2.0) and _directed_mrtree_enabled(problem):
         try:
-            from dagua.layout.ops.pipelines.elk_mrtree import layout_elk_mrtree_pipeline
-
-            candidate_started = time.perf_counter()
-            candidate = layout_elk_mrtree_pipeline(
-                edge_index=cpu_edges,
-                num_nodes=n,
-                node_sizes=cpu_sizes,
-                seed=seed,
-                edge_weights=cpu_weights,
-                fidelity_dtype=torch.float32,
-            )
-            _register_challenger_variants(
-                "elk_mrtree",
-                candidate,
-                problem,
+            mrtree_cost = _directed_flat_arm_cost(problem, config, "directed_mrtree")
+            mrtree_cost_s = mrtree_cost.generation_dwu + mrtree_cost.reserved_score_dwu
+            if _predicted_arm_budget_available(config, mrtree_cost_s) and admit_native_work(
                 config,
-                positions,
-                preserve_rank_order=True,
-                arm_timings=arm_timings,
-                timing_span=(candidate_started, time.perf_counter()),
-            )
+                mrtree_cost,
+                "optional_directed_mrtree",
+            ):
+                from dagua.layout.ops.pipelines.elk_mrtree import layout_elk_mrtree_pipeline
+
+                candidate_started = time.perf_counter()
+                candidate = layout_elk_mrtree_pipeline(
+                    edge_index=cpu_edges,
+                    num_nodes=n,
+                    node_sizes=cpu_sizes,
+                    seed=seed,
+                    edge_weights=cpu_weights,
+                    fidelity_dtype=torch.float32,
+                )
+                _register_challenger_variants(
+                    "elk_mrtree",
+                    candidate,
+                    problem,
+                    config,
+                    positions,
+                    preserve_rank_order=True,
+                    arm_timings=arm_timings,
+                    timing_span=(candidate_started, time.perf_counter()),
+                )
+            else:
+                _LOGGER.info("Skipped directed MrTree: insufficient predicted budget")
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed ELK MrTree challenger failed", exc_info=True)
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         try:
-            candidate_started = time.perf_counter()
-            for name, candidate in _directed_stress_blend_candidates(
+            stress_blend_cost = _directed_flat_arm_cost(
                 problem,
-                incumbent,
-                seed,
-            ).items():
-                _register_challenger_variants(
-                    name,
-                    candidate,
+                config,
+                "directed_stress_blend",
+            )
+            stress_blend_cost_s = (
+                stress_blend_cost.generation_dwu + stress_blend_cost.reserved_score_dwu
+            )
+            if not _predicted_arm_budget_available(
+                config, stress_blend_cost_s
+            ) or not admit_native_work(
+                config,
+                stress_blend_cost,
+                "optional_directed_stress_blend_package",
+            ):
+                _LOGGER.info("Skipped directed stress-blend: insufficient predicted budget")
+            else:
+                candidate_started = time.perf_counter()
+                for name, candidate in _directed_stress_blend_candidates(
                     problem,
-                    config,
-                    positions,
-                    arm_timings=arm_timings,
-                    timing_span=(candidate_started, time.perf_counter()),
-                )
+                    incumbent,
+                    seed,
+                ).items():
+                    _register_challenger_variants(
+                        name,
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed stress-blend challenger failed", exc_info=True)
@@ -2742,50 +2797,58 @@ def layout_native_directed_portfolio(
             )
         ):
             try:
-                candidate_started = time.perf_counter()
-                incumbent_crossings = _exact_crossing_count(incumbent, problem.edge_index)
-                candidate = _rank_local_zero_crossing_swap_candidate(
-                    incumbent,
-                    problem.edge_index,
-                    max_passes=ordering_max_passes,
-                    config=config,
-                )
-                candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
-                if candidate_crossings < incumbent_crossings and not torch.equal(
-                    candidate, incumbent.detach().to(device="cpu")
+                ordering_cost = _directed_flat_arm_cost(problem, config, "directed_ordering")
+                ordering_cost_s = ordering_cost.generation_dwu + ordering_cost.reserved_score_dwu
+                if not _predicted_arm_budget_available(
+                    config, ordering_cost_s
+                ) or not admit_native_work(
+                    config,
+                    ordering_cost,
+                    "optional_directed_rank_local_ordering",
                 ):
-                    # The discrete ordering arm is intentionally stricter
-                    # than legacy directed challengers: it may enter the
-                    # winner contest only when it already beats the incumbent
-                    # under both frozen rulers, matching the W5 contract.
-                    if incumbent_pair is None:
-                        incumbent_pair = _score_directed_candidate_pair(
-                            incumbent,
+                    _LOGGER.info("Skipped directed rank-local ordering: insufficient budget")
+                else:
+                    candidate_started = time.perf_counter()
+                    incumbent_crossings = _exact_crossing_count(incumbent, problem.edge_index)
+                    candidate = _rank_local_zero_crossing_swap_candidate(
+                        incumbent,
+                        problem.edge_index,
+                        max_passes=ordering_max_passes,
+                        config=config,
+                    )
+                    candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
+                    if candidate_crossings < incumbent_crossings and not torch.equal(
+                        candidate, incumbent.detach().to(device="cpu")
+                    ):
+                        # The discrete ordering arm is intentionally stricter
+                        # than legacy directed challengers: it may enter the
+                        # winner contest only when it already beats the incumbent
+                        # under both frozen rulers, matching the W5 contract.
+                        if incumbent_pair is None:
+                            incumbent_pair = _score_directed_candidate_pair(
+                                incumbent,
+                                problem,
+                                cluster_ids,
+                                all_pairs_dist,
+                            )
+                        dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
+                            candidate,
+                            incumbent_pair,
                             problem,
                             cluster_ids,
                             all_pairs_dist,
                         )
-                    dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                        candidate,
-                        incumbent_pair,
-                        problem,
-                        cluster_ids,
-                        all_pairs_dist,
-                    )
-                    if dominates:
-                        if n <= DIRECTED_ORDERING_W5_NODE_CAP:
-                            ordering_w5_seed = candidate
-                        name = "rank_local_zero_crossing_swap"
-                        positions[name] = candidate
-                        scores[name] = candidate_pair.directed
-                        arm_timings[name] = (candidate_started, time.perf_counter())
+                        if dominates:
+                            if n <= DIRECTED_ORDERING_W5_NODE_CAP:
+                                ordering_w5_seed = candidate
+                            name = "rank_local_zero_crossing_swap"
+                            positions[name] = candidate
+                            scores[name] = candidate_pair.directed
+                            arm_timings[name] = (candidate_started, time.perf_counter())
             except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
                 _reraise_worker_timeout(exc)
                 _LOGGER.warning("directed rank-local swap challenger failed", exc_info=True)
-    if _directed_recombinant_layered_enabled(problem) and _predicted_arm_budget_available(
-        config,
-        DIRECTED_RECOMBINANT_PRIOR_S,
-    ):
+    if _directed_recombinant_layered_enabled(problem):
         try:
             incumbent_pair = _register_recombinant_layered_candidates(
                 problem=problem,
@@ -3050,8 +3113,13 @@ def layout_native_directed_portfolio(
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed fCoSE challenger failed", exc_info=True)
         try:
-            if not _portfolio_has_budget(config) or (
-                n >= 120 and not _predicted_arm_budget_available(config, DIRECTED_FORCE_PRIOR_S)
+            yifanhu_cost = _directed_flat_arm_cost(problem, config, "directed_yifanhu")
+            yifanhu_cost.metadata["legacy_prior_s"] = DIRECTED_FORCE_PRIOR_S
+            yifanhu_cost_s = yifanhu_cost.generation_dwu + yifanhu_cost.reserved_score_dwu
+            if (
+                not _portfolio_has_budget(config)
+                or (n >= 120 and not _predicted_arm_budget_available(config, yifanhu_cost_s))
+                or not admit_native_work(config, yifanhu_cost, "optional_directed_yifanhu")
             ):
                 _LOGGER.info("Skipped directed YifanHu: insufficient predicted budget")
             else:
@@ -3165,46 +3233,62 @@ def layout_native_directed_portfolio(
             )
         ):
             try:
-                candidate_started = time.perf_counter()
-                best_crossings = _exact_crossing_count(best_cpu, problem.edge_index)
-                candidate = _rank_local_zero_crossing_swap_candidate(
-                    best_cpu,
-                    problem.edge_index,
-                    max_passes=ordering_max_passes,
-                    config=config,
+                late_ordering_cost = _directed_flat_arm_cost(problem, config, "directed_ordering")
+                late_ordering_cost_s = (
+                    late_ordering_cost.generation_dwu + late_ordering_cost.reserved_score_dwu
                 )
-                candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
-                if candidate_crossings < best_crossings and not torch.equal(candidate, best_cpu):
-                    if best_name == "incumbent":
-                        if incumbent_pair is None:
-                            incumbent_pair = _score_directed_candidate_pair(
-                                incumbent,
+                if not _predicted_arm_budget_available(
+                    config, late_ordering_cost_s
+                ) or not admit_native_work(
+                    config,
+                    late_ordering_cost,
+                    f"optional_directed_late_rank_local_ordering_{best_name}",
+                ):
+                    _LOGGER.info("Skipped directed late rank-local ordering: insufficient budget")
+                else:
+                    candidate_started = time.perf_counter()
+                    best_crossings = _exact_crossing_count(best_cpu, problem.edge_index)
+                    candidate = _rank_local_zero_crossing_swap_candidate(
+                        best_cpu,
+                        problem.edge_index,
+                        max_passes=ordering_max_passes,
+                        config=config,
+                    )
+                    candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
+                    if candidate_crossings < best_crossings and not torch.equal(
+                        candidate,
+                        best_cpu,
+                    ):
+                        if best_name == "incumbent":
+                            if incumbent_pair is None:
+                                incumbent_pair = _score_directed_candidate_pair(
+                                    incumbent,
+                                    problem,
+                                    cluster_ids,
+                                    all_pairs_dist,
+                                )
+                            best_pair_for_ordering = incumbent_pair
+                        else:
+                            best_pair_for_ordering = _score_directed_candidate_pair(
+                                best_position,
                                 problem,
                                 cluster_ids,
                                 all_pairs_dist,
                             )
-                        best_pair_for_ordering = incumbent_pair
-                    else:
-                        best_pair_for_ordering = _score_directed_candidate_pair(
-                            best_position,
+                        dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
+                            candidate,
+                            best_pair_for_ordering,
                             problem,
                             cluster_ids,
                             all_pairs_dist,
                         )
-                    dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                        candidate,
-                        best_pair_for_ordering,
-                        problem,
-                        cluster_ids,
-                        all_pairs_dist,
-                    )
-                    if dominates:
-                        name = f"{best_name}_rank_local_zero_crossing_swap"
-                        positions[name] = candidate
-                        scores[name] = candidate_pair.directed
-                        arm_timings[name] = (candidate_started, time.perf_counter())
-                        best_name = name
-                        best_position = candidate
+                        if dominates:
+                            name = f"{best_name}_rank_local_zero_crossing_swap"
+                            positions[name] = candidate
+                            scores[name] = candidate_pair.directed
+                            arm_timings[name] = (candidate_started, time.perf_counter())
+                            best_name = name
+                            best_position = candidate
             except Exception as exc:  # noqa: BLE001 -- late ordering cannot sink the winner
                 _reraise_worker_timeout(exc)
                 _LOGGER.warning("directed late rank-local swap challenger failed", exc_info=True)

@@ -17,14 +17,13 @@ CostTerms = dict[str, tuple[float, float]]
 CostTable = dict[tuple[str, str], CostTerms]
 
 PROVENANCE_REF = (
-    "TODO-calibration: placeholders seeded for B1 infrastructure only; "
-    "C1 must replace with fitted P90-idle x per-family envelope constants "
-    "and a reviewed provenance document."
+    "C1-2026-07-20: frozen from idle fidelity/runtime telemetry plus bounded "
+    "directed-prior modeling; see docs/native_cost_model_calibration_2026-07-20.md."
 )
 
-# Placeholder constants. They intentionally preserve the known tiny-row W5
-# constants while assigning conservative priors elsewhere until C1 calibration
-# freezes measured values.
+# Frozen modeled wall-second constants. Existing tiny-row W5 and scale-row fCoSE
+# priors are retained as protective measured/model anchors; directed flat arms
+# use P90 idle telemetry with per-family sibling-load envelopes.
 FROZEN_COST_TABLE: CostTable = {
     ("fcose", "cpu"): {"force": (0.0020, 2.0), "score": (0.000015, 1.0)},
     ("fcose", "cuda"): {"force": (0.0012, 1.5), "score": (0.000012, 1.0)},
@@ -52,8 +51,22 @@ FROZEN_COST_TABLE: CostTable = {
         "overlap_heal": (0.000014, 0.8),
         "score": (0.000012, 0.8),
     },
-    ("opaque", "cpu"): {"full_arm": (1.0, 90.0)},
-    ("opaque", "cuda"): {"full_arm": (1.0, 90.0)},
+    ("directed_mrtree", "cpu"): {"full_arm": (0.0, 4.0)},
+    ("directed_mrtree", "cuda"): {"full_arm": (0.0, 4.0)},
+    ("directed_ordering", "cpu"): {"full_arm": (0.0, 5.0)},
+    ("directed_ordering", "cuda"): {"full_arm": (0.0, 5.0)},
+    ("directed_pivot_mds", "cpu"): {"full_arm": (0.0, 6.0)},
+    ("directed_pivot_mds", "cuda"): {"full_arm": (0.0, 5.0)},
+    ("directed_recombinant", "cpu"): {"full_arm": (0.0, 2.5)},
+    ("directed_recombinant", "cuda"): {"full_arm": (0.0, 2.5)},
+    ("directed_stress_blend", "cpu"): {"full_arm": (0.0, 12.0)},
+    ("directed_stress_blend", "cuda"): {"full_arm": (0.0, 10.0)},
+    ("directed_sugiyama", "cpu"): {"full_arm": (0.0, 2.2)},
+    ("directed_sugiyama", "cuda"): {"full_arm": (0.0, 2.2)},
+    ("directed_yifanhu", "cpu"): {"full_arm": (0.0, 4.0)},
+    ("directed_yifanhu", "cuda"): {"full_arm": (0.0, 3.5)},
+    ("opaque", "cpu"): {"full_arm": (0.0, 30.0)},
+    ("opaque", "cuda"): {"full_arm": (0.0, 30.0)},
 }
 
 
@@ -362,7 +375,7 @@ def estimate_native_work_cost(
     knobs: Mapping[str, object],
     device_class: str,
 ) -> NativeWorkCost:
-    """Estimate deterministic native work cost from frozen placeholders.
+    """Estimate deterministic native work cost from frozen calibration constants.
 
     Parameters
     ----------
@@ -380,7 +393,7 @@ def estimate_native_work_cost(
     -------
     NativeWorkCost
         Modeled generation and reserved scoring DWU with metadata describing
-        the chosen volumes and placeholder provenance.
+        the chosen volumes and calibration provenance.
     """
     normalized_family = str(family).lower()
     normalized_device = str(device_class).lower()
@@ -446,6 +459,11 @@ def estimate_native_work_cost(
             "combined": w5_step_volume(mode, steps, seeds, checkpoints),
         }
         metadata["mode"] = mode
+    elif normalized_family.startswith("directed_"):
+        volume = _safe_nonnegative_float(knobs.get("volume", 1.0), 1.0)
+        generation = _term_cost(terms, "full_arm", volume)
+        reserved = 0.0
+        metadata["terms"] = {"full_arm": volume}
     else:
         volume = _safe_nonnegative_float(knobs.get("volume", 1.0), 1.0)
         generation = _term_cost(terms, "full_arm", volume)
