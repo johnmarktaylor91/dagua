@@ -23,7 +23,7 @@ from dagua.metrics import composite_auto, full
 
 DEFAULT_GRAPHS = ("r8_nested_scale_1k_budget", "rgg_500", "residual_block")
 DEFAULT_SCORE_SPREAD = 0.15
-DEFAULT_TIMEOUT_CUSHION_S = 30.0
+DEFAULT_TIMEOUT_MARGIN_S = 180.0
 
 
 class GateRunTimeoutError(RuntimeError):
@@ -48,8 +48,18 @@ class GateRun:
         Native full-ruler composite score.
     runtime_s : float
         Wall-clock runtime reported by the competitor.
+    process_runtime_s : float
+        Process CPU seconds spent in the child around layout and scoring.
+    cpu_wall_ratio : float
+        Ratio of process CPU seconds to wall-clock seconds.
+    torch_num_threads : int
+        Torch intra-op thread count in the child process.
+    device : str
+        Dagua competitor device used by the child process.
     plan_shape : str
         Compact W5 plan/winner summary.
+    marketplace_arms : list[dict[str, Any]]
+        Flattened marketplace arm status records from native telemetry.
     telemetry : list[dict[str, Any]]
         Parsed native W5 and arm-skip telemetry records.
     """
@@ -60,7 +70,12 @@ class GateRun:
     verdict: str
     score: float
     runtime_s: float
+    process_runtime_s: float
+    cpu_wall_ratio: float
+    torch_num_threads: int
+    device: str
     plan_shape: str
+    marketplace_arms: list[dict[str, Any]]
     telemetry: list[dict[str, Any]]
 
 
@@ -247,6 +262,59 @@ def _plan_shape(records: Sequence[dict[str, Any]]) -> str:
     return "|".join(w5_parts + skip_parts)
 
 
+def _marketplace_arms(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return flattened marketplace arm status records.
+
+    Parameters
+    ----------
+    records : Sequence[dict[str, Any]]
+        Parsed native telemetry records.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One JSON-ready status record per marketplace arm.
+    """
+    arms: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("event") != "native_candidate_marketplace":
+            continue
+        for arm in record.get("arms", []):
+            if not isinstance(arm, dict):
+                continue
+            arms.append(
+                {
+                    "route": record.get("route"),
+                    "winner": record.get("winner"),
+                    "name": arm.get("name"),
+                    "family": arm.get("family"),
+                    "status": arm.get("status"),
+                    "reason": arm.get("reason"),
+                    "full_score": arm.get("full_score"),
+                }
+            )
+    return arms
+
+
+def _record_matches_substring(record: dict[str, Any], arm_substr: str) -> bool:
+    """Return whether an arm telemetry record matches a substring.
+
+    Parameters
+    ----------
+    record : dict[str, Any]
+        Parsed telemetry record.
+    arm_substr : str
+        Case-sensitive arm substring requested by the CLI.
+
+    Returns
+    -------
+    bool
+        ``True`` when the substring appears in the arm name or family.
+    """
+    candidates = (record.get("arm"), record.get("name"), record.get("family"))
+    return any(arm_substr in str(candidate) for candidate in candidates if candidate is not None)
+
+
 def _verdict(records: Sequence[dict[str, Any]], score: float) -> str:
     """Return a stable admission verdict for one run.
 
@@ -308,6 +376,9 @@ def _run_once_in_child_process(
         Captured run result.
     """
     competitor = DaguaCompetitor()
+    device = competitor.device
+    child_started_wall = time.perf_counter()
+    child_started_process = time.process_time()
     with tempfile.TemporaryDirectory(prefix="dagua-native-det-") as tmp:
         telemetry_path = Path(tmp) / "telemetry.jsonl"
         old_w5 = os.environ.get("DAGUA_W5_TELEMETRY_PATH")
@@ -329,6 +400,8 @@ def _run_once_in_child_process(
             raise RuntimeError(f"{test_graph.name} returned no positions: {result.error}")
         records = _read_jsonl(telemetry_path)
     score = _score(test_graph, result.pos)
+    process_runtime_s = max(0.0, time.process_time() - child_started_process)
+    wall_runtime_s = max(1.0e-9, time.perf_counter() - child_started_wall)
     return GateRun(
         graph=test_graph.name,
         mode=mode,
@@ -336,7 +409,12 @@ def _run_once_in_child_process(
         verdict=_verdict(records, score),
         score=score,
         runtime_s=float(result.runtime_seconds),
+        process_runtime_s=process_runtime_s,
+        cpu_wall_ratio=process_runtime_s / wall_runtime_s,
+        torch_num_threads=int(torch.get_num_threads()),
+        device=device,
         plan_shape=_plan_shape(records),
+        marketplace_arms=_marketplace_arms(records),
         telemetry=records,
     )
 
@@ -497,6 +575,71 @@ def _assert_stable(runs: Sequence[GateRun], threshold: float) -> list[str]:
     return failures
 
 
+def _assert_expect_no_skip(runs: Sequence[GateRun], arm_substrs: Sequence[str]) -> list[str]:
+    """Return failures for expected arms that show skip telemetry.
+
+    Parameters
+    ----------
+    runs : Sequence[GateRun]
+        Runs for one graph across idle and load modes.
+    arm_substrs : Sequence[str]
+        Arm substrings that must not show budget/skip statuses.
+
+    Returns
+    -------
+    list[str]
+        Human-readable failure messages.
+    """
+    failures: list[str] = []
+    for arm_substr in arm_substrs:
+        for run in runs:
+            for record in run.telemetry:
+                if not _record_matches_substring(record, arm_substr):
+                    continue
+                if (
+                    record.get("event") == "native_undirected_arm_skip"
+                    and record.get("reason") == "insufficient_predicted_budget"
+                ):
+                    failures.append(
+                        f"{run.mode}[{run.index}] {arm_substr} skipped: "
+                        "insufficient_predicted_budget"
+                    )
+            for arm in run.marketplace_arms:
+                if not _record_matches_substring(arm, arm_substr):
+                    continue
+                status = str(arm.get("status", ""))
+                reason = str(arm.get("reason", ""))
+                if "skip" in status or "skip" in reason:
+                    failures.append(
+                        f"{run.mode}[{run.index}] {arm_substr} marketplace skip: {status}/{reason}"
+                    )
+    return failures
+
+
+def _assert_min_score(runs: Sequence[GateRun], min_score: Optional[float]) -> list[str]:
+    """Return failures for runs below the requested score floor.
+
+    Parameters
+    ----------
+    runs : Sequence[GateRun]
+        Runs for one graph across idle and load modes.
+    min_score : float, optional
+        Minimum composite score required for every run.
+
+    Returns
+    -------
+    list[str]
+        Human-readable failure messages.
+    """
+    if min_score is None:
+        return []
+    return [
+        f"{run.mode}[{run.index}] score {run.score:.4f} below {float(min_score):.4f}"
+        for run in runs
+        if run.score < float(min_score)
+    ]
+
+
 def _print_runs(runs: Iterable[GateRun]) -> None:
     """Print gate run records as JSON lines.
 
@@ -520,7 +663,13 @@ def _print_runs(runs: Iterable[GateRun]) -> None:
                     "verdict": run.verdict,
                     "score": run.score,
                     "runtime_s": run.runtime_s,
+                    "process_runtime_s": run.process_runtime_s,
+                    "cpu_wall_ratio": run.cpu_wall_ratio,
+                    "torch_num_threads": run.torch_num_threads,
+                    "device": run.device,
                     "plan_shape": run.plan_shape,
+                    "marketplace_arms": run.marketplace_arms,
+                    "telemetry": run.telemetry,
                 },
                 sort_keys=True,
             )
@@ -546,8 +695,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--run-timeout", type=float, default=None)
+    parser.add_argument("--run-timeout-margin", type=float, default=DEFAULT_TIMEOUT_MARGIN_S)
     parser.add_argument("--score-spread", type=float, default=DEFAULT_SCORE_SPREAD)
     parser.add_argument("--load-workers", type=int, default=None)
+    parser.add_argument("--expect-no-skip", action="append", default=[])
+    parser.add_argument("--min-score", type=float, default=None)
     return parser.parse_args(argv)
 
 
@@ -568,7 +720,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     graphs = _graph_map()
     failures: list[str] = []
     run_timeout_s = (
-        float(args.timeout) + DEFAULT_TIMEOUT_CUSHION_S
+        float(args.timeout) + max(0.0, float(args.run_timeout_margin))
         if args.run_timeout is None
         else float(args.run_timeout)
     )
@@ -604,6 +756,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
         _print_runs(runs)
         for failure in _assert_stable(runs, args.score_spread):
+            failures.append(f"{graph_name}: {failure}")
+        for failure in _assert_expect_no_skip(runs, args.expect_no_skip):
+            failures.append(f"{graph_name}: {failure}")
+        for failure in _assert_min_score(runs, args.min_score):
             failures.append(f"{graph_name}: {failure}")
     if failures:
         print("FAIL native determinism gate", flush=True)

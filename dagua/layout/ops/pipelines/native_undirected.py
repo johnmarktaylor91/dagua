@@ -123,6 +123,44 @@ HIGH_DEGREE_LARGE_REFINEMENT_STEPS = 20
 HIGH_DEGREE_REFINEMENT_THRESHOLD = 20
 NEATO_FULL_ITERATIONS = 200
 NEATO_BALANCED_SMALL_ITERATIONS = 10
+
+
+def _runtime_telemetry_payload(
+    *,
+    config: Optional[LayoutConfig],
+    wall_s: Optional[float],
+    process_s: Optional[float],
+    use_deterministic_costs: bool,
+) -> dict[str, Optional[float] | int | str | bool]:
+    """Return environment metadata for native marketplace telemetry.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying device and budget metadata.
+    wall_s : float, optional
+        Wall-clock seconds for the measured work.
+    process_s : float, optional
+        Process CPU seconds for the measured work.
+    use_deterministic_costs : bool
+        Whether this record used deterministic benchmark cost units.
+
+    Returns
+    -------
+    dict[str, float | int | str | bool | None]
+        JSON-ready runtime metadata for cross-machine interpretation.
+    """
+    cpu_wall_ratio = None
+    if wall_s is not None and process_s is not None and wall_s > 0.0:
+        cpu_wall_ratio = float(process_s) / float(wall_s)
+    return {
+        "use_deterministic_costs": bool(use_deterministic_costs),
+        "cpu_wall_ratio": cpu_wall_ratio,
+        "torch_num_threads": int(torch.get_num_threads()),
+        "device": str(getattr(config, "device", "unknown")) if config is not None else "unknown",
+    }
+
+
 NEATO_MEDIUM_NODE_CAP = 250
 NEATO_BALANCED_MEDIUM_ITERATIONS = 40
 NEATO_BALANCED_LARGE_ITERATIONS = 4
@@ -469,6 +507,17 @@ def _emit_undirected_arm_skip_telemetry(
         "predicted_cost_s": None if predicted_cost_s is None else float(predicted_cost_s),
         "remaining_s": None if remaining_s is None else float(remaining_s),
     }
+    payload.update(
+        _runtime_telemetry_payload(
+            config=config,
+            wall_s=None,
+            process_s=None,
+            use_deterministic_costs=getattr(config, "_dagua_native_deterministic_budget_s", None)
+            is not None
+            if config is not None
+            else False,
+        )
+    )
     if config is not None:
         existing = list(getattr(config, "_dagua_native_arm_skip_telemetry", []))
         existing.append(payload)
@@ -563,6 +612,7 @@ def _log_marketplace_telemetry(
     arm_timings: Optional[Dict[str, Tuple[float, float]]] = None,
     started_process_at: Optional[float] = None,
     arm_process_totals: Optional[Dict[str, float]] = None,
+    config: Optional[LayoutConfig] = None,
 ) -> None:
     """Log structured per-arm marketplace telemetry.
 
@@ -592,6 +642,8 @@ def _log_marketplace_telemetry(
     arm_process_totals : dict[str, float], optional
         Per-arm process CPU totals. Missing arms fall back to the whole route
         process span for compatibility with older call sites.
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark runtime metadata.
 
     Returns
     -------
@@ -653,6 +705,23 @@ def _log_marketplace_telemetry(
         "process_time_s": max(0.0, ended_process_at - started_process),
         "arms": arms,
     }
+    payload.update(
+        _runtime_telemetry_payload(
+            config=config,
+            wall_s=max(0.0, ended_at - started_at),
+            process_s=max(0.0, ended_process_at - started_process),
+            use_deterministic_costs=getattr(config, "_dagua_native_deterministic_budget_s", None)
+            is not None
+            if config is not None
+            else False,
+        )
+    )
+    telemetry_path = os.environ.get("DAGUA_ARM_TELEMETRY_PATH") or os.environ.get(
+        "DAGUA_W5_TELEMETRY_PATH"
+    )
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
     _LOGGER.info("Native marketplace telemetry %s", json.dumps(payload, sort_keys=True))
 
 
@@ -2201,6 +2270,7 @@ def _router_v2_large_mini_contest(
         winner_name=best_name,
         started_at=started_at,
         started_process_at=started_process_at,
+        config=config,
     )
     _LOGGER.info(
         "Undirected contest (large mini) candidates=%s winner=%s",
@@ -3115,6 +3185,7 @@ def layout_native_undirected_portfolio(
         winner_name=best_name,
         started_at=started_at,
         started_process_at=started_process_at,
+        config=config,
     )
     _LOGGER.info(
         "Undirected contest candidates=%s winner=%s",

@@ -59,8 +59,8 @@ _MEASURED_COST_TINY_REFEREE_S = 0.05
 _MEASURED_COST_TINY_MAX_N = 64
 _MEASURED_COST_TINY_STEPS = 96
 _TINY_ROW_CONTINUATION_CAP_S = 2.0
-_TINY_ROW_DETERMINISTIC_STEP_COST_S = 0.04
-_TINY_ROW_DETERMINISTIC_REFEREE_COST_S = 0.012
+_TINY_ROW_DETERMINISTIC_STEP_COST_S = 0.0437
+_TINY_ROW_DETERMINISTIC_REFEREE_COST_S = 0.019
 _MEASURED_COST_DEFAULT_REFEREE_S = 0.40
 _MEASURED_COST_SURROGATE_STEPS = 4
 _W5_STRESS_MAX_SOURCES = 200
@@ -68,6 +68,42 @@ _W5_STRESS_MAX_PAIRS = 100_000
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
+
+
+def _runtime_telemetry_payload(
+    *,
+    config: Optional[LayoutConfig],
+    wall_s: Optional[float],
+    process_s: Optional[float],
+    use_deterministic_costs: bool,
+) -> dict[str, Optional[float] | int | str | bool]:
+    """Return environment metadata for native timing telemetry.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying device and budget metadata.
+    wall_s : float, optional
+        Wall-clock seconds for the measured work.
+    process_s : float, optional
+        Process CPU seconds for the measured work.
+    use_deterministic_costs : bool
+        Whether this record used deterministic tiny-row cost units.
+
+    Returns
+    -------
+    dict[str, float | int | str | bool | None]
+        JSON-ready runtime metadata for cross-machine interpretation.
+    """
+    cpu_wall_ratio = None
+    if wall_s is not None and process_s is not None and wall_s > 0.0:
+        cpu_wall_ratio = float(process_s) / float(wall_s)
+    return {
+        "use_deterministic_costs": bool(use_deterministic_costs),
+        "cpu_wall_ratio": cpu_wall_ratio,
+        "torch_num_threads": int(torch.get_num_threads()),
+        "device": str(getattr(config, "device", "unknown")) if config is not None else "unknown",
+    }
 
 
 @dataclass(frozen=True)
@@ -353,6 +389,8 @@ class W5FinisherResult:
         Work slice granted to this invocation.
     spent_s : float
         Wall-clock seconds spent in this invocation.
+    process_spent_s : float
+        Process CPU seconds spent in this invocation.
     remaining_entry_s : float, optional
         Benchmark seconds remaining at entry.
     remaining_exit_s : float, optional
@@ -394,6 +432,7 @@ class W5FinisherResult:
     skipped_reason: Optional[str] = None
     slice_s: Optional[float] = None
     spent_s: float = 0.0
+    process_spent_s: float = 0.0
     remaining_entry_s: Optional[float] = None
     remaining_exit_s: Optional[float] = None
     node_count: int = 0
@@ -2177,11 +2216,11 @@ def run_w5_finisher(
             winner_name = "incumbent"
             skipped_reason = "clamped_to_incumbent"
         spent_s = max(0.0, time.perf_counter() - started_perf)
+        process_spent_s = max(0.0, time.process_time() - started_process)
         if config is not None:
             previous_spent = float(getattr(config, "_dagua_native_w5_spent_s", 0.0))
             setattr(config, "_dagua_native_w5_spent_s", previous_spent + spent_s)
             previous_process_spent = float(getattr(config, "_dagua_native_w5_process_spent_s", 0.0))
-            process_spent_s = max(0.0, time.process_time() - started_process)
             setattr(
                 config,
                 "_dagua_native_w5_process_spent_s",
@@ -2201,6 +2240,7 @@ def run_w5_finisher(
             skipped_reason=skipped_reason,
             slice_s=slice_s,
             spent_s=spent_s,
+            process_spent_s=process_spent_s,
             remaining_entry_s=remaining_entry,
             remaining_exit_s=_remaining_s(config),
             node_count=node_count,
@@ -2671,6 +2711,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
         "declared_hierarchical": result.declared_hierarchical,
         "slice_s": result.slice_s,
         "spent_s": result.spent_s,
+        "process_spent_s": result.process_spent_s,
         "remaining_entry_s": result.remaining_entry_s,
         "remaining_exit_s": result.remaining_exit_s,
         "measured_step_s": (None if result.cost_plan is None else result.cost_plan.measured_step_s),
@@ -2727,6 +2768,17 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
             for checkpoint in result.checkpoints
         ],
     }
+    payload.update(
+        _runtime_telemetry_payload(
+            config=config,
+            wall_s=result.spent_s,
+            process_s=result.process_spent_s,
+            use_deterministic_costs=(
+                result.cost_plan is not None
+                and _use_tiny_row_deterministic_w5_costs(config, result.node_count)
+            ),
+        )
+    )
     if config is not None:
         existing = list(getattr(config, "_dagua_native_w5_telemetry", []))
         existing.append(payload)

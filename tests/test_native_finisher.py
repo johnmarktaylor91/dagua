@@ -1748,3 +1748,7 @@ def test_w5_telemetry_emits_skip_reject_accept_and_deadline(
     assert records[-1]["graph_name"] == "unit_graph"
     assert all("phase_timings_s" in record for record in records)
     assert all("viability_drop_counts" in record for record in records)
+    assert all("process_spent_s" in record for record in records)
+    assert all("use_deterministic_costs" in record for record in records)
+    assert all(record["torch_num_threads"] >= 1 for record in records)
+    assert all(record["device"] == "unknown" for record in records)
