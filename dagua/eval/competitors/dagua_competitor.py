@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
 _TIMEOUT_CUSHION_SECONDS = 3.0
+_RETURN_RESERVE_DWU = 5.0
 
 
 def _is_worker_timeout_exception(exc: Exception) -> bool:
@@ -95,7 +96,7 @@ class DaguaCompetitor(CompetitorBase):
             "_dagua_native_deadline_s",
             start + max(0.001, float(timeout) - _TIMEOUT_CUSHION_SECONDS),
         )
-        install_budget_ledger(config, budget_s)
+        install_budget_ledger(config, budget_s, return_reserve_dwu=_RETURN_RESERVE_DWU)
 
         try:
             with suspend_torchlens_decoration():
