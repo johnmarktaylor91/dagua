@@ -203,6 +203,7 @@ def test_measured_cost_plan_uses_wall_surrogate_and_restores_small_row_work() ->
         slice_s=20.0,
         config=large_config,
         started_perf=time.perf_counter(),
+        started_process=time.process_time(),
         remaining_entry=300.0,
         honest_axes=None,
     )
@@ -237,6 +238,7 @@ def test_measured_cost_plan_uses_wall_surrogate_and_restores_small_row_work() ->
         slice_s=20.0,
         config=small_config,
         started_perf=time.perf_counter(),
+        started_process=time.process_time(),
         remaining_entry=300.0,
         honest_axes=None,
     )
@@ -325,7 +327,7 @@ def test_measured_cost_plan_does_not_double_charge_warmup(
         return next(spent_s)
 
     monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
 
     plan = native_finisher._measured_cost_plan(
         seeds=[W5Seed("incumbent", pos)],
@@ -336,6 +338,7 @@ def test_measured_cost_plan_does_not_double_charge_warmup(
         slice_s=20.0,
         config=config,
         started_perf=0.0,
+        started_process=0.0,
         remaining_entry=300.0,
         honest_axes=None,
     )
@@ -382,7 +385,7 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
         return next(spent_s)
 
     monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
 
     plan = native_finisher._measured_cost_plan(
         seeds=[W5Seed("small", pos)],
@@ -393,6 +396,7 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
         slice_s=20.0,
         config=config,
         started_perf=0.0,
+        started_process=0.0,
         remaining_entry=300.0,
         honest_axes=None,
     )
@@ -402,6 +406,61 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
     assert plan.steps not in {24, 18, 12, 6, 3, 2, 1}
     assert plan.checkpoints == 2
     assert plan.predicted_s == pytest.approx(3.02)
+
+
+def test_tiny_measured_cost_plan_uses_deterministic_budget_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiny benchmark W5 plans should not depend on noisy process measurements."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    topo_depth = torch.zeros(pos.shape[0], dtype=torch.long)
+    plans = []
+
+    for measured_step_s, warmup_s in ((0.031, 0.05), (0.037, 0.90)):
+        config = LayoutConfig()
+        config._dagua_native_total_budget_s = 60.0
+        config._dagua_native_deterministic_budget_s = 60.0
+        config._dagua_native_process_deadline_s = time.process_time() + 50.0
+        config._dagua_native_w5_referee_cost_s = 0.008
+
+        def fake_measure(
+            *args: object,
+            measured_step_s: float = measured_step_s,
+            warmup_s: float = warmup_s,
+        ) -> object:
+            """Return a deliberately noisy tiny-row timing sample."""
+            del args
+            return native_finisher.W5StepMeasurement(step_s=measured_step_s, warmup_s=warmup_s)
+
+        monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
+        plans.append(
+            native_finisher._measured_cost_plan(
+                seeds=[W5Seed("tiny", pos), W5Seed("tiny_b", pos + 1.0)],
+                edge_index=edge_index,
+                node_sizes=node_sizes,
+                topo_depth=topo_depth,
+                routed_mode="barrier_2d",
+                slice_s=6.0,
+                config=config,
+                started_perf=0.0,
+                started_process=time.process_time(),
+                remaining_entry=50.0,
+                honest_axes=None,
+            )
+        )
+
+    assert plans[0] is not None
+    assert plans[1] is not None
+    assert (plans[0].seeds, plans[0].steps, plans[0].checkpoints) == (
+        plans[1].seeds,
+        plans[1].steps,
+        plans[1].checkpoints,
+    )
+    assert plans[0].measured_step_s == pytest.approx(plans[1].measured_step_s)
+    assert plans[0].referee_s == pytest.approx(plans[1].referee_s)
 
 
 def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
@@ -575,7 +634,7 @@ def test_w5_finisher_does_not_build_stress_sample_when_pass_two_denied(
 
     monkeypatch.setattr(native_finisher, "_measured_cost_plan", fake_plan)
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
     monkeypatch.setattr(native_finisher, "_build_w5_stress_sample", forbidden_build_stress_sample)
 
     result = run_w5_finisher(
@@ -628,7 +687,7 @@ def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
         return next(spent_s)
 
     monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
 
     plan = native_finisher._measured_cost_plan(
         seeds=[W5Seed("rgg", pos), W5Seed("rgg_b", pos + 1.0)],
@@ -639,6 +698,7 @@ def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
         slice_s=2.950,
         config=config,
         started_perf=0.0,
+        started_process=0.0,
         remaining_entry=300.0,
         honest_axes=None,
     )
@@ -727,6 +787,7 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
         slice_s=20.0,
         config=config,
         started_perf=time.perf_counter(),
+        started_process=time.process_time(),
         remaining_entry=300.0,
         honest_axes=None,
     )
@@ -816,7 +877,7 @@ def test_w5_finisher_accumulated_cap_returns_exact_incumbent() -> None:
     config = LayoutConfig()
     config._dagua_native_deadline_s = time.perf_counter() + 120.0
     config._dagua_native_total_budget_s = 300.0
-    config._dagua_native_w5_spent_s = 19.5
+    config._dagua_native_w5_process_spent_s = 19.5
     pos, edge_index, node_sizes = _tiny_layout()
 
     def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
@@ -1223,6 +1284,36 @@ def test_w5_late_entry_prediction_uses_process_time_parity(
     assert getattr(config, "_dagua_native_process_deadline_s") == 140.0
 
 
+def test_w5_no_deadline_budget_behavior_is_unchanged() -> None:
+    """No benchmark budget keeps W5 default slice and leaves metadata absent."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    config = LayoutConfig()
+
+    assert w5_predicted_skip_reason(34, 78, config) is None
+    assert native_finisher._finisher_slice_s(config) == pytest.approx(4.0)
+    assert native_finisher._w5_first_score_epilogue_has_budget(config) is True
+    assert not hasattr(config, "_dagua_native_process_deadline_s")
+
+
+def test_w5_epilogue_budget_uses_process_time_under_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First-score epilogue admission ignores wall depletion above hard reserve."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 106.0
+    config._dagua_native_process_deadline_s = 220.0
+    config._dagua_native_w5_referee_cost_s = 10.0
+    monkeypatch.setattr(native_finisher.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(native_finisher.time, "process_time", lambda: 100.0)
+
+    assert native_finisher._w5_first_score_epilogue_has_budget(config) is True
+
+
 def test_measured_terminal_w5_bypasses_late_entry_prediction() -> None:
     """Measured terminal sizing, not the old late-entry gate, owns terminal skips."""
     config = LayoutConfig()
@@ -1276,7 +1367,7 @@ def test_w5_first_score_epilogue_scores_terminal_once_with_wall_headroom(
         return _pair(2.0, 2.0)
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -1339,7 +1430,7 @@ def test_w5_first_score_epilogue_requires_wall_headroom(
         raise AssertionError("first-score epilogue should not run without wall headroom")
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
     monkeypatch.setattr(
         native_finisher,
         "_w5_first_score_epilogue_has_wall_headroom",
@@ -1407,7 +1498,7 @@ def test_w5_first_score_epilogue_never_runs_after_checkpoint_scored(
         return _pair(0.0, 0.0)
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -1481,7 +1572,7 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
         raise AssertionError("budget-exhausted checkpoint should not be scored")
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_spent_s", fake_w5_spent_s)
+    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
     monkeypatch.setattr(
         native_finisher,
         "_w5_first_score_epilogue_has_wall_headroom",

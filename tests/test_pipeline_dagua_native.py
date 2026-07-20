@@ -543,6 +543,7 @@ def test_terminal_w5_incumbent_is_final_return_tensor_and_runs_once(
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture terminal W5 inputs and return a no-op result."""
         del node_sizes, score_fn, accept_margin
@@ -667,6 +668,7 @@ def test_terminal_w5_preserves_final_tensor_when_candidate_does_not_dominate(
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a one-sided W5 candidate that must be rejected."""
         del (
@@ -681,6 +683,7 @@ def test_terminal_w5_preserves_final_tensor_when_candidate_does_not_dominate(
             config,
             accept_margin,
             incumbent_axes,
+            shape_geometry,
         )
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
         return W5FinisherResult(
@@ -853,6 +856,7 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a one-sided W5 winner for terminal monotonicity checks."""
         del (
@@ -867,6 +871,7 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
             config,
             accept_margin,
             incumbent_axes,
+            shape_geometry,
         )
         calls["run_w5"] += 1
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "x_only")
@@ -1124,6 +1129,7 @@ def test_best_of_polish_w5_receives_final_honest_winner(
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture W5 inputs and return a no-op result."""
         del node_sizes, score_fn, accept_margin
@@ -1203,6 +1209,7 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a W5 winner that dominates the final honest incumbent."""
         del (
@@ -1217,6 +1224,7 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
             config,
             accept_margin,
             incumbent_axes,
+            shape_geometry,
         )
         captured["incumbent"] = incumbent_score_pair
         accepted = W5Candidate("w5_unit", w5_pos, winner_pair, "barrier_2d")
@@ -1285,6 +1293,7 @@ def test_best_of_polish_preserves_final_winner_when_w5_does_not_dominate(
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a W5 winner that fails the unchanged dual-ruler gate."""
         del (
@@ -1299,6 +1308,7 @@ def test_best_of_polish_preserves_final_winner_when_w5_does_not_dominate(
             config,
             accept_margin,
             incumbent_axes,
+            shape_geometry,
         )
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
         return W5FinisherResult(
