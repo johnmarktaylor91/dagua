@@ -15,6 +15,8 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.base import Op, Pipeline
+from dagua.layout.ops.pipelines.native_budget import admit_native_work
+from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -599,17 +601,31 @@ def _predicted_arm_budget_available(
     """
     from dagua.layout.ops.pipelines.native_undirected import (
         ABSOLUTE_DEADLINE_RESERVE_S,
-        _portfolio_remaining_s,
+        _portfolio_available_work_s,
     )
 
-    remaining = _portfolio_remaining_s(config)
+    remaining = _portfolio_available_work_s(config, reserve_s=ABSOLUTE_DEADLINE_RESERVE_S)
     if remaining is None:
         return True
-    required = (
-        DIRECTED_PREDICTED_COST_MULTIPLIER * max(0.0, float(predicted_cost_s))
-        + ABSOLUTE_DEADLINE_RESERVE_S
-    )
+    required = DIRECTED_PREDICTED_COST_MULTIPLIER * max(0.0, float(predicted_cost_s))
     return float(remaining) > required
+
+
+def _native_device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the native cost-model device class for a directed config.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA devices, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
 
 
 def _prediction_cpu_elapsed_s(started_process_time_s: float) -> float:
@@ -1166,15 +1182,25 @@ def _directed_recombinant_layered_candidates(
     if not _directed_recombinant_layered_enabled(problem):
         return {}
     candidates: dict[str, torch.Tensor] = {}
-    predicted_cost_s = DIRECTED_RECOMBINANT_PRIOR_S
+    predicted_cost = estimate_native_work_cost(
+        problem,
+        "opaque",
+        {"volume": DIRECTED_RECOMBINANT_PRIOR_S},
+        _native_device_class(config),
+    )
+    predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
     for spec in _recombinant_layered_specs():
         if len(candidates) >= DIRECTED_RECOMBINANT_MAX_CANDIDATES:
             break
-        if not _predicted_arm_budget_available(config, predicted_cost_s):
+        if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
+            config,
+            predicted_cost,
+            f"optional_directed_recombinant_{spec.name}",
+        ):
             break
         process_started = time.process_time()
         candidate = _build_recombinant_layered_candidate(spec, problem, incumbent, config)
-        predicted_cost_s = max(_prediction_cpu_elapsed_s(process_started), 1.0e-3)
+        _prediction_cpu_elapsed_s(process_started)
         if candidate is None:
             continue
         candidates[spec.name] = candidate
@@ -2885,10 +2911,22 @@ def layout_native_directed_portfolio(
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
             from dagua.layout.ops.pipelines.native_undirected import FCOSE_CONTEST_SEEDS
 
-            force_cost_s = DIRECTED_FORCE_PRIOR_S
+            force_cost = estimate_native_work_cost(
+                problem,
+                "fcose",
+                {"steps": 250, "samples": None},
+                _native_device_class(config),
+            )
+            force_cost_s = force_cost.generation_dwu + force_cost.reserved_score_dwu
             for seed_offset in range(FCOSE_CONTEST_SEEDS):
-                if not _portfolio_has_budget(config) or (
-                    n >= 120 and not _predicted_arm_budget_available(config, force_cost_s)
+                if (
+                    not _portfolio_has_budget(config)
+                    or (n >= 120 and not _predicted_arm_budget_available(config, force_cost_s))
+                    or not admit_native_work(
+                        config,
+                        force_cost,
+                        f"optional_directed_fcose_seed{seed_offset}",
+                    )
                 ):
                     break
                 candidate_started = time.perf_counter()
@@ -2908,7 +2946,7 @@ def layout_native_directed_portfolio(
                     arm_timings=arm_timings,
                     timing_span=(candidate_started, time.perf_counter()),
                 )
-                force_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                _prediction_cpu_elapsed_s(time.process_time())
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed fCoSE challenger failed", exc_info=True)
