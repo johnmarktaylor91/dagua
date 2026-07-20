@@ -33,7 +33,7 @@ def test_cost_model_volume_helpers() -> None:
 
 
 def test_estimate_native_work_cost_uses_problem_shape_and_w5_tiny_constants() -> None:
-    """W5 estimator preserves the tiny-row placeholder constants.
+    """W5 estimator preserves the tiny-row calibrated constants.
 
     Returns
     -------
@@ -77,6 +77,35 @@ def test_estimate_native_work_cost_prices_unknown_family_as_opaque() -> None:
     )
 
     assert cost.family == "new_arm"
-    assert cost.generation_dwu == pytest.approx(93.0)
+    assert cost.generation_dwu == pytest.approx(30.0)
     assert cost.reserved_score_dwu == pytest.approx(0.0)
     assert cost.metadata["terms"] == {"full_arm": 3.0}
+
+
+def test_directed_flat_arm_families_use_calibrated_priors() -> None:
+    """Directed challenger arms price through frozen table-backed families.
+
+    Returns
+    -------
+    None
+        Assertions validate the calibrated flat packages used by directed
+        ledger admission.
+    """
+    problem = {"num_nodes": 500, "num_edges": 1470}
+
+    sugiyama = estimate_native_work_cost(
+        problem,
+        family="directed_sugiyama",
+        knobs={"volume": 1},
+        device_class="cpu",
+    )
+    recombinant = estimate_native_work_cost(
+        problem,
+        family="directed_recombinant",
+        knobs={"volume": 1},
+        device_class="cpu",
+    )
+
+    assert sugiyama.generation_dwu == pytest.approx(2.2)
+    assert recombinant.generation_dwu == pytest.approx(2.5)
+    assert sugiyama.metadata["provenance"] == PROVENANCE_REF
