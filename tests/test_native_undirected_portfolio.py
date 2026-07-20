@@ -1478,6 +1478,31 @@ def test_unloaded_process_time_prediction_preserves_admission_parity(
     assert getattr(config, "_dagua_native_process_deadline_s") == 29.0
 
 
+def test_no_deadline_portfolio_budget_behavior_is_unchanged() -> None:
+    """No benchmark budget keeps optional-arm admission open and metadata absent."""
+    config = LayoutConfig()
+
+    assert _portfolio_has_budget(config, min_remaining_s=10.0) is True
+    assert _predicted_undirected_arm_budget_available(config, predicted_cost_s=10_000.0) is True
+    assert not hasattr(config, "_dagua_native_process_deadline_s")
+
+
+def test_loaded_wall_time_does_not_change_predicted_arm_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Process budget, not consumed wall time, controls predicted arm admission."""
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = 106.0
+    config._dagua_native_process_deadline_s = 220.0
+    monkeypatch.setattr(nu.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(nu.time, "process_time", lambda: 100.0)
+
+    assert _predicted_undirected_arm_budget_available(config, predicted_cost_s=20.0) is True
+    assert _portfolio_has_budget(config, min_remaining_s=10.0) is True
+
+
 def test_marketplace_telemetry_includes_process_time(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
