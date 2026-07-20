@@ -88,10 +88,7 @@ def install_process_budget(config: LayoutConfig, timeout_s: float) -> None:
     None
         The function mutates ``config`` in place.
     """
-    budget_s = max(0.001, float(timeout_s))
-    setattr(config, PROCESS_DEADLINE_ATTR, time.process_time() + budget_s)
-    setattr(config, TOTAL_BUDGET_ATTR, budget_s)
-    setattr(config, DETERMINISTIC_BUDGET_ATTR, budget_s)
+    install_budget_ledger(config, timeout_s)
 
 
 def install_budget_ledger(
@@ -223,6 +220,61 @@ def charge(config: Optional[LayoutConfig], cost_dwu: float, reason: str) -> None
     amount = max(0.0, float(cost_dwu))
     ledger.spent_dwu += amount
     _record_decision(config, "charge", reason, amount)
+
+
+def reserve_tail(config: Optional[LayoutConfig], cost_dwu: float, reason: str) -> float:
+    """Reserve modeled tail work that every later admission must preserve.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying an optional ledger.
+    cost_dwu : float
+        Deterministic work units to add to the tail reservation.
+    reason : str
+        Stable reservation reason for decision logs.
+
+    Returns
+    -------
+    float
+        Reserved deterministic work units. ``0.0`` when no ledger is active.
+    """
+    ledger = _ledger(config)
+    if ledger is None:
+        return 0.0
+    amount = max(0.0, float(cost_dwu))
+    ledger.reserved_tail_dwu += amount
+    _record_decision(config, "reserve_tail", reason, amount)
+    return amount
+
+
+def release_tail_reservation(
+    config: Optional[LayoutConfig],
+    reservation_dwu: float,
+    reason: str,
+) -> None:
+    """Release deterministic tail work after a deterministic non-budget exit.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying an optional ledger.
+    reservation_dwu : float
+        Tail reservation units previously returned by ``reserve_tail``.
+    reason : str
+        Stable release reason for decision logs.
+
+    Returns
+    -------
+    None
+        The function mutates the ledger when installed.
+    """
+    ledger = _ledger(config)
+    if ledger is None:
+        return
+    amount = min(max(0.0, float(reservation_dwu)), max(0.0, float(ledger.reserved_tail_dwu)))
+    ledger.reserved_tail_dwu -= amount
+    _record_decision(config, "release_tail", reason, amount)
 
 
 def _fits_ledger(ledger: NativeBudgetLedger, cost: NativeWorkCost) -> bool:
@@ -368,6 +420,9 @@ def remaining_process_s(config: Optional[LayoutConfig]) -> Optional[float]:
     """
     if config is None:
         return None
+    ledger_remaining = remaining_dwu(config)
+    if ledger_remaining is not None:
+        return ledger_remaining
     process_deadline = getattr(config, PROCESS_DEADLINE_ATTR, None)
     if process_deadline is None:
         remaining = remaining_wall_s(config)
@@ -417,7 +472,9 @@ def available_process_work_s(
         Available deterministic work seconds, clamped to zero. ``None`` means
         no benchmark budget is active, so optional admission is unchanged.
     """
-    remaining = remaining_process_s(config)
+    remaining = remaining_dwu(config)
+    if remaining is None:
+        remaining = remaining_process_s(config)
     if remaining is None:
         return None
     return max(0.0, float(remaining) - float(reserve_s))
@@ -445,6 +502,8 @@ def has_process_budget(
         ``True`` when no budget is active, or when the process-time remainder
         exceeds both requested thresholds.
     """
-    remaining = remaining_process_s(config)
+    remaining = remaining_dwu(config)
+    if remaining is None:
+        remaining = remaining_process_s(config)
     required_remaining = max(float(min_remaining_s), float(reserve_s))
     return remaining is None or remaining > required_remaining
