@@ -1504,11 +1504,17 @@ def test_loaded_wall_time_does_not_change_predicted_arm_admission(
 
 
 def test_marketplace_telemetry_includes_process_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Marketplace driver telemetry reports route and per-arm CPU totals."""
+    telemetry_path = tmp_path / "marketplace.jsonl"
+    monkeypatch.setenv("DAGUA_ARM_TELEMETRY_PATH", str(telemetry_path))
     caplog.set_level("INFO")
     positions = {"incumbent": torch.zeros((2, 2)), "candidate": torch.ones((2, 2))}
+    config = LayoutConfig(device="cpu")
+    config._dagua_native_deterministic_budget_s = 30.0
 
     _log_marketplace_telemetry(
         route="undirected",
@@ -1521,6 +1527,7 @@ def test_marketplace_telemetry_includes_process_time(
         started_at=10.0,
         started_process_at=time.process_time(),
         arm_process_totals={"incumbent": 0.25, "candidate": 0.5},
+        config=config,
     )
 
     records = [
@@ -1534,6 +1541,16 @@ def test_marketplace_telemetry_includes_process_time(
     assert {arm["name"]: arm["process_time_s"] for arm in records[-1]["arms"]} == {
         "candidate": 0.5,
         "incumbent": 0.25,
+    }
+    jsonl_records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+    assert jsonl_records[-1]["event"] == "native_candidate_marketplace"
+    assert jsonl_records[-1]["use_deterministic_costs"] is True
+    assert jsonl_records[-1]["torch_num_threads"] >= 1
+    assert jsonl_records[-1]["device"] == "cpu"
+    assert jsonl_records[-1]["cpu_wall_ratio"] is not None
+    assert {arm["name"]: arm["status"] for arm in jsonl_records[-1]["arms"]} == {
+        "candidate": "winner",
+        "incumbent": "accepted",
     }
 
 
@@ -1563,6 +1580,9 @@ def test_insufficient_predicted_budget_skip_emits_jsonl_telemetry(
     assert records[0]["arm"] == "tsnet_perp30_seed0"
     assert records[0]["reason"] == "insufficient_predicted_budget"
     assert records[0]["predicted_cost_s"] == 12.5
+    assert records[0]["use_deterministic_costs"] is False
+    assert records[0]["torch_num_threads"] >= 1
+    assert records[0]["device"] == "cpu"
     assert getattr(config, "_dagua_native_arm_skip_telemetry") == records
 
 
