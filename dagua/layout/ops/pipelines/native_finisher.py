@@ -19,6 +19,7 @@ from dagua.layout.ops.pipelines.native_budget import (
     PROCESS_DEADLINE_ATTR,
     available_process_work_s,
     charge,
+    remaining_dwu,
     remaining_process_s,
     remaining_wall_s,
     wall_reserve_exhausted,
@@ -749,11 +750,13 @@ def _use_tiny_row_deterministic_w5_costs(
         ``True`` for tiny benchmark-budgeted rows where measured process-time
         step costs are too small and noisy to be a stable admission unit.
     """
+    if config is None or int(node_count) > _MEASURED_COST_TINY_MAX_N:
+        return False
+    if remaining_dwu(config) is not None:
+        return True
     return (
-        config is not None
-        and getattr(config, DETERMINISTIC_BUDGET_ATTR, None) is not None
+        getattr(config, DETERMINISTIC_BUDGET_ATTR, None) is not None
         and getattr(config, PROCESS_DEADLINE_ATTR, None) is not None
-        and int(node_count) <= _MEASURED_COST_TINY_MAX_N
     )
 
 

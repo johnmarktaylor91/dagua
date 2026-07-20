@@ -434,7 +434,7 @@ def _arm_s_full_score_budget_available(
         final full-ruler pass plus the hard return reserve.
     """
     if bool(getattr(config, "_dagua_native_arm_s_full_score_predebited", False)):
-        return _portfolio_has_budget(config, min_remaining_s=0.0)
+        return not wall_reserve_exhausted(config, ABSOLUTE_DEADLINE_RESERVE_S)
     return _portfolio_has_budget(config) and _predicted_undirected_arm_budget_available(
         config,
         predicted_cost_s,
@@ -2460,6 +2460,18 @@ def layout_native_undirected_portfolio(
 
     raw_finalist_names: list[str] = []
     arm_s_candidate_names: set[str] = set()
+    tail_cost = estimate_native_work_cost(
+        problem,
+        "ruler",
+        {"samples": None},
+        _native_device_class(config),
+    )
+    finalist_tail_slots = 4 if use_bounded_inner_solvers else FULL_REFEREE_TOP_K
+    finalist_tail_reservation = reserve_tail(
+        config,
+        tail_cost.reserved_score_dwu * max(1, finalist_tail_slots),
+        "mandatory_finalist_tail",
+    )
 
     def _add_challenger(
         name: str,
@@ -2792,6 +2804,7 @@ def layout_native_undirected_portfolio(
     # multi-seed coverage without consulting any external adapter.
     fcose_started = time.perf_counter()
     fcose_runs = 0
+    fcose_cpu_s = 0.0
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
@@ -2840,14 +2853,15 @@ def layout_native_undirected_portfolio(
                 )
                 fcose_runs += 1
                 _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
-                _prediction_cpu_elapsed_s(candidate_started_process)
+                fcose_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
     _LOGGER.info(
-        "Undirected candidate runtime family=fcose runs=%d seconds=%.3f",
+        "Undirected candidate runtime family=fcose runs=%d seconds=%.3f cpu_seconds=%.3f",
         fcose_runs,
         time.perf_counter() - fcose_started,
+        fcose_cpu_s,
     )
 
     # Candidate H (r83-P3.3): exact local sklearn-compatible tsNET. The
@@ -2856,6 +2870,7 @@ def layout_native_undirected_portfolio(
     if n <= TSNET_MAX_CONTEST_NODES and not is_mesh and _portfolio_has_budget(config):
         tsnet_started = time.perf_counter()
         tsnet_runs = 0
+        tsnet_cpu_s = 0.0
         try:
             from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 
@@ -2910,16 +2925,17 @@ def layout_native_undirected_portfolio(
                     _add_challenger(
                         f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
                     )
-                    _prediction_cpu_elapsed_s(candidate_started_process)
+                    tsnet_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
                 if stop_tsnet:
                     break
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("tsNET undirected challenger failed", exc_info=True)
         _LOGGER.info(
-            "Undirected candidate runtime family=tsnet runs=%d seconds=%.3f",
+            "Undirected candidate runtime family=tsnet runs=%d seconds=%.3f cpu_seconds=%.3f",
             tsnet_runs,
             time.perf_counter() - tsnet_started,
+            tsnet_cpu_s,
         )
 
     # Candidate I (r83-P3.3): NetworkX-compatible Fruchterman-Reingold is a
@@ -3113,17 +3129,7 @@ def layout_native_undirected_portfolio(
         *proxy_finalists,
         *(name for name in raw_finalist_names if name not in proxy_finalists),
     ]
-    tail_cost = estimate_native_work_cost(
-        problem,
-        "ruler",
-        {"samples": None},
-        _native_device_class(config),
-    )
-    finalist_tail_reservation = reserve_tail(
-        config,
-        tail_cost.reserved_score_dwu * max(1, len(finalist_names)),
-        "mandatory_finalist_tail",
-    )
+    finalist_tail_charge = tail_cost.reserved_score_dwu * max(1, len(finalist_names))
     cluster_score_telemetry = {}
     if problem.clusters:
         if arm_s_candidate_names:
@@ -3154,11 +3160,8 @@ def layout_native_undirected_portfolio(
                     excluded_names=budget_skipped_arm_s_names,
                 )
                 arm_s_candidate_names.difference_update(budget_skipped_arm_s_names)
-        release_tail_reservation(
-            config,
-            finalist_tail_reservation,
-            "finalist_tail_entered_scoring",
-        )
+        release_tail_reservation(config, finalist_tail_reservation, "finalist_tail_entered_scoring")
+        charge(config, finalist_tail_charge, "mandatory_finalist_tail")
         scores = {}
         for name in finalist_names:
             score, score_telemetry = _score_undirected_candidate_payload(
@@ -3234,6 +3237,8 @@ def layout_native_undirected_portfolio(
                     if score_telemetry is not None:
                         cluster_score_telemetry[name] = score_telemetry
     else:
+        release_tail_reservation(config, finalist_tail_reservation, "finalist_tail_entered_scoring")
+        charge(config, finalist_tail_charge, "mandatory_finalist_tail")
         scores = {
             name: _score_undirected_candidate_cached(
                 positions[name],

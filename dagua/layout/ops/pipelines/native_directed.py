@@ -16,7 +16,7 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.pipelines.native_budget import admit_native_work
-from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
+from dagua.layout.ops.pipelines.native_cost_model import NativeWorkCost, estimate_native_work_cost
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -644,6 +644,43 @@ def _prediction_cpu_elapsed_s(started_process_time_s: float) -> float:
     return max(0.0, time.process_time() - float(started_process_time_s))
 
 
+def _directed_opaque_arm_cost(
+    problem: LayoutProblem,
+    config: Optional[LayoutConfig],
+    prior_s: float,
+) -> NativeWorkCost:
+    """Return a deterministic placeholder cost for a directed challenger arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem being solved.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+    prior_s : float
+        Structural prior seconds for this directed arm family.
+
+    Returns
+    -------
+    NativeWorkCost
+        Modeled work package used for ledger admission.
+    """
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.ndim >= 2 else 0
+    device_class = _native_device_class(config)
+    return NativeWorkCost(
+        family="opaque",
+        generation_dwu=max(0.0, float(prior_s)),
+        reserved_score_dwu=0.0,
+        metadata={
+            "num_nodes": int(problem.num_nodes),
+            "num_edges": edge_count,
+            "device_class": device_class,
+            "prior_s": max(0.0, float(prior_s)),
+        },
+        device_class=device_class,
+    )
+
+
 def _directed_recombinant_layered_enabled(problem: LayoutProblem) -> bool:
     """Return whether bounded recombinant layered candidates may be built.
 
@@ -1200,7 +1237,12 @@ def _directed_recombinant_layered_candidates(
             break
         process_started = time.process_time()
         candidate = _build_recombinant_layered_candidate(spec, problem, incumbent, config)
-        _prediction_cpu_elapsed_s(process_started)
+        recombinant_cpu_s = _prediction_cpu_elapsed_s(process_started)
+        _LOGGER.info(
+            "Directed candidate runtime family=recombinant arm=%s cpu_seconds=%.3f",
+            spec.name,
+            recombinant_cpu_s,
+        )
         if candidate is None:
             continue
         candidates[spec.name] = candidate
@@ -2763,8 +2805,21 @@ def layout_native_directed_portfolio(
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
 
+            sugiyama_cost = _directed_opaque_arm_cost(
+                problem,
+                config,
+                DIRECTED_SUGIYAMA_SIMPLEX_PRIOR_S,
+            )
+            sugiyama_cost_s = sugiyama_cost.generation_dwu + sugiyama_cost.reserved_score_dwu
             candidate_started = time.perf_counter()
-            if not _predicted_arm_budget_available(config, DIRECTED_SUGIYAMA_SIMPLEX_PRIOR_S):
+            candidate_started_process = time.process_time()
+            if not _predicted_arm_budget_available(
+                config, sugiyama_cost_s
+            ) or not admit_native_work(
+                config,
+                sugiyama_cost,
+                "optional_directed_sugiyama_cluster_dotx",
+            ):
                 _LOGGER.info("Skipped directed cluster dot-x: insufficient predicted budget")
             else:
                 corrected_cluster_dot_x = layout_sugiyama_pipeline(
@@ -2795,14 +2850,24 @@ def layout_native_directed_portfolio(
                     arm_timings=arm_timings,
                     timing_span=(candidate_started, time.perf_counter()),
                 )
-                cluster_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                cluster_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                _LOGGER.info(
+                    "Directed candidate runtime family=sugiyama arm=cluster_dotx cpu_seconds=%.3f",
+                    cluster_cpu_s,
+                )
                 run_remaining_sugiyama = True
-                if not _predicted_arm_budget_available(config, cluster_cost_s):
+                if not _predicted_arm_budget_available(
+                    config, sugiyama_cost_s
+                ) or not admit_native_work(
+                    config,
+                    sugiyama_cost,
+                    "optional_directed_sugiyama_point_unit_dotx",
+                ):
                     _LOGGER.info("Skipped directed point-unit dot-x: insufficient predicted budget")
-                    sibling_cost_s = cluster_cost_s
                     run_remaining_sugiyama = False
                 else:
                     candidate_started = time.perf_counter()
+                    candidate_started_process = time.process_time()
                     point_unit_dot_x = layout_sugiyama_pipeline(
                         edge_index=cpu_edges,
                         num_nodes=n,
@@ -2827,16 +2892,26 @@ def layout_native_directed_portfolio(
                         arm_timings=arm_timings,
                         timing_span=(candidate_started, time.perf_counter()),
                     )
-
-                    sibling_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                    point_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                    _LOGGER.info(
+                        "Directed candidate runtime family=sugiyama arm=point_unit_dotx "
+                        "cpu_seconds=%.3f",
+                        point_cpu_s,
+                    )
                     for mode in ("graphviz_dot", "igraph"):
-                        if not _portfolio_has_budget(config) or not _predicted_arm_budget_available(
-                            config,
-                            sibling_cost_s,
+                        if (
+                            not _portfolio_has_budget(config)
+                            or not _predicted_arm_budget_available(config, sugiyama_cost_s)
+                            or not admit_native_work(
+                                config,
+                                sugiyama_cost,
+                                f"optional_directed_sugiyama_{mode}",
+                            )
                         ):
                             break
                         candidate_started = time.perf_counter()
-                        candidate = layout_sugiyama_pipeline(
+                        candidate_started_process = time.process_time()
+                        mode_candidate = layout_sugiyama_pipeline(
                             edge_index=cpu_edges,
                             num_nodes=n,
                             node_sizes=cpu_sizes,
@@ -2846,18 +2921,23 @@ def layout_native_directed_portfolio(
                             clusters=problem.clusters,
                             cluster_parents=problem.cluster_parents,
                         )
-                        if not isinstance(candidate, torch.Tensor):
+                        if not isinstance(mode_candidate, torch.Tensor):
                             raise RuntimeError(f"{mode} Sugiyama returned non-position output")
                         _register_challenger_variants(
                             mode,
-                            candidate,
+                            mode_candidate,
                             problem,
                             config,
                             positions,
                             arm_timings=arm_timings,
                             timing_span=(candidate_started, time.perf_counter()),
                         )
-                        sibling_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                        sibling_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                        _LOGGER.info(
+                            "Directed candidate runtime family=sugiyama arm=%s cpu_seconds=%.3f",
+                            mode,
+                            sibling_cpu_s,
+                        )
                 if run_remaining_sugiyama and _full_sugiyama_grid_enabled(problem, config):
                     # The full spacing grid remains exact for small DAGs. At
                     # n>=250 it runs only when structural expansion and remaining
@@ -2865,12 +2945,20 @@ def layout_native_directed_portfolio(
                     for mode in SUGIYAMA_FIDELITY_MODES:
                         for rank_sep in SUGIYAMA_RANK_SEP_GRID:
                             for node_sep in SUGIYAMA_NODE_SEP_GRID:
-                                if not _portfolio_has_budget(
-                                    config
-                                ) or not _predicted_arm_budget_available(config, sibling_cost_s):
+                                grid_name = f"{mode}_r{rank_sep:g}_n{node_sep:g}"
+                                if (
+                                    not _portfolio_has_budget(config)
+                                    or not _predicted_arm_budget_available(config, sugiyama_cost_s)
+                                    or not admit_native_work(
+                                        config,
+                                        sugiyama_cost,
+                                        f"optional_directed_sugiyama_grid_{grid_name}",
+                                    )
+                                ):
                                     break
                                 candidate_started = time.perf_counter()
-                                candidate = layout_sugiyama_pipeline(
+                                candidate_started_process = time.process_time()
+                                grid_candidate = layout_sugiyama_pipeline(
                                     edge_index=cpu_edges,
                                     num_nodes=n,
                                     node_sizes=cpu_sizes,
@@ -2882,25 +2970,30 @@ def layout_native_directed_portfolio(
                                     clusters=problem.clusters,
                                     cluster_parents=problem.cluster_parents,
                                 )
-                                grid_name = f"{mode}_r{rank_sep:g}_n{node_sep:g}"
-                                if not isinstance(candidate, torch.Tensor):
+                                if not isinstance(grid_candidate, torch.Tensor):
                                     raise RuntimeError(
                                         f"{grid_name} Sugiyama returned non-position output"
                                     )
                                 if mode == "igraph":
                                     # Match the reference adapter's fixed conversion from
                                     # igraph coordinate units into renderer point units.
-                                    candidate = candidate * IGRAPH_OUTPUT_SCALE
+                                    grid_candidate = grid_candidate * IGRAPH_OUTPUT_SCALE
                                 _register_challenger_variants(
                                     grid_name,
-                                    candidate,
+                                    grid_candidate,
                                     problem,
                                     config,
                                     positions,
                                     arm_timings=arm_timings,
                                     timing_span=(candidate_started, time.perf_counter()),
                                 )
-                                sibling_cost_s = max(0.0, time.perf_counter() - candidate_started)
+                                grid_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                                _LOGGER.info(
+                                    "Directed candidate runtime family=sugiyama arm=%s "
+                                    "cpu_seconds=%.3f",
+                                    grid_name,
+                                    grid_cpu_s,
+                                )
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed Sugiyama challenger failed", exc_info=True)
@@ -2929,6 +3022,7 @@ def layout_native_directed_portfolio(
                     )
                 ):
                     break
+                candidate_started_process = time.process_time()
                 candidate_started = time.perf_counter()
                 candidate = layout_fcose_pipeline(
                     edge_index=cpu_edges,
@@ -2946,7 +3040,12 @@ def layout_native_directed_portfolio(
                     arm_timings=arm_timings,
                     timing_span=(candidate_started, time.perf_counter()),
                 )
-                _prediction_cpu_elapsed_s(time.process_time())
+                force_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                _LOGGER.info(
+                    "Directed candidate runtime family=fcose seed=%d cpu_seconds=%.3f",
+                    seed_offset,
+                    force_cpu_s,
+                )
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed fCoSE challenger failed", exc_info=True)
