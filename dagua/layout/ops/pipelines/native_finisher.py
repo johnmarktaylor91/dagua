@@ -14,6 +14,14 @@ from typing import Any, Callable, Optional, Sequence
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.ops.pipelines.native_budget import (
+    DETERMINISTIC_BUDGET_ATTR,
+    PROCESS_DEADLINE_ATTR,
+    available_process_work_s,
+    remaining_process_s,
+    remaining_wall_s,
+    wall_reserve_exhausted,
+)
 from dagua.layout.ops.pipelines.native_shape_geometry import (
     NativeShapeGeometry,
     pairwise_shape_signed_gap,
@@ -51,12 +59,13 @@ _MEASURED_COST_TINY_REFEREE_S = 0.05
 _MEASURED_COST_TINY_MAX_N = 64
 _MEASURED_COST_TINY_STEPS = 96
 _TINY_ROW_CONTINUATION_CAP_S = 2.0
+_TINY_ROW_DETERMINISTIC_STEP_COST_S = 0.04
+_TINY_ROW_DETERMINISTIC_REFEREE_COST_S = 0.012
 _MEASURED_COST_DEFAULT_REFEREE_S = 0.40
 _MEASURED_COST_SURROGATE_STEPS = 4
 _W5_STRESS_MAX_SOURCES = 200
 _W5_STRESS_MAX_PAIRS = 100_000
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
-_PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
 
@@ -479,14 +488,11 @@ def _remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     float or None
         Remaining seconds, or ``None`` outside benchmark deadline mode.
     """
-    deadline = getattr(config, "_dagua_native_deadline_s", None) if config is not None else None
-    if deadline is None:
-        return None
-    return float(deadline) - time.perf_counter()
+    return remaining_wall_s(config)
 
 
-def _w5_first_score_epilogue_has_wall_headroom(config: Optional[LayoutConfig]) -> bool:
-    """Return whether one terminal checkpoint score has benchmark wall headroom.
+def _w5_first_score_epilogue_has_budget(config: Optional[LayoutConfig]) -> bool:
+    """Return whether one terminal checkpoint score has deterministic budget.
 
     Parameters
     ----------
@@ -496,17 +502,35 @@ def _w5_first_score_epilogue_has_wall_headroom(config: Optional[LayoutConfig]) -
     Returns
     -------
     bool
-        ``True`` when no benchmark wall deadline exists, or when the measured
-        remaining wall time can fit one referee score with a safety margin.
+        ``True`` when no benchmark budget exists, or when the deterministic
+        process-time budget can fit one referee score with a safety margin.
+        Wall-clock only vetoes when the hard return reserve is already gone.
     """
-    wall_remaining = _remaining_s(config)
-    if wall_remaining is None:
-        return True
+    if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
+        return False
     referee_s = float(
         getattr(config, "_dagua_native_w5_referee_cost_s", _MEASURED_COST_DEFAULT_REFEREE_S)
     )
     referee_s = max(1.0e-6, referee_s)
-    return wall_remaining > 2.0 * referee_s + 1.0
+    process_remaining = _process_remaining_s(config)
+    return process_remaining is None or process_remaining > 2.0 * referee_s + 1.0
+
+
+def _w5_first_score_epilogue_has_wall_headroom(config: Optional[LayoutConfig]) -> bool:
+    """Return whether one terminal checkpoint score may run.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark deadline metadata.
+
+    Returns
+    -------
+    bool
+        Alias for the deterministic epilogue budget gate, kept for existing
+        tests and callers that monkeypatch the historical helper name.
+    """
+    return _w5_first_score_epilogue_has_budget(config)
 
 
 def _stack_graph_name() -> Optional[str]:
@@ -580,17 +604,7 @@ def _process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
         Process CPU seconds remaining, or ``None`` without benchmark budget
         metadata.
     """
-    if config is None:
-        return None
-    process_deadline = getattr(config, _PROCESS_DEADLINE_ATTR, None)
-    if process_deadline is None:
-        remaining = _remaining_s(config)
-        if remaining is None:
-            return None
-        process_deadline = time.process_time() + max(0.0, float(remaining))
-        setattr(config, _PROCESS_DEADLINE_ATTR, process_deadline)
-        return float(remaining)
-    return float(process_deadline) - time.process_time()
+    return remaining_process_s(config)
 
 
 def _w5_disabled_by_env() -> bool:
@@ -606,20 +620,20 @@ def _w5_disabled_by_env() -> bool:
 
 
 def _w5_spend_cap_s(config: Optional[LayoutConfig], remaining: Optional[float]) -> float:
-    """Return the per-layout accumulated W5 wall-clock cap.
+    """Return the per-layout accumulated W5 deterministic spend cap.
 
     Parameters
     ----------
     config : LayoutConfig, optional
         Prepared layout configuration carrying benchmark budget metadata.
     remaining : float, optional
-        Remaining benchmark seconds, used as a fallback budget outside normal
-        benchmark configuration.
+        Remaining deterministic benchmark seconds, used as a fallback budget
+        outside normal benchmark configuration.
 
     Returns
     -------
     float
-        Maximum total seconds W5 may spend for this layout invocation.
+        Maximum total process seconds W5 may spend for this layout invocation.
     """
     if config is None or (
         remaining is None and not hasattr(config, "_dagua_native_total_budget_s")
@@ -675,6 +689,33 @@ def _w5_process_spent_s(
     return previous + max(0.0, time.process_time() - started_process)
 
 
+def _use_tiny_row_deterministic_w5_costs(
+    config: Optional[LayoutConfig],
+    node_count: int,
+) -> bool:
+    """Return whether tiny-row W5 admission should use fixed cost units.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying optional benchmark metadata.
+    node_count : int
+        Number of layout nodes in the W5 seed.
+
+    Returns
+    -------
+    bool
+        ``True`` for tiny benchmark-budgeted rows where measured process-time
+        step costs are too small and noisy to be a stable admission unit.
+    """
+    return (
+        config is not None
+        and getattr(config, DETERMINISTIC_BUDGET_ATTR, None) is not None
+        and getattr(config, PROCESS_DEADLINE_ATTR, None) is not None
+        and int(node_count) <= _MEASURED_COST_TINY_MAX_N
+    )
+
+
 def w5_predicted_skip_reason(
     node_count: int,
     edge_count: int,
@@ -723,25 +764,21 @@ def _finisher_slice_s(config: Optional[LayoutConfig]) -> Optional[float]:
     """
     if _w5_disabled_by_env():
         return None
-    wall_remaining = _remaining_s(config)
     process_remaining = _process_remaining_s(config)
-    if wall_remaining is None and process_remaining is None:
+    if process_remaining is None and _remaining_s(config) is None:
         return _DEFAULT_FINISHER_SLICE_S
-    if wall_remaining is not None and wall_remaining < _ABSOLUTE_DEADLINE_RESERVE_S:
+    if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
         return None
-    remaining = wall_remaining if process_remaining is None else process_remaining
-    assert remaining is not None
-    if remaining < _MIN_BENCHMARK_REMAINING_S:
+    if process_remaining is None:
         return None
-    wall_available = (
-        float("inf") if wall_remaining is None else wall_remaining - _ABSOLUTE_DEADLINE_RESERVE_S
-    )
-    process_available = remaining - _ABSOLUTE_DEADLINE_RESERVE_S
-    available = min(wall_available, process_available)
+    if process_remaining < _MIN_BENCHMARK_REMAINING_S:
+        return None
+    available = available_process_work_s(config, _ABSOLUTE_DEADLINE_RESERVE_S)
+    assert available is not None
     if available < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
         return None
-    spend_cap = _w5_spend_cap_s(config, wall_remaining)
-    spent = _w5_spent_s(config)
+    spend_cap = _w5_spend_cap_s(config, process_remaining)
+    spent = _w5_process_spent_s(config)
     remaining_w5_budget = spend_cap - spent
     if remaining_w5_budget < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
         return None
@@ -1846,11 +1883,12 @@ def _measured_cost_plan(
     slice_s: float,
     config: Optional[LayoutConfig],
     started_perf: float,
+    started_process: float,
     remaining_entry: Optional[float],
     honest_axes: Optional[W5HonestAxes],
     shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> Optional[W5CostPlan]:
-    """Return a measured W5 plan that fits the shared wall-clock cap.
+    """Return a measured W5 plan that fits the deterministic process cap.
 
     Parameters
     ----------
@@ -1870,8 +1908,10 @@ def _measured_cost_plan(
         Prepared configuration carrying spend and referee measurements.
     started_perf : float
         ``time.perf_counter()`` value captured at W5 entry.
+    started_process : float
+        ``time.process_time()`` value captured at W5 entry.
     remaining_entry : float, optional
-        Benchmark wall seconds remaining at W5 entry.
+        Benchmark process seconds remaining at W5 entry.
     honest_axes : W5HonestAxes, optional
         Honest incumbent axes used by barrier weighting.
     shape_geometry : NativeShapeGeometry, optional
@@ -1886,9 +1926,11 @@ def _measured_cost_plan(
         getattr(config, "_dagua_native_w5_referee_cost_s", _MEASURED_COST_DEFAULT_REFEREE_S)
     )
     referee_s = max(1.0e-6, referee_s)
-    pre_measure_cap_remaining = _w5_spend_cap_s(config, remaining_entry) - _w5_spent_s(
+    node_count = int(seeds[0].pos.shape[0])
+    use_deterministic_costs = _use_tiny_row_deterministic_w5_costs(config, node_count)
+    pre_measure_cap_remaining = _w5_spend_cap_s(config, remaining_entry) - _w5_process_spent_s(
         config,
-        started_perf,
+        started_process,
     )
     measurement_budget_s = max(
         1.0e-6,
@@ -1905,14 +1947,20 @@ def _measured_cost_plan(
         shape_geometry,
     )
     spend_cap = _w5_spend_cap_s(config, remaining_entry)
-    cap_remaining = spend_cap - _w5_spent_s(config, started_perf)
+    if use_deterministic_costs:
+        cap_remaining = spend_cap
+    else:
+        cap_remaining = spend_cap - _w5_process_spent_s(config, started_process)
     budget_s = max(0.0, min(float(slice_s), cap_remaining))
-    # Invariant: measured plan cost and budget are both wall seconds.
-    # ``process_time`` is telemetry-only; admission matches the wall-based
-    # deadline, slice, and optimizer step guards below.
+    # Admission uses process seconds so sibling-worker load cannot change plan
+    # size. The wall deadline below remains the hard runaway guard.
     usable_s = budget_s - _PREDICTED_COST_RETURN_RESERVE_S
-    step_s = step_measurement.step_s
+    step_s = (
+        _TINY_ROW_DETERMINISTIC_STEP_COST_S if use_deterministic_costs else step_measurement.step_s
+    )
     warmup_s = step_measurement.warmup_s
+    if use_deterministic_costs:
+        referee_s = _TINY_ROW_DETERMINISTIC_REFEREE_COST_S
     minimum_predicted_s = step_s + referee_s
     if usable_s < minimum_predicted_s:
         if config is not None:
@@ -1932,7 +1980,6 @@ def _measured_cost_plan(
                 ),
             )
         return None
-    node_count = int(seeds[0].pos.shape[0])
     is_tiny_referee = (
         node_count <= _MEASURED_COST_TINY_MAX_N and referee_s < _MEASURED_COST_TINY_REFEREE_S
     )
@@ -1942,7 +1989,7 @@ def _measured_cost_plan(
     max_checkpoints = base_checkpoints
 
     def build_plan(seed_count: int, steps: int, checkpoints: int) -> W5CostPlan:
-        """Build a wall-denominated plan payload for candidate work bounds.
+        """Build a process-denominated plan payload for candidate work bounds.
 
         Parameters
         ----------
@@ -1956,7 +2003,7 @@ def _measured_cost_plan(
         Returns
         -------
         W5CostPlan
-            Cost plan for post-probe work under the remaining wall budget.
+            Cost plan for post-probe work under the remaining process budget.
         """
         predicted_s = seed_count * (steps * step_s + checkpoints * referee_s)
         return W5CostPlan(
@@ -2057,7 +2104,7 @@ def run_w5_finisher(
     """
     started_perf = time.perf_counter()
     started_process = time.process_time()
-    remaining_entry = _remaining_s(config)
+    remaining_entry = _process_remaining_s(config)
     slice_s = _finisher_slice_s(config)
     node_count = int(incumbent_pos.shape[0])
     edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
@@ -2242,6 +2289,7 @@ def run_w5_finisher(
             slice_s=float(slice_s),
             config=config,
             started_perf=started_perf,
+            started_process=started_process,
             remaining_entry=remaining_entry,
             honest_axes=incumbent_axes,
             shape_geometry=shape_work,
@@ -2282,7 +2330,10 @@ def run_w5_finisher(
     first_score_epilogue_attempted = False
     for seed in kept_seeds:
         seed_accepted_entry = len(accepted)
-        if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
+        if _w5_process_spent_s(config, started_process) >= _w5_spend_cap_s(
+            config,
+            remaining_entry,
+        ):
             deadline_returned = True
             break
         if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
@@ -2302,10 +2353,10 @@ def run_w5_finisher(
         for ladder_index, mode in enumerate(
             _mode_ladder(mode, is_semantically_directed=is_semantically_directed)
         ):
-            if ladder_index > 0 and _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
+            if ladder_index > 0 and _w5_process_spent_s(
                 config,
-                remaining_entry,
-            ):
+                started_process,
+            ) >= _w5_spend_cap_s(config, remaining_entry):
                 deadline_returned = True
                 break
             if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
@@ -2322,7 +2373,7 @@ def run_w5_finisher(
                 if pass_id == 2:
                     if deadline_returned:
                         break
-                    if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
+                    if _w5_process_spent_s(config, started_process) >= _w5_spend_cap_s(
                         config,
                         remaining_entry,
                     ):
@@ -2396,7 +2447,7 @@ def run_w5_finisher(
                     scored_points.append((steps, final_pos, final_loss))
                 for step, checkpoint_pos, checkpoint_loss in scored_points[:max_checkpoints]:
                     epilogue_scoring = False
-                    if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
+                    if _w5_process_spent_s(config, started_process) >= _w5_spend_cap_s(
                         config,
                         remaining_entry,
                     ):

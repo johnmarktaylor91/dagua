@@ -53,7 +53,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -61,6 +61,13 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily
 from dagua.layout.ops.base import Op, Pipeline
+from dagua.layout.ops.pipelines.native_budget import (
+    available_process_work_s,
+    has_process_budget,
+    remaining_process_s,
+    remaining_wall_s,
+    wall_reserve_exhausted,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
@@ -88,7 +95,6 @@ CLUSTER_EXTENDED_SCORE_KEYS = (
 CLUSTER_DUAL_ACCEPTANCE_MARGIN = 0.05
 MIN_OPTIONAL_ARM_REMAINING_S = 10.0
 ABSOLUTE_DEADLINE_RESERVE_S = 5.0
-PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 MAX_COLLINEAR_WORK = 100_000
 MAX_DENSE_STRESS_NODES = 200
 MAX_DENSE_STRESS_EDGES = 20_000
@@ -253,10 +259,7 @@ def _portfolio_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     float or None
         Remaining seconds, or ``None`` when no benchmark deadline is known.
     """
-    deadline = getattr(config, "_dagua_native_deadline_s", None) if config is not None else None
-    if deadline is None:
-        return None
-    return float(deadline) - time.perf_counter()
+    return remaining_wall_s(config)
 
 
 def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
@@ -274,17 +277,7 @@ def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[f
         Remaining process CPU seconds, or ``None`` when no benchmark
         deadline is known.
     """
-    if config is None:
-        return None
-    process_deadline = getattr(config, PROCESS_DEADLINE_ATTR, None)
-    if process_deadline is None:
-        remaining = _portfolio_remaining_s(config)
-        if remaining is None:
-            return None
-        process_deadline = time.process_time() + max(0.0, float(remaining))
-        setattr(config, PROCESS_DEADLINE_ATTR, process_deadline)
-        return float(remaining)
-    return float(process_deadline) - time.process_time()
+    return remaining_process_s(config)
 
 
 def _portfolio_has_budget(
@@ -305,12 +298,9 @@ def _portfolio_has_budget(
     bool
         ``True`` when there is no known deadline or enough remaining budget.
     """
-    wall_remaining = _portfolio_remaining_s(config)
-    if wall_remaining is not None and wall_remaining <= ABSOLUTE_DEADLINE_RESERVE_S:
+    if wall_reserve_exhausted(config, ABSOLUTE_DEADLINE_RESERVE_S):
         return False
-    remaining = _portfolio_process_remaining_s(config)
-    required_remaining = max(float(min_remaining_s), ABSOLUTE_DEADLINE_RESERVE_S)
-    return remaining is None or remaining > required_remaining
+    return has_process_budget(config, min_remaining_s, ABSOLUTE_DEADLINE_RESERVE_S)
 
 
 def _portfolio_available_work_s(
@@ -333,13 +323,9 @@ def _portfolio_available_work_s(
         Seconds available for additional work, clamped to zero. ``None`` means
         no benchmark deadline is known.
     """
-    wall_remaining = _portfolio_remaining_s(config)
-    if wall_remaining is not None and wall_remaining <= float(reserve_s):
+    if wall_reserve_exhausted(config, reserve_s):
         return 0.0
-    remaining = _portfolio_process_remaining_s(config)
-    if remaining is None:
-        return None
-    return max(0.0, float(remaining) - float(reserve_s))
+    return available_process_work_s(config, reserve_s)
 
 
 def _predicted_undirected_arm_budget_available(
@@ -630,7 +616,7 @@ def _log_marketplace_telemetry(
         arm_ended_wall_time = started_wall_time + max(0.0, arm_ended_at - started_at)
         full_score = full_scores.get(name)
         process_time_s = (
-            arm_process_totals.get(name)
+            float(arm_process_totals[name])
             if arm_process_totals is not None and name in arm_process_totals
             else max(0.0, ended_process_at - started_process)
         )
@@ -2056,7 +2042,7 @@ def _router_v2_large_mini_contest(
     started_process_at = time.process_time()
     n = int(problem.num_nodes)
     shortlist = _undirected_route_shortlist(
-        problem.structure,
+        cast(Any, problem.structure),
         n,
         has_edge_weights=problem.edge_weights is not None,
     )
@@ -2536,6 +2522,8 @@ def layout_native_undirected_portfolio(
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
+                if isinstance(neato_pos, tuple):
+                    neato_pos = neato_pos[0]
                 _add_challenger("neato", neato_pos)
             if problem.edge_weights is not None:
                 neato_unweighted_pos = layout_neato_pipeline(
@@ -2552,6 +2540,8 @@ def layout_native_undirected_portfolio(
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
+                if isinstance(neato_unweighted_pos, tuple):
+                    neato_unweighted_pos = neato_unweighted_pos[0]
                 _add_challenger("neato_unweighted", neato_unweighted_pos)
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
@@ -2848,7 +2838,7 @@ def layout_native_undirected_portfolio(
     from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
 
     shortlist = _undirected_route_shortlist(
-        problem.structure,
+        cast(Any, problem.structure),
         n,
         has_edge_weights=problem.edge_weights is not None,
     )
@@ -3208,11 +3198,11 @@ class UndirectedPortfolioRoute(Op):
 
     config: UndirectedPortfolioRouteConfig = field(default_factory=UndirectedPortfolioRouteConfig)
 
-    name: ClassVar[str] = "undirected_portfolio_route"
-    category: ClassVar[OpCategory] = OpCategory.CONTROL
-    reads: ClassVar[Tuple[str, ...]] = ("pos",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ()
+    name: str = "undirected_portfolio_route"
+    category: OpCategory = OpCategory.CONTROL
+    reads: Tuple[str, ...] = ("pos",)
+    writes: Tuple[str, ...] = ("pos",)
+    requires: Tuple[str, ...] = ()
 
     def apply(
         self,
