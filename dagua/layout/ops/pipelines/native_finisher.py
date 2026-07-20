@@ -18,10 +18,12 @@ from dagua.layout.ops.pipelines.native_budget import (
     DETERMINISTIC_BUDGET_ATTR,
     PROCESS_DEADLINE_ATTR,
     available_process_work_s,
+    charge,
     remaining_process_s,
     remaining_wall_s,
     wall_reserve_exhausted,
 )
+from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.pipelines.native_shape_geometry import (
     NativeShapeGeometry,
     pairwise_shape_signed_gap,
@@ -753,6 +755,69 @@ def _use_tiny_row_deterministic_w5_costs(
         and getattr(config, PROCESS_DEADLINE_ATTR, None) is not None
         and int(node_count) <= _MEASURED_COST_TINY_MAX_N
     )
+
+
+def _native_device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the native cost-model device class for a W5 config.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA devices, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
+
+
+def _charge_w5_owner_plan(
+    config: Optional[LayoutConfig],
+    node_count: int,
+    edge_count: int,
+    mode: str,
+    cost_plan: W5CostPlan,
+) -> None:
+    """Charge the deterministic W5 owner package for an admitted plan.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying an optional ledger.
+    node_count : int
+        Number of layout nodes.
+    edge_count : int
+        Number of layout edges.
+    mode : str
+        Routed W5 mode for the first admitted plan.
+    cost_plan : W5CostPlan
+        Deterministic W5 plan containing seeds, steps, and checkpoints.
+
+    Returns
+    -------
+    None
+        The function charges the ledger when installed and marks the plan so
+        repeated local checks do not double-debit it.
+    """
+    if config is None or bool(getattr(config, "_dagua_native_w5_owner_charged", False)):
+        return
+    problem = {"num_nodes": int(node_count), "num_edges": int(edge_count)}
+    cost = estimate_native_work_cost(
+        problem,
+        "w5",
+        {
+            "mode": mode,
+            "steps": int(cost_plan.steps),
+            "seeds": int(cost_plan.seeds),
+            "checkpoints": int(cost_plan.checkpoints),
+        },
+        _native_device_class(config),
+    )
+    charge(config, cost.generation_dwu + cost.reserved_score_dwu, "mandatory_w5_owner")
+    setattr(config, "_dagua_native_w5_owner_charged", True)
 
 
 def w5_predicted_skip_reason(
@@ -2351,6 +2416,13 @@ def run_w5_finisher(
                 steps=0,
                 skipped_reason="predicted_cost_measured",
             )
+        _charge_w5_owner_plan(
+            config,
+            node_count,
+            edge_count,
+            first_mode,
+            cost_plan,
+        )
         kept_seeds = kept_seeds[: cost_plan.seeds]
         max_steps = cost_plan.steps
         max_checkpoints = cost_plan.checkpoints

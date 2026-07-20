@@ -62,12 +62,17 @@ from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily
 from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.pipelines.native_budget import (
+    admit_native_work,
     available_process_work_s,
+    charge,
     has_process_budget,
+    release_tail_reservation,
     remaining_process_s,
     remaining_wall_s,
+    reserve_tail,
     wall_reserve_exhausted,
 )
+from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
@@ -318,6 +323,23 @@ def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[f
     return remaining_process_s(config)
 
 
+def _native_device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the native cost-model device class for a config.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA devices, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
+
+
 def _portfolio_has_budget(
     config: Optional[LayoutConfig],
     min_remaining_s: float = MIN_OPTIONAL_ARM_REMAINING_S,
@@ -411,6 +433,8 @@ def _arm_s_full_score_budget_available(
         ``True`` when no deadline is known or remaining budget covers the
         final full-ruler pass plus the hard return reserve.
     """
+    if bool(getattr(config, "_dagua_native_arm_s_full_score_predebited", False)):
+        return _portfolio_has_budget(config, min_remaining_s=0.0)
     return _portfolio_has_budget(config) and _predicted_undirected_arm_budget_available(
         config,
         predicted_cost_s,
@@ -2359,6 +2383,13 @@ def layout_native_undirected_portfolio(
                 int(problem.seed) if problem.seed is not None else 42,
             )
     incumbent_pos = _run_incumbent()
+    incumbent_cost = estimate_native_work_cost(
+        problem,
+        "stress",
+        {"steps": 10, "samples": None},
+        _native_device_class(config),
+    )
+    charge(config, incumbent_cost.generation_dwu, "mandatory_incumbent_solve")
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
         return incumbent_pos
     if not _portfolio_has_budget(config):
@@ -2765,14 +2796,26 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
 
-            fcose_cost_s = FCOSE_PRIOR_S
+            fcose_cost = estimate_native_work_cost(
+                problem,
+                "fcose",
+                {"steps": FCOSE_REFERENCE_STEPS, "samples": None},
+                _native_device_class(config),
+            )
+            fcose_cost_s = fcose_cost.generation_dwu + fcose_cost.reserved_score_dwu
             for seed_offset in range(FCOSE_CONTEST_SEEDS):
-                if not _portfolio_has_budget(
-                    config
-                ) or not _predicted_arm_budget_preserving_arm_s_score(
-                    config,
-                    fcose_cost_s,
-                    arm_s_pending=bool(arm_s_candidate_names),
+                if (
+                    not _portfolio_has_budget(config)
+                    or not _predicted_arm_budget_preserving_arm_s_score(
+                        config,
+                        fcose_cost_s,
+                        arm_s_pending=bool(arm_s_candidate_names),
+                    )
+                    or not admit_native_work(
+                        config,
+                        fcose_cost,
+                        f"optional_fcose_seed{seed_offset}",
+                    )
                 ):
                     _record_insufficient_predicted_budget_skip(
                         arm=f"fcose_seed{seed_offset}",
@@ -2797,7 +2840,7 @@ def layout_native_undirected_portfolio(
                 )
                 fcose_runs += 1
                 _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
-                fcose_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                _prediction_cpu_elapsed_s(candidate_started_process)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
@@ -2816,16 +2859,28 @@ def layout_native_undirected_portfolio(
         try:
             from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 
-            tsnet_cost_s = TSNET_PRIOR_S
+            tsnet_cost = estimate_native_work_cost(
+                problem,
+                "stress",
+                {"steps": TSNET_REFERENCE_STEPS, "samples": None},
+                _native_device_class(config),
+            )
+            tsnet_cost_s = tsnet_cost.generation_dwu + tsnet_cost.reserved_score_dwu
             stop_tsnet = False
             for perplexity in TSNET_PERPLEXITIES:
                 for seed_offset in range(TSNET_CONTEST_SEEDS):
-                    if not _portfolio_has_budget(
-                        config
-                    ) or not _predicted_arm_budget_preserving_arm_s_score(
-                        config,
-                        tsnet_cost_s,
-                        arm_s_pending=bool(arm_s_candidate_names),
+                    if (
+                        not _portfolio_has_budget(config)
+                        or not _predicted_arm_budget_preserving_arm_s_score(
+                            config,
+                            tsnet_cost_s,
+                            arm_s_pending=bool(arm_s_candidate_names),
+                        )
+                        or not admit_native_work(
+                            config,
+                            tsnet_cost,
+                            f"optional_tsnet_perp{perplexity:g}_seed{seed_offset}",
+                        )
                     ):
                         _record_insufficient_predicted_budget_skip(
                             arm=f"tsnet_perp{perplexity:g}_seed{seed_offset}",
@@ -2855,7 +2910,7 @@ def layout_native_undirected_portfolio(
                     _add_challenger(
                         f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
                     )
-                    tsnet_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                    _prediction_cpu_elapsed_s(candidate_started_process)
                 if stop_tsnet:
                     break
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
@@ -3019,6 +3074,13 @@ def layout_native_undirected_portfolio(
 
     offsets, targets = _build_csr(problem.edge_index.detach().to(device="cpu"), n)
     all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
+    proxy_cost = estimate_native_work_cost(
+        problem,
+        "ruler",
+        {"samples": None},
+        _native_device_class(config),
+    )
+    charge(config, proxy_cost.reserved_score_dwu, "mandatory_shortlist_proxy_pass")
     proxy_scores = {
         name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
         for name, pos in positions.items()
@@ -3051,6 +3113,17 @@ def layout_native_undirected_portfolio(
         *proxy_finalists,
         *(name for name in raw_finalist_names if name not in proxy_finalists),
     ]
+    tail_cost = estimate_native_work_cost(
+        problem,
+        "ruler",
+        {"samples": None},
+        _native_device_class(config),
+    )
+    finalist_tail_reservation = reserve_tail(
+        config,
+        tail_cost.reserved_score_dwu * max(1, len(finalist_names)),
+        "mandatory_finalist_tail",
+    )
     cluster_score_telemetry = {}
     if problem.clusters:
         if arm_s_candidate_names:
@@ -3081,6 +3154,11 @@ def layout_native_undirected_portfolio(
                     excluded_names=budget_skipped_arm_s_names,
                 )
                 arm_s_candidate_names.difference_update(budget_skipped_arm_s_names)
+        release_tail_reservation(
+            config,
+            finalist_tail_reservation,
+            "finalist_tail_entered_scoring",
+        )
         scores = {}
         for name in finalist_names:
             score, score_telemetry = _score_undirected_candidate_payload(

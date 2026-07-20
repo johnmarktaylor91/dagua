@@ -9,6 +9,12 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.ops.pipelines.native_budget import (
+    admit_native_work,
+    available_process_work_s,
+    remaining_dwu,
+)
+from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.state import LayoutProblem
 
 SMALL_EXACT = "small_exact"
@@ -533,15 +539,34 @@ def native_guardrail_available_work_s(
     """
     if config is None:
         return None
+    ledger_remaining = remaining_dwu(config)
+    if ledger_remaining is not None:
+        if ledger_remaining <= float(reserve_s):
+            return 0.0
+        return max(0.0, ledger_remaining - float(reserve_s))
     wall_deadline = getattr(config, "_dagua_native_deadline_s", None)
     if wall_deadline is not None:
         remaining = float(wall_deadline) - time.perf_counter()
         if remaining <= float(reserve_s):
             return 0.0
-    process_deadline = getattr(config, "_dagua_native_process_deadline_s", None)
-    if process_deadline is None:
-        return None
-    return max(0.0, float(process_deadline) - time.process_time() - float(reserve_s))
+    return available_process_work_s(config, reserve_s)
+
+
+def _device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the cost-model device class for a native config.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA devices, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
 
 
 def _mode_for_cost(cost: NativeGuardrailCostInputs, caps: NativeGuardrailCaps) -> str:
@@ -622,6 +647,25 @@ def build_native_guardrail_plan(
             available_work_s=available,
             skip_reason="insufficient_predicted_budget",
         )
+    package = estimate_native_work_cost(
+        problem,
+        "arm_s",
+        {"steps": 30, "samples": None},
+        _device_class(config),
+    )
+    if not admit_native_work(config, package, "protected_arm_s_package"):
+        return NativeGuardrailPlan(
+            mode=INCUMBENT_ONLY,
+            admitted=False,
+            cost_inputs=cost,
+            caps=caps,
+            samples=samples,
+            predicted_cost_s=package.generation_dwu + package.reserved_score_dwu,
+            available_work_s=available,
+            skip_reason="insufficient_predicted_budget",
+        )
+    if config is not None:
+        setattr(config, "_dagua_native_arm_s_full_score_predebited", True)
     return NativeGuardrailPlan(
         mode=mode,
         admitted=True,

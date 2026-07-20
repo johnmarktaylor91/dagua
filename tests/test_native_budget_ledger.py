@@ -19,6 +19,7 @@ from dagua.layout.ops.pipelines.native_budget import (
     remaining_process_s,
 )
 from dagua.layout.ops.pipelines.native_cost_model import NativeWorkCost
+from dagua.layout.ops.pipelines.native_guardrails import build_native_guardrail_plan
 
 
 def _cost(
@@ -171,4 +172,49 @@ def test_ledger_decisions_do_not_read_physical_meters_without_wall_deadline(
     monkeypatch.setattr(native_budget.time, "process_time", fail_meter)
 
     assert admit_native_work(config, _cost(1.0, 1.0), "candidate")
-    assert remaining_process_s(config) is None
+    assert remaining_process_s(config) == pytest.approx(88.0)
+
+
+def test_scale_1k_ledger_skips_fcose_and_admits_protected_arm_s() -> None:
+    """Model-priced fCoSE is skipped while protected Arm-S fits scale inputs.
+
+    Returns
+    -------
+    None
+        Assertions validate deterministic B2 admission decisions.
+    """
+    from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
+
+    config = LayoutConfig(device="cpu")
+    install_budget_ledger(config, timeout_s=300.0, return_reserve_dwu=5.0)
+    problem = {
+        "num_nodes": 1000,
+        "num_edges": 1500,
+    }
+
+    fcose_cost = estimate_native_work_cost(
+        problem,
+        "fcose",
+        {"steps": 2500, "samples": None},
+        "cpu",
+    )
+
+    assert not admit_native_work(config, fcose_cost, "optional_fcose_seed0")
+    assert getattr(config, LEDGER_ATTR).event_log[-1]["event"] == "skip"
+    assert getattr(config, LEDGER_ATTR).event_log[-1]["reason"] == "optional_fcose_seed0"
+
+    edge_index = pytest.importorskip("torch").tensor(
+        [list(range(999)), list(range(1, 1000))],
+        dtype=pytest.importorskip("torch").long,
+    )
+    graph_problem = pytest.importorskip("dagua.layout.ops.state").LayoutProblem(
+        edge_index=edge_index, num_nodes=1000
+    )
+    plan = build_native_guardrail_plan(graph_problem, config)
+
+    assert plan.admitted
+    assert plan.skip_reason is None
+    assert any(
+        record["event"] == "admit" and record["reason"] == "protected_arm_s_package"
+        for record in getattr(config, LEDGER_ATTR).event_log
+    )
