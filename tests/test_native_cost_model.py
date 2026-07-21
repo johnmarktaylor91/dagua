@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from dagua.layout.ops.pipelines import native_cost_model as cost_model
 from dagua.layout.ops.pipelines.native_cost_model import (
     PROVENANCE_REF,
     apsp_volume,
@@ -109,3 +110,107 @@ def test_directed_flat_arm_families_use_calibrated_priors() -> None:
     assert sugiyama.generation_dwu == pytest.approx(2.2)
     assert recombinant.generation_dwu == pytest.approx(2.5)
     assert sugiyama.metadata["provenance"] == PROVENANCE_REF
+
+
+def test_fcose_exact_regime_prices_small_rows_at_true_tiny_cost() -> None:
+    """Exact-repulsion fCoSE rows (N <= 512) price near their real ~0.2-0.6s cost.
+
+    The M2 4-row regression class: the old single linear prior over-priced
+    small/medium rows 90-7000x (sbm_low_mix predicted 2229.7 DWU vs 0.32s
+    real), starving the winning fCoSE contest arms. C2 telemetry prices the
+    exact regime at its true tiny cost so the arms admit.
+    """
+    sbm_low_mix_shape = {"num_nodes": 100, "num_edges": 642}
+
+    cost = estimate_native_work_cost(
+        sbm_low_mix_shape,
+        family="fcose",
+        knobs={"steps": 2500, "samples": None},
+        device_class="cuda",
+    )
+
+    assert cost.metadata["fcose_regime"] == "exact"
+    assert "force" in cost.metadata["terms"]
+    assert cost.generation_dwu < 2.0
+    # Admission headroom: 2.0 x (generation + score + 55s Arm-S prior) must fit
+    # far under the ~280s remaining observed at the fCoSE seam on this row.
+    assert 2.0 * (cost.generation_dwu + cost.reserved_score_dwu + 55.0) < 150.0
+
+
+def test_fcose_barnes_hut_regime_keeps_scale_1k_priced_out() -> None:
+    """Barnes-Hut fCoSE rows (N > 512) stay decisively unaffordable.
+
+    r8_nested_scale_1k_budget real cost is ~6.5 s/step (~16,000s per full
+    2500-step arm) on the calibration box; the frozen prior must keep it above
+    2x the 300s benchmark budget with wide margin so the fCoSE-skip /
+    Arm-S-admit scale anchor and the parity gate are preserved.
+    """
+    scale_1k_shape = {"num_nodes": 1000, "num_edges": 2038}
+
+    cost = estimate_native_work_cost(
+        scale_1k_shape,
+        family="fcose",
+        knobs={"steps": 2500, "samples": None},
+        device_class="cuda",
+    )
+
+    assert cost.metadata["fcose_regime"] == "barnes_hut"
+    assert "force_bh" in cost.metadata["terms"]
+    assert cost.generation_dwu > 600.0
+
+    cpu_cost = estimate_native_work_cost(
+        scale_1k_shape,
+        family="fcose",
+        knobs={"steps": 2500, "samples": None},
+        device_class="cpu",
+    )
+
+    assert cpu_cost.generation_dwu > 600.0
+
+
+def test_fcose_regime_cliff_is_at_the_exact_repulsion_cap() -> None:
+    """Pricing jumps by orders of magnitude exactly where the embedder regime flips."""
+    knobs = {"steps": 2500, "samples": None}
+
+    at_cap = estimate_native_work_cost(
+        {"num_nodes": 512, "num_edges": 1024},
+        family="fcose",
+        knobs=knobs,
+        device_class="cuda",
+    )
+    above_cap = estimate_native_work_cost(
+        {"num_nodes": 513, "num_edges": 1024},
+        family="fcose",
+        knobs=knobs,
+        device_class="cuda",
+    )
+
+    assert at_cap.metadata["fcose_regime"] == "exact"
+    assert above_cap.metadata["fcose_regime"] == "barnes_hut"
+    assert above_cap.generation_dwu > 100.0 * at_cap.generation_dwu
+
+
+def test_fcose_barnes_hut_missing_term_falls_back_to_exact_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom table without ``force_bh`` degrades to the exact-regime term.
+
+    The fallback must never price a Barnes-Hut row at an accidental zero
+    (free admission).
+    """
+    stripped = {
+        key: {term: pair for term, pair in terms.items() if term != "force_bh"}
+        for key, terms in cost_model.FROZEN_COST_TABLE.items()
+    }
+    monkeypatch.setattr(cost_model, "FROZEN_COST_TABLE", stripped)
+
+    cost = cost_model.estimate_native_work_cost(
+        {"num_nodes": 1000, "num_edges": 2038},
+        family="fcose",
+        knobs={"steps": 2500, "samples": None},
+        device_class="cuda",
+    )
+
+    assert cost.metadata["fcose_regime"] == "barnes_hut"
+    assert "force" in cost.metadata["terms"]
+    assert cost.generation_dwu > 0.0

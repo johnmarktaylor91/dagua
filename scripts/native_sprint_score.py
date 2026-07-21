@@ -508,8 +508,28 @@ def score_position(
     -------
     Dict[str, Any]
         Raw candidate score row.
+
+    Raises
+    ------
+    RuntimeError
+        If the graph was built without measured node sizes. Scoring with
+        ``node_sizes=None`` silently nulls ``node_occlusion_score`` and
+        renormalizes the composite without a facet that is ~always 1.0,
+        deflating every score ~0.5-3.5 pts relative to the V2 scale (the
+        2026-07-21 S1/M2 tally incident -- 6th instance of the oracle-bug
+        class). Legitimate scoring always goes through ``build_graph_map()``,
+        which calls ``compute_node_sizes()``; cached-row reuse paths never
+        reach this function.
     """
     graph = test_graph.graph
+    if graph.node_sizes is None:
+        raise RuntimeError(
+            f"score_position({test_graph.name!r}): graph.node_sizes is None. "
+            "The graph was built without compute_node_sizes() (e.g. bare "
+            "get_test_graphs()), which would silently null node_occlusion_score "
+            "and deflate the composite. Build graphs via build_graph_map() or "
+            "call graph.compute_node_sizes() before scoring."
+        )
     positions = torch.load(path_string, map_location="cpu", weights_only=True)
     expected_shape = (graph.num_nodes, 2)
     if not isinstance(positions, torch.Tensor) or tuple(positions.shape) != expected_shape:
