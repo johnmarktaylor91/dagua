@@ -15,17 +15,29 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
+from dagua.eval.distributional_fidelity import pairwise_procrustes_matrix
+from dagua.eval.drawing import native_route_coverage, routes_to_curves
 from dagua.metrics import (
     _deterministic_sample_indices,
     _ensure_cpu,
+    bend_count,
     cluster_edge_intrusion_score,
     cluster_exclusion_score,
     cluster_label_occlusion_score,
     cluster_nesting_fidelity_score,
     cluster_sibling_overlap_score,
+    composite_drawing,
     directed_flow_score,
+    port_angular_resolution,
+    routed_crossing_rate,
 )
 
+G5_QUALITY_BAND_DELTA = 0.05
+G5_CHANGE_EPSILON = 1e-9
+G5_ZERO_CHANGE_SCALE = 0.05
+G7_SEVERE_PORT_CAP = 0.5
+G7_PORT_SIDE_COSINE_THRESHOLD = math.sqrt(0.5)
+G7_TERMINAL_SEPARATION_FRACTION = 0.5
 G2_SLOT_A_TOTAL = 7.0
 G2_SLOT_B_TOTAL = 3.0
 G4_SLOT_A_TOTAL = 5.0
@@ -381,6 +393,54 @@ def _weighted_gate(meta: Mapping[str, Any]) -> bool:
     return bool(_weight_cv(weights) > NONDEGENERATE_WEIGHT_CV)
 
 
+def _declared_temporal_gate(meta: Mapping[str, Any]) -> bool:
+    """Gate G5 from declared frame history and node identity only.
+
+    Parameters
+    ----------
+    meta : Mapping[str, Any]
+        Declared graph metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when previous frame geometry and node identity metadata are
+        declared by the corpus row.
+    """
+    has_frames = any(
+        meta.get(key) is not None for key in ("previous", "previous_positions", "frames")
+    )
+    has_identity = any(
+        meta.get(key) is not None
+        for key in ("node_identity", "node_identity_map", "node_ids", "frame_node_ids")
+    )
+    return bool(has_frames and has_identity)
+
+
+def _declared_port_gate(meta: Mapping[str, Any]) -> bool:
+    """Gate G7 from declared ports or routed drawing metadata only.
+
+    Parameters
+    ----------
+    meta : Mapping[str, Any]
+        Declared graph metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when the input row declares port constraints, routed labels,
+        or route paths.
+    """
+    return bool(
+        meta.get("ports") is not None
+        or meta.get("port_sides") is not None
+        or meta.get("port_order") is not None
+        or meta.get("routed_labels") is not None
+        or meta.get("route_paths") is not None
+        or meta.get("routes") is not None
+    )
+
+
 def _inapplicable_reason(key: str, meta: Mapping[str, Any]) -> str:
     """Return a concise input-gate failure reason.
 
@@ -408,6 +468,10 @@ def _inapplicable_reason(key: str, meta: Mapping[str, Any]) -> str:
         return "inapplicable:thickness_only_weights_make_no_geometric_claim"
     if key == "G6":
         return "inapplicable:no_declared_non_degenerate_weight_semantics"
+    if key == "G5":
+        return "inapplicable:no_declared_previous_frames_with_node_identity"
+    if key == "G7":
+        return "inapplicable:no_declared_ports_or_routing"
     return "inapplicable:input_gate_false"
 
 
@@ -848,6 +912,202 @@ def _score_g6(
     )
 
 
+def _score_g5(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    meta: Mapping[str, Any],
+) -> GroupEvaluation:
+    """Score G5 temporal stability under a static-quality band.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Current-frame node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``; unused except for the registry
+        signature.
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``; unused by G5.
+    meta : Mapping[str, Any]
+        Declared temporal metadata containing previous frame positions, node
+        identity, quality-band records, and graph-change magnitude.
+
+    Returns
+    -------
+    GroupEvaluation
+        G5 stability facet record.
+    """
+    del edge_index, node_sizes
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    current_ids = _temporal_current_node_ids(meta, int(positions.shape[0]))
+    frame_records = _temporal_frame_records(meta)
+    if not frame_records:
+        raise ValueError("G5 score called without declared previous frame metadata")
+
+    frame_scores: list[float] = []
+    frame_metadata: list[Dict[str, Any]] = []
+    band_decays: list[float] = []
+    stability_band_flag = False
+    for frame in frame_records:
+        aligned_prev, curr_aligned, matched_count = _aligned_temporal_pair(
+            frame,
+            positions,
+            current_ids,
+        )
+        observed = _normalized_mean_displacement(aligned_prev, curr_aligned)
+        graph_change = max(0.0, float(frame.get("graph_change", frame.get("change", observed))))
+        dcq = _change_proportionality_score(observed, graph_change)
+        decay, below_band = _temporal_quality_decay(frame, meta)
+        stability_band_flag = stability_band_flag or below_band
+        band_decays.append(decay)
+        frame_scores.append(dcq * decay)
+        procrustes = pairwise_procrustes_matrix(
+            [aligned_prev.numpy(), curr_aligned.numpy()],
+            free_aspect=False,
+        )
+        frame_metadata.append(
+            {
+                "matched_nodes": matched_count,
+                "observed_procrustes_aligned_displacement": observed,
+                "ground_truth_graph_change": graph_change,
+                "dcq_change_proportionality": dcq,
+                "quality_band_decay": decay,
+                "below_quality_band": below_band,
+                "pairwise_procrustes_distance": float(procrustes[0, 1]),
+            }
+        )
+
+    score = float(np.mean(frame_scores)) if frame_scores else None
+    reason = "applicable:declared_previous_frames_with_node_identity"
+    metadata = {
+        "gate": "previous_frames_x_node_identity_only",
+        "normalization": (
+            "mean graded DCQ proportionality after Procrustes alignment x quality-band decay"
+        ),
+        "quality_band_delta": G5_QUALITY_BAND_DELTA,
+        "frame_count": len(frame_scores),
+        "quality_band_decays": tuple(float(value) for value in band_decays),
+        "frame_records": tuple(frame_metadata),
+        "flags": ("STABILITY_BAND",) if stability_band_flag else tuple(),
+        "invariance": (
+            "translation_rotation_reflection_position_scale_invariant_after_procrustes_alignment"
+        ),
+        "honesty_note": (
+            "Temporal stability aids orientation/navigation across frames; it is not "
+            "a general readability substitute."
+        ),
+    }
+    facets = {
+        "G5_temporal_stability": GroupFacetScore(
+            code="G5_temporal_stability",
+            name="temporal_dcq_stability_band",
+            tier=2,
+            score=score,
+            base_weight=_tier_weight(2),
+            effective_weight=_tier_weight(2) if score is not None else 0.0,
+            applicable=score is not None,
+            applicability_reason=reason,
+            metadata=metadata,
+        )
+    }
+    return GroupEvaluation(
+        key="G5",
+        applicable=True,
+        applicability_reason=reason,
+        facets=facets,
+        metadata={"tier_slots": _slot_metadata(GROUP_REGISTRY["G5"].tier_slots), **metadata},
+    )
+
+
+def _score_g7(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    meta: Mapping[str, Any],
+) -> GroupEvaluation:
+    """Score G7 port compliance and routed drawing facets.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+    meta : Mapping[str, Any]
+        Declared port and optional route metadata.
+
+    Returns
+    -------
+    GroupEvaluation
+        G7 placement compliance plus routed-bundle facet records when routes
+        are declared.
+    """
+    positions = _ensure_cpu(pos).to(dtype=torch.float64)
+    edges = _normalize_edge_index(edge_index)
+    sizes = _ensure_cpu(node_sizes).to(dtype=torch.float64)
+    ports = _declared_port_records(meta, int(edges.shape[1]))
+    routes = meta.get("route_paths", meta.get("routes"))
+    curves = routes_to_curves(routes, positions, edges) if routes is not None else None
+    compliance = _port_compliance_score(positions, edges, ports, curves)
+    severe = bool(compliance["severe_side_violation_count"] > 0)
+    group_cap = G7_SEVERE_PORT_CAP if severe else 1.0
+    flags = ("PORT_VIOLATION",) if compliance["hard_compliance"] < 1.0 else tuple()
+    reason = "applicable:declared_ports_or_routing"
+    common = {
+        "gate": "declared_ports_or_routing_only",
+        "flags": flags,
+        "group_cap": group_cap,
+        "normalization": "hard discrete compliance plus decomposed frozen routed drawing terms",
+        "invariance_compliance": "discrete_side_and_order_satisfaction_position_scale_invariant",
+        "invariance_approach_angle": "rotation_anchored_to_declared_port_side_by_design",
+        "invariance_clearance_congestion": "size_anchored_position_scale_sensitive_by_design",
+        "deformation_monotonicity_probe": "implemented_by_tests/test_ruler_v3_groups.py",
+    }
+    compliance_score = min(float(compliance["hard_compliance"]), group_cap)
+    facets = {
+        "G7_port_hard_compliance": GroupFacetScore(
+            code="G7_port_hard_compliance",
+            name="port_side_order_position_hard_compliance",
+            tier=2,
+            score=compliance_score,
+            base_weight=_tier_weight(2),
+            effective_weight=_tier_weight(2),
+            applicable=True,
+            applicability_reason=reason,
+            metadata={**common, **compliance, "slot": "G7_port_compliance"},
+        )
+    }
+    if curves is not None:
+        routed = _g7_routed_bundle_scores(positions, edges, sizes, curves, ports, meta, group_cap)
+        for code, name, score, metadata in routed:
+            facets[code] = GroupFacetScore(
+                code=code,
+                name=name,
+                tier=2,
+                score=score,
+                base_weight=_tier_weight(2),
+                effective_weight=_tier_weight(2),
+                applicable=True,
+                applicability_reason=reason,
+                metadata={**common, **metadata},
+            )
+    return GroupEvaluation(
+        key="G7",
+        applicable=True,
+        applicability_reason=reason,
+        facets=facets,
+        metadata={
+            "tier_slots": _slot_metadata(GROUP_REGISTRY["G7"].tier_slots),
+            **common,
+            "native_route_coverage": native_route_coverage(routes, int(edges.shape[1])),
+            "routed_bundle_applicable": curves is not None,
+        },
+    )
+
+
 def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
     """Return a CPU long edge tensor with shape ``[2, E]``.
 
@@ -865,6 +1125,811 @@ def _normalize_edge_index(edge_index: torch.Tensor) -> torch.Tensor:
     if edges.ndim != 2 or int(edges.shape[0]) != 2:
         raise ValueError("edge_index must have shape [2, E]")
     return edges
+
+
+def _temporal_frame_records(meta: Mapping[str, Any]) -> Tuple[Mapping[str, Any], ...]:
+    """Normalize declared temporal frame metadata.
+
+    Parameters
+    ----------
+    meta : Mapping[str, Any]
+        Declared graph metadata.
+
+    Returns
+    -------
+    Tuple[Mapping[str, Any], ...]
+        Previous-frame records. Each record contains at least ``positions``.
+    """
+    frames = meta.get("previous", meta.get("frames"))
+    if isinstance(frames, Mapping):
+        return (frames,)
+    if frames is not None:
+        records = []
+        for frame in frames:
+            if isinstance(frame, Mapping):
+                records.append(frame)
+            else:
+                records.append({"positions": frame})
+        return tuple(records)
+    previous_positions = meta.get("previous_positions")
+    if previous_positions is None:
+        return tuple()
+    return (
+        {
+            "positions": previous_positions,
+            "node_ids": meta.get("previous_node_ids", meta.get("frame_node_ids")),
+            "quality": meta.get("previous_v3_core_score", meta.get("frame_v3_core_score")),
+            "best_static_v3_core": meta.get("previous_best_static_v3_core"),
+            "graph_change": meta.get("graph_change"),
+        },
+    )
+
+
+def _temporal_current_node_ids(meta: Mapping[str, Any], num_nodes: int) -> Tuple[Any, ...]:
+    """Return current-frame node identities.
+
+    Parameters
+    ----------
+    meta : Mapping[str, Any]
+        Declared graph metadata.
+    num_nodes : int
+        Current-frame node count.
+
+    Returns
+    -------
+    Tuple[Any, ...]
+        Stable node identities aligned to current positions.
+    """
+    ids = meta.get("node_ids", meta.get("node_identity"))
+    if ids is None and isinstance(meta.get("node_identity_map"), Mapping):
+        mapping = meta["node_identity_map"]
+        ids = [mapping.get(index, mapping.get(str(index), index)) for index in range(num_nodes)]
+    if ids is None:
+        ids = list(range(num_nodes))
+    values = tuple(ids)
+    if len(values) != num_nodes:
+        raise ValueError("current temporal node identity metadata must have length N")
+    return values
+
+
+def _aligned_temporal_pair(
+    frame: Mapping[str, Any],
+    current_positions: torch.Tensor,
+    current_ids: Sequence[Any],
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """Return Procrustes-aligned previous/current positions on matched nodes.
+
+    Parameters
+    ----------
+    frame : Mapping[str, Any]
+        Previous-frame metadata.
+    current_positions : torch.Tensor
+        Current positions with shape ``[N, 2]``.
+    current_ids : Sequence[Any]
+        Current node identities aligned to ``current_positions``.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor, int]
+        Aligned previous positions, matched current positions, and match count.
+    """
+    previous = torch.as_tensor(frame.get("positions"), dtype=torch.float64)
+    if previous.ndim != 2 or int(previous.shape[1]) != 2:
+        raise ValueError("temporal frame positions must have shape [N, 2]")
+    previous_ids = tuple(frame.get("node_ids", frame.get("node_identity", current_ids)))
+    if len(previous_ids) != int(previous.shape[0]):
+        raise ValueError("previous temporal node identity metadata must match frame positions")
+    previous_lookup = {identity: index for index, identity in enumerate(previous_ids)}
+    previous_rows: list[int] = []
+    current_rows: list[int] = []
+    for current_index, identity in enumerate(current_ids):
+        if identity in previous_lookup:
+            previous_rows.append(previous_lookup[identity])
+            current_rows.append(current_index)
+    if len(previous_rows) < 2:
+        raise ValueError("G5 requires at least two node identities shared with the previous frame")
+    prev = previous[previous_rows]
+    curr = current_positions[current_rows]
+    return _procrustes_align(prev, curr), curr, len(previous_rows)
+
+
+def _procrustes_align(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Align a point set to a target by similarity Procrustes transform.
+
+    Parameters
+    ----------
+    source : torch.Tensor
+        Source positions with shape ``[N, 2]``.
+    target : torch.Tensor
+        Target positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Source positions aligned into target coordinates.
+    """
+    src_centered = source - source.mean(dim=0, keepdim=True)
+    tgt_centered = target - target.mean(dim=0, keepdim=True)
+    src_norm = torch.linalg.vector_norm(src_centered)
+    tgt_norm = torch.linalg.vector_norm(tgt_centered)
+    if float(src_norm.item()) <= 1e-12 or float(tgt_norm.item()) <= 1e-12:
+        return source - source.mean(dim=0, keepdim=True) + target.mean(dim=0, keepdim=True)
+    src_unit = src_centered / src_norm
+    tgt_unit = tgt_centered / tgt_norm
+    u, _singular, vh = torch.linalg.svd(src_unit.T @ tgt_unit)
+    rotation = u @ vh
+    scale = tgt_norm / src_norm
+    return (src_centered @ rotation) * scale + target.mean(dim=0, keepdim=True)
+
+
+def _normalized_mean_displacement(aligned_previous: torch.Tensor, current: torch.Tensor) -> float:
+    """Measure mean displacement after Procrustes alignment.
+
+    Parameters
+    ----------
+    aligned_previous : torch.Tensor
+        Previous positions aligned to current coordinates with shape ``[N, 2]``.
+    current : torch.Tensor
+        Current positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Mean node displacement divided by current RMS radius.
+    """
+    displacement = torch.linalg.vector_norm(current - aligned_previous, dim=1).mean()
+    centered = current - current.mean(dim=0, keepdim=True)
+    scale = torch.linalg.vector_norm(centered, dim=1).mean()
+    return float((displacement / torch.clamp(scale, min=1e-12)).item())
+
+
+def _change_proportionality_score(observed: float, graph_change: float) -> float:
+    """Score proportionality between drawn displacement and graph change.
+
+    Parameters
+    ----------
+    observed : float
+        Normalized Procrustes-aligned displacement.
+    graph_change : float
+        Declared ground-truth graph-change magnitude.
+
+    Returns
+    -------
+    float
+        Score in ``[0, 1]`` penalizing thrash and false stability.
+    """
+    if graph_change <= G5_CHANGE_EPSILON:
+        return math.exp(-observed / G5_ZERO_CHANGE_SCALE)
+    ratio = (observed + G5_CHANGE_EPSILON) / (graph_change + G5_CHANGE_EPSILON)
+    return math.exp(-abs(math.log(ratio)))
+
+
+def _temporal_quality_decay(
+    frame: Mapping[str, Any],
+    meta: Mapping[str, Any],
+) -> Tuple[float, bool]:
+    """Return graded quality-band decay for one temporal frame.
+
+    Parameters
+    ----------
+    frame : Mapping[str, Any]
+        Previous-frame metadata.
+    meta : Mapping[str, Any]
+        Current row metadata with optional default band records.
+
+    Returns
+    -------
+    Tuple[float, bool]
+        Decay in ``[0, 1]`` and whether the band was violated.
+    """
+    quality = frame.get("quality", frame.get("v3_core_score", meta.get("frame_v3_core_score", 1.0)))
+    best = frame.get(
+        "best_static_v3_core",
+        frame.get("best_static", meta.get("best_static_v3_core", 1.0)),
+    )
+    threshold = (1.0 - float(meta.get("temporal_quality_delta", G5_QUALITY_BAND_DELTA))) * (
+        float(best)
+    )
+    if threshold <= 0.0:
+        return 1.0, False
+    decay = max(0.0, min(1.0, float(quality) / threshold))
+    return decay, decay < 1.0
+
+
+def _declared_port_records(meta: Mapping[str, Any], num_edges: int) -> Tuple[Dict[str, Any], ...]:
+    """Normalize declared port metadata to endpoint records.
+
+    Parameters
+    ----------
+    meta : Mapping[str, Any]
+        Declared graph metadata.
+    num_edges : int
+        Edge count.
+
+    Returns
+    -------
+    Tuple[Dict[str, Any], ...]
+        Port endpoint records with ``edge``, ``endpoint``, ``node``, and
+        optional ``side``/``order``/``position`` keys.
+    """
+    ports = meta.get("ports")
+    if ports is not None:
+        return tuple(dict(port) for port in ports)
+    records: list[Dict[str, Any]] = []
+    side_data = meta.get("port_sides")
+    if isinstance(side_data, Mapping):
+        for raw_edge, value in side_data.items():
+            edge = int(raw_edge)
+            if isinstance(value, Mapping):
+                for endpoint in ("source", "target"):
+                    if endpoint in value:
+                        records.append(
+                            {"edge": edge, "endpoint": endpoint, "side": value[endpoint]}
+                        )
+            else:
+                source_side, target_side = value
+                records.append({"edge": edge, "endpoint": "source", "side": source_side})
+                records.append({"edge": edge, "endpoint": "target", "side": target_side})
+    order_data = meta.get("port_order")
+    if isinstance(order_data, Mapping):
+        for record in records:
+            key = (record.get("node"), record.get("side"))
+            record["order"] = order_data.get(key, order_data.get(str(key), record.get("order")))
+    if not records and meta.get("route_paths") is not None:
+        records = [{"edge": edge, "endpoint": "source"} for edge in range(num_edges)]
+    return tuple(records)
+
+
+def _port_compliance_score(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    ports: Sequence[Mapping[str, Any]],
+    curves: Optional[Sequence[Any]],
+) -> Dict[str, Any]:
+    """Score hard port side/order/position compliance.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    ports : Sequence[Mapping[str, Any]]
+        Declared port endpoint records.
+    curves : Optional[Sequence[Any]]
+        Optional routed curves aligned to ``edge_index``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Compliance score and violation diagnostics.
+    """
+    checks = 0
+    satisfied = 0
+    side_violations = 0
+    severe_side_violations = 0
+    normalized_ports = [_complete_port_record(port, edge_index) for port in ports]
+    for port in normalized_ports:
+        side = port.get("side")
+        if side is not None:
+            checks += 1
+            score = _port_side_alignment_score(positions, edge_index, port, curves)
+            ok = score >= G7_PORT_SIDE_COSINE_THRESHOLD
+            satisfied += int(ok)
+            if not ok:
+                side_violations += 1
+                if score <= 0.0:
+                    severe_side_violations += 1
+        if port.get("position") is not None:
+            checks += 1
+            if _port_position_satisfied(positions, port):
+                satisfied += 1
+    order_checks, order_satisfied = _port_order_satisfaction(positions, normalized_ports)
+    checks += order_checks
+    satisfied += order_satisfied
+    hard = 1.0 if checks == 0 else satisfied / checks
+    return {
+        "hard_compliance": float(hard),
+        "compliance_checks": checks,
+        "compliance_satisfied": satisfied,
+        "side_violation_count": side_violations,
+        "severe_side_violation_count": severe_side_violations,
+        "order_checks": order_checks,
+        "order_satisfied": order_satisfied,
+    }
+
+
+def _complete_port_record(port: Mapping[str, Any], edge_index: torch.Tensor) -> Dict[str, Any]:
+    """Fill endpoint and node fields for a declared port record.
+
+    Parameters
+    ----------
+    port : Mapping[str, Any]
+        Raw port metadata.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Completed port record.
+    """
+    record = dict(port)
+    edge = int(record.get("edge", record.get("edge_id", 0)))
+    record["edge"] = edge
+    endpoint = str(record.get("endpoint", "source"))
+    if "node" not in record and 0 <= edge < int(edge_index.shape[1]):
+        endpoint = "target" if endpoint in {"target", "t"} else "source"
+        row = 1 if endpoint == "target" else 0
+        record["node"] = int(edge_index[row, edge].item())
+        record["endpoint"] = endpoint
+    return record
+
+
+def _port_side_alignment_score(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    port: Mapping[str, Any],
+    curves: Optional[Sequence[Any]],
+) -> float:
+    """Return cosine alignment between route approach and declared side.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    port : Mapping[str, Any]
+        Completed port record.
+    curves : Optional[Sequence[Any]]
+        Optional routed curves.
+
+    Returns
+    -------
+    float
+        Cosine-like score where ``1`` is exactly orthogonal to the declared
+        side and ``-1`` exits through the opposite side.
+    """
+    node = int(port["node"])
+    edge = int(port["edge"])
+    side_normal = _port_side_normal(str(port["side"]))
+    vector = _port_endpoint_vector(
+        positions,
+        edge_index,
+        node,
+        edge,
+        str(port.get("endpoint")),
+        curves,
+    )
+    length = math.hypot(vector[0], vector[1])
+    if length <= 1e-12:
+        return -1.0
+    return (vector[0] * side_normal[0] + vector[1] * side_normal[1]) / length
+
+
+def _port_endpoint_vector(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    node: int,
+    edge: int,
+    endpoint: str,
+    curves: Optional[Sequence[Any]],
+) -> Tuple[float, float]:
+    """Return the vector from a node center toward the edge's port approach.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node : int
+        Port node id.
+    edge : int
+        Edge id.
+    endpoint : str
+        ``source`` or ``target``.
+    curves : Optional[Sequence[Any]]
+        Optional routed curves.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Endpoint approach vector.
+    """
+    if curves is not None and 0 <= edge < len(curves):
+        points = _curve_points(curves[edge])
+        if endpoint == "target" and len(points) >= 2:
+            anchor = points[-2]
+        elif len(points) >= 2:
+            anchor = points[1]
+        else:
+            anchor = points[0]
+        return (
+            float(anchor[0]) - float(positions[node, 0].item()),
+            float(anchor[1]) - float(positions[node, 1].item()),
+        )
+    other_row = 1 if endpoint != "target" else 0
+    other = int(edge_index[other_row, edge].item())
+    return (
+        float(positions[other, 0].item() - positions[node, 0].item()),
+        float(positions[other, 1].item() - positions[node, 1].item()),
+    )
+
+
+def _port_side_normal(side: str) -> Tuple[float, float]:
+    """Return the outward normal vector for a port side.
+
+    Parameters
+    ----------
+    side : str
+        Side code such as ``E``, ``W``, ``N``, or ``S``.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Unit side normal.
+    """
+    key = side.strip().lower()
+    if key in {"e", "east", "right"}:
+        return (1.0, 0.0)
+    if key in {"w", "west", "left"}:
+        return (-1.0, 0.0)
+    if key in {"n", "north", "top"}:
+        return (0.0, 1.0)
+    if key in {"s", "south", "bottom"}:
+        return (0.0, -1.0)
+    raise ValueError(f"unsupported port side: {side}")
+
+
+def _port_position_satisfied(positions: torch.Tensor, port: Mapping[str, Any]) -> bool:
+    """Return whether an explicit port point lies on its declared side.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    port : Mapping[str, Any]
+        Completed port record.
+
+    Returns
+    -------
+    bool
+        ``True`` when the declared point is on the declared side half-plane.
+    """
+    side = port.get("side")
+    if side is None:
+        return True
+    node = int(port["node"])
+    point = port["position"]
+    normal = _port_side_normal(str(side))
+    delta = (
+        float(point[0]) - float(positions[node, 0].item()),
+        float(point[1]) - float(positions[node, 1].item()),
+    )
+    return delta[0] * normal[0] + delta[1] * normal[1] >= 0.0
+
+
+def _port_order_satisfaction(
+    positions: torch.Tensor,
+    ports: Sequence[Mapping[str, Any]],
+) -> Tuple[int, int]:
+    """Score declared order along each node side.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    ports : Sequence[Mapping[str, Any]]
+        Completed port records.
+
+    Returns
+    -------
+    Tuple[int, int]
+        Number of order checks and satisfied checks.
+    """
+    buckets: Dict[Tuple[int, str], list[Tuple[float, int]]] = {}
+    for port in ports:
+        if port.get("order") is None or port.get("side") is None:
+            continue
+        node = int(port["node"])
+        side = str(port["side"])
+        coordinate = _port_order_coordinate(positions, port)
+        buckets.setdefault((node, side), []).append((coordinate, int(port["order"])))
+    checks = 0
+    satisfied = 0
+    for values in buckets.values():
+        if len(values) < 2:
+            continue
+        checks += 1
+        drawn = [order for _coord, order in sorted(values)]
+        satisfied += int(drawn == sorted(drawn))
+    return checks, satisfied
+
+
+def _port_order_coordinate(positions: torch.Tensor, port: Mapping[str, Any]) -> float:
+    """Return a side tangent coordinate for port ordering.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    port : Mapping[str, Any]
+        Completed port record.
+
+    Returns
+    -------
+    float
+        Tangent coordinate along the declared side.
+    """
+    point = port.get("position")
+    if point is not None:
+        x_value, y_value = float(point[0]), float(point[1])
+    else:
+        node = int(port["node"])
+        x_value, y_value = float(positions[node, 0].item()), float(positions[node, 1].item())
+    side = str(port.get("side", "E")).lower()
+    return x_value if side in {"n", "north", "top", "s", "south", "bottom"} else y_value
+
+
+def _g7_routed_bundle_scores(
+    positions: torch.Tensor,
+    edges: torch.Tensor,
+    sizes: torch.Tensor,
+    curves: Sequence[Any],
+    ports: Sequence[Mapping[str, Any]],
+    meta: Mapping[str, Any],
+    group_cap: float,
+) -> Tuple[Tuple[str, str, float, Dict[str, Any]], ...]:
+    """Return G7 routed bundle facet tuples.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    curves : Sequence[Any]
+        Routed curves aligned to edges.
+    ports : Sequence[Mapping[str, Any]]
+        Declared port records.
+    meta : Mapping[str, Any]
+        Declared graph metadata.
+    group_cap : float
+        Severe-violation cap applied to G7 facets.
+
+    Returns
+    -------
+    Tuple[Tuple[str, str, float, Dict[str, Any]], ...]
+        Routed facet tuples.
+    """
+    labels = meta.get("edge_labels", meta.get("routed_labels"))
+    label_positions = meta.get("label_positions")
+    drawing = composite_drawing(
+        positions,
+        edges,
+        sizes,
+        curves,
+        label_positions=label_positions,
+        edge_labels=labels,
+        seed=0,
+    )
+    routed_crossings = routed_crossing_rate(curves, edges, seed=0)
+    bends = bend_count(curves)
+    port_ar = port_angular_resolution(curves, edges)
+    side_approach = _port_approach_angle_score(positions, edges, ports, curves)
+    terminal = _terminal_congestion_score(positions, sizes, edges, ports, curves)
+    label_terms = [
+        drawing.get("drawing_term_label_node"),
+        drawing.get("drawing_term_label_label"),
+    ]
+    quality_terms = [
+        side_approach,
+        drawing.get("drawing_term_crossing"),
+        drawing.get("drawing_term_edge_node"),
+        *[term for term in label_terms if term is not None],
+        terminal,
+    ]
+    economy_terms = [
+        drawing.get("drawing_term_bend"),
+        terminal,
+        _flow_consistency_for_routed_row(positions, edges, meta),
+    ]
+    quality = min(group_cap, _mean_score_terms(quality_terms))
+    economy = min(group_cap, _mean_score_terms(economy_terms))
+    return (
+        (
+            "G7_routed_curve_quality",
+            "routed_crossings_edge_node_labels_terminal_quality",
+            quality,
+            {
+                "slot": "G7_routed_quality",
+                "drawing_term_crossing": drawing.get("drawing_term_crossing"),
+                "drawing_term_edge_node": drawing.get("drawing_term_edge_node"),
+                "drawing_term_label_node": drawing.get("drawing_term_label_node"),
+                "drawing_term_label_label": drawing.get("drawing_term_label_label"),
+                "port_side_approach_score": side_approach,
+                "port_angular_resolution_score": port_ar.get("port_angular_resolution_score"),
+                "terminal_congestion_score": terminal,
+                "routed_crossing_rate": routed_crossings["routed_crossing_rate"],
+                "composite_drawing_reuse": drawing,
+            },
+        ),
+        (
+            "G7_routed_bend_terminal_economy",
+            "routed_bend_dogleg_terminal_flow_economy",
+            economy,
+            {
+                "slot": "G7_routed_economy",
+                "drawing_term_bend": drawing.get("drawing_term_bend"),
+                "bend_mean_per_edge": bends["bend_mean_per_edge"],
+                "terminal_congestion_score": terminal,
+                "flow_consistency_score": _flow_consistency_for_routed_row(positions, edges, meta),
+                "composite_drawing_reuse": drawing,
+            },
+        ),
+    )
+
+
+def _port_approach_angle_score(
+    positions: torch.Tensor,
+    edges: torch.Tensor,
+    ports: Sequence[Mapping[str, Any]],
+    curves: Sequence[Any],
+) -> float:
+    """Score routed approach angles against declared port sides.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    ports : Sequence[Mapping[str, Any]]
+        Declared port records.
+    curves : Sequence[Any]
+        Routed curves aligned to edges.
+
+    Returns
+    -------
+    float
+        Mean clipped side-normal alignment in ``[0, 1]``.
+    """
+    scores = []
+    for port in (_complete_port_record(port, edges) for port in ports):
+        if port.get("side") is None:
+            continue
+        scores.append(max(0.0, _port_side_alignment_score(positions, edges, port, curves)))
+    return float(np.mean(scores)) if scores else 1.0
+
+
+def _terminal_congestion_score(
+    positions: torch.Tensor,
+    sizes: torch.Tensor,
+    edges: torch.Tensor,
+    ports: Sequence[Mapping[str, Any]],
+    curves: Sequence[Any],
+) -> float:
+    """Score same-side terminal separation with node-size anchoring.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    ports : Sequence[Mapping[str, Any]]
+        Declared port records.
+    curves : Sequence[Any]
+        Routed curves aligned to edges.
+
+    Returns
+    -------
+    float
+        Mean terminal separation score in ``[0, 1]``.
+    """
+    buckets: Dict[Tuple[int, str], list[float]] = {}
+    for port in (_complete_port_record(port, edges) for port in ports):
+        if port.get("side") is None:
+            continue
+        node = int(port["node"])
+        side = str(port["side"])
+        vector = _port_endpoint_vector(
+            positions,
+            edges,
+            node,
+            int(port["edge"]),
+            str(port["endpoint"]),
+            curves,
+        )
+        tangent_coord = (
+            vector[1] if side.lower() in {"e", "east", "right", "w", "west", "left"} else vector[0]
+        )
+        buckets.setdefault((node, side), []).append(float(tangent_coord))
+    scores = []
+    for node_side, coords in buckets.items():
+        if len(coords) < 2:
+            continue
+        node = node_side[0]
+        coords = sorted(coords)
+        min_sep = min(abs(after - before) for before, after in zip(coords, coords[1:]))
+        node_diag = float(torch.linalg.vector_norm(sizes[node]).item())
+        target = max(1e-12, G7_TERMINAL_SEPARATION_FRACTION * node_diag)
+        scores.append(min(1.0, min_sep / target))
+    return float(np.mean(scores)) if scores else 1.0
+
+
+def _flow_consistency_for_routed_row(
+    positions: torch.Tensor,
+    edges: torch.Tensor,
+    meta: Mapping[str, Any],
+) -> float:
+    """Return directed-flow consistency for routed data-flow rows.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    meta : Mapping[str, Any]
+        Declared graph metadata.
+
+    Returns
+    -------
+    float
+        Directed-flow score when a flow direction is declared, otherwise 1.0.
+    """
+    if meta.get("flow_direction") is None and meta.get("direction") is None:
+        return 1.0
+    return float(
+        directed_flow_score(
+            positions,
+            edges,
+            direction=str(meta.get("flow_direction", meta.get("direction", "TB"))),
+        )["directed_flow_score"]
+    )
+
+
+def _mean_score_terms(values: Sequence[Any]) -> float:
+    """Average finite normalized score terms.
+
+    Parameters
+    ----------
+    values : Sequence[Any]
+        Optional score-like values.
+
+    Returns
+    -------
+    float
+        Mean finite value in ``[0, 1]`` or ``1.0`` when no terms apply.
+    """
+    finite = [max(0.0, min(1.0, float(value))) for value in values if value is not None]
+    return float(np.mean(finite)) if finite else 1.0
+
+
+def _curve_points(curve: Any) -> Tuple[Tuple[float, float], ...]:
+    """Return representative points from a routed curve.
+
+    Parameters
+    ----------
+    curve : Any
+        BezierCurve-compatible routed curve.
+
+    Returns
+    -------
+    Tuple[Tuple[float, float], ...]
+        Waypoints or endpoints.
+    """
+    waypoints = getattr(curve, "waypoints", None)
+    if waypoints is not None:
+        return tuple((float(x), float(y)) for x, y in waypoints)
+    return (tuple(curve.p0), tuple(curve.p1))
 
 
 def _optional_bool_tensor(value: Any, expected_len: int) -> Optional[torch.Tensor]:
@@ -2687,6 +3752,12 @@ GROUP_REGISTRY: Dict[str, ConditionalGroup] = {
         ),
         score_fn=_score_g4,
     ),
+    "G5": ConditionalGroup(
+        key="G5",
+        applicability_gate=_declared_temporal_gate,
+        tier_slots=(GroupSlot("G5_temporal_stability", 2, 1.0),),
+        score_fn=_score_g5,
+    ),
     "G6": ConditionalGroup(
         key="G6",
         applicability_gate=_weighted_gate,
@@ -2695,6 +3766,16 @@ GROUP_REGISTRY: Dict[str, ConditionalGroup] = {
             GroupSlot("G6_local_weight_monotonicity", 3, 1.0),
         ),
         score_fn=_score_g6,
+    ),
+    "G7": ConditionalGroup(
+        key="G7",
+        applicability_gate=_declared_port_gate,
+        tier_slots=(
+            GroupSlot("G7_port_hard_compliance", 2, 1.0),
+            GroupSlot("G7_routed_curve_quality", 2, 1.0),
+            GroupSlot("G7_routed_bend_terminal_economy", 2, 1.0),
+        ),
+        score_fn=_score_g7,
     ),
 }
 
