@@ -317,7 +317,17 @@ class TestLayoutWithCycles:
         graph_name: str,
         minimum_dag_consistency: float,
     ) -> None:
-        """Sprint-19 cycle wins should stay within 0.05 dag-consistency."""
+        """Sprint-19 cycle wins should stay within 0.05 dag-consistency.
+
+        Since the r83 honest-ruler port, the DEFAULT route for cyclic graphs
+        is the undirected portfolio contest: the frozen ruler scores semantic
+        digraphs with cycles on the common table, so downward edge flow is
+        deliberately not an optimization target there (dag_consistency on the
+        default route sits near chance). The sprint-19 machinery this test
+        protects -- FAS cycle breaking + cycle-aware layered layout -- still
+        runs as the contest's incumbent candidate and via ``force_pipeline``;
+        pin that route so the original thresholds keep guarding it.
+        """
         from dagua.eval.graphs import get_test_graphs
         from dagua.layout.engine import layout as engine_layout
 
@@ -325,7 +335,7 @@ class TestLayoutWithCycles:
         graph = graphs[graph_name]
         graph.compute_node_sizes()
 
-        pos = engine_layout(graph, LayoutConfig(seed=42))
+        pos = engine_layout(graph, LayoutConfig(seed=42, force_pipeline="hybrid"))
         metrics = full(pos, graph.edge_index, node_sizes=graph.node_sizes)
 
         assert metrics["dag_consistency"] >= minimum_dag_consistency
