@@ -118,6 +118,68 @@ def _grid_layout(side: int, gap: float = 3.0) -> Tuple[torch.Tensor, torch.Tenso
     )
 
 
+def _directed_grid_layout(
+    side: int,
+    gap: float = 3.0,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Create a square grid probe with one-way right/down edges.
+
+    Parameters
+    ----------
+    side : int
+        Number of nodes per grid side.
+    gap : float, optional
+        Center spacing.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Positions ``[N, 2]``, edge index ``[2, E]``, and node sizes ``[N, 2]``.
+    """
+    coords = [(float(x) * gap, float(y) * gap) for y in range(side) for x in range(side)]
+    edges = []
+    for y in range(side):
+        for x in range(side):
+            node = y * side + x
+            if x + 1 < side:
+                edges.append((node, node + 1))
+            if y + 1 < side:
+                edges.append((node, node + side))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return (
+        torch.tensor(coords, dtype=torch.float64),
+        edge_index,
+        torch.ones((side * side, 2), dtype=torch.float64),
+    )
+
+
+def _one_row_star_layout(leaves: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Create a directed hub-and-one-leaf-row star probe.
+
+    Parameters
+    ----------
+    leaves : int
+        Number of leaves in the single row.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Positions ``[N, 2]``, edge index ``[2, E]``, and node sizes ``[N, 2]``.
+    """
+    leaf_x = torch.arange(leaves, dtype=torch.float64) * 3.0
+    leaf_x -= float(leaf_x.mean().item())
+    coords = [(0.0, 0.0)] + [(float(x), 3.0) for x in leaf_x.tolist()]
+    edge_index = torch.tensor(
+        [[0 for _ in range(leaves)], list(range(1, leaves + 1))],
+        dtype=torch.long,
+    )
+    return (
+        torch.tensor(coords, dtype=torch.float64),
+        edge_index,
+        torch.ones((leaves + 1, 2), dtype=torch.float64),
+    )
+
+
 def _binary_tree_layout(
     depth: int,
     gap: float = 3.0,
@@ -259,6 +321,32 @@ def _disconnected_collinear_layout() -> Tuple[torch.Tensor, torch.Tensor, torch.
     return pos, edge_index, node_sizes
 
 
+def _jittered_rotated_disconnected_chain_layout() -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Create the C1 alpha-regime flip probe with a tiny nonzero chain hull.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Positions ``[N, 2]``, edge index ``[2, E]``, and node sizes ``[N, 2]``.
+    """
+    pos, edge_index, node_sizes = _disconnected_collinear_layout()
+    pos = pos.clone()
+    pos[6, 1] = 1e-14
+    theta = math.radians(17.0)
+    rotation = torch.tensor(
+        [
+            [math.cos(theta), -math.sin(theta)],
+            [math.sin(theta), math.cos(theta)],
+        ],
+        dtype=torch.float64,
+    )
+    return pos @ rotation.T, edge_index, node_sizes
+
+
 def test_unit_invariance_for_all_core_facets() -> None:
     """Joint scaling of positions and node sizes must preserve every facet."""
     pos, edge_index, node_sizes = _probe_layout()
@@ -298,6 +386,19 @@ def test_c1_disconnected_collinear_position_scale_invariance() -> None:
     assert max(scores) - min(scores) < 1e-6
 
 
+def test_c1_jittered_rotated_chain_uses_scale_invariant_degeneracy_gate() -> None:
+    """C1 should not drift when tiny nonzero hulls are scaled with positions."""
+    pos, edge_index, node_sizes = _jittered_rotated_disconnected_chain_layout()
+    scores = []
+
+    for alpha in (0.1, 50.0):
+        result = score_core_v3(alpha * pos, edge_index, node_sizes)
+        assert result.facets["C1"].score is not None
+        scores.append(float(result.facets["C1"].score))
+
+    assert max(scores) - min(scores) < 1e-6
+
+
 def test_c5_whitespace_band_flags_crater_and_stays_flat_on_legitimate_chain() -> None:
     """The C5 band should tolerate normal chain extent but penalize crater sprawl."""
     pos, edge_index, node_sizes = _chain_layout(10)
@@ -310,6 +411,31 @@ def test_c5_whitespace_band_flags_crater_and_stays_flat_on_legitimate_chain() ->
     assert crater.facets["C5"].score < 0.01
     assert crater.facets["C5"].metadata["whitespace_ratio"] > WHITESPACE_RATIO_HI
     assert "SPRAWL" in crater.flags
+
+
+def test_c5_directed_tidy_grid_uses_content_floor_for_crowding_side() -> None:
+    """A tidy directed grid should not be crowding-penalized by the DAG floor."""
+    pos, edge_index, node_sizes = _directed_grid_layout(10, gap=3.0)
+
+    result = score_core_v3(pos, edge_index, node_sizes)
+    metadata = result.facets["C5"].metadata
+
+    assert result.facets["C5"].score == pytest.approx(1.0)
+    assert "SPRAWL" not in result.flags
+    assert metadata["whitespace_crowding_score"] == pytest.approx(1.0)
+    assert metadata["whitespace_sprawl_side_score"] == pytest.approx(1.0)
+    assert metadata["whitespace_ratio"] == pytest.approx(metadata["whitespace_sprawl_ratio"])
+
+
+def test_c5_directed_one_row_star_uses_content_floor_for_crowding_side() -> None:
+    """A directed one-row star should stay on the C5 plateau."""
+    pos, edge_index, node_sizes = _one_row_star_layout(1000)
+
+    result = score_core_v3(pos, edge_index, node_sizes)
+
+    assert result.facets["C5"].score is not None
+    assert result.facets["C5"].score >= 0.99
+    assert "SPRAWL" not in result.flags
 
 
 def test_c5_legitimate_sprawl_probe_set_stays_on_plateau() -> None:
@@ -342,6 +468,22 @@ def test_c5_crater_threshold_locks_still_fire() -> None:
         assert score is not None
         assert score < 0.01
         assert "SPRAWL" in crater.flags
+
+
+def test_c5_bidirectional_grid_x10_x50_locks_still_fire() -> None:
+    """Bidirectional grid x10 and x50 crater locks should remain hard failures."""
+    pos, edge_index, node_sizes = _grid_layout(10)
+
+    locks: Dict[float, float] = {}
+    for alpha in (10.0, 50.0):
+        crater = score_core_v3(alpha * pos, edge_index, node_sizes)
+        score = crater.facets["C5"].score
+        assert score is not None
+        assert score < 0.01
+        assert "SPRAWL" in crater.flags
+        locks[alpha] = float(crater.facets["C5"].metadata["whitespace_ratio"])
+
+    assert locks[50.0] > locks[10.0]
 
 
 def test_edgeless_margins_are_inapplicable_not_imputed() -> None:
