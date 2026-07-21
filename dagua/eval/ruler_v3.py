@@ -36,6 +36,9 @@ from dagua.metrics import (
 TIER_1_WEIGHT = 4.0
 TIER_2_WEIGHT = 2.0
 TIER_3_WEIGHT = 1.0
+TIER1_TRADEOFF_FLAG = "TIER1_TRADEOFF"
+TIER1_TRADEOFF_TOLERANCE = 0.05
+TIER1_TRADEOFF_AGGREGATE_TOLERANCE_FRACTION = 0.05
 
 CORE_TIERS: Dict[str, int] = {
     "C1": 1,
@@ -391,6 +394,96 @@ def composite_v3(
         Tiered V3 CORE headline score on a 0--100 scale.
     """
     return float(score_core_v3(pos, edge_index, node_sizes, **kwargs).scores["tiered"])
+
+
+def tier1_tradeoff_flags(
+    baseline: RulerV3Result,
+    candidate: RulerV3Result,
+    *,
+    tier1_tolerance: float = TIER1_TRADEOFF_TOLERANCE,
+    aggregate_tolerance_fraction: float = TIER1_TRADEOFF_AGGREGATE_TOLERANCE_FRACTION,
+) -> Tuple[str, ...]:
+    """Return W7 comparison flags for a baseline/candidate pair.
+
+    Parameters
+    ----------
+    baseline : RulerV3Result
+        Baseline row result.
+    candidate : RulerV3Result
+        Candidate row result to flag.
+    tier1_tolerance : float, optional
+        Maximum tolerated T1 facet score loss before W7 fires.
+    aggregate_tolerance_fraction : float, optional
+        Aggregate tie band as a fraction of the baseline tiered score.
+
+    Returns
+    -------
+    Tuple[str, ...]
+        ``("TIER1_TRADEOFF",)`` when the candidate wins or holds the tiered
+        aggregate while losing any applicable T1 facet beyond tolerance.
+    """
+    baseline_tiered = float(baseline.scores["tiered"])
+    candidate_tiered = float(candidate.scores["tiered"])
+    denominator = max(1.0e-12, abs(baseline_tiered))
+    aggregate_drop_fraction = max(0.0, baseline_tiered - candidate_tiered) / denominator
+    if aggregate_drop_fraction > aggregate_tolerance_fraction:
+        return tuple()
+    for code, candidate_facet in candidate.facets.items():
+        baseline_facet = baseline.facets.get(code)
+        if baseline_facet is None or baseline_facet.tier != 1 or candidate_facet.tier != 1:
+            continue
+        if baseline_facet.score is None or candidate_facet.score is None:
+            continue
+        if not baseline_facet.applicable or not candidate_facet.applicable:
+            continue
+        if float(baseline_facet.score) - float(candidate_facet.score) > tier1_tolerance:
+            return (TIER1_TRADEOFF_FLAG,)
+    return tuple()
+
+
+def with_tier1_tradeoff_flag(
+    baseline: RulerV3Result,
+    candidate: RulerV3Result,
+    *,
+    tier1_tolerance: float = TIER1_TRADEOFF_TOLERANCE,
+    aggregate_tolerance_fraction: float = TIER1_TRADEOFF_AGGREGATE_TOLERANCE_FRACTION,
+) -> RulerV3Result:
+    """Return a candidate result with any W7 row flag appended.
+
+    Parameters
+    ----------
+    baseline : RulerV3Result
+        Baseline row result.
+    candidate : RulerV3Result
+        Candidate row result.
+    tier1_tolerance : float, optional
+        Maximum tolerated T1 facet score loss before W7 fires.
+    aggregate_tolerance_fraction : float, optional
+        Aggregate tie band as a fraction of the baseline tiered score.
+
+    Returns
+    -------
+    RulerV3Result
+        Candidate result with identical facets, scores, applicability,
+        coverage, and metadata. Only ``flags`` may gain ``TIER1_TRADEOFF``.
+    """
+    flags = list(candidate.flags)
+    for flag in tier1_tradeoff_flags(
+        baseline,
+        candidate,
+        tier1_tolerance=tier1_tolerance,
+        aggregate_tolerance_fraction=aggregate_tolerance_fraction,
+    ):
+        if flag not in flags:
+            flags.append(flag)
+    return RulerV3Result(
+        facets=candidate.facets,
+        scores=candidate.scores,
+        flags=tuple(flags),
+        applicability=candidate.applicability,
+        coverage=candidate.coverage,
+        metadata=candidate.metadata,
+    )
 
 
 def multi_radius_neighborhood_preservation(
@@ -2017,6 +2110,7 @@ __all__ = [
     "RulerV3Facet",
     "RulerV3Result",
     "SPRAWL_RATIO_FACTOR",
+    "TIER1_TRADEOFF_FLAG",
     "WHITESPACE_RATIO_HI",
     "WHITESPACE_RATIO_LO",
     "composite_v3",
@@ -2025,6 +2119,8 @@ __all__ = [
     "multi_radius_neighborhood_preservation",
     "renormalized_score",
     "score_core_v3",
+    "tier1_tradeoff_flags",
     "tier_weight",
+    "with_tier1_tradeoff_flag",
     "whitespace_sprawl_score",
 ]
