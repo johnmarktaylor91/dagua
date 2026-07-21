@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Mapping, Tuple
+from typing import Dict, List, Mapping, Tuple, cast
 
 import pytest
 import torch
@@ -194,6 +194,121 @@ def _weighted_star(lengths: List[float]) -> Tuple[torch.Tensor, torch.Tensor, to
     return torch.tensor(coords, dtype=torch.float64), edges, _sizes(len(lengths) + 1)
 
 
+def _temporal_probe(
+    *,
+    current_shift: float = 0.2,
+    previous_quality: float = 0.98,
+    graph_change: float = 0.042,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, object]]:
+    """Create a synthetic declared temporal probe.
+
+    Parameters
+    ----------
+    current_shift : float, optional
+        Non-similarity deformation applied to the current frame.
+    previous_quality : float, optional
+        Declared static V3-core score for the previous frame.
+    graph_change : float, optional
+        Declared ground-truth graph-change magnitude.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, object]]
+        Positions, edge index, node sizes, and temporal metadata.
+    """
+    previous = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [0.0, 2.0], [2.0, 2.0]],
+        dtype=torch.float64,
+    )
+    current = previous.clone()
+    current[3, 0] += current_shift
+    edges = torch.tensor([[0, 1, 2], [1, 3, 3]], dtype=torch.long)
+    meta: Dict[str, object] = {
+        "node_ids": ["a", "b", "c", "d"],
+        "previous": {
+            "positions": previous.tolist(),
+            "node_ids": ["a", "b", "c", "d"],
+            "quality": previous_quality,
+            "best_static_v3_core": 1.0,
+            "graph_change": graph_change,
+        },
+    }
+    return current, edges, _sizes(4), meta
+
+
+def _ported_probe(
+    *,
+    wrong_side: bool = False,
+    routed: bool = False,
+    deformation: int = 0,
+    scale: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, object]]:
+    """Create a synthetic ported/routed probe.
+
+    Parameters
+    ----------
+    wrong_side : bool, optional
+        Whether to declare source ports on the opposite side.
+    routed : bool, optional
+        Whether to include declared route paths.
+    deformation : int, optional
+        Progressive route/port deformation level.
+    scale : float, optional
+        Position-only scale multiplier.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, object]]
+        Positions, edge index, node sizes, and port metadata.
+    """
+    pos = scale * torch.tensor(
+        [[0.0, 0.0], [4.0, -1.0], [4.0, 1.0], [8.0, 0.0]],
+        dtype=torch.float64,
+    )
+    edges = torch.tensor([[0, 0, 1, 2], [1, 2, 3, 3]], dtype=torch.long)
+    source_side = "W" if wrong_side else "E"
+    ports: List[Dict[str, object]] = [
+        {"edge": 0, "endpoint": "source", "side": source_side, "order": 0},
+        {"edge": 1, "endpoint": "source", "side": source_side, "order": 1},
+        {"edge": 0, "endpoint": "target", "side": "W"},
+        {"edge": 1, "endpoint": "target", "side": "W"},
+        {"edge": 2, "endpoint": "source", "side": "E"},
+        {"edge": 3, "endpoint": "source", "side": "E"},
+        {"edge": 2, "endpoint": "target", "side": "W", "order": 0},
+        {"edge": 3, "endpoint": "target", "side": "W", "order": 1},
+    ]
+    meta: Dict[str, object] = {"ports": ports, "flow_direction": "LR"}
+    if routed:
+        route_paths: List[List[Tuple[float, float]]] = [
+            [(0.0, 0.0), (2.0, -1.0), (4.0, -1.0)],
+            [(0.0, 0.0), (2.0, 1.0), (4.0, 1.0)],
+            [(4.0, -1.0), (6.0, -1.0), (8.0, 0.0)],
+            [(4.0, 1.0), (6.0, 1.0), (8.0, 0.0)],
+        ]
+        if deformation == 1:
+            route_paths[1] = [(0.0, 0.0), (2.0, -0.8), (4.0, 1.0)]
+            route_paths[3] = [(4.0, 1.0), (5.0, 0.0), (7.0, 0.0), (8.0, 0.0)]
+        elif deformation >= 2:
+            route_paths = [
+                [(0.0, 0.0), (-1.0, 0.0), (4.0, -1.0)],
+                [(0.0, 0.0), (-1.0, 0.0), (4.0, 1.0)],
+                [(4.0, -1.0), (4.0, 2.0), (8.0, 0.0)],
+                [(4.0, 1.0), (4.0, -2.0), (8.0, 0.0)],
+            ]
+        meta["route_paths"] = [
+            [(scale * x_value, scale * y_value) for x_value, y_value in route]
+            for route in route_paths
+        ]
+        meta["routed_labels"] = ["a", "b", "c", "d"]
+        meta["label_positions"] = [
+            (scale * 2.0, scale * -1.0),
+            (scale * 2.0, scale * 1.0),
+            (scale * 6.0, scale * -1.0),
+            (scale * 6.0, scale * 1.0),
+        ]
+    return pos, edges, _sizes(4), meta
+
+
 def test_applicability_gates_are_input_only() -> None:
     """Assert G1, G3, and G6 gates fire only on declared metadata.
 
@@ -213,6 +328,8 @@ def test_applicability_gates_are_input_only() -> None:
     assert not plain["G1"].applicable
     assert not plain["G3"].applicable
     assert not plain["G6"].applicable
+    assert not plain["G5"].applicable
+    assert not plain["G7"].applicable
 
     g1 = evaluate_conditional_groups(dag_pos, dag_edges, dag_sizes, dag_meta)
     assert g1["G1"].applicable
@@ -256,6 +373,24 @@ def test_applicability_gates_are_input_only() -> None:
         weighted_sizes,
         {"edge_weights": [2.0, 2.0, 2.0, 2.0], "weight_mode": "distance"},
     )["G6"].applicable
+
+    temporal_pos, temporal_edges, temporal_sizes, temporal_meta = _temporal_probe()
+    assert evaluate_conditional_groups(
+        temporal_pos,
+        temporal_edges,
+        temporal_sizes,
+        temporal_meta,
+    )["G5"].applicable
+    assert not evaluate_conditional_groups(
+        temporal_pos,
+        temporal_edges,
+        temporal_sizes,
+        {"previous_positions": temporal_pos.tolist()},
+    )["G5"].applicable
+
+    port_pos, port_edges, port_sizes, port_meta = _ported_probe()
+    assert evaluate_conditional_groups(port_pos, port_edges, port_sizes, port_meta)["G7"].applicable
+    assert not evaluate_conditional_groups(port_pos, port_edges, port_sizes, {})["G7"].applicable
 
     cluster_pos, cluster_edges, cluster_sizes, cluster_meta = _cluster_probe()
     cluster_groups = evaluate_conditional_groups(
@@ -338,6 +473,27 @@ def test_doc4_no_impute_for_g2_and_g4_rows() -> None:
     values = {code: facet.score for code, facet in cluster_result.facets.items()}
     weights = {code: facet.effective_weight for code, facet in cluster_result.facets.items()}
     assert cluster_result.scores["tiered"] == pytest.approx(renormalized_score(values, weights))
+
+
+def test_doc4_no_impute_for_plain_graph_g5_g7_absent() -> None:
+    """Assert plain rows do not impute temporal or port group facets.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, _meta = _dag_probe()
+    result = score_core_v3(pos, edges, sizes, graph_meta={})
+    assert result.coverage["applicable_groups"] == 0
+    assert not any(code.startswith("G5_") for code in result.facets)
+    assert not any(code.startswith("G7_") for code in result.facets)
+    values = {code: facet.score for code, facet in result.facets.items()}
+    weights = {code: facet.effective_weight for code, facet in result.facets.items()}
+    assert result.scores["tiered"] == pytest.approx(renormalized_score(values, weights))
 
 
 @pytest.mark.parametrize("alpha", [0.1, 10.0, 50.0])
@@ -486,6 +642,112 @@ def test_g1_axis_anchored_declared_transform() -> None:
     assert "axis_anchored" in str(tb.metadata["invariance"])
 
 
+def test_g5_temporal_band_false_stability_and_scale_invariance() -> None:
+    """Assert G5 band decay, false-stability penalty, and scale invariance.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _temporal_probe(current_shift=0.2, graph_change=0.042)
+    within = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    within_facet = within.facets["G5_temporal_stability"]
+    assert within_facet.score is not None
+    assert within_facet.score > 0.5
+    assert "STABILITY_BAND" not in within.flags
+
+    below_meta = dict(meta)
+    below_previous = cast(Mapping[str, object], meta["previous"])
+    below_meta["previous"] = {**dict(below_previous), "quality": 0.2}
+    below = score_core_v3(pos, edges, sizes, graph_meta=below_meta)
+    below_score = below.facets["G5_temporal_stability"].score
+    assert below_score is not None
+    assert 0.0 < below_score < within_facet.score
+    assert "STABILITY_BAND" in below.flags
+
+    frozen_pos, frozen_edges, frozen_sizes, frozen_meta = _temporal_probe(
+        current_shift=0.0,
+        graph_change=0.102,
+    )
+    proportional_pos, proportional_edges, proportional_sizes, proportional_meta = _temporal_probe(
+        current_shift=0.5,
+        graph_change=0.102,
+    )
+    frozen = score_core_v3(
+        frozen_pos,
+        frozen_edges,
+        frozen_sizes,
+        graph_meta=frozen_meta,
+    ).facets["G5_temporal_stability"]
+    proportional = score_core_v3(
+        proportional_pos,
+        proportional_edges,
+        proportional_sizes,
+        graph_meta=proportional_meta,
+    ).facets["G5_temporal_stability"]
+    assert frozen.score is not None
+    assert proportional.score is not None
+    assert frozen.score < proportional.score
+
+    alpha = 10.0
+    scaled_meta = dict(meta)
+    previous = dict(cast(Mapping[str, object], meta["previous"]))
+    previous["positions"] = (alpha * torch.as_tensor(previous["positions"])).tolist()
+    scaled_meta["previous"] = previous
+    scaled = score_core_v3(alpha * pos, edges, sizes, graph_meta=scaled_meta)
+    assert scaled.facets["G5_temporal_stability"].score == pytest.approx(
+        within_facet.score,
+        abs=1e-6,
+    )
+
+
+def test_g7_port_compliance_cap_routed_curves_and_scale_invariance() -> None:
+    """Assert G7 hard compliance, cap, routed bundle, and scale invariance.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _ported_probe()
+    result = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    compliance = result.facets["G7_port_hard_compliance"]
+    assert compliance.score == pytest.approx(1.0)
+    assert "PORT_VIOLATION" not in result.flags
+
+    wrong_pos, wrong_edges, wrong_sizes, wrong_meta = _ported_probe(wrong_side=True)
+    wrong = score_core_v3(wrong_pos, wrong_edges, wrong_sizes, graph_meta=wrong_meta)
+    wrong_compliance = wrong.facets["G7_port_hard_compliance"]
+    assert wrong_compliance.score is not None
+    assert wrong_compliance.score < 1.0
+    assert wrong_compliance.score <= 0.5
+    assert wrong.metadata["conditional_groups"]["G7"].metadata["group_cap"] == pytest.approx(0.5)
+    assert "PORT_VIOLATION" in wrong.flags
+
+    routed_pos, routed_edges, routed_sizes, routed_meta = _ported_probe(routed=True)
+    routed = score_core_v3(routed_pos, routed_edges, routed_sizes, graph_meta=routed_meta)
+    assert "G7_routed_curve_quality" in routed.facets
+    assert "G7_routed_bend_terminal_economy" in routed.facets
+    routed_meta_record = routed.facets["G7_routed_curve_quality"].metadata
+    assert routed_meta_record["routed_crossing_rate"] >= 0.0
+    assert "composite_drawing_reuse" in routed_meta_record
+
+    alpha = 20.0
+    scaled_pos, scaled_edges, scaled_sizes, scaled_meta = _ported_probe(scale=alpha)
+    scaled = score_core_v3(scaled_pos, scaled_edges, scaled_sizes, graph_meta=scaled_meta)
+    assert scaled.facets["G7_port_hard_compliance"].score == pytest.approx(
+        compliance.score,
+        abs=1e-6,
+    )
+
+
 def test_deformation_monotonicity_smoke() -> None:
     """Assert G1, G3, and G6 decay under progressive deformations.
 
@@ -616,6 +878,37 @@ def test_deformation_monotonicity_smoke() -> None:
         )
     _assert_nonincreasing(g4_radial_scores)
 
+    g5_scores = []
+    for shift, quality, change in ((0.2, 0.98, 0.042), (0.45, 0.90, 0.02), (0.0, 0.70, 0.40)):
+        t_pos, t_edges, t_sizes, t_meta = _temporal_probe(
+            current_shift=shift,
+            previous_quality=quality,
+            graph_change=change,
+        )
+        result = score_core_v3(t_pos, t_edges, t_sizes, graph_meta=t_meta)
+        g5_scores.append(_facet_sum(result.facets, ("G5_temporal_stability",)))
+    _assert_nonincreasing(g5_scores)
+
+    g7_scores = []
+    for deformation in (0, 1, 2):
+        p_pos, p_edges, p_sizes, p_meta = _ported_probe(
+            wrong_side=deformation >= 2,
+            routed=True,
+            deformation=deformation,
+        )
+        result = score_core_v3(p_pos, p_edges, p_sizes, graph_meta=p_meta)
+        g7_scores.append(
+            _facet_sum(
+                result.facets,
+                (
+                    "G7_port_hard_compliance",
+                    "G7_routed_curve_quality",
+                    "G7_routed_bend_terminal_economy",
+                ),
+            )
+        )
+    _assert_nonincreasing(g7_scores)
+
 
 def test_g2_compactness_log_ratio_band_discriminates_sprawl() -> None:
     """Assert the rebuilt compactness band separates 20x and 100x inflation.
@@ -646,7 +939,7 @@ def test_g2_compactness_log_ratio_band_discriminates_sprawl() -> None:
     assert twenty_score > hundred_score + 0.05
 
 
-def test_print_g2_g4_publication_records(capsys: pytest.CaptureFixture[str]) -> None:
+def test_print_g2_g4_g5_g7_publication_records(capsys: pytest.CaptureFixture[str]) -> None:
     """Print representative facet scores and applicability records.
 
     Parameters
@@ -660,8 +953,17 @@ def test_print_g2_g4_publication_records(capsys: pytest.CaptureFixture[str]) -> 
     """
     cluster_pos, cluster_edges, cluster_sizes, cluster_meta = _cluster_probe()
     tree_pos, tree_edges, tree_sizes, tree_meta = _tree_probe()
+    temporal_pos, temporal_edges, temporal_sizes, temporal_meta = _temporal_probe()
+    port_pos, port_edges, port_sizes, port_meta = _ported_probe(routed=True)
     cluster = score_core_v3(cluster_pos, cluster_edges, cluster_sizes, graph_meta=cluster_meta)
     tree = score_core_v3(tree_pos, tree_edges, tree_sizes, graph_meta=tree_meta)
+    temporal = score_core_v3(
+        temporal_pos,
+        temporal_edges,
+        temporal_sizes,
+        graph_meta=temporal_meta,
+    )
+    ported = score_core_v3(port_pos, port_edges, port_sizes, graph_meta=port_meta)
     print("G2 clustered row")
     for code, facet in cluster.facets.items():
         if code.startswith("G2_"):
@@ -670,9 +972,19 @@ def test_print_g2_g4_publication_records(capsys: pytest.CaptureFixture[str]) -> 
     for code, facet in tree.facets.items():
         if code.startswith("G4_"):
             print(code, facet.score, facet.applicability_reason)
+    print("G5 temporal row")
+    for code, facet in temporal.facets.items():
+        if code.startswith("G5_"):
+            print(code, facet.score, facet.applicability_reason, facet.metadata["flags"])
+    print("G7 ported row")
+    for code, facet in ported.facets.items():
+        if code.startswith("G7_"):
+            print(code, facet.score, facet.applicability_reason, facet.metadata["flags"])
     captured = capsys.readouterr()
     assert "G2 clustered row" in captured.out
     assert "G4 tree row" in captured.out
+    assert "G5 temporal row" in captured.out
+    assert "G7 ported row" in captured.out
 
 
 def _facet_sum(facets: Mapping[str, object], codes: Tuple[str, ...]) -> float:
