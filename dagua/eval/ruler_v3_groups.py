@@ -54,6 +54,8 @@ TIER_3_WEIGHT = 1.0
 WEIGHT_CV_SATURATION = 1.0
 NONDEGENERATE_WEIGHT_CV = 1e-9
 LOCAL_WEIGHT_MONOTONICITY_NODE_BUDGET = 512
+G6_WEIGHTED_STRESS_SOURCE_BUDGET = 200
+G6_WEIGHTED_STRESS_TARGET_BUDGET = 1000
 
 
 @dataclass(frozen=True)
@@ -414,11 +416,14 @@ def _declared_temporal_gate(meta: Mapping[str, Any]) -> bool:
         meta.get(key) is not None
         for key in ("node_identity", "node_identity_map", "node_ids", "frame_node_ids")
     )
-    return bool(has_frames and has_identity)
+    has_declared_change = all(
+        _temporal_frame_has_graph_change(frame, meta) for frame in _temporal_frame_records(meta)
+    )
+    return bool(has_frames and has_identity and has_declared_change)
 
 
 def _declared_port_gate(meta: Mapping[str, Any]) -> bool:
-    """Gate G7 from declared ports or routed drawing metadata only.
+    """Gate G7 from declared ports or row-level routing declarations only.
 
     Parameters
     ----------
@@ -428,16 +433,15 @@ def _declared_port_gate(meta: Mapping[str, Any]) -> bool:
     Returns
     -------
     bool
-        ``True`` when the input row declares port constraints, routed labels,
-        or route paths.
+        ``True`` when the input row declares port constraints or the row-level
+        routed bundle. Engine-captured route geometry alone cannot change
+        applicability.
     """
     return bool(
         meta.get("ports") is not None
         or meta.get("port_sides") is not None
         or meta.get("port_order") is not None
-        or meta.get("routed_labels") is not None
-        or meta.get("route_paths") is not None
-        or meta.get("routes") is not None
+        or meta.get("routing_declared", False)
     )
 
 
@@ -469,9 +473,9 @@ def _inapplicable_reason(key: str, meta: Mapping[str, Any]) -> str:
     if key == "G6":
         return "inapplicable:no_declared_non_degenerate_weight_semantics"
     if key == "G5":
-        return "inapplicable:no_declared_previous_frames_with_node_identity"
+        return "inapplicable:no_declared_previous_frames_with_node_identity_and_graph_change"
     if key == "G7":
-        return "inapplicable:no_declared_ports_or_routing"
+        return "inapplicable:no_declared_ports_or_row_level_routing"
     return "inapplicable:input_gate_false"
 
 
@@ -504,7 +508,12 @@ def _score_g1(
     edges = _normalize_edge_index(edge_index)
     direction = str(meta.get("flow_direction", meta.get("direction", "TB")))
     back_edge_mask = _optional_bool_tensor(meta.get("back_edge_mask"), int(edges.shape[1]))
-    frac_acyclic, depth = _acyclic_fraction_and_depth(edges, int(positions.shape[0]), meta)
+    hierarchy_edges = _drop_masked_edges(edges, back_edge_mask)
+    frac_acyclic, depth = _acyclic_fraction_and_depth(
+        hierarchy_edges,
+        int(positions.shape[0]),
+        meta,
+    )
     flow = directed_flow_score(
         positions,
         edges,
@@ -530,7 +539,7 @@ def _score_g1(
             effective_weight=_tier_weight(2) * frac_acyclic,
             applicable=True,
             applicability_reason=reason,
-            metadata={**common_meta, "sample_count": int(edges.shape[1])},
+            metadata={**common_meta, "sample_count": int(hierarchy_edges.shape[1])},
         ),
         "G1_depth_order": GroupFacetScore(
             code="G1_depth_order",
@@ -654,8 +663,11 @@ def _score_g2(
     cluster_labels = _declared_cluster_labels(meta)
     declared_labels = _cluster_labels_from_clusters(clusters, int(positions.shape[0]))
     cluster_count = int(np.unique(declared_labels).size)
-    predicted = _hac_labels(positions.numpy(), cluster_count)
-    ari_raw = adjusted_rand_index(declared_labels, predicted)
+    has_ari_membership = _has_cluster_with_min_members(clusters, min_members=2)
+    ari_raw: Optional[float] = None
+    if has_ari_membership:
+        predicted = _hac_labels(positions.numpy(), cluster_count)
+        ari_raw = adjusted_rand_index(declared_labels, predicted)
     compactness_score, compactness_meta = _cluster_log_ratio_compactness(
         positions,
         sizes,
@@ -671,15 +683,25 @@ def _score_g2(
         "deformation_monotonicity_probe": "implemented_by_tests/test_ruler_v3_groups.py",
     }
     facets = {}
-    for code, name, raw_score, slot_weight, metadata in _g2_slot_a_scores(
+    slot_a_scores = _g2_slot_a_scores(
         positions,
         edges,
         sizes,
         clusters,
         cluster_parents,
         cluster_labels,
-    ):
-        effective_weight = _tier_weight(2) * slot_weight / G2_SLOT_A_TOTAL
+    )
+    active_slot_a_total = sum(
+        slot_weight
+        for _code, _name, raw_score, slot_weight, _metadata in slot_a_scores
+        if raw_score is not None
+    )
+    for code, name, raw_score, slot_weight, metadata in slot_a_scores:
+        effective_weight = (
+            _tier_weight(2) * slot_weight / active_slot_a_total
+            if active_slot_a_total > 0.0
+            else 0.0
+        )
         facets[code] = GroupFacetScore(
             code=code,
             name=name,
@@ -698,8 +720,8 @@ def _score_g2(
                 "invariance": "size_anchored_position_scale_sensitive_by_design",
             },
         )
-    ari_score = max(0.0, min(1.0, ari_raw))
-    for code, name, score, slot_weight, metadata in (
+    ari_score = None if ari_raw is None else max(0.0, min(1.0, ari_raw))
+    slot_b_scores = (
         (
             "G2_cluster_hac_ari",
             "declared_cluster_hac_ari",
@@ -712,6 +734,7 @@ def _score_g2(
                 "normalization": "adjusted_rand_index remapped as max(0, ARI)",
                 "invariance": "translation_rotation_reflection_position_scale_invariant",
                 "diagnostic_capable": True,
+                "membership_gate": "requires_at_least_one_declared_cluster_with_at_least_2_members",
             },
         ),
         (
@@ -723,10 +746,24 @@ def _score_g2(
                 **compactness_meta,
                 "normalization": "leaf cluster AABB/member-area log-ratio band",
                 "invariance": "size_anchored_position_scale_sensitive_by_design",
+                "monotonicity_note": (
+                    "intra_cluster_diagnostic_within_ARI_primary_slot_b; "
+                    "whole-cluster placement monotonicity is carried by G2_cluster_hac_ari"
+                ),
             },
         ),
-    ):
-        effective_weight = _tier_weight(2) * slot_weight / G2_SLOT_B_TOTAL
+    )
+    active_slot_b_total = sum(
+        slot_weight
+        for _code, _name, score, slot_weight, _metadata in slot_b_scores
+        if score is not None
+    )
+    for code, name, score, slot_weight, metadata in slot_b_scores:
+        effective_weight = (
+            _tier_weight(2) * slot_weight / active_slot_b_total
+            if active_slot_b_total > 0.0
+            else 0.0
+        )
         facets[code] = GroupFacetScore(
             code=code,
             name=name,
@@ -779,14 +816,28 @@ def _score_g4(
     positions = _ensure_cpu(pos).to(dtype=torch.float64)
     edges = _normalize_edge_index(edge_index)
     sizes = _ensure_cpu(node_sizes).to(dtype=torch.float64)
-    forest = _tree_forest(edges, int(positions.shape[0]), meta)
     convention = str(meta.get("tree_convention", meta.get("tree_layout", "layered"))).lower()
     reason = f"applicable:declared_rooted_tree_{convention}_convention"
+    try:
+        forest = _tree_forest(edges, int(positions.shape[0]), meta)
+    except ValueError as exc:
+        return GroupEvaluation(
+            key="G4",
+            applicable=False,
+            applicability_reason="inapplicable:malformed_declared_tree",
+            facets={},
+            metadata={
+                "tier_slots": _slot_metadata(GROUP_REGISTRY["G4"].tier_slots),
+                "gate": "declared_rooted_tree_forest_x_declared_convention",
+                "tree_convention": convention,
+                "malformed_reason": str(exc),
+            },
+        )
     common = {
         "gate": "declared_rooted_tree_forest_x_declared_convention",
         "tree_convention": convention,
         "root_count": len(forest.roots),
-        "invariance": "translation_rotation_reflection_position_scale_invariant",
+        "invariance": "mixed;see_facet_metadata",
         "normalization": "continuous ratios/orders/ranks with frozen BJL/radial reference extents",
         "deformation_monotonicity_probe": "implemented_by_tests/test_ruler_v3_groups.py",
     }
@@ -857,8 +908,8 @@ def _score_g6(
     ksm = weighted_isotonic_ksm(
         positions,
         weighted_dist,
-        n_sources=int(meta.get("weighted_stress_sources", 200)),
-        n_targets=int(meta.get("weighted_stress_targets", 1000)),
+        n_sources=G6_WEIGHTED_STRESS_SOURCE_BUDGET,
+        n_targets=G6_WEIGHTED_STRESS_TARGET_BUDGET,
     )
     local = local_weight_monotonicity_score(positions, edges, weights, mode)
     reason = "applicable:declared_non_degenerate_weight_semantics"
@@ -956,7 +1007,14 @@ def _score_g5(
             current_ids,
         )
         observed = _normalized_mean_displacement(aligned_prev, curr_aligned)
-        graph_change = max(0.0, float(frame.get("graph_change", frame.get("change", observed))))
+        if not _temporal_frame_has_graph_change(frame, meta):
+            raise ValueError(
+                "G5 requires declared graph_change; observed displacement is not a default"
+            )
+        graph_change = max(
+            0.0,
+            float(frame.get("graph_change", frame.get("change", meta.get("graph_change")))),
+        )
         dcq = _change_proportionality_score(observed, graph_change)
         decay, below_band = _temporal_quality_decay(frame, meta)
         stability_band_flag = stability_band_flag or below_band
@@ -979,9 +1037,9 @@ def _score_g5(
         )
 
     score = float(np.mean(frame_scores)) if frame_scores else None
-    reason = "applicable:declared_previous_frames_with_node_identity"
+    reason = "applicable:declared_previous_frames_with_node_identity_and_graph_change"
     metadata = {
-        "gate": "previous_frames_x_node_identity_only",
+        "gate": "previous_frames_x_node_identity_x_declared_graph_change",
         "normalization": (
             "mean graded DCQ proportionality after Procrustes alignment x quality-band decay"
         ),
@@ -1048,9 +1106,11 @@ def _score_g7(
     positions = _ensure_cpu(pos).to(dtype=torch.float64)
     edges = _normalize_edge_index(edge_index)
     sizes = _ensure_cpu(node_sizes).to(dtype=torch.float64)
-    ports = _declared_port_records(meta, int(edges.shape[1]))
+    ports = _declared_port_records(meta, edges)
     routes = meta.get("route_paths", meta.get("routes"))
-    curves = routes_to_curves(routes, positions, edges) if routes is not None else None
+    routing_declared = bool(meta.get("routing_declared", False))
+    route_input = routes if routes is not None else [None] * int(edges.shape[1])
+    curves = routes_to_curves(route_input, positions, edges) if routing_declared else None
     compliance = _port_compliance_score(positions, edges, ports, curves)
     severe = bool(compliance["severe_side_violation_count"] > 0)
     group_cap = G7_SEVERE_PORT_CAP if severe else 1.0
@@ -1067,8 +1127,9 @@ def _score_g7(
         "deformation_monotonicity_probe": "implemented_by_tests/test_ruler_v3_groups.py",
     }
     compliance_score = min(float(compliance["hard_compliance"]), group_cap)
-    facets = {
-        "G7_port_hard_compliance": GroupFacetScore(
+    facets = {}
+    if int(compliance["compliance_checks"]) > 0:
+        facets["G7_port_hard_compliance"] = GroupFacetScore(
             code="G7_port_hard_compliance",
             name="port_side_order_position_hard_compliance",
             tier=2,
@@ -1079,7 +1140,6 @@ def _score_g7(
             applicability_reason=reason,
             metadata={**common, **compliance, "slot": "G7_port_compliance"},
         )
-    }
     if curves is not None:
         routed = _g7_routed_bundle_scores(positions, edges, sizes, curves, ports, meta, group_cap)
         for code, name, score, metadata in routed:
@@ -1104,6 +1164,7 @@ def _score_g7(
             **common,
             "native_route_coverage": native_route_coverage(routes, int(edges.shape[1])),
             "routed_bundle_applicable": curves is not None,
+            "routing_declared": routing_declared,
         },
     )
 
@@ -1159,10 +1220,30 @@ def _temporal_frame_records(meta: Mapping[str, Any]) -> Tuple[Mapping[str, Any],
             "positions": previous_positions,
             "node_ids": meta.get("previous_node_ids", meta.get("frame_node_ids")),
             "quality": meta.get("previous_v3_core_score", meta.get("frame_v3_core_score")),
-            "best_static_v3_core": meta.get("previous_best_static_v3_core"),
             "graph_change": meta.get("graph_change"),
         },
     )
+
+
+def _temporal_frame_has_graph_change(
+    frame: Mapping[str, Any],
+    meta: Mapping[str, Any],
+) -> bool:
+    """Return whether a temporal frame declares ground-truth graph change.
+
+    Parameters
+    ----------
+    frame : Mapping[str, Any]
+        Previous-frame metadata.
+    meta : Mapping[str, Any]
+        Current row metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when a frame- or row-level change magnitude is declared.
+    """
+    return frame.get("graph_change", frame.get("change", meta.get("graph_change"))) is not None
 
 
 def _temporal_current_node_ids(meta: Mapping[str, Any], num_nodes: int) -> Tuple[Any, ...]:
@@ -1315,7 +1396,7 @@ def _temporal_quality_decay(
     frame : Mapping[str, Any]
         Previous-frame metadata.
     meta : Mapping[str, Any]
-        Current row metadata with optional default band records.
+        Current row metadata with the optional quality delta.
 
     Returns
     -------
@@ -1323,10 +1404,7 @@ def _temporal_quality_decay(
         Decay in ``[0, 1]`` and whether the band was violated.
     """
     quality = frame.get("quality", frame.get("v3_core_score", meta.get("frame_v3_core_score", 1.0)))
-    best = frame.get(
-        "best_static_v3_core",
-        frame.get("best_static", meta.get("best_static_v3_core", 1.0)),
-    )
+    best = 1.0
     threshold = (1.0 - float(meta.get("temporal_quality_delta", G5_QUALITY_BAND_DELTA))) * (
         float(best)
     )
@@ -1336,15 +1414,18 @@ def _temporal_quality_decay(
     return decay, decay < 1.0
 
 
-def _declared_port_records(meta: Mapping[str, Any], num_edges: int) -> Tuple[Dict[str, Any], ...]:
+def _declared_port_records(
+    meta: Mapping[str, Any],
+    edge_index: torch.Tensor,
+) -> Tuple[Dict[str, Any], ...]:
     """Normalize declared port metadata to endpoint records.
 
     Parameters
     ----------
     meta : Mapping[str, Any]
         Declared graph metadata.
-    num_edges : int
-        Edge count.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
 
     Returns
     -------
@@ -1372,11 +1453,10 @@ def _declared_port_records(meta: Mapping[str, Any], num_edges: int) -> Tuple[Dic
                 records.append({"edge": edge, "endpoint": "target", "side": target_side})
     order_data = meta.get("port_order")
     if isinstance(order_data, Mapping):
+        records = [_complete_port_record(record, edge_index) for record in records]
         for record in records:
             key = (record.get("node"), record.get("side"))
             record["order"] = order_data.get(key, order_data.get(str(key), record.get("order")))
-    if not records and meta.get("route_paths") is not None:
-        records = [{"edge": edge, "endpoint": "source"} for edge in range(num_edges)]
     return tuple(records)
 
 
@@ -1540,22 +1620,57 @@ def _port_endpoint_vector(
     """
     if curves is not None and 0 <= edge < len(curves):
         points = _curve_points(curves[edge])
-        if endpoint == "target" and len(points) >= 2:
-            anchor = points[-2]
-        elif len(points) >= 2:
-            anchor = points[1]
-        else:
-            anchor = points[0]
-        return (
-            float(anchor[0]) - float(positions[node, 0].item()),
-            float(anchor[1]) - float(positions[node, 1].item()),
-        )
+        origin = (float(positions[node, 0].item()), float(positions[node, 1].item()))
+        if endpoint == "target":
+            points = tuple(reversed(points))
+        return _route_vector_at_arc_length(origin, points)
     other_row = 1 if endpoint != "target" else 0
     other = int(edge_index[other_row, edge].item())
     return (
         float(positions[other, 0].item() - positions[node, 0].item()),
         float(positions[other, 1].item() - positions[node, 1].item()),
     )
+
+
+def _route_vector_at_arc_length(
+    origin: Tuple[float, float],
+    points: Sequence[Tuple[float, float]],
+) -> Tuple[float, float]:
+    """Return a route vector sampled after a frozen arc length from a node.
+
+    Parameters
+    ----------
+    origin : Tuple[float, float]
+        Node center.
+    points : Sequence[Tuple[float, float]]
+        Route points ordered away from the endpoint being tested.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Vector from ``origin`` to the sampled route point.
+    """
+    if not points:
+        return (0.0, 0.0)
+    target_distance = 1.0
+    previous = (float(points[0][0]), float(points[0][1]))
+    travelled = math.hypot(previous[0] - origin[0], previous[1] - origin[1])
+    for point in points[1:]:
+        current = (float(point[0]), float(point[1]))
+        segment = math.hypot(current[0] - previous[0], current[1] - previous[1])
+        if segment <= 1e-12:
+            previous = current
+            continue
+        if travelled + segment >= target_distance:
+            fraction = max(0.0, min(1.0, (target_distance - travelled) / segment))
+            sample = (
+                previous[0] + fraction * (current[0] - previous[0]),
+                previous[1] + fraction * (current[1] - previous[1]),
+            )
+            return (sample[0] - origin[0], sample[1] - origin[1])
+        travelled += segment
+        previous = current
+    return (previous[0] - origin[0], previous[1] - origin[1])
 
 
 def _port_side_normal(side: str) -> Tuple[float, float]:
@@ -1642,9 +1757,9 @@ def _port_order_satisfaction(
     for values in buckets.values():
         if len(values) < 2:
             continue
-        checks += 1
+        checks += len(values)
         drawn = [order for _coord, order in sorted(values)]
-        satisfied += int(drawn == sorted(drawn))
+        satisfied += len(values) if drawn == sorted(drawn) else 0
     return checks, satisfied
 
 
@@ -1735,7 +1850,6 @@ def _g7_routed_bundle_scores(
     ]
     economy_terms = [
         drawing.get("drawing_term_bend"),
-        terminal,
         _flow_consistency_for_routed_row(positions, edges, meta),
     ]
     quality = min(group_cap, _mean_score_terms(quality_terms))
@@ -1955,6 +2069,27 @@ def _optional_bool_tensor(value: Any, expected_len: int) -> Optional[torch.Tenso
     return mask.reshape(expected_len)
 
 
+def _drop_masked_edges(edge_index: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    """Drop edges marked as declared feedback/back edges.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    mask : Optional[torch.Tensor]
+        Boolean mask with shape ``[E]`` where ``True`` means excluded from DAG
+        hierarchy computations.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with masked columns removed.
+    """
+    if mask is None:
+        return edge_index
+    return edge_index[:, ~mask]
+
+
 def _metadata_sequence(
     meta: Mapping[str, Any],
     keys: Sequence[str],
@@ -2051,6 +2186,30 @@ def _declared_cluster_labels(meta: Mapping[str, Any]) -> Dict[str, str]:
     if not isinstance(labels, Mapping):
         return {}
     return {str(name): str(label) for name, label in labels.items()}
+
+
+def _has_cluster_with_min_members(
+    clusters: Mapping[str, Sequence[int]],
+    *,
+    min_members: int,
+) -> bool:
+    """Return whether any declared cluster has enough explicit members.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Sequence[int]]
+        Declared cluster membership.
+    min_members : int
+        Minimum required member count.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one cluster has ``min_members`` unique nodes.
+    """
+    return any(
+        len({int(index) for index in members}) >= min_members for members in clusters.values()
+    )
 
 
 def _cluster_labels_from_clusters(
@@ -2225,6 +2384,7 @@ def _cluster_log_ratio_compactness(
             ratios.append(cluster_area / member_area)
     if not ratios:
         return None, {"cluster_compactness_log_mean_ratio": None, "sample_count": 0}
+    # Scores intentionally floor at 0 beyond the 100x log-band cutoff; 100x is maximally bad.
     scores = [
         1.0
         if ratio <= COMPACTNESS_RATIO_PLATEAU_HI
@@ -2272,16 +2432,18 @@ def _tree_forest(edge_index: torch.Tensor, num_nodes: int, meta: Mapping[str, An
     roots = _declared_tree_roots(meta, parents)
     for root in roots:
         parents[root] = None
-    for node in children:
-        children[node].sort()
     components: list[Tuple[int, ...]] = []
     depths: Dict[int, int] = {}
     for root in roots:
         queue = [root]
         depths[root] = 0
         component: list[int] = []
+        visited: set[int] = set()
         while queue:
             node = queue.pop(0)
+            if node in visited:
+                raise ValueError("G4 declared tree contains a cycle reachable from a root")
+            visited.add(node)
             component.append(node)
             for child in children[node]:
                 depths[child] = depths[node] + 1
@@ -2388,23 +2550,37 @@ def _fill_subtree(
     -------
     None
     """
-    child_values = tuple(children[node])
-    if not child_values:
-        subtree_nodes[node] = (node,)
-        subtree_leaves[node] = 1
-        subtree_hashes[node] = "()"
-        return
-    nodes = [node]
-    leaves = 0
-    child_hashes: list[str] = []
-    for child in child_values:
-        _fill_subtree(child, children, subtree_nodes, subtree_leaves, subtree_hashes)
-        nodes.extend(subtree_nodes[child])
-        leaves += subtree_leaves[child]
-        child_hashes.append(subtree_hashes[child])
-    subtree_nodes[node] = tuple(sorted(nodes))
-    subtree_leaves[node] = leaves
-    subtree_hashes[node] = "(" + "".join(sorted(child_hashes)) + ")"
+    stack: list[Tuple[int, bool]] = [(node, False)]
+    visiting: set[int] = set()
+    while stack:
+        current, expanded = stack.pop()
+        if expanded:
+            visiting.discard(current)
+            child_values = tuple(children[current])
+            if not child_values:
+                subtree_nodes[current] = (current,)
+                subtree_leaves[current] = 1
+                subtree_hashes[current] = "()"
+                continue
+            nodes = [current]
+            leaves = 0
+            child_hashes: list[str] = []
+            for child in child_values:
+                nodes.extend(subtree_nodes[child])
+                leaves += subtree_leaves[child]
+                child_hashes.append(subtree_hashes[child])
+            subtree_nodes[current] = tuple(sorted(nodes))
+            subtree_leaves[current] = leaves
+            subtree_hashes[current] = "(" + "".join(sorted(child_hashes)) + ")"
+            continue
+        if current in subtree_nodes:
+            continue
+        if current in visiting:
+            raise ValueError("G4 declared tree contains a subtree cycle")
+        visiting.add(current)
+        stack.append((current, True))
+        for child in reversed(tuple(children[current])):
+            stack.append((child, False))
 
 
 def _g4_layered_scores(
@@ -2439,7 +2615,10 @@ def _g4_layered_scores(
             "G4_A_RT_axioms",
             2.0,
             G4_SLOT_A_TOTAL,
-            {"raw_spearman": depth_rho},
+            {
+                "raw_spearman": depth_rho,
+                "invariance": "axis_anchored;not_rotation_or_position_scale_invariant",
+            },
         ),
         (
             "G4_layered_parent_centering",
@@ -2448,7 +2627,7 @@ def _g4_layered_scores(
             "G4_A_RT_axioms",
             2.0,
             G4_SLOT_A_TOTAL,
-            {},
+            {"invariance": "axis_anchored;not_rotation_or_position_scale_invariant"},
         ),
         (
             "G4_layered_sibling_order",
@@ -2457,7 +2636,7 @@ def _g4_layered_scores(
             "G4_A_RT_axioms",
             1.0,
             G4_SLOT_A_TOTAL,
-            {},
+            {"invariance": "axis_anchored_order;not_rotation_invariant"},
         ),
         (
             "G4_layered_subtree_congruence",
@@ -2475,7 +2654,7 @@ def _g4_layered_scores(
             "G4_B_tidiness",
             1.0,
             G4_SLOT_B_TOTAL,
-            {},
+            {"invariance": "axis_anchored;not_rotation_or_position_scale_invariant"},
         ),
         (
             "G4_layered_contour_separation",
@@ -2546,7 +2725,7 @@ def _g4_radial_scores(
         (
             "G4_radial_circular_order",
             "radial_circular_order_preservation",
-            _sibling_order_score(angles, forest),
+            _sibling_circular_order_score(angles, forest),
             "G4_A_radial_axioms",
             1.0,
             G4_SLOT_A_TOTAL,
@@ -2606,13 +2785,16 @@ def _parent_centering_score(positions: torch.Tensor, forest: TreeForest) -> floa
     float
         Continuous score in ``[0, 1]``.
     """
-    span = _position_span(positions[:, 0].numpy())
     penalties: list[float] = []
     for parent, children in forest.children.items():
         if not children:
             continue
         child_center = float(positions[list(children), 0].mean().item())
-        penalties.append(min(1.0, abs(float(positions[parent, 0].item()) - child_center) / span))
+        child_values = positions[list(children), 0].numpy()
+        family_span = _position_span(child_values) if len(children) > 1 else 1.0
+        penalties.append(
+            min(1.0, abs(float(positions[parent, 0].item()) - child_center) / family_span)
+        )
     return 1.0 - float(np.mean(penalties)) if penalties else 1.0
 
 
@@ -2643,6 +2825,46 @@ def _sibling_order_score(axis_values: np.ndarray, forest: TreeForest) -> float:
                 if axis_values[int(left)] > axis_values[int(right)]:
                     inversions += 1
         penalties.append(inversions / max(1, total))
+    return 1.0 - float(np.mean(penalties)) if penalties else 1.0
+
+
+def _sibling_circular_order_score(angles: np.ndarray, forest: TreeForest) -> float:
+    """Score sibling circular order while allowing the 0/2pi cut to move.
+
+    Parameters
+    ----------
+    angles : numpy.ndarray
+        Node polar angles with shape ``[N]``.
+    forest : TreeForest
+        Normalized rooted forest.
+
+    Returns
+    -------
+    float
+        One minus the minimum normalized inversion count over circular cuts.
+    """
+    penalties: list[float] = []
+    for children in forest.children.values():
+        count = len(children)
+        if count < 2:
+            continue
+        drawn = [
+            child for _angle, child in sorted((angles[int(child)], child) for child in children)
+        ]
+        declared = list(children)
+        order_rank = {child: index for index, child in enumerate(declared)}
+        best = 1.0
+        total = count * (count - 1) // 2
+        for offset in range(count):
+            rotated = drawn[offset:] + drawn[:offset]
+            inversions = 0
+            ranks = [order_rank[child] for child in rotated]
+            for left_index, left_rank in enumerate(ranks):
+                for right_rank in ranks[left_index + 1 :]:
+                    if left_rank > right_rank:
+                        inversions += 1
+            best = min(best, inversions / max(1, total))
+        penalties.append(best)
     return 1.0 - float(np.mean(penalties)) if penalties else 1.0
 
 
@@ -2789,13 +3011,12 @@ def _subtree_contour_separation_score(
     float
         Contour-separation score in ``[0, 1]``.
     """
-    del sizes
     penalties: list[float] = []
     for children in forest.children.values():
         for left_index, left in enumerate(children):
-            left_box = _subtree_position_bounds(positions, forest.subtree_nodes[left])
+            left_box = _subtree_bounds(positions, sizes, forest.subtree_nodes[left])
             for right in children[left_index + 1 :]:
-                right_box = _subtree_position_bounds(positions, forest.subtree_nodes[right])
+                right_box = _subtree_bounds(positions, sizes, forest.subtree_nodes[right])
                 overlap = _box_intersection_area(left_box, right_box)
                 denom = max(1e-12, min(_box_area(left_box), _box_area(right_box)))
                 penalties.append(min(1.0, overlap / denom))
@@ -2918,9 +3139,10 @@ def _angular_allocation_score(angles: np.ndarray, forest: TreeForest) -> float:
             [_angular_span(angles[list(forest.subtree_nodes[child])]) for child in children]
         )
         if float(spans.sum()) <= 1e-12:
-            penalties.append(1.0)
-            continue
-        drawn_share = spans / spans.sum()
+            child_angles = np.asarray([angles[int(child)] for child in children], dtype=np.float64)
+            drawn_share = _circular_voronoi_shares(child_angles)
+        else:
+            drawn_share = spans / spans.sum()
         leaves = np.asarray([forest.subtree_leaves[child] for child in children], dtype=np.float64)
         target_share = leaves / max(float(leaves.sum()), 1e-12)
         penalties.append(min(1.0, float(np.mean(np.abs(drawn_share - target_share)))))
@@ -2944,15 +3166,174 @@ def _angular_overlap_score(angles: np.ndarray, forest: TreeForest) -> float:
     """
     penalties: list[float] = []
     for children in forest.children.values():
-        intervals = [
-            _angular_interval(angles[list(forest.subtree_nodes[child])]) for child in children
-        ]
-        for left_index, left in enumerate(intervals):
-            for right in intervals[left_index + 1 :]:
-                overlap = max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
-                denom = max(1e-12, min(left[1] - left[0], right[1] - right[0]))
+        leaves = np.asarray([forest.subtree_leaves[child] for child in children], dtype=np.float64)
+        target_shares = leaves / max(float(leaves.sum()), 1e-12)
+        sectors = []
+        for child, target_share in zip(children, target_shares):
+            values = angles[list(forest.subtree_nodes[child])]
+            center = _circular_mean(values)
+            half_width = max(_angular_span(values) / 2.0, math.pi * float(target_share))
+            sectors.append(_circular_interval_segments(center, half_width))
+        for left_index, left in enumerate(sectors):
+            for right in sectors[left_index + 1 :]:
+                overlap = _circular_segments_overlap(left, right)
+                left_width = sum(segment[1] - segment[0] for segment in left)
+                right_width = sum(segment[1] - segment[0] for segment in right)
+                denom = max(1e-12, min(left_width, right_width))
                 penalties.append(min(1.0, overlap / denom))
     return 1.0 - float(np.mean(penalties)) if penalties else 1.0
+
+
+def _circular_voronoi_shares(values: np.ndarray) -> np.ndarray:
+    """Return circular sector shares induced by child root angles.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Child root angles in radians.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sector shares summing to one, aligned to ``values``.
+    """
+    count = int(values.size)
+    if count == 0:
+        return np.asarray([], dtype=np.float64)
+    if count == 1:
+        return np.asarray([1.0], dtype=np.float64)
+    ordered_indices = np.argsort(np.mod(values, 2.0 * math.pi))
+    ordered = np.mod(values[ordered_indices], 2.0 * math.pi)
+    prev_gap = np.empty(count, dtype=np.float64)
+    next_gap = np.empty(count, dtype=np.float64)
+    for index in range(count):
+        prev_value = ordered[index - 1] if index > 0 else ordered[-1] - 2.0 * math.pi
+        next_value = ordered[(index + 1) % count] + (2.0 * math.pi if index == count - 1 else 0.0)
+        prev_gap[index] = ordered[index] - prev_value
+        next_gap[index] = next_value - ordered[index]
+    shares_ordered = (prev_gap + next_gap) / (4.0 * math.pi)
+    shares = np.empty(count, dtype=np.float64)
+    shares[ordered_indices] = shares_ordered
+    return shares / max(float(shares.sum()), 1e-12)
+
+
+def _largest_gap_cut(values: np.ndarray) -> float:
+    """Return an angle just after the largest gap in a set of angles.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Angles in radians.
+
+    Returns
+    -------
+    float
+        Common cut angle in radians.
+    """
+    if values.size == 0:
+        return 0.0
+    ordered = np.sort(np.mod(values, 2.0 * math.pi))
+    if ordered.size == 1:
+        return float(ordered[0])
+    gaps = np.diff(np.concatenate([ordered, ordered[:1] + 2.0 * math.pi]))
+    start = int(np.argmax(gaps) + 1) % ordered.size
+    return float(ordered[start])
+
+
+def _circular_mean(values: np.ndarray) -> float:
+    """Return a circular mean angle.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Angles in radians.
+
+    Returns
+    -------
+    float
+        Mean angle in ``[0, 2pi)``.
+    """
+    if values.size == 0:
+        return 0.0
+    sin_mean = float(np.sin(values).mean())
+    cos_mean = float(np.cos(values).mean())
+    return float(np.mod(math.atan2(sin_mean, cos_mean), 2.0 * math.pi))
+
+
+def _circular_interval_segments(
+    center: float,
+    half_width: float,
+) -> Tuple[Tuple[float, float], ...]:
+    """Return non-wrapping segments for one circular interval.
+
+    Parameters
+    ----------
+    center : float
+        Interval center angle in radians.
+    half_width : float
+        Half interval width in radians.
+
+    Returns
+    -------
+    Tuple[Tuple[float, float], ...]
+        One or two segments in ``[0, 2pi]``.
+    """
+    full = 2.0 * math.pi
+    if half_width >= math.pi:
+        return ((0.0, full),)
+    start = center - half_width
+    end = center + half_width
+    if start < 0.0:
+        return ((start + full, full), (0.0, end))
+    if end > full:
+        return ((start, full), (0.0, end - full))
+    return ((start, end),)
+
+
+def _circular_segments_overlap(
+    left: Sequence[Tuple[float, float]],
+    right: Sequence[Tuple[float, float]],
+) -> float:
+    """Return overlap length between circular interval segment sets.
+
+    Parameters
+    ----------
+    left : Sequence[Tuple[float, float]]
+        First segment set.
+    right : Sequence[Tuple[float, float]]
+        Second segment set.
+
+    Returns
+    -------
+    float
+        Total overlap length in radians.
+    """
+    total = 0.0
+    for left_start, left_end in left:
+        for right_start, right_end in right:
+            total += max(0.0, min(left_end, right_end) - max(left_start, right_start))
+    return total
+
+
+def _angular_interval_with_cut(values: np.ndarray, cut: float) -> Tuple[float, float]:
+    """Return an angular interval unwrapped on a shared family cut.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Angles in radians.
+    cut : float
+        Common cut angle in radians.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Interval endpoints in radians.
+    """
+    if values.size == 0:
+        return (0.0, 0.0)
+    unwrapped = np.sort(np.mod(values - cut, 2.0 * math.pi))
+    return float(unwrapped[0]), float(unwrapped[-1])
 
 
 def _angular_span(values: np.ndarray) -> float:

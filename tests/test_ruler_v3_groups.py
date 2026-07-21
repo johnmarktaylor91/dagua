@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Mapping, Tuple, cast
+import math
+import signal
+from typing import Any, Dict, List, Mapping, Tuple, cast
 
 import pytest
 import torch
@@ -279,6 +281,7 @@ def _ported_probe(
     ]
     meta: Dict[str, object] = {"ports": ports, "flow_direction": "LR"}
     if routed:
+        meta["routing_declared"] = True
         route_paths: List[List[Tuple[float, float]]] = [
             [(0.0, 0.0), (2.0, -1.0), (4.0, -1.0)],
             [(0.0, 0.0), (2.0, 1.0), (4.0, 1.0)],
@@ -307,6 +310,26 @@ def _ported_probe(
             (scale * 6.0, scale * 1.0),
         ]
     return pos, edges, _sizes(4), meta
+
+
+def _facet_score(result: object, code: str) -> float:
+    """Return a finite facet score from a V3 score result.
+
+    Parameters
+    ----------
+    result : object
+        Score result exposing a ``facets`` mapping.
+    code : str
+        Facet code.
+
+    Returns
+    -------
+    float
+        Facet score as a float.
+    """
+    score = result.facets[code].score  # type: ignore[attr-defined]
+    assert score is not None
+    return float(score)
 
 
 def test_applicability_gates_are_input_only() -> None:
@@ -547,8 +570,11 @@ def test_g2_g4_position_scale_invariance_and_size_anchoring(alpha: float) -> Non
     base_tree = score_core_v3(tree_pos, tree_edges, tree_sizes, graph_meta=tree_meta)
     scaled_tree = score_core_v3(alpha * tree_pos, tree_edges, tree_sizes, graph_meta=tree_meta)
     for code, facet in base_tree.facets.items():
-        if code.startswith("G4_"):
+        if code.startswith("G4_") and code != "G4_layered_contour_separation":
             assert scaled_tree.facets[code].score == pytest.approx(facet.score, abs=1e-6)
+    assert "axis_anchored" in str(
+        base_tree.facets["G4_layered_parent_centering"].metadata["invariance"]
+    )
 
     cluster_pos, cluster_edges, cluster_sizes, cluster_meta = _cluster_probe()
     base_cluster = score_core_v3(
@@ -746,6 +772,295 @@ def test_g7_port_compliance_cap_routed_curves_and_scale_invariance() -> None:
         compliance.score,
         abs=1e-6,
     )
+
+
+def test_g5_requires_declared_graph_change_and_ignores_best_static_metadata() -> None:
+    """Probe G5 no-default ground truth and frozen band provenance.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _temporal_probe(current_shift=0.0, graph_change=0.5)
+    previous = dict(cast(Mapping[str, object], meta["previous"]))
+    previous.pop("graph_change", None)
+    no_change_meta = {**meta, "previous": previous}
+    assert not evaluate_conditional_groups(pos, edges, sizes, no_change_meta)["G5"].applicable
+
+    thrash = pos.clone()
+    thrash[0, 0] += 10.0
+    thrash[3, 1] -= 5.0
+    assert not evaluate_conditional_groups(thrash, edges, sizes, no_change_meta)["G5"].applicable
+
+    frozen = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    assert _facet_score(frozen, "G5_temporal_stability") < 1e-6
+
+    with_best_one = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    varied_previous = {
+        **dict(cast(Mapping[str, object], meta["previous"])),
+        "best_static_v3_core": 0.5,
+    }
+    with_best_half = score_core_v3(
+        pos,
+        edges,
+        sizes,
+        graph_meta={**meta, "previous": varied_previous},
+    )
+    assert _facet_score(with_best_half, "G5_temporal_stability") == pytest.approx(
+        _facet_score(with_best_one, "G5_temporal_stability"),
+        abs=1e-12,
+    )
+
+
+def test_g4_declared_cycle_through_root_returns_malformed() -> None:
+    """Probe the G4 cycle-through-root hang guard.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+
+    def timeout_handler(_signum: int, _frame: Any) -> None:
+        """Raise when the malformed tree probe exceeds the alarm.
+
+        Parameters
+        ----------
+        _signum : int
+            Signal number.
+        _frame : Any
+            Current frame.
+
+        Returns
+        -------
+        None
+        """
+        raise TimeoutError("G4 malformed-tree probe exceeded 10 seconds")
+
+    previous_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(10)
+    try:
+        pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=torch.float64)
+        edges = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+        meta: Dict[str, object] = {"declared_tree": True, "root": 0, "tree_convention": "layered"}
+        result = evaluate_conditional_groups(pos, edges, _sizes(3), meta)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    assert not result["G4"].applicable
+    assert result["G4"].applicability_reason == "inapplicable:malformed_declared_tree"
+
+
+def test_equal_view_weights_conditional_groups_by_slots() -> None:
+    """Probe DOC-6 equal-view group slot aggregation.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _cluster_probe()
+    row_meta = {
+        **meta,
+        "declared_hierarchical": True,
+        "flow_direction": "TB",
+        "topological_depth": [0, 1, 1, 2, 2, 3],
+        "planted_partition": [0, 0, 0, 1, 1, 1],
+    }
+    result = score_core_v3(pos, edges, sizes, graph_meta=row_meta)
+    from dagua.eval.ruler_v3 import _equal_view_weights
+
+    weights = _equal_view_weights(result.facets)
+    g2_share = sum(weight for code, weight in weights.items() if code.startswith("G2_")) / sum(
+        weights.values()
+    )
+    assert g2_share < 0.2
+    assert g2_share == pytest.approx(2.0 / 15.0)
+
+
+def test_g4_radial_facets_pass_perfect_and_crater_on_sector_squeeze() -> None:
+    """Probe the radial allocation, overlap, and circular-order fixes.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    edges = torch.tensor([[0, 0, 0], [1, 2, 3]], dtype=torch.long)
+    radius = 3.0
+    angles = [0.0, 2.0 * math.pi / 3.0, 4.0 * math.pi / 3.0]
+    perfect = torch.tensor(
+        [[0.0, 0.0], *[(radius * math.cos(a), radius * math.sin(a)) for a in angles]],
+        dtype=torch.float64,
+    )
+    meta: Dict[str, object] = {"declared_tree": True, "root": 0, "tree_convention": "radial"}
+    result = score_core_v3(perfect, edges, _sizes(4), graph_meta=meta)
+    for code in (
+        "G4_radial_angular_allocation",
+        "G4_radial_angular_overlap",
+        "G4_radial_circular_order",
+    ):
+        assert _facet_score(result, code) == pytest.approx(1.0, abs=1e-6)
+
+    squeezed = torch.tensor(
+        [[0.0, 0.0], [3.0, -0.05], [3.0, 0.0], [3.0, 0.05]],
+        dtype=torch.float64,
+    )
+    squeezed_result = score_core_v3(squeezed, edges, _sizes(4), graph_meta=meta)
+    assert _facet_score(squeezed_result, "G4_radial_angular_overlap") < 0.5
+
+
+def test_g7_route_only_has_no_compliance_and_routed_facets_are_row_level() -> None:
+    """Probe G7 route-only compliance and routed facet-set parity.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos = torch.tensor([[0.0, 0.0], [4.0, 0.0]], dtype=torch.float64)
+    edges = torch.tensor([[0], [1]], dtype=torch.long)
+    route_meta: Dict[str, object] = {
+        "routing_declared": True,
+        "route_paths": [[(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)]],
+    }
+    result = score_core_v3(pos, edges, _sizes(2), graph_meta=route_meta)
+    assert "G7_port_hard_compliance" not in result.facets
+    assert "G7_routed_curve_quality" in result.facets
+
+    port_meta: Dict[str, object] = {
+        "ports": [{"edge": 0, "endpoint": "source", "side": "E"}],
+        "routing_declared": True,
+    }
+    with_routes = score_core_v3(pos, edges, _sizes(2), graph_meta={**port_meta, **route_meta})
+    without_routes = score_core_v3(pos, edges, _sizes(2), graph_meta=port_meta)
+    assert {code for code in with_routes.facets if code.startswith("G7_")} == {
+        code for code in without_routes.facets if code.startswith("G7_")
+    }
+
+
+def test_g7_port_order_with_port_sides_fills_node_before_lookup() -> None:
+    """Probe port_sides plus port_order declarations.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos = torch.tensor([[0.0, 0.0], [4.0, -1.0], [4.0, 1.0]], dtype=torch.float64)
+    edges = torch.tensor([[0, 0], [1, 2]], dtype=torch.long)
+    meta: Dict[str, object] = {
+        "port_sides": {0: {"source": "E"}, 1: {"source": "E"}},
+        "port_order": {(0, "E"): 0},
+    }
+    result = score_core_v3(pos, edges, _sizes(3), graph_meta=meta)
+    compliance = result.facets["G7_port_hard_compliance"]
+    assert compliance.metadata["order_checks"] == 2
+    assert compliance.metadata["compliance_checks"] == 4
+
+
+def test_g4_layered_contour_separation_uses_node_sizes() -> None:
+    """Probe size-aware sibling subtree contour overlap.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos = torch.tensor([[0.0, 0.0], [-0.1, 1.0], [0.1, 1.0]], dtype=torch.float64)
+    edges = torch.tensor([[0, 0], [1, 2]], dtype=torch.long)
+    sizes = torch.full((3, 2), 10.0, dtype=torch.float64)
+    meta: Dict[str, object] = {"declared_tree": True, "root": 0, "tree_convention": "layered"}
+    result = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    assert _facet_score(result, "G4_layered_contour_separation") < 1.0
+
+
+def test_g1_back_edge_mask_excluded_from_acyclic_fraction() -> None:
+    """Probe G1 frac_acyclic with declared feedback edges removed.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0]], dtype=torch.float64)
+    edges = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    meta: Dict[str, object] = {
+        "declared_hierarchical": True,
+        "flow_direction": "TB",
+        "back_edge_mask": [False, False, True],
+    }
+    result = score_core_v3(pos, edges, _sizes(3), graph_meta=meta)
+    facet = result.facets["G1_directed_flow"]
+    assert facet.metadata["frac_acyclic"] == pytest.approx(1.0)
+    assert facet.effective_weight > 0.0
+
+
+def test_g7_exit_stub_does_not_satisfy_wrong_route_direction() -> None:
+    """Probe side compliance past a short cosmetic exit stub.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos = torch.tensor([[0.0, 0.0], [4.0, -1.0]], dtype=torch.float64)
+    edges = torch.tensor([[0], [1]], dtype=torch.long)
+    meta: Dict[str, object] = {
+        "ports": [{"edge": 0, "endpoint": "source", "side": "E"}],
+        "routing_declared": True,
+        "route_paths": [[(0.0, 0.0), (0.05, 0.0), (-6.0, 0.0), (4.0, -1.0)]],
+    }
+    result = score_core_v3(pos, edges, _sizes(2), graph_meta=meta)
+    compliance = result.facets["G7_port_hard_compliance"]
+    assert compliance.metadata["side_violation_count"] == 1
+    assert compliance.score is not None and compliance.score < 1.0
+
+
+def test_g4_sibling_order_preserves_edge_insertion_order() -> None:
+    """Probe sibling order against declared edge order rather than node id.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos = torch.tensor([[0.0, 0.0], [1.0, 1.0], [-1.0, 1.0]], dtype=torch.float64)
+    edges = torch.tensor([[0, 0], [2, 1]], dtype=torch.long)
+    meta: Dict[str, object] = {"declared_tree": True, "root": 0, "tree_convention": "layered"}
+    result = score_core_v3(pos, edges, _sizes(3), graph_meta=meta)
+    assert _facet_score(result, "G4_layered_sibling_order") == pytest.approx(1.0)
 
 
 def test_deformation_monotonicity_smoke() -> None:
