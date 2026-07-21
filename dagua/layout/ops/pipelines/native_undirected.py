@@ -53,7 +53,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Dict, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -61,6 +61,18 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily
 from dagua.layout.ops.base import Op, Pipeline
+from dagua.layout.ops.pipelines.native_budget import (
+    admit_native_work,
+    available_process_work_s,
+    charge,
+    has_process_budget,
+    release_tail_reservation,
+    remaining_process_s,
+    remaining_wall_s,
+    reserve_tail,
+    wall_reserve_exhausted,
+)
+from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
@@ -88,7 +100,6 @@ CLUSTER_EXTENDED_SCORE_KEYS = (
 CLUSTER_DUAL_ACCEPTANCE_MARGIN = 0.05
 MIN_OPTIONAL_ARM_REMAINING_S = 10.0
 ABSOLUTE_DEADLINE_RESERVE_S = 5.0
-PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 MAX_COLLINEAR_WORK = 100_000
 MAX_DENSE_STRESS_NODES = 200
 MAX_DENSE_STRESS_EDGES = 20_000
@@ -117,6 +128,44 @@ HIGH_DEGREE_LARGE_REFINEMENT_STEPS = 20
 HIGH_DEGREE_REFINEMENT_THRESHOLD = 20
 NEATO_FULL_ITERATIONS = 200
 NEATO_BALANCED_SMALL_ITERATIONS = 10
+
+
+def _runtime_telemetry_payload(
+    *,
+    config: Optional[LayoutConfig],
+    wall_s: Optional[float],
+    process_s: Optional[float],
+    use_deterministic_costs: bool,
+) -> dict[str, Optional[float] | int | str | bool]:
+    """Return environment metadata for native marketplace telemetry.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying device and budget metadata.
+    wall_s : float, optional
+        Wall-clock seconds for the measured work.
+    process_s : float, optional
+        Process CPU seconds for the measured work.
+    use_deterministic_costs : bool
+        Whether this record used deterministic benchmark cost units.
+
+    Returns
+    -------
+    dict[str, float | int | str | bool | None]
+        JSON-ready runtime metadata for cross-machine interpretation.
+    """
+    cpu_wall_ratio = None
+    if wall_s is not None and process_s is not None and wall_s > 0.0:
+        cpu_wall_ratio = float(process_s) / float(wall_s)
+    return {
+        "use_deterministic_costs": bool(use_deterministic_costs),
+        "cpu_wall_ratio": cpu_wall_ratio,
+        "torch_num_threads": int(torch.get_num_threads()),
+        "device": str(getattr(config, "device", "unknown")) if config is not None else "unknown",
+    }
+
+
 NEATO_MEDIUM_NODE_CAP = 250
 NEATO_BALANCED_MEDIUM_ITERATIONS = 40
 NEATO_BALANCED_LARGE_ITERATIONS = 4
@@ -253,10 +302,7 @@ def _portfolio_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     float or None
         Remaining seconds, or ``None`` when no benchmark deadline is known.
     """
-    deadline = getattr(config, "_dagua_native_deadline_s", None) if config is not None else None
-    if deadline is None:
-        return None
-    return float(deadline) - time.perf_counter()
+    return remaining_wall_s(config)
 
 
 def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
@@ -274,17 +320,24 @@ def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[f
         Remaining process CPU seconds, or ``None`` when no benchmark
         deadline is known.
     """
-    if config is None:
-        return None
-    process_deadline = getattr(config, PROCESS_DEADLINE_ATTR, None)
-    if process_deadline is None:
-        remaining = _portfolio_remaining_s(config)
-        if remaining is None:
-            return None
-        process_deadline = time.process_time() + max(0.0, float(remaining))
-        setattr(config, PROCESS_DEADLINE_ATTR, process_deadline)
-        return float(remaining)
-    return float(process_deadline) - time.process_time()
+    return remaining_process_s(config)
+
+
+def _native_device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the native cost-model device class for a config.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA devices, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
 
 
 def _portfolio_has_budget(
@@ -305,12 +358,9 @@ def _portfolio_has_budget(
     bool
         ``True`` when there is no known deadline or enough remaining budget.
     """
-    wall_remaining = _portfolio_remaining_s(config)
-    if wall_remaining is not None and wall_remaining <= ABSOLUTE_DEADLINE_RESERVE_S:
+    if wall_reserve_exhausted(config, ABSOLUTE_DEADLINE_RESERVE_S):
         return False
-    remaining = _portfolio_process_remaining_s(config)
-    required_remaining = max(float(min_remaining_s), ABSOLUTE_DEADLINE_RESERVE_S)
-    return remaining is None or remaining > required_remaining
+    return has_process_budget(config, min_remaining_s, ABSOLUTE_DEADLINE_RESERVE_S)
 
 
 def _portfolio_available_work_s(
@@ -333,13 +383,9 @@ def _portfolio_available_work_s(
         Seconds available for additional work, clamped to zero. ``None`` means
         no benchmark deadline is known.
     """
-    wall_remaining = _portfolio_remaining_s(config)
-    if wall_remaining is not None and wall_remaining <= float(reserve_s):
+    if wall_reserve_exhausted(config, reserve_s):
         return 0.0
-    remaining = _portfolio_process_remaining_s(config)
-    if remaining is None:
-        return None
-    return max(0.0, float(remaining) - float(reserve_s))
+    return available_process_work_s(config, reserve_s)
 
 
 def _predicted_undirected_arm_budget_available(
@@ -387,6 +433,8 @@ def _arm_s_full_score_budget_available(
         ``True`` when no deadline is known or remaining budget covers the
         final full-ruler pass plus the hard return reserve.
     """
+    if bool(getattr(config, "_dagua_native_arm_s_full_score_predebited", False)):
+        return not wall_reserve_exhausted(config, ABSOLUTE_DEADLINE_RESERVE_S)
     return _portfolio_has_budget(config) and _predicted_undirected_arm_budget_available(
         config,
         predicted_cost_s,
@@ -483,6 +531,17 @@ def _emit_undirected_arm_skip_telemetry(
         "predicted_cost_s": None if predicted_cost_s is None else float(predicted_cost_s),
         "remaining_s": None if remaining_s is None else float(remaining_s),
     }
+    payload.update(
+        _runtime_telemetry_payload(
+            config=config,
+            wall_s=None,
+            process_s=None,
+            use_deterministic_costs=getattr(config, "_dagua_native_deterministic_budget_s", None)
+            is not None
+            if config is not None
+            else False,
+        )
+    )
     if config is not None:
         existing = list(getattr(config, "_dagua_native_arm_skip_telemetry", []))
         existing.append(payload)
@@ -577,6 +636,7 @@ def _log_marketplace_telemetry(
     arm_timings: Optional[Dict[str, Tuple[float, float]]] = None,
     started_process_at: Optional[float] = None,
     arm_process_totals: Optional[Dict[str, float]] = None,
+    config: Optional[LayoutConfig] = None,
 ) -> None:
     """Log structured per-arm marketplace telemetry.
 
@@ -606,6 +666,8 @@ def _log_marketplace_telemetry(
     arm_process_totals : dict[str, float], optional
         Per-arm process CPU totals. Missing arms fall back to the whole route
         process span for compatibility with older call sites.
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark runtime metadata.
 
     Returns
     -------
@@ -630,7 +692,7 @@ def _log_marketplace_telemetry(
         arm_ended_wall_time = started_wall_time + max(0.0, arm_ended_at - started_at)
         full_score = full_scores.get(name)
         process_time_s = (
-            arm_process_totals.get(name)
+            float(arm_process_totals[name])
             if arm_process_totals is not None and name in arm_process_totals
             else max(0.0, ended_process_at - started_process)
         )
@@ -667,6 +729,23 @@ def _log_marketplace_telemetry(
         "process_time_s": max(0.0, ended_process_at - started_process),
         "arms": arms,
     }
+    payload.update(
+        _runtime_telemetry_payload(
+            config=config,
+            wall_s=max(0.0, ended_at - started_at),
+            process_s=max(0.0, ended_process_at - started_process),
+            use_deterministic_costs=getattr(config, "_dagua_native_deterministic_budget_s", None)
+            is not None
+            if config is not None
+            else False,
+        )
+    )
+    telemetry_path = os.environ.get("DAGUA_ARM_TELEMETRY_PATH") or os.environ.get(
+        "DAGUA_W5_TELEMETRY_PATH"
+    )
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
     _LOGGER.info("Native marketplace telemetry %s", json.dumps(payload, sort_keys=True))
 
 
@@ -2056,7 +2135,7 @@ def _router_v2_large_mini_contest(
     started_process_at = time.process_time()
     n = int(problem.num_nodes)
     shortlist = _undirected_route_shortlist(
-        problem.structure,
+        cast(Any, problem.structure),
         n,
         has_edge_weights=problem.edge_weights is not None,
     )
@@ -2215,6 +2294,7 @@ def _router_v2_large_mini_contest(
         winner_name=best_name,
         started_at=started_at,
         started_process_at=started_process_at,
+        config=config,
     )
     _LOGGER.info(
         "Undirected contest (large mini) candidates=%s winner=%s",
@@ -2303,6 +2383,13 @@ def layout_native_undirected_portfolio(
                 int(problem.seed) if problem.seed is not None else 42,
             )
     incumbent_pos = _run_incumbent()
+    incumbent_cost = estimate_native_work_cost(
+        problem,
+        "stress",
+        {"steps": 10, "samples": None},
+        _native_device_class(config),
+    )
+    charge(config, incumbent_cost.generation_dwu, "mandatory_incumbent_solve")
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
         return incumbent_pos
     if not _portfolio_has_budget(config):
@@ -2373,6 +2460,18 @@ def layout_native_undirected_portfolio(
 
     raw_finalist_names: list[str] = []
     arm_s_candidate_names: set[str] = set()
+    tail_cost = estimate_native_work_cost(
+        problem,
+        "ruler",
+        {"samples": None},
+        _native_device_class(config),
+    )
+    finalist_tail_slots = 4 if use_bounded_inner_solvers else FULL_REFEREE_TOP_K
+    finalist_tail_reservation = reserve_tail(
+        config,
+        tail_cost.reserved_score_dwu * max(1, finalist_tail_slots),
+        "mandatory_finalist_tail",
+    )
 
     def _add_challenger(
         name: str,
@@ -2536,6 +2635,8 @@ def layout_native_undirected_portfolio(
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
+                if isinstance(neato_pos, tuple):
+                    neato_pos = neato_pos[0]
                 _add_challenger("neato", neato_pos)
             if problem.edge_weights is not None:
                 neato_unweighted_pos = layout_neato_pipeline(
@@ -2552,6 +2653,8 @@ def layout_native_undirected_portfolio(
                     fidelity_mode="graphviz",
                     overlap_removal=False,
                 )
+                if isinstance(neato_unweighted_pos, tuple):
+                    neato_unweighted_pos = neato_unweighted_pos[0]
                 _add_challenger("neato_unweighted", neato_unweighted_pos)
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
@@ -2701,18 +2804,31 @@ def layout_native_undirected_portfolio(
     # multi-seed coverage without consulting any external adapter.
     fcose_started = time.perf_counter()
     fcose_runs = 0
+    fcose_cpu_s = 0.0
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
 
-            fcose_cost_s = FCOSE_PRIOR_S
+            fcose_cost = estimate_native_work_cost(
+                problem,
+                "fcose",
+                {"steps": FCOSE_REFERENCE_STEPS, "samples": None},
+                _native_device_class(config),
+            )
+            fcose_cost_s = fcose_cost.generation_dwu + fcose_cost.reserved_score_dwu
             for seed_offset in range(FCOSE_CONTEST_SEEDS):
-                if not _portfolio_has_budget(
-                    config
-                ) or not _predicted_arm_budget_preserving_arm_s_score(
-                    config,
-                    fcose_cost_s,
-                    arm_s_pending=bool(arm_s_candidate_names),
+                if (
+                    not _portfolio_has_budget(config)
+                    or not _predicted_arm_budget_preserving_arm_s_score(
+                        config,
+                        fcose_cost_s,
+                        arm_s_pending=bool(arm_s_candidate_names),
+                    )
+                    or not admit_native_work(
+                        config,
+                        fcose_cost,
+                        f"optional_fcose_seed{seed_offset}",
+                    )
                 ):
                     _record_insufficient_predicted_budget_skip(
                         arm=f"fcose_seed{seed_offset}",
@@ -2737,14 +2853,15 @@ def layout_native_undirected_portfolio(
                 )
                 fcose_runs += 1
                 _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
-                fcose_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                fcose_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
     _LOGGER.info(
-        "Undirected candidate runtime family=fcose runs=%d seconds=%.3f",
+        "Undirected candidate runtime family=fcose runs=%d seconds=%.3f cpu_seconds=%.3f",
         fcose_runs,
         time.perf_counter() - fcose_started,
+        fcose_cpu_s,
     )
 
     # Candidate H (r83-P3.3): exact local sklearn-compatible tsNET. The
@@ -2753,19 +2870,32 @@ def layout_native_undirected_portfolio(
     if n <= TSNET_MAX_CONTEST_NODES and not is_mesh and _portfolio_has_budget(config):
         tsnet_started = time.perf_counter()
         tsnet_runs = 0
+        tsnet_cpu_s = 0.0
         try:
             from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 
-            tsnet_cost_s = TSNET_PRIOR_S
+            tsnet_cost = estimate_native_work_cost(
+                problem,
+                "stress",
+                {"steps": TSNET_REFERENCE_STEPS, "samples": None},
+                _native_device_class(config),
+            )
+            tsnet_cost_s = tsnet_cost.generation_dwu + tsnet_cost.reserved_score_dwu
             stop_tsnet = False
             for perplexity in TSNET_PERPLEXITIES:
                 for seed_offset in range(TSNET_CONTEST_SEEDS):
-                    if not _portfolio_has_budget(
-                        config
-                    ) or not _predicted_arm_budget_preserving_arm_s_score(
-                        config,
-                        tsnet_cost_s,
-                        arm_s_pending=bool(arm_s_candidate_names),
+                    if (
+                        not _portfolio_has_budget(config)
+                        or not _predicted_arm_budget_preserving_arm_s_score(
+                            config,
+                            tsnet_cost_s,
+                            arm_s_pending=bool(arm_s_candidate_names),
+                        )
+                        or not admit_native_work(
+                            config,
+                            tsnet_cost,
+                            f"optional_tsnet_perp{perplexity:g}_seed{seed_offset}",
+                        )
                     ):
                         _record_insufficient_predicted_budget_skip(
                             arm=f"tsnet_perp{perplexity:g}_seed{seed_offset}",
@@ -2795,16 +2925,17 @@ def layout_native_undirected_portfolio(
                     _add_challenger(
                         f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
                     )
-                    tsnet_cost_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                    tsnet_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
                 if stop_tsnet:
                     break
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("tsNET undirected challenger failed", exc_info=True)
         _LOGGER.info(
-            "Undirected candidate runtime family=tsnet runs=%d seconds=%.3f",
+            "Undirected candidate runtime family=tsnet runs=%d seconds=%.3f cpu_seconds=%.3f",
             tsnet_runs,
             time.perf_counter() - tsnet_started,
+            tsnet_cpu_s,
         )
 
     # Candidate I (r83-P3.3): NetworkX-compatible Fruchterman-Reingold is a
@@ -2848,7 +2979,7 @@ def layout_native_undirected_portfolio(
     from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
 
     shortlist = _undirected_route_shortlist(
-        problem.structure,
+        cast(Any, problem.structure),
         n,
         has_edge_weights=problem.edge_weights is not None,
     )
@@ -2959,6 +3090,13 @@ def layout_native_undirected_portfolio(
 
     offsets, targets = _build_csr(problem.edge_index.detach().to(device="cpu"), n)
     all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
+    proxy_cost = estimate_native_work_cost(
+        problem,
+        "ruler",
+        {"samples": None},
+        _native_device_class(config),
+    )
+    charge(config, proxy_cost.reserved_score_dwu, "mandatory_shortlist_proxy_pass")
     proxy_scores = {
         name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
         for name, pos in positions.items()
@@ -2991,6 +3129,7 @@ def layout_native_undirected_portfolio(
         *proxy_finalists,
         *(name for name in raw_finalist_names if name not in proxy_finalists),
     ]
+    finalist_tail_charge = tail_cost.reserved_score_dwu * max(1, len(finalist_names))
     cluster_score_telemetry = {}
     if problem.clusters:
         if arm_s_candidate_names:
@@ -3021,6 +3160,8 @@ def layout_native_undirected_portfolio(
                     excluded_names=budget_skipped_arm_s_names,
                 )
                 arm_s_candidate_names.difference_update(budget_skipped_arm_s_names)
+        release_tail_reservation(config, finalist_tail_reservation, "finalist_tail_entered_scoring")
+        charge(config, finalist_tail_charge, "mandatory_finalist_tail")
         scores = {}
         for name in finalist_names:
             score, score_telemetry = _score_undirected_candidate_payload(
@@ -3096,6 +3237,8 @@ def layout_native_undirected_portfolio(
                     if score_telemetry is not None:
                         cluster_score_telemetry[name] = score_telemetry
     else:
+        release_tail_reservation(config, finalist_tail_reservation, "finalist_tail_entered_scoring")
+        charge(config, finalist_tail_charge, "mandatory_finalist_tail")
         scores = {
             name: _score_undirected_candidate_cached(
                 positions[name],
@@ -3125,6 +3268,7 @@ def layout_native_undirected_portfolio(
         winner_name=best_name,
         started_at=started_at,
         started_process_at=started_process_at,
+        config=config,
     )
     _LOGGER.info(
         "Undirected contest candidates=%s winner=%s",
@@ -3208,11 +3352,11 @@ class UndirectedPortfolioRoute(Op):
 
     config: UndirectedPortfolioRouteConfig = field(default_factory=UndirectedPortfolioRouteConfig)
 
-    name: ClassVar[str] = "undirected_portfolio_route"
-    category: ClassVar[OpCategory] = OpCategory.CONTROL
-    reads: ClassVar[Tuple[str, ...]] = ("pos",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ()
+    name: str = "undirected_portfolio_route"
+    category: OpCategory = OpCategory.CONTROL
+    reads: Tuple[str, ...] = ("pos",)
+    writes: Tuple[str, ...] = ("pos",)
+    requires: Tuple[str, ...] = ()
 
     def apply(
         self,
