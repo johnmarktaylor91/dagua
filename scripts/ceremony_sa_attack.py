@@ -12,10 +12,20 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from dagua.eval.ruler_v3 import RulerV3Result, score_core_v3
+from dagua.eval.ruler_v3 import (
+    RulerV3Result,
+    score_core_v3,
+    tier1_tradeoff_flags,
+    with_tier1_tradeoff_flag,
+)
 
 AGGREGATE_TOLERANCE_FRACTION = 0.05
+GG3_BLOCK_AGGREGATE_DELTA_FRACTION = 0.02
 SHAPE_DISTANCE_THRESHOLD = 0.35
+PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.05
+SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.08
+SOL_AGGREGATE_DELTA_TIERED_POINTS = 3.0
+PRIMARY_FAITHFULNESS_FACETS = ("C1", "C3", "G6_weighted_ksm")
 DEFAULT_ITERATIONS = 450
 DEFAULT_RESTARTS = 4
 HIGH_FACET_FLOOR = 0.8
@@ -132,6 +142,13 @@ class AttackResult:
     blocked : bool
         Whether the attack found a materially changed drawing inside the
         aggregate tolerance.
+    primary_faithfulness_drop : float
+        Maximum C1/C3/G6 weighted-KSM score drop, ignoring inapplicable facets.
+    sol_variant_blocked : bool
+        Whether the same morph blocks under Sol's stricter sensitivity
+        thresholds.
+    tier1_tradeoff : bool
+        Whether W7 flags the morph as an aggregate-held T1 tradeoff.
     fooled_facets : Tuple[str, ...]
         Facets that stayed high on a blocking morph.
     best_positions : torch.Tensor
@@ -144,6 +161,9 @@ class AttackResult:
     best_shape_distance: float
     aggregate_delta_fraction: float
     blocked: bool
+    primary_faithfulness_drop: float
+    sol_variant_blocked: bool
+    tier1_tradeoff: bool
     fooled_facets: Tuple[str, ...]
     best_positions: torch.Tensor
 
@@ -470,9 +490,103 @@ def _aggregate_delta_fraction(score: float, baseline_score: float) -> float:
     return abs(score - baseline_score) / denominator
 
 
+def primary_faithfulness_drop(
+    baseline_result: RulerV3Result,
+    candidate_result: RulerV3Result,
+) -> float:
+    """Return the largest primary faithfulness drop for GG-3.
+
+    Parameters
+    ----------
+    baseline_result : RulerV3Result
+        Baseline V3 result.
+    candidate_result : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    float
+        Maximum baseline-minus-candidate score over C1, C3, and G6 weighted
+        KSM, ignoring inapplicable or missing facet scores.
+    """
+    drops: List[float] = []
+    for code in PRIMARY_FAITHFULNESS_FACETS:
+        baseline = baseline_result.facets.get(code)
+        candidate = candidate_result.facets.get(code)
+        if baseline is None or candidate is None:
+            continue
+        if baseline.score is None or candidate.score is None:
+            continue
+        if not baseline.applicable or not candidate.applicable:
+            continue
+        drops.append(float(baseline.score) - float(candidate.score))
+    return max(drops) if drops else 0.0
+
+
+def _gg3_blocked(
+    *,
+    shape_distance: float,
+    aggregate_delta_fraction: float,
+    faithfulness_drop: float,
+) -> bool:
+    """Return whether the Fable GG-3 recalibrated BLOCK gate fires.
+
+    Parameters
+    ----------
+    shape_distance : float
+        Normalized Procrustes RMSD.
+    aggregate_delta_fraction : float
+        Absolute tiered-aggregate drift as a baseline fraction.
+    faithfulness_drop : float
+        Maximum primary faithfulness facet drop.
+
+    Returns
+    -------
+    bool
+        ``True`` only for material shape movement, material primary
+        faithfulness loss, and non-material aggregate movement.
+    """
+    return (
+        shape_distance >= SHAPE_DISTANCE_THRESHOLD
+        and faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
+        and aggregate_delta_fraction <= GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+    )
+
+
+def _sol_variant_blocked(
+    *,
+    shape_distance: float,
+    aggregate_delta_points: float,
+    faithfulness_drop: float,
+) -> bool:
+    """Return whether Sol's GG-3 sensitivity variant blocks.
+
+    Parameters
+    ----------
+    shape_distance : float
+        Normalized Procrustes RMSD.
+    aggregate_delta_points : float
+        Absolute tiered-aggregate movement in 0--100 score points.
+    faithfulness_drop : float
+        Maximum primary faithfulness facet drop.
+
+    Returns
+    -------
+    bool
+        Sensitivity-check verdict using 0.08 primary drop and 3.0 tiered-point
+        aggregate thresholds.
+    """
+    return (
+        shape_distance >= SHAPE_DISTANCE_THRESHOLD
+        and faithfulness_drop >= SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD
+        and aggregate_delta_points <= SOL_AGGREGATE_DELTA_TIERED_POINTS
+    )
+
+
 def _objective(
     shape_distance: float,
     aggregate_delta_fraction: float,
+    faithfulness_drop: float,
     attack_config: AttackConfig,
 ) -> float:
     """Return the adversarial SA objective with a hard tolerance penalty.
@@ -483,6 +597,8 @@ def _objective(
         Normalized Procrustes RMSD.
     aggregate_delta_fraction : float
         Absolute aggregate drift fraction.
+    faithfulness_drop : float
+        Maximum primary faithfulness score drop.
     attack_config : AttackConfig
         Attack thresholds.
 
@@ -493,9 +609,17 @@ def _objective(
     """
     excess = aggregate_delta_fraction - attack_config.aggregate_tolerance_fraction
     if excess <= 0.0:
-        return shape_distance
+        aggregate_hold_bonus = max(
+            0.0,
+            1.0 - aggregate_delta_fraction / attack_config.aggregate_tolerance_fraction,
+        )
+        return shape_distance + 0.25 * max(0.0, faithfulness_drop) + 0.1 * aggregate_hold_bonus
     excess_ratio = excess / max(MIN_BASELINE_SCORE, attack_config.aggregate_tolerance_fraction)
-    return shape_distance - OBJECTIVE_PENALTY * (1.0 + excess_ratio * excess_ratio)
+    return (
+        shape_distance
+        + 0.25 * max(0.0, faithfulness_drop)
+        - OBJECTIVE_PENALTY * (1.0 + excess_ratio * excess_ratio)
+    )
 
 
 def _temperature(step: int, attack_config: AttackConfig) -> float:
@@ -706,6 +830,8 @@ def run_family_attack(
     best_valid_positions = probe.pos.detach().clone()
     best_valid_shape = 0.0
     best_valid_score = baseline_score
+    best_valid_faithfulness_drop = 0.0
+    best_valid_objective = _objective(0.0, 0.0, 0.0, attack_config)
     rng = np.random.default_rng(seed)
 
     for _restart in range(attack_config.restarts):
@@ -714,7 +840,13 @@ def run_family_attack(
         current_score = baseline_score
         current_shape = 0.0
         current_delta = 0.0
-        current_objective = _objective(current_shape, current_delta, attack_config)
+        current_faithfulness_drop = 0.0
+        current_objective = _objective(
+            current_shape,
+            current_delta,
+            current_faithfulness_drop,
+            attack_config,
+        )
         for step in range(attack_config.iterations):
             temperature = _temperature(step, attack_config)
             proposed = _propose_positions(current, probe.pos, rng, temperature)
@@ -722,7 +854,16 @@ def run_family_attack(
             proposed_score = float(proposed_result.scores["tiered"])
             proposed_shape = procrustes_shape_distance(probe.pos, proposed)
             proposed_delta = _aggregate_delta_fraction(proposed_score, baseline_score)
-            proposed_objective = _objective(proposed_shape, proposed_delta, attack_config)
+            proposed_faithfulness_drop = primary_faithfulness_drop(
+                baseline_result,
+                proposed_result,
+            )
+            proposed_objective = _objective(
+                proposed_shape,
+                proposed_delta,
+                proposed_faithfulness_drop,
+                attack_config,
+            )
             objective_gain = proposed_objective - current_objective
             accept = objective_gain >= 0.0 or rng.random() < math.exp(
                 max(-700.0, objective_gain / max(1.0e-12, temperature))
@@ -733,29 +874,49 @@ def run_family_attack(
                 current_score = proposed_score
                 current_shape = proposed_shape
                 current_delta = proposed_delta
+                current_faithfulness_drop = proposed_faithfulness_drop
                 current_objective = proposed_objective
             if (
                 proposed_delta <= attack_config.aggregate_tolerance_fraction
-                and proposed_shape > best_valid_shape
+                and proposed_objective > best_valid_objective
             ):
                 best_valid_result = proposed_result
                 best_valid_positions = proposed.detach().clone()
                 best_valid_shape = proposed_shape
                 best_valid_score = proposed_score
+                best_valid_faithfulness_drop = proposed_faithfulness_drop
+                best_valid_objective = proposed_objective
             if (
                 current_delta <= attack_config.aggregate_tolerance_fraction
-                and current_shape > best_valid_shape
+                and current_objective > best_valid_objective
             ):
                 best_valid_result = current_result
                 best_valid_positions = current.detach().clone()
                 best_valid_shape = current_shape
                 best_valid_score = current_score
+                best_valid_faithfulness_drop = current_faithfulness_drop
+                best_valid_objective = current_objective
 
     best_delta = _aggregate_delta_fraction(best_valid_score, baseline_score)
-    blocked = (
-        best_delta <= attack_config.aggregate_tolerance_fraction
-        and best_valid_shape >= attack_config.shape_distance_threshold
+    aggregate_drop_points = max(0.0, baseline_score - best_valid_score)
+    tier1_tradeoff = bool(tier1_tradeoff_flags(baseline_result, best_valid_result))
+    blocked = _gg3_blocked(
+        shape_distance=best_valid_shape,
+        aggregate_delta_fraction=best_delta,
+        faithfulness_drop=best_valid_faithfulness_drop,
     )
+    sol_variant_blocked = _sol_variant_blocked(
+        shape_distance=best_valid_shape,
+        aggregate_delta_points=aggregate_drop_points,
+        faithfulness_drop=best_valid_faithfulness_drop,
+    )
+    tradeoff_region_blocked = (
+        best_valid_shape >= SHAPE_DISTANCE_THRESHOLD
+        and best_valid_faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
+        and GG3_BLOCK_AGGREGATE_DELTA_FRACTION < best_delta < AGGREGATE_TOLERANCE_FRACTION
+        and not tier1_tradeoff
+    )
+    blocked = blocked or tradeoff_region_blocked
     return AttackResult(
         family=probe.family,
         baseline_score=baseline_score,
@@ -763,6 +924,9 @@ def run_family_attack(
         best_shape_distance=best_valid_shape,
         aggregate_delta_fraction=best_delta,
         blocked=blocked,
+        primary_faithfulness_drop=best_valid_faithfulness_drop,
+        sol_variant_blocked=sol_variant_blocked,
+        tier1_tradeoff=tier1_tradeoff,
         fooled_facets=fooled_facets(baseline_result, best_valid_result) if blocked else (),
         best_positions=best_valid_positions,
     )
@@ -1187,7 +1351,10 @@ def _write_family_diagnostics(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     baseline_result = _score_probe(probe, probe.pos, score_config)
-    morph_result = _score_probe(probe, result.best_positions, score_config)
+    morph_result = with_tier1_tradeoff_flag(
+        baseline_result,
+        _score_probe(probe, result.best_positions, score_config),
+    )
     morph_shape = procrustes_shape_distance(probe.pos, result.best_positions)
     baseline_path = output_dir / f"{probe.family}_baseline.pt"
     morph_path = output_dir / f"{probe.family}_morph.pt"
@@ -1389,29 +1556,94 @@ def run_all_attacks(
     return tuple(results)
 
 
-def format_results_table(results: Sequence[AttackResult]) -> str:
+def _fable_verdict(result: AttackResult) -> str:
+    """Return the Fable GG-3 verdict label for one attack result.
+
+    Parameters
+    ----------
+    result : AttackResult
+        Per-family attack outcome.
+
+    Returns
+    -------
+    str
+        ``BLOCK``, ``PASS-with-signal``, or ``PASS``.
+    """
+    if result.blocked:
+        return "BLOCK"
+    signaled = (
+        result.best_shape_distance >= SHAPE_DISTANCE_THRESHOLD
+        and result.primary_faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
+        and GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+        < result.aggregate_delta_fraction
+        <= AGGREGATE_TOLERANCE_FRACTION
+        and result.tier1_tradeoff
+    )
+    return "PASS-with-signal" if signaled else "PASS"
+
+
+def _sol_verdict(result: AttackResult) -> str:
+    """Return Sol's sensitivity-check GG-3 verdict label.
+
+    Parameters
+    ----------
+    result : AttackResult
+        Per-family attack outcome.
+
+    Returns
+    -------
+    str
+        ``BLOCK``, ``PASS-with-signal``, or ``PASS`` under Sol thresholds.
+    """
+    if result.sol_variant_blocked:
+        return "BLOCK"
+    aggregate_drop_points = max(0.0, result.baseline_score - result.best_score)
+    signaled = (
+        result.best_shape_distance >= SHAPE_DISTANCE_THRESHOLD
+        and result.primary_faithfulness_drop >= SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD
+        and aggregate_drop_points > SOL_AGGREGATE_DELTA_TIERED_POINTS
+        and result.aggregate_delta_fraction <= AGGREGATE_TOLERANCE_FRACTION
+        and result.tier1_tradeoff
+    )
+    return "PASS-with-signal" if signaled else "PASS"
+
+
+def format_results_table(
+    results: Sequence[AttackResult],
+    *,
+    sensitivity_variant: str = "fable",
+) -> str:
     """Format the ceremony PASS/BLOCK table.
 
     Parameters
     ----------
     results : Sequence[AttackResult]
         Per-family attack outcomes.
+    sensitivity_variant : str, optional
+        Threshold variant to format, either ``"fable"`` or ``"sol"``.
 
     Returns
     -------
     str
         Markdown table with the required verdict columns.
     """
+    if sensitivity_variant not in {"fable", "sol"}:
+        raise ValueError(f"unknown GG-3 sensitivity variant: {sensitivity_variant}")
     lines = [
-        "| family | best shape dist | aggregate delta | verdict | fooled facets |",
-        "|---|---:|---:|---|---|",
+        "| family | best shape dist | primary faith drop | aggregate delta | "
+        "tiered delta | W7 | verdict | fooled facets |",
+        "|---|---:|---:|---:|---:|---|---|---|",
     ]
     for result in results:
-        verdict = "BLOCK" if result.blocked else "PASS"
+        verdict = _fable_verdict(result) if sensitivity_variant == "fable" else _sol_verdict(result)
         facets = ", ".join(result.fooled_facets) if result.fooled_facets else "-"
+        signed_tiered_drop = result.baseline_score - result.best_score
         lines.append(
             f"| {result.family} | {result.best_shape_distance:.4f} | "
-            f"{100.0 * result.aggregate_delta_fraction:.2f}% | {verdict} | {facets} |"
+            f"{result.primary_faithfulness_drop:.4f} | "
+            f"{100.0 * result.aggregate_delta_fraction:.2f}% | "
+            f"{signed_tiered_drop:.2f} | "
+            f"{'yes' if result.tier1_tradeoff else 'no'} | {verdict} | {facets} |"
         )
     return "\n".join(lines)
 
@@ -1486,11 +1718,19 @@ def main() -> int:
             attack_config=attack_config,
             score_config=ScoreConfig(),
         )
-    print(format_results_table(results))
+    print("Fable GG-3 criterion")
+    print(format_results_table(results, sensitivity_variant="fable"))
+    print()
+    print("Sol GG-3 sensitivity variant")
+    print(format_results_table(results, sensitivity_variant="sol"))
     print()
     print(
         "thresholds: "
-        f"aggregate_tolerance={attack_config.aggregate_tolerance_fraction:.2%}, "
+        f"search_aggregate_tolerance={attack_config.aggregate_tolerance_fraction:.2%}, "
+        f"block_aggregate_tolerance={GG3_BLOCK_AGGREGATE_DELTA_FRACTION:.2%}, "
+        f"primary_faithfulness_drop={PRIMARY_FAITHFULNESS_DROP_THRESHOLD:.2f}, "
+        f"sol_primary_faithfulness_drop={SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD:.2f}, "
+        f"sol_aggregate_delta={SOL_AGGREGATE_DELTA_TIERED_POINTS:.1f}pt, "
         f"shape_distance={attack_config.shape_distance_threshold:.2f}, "
         f"budget={attack_config.restarts}x{attack_config.iterations}"
     )
