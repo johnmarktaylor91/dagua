@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
+from dagua.eval.ruler_v3_frozen import FROZEN_CONSTANTS
 from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
 from dagua.metrics import (
     _all_pairs_unweighted,
@@ -354,6 +355,8 @@ def score_core_v3(
         metadata={
             "num_nodes": num_nodes,
             "num_edges": int(edges.shape[1]) if edges.numel() else 0,
+            "frozen_constants_manifest": "dagua.eval.ruler_v3_frozen.FROZEN_CONSTANTS",
+            "frozen_constant_count": len(FROZEN_CONSTANTS),
             "default_node_sizes": used_default_sizes,
             "node_diag_mean": node_diag_mean,
             "edge_length_mean": float(length_stats["edge_length_mean"]),
