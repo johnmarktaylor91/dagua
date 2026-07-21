@@ -10,6 +10,9 @@ import pytest
 import torch
 
 from scripts.ceremony_sa_attack import (
+    AGGREGATE_TOLERANCE_FRACTION,
+    GG3_BLOCK_AGGREGATE_DELTA_FRACTION,
+    PRIMARY_FAITHFULNESS_DROP_THRESHOLD,
     AttackConfig,
     AttackResult,
     ProbeFamily,
@@ -39,7 +42,7 @@ FAMILY_SEEDS = {
 
 def _result_signature(
     result: AttackResult,
-) -> Tuple[str, float, float, float, bool, Tuple[str, ...]]:
+) -> Tuple[str, float, float, float, bool, float, bool, bool, Tuple[str, ...]]:
     """Return the deterministic fields compared by the tests.
 
     Parameters
@@ -49,7 +52,7 @@ def _result_signature(
 
     Returns
     -------
-    Tuple[str, float, float, float, bool, Tuple[str, ...]]
+    Tuple[str, float, float, float, bool, float, bool, bool, Tuple[str, ...]]
         Stable comparison tuple.
     """
     return (
@@ -58,6 +61,9 @@ def _result_signature(
         result.best_shape_distance,
         result.aggregate_delta_fraction,
         result.blocked,
+        result.primary_faithfulness_drop,
+        result.sol_variant_blocked,
+        result.tier1_tradeoff,
         result.fooled_facets,
     )
 
@@ -90,7 +96,17 @@ def test_gg3_sa_attack_per_family_passes_or_reports_block(probe: ProbeFamily) ->
             f"fooled_facets={facets}"
         )
     assert result.aggregate_delta_fraction <= TEST_ATTACK_CONFIG.aggregate_tolerance_fraction
-    assert result.best_shape_distance < TEST_ATTACK_CONFIG.shape_distance_threshold
+    material_shape = result.best_shape_distance >= TEST_ATTACK_CONFIG.shape_distance_threshold
+    material_faith = result.primary_faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
+    aggregate_held = result.aggregate_delta_fraction <= GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+    tradeoff_band = (
+        GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+        < result.aggregate_delta_fraction
+        < AGGREGATE_TOLERANCE_FRACTION
+    )
+    assert not (material_shape and material_faith and aggregate_held)
+    if material_shape and material_faith and tradeoff_band:
+        assert result.tier1_tradeoff
 
 
 def test_gg3_sa_attack_is_deterministic_for_same_seed() -> None:
