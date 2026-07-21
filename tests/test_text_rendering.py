@@ -1315,7 +1315,15 @@ def test_fc_match_font_path_builds_normalized_pattern(monkeypatch: pytest.Monkey
 def test_measure_text_uses_fontconfig_for_times_when_termes_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exact measurement must use the same fontconfig face as rendering."""
+    """Termes-less Times measurement must resolve through fontconfig.
+
+    The exact pattern is the documented CoreText/Pango font-stack waiver
+    (graphviz multiline autosizing parity): Graphviz's Times-Roman PostScript
+    alias resolves to Times New Roman through Pango, and asking fontconfig for
+    the generic "Times,serif" stack would select Apple's Times.ttc on macOS,
+    whose short-label advances differ. Regular weight therefore queries
+    "Times New Roman"; bold keeps the caller's family passthrough.
+    """
     paths = importlib.import_module("dagua.render.text.paths")
     utils = importlib.import_module("dagua.utils")
     matched_families: list[str] = []
@@ -1335,6 +1343,14 @@ def test_measure_text_uses_fontconfig_for_times_when_termes_is_missing(
         )
         assert width > 0.0
         assert height >= 14.0
+        assert matched_families == ["Times New Roman"]
+
+        matched_families.clear()
+        bold_width, bold_height = utils._measure_text_exact_cached(
+            "Graphviz", "Times,serif", 14.0, "bold", "normal"
+        )
+        assert bold_width > 0.0
+        assert bold_height >= 14.0
         assert matched_families == ["Times,serif"]
     finally:
         utils._measure_text_exact_cached.cache_clear()
@@ -1423,9 +1439,19 @@ def test_render_text_background_and_outline() -> None:
     assert len(artists) >= 3
 
 
-def test_render_text_outline_clamps_to_visible_width() -> None:
-    """Outline strokes should keep a minimum width even for tiny style values."""
+def _outline_ribbon_bbox(outline_width: float) -> tuple[float, float, float, float]:
+    """Render one outlined label and return its outline ribbons' union bbox.
 
+    Parameters
+    ----------
+    outline_width : float
+        Requested outline stroke width in typographic points.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        ``(min_x, min_y, max_x, max_y)`` over every outline ribbon vertex.
+    """
     fig, ax = _make_axes()
     artists = _render_specs(
         ax,
@@ -1436,21 +1462,48 @@ def test_render_text_outline_clamps_to_visible_width() -> None:
                 "Outline",
                 font_size=12.0,
                 outline=True,
-                outline_width=0.5,
+                outline_width=outline_width,
                 gid="outline-clamp",
             )
         ],
     )
     plt.close(fig)
 
-    outline_patches = [
-        artist for artist in artists if isinstance(artist, PathPatch) and artist.get_gid()
+    ribbon_vertices = [
+        artist.get_path().vertices
+        for artist in artists
+        if isinstance(artist, PathPatch) and str(artist.get_gid()) == "outline-clamp-outline-0-0"
     ]
-    assert any(
-        str(patch.get_gid()) == "outline-clamp-outline-0-0"
-        and float(patch.get_linewidth()) == pytest.approx(2.0)
-        for patch in outline_patches
+    assert ribbon_vertices, "outline ribbons must carry the outline gid"
+    stacked = np.concatenate(ribbon_vertices, axis=0)
+    return (
+        float(stacked[:, 0].min()),
+        float(stacked[:, 1].min()),
+        float(stacked[:, 0].max()),
+        float(stacked[:, 1].max()),
     )
+
+
+def test_render_text_outline_clamps_to_visible_width() -> None:
+    """Outline strokes should keep a minimum width even for tiny style values.
+
+    Outlines are rendered as filled data-coordinate stroke ribbons (the
+    data-coord rendering doctrine), so the clamp shows up in the ribbon
+    geometry rather than in a matplotlib linewidth: a sub-minimum request
+    (0.5pt) must produce exactly the same ribbon extent as the 2.0pt visible
+    floor, while a request above the floor must widen the ribbons.
+    """
+    clamped_bbox = _outline_ribbon_bbox(0.5)
+    floor_bbox = _outline_ribbon_bbox(2.0)
+    wide_bbox = _outline_ribbon_bbox(6.0)
+
+    assert clamped_bbox == pytest.approx(floor_bbox)
+    wide_span_x = wide_bbox[2] - wide_bbox[0]
+    wide_span_y = wide_bbox[3] - wide_bbox[1]
+    floor_span_x = floor_bbox[2] - floor_bbox[0]
+    floor_span_y = floor_bbox[3] - floor_bbox[1]
+    assert wide_span_x > floor_span_x
+    assert wide_span_y > floor_span_y
 
 
 def test_render_text_bold_adds_emphasis_patch(monkeypatch: pytest.MonkeyPatch) -> None:
