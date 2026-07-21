@@ -39,8 +39,9 @@ G7_SEVERE_PORT_CAP = 0.5
 G7_PORT_SIDE_COSINE_THRESHOLD = math.sqrt(0.5)
 G7_ROUTE_SAMPLE_CANONICAL_DISTANCE = 1.0
 G7_TERMINAL_SEPARATION_FRACTION = 0.5
-G2_SLOT_A_TOTAL = 7.0
+G2_SLOT_A_TOTAL = 5.0
 G2_SLOT_B_TOTAL = 3.0
+G2_SLOT_A_DIAGNOSTIC_FACETS = frozenset({"G2_cluster_exclusion"})
 G4_SLOT_A_TOTAL = 5.0
 G4_SLOT_B_TOTAL = 5.0
 COMPACTNESS_RATIO_PLATEAU_HI = 8.0
@@ -961,12 +962,13 @@ def _score_g2(
     active_slot_a_total = sum(
         slot_weight
         for _code, _name, raw_score, slot_weight, _metadata in slot_a_scores
-        if raw_score is not None
+        if raw_score is not None and _code not in G2_SLOT_A_DIAGNOSTIC_FACETS
     )
     for code, name, raw_score, slot_weight, metadata in slot_a_scores:
+        diagnostic_only = code in G2_SLOT_A_DIAGNOSTIC_FACETS
         effective_weight = (
             _tier_weight(2) * slot_weight / active_slot_a_total
-            if active_slot_a_total > 0.0
+            if active_slot_a_total > 0.0 and not diagnostic_only
             else 0.0
         )
         facets[code] = GroupFacetScore(
@@ -976,13 +978,23 @@ def _score_g2(
             score=raw_score,
             base_weight=effective_weight,
             effective_weight=effective_weight if raw_score is not None else 0.0,
-            applicable=raw_score is not None,
-            applicability_reason=reason,
+            applicable=raw_score is not None and not diagnostic_only,
+            applicability_reason=(
+                "diagnostic_only:sec_2_3_redundant_with_C4" if diagnostic_only else reason
+            ),
             metadata={
                 **common,
                 **metadata,
                 "slot": "G2_A_containment_hygiene",
                 "slot_internal_weight": slot_weight,
+                **(
+                    {
+                        "diagnostic_only": True,
+                        "audit_demotion": "sec_2_3_redundant_with_C4_clean_units_field",
+                    }
+                    if diagnostic_only
+                    else {}
+                ),
                 "normalization": (
                     "reused frozen dagua.metrics AABB cluster scorer in canonical node-height frame"
                 ),
@@ -4455,7 +4467,6 @@ GROUP_REGISTRY: Dict[str, ConditionalGroup] = {
         key="G2",
         applicability_gate=_declared_cluster_gate,
         tier_slots=(
-            GroupSlot("G2_cluster_exclusion", 2, 2.0 / G2_SLOT_A_TOTAL),
             GroupSlot("G2_cluster_sibling_overlap", 2, 2.0 / G2_SLOT_A_TOTAL),
             GroupSlot("G2_cluster_nesting_fidelity", 2, 1.0 / G2_SLOT_A_TOTAL),
             GroupSlot("G2_cluster_edge_intrusion", 2, 1.0 / G2_SLOT_A_TOTAL),
