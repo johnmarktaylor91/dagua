@@ -1426,7 +1426,7 @@ def test_directed_predicted_cost_skips_second_dotx_arm(monkeypatch: object) -> N
         """Allow the first dot-x arm and reject the measured sibling follow-up."""
         del config
         predictions.append(predicted_cost_s)
-        return len(predictions) == 1
+        return len(calls) == 0
 
     def fake_proxy(*args: object, **kwargs: object) -> float:
         """Return a tied proxy score."""
@@ -1447,6 +1447,15 @@ def test_directed_predicted_cost_skips_second_dotx_arm(monkeypatch: object) -> N
     monkeypatch.setattr(native_directed, "_predicted_arm_budget_available", fake_predicted)
     monkeypatch.setattr(native_directed, "_proxy_directed_candidate", fake_proxy)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_recombinant_layered_enabled",
+        lambda *args: False,
+    )
+    monkeypatch.setattr(native_directed, "_ordering_cost_admissible", lambda *args, **kwargs: False)
     edge_index = torch.stack(
         [
             torch.arange(num_nodes - 1, dtype=torch.long),
@@ -1467,11 +1476,82 @@ def test_directed_predicted_cost_skips_second_dotx_arm(monkeypatch: object) -> N
 
     assert len(calls) == 1
     assert calls[0]["graphviz_corrected_dot_x"] is True
-    assert len(predictions) == 2
+    assert predictions[-2:] == [pytest.approx(2.2), pytest.approx(2.2)]
+
+
+def test_directed_sugiyama_ledger_admission_skips_before_run(monkeypatch: object) -> None:
+    """Directed Sugiyama arms use ledger admission instead of measured sibling runtime."""
+    from dagua.layout.ops.pipelines.native_budget import DECISION_LOG_ATTR, install_budget_ledger
+
+    calls: list[dict[str, object]] = []
+    num_nodes = 250
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite incumbent quickly."""
+        del args, kwargs
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    def fake_sugiyama(**kwargs: object) -> torch.Tensor:
+        """Record unexpected Sugiyama execution."""
+        calls.append(kwargs)
+        y = torch.arange(num_nodes, dtype=torch.float32)
+        return torch.stack([torch.zeros_like(y), y * 100.0], dim=1)
+
+    def fake_proxy(*args: object, **kwargs: object) -> float:
+        """Return tied proxy scores."""
+        del args, kwargs
+        return 0.0
+
+    def fake_score(*args: object, **kwargs: object) -> float:
+        """Return tied full scores."""
+        del args, kwargs
+        return 0.0
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
+    monkeypatch.setattr(native_directed, "_predicted_arm_budget_available", lambda *args: True)
+    monkeypatch.setattr(native_undirected, "_portfolio_has_budget", lambda *args, **kwargs: True)
+    monkeypatch.setattr(native_directed, "_proxy_directed_candidate", fake_proxy)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    edge_index = torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=6.0, return_reserve_dwu=5.0)
+
+    layout_native_directed_portfolio(
+        LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=torch.full((num_nodes, 2), 60.0),
+        ),
+        SolveState(),
+        RuntimeContext(),
+        config,
+    )
+
+    assert calls == []
+    assert any(
+        record["event"] == "skip" and record["reason"] == "optional_directed_sugiyama_cluster_dotx"
+        for record in getattr(config, DECISION_LOG_ATTR)
+    )
 
 
 def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) -> None:
     """Directed contests quick-score all arms but full-score only challenger finalists."""
+    from dagua.layout.ops.pipelines.native_budget import DECISION_LOG_ATTR, install_budget_ledger
+
     full_scored: list[float] = []
     proxy_scored: list[float] = []
     num_nodes = 250
@@ -1553,10 +1633,29 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         node_sizes=torch.full((num_nodes, 2), 60.0),
     )
 
-    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), LayoutConfig())
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=300.0, return_reserve_dwu=5.0)
+
+    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), config)
 
     expected_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(SUGIYAMA_RANK_SEP_GRID) * len(
         SUGIYAMA_NODE_SEP_GRID
     )
     assert len(proxy_scored) == expected_candidates + 1
     assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
+    decision_log = getattr(config, DECISION_LOG_ATTR)
+    admitted_sugiyama = [
+        record["reason"]
+        for record in decision_log
+        if record["event"] == "admit"
+        and str(record["reason"]).startswith("optional_directed_sugiyama")
+    ]
+    skipped_sugiyama = [
+        record["reason"]
+        for record in decision_log
+        if record["event"] == "skip"
+        and str(record["reason"]).startswith("optional_directed_sugiyama")
+    ]
+
+    assert len(admitted_sugiyama) == expected_candidates
+    assert skipped_sugiyama == []
