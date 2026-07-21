@@ -37,6 +37,7 @@ G5_CHANGE_EPSILON = 1e-9
 G5_ZERO_CHANGE_SCALE = 0.05
 G7_SEVERE_PORT_CAP = 0.5
 G7_PORT_SIDE_COSINE_THRESHOLD = math.sqrt(0.5)
+G7_ROUTE_SAMPLE_CANONICAL_DISTANCE = 1.0
 G7_TERMINAL_SEPARATION_FRACTION = 0.5
 G2_SLOT_A_TOTAL = 7.0
 G2_SLOT_B_TOTAL = 3.0
@@ -442,6 +443,37 @@ def _canonicalize_curves(
             )
         )
     return tuple(canonical_curves)
+
+
+def _canonicalize_port_records(
+    ports: Sequence[Mapping[str, Any]],
+    canonicalization: IntrinsicRulerCanonicalization,
+) -> Tuple[Dict[str, Any], ...]:
+    """Divide explicit port coordinates into the canonical frame.
+
+    Parameters
+    ----------
+    ports : Sequence[Mapping[str, Any]]
+        Declared port endpoint records.
+    canonicalization : IntrinsicRulerCanonicalization
+        Per-drawing canonicalization record.
+
+    Returns
+    -------
+    Tuple[Dict[str, Any], ...]
+        Port records with explicit ``position`` coordinates canonicalized.
+    """
+    canonical_ports = []
+    for port in ports:
+        record = dict(port)
+        point = record.get("position")
+        if point is not None:
+            record["position"] = _canonicalize_point(
+                (float(point[0]), float(point[1])),
+                canonicalization,
+            )
+        canonical_ports.append(record)
+    return tuple(canonical_ports)
 
 
 def _canonicalize_label_positions(
@@ -1352,10 +1384,20 @@ def _score_g7(
     routing_declared = bool(meta.get("routing_declared", False))
     route_input = routes if routes is not None else [None] * int(edges.shape[1])
     curves = routes_to_curves(route_input, positions, edges) if routing_declared else None
-    compliance = _port_compliance_score(positions, edges, ports, curves)
+    routed_canonicalization = _intrinsic_ruler_canonicalization(sizes)
+    compliance_positions = _canonicalize_tensor(positions, routed_canonicalization)
+    compliance_curves = (
+        _canonicalize_curves(curves, routed_canonicalization) if curves is not None else None
+    )
+    compliance_ports = _canonicalize_port_records(ports, routed_canonicalization)
+    compliance = _port_compliance_score(
+        compliance_positions,
+        edges,
+        compliance_ports,
+        compliance_curves,
+    )
     severe = bool(compliance["severe_side_violation_count"] > 0)
     group_cap = G7_SEVERE_PORT_CAP if severe else 1.0
-    routed_canonicalization = _intrinsic_ruler_canonicalization(sizes)
     flags = _merge_flags(
         ("PORT_VIOLATION",) if compliance["hard_compliance"] < 1.0 else tuple(),
         routed_canonicalization.flags if curves is not None else tuple(),
@@ -1763,7 +1805,12 @@ def _port_compliance_score(
             checks += 1
             if _port_position_satisfied(positions, port):
                 satisfied += 1
-    order_checks, order_satisfied = _port_order_satisfaction(positions, normalized_ports)
+    order_checks, order_satisfied = _port_order_satisfaction(
+        positions,
+        edge_index,
+        normalized_ports,
+        curves,
+    )
     checks += order_checks
     satisfied += order_satisfied
     hard = 1.0 if checks == 0 else satisfied / checks
@@ -1882,7 +1929,8 @@ def _port_endpoint_vector(
         origin = (float(positions[node, 0].item()), float(positions[node, 1].item()))
         if endpoint == "target":
             points = tuple(reversed(points))
-        return _route_vector_at_arc_length(origin, points)
+        sample = _route_sample_at_arc_length(origin, points)
+        return (sample[0] - origin[0], sample[1] - origin[1])
     other_row = 1 if endpoint != "target" else 0
     other = int(edge_index[other_row, edge].item())
     return (
@@ -1891,11 +1939,11 @@ def _port_endpoint_vector(
     )
 
 
-def _route_vector_at_arc_length(
+def _route_sample_at_arc_length(
     origin: Tuple[float, float],
     points: Sequence[Tuple[float, float]],
 ) -> Tuple[float, float]:
-    """Return a route vector sampled after a frozen arc length from a node.
+    """Return a route point sampled after a canonical arc length from a node.
 
     Parameters
     ----------
@@ -1907,11 +1955,11 @@ def _route_vector_at_arc_length(
     Returns
     -------
     Tuple[float, float]
-        Vector from ``origin`` to the sampled route point.
+        Sampled route point in the same frame as ``origin`` and ``points``.
     """
     if not points:
-        return (0.0, 0.0)
-    target_distance = 1.0
+        return origin
+    target_distance = G7_ROUTE_SAMPLE_CANONICAL_DISTANCE
     previous = (float(points[0][0]), float(points[0][1]))
     travelled = math.hypot(previous[0] - origin[0], previous[1] - origin[1])
     for point in points[1:]:
@@ -1926,10 +1974,10 @@ def _route_vector_at_arc_length(
                 previous[0] + fraction * (current[0] - previous[0]),
                 previous[1] + fraction * (current[1] - previous[1]),
             )
-            return (sample[0] - origin[0], sample[1] - origin[1])
+            return sample
         travelled += segment
         previous = current
-    return (previous[0] - origin[0], previous[1] - origin[1])
+    return previous
 
 
 def _port_side_normal(side: str) -> Tuple[float, float]:
@@ -1987,7 +2035,9 @@ def _port_position_satisfied(positions: torch.Tensor, port: Mapping[str, Any]) -
 
 def _port_order_satisfaction(
     positions: torch.Tensor,
+    edge_index: torch.Tensor,
     ports: Sequence[Mapping[str, Any]],
+    curves: Optional[Sequence[Any]],
 ) -> Tuple[int, int]:
     """Score declared order along each node side.
 
@@ -1995,8 +2045,12 @@ def _port_order_satisfaction(
     ----------
     positions : torch.Tensor
         Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
     ports : Sequence[Mapping[str, Any]]
         Completed port records.
+    curves : Optional[Sequence[Any]]
+        Optional routed curves aligned to ``edge_index``.
 
     Returns
     -------
@@ -2009,12 +2063,20 @@ def _port_order_satisfaction(
             continue
         node = int(port["node"])
         side = str(port["side"])
-        coordinate = _port_order_coordinate(positions, port)
+        coordinate = _port_order_coordinate(positions, edge_index, port, curves)
+        if coordinate is None:
+            continue
         buckets.setdefault((node, side), []).append((coordinate, int(port["order"])))
     checks = 0
     satisfied = 0
     for values in buckets.values():
         if len(values) < 2:
+            continue
+        if (
+            max(coordinate for coordinate, _order in values)
+            - min(coordinate for coordinate, _order in values)
+            <= 1e-12
+        ):
             continue
         checks += len(values)
         drawn = [order for _coord, order in sorted(values)]
@@ -2022,27 +2084,46 @@ def _port_order_satisfaction(
     return checks, satisfied
 
 
-def _port_order_coordinate(positions: torch.Tensor, port: Mapping[str, Any]) -> float:
+def _port_order_coordinate(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    port: Mapping[str, Any],
+    curves: Optional[Sequence[Any]],
+) -> Optional[float]:
     """Return a side tangent coordinate for port ordering.
 
     Parameters
     ----------
     positions : torch.Tensor
         Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
     port : Mapping[str, Any]
         Completed port record.
+    curves : Optional[Sequence[Any]]
+        Optional routed curves aligned to ``edge_index``.
 
     Returns
     -------
-    float
-        Tangent coordinate along the declared side.
+    Optional[float]
+        Tangent coordinate along the declared side, or ``None`` when no real
+        port geometry is resolvable.
     """
     point = port.get("position")
     if point is not None:
         x_value, y_value = float(point[0]), float(point[1])
-    else:
+    elif curves is not None:
+        edge = int(port["edge"])
+        if edge < 0 or edge >= len(curves):
+            return None
         node = int(port["node"])
-        x_value, y_value = float(positions[node, 0].item()), float(positions[node, 1].item())
+        points = _curve_points(curves[edge])
+        if str(port.get("endpoint")) == "target":
+            points = tuple(reversed(points))
+        origin = (float(positions[node, 0].item()), float(positions[node, 1].item()))
+        x_value, y_value = _route_sample_at_arc_length(origin, points)
+    else:
+        return None
     side = str(port.get("side", "E")).lower()
     return x_value if side in {"n", "north", "top", "s", "south", "bottom"} else y_value
 
@@ -2921,7 +3002,7 @@ def _g4_layered_scores(
         (
             "G4_layered_parent_centering",
             "rt_parent_centering",
-            _parent_centering_score(positions, forest),
+            _parent_centering_score(positions, sizes, forest),
             "G4_A_RT_axioms",
             2.0,
             G4_SLOT_A_TOTAL,
@@ -3036,7 +3117,12 @@ def _g4_radial_scores(
             "G4_B_radial_tidiness",
             2.0,
             G4_SLOT_B_TOTAL,
-            {},
+            {
+                "fair_share_floor_note": (
+                    "full-circle row-fair angular floor can ceiling perfect multi-level radial "
+                    "drawings below 1.0 by design"
+                )
+            },
         ),
         (
             "G4_radial_subtree_congruence",
@@ -3068,13 +3154,19 @@ def _g4_radial_scores(
     )
 
 
-def _parent_centering_score(positions: torch.Tensor, forest: TreeForest) -> float:
+def _parent_centering_score(
+    positions: torch.Tensor,
+    sizes: torch.Tensor,
+    forest: TreeForest,
+) -> float:
     """Score parent x-coordinate centering over child centroids.
 
     Parameters
     ----------
     positions : torch.Tensor
         Node positions with shape ``[N, 2]``.
+    sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
     forest : TreeForest
         Normalized rooted forest.
 
@@ -3089,7 +3181,11 @@ def _parent_centering_score(positions: torch.Tensor, forest: TreeForest) -> floa
             continue
         child_center = float(positions[list(children), 0].mean().item())
         child_values = positions[list(children), 0].numpy()
-        family_span = _position_span(child_values) if len(children) > 1 else 1.0
+        family_span = (
+            _position_span(child_values)
+            if len(children) > 1
+            else _intrinsic_ruler_canonicalization(sizes).scale
+        )
         penalties.append(
             min(1.0, abs(float(positions[parent, 0].item()) - child_center) / family_span)
         )
@@ -3515,29 +3611,6 @@ def _circular_voronoi_shares(values: np.ndarray) -> np.ndarray:
     return shares / max(float(shares.sum()), 1e-12)
 
 
-def _largest_gap_cut(values: np.ndarray) -> float:
-    """Return an angle just after the largest gap in a set of angles.
-
-    Parameters
-    ----------
-    values : numpy.ndarray
-        Angles in radians.
-
-    Returns
-    -------
-    float
-        Common cut angle in radians.
-    """
-    if values.size == 0:
-        return 0.0
-    ordered = np.sort(np.mod(values, 2.0 * math.pi))
-    if ordered.size == 1:
-        return float(ordered[0])
-    gaps = np.diff(np.concatenate([ordered, ordered[:1] + 2.0 * math.pi]))
-    start = int(np.argmax(gaps) + 1) % ordered.size
-    return float(ordered[start])
-
-
 def _circular_mean(values: np.ndarray) -> float:
     """Return a circular mean angle.
 
@@ -3611,27 +3684,6 @@ def _circular_segments_overlap(
         for right_start, right_end in right:
             total += max(0.0, min(left_end, right_end) - max(left_start, right_start))
     return total
-
-
-def _angular_interval_with_cut(values: np.ndarray, cut: float) -> Tuple[float, float]:
-    """Return an angular interval unwrapped on a shared family cut.
-
-    Parameters
-    ----------
-    values : numpy.ndarray
-        Angles in radians.
-    cut : float
-        Common cut angle in radians.
-
-    Returns
-    -------
-    Tuple[float, float]
-        Interval endpoints in radians.
-    """
-    if values.size == 0:
-        return (0.0, 0.0)
-    unwrapped = np.sort(np.mod(values - cut, 2.0 * math.pi))
-    return float(unwrapped[0]), float(unwrapped[-1])
 
 
 def _angular_span(values: np.ndarray) -> float:
