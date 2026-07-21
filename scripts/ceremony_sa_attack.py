@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -20,6 +22,7 @@ HIGH_FACET_FLOOR = 0.8
 FOOLED_FACET_MAX_DROP = 0.05
 OBJECTIVE_PENALTY = 10.0
 MIN_BASELINE_SCORE = 1.0e-12
+DEFAULT_DIAGNOSTICS_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_diagnostics"
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,8 @@ class AttackResult:
         aggregate tolerance.
     fooled_facets : Tuple[str, ...]
         Facets that stayed high on a blocking morph.
+    best_positions : torch.Tensor
+        Position tensor with shape ``[N, 2]`` for the best valid morph.
     """
 
     family: str
@@ -140,6 +145,38 @@ class AttackResult:
     aggregate_delta_fraction: float
     blocked: bool
     fooled_facets: Tuple[str, ...]
+    best_positions: torch.Tensor
+
+
+@dataclass(frozen=True)
+class FacetDiff:
+    """Facet comparison used by the GG-3 diagnostics report.
+
+    Parameters
+    ----------
+    code : str
+        Facet code.
+    baseline_score : Optional[float]
+        Baseline facet score, or ``None`` when inapplicable.
+    morph_score : Optional[float]
+        Morph facet score, or ``None`` when inapplicable.
+    baseline_applicable : bool
+        Whether the facet applied on the baseline drawing.
+    morph_applicable : bool
+        Whether the facet applied on the morph drawing.
+    weight : float
+        Morph-side effective tiered weight used by the attack aggregate.
+    drop : Optional[float]
+        Baseline minus morph score when both are applicable.
+    """
+
+    code: str
+    baseline_score: Optional[float]
+    morph_score: Optional[float]
+    baseline_applicable: bool
+    morph_applicable: bool
+    weight: float
+    drop: Optional[float]
 
 
 def _sizes(count: int, width: float = 0.2, height: Optional[float] = None) -> torch.Tensor:
@@ -666,6 +703,7 @@ def run_family_attack(
     baseline_result = _score_probe(probe, probe.pos, score_config)
     baseline_score = float(baseline_result.scores["tiered"])
     best_valid_result = baseline_result
+    best_valid_positions = probe.pos.detach().clone()
     best_valid_shape = 0.0
     best_valid_score = baseline_score
     rng = np.random.default_rng(seed)
@@ -701,6 +739,7 @@ def run_family_attack(
                 and proposed_shape > best_valid_shape
             ):
                 best_valid_result = proposed_result
+                best_valid_positions = proposed.detach().clone()
                 best_valid_shape = proposed_shape
                 best_valid_score = proposed_score
             if (
@@ -708,6 +747,7 @@ def run_family_attack(
                 and current_shape > best_valid_shape
             ):
                 best_valid_result = current_result
+                best_valid_positions = current.detach().clone()
                 best_valid_shape = current_shape
                 best_valid_score = current_score
 
@@ -724,7 +764,588 @@ def run_family_attack(
         aggregate_delta_fraction=best_delta,
         blocked=blocked,
         fooled_facets=fooled_facets(baseline_result, best_valid_result) if blocked else (),
+        best_positions=best_valid_positions,
     )
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert scorer metadata to JSON-compatible primitives.
+
+    Parameters
+    ----------
+    value : Any
+        Metadata value emitted by V3 scoring or probe declarations.
+
+    Returns
+    -------
+    Any
+        JSON-serializable representation preserving diagnostic content.
+    """
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _tiered_contributions(result: RulerV3Result) -> Dict[str, float]:
+    """Return per-facet contributions to the tiered 0--100 composite.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        Full V3 score result.
+
+    Returns
+    -------
+    Dict[str, float]
+        Tiered contribution keyed by facet code. Contributions sum to
+        ``result.scores["tiered"]`` up to floating-point roundoff.
+    """
+    total_weight = sum(
+        float(facet.effective_weight)
+        for facet in result.facets.values()
+        if facet.score is not None and float(facet.effective_weight) > 0.0
+    )
+    if total_weight <= 0.0:
+        return {code: 0.0 for code in result.facets}
+    contributions: Dict[str, float] = {}
+    for code, facet in result.facets.items():
+        if facet.score is None or float(facet.effective_weight) <= 0.0:
+            contributions[code] = 0.0
+            continue
+        contributions[code] = 100.0 * float(facet.effective_weight) * float(facet.score)
+        contributions[code] /= total_weight
+    return contributions
+
+
+def _facet_records(result: RulerV3Result) -> List[Dict[str, Any]]:
+    """Return the full diagnostic facet records for one score result.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        Full V3 score result.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        JSON-ready facet records sorted by facet code.
+    """
+    contributions = _tiered_contributions(result)
+    records: List[Dict[str, Any]] = []
+    for code in sorted(result.facets):
+        facet = result.facets[code]
+        records.append(
+            {
+                "code": facet.code,
+                "name": facet.name,
+                "score": None if facet.score is None else float(facet.score),
+                "applicable": bool(facet.applicable),
+                "applicability_reason": facet.applicability_reason,
+                "tier": int(facet.tier),
+                "base_weight": float(facet.base_weight),
+                "effective_weight": float(facet.effective_weight),
+                "tiered_contribution": float(contributions[code]),
+                "metadata": _jsonable(facet.metadata),
+            }
+        )
+    return records
+
+
+def _save_probe_artifact(
+    path: Path,
+    probe: ProbeFamily,
+    positions: torch.Tensor,
+    *,
+    role: str,
+    score_result: RulerV3Result,
+    shape_distance: float,
+) -> None:
+    """Save positions and graph inputs needed to re-score or re-render.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Output ``.pt`` path.
+    probe : ProbeFamily
+        Frozen family probe.
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    role : str
+        Artifact role, either ``"baseline"`` or ``"morph"``.
+    score_result : RulerV3Result
+        Score result for ``positions``.
+    shape_distance : float
+        Procrustes shape distance from the baseline drawing.
+
+    Returns
+    -------
+    None
+    """
+    torch.save(
+        {
+            "family": probe.family,
+            "role": role,
+            "positions": positions.detach().cpu(),
+            "edges": probe.edges.detach().cpu(),
+            "sizes": probe.sizes.detach().cpu(),
+            "label_sizes": None if probe.label_sizes is None else probe.label_sizes.detach().cpu(),
+            "label_offsets": None
+            if probe.label_offsets is None
+            else probe.label_offsets.detach().cpu(),
+            "edge_length_targets": None
+            if probe.edge_length_targets is None
+            else probe.edge_length_targets.detach().cpu(),
+            "meta": _jsonable(probe.meta),
+            "scores": dict(score_result.scores),
+            "shape_distance": float(shape_distance),
+        },
+        path,
+    )
+
+
+def _render_comparison_png(
+    path: Path,
+    probe: ProbeFamily,
+    baseline_pos: torch.Tensor,
+    morph_pos: torch.Tensor,
+    baseline_result: RulerV3Result,
+    morph_result: RulerV3Result,
+    morph_shape_distance: float,
+) -> None:
+    """Render a side-by-side baseline-vs-morph comparison PNG.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Output PNG path.
+    probe : ProbeFamily
+        Frozen family probe supplying edges.
+    baseline_pos : torch.Tensor
+        Baseline positions with shape ``[N, 2]``.
+    morph_pos : torch.Tensor
+        Morph positions with shape ``[N, 2]``.
+    baseline_result : RulerV3Result
+        Baseline score result.
+    morph_result : RulerV3Result
+        Morph score result.
+    morph_shape_distance : float
+        Procrustes shape distance for the morph.
+
+    Returns
+    -------
+    None
+    """
+    import matplotlib.pyplot as plt
+
+    baseline = baseline_pos.detach().cpu().numpy()
+    morph = morph_pos.detach().cpu().numpy()
+    combined = np.vstack([baseline, morph])
+    min_xy = combined.min(axis=0)
+    max_xy = combined.max(axis=0)
+    span = np.maximum(max_xy - min_xy, 1.0)
+    pad = 0.12 * span
+    xlim = (float(min_xy[0] - pad[0]), float(max_xy[0] + pad[0]))
+    ylim = (float(min_xy[1] - pad[1]), float(max_xy[1] + pad[1]))
+    edge_pairs = probe.edges.detach().cpu().t().tolist() if probe.edges.numel() else []
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True)
+    panels = (
+        ("baseline", baseline, baseline_result, 0.0),
+        ("best morph", morph, morph_result, morph_shape_distance),
+    )
+    for axis, (title, positions, result, shape_distance) in zip(axes, panels):
+        for source, target in edge_pairs:
+            xs = [positions[int(source), 0], positions[int(target), 0]]
+            ys = [positions[int(source), 1], positions[int(target), 1]]
+            axis.plot(xs, ys, color="#6b7280", linewidth=1.1, alpha=0.85, zorder=1)
+        axis.scatter(
+            positions[:, 0],
+            positions[:, 1],
+            s=80,
+            color="#2563eb",
+            edgecolors="#111827",
+            linewidths=0.8,
+            zorder=2,
+        )
+        for index, (x_value, y_value) in enumerate(positions):
+            axis.text(
+                float(x_value),
+                float(y_value),
+                str(index),
+                ha="center",
+                va="center",
+                fontsize=8,
+            )
+        axis.set_aspect("equal", adjustable="box")
+        axis.set_xlim(*xlim)
+        axis.set_ylim(*ylim)
+        axis.set_title(f"{title}\ntiered={result.scores['tiered']:.2f}, shape={shape_distance:.3f}")
+        axis.grid(True, color="#e5e7eb", linewidth=0.6)
+    fig.suptitle(probe.family)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def _facet_diffs(
+    baseline_result: RulerV3Result,
+    morph_result: RulerV3Result,
+) -> Tuple[FacetDiff, ...]:
+    """Compare baseline and morph facet scores.
+
+    Parameters
+    ----------
+    baseline_result : RulerV3Result
+        Baseline score result.
+    morph_result : RulerV3Result
+        Morph score result.
+
+    Returns
+    -------
+    Tuple[FacetDiff, ...]
+        Facet comparisons sorted by code.
+    """
+    diffs: List[FacetDiff] = []
+    for code in sorted(set(baseline_result.facets) | set(morph_result.facets)):
+        baseline = baseline_result.facets[code]
+        morph = morph_result.facets[code]
+        baseline_score = None if baseline.score is None else float(baseline.score)
+        morph_score = None if morph.score is None else float(morph.score)
+        drop = None
+        if baseline_score is not None and morph_score is not None:
+            drop = baseline_score - morph_score
+        diffs.append(
+            FacetDiff(
+                code=code,
+                baseline_score=baseline_score,
+                morph_score=morph_score,
+                baseline_applicable=bool(baseline.applicable),
+                morph_applicable=bool(morph.applicable),
+                weight=float(morph.effective_weight),
+                drop=drop,
+            )
+        )
+    return tuple(diffs)
+
+
+def _format_optional_score(value: Optional[float]) -> str:
+    """Format an optional facet score for tabular diagnostics.
+
+    Parameters
+    ----------
+    value : Optional[float]
+        Score value, or ``None`` when inapplicable.
+
+    Returns
+    -------
+    str
+        Human-readable score cell.
+    """
+    return "NA" if value is None else f"{value:.4f}"
+
+
+def _format_facet_table(diffs: Sequence[FacetDiff]) -> str:
+    """Format a baseline-vs-morph facet comparison table.
+
+    Parameters
+    ----------
+    diffs : Sequence[FacetDiff]
+        Per-facet comparison rows.
+
+    Returns
+    -------
+    str
+        Markdown table with score, applicability, and weight columns.
+    """
+    lines = [
+        "| facet | base | morph | drop | base appl | morph appl | morph weight |",
+        "|---|---:|---:|---:|---|---|---:|",
+    ]
+    for diff in diffs:
+        drop = "NA" if diff.drop is None else f"{diff.drop:.4f}"
+        lines.append(
+            f"| {diff.code} | {_format_optional_score(diff.baseline_score)} | "
+            f"{_format_optional_score(diff.morph_score)} | {drop} | "
+            f"{diff.baseline_applicable} | {diff.morph_applicable} | {diff.weight:.4f} |"
+        )
+    return "\n".join(lines)
+
+
+def _decomposition_summary(
+    result: AttackResult,
+    baseline_result: RulerV3Result,
+    morph_result: RulerV3Result,
+) -> str:
+    """Return the aggregate-hold explanation for one family.
+
+    Parameters
+    ----------
+    result : AttackResult
+        Attack outcome containing aggregate drift and shape distance.
+    baseline_result : RulerV3Result
+        Baseline score result.
+    morph_result : RulerV3Result
+        Morph score result.
+
+    Returns
+    -------
+    str
+        One-line decomposition summary.
+    """
+    diffs = _facet_diffs(baseline_result, morph_result)
+    held = [
+        diff.code
+        for diff in diffs
+        if diff.drop is not None
+        and diff.morph_score is not None
+        and diff.morph_score >= HIGH_FACET_FLOOR
+        and diff.drop <= FOOLED_FACET_MAX_DROP
+    ]
+    dropped = [
+        diff.code for diff in diffs if diff.drop is not None and diff.drop > FOOLED_FACET_MAX_DROP
+    ]
+    held_codes = set(held)
+    held_weight = sum(
+        diff.weight for diff in diffs if diff.code in held_codes and diff.morph_applicable
+    )
+    applicability_changes = sum(
+        1 for diff in diffs if diff.baseline_applicable != diff.morph_applicable
+    )
+    held_text = ", ".join(held) if held else "none"
+    dropped_text = ", ".join(dropped) if dropped else "none"
+    return (
+        f"aggregate held within {100.0 * result.aggregate_delta_fraction:.2f}% because "
+        f"facets {{{held_text}}} (total weight {held_weight:.4f}) stayed high while "
+        f"facets {{{dropped_text}}} dropped; {applicability_changes} facets changed applicability."
+    )
+
+
+def _faithfulness_readability_summary(diffs: Sequence[FacetDiff]) -> str:
+    """Summarize whether faithfulness dropped while readability held.
+
+    Parameters
+    ----------
+    diffs : Sequence[FacetDiff]
+        Per-facet comparison rows.
+
+    Returns
+    -------
+    str
+        Plain-language C1/C3 versus C2/C4/C5/C6 summary.
+    """
+    by_code = {diff.code: diff for diff in diffs}
+    faithfulness = []
+    readability = []
+    for code in ("C1", "C3"):
+        diff = by_code.get(code)
+        if diff is None or diff.drop is None:
+            faithfulness.append(f"{code}=NA")
+        else:
+            faithfulness.append(f"{code} drop {diff.drop:.4f}")
+    for code in ("C2", "C4", "C5", "C6"):
+        diff = by_code.get(code)
+        if diff is None or diff.drop is None or diff.morph_score is None:
+            readability.append(f"{code}=NA")
+        else:
+            held = diff.morph_score >= HIGH_FACET_FLOOR and diff.drop <= FOOLED_FACET_MAX_DROP
+            readability.append(f"{code} {'HELD' if held else 'DROPPED'} ({diff.morph_score:.4f})")
+    return f"faithfulness: {', '.join(faithfulness)}; readability: {', '.join(readability)}"
+
+
+def _write_family_diagnostics(
+    output_dir: Path,
+    probe: ProbeFamily,
+    result: AttackResult,
+    score_config: ScoreConfig,
+) -> Tuple[RulerV3Result, RulerV3Result]:
+    """Write diagnostics artifacts for one family.
+
+    Parameters
+    ----------
+    output_dir : pathlib.Path
+        Directory receiving ``.pt``, ``.json``, and ``.png`` artifacts.
+    probe : ProbeFamily
+        Frozen family probe.
+    result : AttackResult
+        Attack outcome with best morph positions.
+    score_config : ScoreConfig
+        Deterministic V3 scoring budget.
+
+    Returns
+    -------
+    Tuple[RulerV3Result, RulerV3Result]
+        Baseline and independently recomputed morph score results.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    baseline_result = _score_probe(probe, probe.pos, score_config)
+    morph_result = _score_probe(probe, result.best_positions, score_config)
+    morph_shape = procrustes_shape_distance(probe.pos, result.best_positions)
+    baseline_path = output_dir / f"{probe.family}_baseline.pt"
+    morph_path = output_dir / f"{probe.family}_morph.pt"
+    json_path = output_dir / f"{probe.family}_facets.json"
+    png_path = output_dir / f"{probe.family}_compare.png"
+    _save_probe_artifact(
+        baseline_path,
+        probe,
+        probe.pos,
+        role="baseline",
+        score_result=baseline_result,
+        shape_distance=0.0,
+    )
+    _save_probe_artifact(
+        morph_path,
+        probe,
+        result.best_positions,
+        role="morph",
+        score_result=morph_result,
+        shape_distance=morph_shape,
+    )
+    _render_comparison_png(
+        png_path,
+        probe,
+        probe.pos,
+        result.best_positions,
+        baseline_result,
+        morph_result,
+        morph_shape,
+    )
+    payload = {
+        "family": probe.family,
+        "baseline": {
+            "scores": dict(baseline_result.scores),
+            "coverage": dict(baseline_result.coverage),
+            "flags": list(baseline_result.flags),
+            "facets": _facet_records(baseline_result),
+        },
+        "morph": {
+            "scores": dict(morph_result.scores),
+            "coverage": dict(morph_result.coverage),
+            "flags": list(morph_result.flags),
+            "shape_distance": morph_shape,
+            "facets": _facet_records(morph_result),
+        },
+        "decomposition": _decomposition_summary(result, baseline_result, morph_result),
+    }
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return baseline_result, morph_result
+
+
+def _assert_deterministic_positions(
+    probe: ProbeFamily,
+    *,
+    seed: int,
+    attack_config: AttackConfig,
+    score_config: ScoreConfig,
+    expected: torch.Tensor,
+) -> None:
+    """Assert same-seed attack replay reproduces the best morph positions.
+
+    Parameters
+    ----------
+    probe : ProbeFamily
+        Frozen family probe.
+    seed : int
+        Family-specific deterministic attack seed.
+    attack_config : AttackConfig
+        SA budget and thresholds.
+    score_config : ScoreConfig
+        Deterministic V3 scoring budget.
+    expected : torch.Tensor
+        First-run best morph positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    None
+    """
+    replay = run_family_attack(
+        probe,
+        seed=seed,
+        attack_config=attack_config,
+        score_config=score_config,
+    )
+    if not torch.equal(replay.best_positions, expected):
+        raise AssertionError(f"{probe.family} same-seed morph positions changed")
+
+
+def run_diagnostics(
+    *,
+    seed: int,
+    families: Optional[Iterable[str]] = None,
+    attack_config: AttackConfig = AttackConfig(),
+    score_config: ScoreConfig = ScoreConfig(),
+    output_dir: Path = DEFAULT_DIAGNOSTICS_DIR,
+) -> Tuple[AttackResult, ...]:
+    """Run GG-3 diagnostics and write requested artifacts.
+
+    Parameters
+    ----------
+    seed : int
+        Base deterministic seed.
+    families : Optional[Iterable[str]], optional
+        Family names to run. Defaults to all frozen probes.
+    attack_config : AttackConfig, optional
+        SA budget and thresholds.
+    score_config : ScoreConfig, optional
+        Deterministic V3 scoring budget.
+    output_dir : pathlib.Path, optional
+        Artifact directory.
+
+    Returns
+    -------
+    Tuple[AttackResult, ...]
+        Per-family attack outcomes in frozen probe order.
+    """
+    selected = set(families) if families is not None else None
+    results: List[AttackResult] = []
+    for index, probe in enumerate(build_probe_families()):
+        if selected is not None and probe.family not in selected:
+            continue
+        family_seed = seed + 10_003 * index
+        result = run_family_attack(
+            probe,
+            seed=family_seed,
+            attack_config=attack_config,
+            score_config=score_config,
+        )
+        _assert_deterministic_positions(
+            probe,
+            seed=family_seed,
+            attack_config=attack_config,
+            score_config=score_config,
+            expected=result.best_positions,
+        )
+        baseline_result, morph_result = _write_family_diagnostics(
+            output_dir,
+            probe,
+            result,
+            score_config,
+        )
+        diffs = _facet_diffs(baseline_result, morph_result)
+        independent_delta = abs(float(morph_result.scores["tiered"]) - result.best_score)
+        if independent_delta > 1.0e-9:
+            raise AssertionError(
+                f"{probe.family} tiered score drift: attack={result.best_score}, "
+                f"recomputed={morph_result.scores['tiered']}"
+            )
+        print(f"\n## {probe.family}")
+        print(_format_facet_table(diffs))
+        print(_decomposition_summary(result, baseline_result, morph_result))
+        print(_faithfulness_readability_summary(diffs))
+        print(
+            "sanity: attack tiered equals independent score_core_v3 recompute "
+            f"({result.best_score:.10f})"
+        )
+        results.append(result)
+    return tuple(results)
 
 
 def run_all_attacks(
@@ -821,6 +1442,17 @@ def _parse_args() -> argparse.Namespace:
         action="append",
         help="family to attack; repeat to run multiple families",
     )
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="write GG-3 per-facet diagnostics artifacts and print decomposition tables",
+    )
+    parser.add_argument(
+        "--diagnostics-dir",
+        type=Path,
+        default=DEFAULT_DIAGNOSTICS_DIR,
+        help="directory for diagnostics .pt, .json, and .png artifacts",
+    )
     return parser.parse_args()
 
 
@@ -839,12 +1471,21 @@ def main() -> int:
         aggregate_tolerance_fraction=float(args.aggregate_tolerance),
         shape_distance_threshold=float(args.shape_threshold),
     )
-    results = run_all_attacks(
-        seed=int(args.seed),
-        families=args.family,
-        attack_config=attack_config,
-        score_config=ScoreConfig(),
-    )
+    if bool(args.diagnostics):
+        results = run_diagnostics(
+            seed=int(args.seed),
+            families=args.family,
+            attack_config=attack_config,
+            score_config=ScoreConfig(),
+            output_dir=Path(args.diagnostics_dir),
+        )
+    else:
+        results = run_all_attacks(
+            seed=int(args.seed),
+            families=args.family,
+            attack_config=attack_config,
+            score_config=ScoreConfig(),
+        )
     print(format_results_table(results))
     print()
     print(
