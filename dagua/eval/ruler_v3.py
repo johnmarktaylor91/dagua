@@ -336,6 +336,7 @@ def score_core_v3(
         degenerate_scale=degenerate_scale,
         occlusion_score=raw_scores["C4"],
         whitespace_ratio=float(c5["whitespace_ratio"]),
+        conditional_group_flags=_conditional_group_flags(group_results),
     )
     return RulerV3Result(
         facets=facets,
@@ -1903,6 +1904,7 @@ def _row_flags(
     degenerate_scale: bool,
     occlusion_score: Optional[float],
     whitespace_ratio: float,
+    conditional_group_flags: Sequence[str] = tuple(),
 ) -> Tuple[str, ...]:
     """Return hard row flags for floor violations.
 
@@ -1914,6 +1916,8 @@ def _row_flags(
         C4 node-occlusion score.
     whitespace_ratio : float
         C5 ``visual_area / area_floor`` ratio.
+    conditional_group_flags : Sequence[str], optional
+        Row flags raised by applicable conditional groups.
 
     Returns
     -------
@@ -1927,6 +1931,31 @@ def _row_flags(
         flags.append("OCCLUSION_FLOOR")
     if whitespace_ratio > WHITESPACE_RATIO_HI * SPRAWL_RATIO_FACTOR:
         flags.append("SPRAWL")
+    for flag in conditional_group_flags:
+        if flag not in flags:
+            flags.append(flag)
+    return tuple(flags)
+
+
+def _conditional_group_flags(group_results: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Return row flags published by conditional-group metadata.
+
+    Parameters
+    ----------
+    group_results : Mapping[str, Any]
+        Conditional-group evaluations.
+
+    Returns
+    -------
+    Tuple[str, ...]
+        Stable flag names in registry iteration order.
+    """
+    flags: List[str] = []
+    for group in group_results.values():
+        for flag in group.metadata.get("flags", tuple()):
+            value = str(flag)
+            if value not in flags:
+                flags.append(value)
     return tuple(flags)
 
 
