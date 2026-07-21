@@ -503,7 +503,7 @@ def whitespace_sprawl_score(
     label_sizes: Optional[torch.Tensor] = None,
     label_offsets: Optional[torch.Tensor] = None,
 ) -> Dict[str, Any]:
-    """Score label-inclusive visual area against a frozen content floor.
+    """Score label-inclusive visual area with asymmetric C5 floor ratios.
 
     Parameters
     ----------
@@ -521,7 +521,8 @@ def whitespace_sprawl_score(
     Returns
     -------
     Dict[str, Any]
-        Whitespace band score, visual area, floor, and ratio metadata.
+        Whitespace band score, visual area, floor, crowding ratio, sprawl ratio,
+        and parallel fallback metadata.
     """
     positions = _ensure_cpu(pos).to(dtype=torch.float64)
     edges = _normalize_edge_index(edge_index)
@@ -534,14 +535,24 @@ def whitespace_sprawl_score(
     visual_area = _union_bbox_area(boxes)
     content_area = _content_area(sizes, labels)
     structure_floor = _structure_area_floor(sizes, labels, edges)
-    area_floor = max(WHITESPACE_CONTENT_MULTIPLIER * content_area, structure_floor, 1e-12)
-    ratio = visual_area / area_floor
+    content_floor = max(WHITESPACE_CONTENT_MULTIPLIER * content_area, 1e-12)
+    structure_floor = max(structure_floor, 1e-12)
+    area_floor = max(content_floor, structure_floor)
+    crowd_ratio = visual_area / content_floor
+    sprawl_ratio = visual_area / structure_floor
+    crowd_score = _log_band_crowding_score(crowd_ratio)
+    sprawl_score = _log_band_sprawl_score(sprawl_ratio)
     edge_band = _edge_length_node_diag_band_score(positions, edges, sizes)
     return {
-        "whitespace_sprawl_score": _log_band_score(ratio),
+        "whitespace_sprawl_score": min(crowd_score, sprawl_score),
         "whitespace_visual_area": visual_area,
         "whitespace_area_floor": area_floor,
-        "whitespace_ratio": ratio,
+        "whitespace_ratio": sprawl_ratio,
+        "whitespace_content_floor": content_floor,
+        "whitespace_crowding_ratio": crowd_ratio,
+        "whitespace_crowding_score": crowd_score,
+        "whitespace_sprawl_ratio": sprawl_ratio,
+        "whitespace_sprawl_side_score": sprawl_score,
         "whitespace_structure_area_floor": structure_floor,
         "whitespace_content_area": content_area,
         "whitespace_edge_length_node_diag_score": edge_band[0],
@@ -759,7 +770,8 @@ def _component_weighted_ksm(
         )
     del node_sizes
     weights = [_component_visual_weight(pos, component) for component in nontrivial]
-    if any(weight <= 1e-12 for weight in weights):
+    degeneracy_floor = 1e-9 * max(weights)
+    if any(weight <= degeneracy_floor for weight in weights):
         weights = [1.0 for _component in nontrivial]
     if sum(weights) <= 1e-12:
         weights = [float(len(component) * (len(component) - 1)) for component in nontrivial]
@@ -1651,6 +1663,48 @@ def _log_band_score(ratio: float) -> float:
     if safe_ratio < WHITESPACE_RATIO_LO:
         distance = math.log(WHITESPACE_RATIO_LO / safe_ratio)
         return math.exp(-WHITESPACE_CROWDING_DECAY * distance * distance)
+    distance = math.log(safe_ratio / WHITESPACE_RATIO_HI)
+    return math.exp(-WHITESPACE_SPRAWL_DECAY * distance * distance)
+
+
+def _log_band_crowding_score(ratio: float) -> float:
+    """Score only the crowding half of the C5 area band.
+
+    Parameters
+    ----------
+    ratio : float
+        ``visual_area / (2 * content_area)``.
+
+    Returns
+    -------
+    float
+        Crowding-side score in ``[0, 1]``; ratios on or above the low edge
+        receive the plateau score.
+    """
+    safe_ratio = max(float(ratio), 1e-12)
+    if safe_ratio >= WHITESPACE_RATIO_LO:
+        return 1.0
+    distance = math.log(WHITESPACE_RATIO_LO / safe_ratio)
+    return math.exp(-WHITESPACE_CROWDING_DECAY * distance * distance)
+
+
+def _log_band_sprawl_score(ratio: float) -> float:
+    """Score only the sprawl half of the C5 area band.
+
+    Parameters
+    ----------
+    ratio : float
+        ``visual_area / structure_area_floor``.
+
+    Returns
+    -------
+    float
+        Sprawl-side score in ``[0, 1]``; ratios on or below the high edge
+        receive the plateau score.
+    """
+    safe_ratio = max(float(ratio), 1e-12)
+    if safe_ratio <= WHITESPACE_RATIO_HI:
+        return 1.0
     distance = math.log(safe_ratio / WHITESPACE_RATIO_HI)
     return math.exp(-WHITESPACE_SPRAWL_DECAY * distance * distance)
 
