@@ -1888,7 +1888,7 @@ def _triple_view_scores(facets: Mapping[str, RulerV3Facet]) -> Dict[str, float]:
     """
     values = {code: facet.score for code, facet in facets.items()}
     tiered_weights = {code: facet.effective_weight for code, facet in facets.items()}
-    equal_weights = {code: 1.0 for code in facets}
+    equal_weights = _equal_view_weights(facets)
     tier1_weights = {
         code: facet.effective_weight for code, facet in facets.items() if facet.tier == 1
     }
@@ -1897,6 +1897,53 @@ def _triple_view_scores(facets: Mapping[str, RulerV3Facet]) -> Dict[str, float]:
         "equal": renormalized_score(values, equal_weights),
         "tier1_only": renormalized_score(values, tier1_weights),
     }
+
+
+def _equal_view_weights(facets: Mapping[str, RulerV3Facet]) -> Dict[str, float]:
+    """Return DOC-6 equal-view weights with groups entering by slots.
+
+    Parameters
+    ----------
+    facets : Mapping[str, RulerV3Facet]
+        Facet publication records keyed by V3 facet code.
+
+    Returns
+    -------
+    Dict[str, float]
+        Equal-view weights keyed by facet code.
+    """
+    weights: Dict[str, float] = {}
+    grouped: Dict[Tuple[str, str], list[str]] = {}
+    for code, facet in facets.items():
+        group_key = _conditional_group_key(code)
+        slot = facet.metadata.get("slot") if isinstance(facet.metadata, Mapping) else None
+        if group_key is None or slot is None:
+            weights[code] = 1.0
+            continue
+        grouped.setdefault((group_key, str(slot)), []).append(code)
+    for codes in grouped.values():
+        slot_weight = 1.0 / max(1, len(codes))
+        for code in codes:
+            weights[code] = slot_weight
+    return weights
+
+
+def _conditional_group_key(code: str) -> Optional[str]:
+    """Return a conditional-group prefix for a facet code.
+
+    Parameters
+    ----------
+    code : str
+        V3 facet code.
+
+    Returns
+    -------
+    Optional[str]
+        Group key such as ``G2`` or ``None`` for core facets.
+    """
+    if len(code) >= 2 and code[0] == "G" and code[1].isdigit():
+        return code[:2]
+    return None
 
 
 def _row_flags(
