@@ -6505,10 +6505,24 @@ def layout_dagua_native_pipeline(
             component_ids = component_state.component_ids
 
         full_graph_route = _choose_native_pipeline(problem.structure, prepared_config)
-        if full_graph_route not in {
-            "directed_portfolio",
-            "undirected_portfolio",
-        } and _should_decompose_native_components(problem, prepared_config, component_ids):
+        # Portfolio routes own component handling for graphs WITH edges: their
+        # dot/sugiyama-family candidates pack components internally and the
+        # frozen-ruler referee penalizes overlap. An edgeless multi-node graph
+        # (always all-singletons) has nothing to contest -- the referee's flow
+        # and depth signals are degenerate and the layered incumbent cannot
+        # resolve layers without edges -- so it must keep the per-component
+        # tiling wrapper.
+        portfolio_owns_components = (
+            full_graph_route
+            in {
+                "directed_portfolio",
+                "undirected_portfolio",
+            }
+            and int(prepared_edge_index.numel()) > 0
+        )
+        if not portfolio_owns_components and _should_decompose_native_components(
+            problem, prepared_config, component_ids
+        ):
             component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
             parent_layers = getattr(prepared_config, "_dagua_native_layer_assignments", None)
             assert component_ids is not None
