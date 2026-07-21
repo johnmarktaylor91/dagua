@@ -8,6 +8,8 @@ import json
 import math
 import multiprocessing as mp
 import os
+import signal
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -28,6 +30,10 @@ DEFAULT_TIMEOUT_MARGIN_S = 180.0
 
 class GateRunTimeoutError(RuntimeError):
     """Raised when one determinism-gate layout run exceeds its watchdog."""
+
+
+class _WorkerLayoutTimeoutError(TimeoutError):
+    """Gate-local benchmark worker alarm sentinel."""
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,91 @@ class GateRun:
     plan_shape: str
     marketplace_arms: list[dict[str, Any]]
     telemetry: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ParityReplayRow:
+    """One parity-replay comparison row.
+
+    Parameters
+    ----------
+    graph : str
+        Benchmark graph name.
+    baseline_signature : str
+        Harvested idle-main admission and W5 plan signature.
+    replay_signature : str
+        Current ledger replay admission and W5 plan signature.
+    matches : bool
+        Whether the two signatures match exactly.
+    expected_diff : bool
+        Whether this row is in the documented expected-diff list.
+    """
+
+    graph: str
+    baseline_signature: str
+    replay_signature: str
+    matches: bool
+    expected_diff: bool
+
+
+def _timeout_signal_handler(signum: int, frame: object) -> None:
+    """Raise the same-named timeout exception as the benchmark worker.
+
+    Parameters
+    ----------
+    signum : int
+        Delivered signal number.
+    frame : object
+        Current interpreter frame.
+
+    Returns
+    -------
+    None
+        The function always raises.
+    """
+    del signum, frame
+    raise _WorkerLayoutTimeoutError("worker layout timeout exceeded")
+
+
+def _enable_worker_timeout(timeout_seconds: float) -> Optional[Any]:
+    """Install the benchmark-faithful wall-clock alarm in this child.
+
+    Parameters
+    ----------
+    timeout_seconds : float
+        Maximum wall seconds before ``SIGALRM`` raises.
+
+    Returns
+    -------
+    object or None
+        Previous signal handler, or ``None`` when alarms are unavailable.
+    """
+    if timeout_seconds <= 0.0 or not hasattr(signal, "SIGALRM"):
+        return None
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _timeout_signal_handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    return previous_handler
+
+
+def _disable_worker_timeout(previous_handler: Optional[Any]) -> None:
+    """Clear the gate child alarm and restore the previous handler.
+
+    Parameters
+    ----------
+    previous_handler : object or None
+        Handler returned by ``_enable_worker_timeout``.
+
+    Returns
+    -------
+    None
+        Process-local signal state is restored.
+    """
+    if not hasattr(signal, "SIGALRM"):
+        return
+    signal.setitimer(signal.ITIMER_REAL, 0.0)
+    if previous_handler is not None:
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _burn_cpu(stop: Any) -> None:
@@ -385,9 +476,11 @@ def _run_once_in_child_process(
         old_arm = os.environ.get("DAGUA_ARM_TELEMETRY_PATH")
         os.environ["DAGUA_W5_TELEMETRY_PATH"] = str(telemetry_path)
         os.environ["DAGUA_ARM_TELEMETRY_PATH"] = str(telemetry_path)
+        previous_handler = _enable_worker_timeout(timeout_s)
         try:
             result = competitor.layout(test_graph.graph, timeout=timeout_s, seed=42)
         finally:
+            _disable_worker_timeout(previous_handler)
             if old_w5 is None:
                 os.environ.pop("DAGUA_W5_TELEMETRY_PATH", None)
             else:
@@ -640,6 +733,33 @@ def _assert_min_score(runs: Sequence[GateRun], min_score: Optional[float]) -> li
     ]
 
 
+def _assert_stable_fallback(runs: Sequence[GateRun], min_score: Optional[float]) -> list[str]:
+    """Return failures for the certified stable-fallback branch.
+
+    Parameters
+    ----------
+    runs : Sequence[GateRun]
+        Runs for one graph across idle and load modes.
+    min_score : float, optional
+        Optional high-score branch floor. When present, fallback scores must
+        remain below it so the gate cannot silently pass the 84-class branch.
+
+    Returns
+    -------
+    list[str]
+        Human-readable failure messages.
+    """
+    failures: list[str] = []
+    if any(not math.isfinite(run.score) for run in runs):
+        failures.append("stable fallback produced a non-finite score")
+    if min_score is not None and any(run.score >= float(min_score) for run in runs):
+        failures.append(
+            "stable fallback requested but at least one run reached "
+            f"the high-score floor {float(min_score):.4f}"
+        )
+    return failures
+
+
 def _print_runs(runs: Iterable[GateRun]) -> None:
     """Print gate run records as JSON lines.
 
@@ -676,6 +796,133 @@ def _print_runs(runs: Iterable[GateRun]) -> None:
         )
 
 
+def _replay_signature(run: GateRun) -> str:
+    """Return the admission and W5 plan signature used by parity replay.
+
+    Parameters
+    ----------
+    run : GateRun
+        Captured gate run.
+
+    Returns
+    -------
+    str
+        Stable signature combining verdict and plan shape.
+    """
+    return f"{run.verdict}::{run.plan_shape}"
+
+
+def _default_expected_diffs(graphs: Sequence[str]) -> list[str]:
+    """Return the documented expected-diff rows present in ``graphs``.
+
+    Parameters
+    ----------
+    graphs : Sequence[str]
+        Requested replay graph names.
+
+    Returns
+    -------
+    list[str]
+        Rows in the scale_1k class, the only intended replay diffs.
+    """
+    return [name for name in graphs if "scale_1k" in name]
+
+
+def _print_parity_rows(rows: Iterable[ParityReplayRow], expected_diffs: Sequence[str]) -> None:
+    """Print parity-replay rows as JSON lines.
+
+    Parameters
+    ----------
+    rows : Iterable[ParityReplayRow]
+        Replay comparison rows.
+    expected_diffs : Sequence[str]
+        Documented expected-diff row names.
+
+    Returns
+    -------
+    None
+        JSON payloads are written to stdout.
+    """
+    expected = list(expected_diffs)
+    for row in rows:
+        print(
+            json.dumps(
+                {
+                    "event": "native_parity_replay",
+                    "graph": row.graph,
+                    "baseline_signature": row.baseline_signature,
+                    "replay_signature": row.replay_signature,
+                    "matches": row.matches,
+                    "expected_diff": row.expected_diff,
+                    "expected_diffs": expected,
+                },
+                sort_keys=True,
+            )
+        )
+
+
+def _run_parity_replay(args: argparse.Namespace) -> int:
+    """Run the cheap admission and W5-plan parity replay command.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed ``parity-replay`` arguments.
+
+    Returns
+    -------
+    int
+        ``0`` when all unexpected diffs are absent, else ``1``.
+    """
+    graphs = _graph_map()
+    requested = list(args.graphs)
+    expected_diffs = list(args.expected_diff or _default_expected_diffs(requested))
+    expected_diff_set = set(expected_diffs)
+    rows: list[ParityReplayRow] = []
+    failures: list[str] = []
+    run_timeout_s = (
+        float(args.timeout) + max(0.0, float(args.run_timeout_margin))
+        if args.run_timeout is None
+        else float(args.run_timeout)
+    )
+    for graph_name in requested:
+        if graph_name not in graphs:
+            failures.append(f"{graph_name}: unknown graph")
+            continue
+        test_graph = graphs[graph_name]
+        try:
+            baseline = _run_once(test_graph, "idle-main", 0, args.timeout, run_timeout_s)
+            replay = _run_once(test_graph, "ledger-replay", 0, args.timeout, run_timeout_s)
+        except GateRunTimeoutError as exc:
+            failures.append(f"{graph_name}: {exc}")
+            continue
+        baseline_signature = _replay_signature(baseline)
+        replay_signature = _replay_signature(replay)
+        matches = baseline_signature == replay_signature
+        expected_diff = graph_name in expected_diff_set
+        rows.append(
+            ParityReplayRow(
+                graph=graph_name,
+                baseline_signature=baseline_signature,
+                replay_signature=replay_signature,
+                matches=matches,
+                expected_diff=expected_diff,
+            )
+        )
+        if matches and expected_diff:
+            continue
+        if not matches and not expected_diff:
+            failures.append(f"{graph_name}: unexpected replay diff")
+    _print_parity_rows(rows, expected_diffs)
+    if failures:
+        print("FAIL native parity replay", flush=True)
+        for failure in failures:
+            print(f" - {failure}", flush=True)
+        return 1
+    print("PASS native parity replay", flush=True)
+    return 0
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -689,6 +936,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     argparse.Namespace
         Parsed arguments.
     """
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list and args_list[0] == "parity-replay":
+        parser = argparse.ArgumentParser(description="Replay native budget admission parity.")
+        parser.add_argument("command", choices=("parity-replay",))
+        parser.add_argument("graphs", nargs="*", default=list(DEFAULT_GRAPHS))
+        parser.add_argument("--timeout", type=float, default=300.0)
+        parser.add_argument("--run-timeout", type=float, default=None)
+        parser.add_argument("--run-timeout-margin", type=float, default=DEFAULT_TIMEOUT_MARGIN_S)
+        parser.add_argument("--expected-diff", action="append", default=[])
+        return parser.parse_args(args_list)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("graphs", nargs="*", default=list(DEFAULT_GRAPHS))
     parser.add_argument("--engine", default="dagua", choices=("dagua",))
@@ -699,8 +957,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--score-spread", type=float, default=DEFAULT_SCORE_SPREAD)
     parser.add_argument("--load-workers", type=int, default=None)
     parser.add_argument("--expect-no-skip", action="append", default=[])
+    parser.add_argument("--expect-stable-fallback", action="store_true")
     parser.add_argument("--min-score", type=float, default=None)
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(args_list)
+    setattr(parsed, "command", "gate")
+    return parsed
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -717,6 +978,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ``0`` when all graph verdicts and score spreads are stable, else ``1``.
     """
     args = parse_args(argv)
+    if args.command == "parity-replay":
+        return _run_parity_replay(args)
     graphs = _graph_map()
     failures: list[str] = []
     run_timeout_s = (
@@ -761,6 +1024,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             failures.append(f"{graph_name}: {failure}")
         for failure in _assert_min_score(runs, args.min_score):
             failures.append(f"{graph_name}: {failure}")
+        if args.expect_stable_fallback:
+            for failure in _assert_stable_fallback(runs, args.min_score):
+                failures.append(f"{graph_name}: {failure}")
     if failures:
         print("FAIL native determinism gate", flush=True)
         for failure in failures:
