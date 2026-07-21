@@ -68,11 +68,14 @@ DEFAULT_NODE_HEIGHT = 1.0
 DEGENERATE_SCALE_RATIO = 0.25
 OCCLUSION_FLOOR_THRESHOLD = 0.75
 WHITESPACE_CONTENT_MULTIPLIER = 2.0
+WHITESPACE_STRUCTURE_SEPARATION = 3.0
 WHITESPACE_RATIO_LO = 1.0
 WHITESPACE_RATIO_HI = 16.0
 WHITESPACE_CROWDING_DECAY = 0.5
 WHITESPACE_SPRAWL_DECAY = 1.25
 SPRAWL_RATIO_FACTOR = 4.0
+EDGE_LENGTH_RATIO_LO = 0.75
+EDGE_LENGTH_RATIO_HI = 16.0
 
 
 @dataclass(frozen=True)
@@ -260,7 +263,7 @@ def score_core_v3(
         n_samples=neighborhood_samples,
         all_pairs_dist=all_pairs_dist,
     )
-    c4 = node_occlusion_score(positions, sizes, seed=seed)
+    c4 = _visual_occlusion_score(positions, sizes, labels, offsets, seed=seed)
     c5 = whitespace_sprawl_score(
         positions,
         edges,
@@ -287,16 +290,16 @@ def score_core_v3(
         node_diag_mean,
     )
     raw_scores: Dict[str, Optional[float]] = {
-        "C1": float(c1["ksm_score"]),
+        "C1": None if edges.shape[1] == 0 else float(c1["ksm_score"]),
         "C2": float(c2["edge_crossing_score"]),
-        "C3": float(c3["multi_radius_neighborhood_preservation_score"]),
+        "C3": _optional_float(c3["multi_radius_neighborhood_preservation_score"]),
         "C4": float(c4["node_occlusion_score"]),
         "C5": float(c5["whitespace_sprawl_score"]),
         "C6": float(c6["crossing_angle_score"]),
         "C7": float(c7["gabriel_score"]),
         "C8": _optional_float(c8["path_continuity_score"]),
         "C9": _optional_float(c9["angular_resolution_score"]),
-        "C10": float(c10["edge_length_deviation_score"]),
+        "C10": None if edges.shape[1] == 0 else float(c10["edge_length_deviation_score"]),
     }
     if degenerate_scale:
         raw_scores["C5"] = 0.0
@@ -307,7 +310,11 @@ def score_core_v3(
             "C1": c1,
             "C2": c2,
             "C3": c3,
-            "C4": {**c4, "default_node_sizes": used_default_sizes},
+            "C4": {
+                **c4,
+                "default_node_sizes": used_default_sizes,
+                "label_inclusive": labels is not None,
+            },
             "C5": c5,
             "C6": c6,
             "C7": c7,
@@ -417,7 +424,7 @@ def multi_radius_neighborhood_preservation(
     distances = _graph_distances(edges, n, max(radii), all_pairs_dist)
     rows_np = _deterministic_sample_indices(n, min(n, n_samples))
     layout_distances = torch.cdist(positions[torch.from_numpy(rows_np)], positions).numpy()
-    radius_scores: Dict[int, float] = {}
+    radius_scores: Dict[int, Optional[float]] = {}
     for radius in radii:
         radius_scores[int(radius)] = _radius_jaccard_score(
             distances,
@@ -425,9 +432,9 @@ def multi_radius_neighborhood_preservation(
             rows_np,
             int(radius),
         )
-    values = list(radius_scores.values())
+    values = [score for score in radius_scores.values() if score is not None]
     return {
-        "multi_radius_neighborhood_preservation_score": float(np.mean(values)) if values else 0.0,
+        "multi_radius_neighborhood_preservation_score": float(np.mean(values)) if values else None,
         "neighborhood_radius_scores": radius_scores,
         "neighborhood_n_rows": int(len(rows_np)),
     }
@@ -495,7 +502,7 @@ def whitespace_sprawl_score(
     *,
     label_sizes: Optional[torch.Tensor] = None,
     label_offsets: Optional[torch.Tensor] = None,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Score label-inclusive visual area against a frozen content floor.
 
     Parameters
@@ -513,7 +520,7 @@ def whitespace_sprawl_score(
 
     Returns
     -------
-    Dict[str, float]
+    Dict[str, Any]
         Whitespace band score, visual area, floor, and ratio metadata.
     """
     positions = _ensure_cpu(pos).to(dtype=torch.float64)
@@ -526,9 +533,10 @@ def whitespace_sprawl_score(
         boxes.extend(_centered_boxes(positions + offsets, labels))
     visual_area = _union_bbox_area(boxes)
     content_area = _content_area(sizes, labels)
-    structure_floor = _generic_structure_area_floor(sizes, edges)
+    structure_floor = _structure_area_floor(sizes, labels, edges)
     area_floor = max(WHITESPACE_CONTENT_MULTIPLIER * content_area, structure_floor, 1e-12)
     ratio = visual_area / area_floor
+    edge_band = _edge_length_node_diag_band_score(positions, edges, sizes)
     return {
         "whitespace_sprawl_score": _log_band_score(ratio),
         "whitespace_visual_area": visual_area,
@@ -536,6 +544,8 @@ def whitespace_sprawl_score(
         "whitespace_ratio": ratio,
         "whitespace_structure_area_floor": structure_floor,
         "whitespace_content_area": content_area,
+        "whitespace_edge_length_node_diag_score": edge_band[0],
+        "whitespace_edge_length_node_diag_ratio": edge_band[1],
     }
 
 
@@ -665,7 +675,7 @@ def _radius_jaccard_score(
     layout_distances: np.ndarray,
     rows: np.ndarray,
     radius: int,
-) -> float:
+) -> Optional[float]:
     """Score one graph-distance radius against layout nearest neighbors.
 
     Parameters
@@ -682,8 +692,9 @@ def _radius_jaccard_score(
 
     Returns
     -------
-    float
-        Mean Jaccard score over rows with a non-empty graph neighborhood.
+    Optional[float]
+        Mean Jaccard score over rows with a non-empty graph neighborhood, or
+        ``None`` when the radius has no applicable rows.
     """
     row_scores: List[float] = []
     for row_offset, node in enumerate(rows.tolist()):
@@ -701,7 +712,7 @@ def _radius_jaccard_score(
         layout_neighbors = set(int(index) for index in nearest.tolist())
         union = graph_neighbors | layout_neighbors
         row_scores.append(len(graph_neighbors & layout_neighbors) / len(union) if union else 1.0)
-    return float(np.mean(row_scores)) if row_scores else 0.0
+    return float(np.mean(row_scores)) if row_scores else None
 
 
 def _component_weighted_ksm(
@@ -746,7 +757,10 @@ def _component_weighted_ksm(
             n_targets=stress_targets,
             all_pairs_dist=all_pairs_dist,
         )
-    weights = [_component_visual_weight(pos, node_sizes, component) for component in nontrivial]
+    del node_sizes
+    weights = [_component_visual_weight(pos, component) for component in nontrivial]
+    if any(weight <= 1e-12 for weight in weights):
+        weights = [1.0 for _component in nontrivial]
     if sum(weights) <= 1e-12:
         weights = [float(len(component) * (len(component) - 1)) for component in nontrivial]
     weighted_score = 0.0
@@ -853,7 +867,6 @@ def _induced_component_edges(edge_index: torch.Tensor, component: Sequence[int])
 
 def _component_visual_weight(
     pos: torch.Tensor,
-    node_sizes: torch.Tensor,
     component: Sequence[int],
 ) -> float:
     """Return the hull-area visual weight for one component.
@@ -862,22 +875,122 @@ def _component_visual_weight(
     ----------
     pos : torch.Tensor
         Node positions with shape ``[N, 2]``.
-    node_sizes : torch.Tensor
-        Node box sizes with shape ``[N, 2]``.
     component : Sequence[int]
         Node ids in one component.
 
     Returns
     -------
     float
-        Convex-hull area, with zero-area components falling back to node-box
-        content area.
+        Convex-hull area. Degenerate components return ``0`` so the caller can
+        choose one position-scale-invariant weighting regime for all components.
     """
     points = pos[list(component)].numpy()
     hull_area = _convex_hull_area(points)
     if hull_area > 1e-12:
         return hull_area
-    return float((node_sizes[list(component), 0] * node_sizes[list(component), 1]).sum().item())
+    return 0.0
+
+
+def _visual_occlusion_score(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    label_sizes: Optional[torch.Tensor],
+    label_offsets: Optional[torch.Tensor],
+    *,
+    seed: Optional[int],
+) -> Dict[str, float]:
+    """Score C4 on node visual extents, including labels when supplied.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+    label_sizes : Optional[torch.Tensor]
+        Optional label extents with shape ``[N, 2]``.
+    label_offsets : Optional[torch.Tensor]
+        Optional label center offsets with shape ``[N, 2]``.
+    seed : Optional[int]
+        Frozen seed forwarded to the overlap counter.
+
+    Returns
+    -------
+    Dict[str, float]
+        Label-inclusive overlap count and C4 score.
+    """
+    if label_sizes is None or label_offsets is None:
+        return node_occlusion_score(pos, node_sizes, seed=seed)
+    boxes = _node_visual_boxes(pos, node_sizes, label_sizes, label_offsets)
+    centers, sizes = _boxes_to_centers_sizes(boxes)
+    return node_occlusion_score(centers, sizes, seed=seed)
+
+
+def _node_visual_boxes(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    label_sizes: torch.Tensor,
+    label_offsets: torch.Tensor,
+) -> List[Tuple[float, float, float, float]]:
+    """Return one label-inclusive visual box per node.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+    label_sizes : torch.Tensor
+        Label extents with shape ``[N, 2]``.
+    label_offsets : torch.Tensor
+        Label center offsets from node centers with shape ``[N, 2]``.
+
+    Returns
+    -------
+    List[Tuple[float, float, float, float]]
+        Per-node visual boxes as ``(min_x, min_y, max_x, max_y)`` tuples.
+    """
+    node_boxes = _centered_boxes(pos, node_sizes)
+    label_boxes = _centered_boxes(pos + label_offsets, label_sizes)
+    visual_boxes: List[Tuple[float, float, float, float]] = []
+    for node_box, label_box in zip(node_boxes, label_boxes):
+        visual_boxes.append(
+            (
+                min(node_box[0], label_box[0]),
+                min(node_box[1], label_box[1]),
+                max(node_box[2], label_box[2]),
+                max(node_box[3], label_box[3]),
+            )
+        )
+    return visual_boxes
+
+
+def _boxes_to_centers_sizes(
+    boxes: Sequence[Tuple[float, float, float, float]],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert axis-aligned boxes to center and size tensors.
+
+    Parameters
+    ----------
+    boxes : Sequence[Tuple[float, float, float, float]]
+        Boxes as ``(min_x, min_y, max_x, max_y)`` tuples.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        Centers and positive sizes, both with shape ``[N, 2]``.
+    """
+    centers: List[Tuple[float, float]] = []
+    sizes: List[Tuple[float, float]] = []
+    for min_x, min_y, max_x, max_y in boxes:
+        width = max(max_x - min_x, 1e-12)
+        height = max(max_y - min_y, 1e-12)
+        centers.append((min_x + width / 2.0, min_y + height / 2.0))
+        sizes.append((width, height))
+    return (
+        torch.tensor(centers, dtype=torch.float64),
+        torch.tensor(sizes, dtype=torch.float64),
+    )
 
 
 def _convex_hull_area(points: np.ndarray) -> float:
@@ -1015,24 +1128,508 @@ def _content_area(node_sizes: torch.Tensor, label_sizes: Optional[torch.Tensor])
     return area
 
 
-def _generic_structure_area_floor(node_sizes: torch.Tensor, edge_index: torch.Tensor) -> float:
-    """Return the frozen generic structure area floor for C5.
+def _structure_area_floor(
+    node_sizes: torch.Tensor,
+    label_sizes: Optional[torch.Tensor],
+    edge_index: torch.Tensor,
+) -> float:
+    """Return the frozen topology-aware structure area floor for C5.
 
     Parameters
     ----------
     node_sizes : torch.Tensor
         Node box sizes with shape ``[N, 2]``.
+    label_sizes : Optional[torch.Tensor]
+        Optional label box sizes with shape ``[N, 2]``.
     edge_index : torch.Tensor
         Edge tensor with shape ``[2, E]``.
 
     Returns
     -------
     float
-        Input-only generic floor based on content and graph size.
+        Input-only structure reference area. The submitted layout coordinates
+        are deliberately excluded so position-only crater scaling remains
+        visible to C5.
     """
-    del edge_index
-    content = _content_area(node_sizes, None)
-    return WHITESPACE_CONTENT_MULTIPLIER * content
+    if int(node_sizes.shape[0]) == 0:
+        return 0.0
+    visual_sizes = _input_visual_sizes(node_sizes, label_sizes)
+    components = _connected_components(edge_index, int(node_sizes.shape[0]))
+    generic = WHITESPACE_CONTENT_MULTIPLIER * _content_area(node_sizes, label_sizes)
+    component_extents = [
+        _component_reference_extent(visual_sizes, edge_index, component) for component in components
+    ]
+    packed = _component_packing_area(component_extents, _structure_gap(visual_sizes))
+    whole_extent = _component_reference_extent(
+        visual_sizes,
+        edge_index,
+        list(range(int(node_sizes.shape[0]))),
+    )
+    return max(generic, packed, whole_extent[0] * whole_extent[1])
+
+
+def _input_visual_sizes(
+    node_sizes: torch.Tensor,
+    label_sizes: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Return input-declared per-node visual sizes for frozen references.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+    label_sizes : Optional[torch.Tensor]
+        Optional label box sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-node visual sizes with shape ``[N, 2]``.
+    """
+    if label_sizes is None:
+        return node_sizes
+    return torch.maximum(node_sizes, label_sizes)
+
+
+def _structure_gap(visual_sizes: torch.Tensor) -> float:
+    """Return the frozen nominal separation used by structure references.
+
+    Parameters
+    ----------
+    visual_sizes : torch.Tensor
+        Input visual sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Nominal center-to-center gap in drawing units.
+    """
+    if int(visual_sizes.shape[0]) == 0:
+        return 1.0
+    max_dimension = torch.maximum(visual_sizes[:, 0], visual_sizes[:, 1])
+    return WHITESPACE_STRUCTURE_SEPARATION * float(max_dimension.mean().item())
+
+
+def _component_reference_extent(
+    visual_sizes: torch.Tensor,
+    edge_index: torch.Tensor,
+    component: Sequence[int],
+) -> Tuple[float, float]:
+    """Return a frozen reference extent for one graph component.
+
+    Parameters
+    ----------
+    visual_sizes : torch.Tensor
+        Per-node visual sizes with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Full edge tensor with shape ``[2, E]``.
+    component : Sequence[int]
+        Node ids in the component.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Reference width and height.
+    """
+    if not component:
+        return 0.0, 0.0
+    component_edges = _component_global_edges(edge_index, component)
+    extents: List[Tuple[float, float]] = [_generic_component_extent(visual_sizes, component)]
+    if _is_tree_component(component_edges, len(component)):
+        extents.append(_tree_reference_extent(visual_sizes, component_edges, component))
+        extents.append(_radial_reference_extent(visual_sizes, component_edges, component))
+    dag_extent = _dag_reference_extent(visual_sizes, component_edges, component)
+    if dag_extent is not None:
+        extents.append(dag_extent)
+    return max(extents, key=lambda extent: extent[0] * extent[1])
+
+
+def _component_global_edges(
+    edge_index: torch.Tensor,
+    component: Sequence[int],
+) -> List[Tuple[int, int]]:
+    """Return full-node-id edges induced by a component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Full edge tensor with shape ``[2, E]``.
+    component : Sequence[int]
+        Component node ids.
+
+    Returns
+    -------
+    List[Tuple[int, int]]
+        Directed edge pairs using global node ids.
+    """
+    component_nodes = set(int(node) for node in component)
+    edges: List[Tuple[int, int]] = []
+    for source, target in edge_index.t().tolist() if edge_index.numel() else []:
+        s = int(source)
+        t = int(target)
+        if s in component_nodes and t in component_nodes and s != t:
+            edges.append((s, t))
+    return edges
+
+
+def _generic_component_extent(
+    visual_sizes: torch.Tensor,
+    component: Sequence[int],
+) -> Tuple[float, float]:
+    """Return a content-only square-pack fallback extent for a component.
+
+    Parameters
+    ----------
+    visual_sizes : torch.Tensor
+        Per-node visual sizes with shape ``[N, 2]``.
+    component : Sequence[int]
+        Component node ids.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Generic width and height.
+    """
+    area = float(
+        (
+            visual_sizes[list(component), 0]
+            * visual_sizes[list(component), 1]
+            * WHITESPACE_CONTENT_MULTIPLIER
+        )
+        .sum()
+        .item()
+    )
+    side = math.sqrt(max(area, 1e-12))
+    return side, side
+
+
+def _is_tree_component(edges: Sequence[Tuple[int, int]], node_count: int) -> bool:
+    """Return whether a component is an undirected tree.
+
+    Parameters
+    ----------
+    edges : Sequence[Tuple[int, int]]
+        Directed edge list using global node ids.
+    node_count : int
+        Component node count.
+
+    Returns
+    -------
+    bool
+        ``True`` for connected acyclic components with ``N - 1`` edges.
+    """
+    return node_count > 1 and len({tuple(sorted(edge)) for edge in edges}) == node_count - 1
+
+
+def _tree_reference_extent(
+    visual_sizes: torch.Tensor,
+    edges: Sequence[Tuple[int, int]],
+    component: Sequence[int],
+) -> Tuple[float, float]:
+    """Return a BJL/Reingold-Tilford-style tree reference extent.
+
+    Parameters
+    ----------
+    visual_sizes : torch.Tensor
+        Per-node visual sizes with shape ``[N, 2]``.
+    edges : Sequence[Tuple[int, int]]
+        Component edges using global node ids.
+    component : Sequence[int]
+        Component node ids.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Layered tree reference width and height.
+    """
+    adjacency = _undirected_adjacency(edges, component)
+    root = _reference_root(edges, component, adjacency)
+    depths = _bfs_depths(adjacency, root)
+    max_depth = max(depths.values()) if depths else 0
+    layer_counts: Dict[int, int] = {}
+    for depth in depths.values():
+        layer_counts[depth] = layer_counts.get(depth, 0) + 1
+    leaf_count = sum(
+        1
+        for node in component
+        if (node != root and len(adjacency[int(node)]) <= 1)
+        or (node == root and len(component) == 1)
+    )
+    width_units = max(1, leaf_count, max(layer_counts.values(), default=1))
+    gap = _structure_gap(visual_sizes[list(component)])
+    max_width = float(visual_sizes[list(component), 0].max().item())
+    max_height = float(visual_sizes[list(component), 1].max().item())
+    width = max_width + max(0, width_units - 1) * gap
+    height = max_height + max_depth * gap
+    return width, height
+
+
+def _radial_reference_extent(
+    visual_sizes: torch.Tensor,
+    edges: Sequence[Tuple[int, int]],
+    component: Sequence[int],
+) -> Tuple[float, float]:
+    """Return a minimum enclosing-circle reference extent for radial trees.
+
+    Parameters
+    ----------
+    visual_sizes : torch.Tensor
+        Per-node visual sizes with shape ``[N, 2]``.
+    edges : Sequence[Tuple[int, int]]
+        Component edges using global node ids.
+    component : Sequence[int]
+        Component node ids.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Square extent enclosing the circumference-packed radial reference.
+    """
+    adjacency = _undirected_adjacency(edges, component)
+    root = _reference_root(edges, component, adjacency)
+    leaf_count = sum(1 for node in component if node != root and len(adjacency[int(node)]) <= 1)
+    if leaf_count <= 2:
+        return _tree_reference_extent(visual_sizes, edges, component)
+    max_width = float(visual_sizes[list(component), 0].max().item())
+    max_height = float(visual_sizes[list(component), 1].max().item())
+    diameter = max_width + (leaf_count * max_width / math.pi)
+    return diameter, max(diameter, max_height)
+
+
+def _dag_reference_extent(
+    visual_sizes: torch.Tensor,
+    edges: Sequence[Tuple[int, int]],
+    component: Sequence[int],
+) -> Optional[Tuple[float, float]]:
+    """Return a layer-count reference extent for directed acyclic components.
+
+    Parameters
+    ----------
+    visual_sizes : torch.Tensor
+        Per-node visual sizes with shape ``[N, 2]``.
+    edges : Sequence[Tuple[int, int]]
+        Component directed edges using global node ids.
+    component : Sequence[int]
+        Component node ids.
+
+    Returns
+    -------
+    Optional[Tuple[float, float]]
+        Layered DAG reference extent, or ``None`` for cyclic components.
+    """
+    if not edges:
+        return None
+    indegree = {int(node): 0 for node in component}
+    outgoing: Dict[int, List[int]] = {int(node): [] for node in component}
+    for source, target in edges:
+        outgoing[int(source)].append(int(target))
+        indegree[int(target)] += 1
+    queue = sorted(node for node, degree in indegree.items() if degree == 0)
+    levels = {node: 0 for node in queue}
+    visited = 0
+    while queue:
+        node = queue.pop(0)
+        visited += 1
+        for target in outgoing[node]:
+            levels[target] = max(levels.get(target, 0), levels[node] + 1)
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+                queue.sort()
+    if visited != len(component):
+        return None
+    layer_counts: Dict[int, int] = {}
+    for node in component:
+        layer = levels.get(int(node), 0)
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
+    gap = _structure_gap(visual_sizes[list(component)])
+    max_width = float(visual_sizes[list(component), 0].max().item())
+    max_height = float(visual_sizes[list(component), 1].max().item())
+    width = max_width + max(0, max(layer_counts.values(), default=1) - 1) * gap
+    height = max_height + max(0, len(layer_counts) - 1) * gap
+    return width, height
+
+
+def _undirected_adjacency(
+    edges: Sequence[Tuple[int, int]],
+    component: Sequence[int],
+) -> Dict[int, List[int]]:
+    """Build undirected adjacency for a component.
+
+    Parameters
+    ----------
+    edges : Sequence[Tuple[int, int]]
+        Component edges using global node ids.
+    component : Sequence[int]
+        Component node ids.
+
+    Returns
+    -------
+    Dict[int, List[int]]
+        Sorted neighbor lists keyed by node id.
+    """
+    adjacency: Dict[int, List[int]] = {int(node): [] for node in component}
+    for source, target in edges:
+        adjacency[int(source)].append(int(target))
+        adjacency[int(target)].append(int(source))
+    return {node: sorted(neighbors) for node, neighbors in adjacency.items()}
+
+
+def _reference_root(
+    edges: Sequence[Tuple[int, int]],
+    component: Sequence[int],
+    adjacency: Mapping[int, Sequence[int]],
+) -> int:
+    """Choose a deterministic root for frozen tree references.
+
+    Parameters
+    ----------
+    edges : Sequence[Tuple[int, int]]
+        Component directed edges using global node ids.
+    component : Sequence[int]
+        Component node ids.
+    adjacency : Mapping[int, Sequence[int]]
+        Undirected adjacency keyed by node id.
+
+    Returns
+    -------
+    int
+        Root node id.
+    """
+    indegree = {int(node): 0 for node in component}
+    for _source, target in edges:
+        indegree[int(target)] += 1
+    sources = [node for node, degree in indegree.items() if degree == 0]
+    if len(sources) == 1:
+        return sources[0]
+    eccentricities = {
+        int(node): max(_bfs_depths(adjacency, int(node)).values(), default=0) for node in component
+    }
+    return min(eccentricities, key=lambda node: (eccentricities[node], node))
+
+
+def _bfs_depths(adjacency: Mapping[int, Sequence[int]], root: int) -> Dict[int, int]:
+    """Return unweighted depths from a root.
+
+    Parameters
+    ----------
+    adjacency : Mapping[int, Sequence[int]]
+        Undirected adjacency keyed by node id.
+    root : int
+        Root node id.
+
+    Returns
+    -------
+    Dict[int, int]
+        Depth per reached node.
+    """
+    depths = {int(root): 0}
+    queue = [int(root)]
+    while queue:
+        node = queue.pop(0)
+        for neighbor in adjacency[node]:
+            if int(neighbor) in depths:
+                continue
+            depths[int(neighbor)] = depths[node] + 1
+            queue.append(int(neighbor))
+    return depths
+
+
+def _component_packing_area(
+    extents: Sequence[Tuple[float, float]],
+    gap: float,
+) -> float:
+    """Return a frozen square-ish component-packing reference area.
+
+    Parameters
+    ----------
+    extents : Sequence[Tuple[float, float]]
+        Component reference extents.
+    gap : float
+        Nominal gutter between packed components.
+
+    Returns
+    -------
+    float
+        Area of a shelf-packed component reference.
+    """
+    if not extents:
+        return 0.0
+    total_area = sum(width * height for width, height in extents)
+    target_width = math.sqrt(max(total_area, 1e-12))
+    row_width = 0.0
+    row_height = 0.0
+    packed_width = 0.0
+    packed_height = 0.0
+    for width, height in sorted(extents, key=lambda extent: extent[1], reverse=True):
+        next_width = width if row_width <= 0.0 else row_width + gap + width
+        if row_width > 0.0 and next_width > target_width:
+            packed_width = max(packed_width, row_width)
+            packed_height += row_height + gap
+            row_width = width
+            row_height = height
+        else:
+            row_width = next_width
+            row_height = max(row_height, height)
+    packed_width = max(packed_width, row_width)
+    packed_height += row_height
+    return max(total_area, packed_width * packed_height)
+
+
+def _edge_length_node_diag_band_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Return the parallel C5 fallback edge-length/node-diagonal band.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    Tuple[Optional[float], Optional[float]]
+        Fallback band score and mean-edge/node-diagonal ratio, or
+        ``(None, None)`` when no edges are present.
+    """
+    if edge_index.numel() == 0:
+        return None, None
+    lengths = torch.linalg.vector_norm(pos[edge_index[0]] - pos[edge_index[1]], dim=1)
+    mean_length = float(lengths.mean().item())
+    mean_diag = _mean_node_diagonal(node_sizes)
+    if mean_diag <= 1e-12:
+        return None, None
+    ratio = mean_length / mean_diag
+    return _edge_length_log_band_score(ratio), ratio
+
+
+def _edge_length_log_band_score(ratio: float) -> float:
+    """Score the fallback edge-length ratio with a log band.
+
+    Parameters
+    ----------
+    ratio : float
+        Mean edge length divided by mean node diagonal.
+
+    Returns
+    -------
+    float
+        Fallback score in ``[0, 1]``.
+    """
+    safe_ratio = max(float(ratio), 1e-12)
+    if EDGE_LENGTH_RATIO_LO <= safe_ratio <= EDGE_LENGTH_RATIO_HI:
+        return 1.0
+    if safe_ratio < EDGE_LENGTH_RATIO_LO:
+        distance = math.log(EDGE_LENGTH_RATIO_LO / safe_ratio)
+        return math.exp(-WHITESPACE_CROWDING_DECAY * distance * distance)
+    distance = math.log(safe_ratio / EDGE_LENGTH_RATIO_HI)
+    return math.exp(-WHITESPACE_SPRAWL_DECAY * distance * distance)
 
 
 def _log_band_score(ratio: float) -> float:
