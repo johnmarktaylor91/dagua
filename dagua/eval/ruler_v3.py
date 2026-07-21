@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
+from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
 from dagua.metrics import (
     _all_pairs_unweighted,
     _build_csr,
@@ -193,6 +194,7 @@ def score_core_v3(
     crossing_samples: int = 1_000_000,
     neighborhood_samples: int = 5000,
     all_pairs_dist: Optional[np.ndarray] = None,
+    graph_meta: Optional[Mapping[str, Any]] = None,
     seed: int = 0,
 ) -> RulerV3Result:
     """Score the V3 CORE ruler facets for a straight-line layout.
@@ -223,6 +225,9 @@ def score_core_v3(
         Deterministic node-row budget for C3.
     all_pairs_dist : Optional[numpy.ndarray], optional
         Optional precomputed graph-distance matrix with shape ``[N, N]``.
+    graph_meta : Optional[Mapping[str, Any]], optional
+        Declared input metadata for V3 conditional groups. Gates read only this
+        input metadata and never the drawing.
     seed : int, optional
         Frozen seed for sampled V2-compatible primitives.
 
@@ -324,6 +329,8 @@ def score_core_v3(
         },
         num_nodes=num_nodes,
     )
+    group_results = evaluate_conditional_groups(positions, edges, sizes, graph_meta)
+    facets = _merge_conditional_group_facets(facets, group_results)
     scores = _triple_view_scores(facets)
     flags = _row_flags(
         degenerate_scale=degenerate_scale,
@@ -341,6 +348,7 @@ def score_core_v3(
             "tier1_applicable_facets": sum(
                 1 for facet in facets.values() if facet.applicable and facet.tier == 1
             ),
+            "applicable_groups": sum(1 for group in group_results.values() if group.applicable),
         },
         metadata={
             "num_nodes": num_nodes,
@@ -349,6 +357,7 @@ def score_core_v3(
             "node_diag_mean": node_diag_mean,
             "edge_length_mean": float(length_stats["edge_length_mean"]),
             "crossing_weight_multiplier": crossing_weight_multiplier(num_nodes),
+            "conditional_groups": group_results,
         },
     )
 
@@ -1808,6 +1817,58 @@ def _build_facets(
             applicability_reason="core_facet_input_applicable",
             metadata=metadata.get(code, {}),
         )
+    return facets
+
+
+def _merge_conditional_group_facets(
+    core_facets: Mapping[str, RulerV3Facet],
+    group_results: Mapping[str, Any],
+) -> Dict[str, RulerV3Facet]:
+    """Append applicable conditional-group facets to CORE facet records.
+
+    Parameters
+    ----------
+    core_facets : Mapping[str, RulerV3Facet]
+        CORE V3 facet records.
+    group_results : Mapping[str, Any]
+        Conditional-group evaluations from
+        :func:`dagua.eval.ruler_v3_groups.evaluate_conditional_groups`.
+
+    Returns
+    -------
+    Dict[str, RulerV3Facet]
+        Facet records for applicability-renormalized macro-averaging. G6's
+        weighted KSM explicitly replaces C1 on weighted rows to avoid
+        double-counting distance fidelity.
+    """
+    facets = dict(core_facets)
+    for group in group_results.values():
+        for group_facet in group.facets.values():
+            replaced = group_facet.replaces_core
+            if replaced is not None and replaced in facets:
+                original = facets[replaced]
+                facets[replaced] = RulerV3Facet(
+                    code=original.code,
+                    name=original.name,
+                    tier=original.tier,
+                    score=None,
+                    base_weight=original.base_weight,
+                    effective_weight=0.0,
+                    applicable=False,
+                    applicability_reason=f"replaced_by:{group_facet.code}",
+                    metadata={**original.metadata, "replaced_by": group_facet.code},
+                )
+            facets[group_facet.code] = RulerV3Facet(
+                code=group_facet.code,
+                name=group_facet.name,
+                tier=group_facet.tier,
+                score=group_facet.score,
+                base_weight=group_facet.base_weight,
+                effective_weight=group_facet.effective_weight,
+                applicable=group_facet.applicable,
+                applicability_reason=group_facet.applicability_reason,
+                metadata=group_facet.metadata,
+            )
     return facets
 
 
