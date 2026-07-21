@@ -56,6 +56,9 @@ SIZE_SENSITIVE_FACETS = {
     "G7_routed_curve_quality",
     "G7_routed_bend_terminal_economy",
 }
+LOW_INFORMATION_DEFORMATION_FACETS = {
+    "G2_cluster_nesting_fidelity",
+}
 
 
 @dataclass(frozen=True)
@@ -791,16 +794,30 @@ def test_gg4_deformation_monotonicity_sweep(capsys: pytest.CaptureFixture[str]) 
     del capsys
     sweeps = _deformation_sweeps()
     rows: List[Tuple[str, str, str]] = []
+    detail_rows: List[Tuple[str, int, float]] = []
     failures = []
     for facet, probes in sweeps.items():
         scores = [_facet_value(_score(probe), facet) for probe in probes]
         monotone = all(a + 1e-9 >= b for a, b in zip(scores, scores[1:]))
         decays = scores[0] > scores[-1] + 1e-9
-        status = "PASS" if monotone and decays else f"FAIL {scores}"
+        flat = max(scores) - min(scores) <= 1e-9
+        low_information = facet in LOW_INFORMATION_DEFORMATION_FACETS and monotone and flat
+        status = (
+            "PASS"
+            if monotone and decays
+            else "LOW-INFORMATION flat-not-inverting"
+            if low_information
+            else f"FAIL {scores}"
+        )
         rows.append((facet, probes[0].name, status))
-        if not monotone or not decays:
+        detail_rows.extend((facet, step, score) for step, score in enumerate(scores))
+        if not ((monotone and decays) or low_information):
             failures.append((facet, scores))
     _print_matrix("GG-4 deformation monotonicity matrix", sorted(rows))
+    print("GG-4 deformation sweep scores")
+    print("facet step score")
+    for facet, step, score in sorted(detail_rows):
+        print(f"{facet:40s} {step:d} {score:.12g}")
     assert not failures
 
 
@@ -845,6 +862,9 @@ def _deformation_sweeps() -> Mapping[str, Tuple[Probe, ...]]:
         "G2_cluster_sibling_overlap": tuple(_g2_deformation(step) for step in range(4)),
         "G2_cluster_edge_intrusion": tuple(_g2_deformation(step) for step in range(4)),
         "G2_cluster_hac_ari": tuple(_g2_deformation(step) for step in range(4)),
+        "G2_cluster_nesting_fidelity": tuple(
+            _g2_nesting_escape_deformation(step) for step in range(4)
+        ),
         "G2_cluster_compactness_log_band": tuple(
             _g2_compactness_deformation(step) for step in range(4)
         ),
@@ -852,8 +872,17 @@ def _deformation_sweeps() -> Mapping[str, Tuple[Probe, ...]]:
         "G4_layered_depth_bands": tuple(_g4_layered_deformation(step) for step in range(4)),
         "G4_layered_parent_centering": tuple(_g4_layered_deformation(step) for step in range(4)),
         "G4_layered_sibling_order": tuple(_g4_layered_deformation(step) for step in range(4)),
+        "G4_layered_contour_separation": tuple(
+            _g4_layered_contour_deformation(step) for step in range(4)
+        ),
+        "G4_radial_depth_monotonicity": tuple(
+            _g4_radial_depth_deformation(step) for step in range(4)
+        ),
         "G4_radial_angular_allocation": tuple(_g4_radial_deformation(step) for step in range(4)),
         "G4_radial_angular_overlap": tuple(_g4_radial_deformation(step) for step in range(4)),
+        "G4_radial_circular_order": tuple(
+            _g4_radial_circular_order_deformation(step) for step in range(4)
+        ),
         "G5_temporal_stability": tuple(_g5_deformation(step) for step in range(4)),
         "G6_weighted_ksm": tuple(
             _weighted_probe(lengths)
@@ -1123,6 +1152,41 @@ def _g2_compactness_deformation(step: int) -> Probe:
     return _cluster_probe(scale=scale)
 
 
+def _g2_nesting_escape_deformation(step: int) -> Probe:
+    """Create a nested-cluster child-escape deformation probe.
+
+    Parameters
+    ----------
+    step : int
+        Deformation step.
+
+    Returns
+    -------
+    Probe
+        Nested G2 probe.
+    """
+    escape = (0.0, 8.0, 40.0, 160.0)[step]
+    pos = torch.tensor(
+        [
+            [-1.0 + escape, -0.2],
+            [1.0 + escape, 0.2],
+            [-3.0, 0.0],
+            [3.0, 0.0],
+        ],
+        dtype=torch.float64,
+    )
+    edges = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    meta = {
+        "clusters": {
+            "parent": [0, 1, 2, 3],
+            "child": [0, 1],
+        },
+        "cluster_parents": {"parent": None, "child": "parent"},
+        "cluster_labels": {"parent": "Parent", "child": "Child"},
+    }
+    return Probe("g2_nesting_escape", pos, edges, _sizes(4, 0.5), meta)
+
+
 def _g3_deformation(step: int) -> Probe:
     """Create a planted-community deformation probe.
 
@@ -1171,6 +1235,40 @@ def _g4_layered_deformation(step: int) -> Probe:
     )
 
 
+def _g4_layered_contour_deformation(step: int) -> Probe:
+    """Create a layered sibling-subtree overlap deformation probe.
+
+    Parameters
+    ----------
+    step : int
+        Deformation step.
+
+    Returns
+    -------
+    Probe
+        Layered contour-separation probe.
+    """
+    right_center = (5.0, -1.5, -4.0, -5.0)[step]
+    coords = [
+        (0.0, -2.0),
+        (-5.0, 0.0),
+        (-6.0, 1.0),
+        (-4.0, 1.0),
+        (right_center, 0.0),
+        (right_center - 1.0, 1.0),
+        (right_center + 1.0, 1.0),
+    ]
+    edges = torch.tensor([[0, 0, 1, 1, 4, 4], [1, 4, 2, 3, 5, 6]], dtype=torch.long)
+    meta = {"declared_tree": True, "root": 0, "tree_convention": "layered"}
+    return Probe(
+        "g4_layered_contour",
+        torch.tensor(coords, dtype=torch.float64),
+        edges,
+        _sizes(7, 2.0),
+        meta,
+    )
+
+
 def _g4_radial_deformation(step: int) -> Probe:
     """Create a radial-tree deformation probe.
 
@@ -1196,6 +1294,66 @@ def _g4_radial_deformation(step: int) -> Probe:
     meta = {"declared_tree": True, "root": 0, "tree_convention": "radial"}
     return Probe(
         "g4_radial", torch.tensor(coords, dtype=torch.float64), edges, _sizes(4, 0.2), meta
+    )
+
+
+def _g4_radial_depth_deformation(step: int) -> Probe:
+    """Create a radial radius-depth inversion deformation probe.
+
+    Parameters
+    ----------
+    step : int
+        Deformation step.
+
+    Returns
+    -------
+    Probe
+        Radial depth-monotonicity probe.
+    """
+    inner_radius = (1.0, 3.5, 5.5, 7.5)[step]
+    coords = [
+        (0.0, 0.0),
+        (inner_radius, 0.0),
+        (0.0, 2.0),
+        (0.0, 3.0),
+        (0.0, 4.0),
+        (0.0, 5.0),
+    ]
+    edges = torch.tensor([[0, 1, 2, 3, 4], [1, 2, 3, 4, 5]], dtype=torch.long)
+    meta = {"declared_tree": True, "root": 0, "tree_convention": "radial"}
+    return Probe(
+        "g4_radial_depth", torch.tensor(coords, dtype=torch.float64), edges, _sizes(6, 0.2), meta
+    )
+
+
+def _g4_radial_circular_order_deformation(step: int) -> Probe:
+    """Create a radial sibling circular-order deformation probe.
+
+    Parameters
+    ----------
+    step : int
+        Deformation step.
+
+    Returns
+    -------
+    Probe
+        Radial circular-order probe.
+    """
+    drawn_orders = (
+        [1, 2, 3, 4, 5],
+        [1, 2, 4, 3, 5],
+        [1, 4, 2, 5, 3],
+        [5, 4, 3, 2, 1],
+    )
+    radius = 4.0
+    coords = [(0.0, 0.0)] * 6
+    for rank, node in enumerate(drawn_orders[step]):
+        angle = 2.0 * math.pi * rank / 5.0
+        coords[node] = (radius * math.cos(angle), radius * math.sin(angle))
+    edges = torch.tensor([[0, 0, 0, 0, 0], [1, 2, 3, 4, 5]], dtype=torch.long)
+    meta = {"declared_tree": True, "root": 0, "tree_convention": "radial"}
+    return Probe(
+        "g4_radial_order", torch.tensor(coords, dtype=torch.float64), edges, _sizes(6, 0.2), meta
     )
 
 
