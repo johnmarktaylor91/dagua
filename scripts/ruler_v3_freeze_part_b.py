@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from scripts.native_sprint_score import (  # noqa: E402
     build_graph_map,
     graph_meta_for_v3,
+    normalize_position_units_for_scoring,
     score_position,
     scoring_signature,
 )
@@ -34,6 +35,7 @@ DEFAULT_REPORT_PATH = Path(
 HIGH_CORRELATION_THRESHOLD = 0.85
 RANDOM_LAYOUTS_PER_GRAPH = 3
 DEFAULT_MAX_REAL_ROWS = 1800
+GG6_TIE_EPSILON = 0.5
 
 SPECIALIST_RULES: Tuple[Tuple[str, str, Tuple[str, ...], Tuple[str, ...]], ...] = (
     ("tree", "G4", ("tidy", "rt", "tree", "mrtree"), ("tree",)),
@@ -319,13 +321,21 @@ def score_real_tasks(
     return rows
 
 
-def position_bbox(path: Path) -> Tuple[float, float, float, float]:
-    """Read a position tensor and return its bounding box.
+def position_bbox(
+    path: Path,
+    graph: Any,
+    engine: str,
+) -> Tuple[float, float, float, float]:
+    """Read a position tensor and return its rendered-unit bounding box.
 
     Parameters
     ----------
     path : Path
         Position tensor path.
+    graph : Any
+        Graph object whose measured node sizes define rendered point units.
+    engine : str
+        Engine identifier used to apply the store-unit convention.
 
     Returns
     -------
@@ -333,18 +343,24 @@ def position_bbox(path: Path) -> Tuple[float, float, float, float]:
         Minimum x, minimum y, maximum x, and maximum y.
     """
     positions = torch.load(path, map_location="cpu", weights_only=True).to(dtype=torch.float32)
-    mins = positions.amin(dim=0)
-    maxes = positions.amax(dim=0)
+    normalized = normalize_position_units_for_scoring(graph, positions, engine)
+    mins = normalized.positions.amin(dim=0)
+    maxes = normalized.positions.amax(dim=0)
     return (float(mins[0]), float(mins[1]), float(maxes[0]), float(maxes[1]))
 
 
-def graph_bboxes(tasks: Sequence[PositionTask]) -> Dict[str, Tuple[float, float, float, float]]:
-    """Compute one real-layout bounding box per graph for random-layout floors.
+def graph_bboxes(
+    tasks: Sequence[PositionTask],
+    graphs: Mapping[str, Any],
+) -> Dict[str, Tuple[float, float, float, float]]:
+    """Compute one rendered-layout bounding box per graph for random floors.
 
     Parameters
     ----------
     tasks : Sequence[PositionTask]
         Real score tasks.
+    graphs : Mapping[str, Any]
+        Reconstructed graph map from ``build_graph_map``.
 
     Returns
     -------
@@ -354,7 +370,7 @@ def graph_bboxes(tasks: Sequence[PositionTask]) -> Dict[str, Tuple[float, float,
     boxes: Dict[str, Tuple[float, float, float, float]] = {}
     for task in tasks:
         if task.graph not in boxes:
-            boxes[task.graph] = position_bbox(task.path)
+            boxes[task.graph] = position_bbox(task.path, graphs[task.graph].graph, task.engine)
     return boxes
 
 
@@ -528,6 +544,64 @@ def rows_by_family(
     return dict(grouped)
 
 
+def row_flags(row: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Return V3 row flags from a scored row.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        V3 score row from ``score_position``.
+
+    Returns
+    -------
+    Tuple[str, ...]
+        Row flags such as ``DEGENERATE_SCALE`` and ``OCCLUSION_FLOOR``.
+    """
+    flags = row.get("v3_row_flags")
+    if isinstance(flags, (list, tuple)):
+        return tuple(str(flag) for flag in flags)
+    metrics = row.get("metrics", {})
+    if isinstance(metrics, Mapping):
+        metric_flags = metrics.get("v3_flags")
+        if isinstance(metric_flags, (list, tuple)):
+            return tuple(str(flag) for flag in metric_flags)
+    return tuple()
+
+
+def gg6_block_signal(
+    random_row: Mapping[str, Any],
+    real_row: Mapping[str, Any],
+) -> Optional[str]:
+    """Return a GG-6 block line when random beats real beyond acceptance rules.
+
+    Parameters
+    ----------
+    random_row : Mapping[str, Any]
+        Random-layout V3 score row.
+    real_row : Mapping[str, Any]
+        Real-engine V3 score row.
+
+    Returns
+    -------
+    Optional[str]
+        Human-readable block signal, or ``None`` for ties, flagged rows, and
+        non-breaches.
+    """
+    random_score = float(random_row["v3_tiered"])
+    real_score = float(real_row["v3_tiered"])
+    if random_score <= real_score + GG6_TIE_EPSILON:
+        return None
+    random_flags = row_flags(random_row)
+    real_flags = row_flags(real_row)
+    if random_flags or real_flags:
+        return None
+    graph = str(random_row["graph"])
+    return (
+        f"{graph}: {random_row['engine']} {random_score:.3f} > "
+        f"{real_row['engine']} {real_score:.3f} (delta={random_score - real_score:.3f})"
+    )
+
+
 def summarize_random_floor(
     real_rows: Sequence[Mapping[str, Any]],
     random_rows: Sequence[Mapping[str, Any]],
@@ -558,13 +632,10 @@ def summarize_random_floor(
         real_by_graph[str(row["graph"])].append(row)
     for random_row in random_rows:
         graph = str(random_row["graph"])
-        random_score = float(random_row["v3_tiered"])
         for real_row in real_by_graph.get(graph, []):
-            if random_score > float(real_row["v3_tiered"]):
-                block_signals.append(
-                    f"{graph}: {random_row['engine']} {random_score:.3f} > "
-                    f"{real_row['engine']} {float(real_row['v3_tiered']):.3f}"
-                )
+            signal = gg6_block_signal(random_row, real_row)
+            if signal is not None:
+                block_signals.append(signal)
     for family in sorted(set(real_by_family) | set(random_by_family)):
         real_scores = [float(row["v3_tiered"]) for row in real_by_family.get(family, [])]
         random_scores = [float(row["v3_tiered"]) for row in random_by_family.get(family, [])]
@@ -963,7 +1034,7 @@ def main() -> None:
     graphs = build_graph_map(selected_graphs)
     signature = scoring_signature()
     real_rows = score_real_tasks(selected_tasks, graphs, signature)
-    bboxes = graph_bboxes(selected_tasks)
+    bboxes = graph_bboxes(selected_tasks, graphs)
     random_rows = score_random_rows(selected_graphs, graphs, bboxes, signature)
     random_summary, random_blocks = summarize_random_floor(real_rows, random_rows, graphs)
     winners = summarize_facet_winners(real_rows, graphs)

@@ -11,8 +11,10 @@ import pytest
 import torch
 
 from dagua.eval.graphs import TestGraph
+from dagua.eval.ruler_v3 import RulerV3Result
 from dagua.graph import DaguaGraph
 from scripts import native_sprint_score as scorer
+from scripts import ruler_v3_freeze_part_b as part_b
 
 
 def _make_noncluster_graph(name: str) -> TestGraph:
@@ -415,6 +417,121 @@ def test_score_position_v2_stays_unchanged(
     assert default_row["old_composite"] == explicit_v2_row["old_composite"] == 42.0
     assert default_row["extended_composite"] == explicit_v2_row["extended_composite"] == 42.0
     assert calls and calls[0]["node_sizes"] is graph.node_sizes
+
+
+def test_score_position_v2_converts_native_units(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V2 scoring receives renderer point-space positions for native-unit stores."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="native_units", graph=graph, tags={"directed"})
+    pos_path = tmp_path / "native.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [2.0, 0.0]], dtype=torch.float32), pos_path)
+    captured: dict[str, Any] = {}
+
+    def fake_full(positions: torch.Tensor, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Capture scorer inputs and return stable V2 metrics."""
+        del args
+        captured["positions"] = positions.detach().clone()
+        captured["node_sizes"] = kwargs["node_sizes"]
+        return {"score": 10.0, "node_occlusion_score": 1.0}
+
+    monkeypatch.setattr(scorer, "full", fake_full)
+    monkeypatch.setattr(scorer, "composite_auto", _score_from_payload)
+
+    row = scorer.score_position(test_graph, str(pos_path), "dot", "sig", ruler="v2")
+
+    assert float(captured["positions"][1, 0] - captured["positions"][0, 0]) == pytest.approx(144.0)
+    assert graph.node_sizes is not None
+    assert captured["node_sizes"].shape == graph.node_sizes.shape
+    assert row["scoring_units"]["position_scale"] == pytest.approx(72.0)
+    assert row["scoring_units"]["rendered_span"] == pytest.approx(144.0)
+
+
+def test_score_position_v2_keeps_point_scale_engines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point-scale stores are not rescaled before V2 scoring."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="point_units", graph=graph, tags={"directed"})
+    pos_path = tmp_path / "points.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [144.0, 0.0]], dtype=torch.float32), pos_path)
+    captured: dict[str, Any] = {}
+
+    def fake_full(positions: torch.Tensor, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Capture scorer inputs and return stable V2 metrics."""
+        del args, kwargs
+        captured["positions"] = positions.detach().clone()
+        return {"score": 10.0, "node_occlusion_score": 1.0}
+
+    monkeypatch.setattr(scorer, "full", fake_full)
+    monkeypatch.setattr(scorer, "composite_auto", _score_from_payload)
+
+    row = scorer.score_position(test_graph, str(pos_path), "graphviz_dot", "sig", ruler="v2")
+
+    assert float(captured["positions"][1, 0] - captured["positions"][0, 0]) == pytest.approx(144.0)
+    assert row["scoring_units"]["position_scale"] == pytest.approx(1.0)
+
+
+def test_score_position_v3_merges_scoring_degenerate_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V3 rows carry scoring-path degeneracy flags without ruler changes."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="degenerate", graph=graph, tags={"directed"})
+    pos_path = tmp_path / "degenerate.pt"
+    torch.save(torch.zeros((2, 2), dtype=torch.float32), pos_path)
+
+    def fake_score_core_v3(*args: Any, **kwargs: Any) -> RulerV3Result:
+        """Return a V3 result with no ruler-side flags."""
+        del args, kwargs
+        return RulerV3Result(
+            facets={},
+            scores={"tiered": 1.0, "equal": 1.0, "tier1_only": 1.0},
+            flags=tuple(),
+            applicability={},
+            coverage={},
+            metadata={},
+        )
+
+    monkeypatch.setattr(scorer, "score_core_v3", fake_score_core_v3)
+
+    row = scorer.score_position(test_graph, str(pos_path), "graphviz_dot", "sig", ruler="v3")
+
+    assert row["v3_row_flags"] == ["DEGENERATE_SCALE"]
+    assert row["metrics"]["v3_flags"] == ["DEGENERATE_SCALE"]
+
+
+def test_gg6_block_signal_respects_tie_band_and_flags() -> None:
+    """GG-6 blocks only unflagged random wins beyond the tie band."""
+    random_row = {
+        "graph": "g",
+        "engine": "random_uniform_0",
+        "v3_tiered": 51.0,
+        "v3_row_flags": [],
+    }
+    tied_real = {"engine": "dagre", "v3_tiered": 50.75, "v3_row_flags": []}
+    flagged_real = {"engine": "dot", "v3_tiered": 40.0, "v3_row_flags": ["DEGENERATE_SCALE"]}
+    clean_real = {"engine": "elk_layered", "v3_tiered": 49.0, "v3_row_flags": []}
+
+    assert part_b.gg6_block_signal(random_row, tied_real) is None
+    assert part_b.gg6_block_signal(random_row, flagged_real) is None
+    assert part_b.gg6_block_signal(random_row, clean_real) is not None
 
 
 def test_score_position_v3_scores(tmp_path: Path) -> None:
