@@ -28,6 +28,7 @@ import torch
 
 from dagua.eval.benchmark import _declares_hierarchy
 from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_directed
+from dagua.eval.ruler_v3 import RulerV3Result, score_core_v3
 from dagua.eval.size_policy import set_size_aware_externals
 from dagua.metrics import composite_auto, full
 
@@ -84,6 +85,14 @@ _FULL_POLICY = {
 }
 _WORKER_GRAPHS: Dict[str, TestGraph] = {}
 _WORKER_SIGNATURE = ""
+_PLANTED_PARTITION_GRAPH_NAMES = {
+    "r79_weighted_community_4x18",
+    "r79_undirected_sbm_low_mix_4x25",
+    "r79_undirected_sbm_mid_mix_5x20",
+    "r79_undirected_sbm_high_mix_3x30",
+    "sbm_5x40",
+    "weighted_clusters_3x10",
+}
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -464,6 +473,10 @@ def normalized_metric_value(value: Any) -> Any:
     """
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().tolist()
+    if isinstance(value, Mapping):
+        return {str(key): normalized_metric_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [normalized_metric_value(item) for item in value]
     if hasattr(value, "item"):
         try:
             return value.item()
@@ -488,8 +501,188 @@ def normalized_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: normalized_metric_value(value) for key, value in metrics.items()}
 
 
+def _cluster_labels_from_mapping(
+    clusters: Mapping[str, Sequence[int]], num_nodes: int
+) -> List[int]:
+    """Build per-node labels from declared cluster membership.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Sequence[int]]
+        Cluster membership keyed by cluster id.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    List[int]
+        Per-node cluster labels using ``-1`` for unassigned nodes.
+    """
+    labels = [-1] * num_nodes
+    for cluster_index, cluster_name in enumerate(sorted(clusters)):
+        for node_index in clusters[cluster_name]:
+            if 0 <= int(node_index) < num_nodes:
+                labels[int(node_index)] = cluster_index
+    return labels
+
+
+def _planted_partition_from_declared_row(test_graph: TestGraph) -> Optional[List[int]]:
+    """Return planted labels only for pre-registered planted-partition rows.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Corpus row whose input declarations are inspected.
+
+    Returns
+    -------
+    Optional[List[int]]
+        Per-node planted partition labels, or ``None`` when the row is not a
+        pre-registered planted-partition case.
+    """
+    if test_graph.name not in _PLANTED_PARTITION_GRAPH_NAMES:
+        return None
+    graph = test_graph.graph
+    if graph.clusters:
+        return _cluster_labels_from_mapping(graph.clusters, graph.num_nodes)
+    if test_graph.name == "r79_weighted_community_4x18":
+        return [node_index // 18 for node_index in range(graph.num_nodes)]
+    if test_graph.name == "weighted_clusters_3x10":
+        return [node_index // 10 for node_index in range(graph.num_nodes)]
+    return None
+
+
+def _rooted_forest_roots(test_graph: TestGraph) -> Optional[List[int]]:
+    """Return roots when the row declares a rooted tree/forest.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Corpus row whose graph-level tree declaration and topology are checked.
+
+    Returns
+    -------
+    Optional[List[int]]
+        Root node indices for declared tree rows, or ``None`` when no rooted
+        tree declaration is present.
+    """
+    tags = {str(tag).lower() for tag in test_graph.tags}
+    if "tree" not in tags:
+        return None
+    graph = test_graph.graph
+    edge_index = graph.edge_index
+    parent: Dict[int, Optional[int]] = {node_index: None for node_index in range(graph.num_nodes)}
+    child_counts = [0 for _ in range(graph.num_nodes)]
+    for source, target in edge_index.t().tolist():
+        source_index = int(source)
+        target_index = int(target)
+        if parent[target_index] is not None:
+            return None
+        parent[target_index] = source_index
+        child_counts[source_index] += 1
+    roots = [node_index for node_index, parent_index in parent.items() if parent_index is None]
+    if not roots:
+        return None
+    return roots
+
+
+def _declared_weight_mode(test_graph: TestGraph) -> str:
+    """Return the declared geometric interpretation for edge weights.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Corpus row carrying edge-weight declarations.
+
+    Returns
+    -------
+    str
+        V3 G6 ``weight_mode`` value.
+    """
+    del test_graph
+    return "distance"
+
+
+def graph_meta_for_v3(test_graph: TestGraph) -> Dict[str, Any]:
+    """Extract input-only graph metadata consumed by V3 conditional groups.
+
+    Parameters
+    ----------
+    test_graph : TestGraph
+        Corpus row definition and reconstructed graph.
+
+    Returns
+    -------
+    Dict[str, Any]
+        V3 group-gate metadata. Absent declarations are omitted rather than
+        zero-filled so DOC-4 inapplicability remains explicit.
+    """
+    graph = test_graph.graph
+    meta: Dict[str, Any] = {}
+    declared_hierarchy = _declares_hierarchy(test_graph)
+    if declared_hierarchy:
+        meta["declared_hierarchical"] = declared_hierarchy
+        meta["flow_direction"] = graph.direction
+    if graph.clusters:
+        meta["clusters"] = {
+            str(cluster_id): [int(node_index) for node_index in members]
+            for cluster_id, members in graph.clusters.items()
+        }
+    if graph.cluster_parents:
+        meta["cluster_parents"] = {
+            str(cluster_id): (None if parent is None else str(parent))
+            for cluster_id, parent in graph.cluster_parents.items()
+        }
+    tree_roots = _rooted_forest_roots(test_graph)
+    if tree_roots is not None:
+        meta["declared_tree"] = True
+        meta["tree_roots"] = tree_roots
+        meta["tree_convention"] = "radial" if "radial" in test_graph.tags else "layered"
+    edge_weights = graph.edge_weights
+    if edge_weights is not None and int(edge_weights.numel()) > 0:
+        meta["edge_weights"] = edge_weights.detach().cpu().to(dtype=torch.float64).tolist()
+        meta["weight_mode"] = _declared_weight_mode(test_graph)
+    planted_partition = _planted_partition_from_declared_row(test_graph)
+    if planted_partition is not None:
+        meta["planted_partition"] = planted_partition
+    return meta
+
+
+def _v3_facet_records(result: RulerV3Result) -> Dict[str, Dict[str, Any]]:
+    """Serialize V3 facet records for raw score rows.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 scoring result.
+
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        JSON-compatible facet records keyed by facet code.
+    """
+    return {
+        code: {
+            "code": facet.code,
+            "name": facet.name,
+            "tier": facet.tier,
+            "score": facet.score,
+            "base_weight": facet.base_weight,
+            "effective_weight": facet.effective_weight,
+            "applicable": facet.applicable,
+            "applicability_reason": facet.applicability_reason,
+            "metadata": normalized_metric_value(facet.metadata),
+        }
+        for code, facet in result.facets.items()
+    }
+
+
 def score_position(
-    test_graph: TestGraph, path_string: str, engine: str, signature: str
+    test_graph: TestGraph,
+    path_string: str,
+    engine: str,
+    signature: str,
+    ruler: str = "v2",
 ) -> Dict[str, Any]:
     """Score one saved position tensor under old and extended rulers.
 
@@ -503,6 +696,9 @@ def score_position(
         Engine name.
     signature : str
         Current scoring signature.
+    ruler : str, default="v2"
+        Ruler version. ``"v2"`` preserves the frozen old/extended scoring path;
+        ``"v3"`` scores with the V3 core plus input-gated conditional groups.
 
     Returns
     -------
@@ -534,6 +730,38 @@ def score_position(
     expected_shape = (graph.num_nodes, 2)
     if not isinstance(positions, torch.Tensor) or tuple(positions.shape) != expected_shape:
         raise ValueError(f"shape {getattr(positions, 'shape', None)} != {expected_shape}")
+    normalized_ruler = ruler.lower()
+    if normalized_ruler not in {"v2", "v3"}:
+        raise ValueError(f"unsupported ruler version: {ruler!r}")
+    if normalized_ruler == "v3":
+        graph_meta = graph_meta_for_v3(test_graph)
+        result = score_core_v3(
+            positions.to(dtype=torch.float32),
+            graph.edge_index,
+            node_sizes=graph.node_sizes,
+            graph_meta=graph_meta,
+        )
+        return {
+            "graph": test_graph.name,
+            "engine": engine,
+            "position_path": path_string,
+            "position_sha256": sha256_file(Path(path_string)),
+            "metrics": {
+                "v3_scores": dict(result.scores),
+                "v3_flags": list(result.flags),
+                "v3_coverage": dict(result.coverage),
+            },
+            "v3_tiered": float(result.scores["tiered"]),
+            "v3_equal": float(result.scores["equal"]),
+            "v3_tier1_only": float(result.scores["tier1_only"]),
+            "v3_facets": _v3_facet_records(result),
+            "v3_applicability": dict(result.applicability),
+            "v3_row_flags": list(result.flags),
+            "graph_meta": normalized_metric_value(graph_meta),
+            "scoring_signature": signature,
+            "score_origin": "fresh_positions",
+            "ruler_version": "v3",
+        }
     declared = _declares_hierarchy(test_graph)
     metrics = full(
         positions.to(dtype=torch.float32),
