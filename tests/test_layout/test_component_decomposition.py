@@ -104,7 +104,19 @@ def _composite_score(graph_name: str, config: LayoutConfig) -> float:
 
 
 def test_component_wrapper_detects_and_tiles_three_components(monkeypatch) -> None:
-    """Disconnected graphs should recurse per component and tile child layouts."""
+    """Non-portfolio routes should recurse per component and tile child layouts.
+
+    Since the r83 portfolio port, declared-hierarchical full graphs route to
+    the directed portfolio contest, which owns component handling internally
+    (its dot/sugiyama-family candidates pack components and the frozen-ruler
+    referee penalizes overlap). The per-component wrapper is therefore the
+    non-portfolio path; force a non-portfolio sub-pipeline so this test keeps
+    exercising the wrapper machinery (DetectComponents -> extraction ->
+    per-child solve -> tiling). The portfolio route's disconnected behavior is
+    locked separately by
+    ``test_directed_portfolio_route_tiles_disconnected_forest``.
+    """
+    monkeypatch.setenv("DAGUA_NATIVE_DISABLE_W5", "1")
     edge_index = torch.tensor(
         [
             [0, 1, 3, 5],
@@ -142,10 +154,54 @@ def test_component_wrapper_detects_and_tiles_three_components(monkeypatch) -> No
         edge_index=edge_index,
         num_nodes=7,
         node_sizes=node_sizes,
-        config=LayoutConfig(seed=42, steps=10, decompose_components=True),
+        config=LayoutConfig(
+            seed=42,
+            steps=10,
+            decompose_components=True,
+            force_pipeline="stress",
+        ),
     )
 
     assert observed_child_sizes == [3, 2, 2]
+    boxes = [
+        _bbox_for_nodes(pos, [0, 1, 2]),
+        _bbox_for_nodes(pos, [3, 4]),
+        _bbox_for_nodes(pos, [5, 6]),
+    ]
+    assert _boxes_are_disjoint(boxes[0], boxes[1])
+    assert _boxes_are_disjoint(boxes[0], boxes[2])
+    assert _boxes_are_disjoint(boxes[1], boxes[2])
+
+
+def test_directed_portfolio_route_tiles_disconnected_forest(monkeypatch) -> None:
+    """The full-graph portfolio route must keep disconnected components disjoint.
+
+    Declared-hierarchical graphs (this three-chain forest classifies as one)
+    bypass the per-component wrapper and solve the full graph inside the
+    directed portfolio contest. That is only safe because the contest's
+    candidates handle components internally; this end-to-end check locks the
+    sprint-19d behavioral guarantee (no overlapping components) on the
+    portfolio path itself.
+    """
+    monkeypatch.setenv("DAGUA_NATIVE_DISABLE_W5", "1")
+    edge_index = torch.tensor(
+        [
+            [0, 1, 3, 5],
+            [1, 2, 4, 6],
+        ],
+        dtype=torch.long,
+    )
+    node_sizes = torch.full((7, 2), 20.0, dtype=torch.float32)
+
+    pos = dagua_native_module.layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=7,
+        node_sizes=node_sizes,
+        config=LayoutConfig(seed=42, steps=10, decompose_components=True),
+    )
+
+    assert pos.shape == (7, 2)
+    assert torch.isfinite(pos).all()
     boxes = [
         _bbox_for_nodes(pos, [0, 1, 2]),
         _bbox_for_nodes(pos, [3, 4]),

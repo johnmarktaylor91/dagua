@@ -1488,8 +1488,12 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
     elif remapped_from_default:
         config = copy.copy(config)
         config.algorithm = "dagua_native"
+        # Graph-declared direction fills in ONLY when the config still holds
+        # the default "TB": an explicit config/draw(direction=...) override
+        # must win over graph.direction (same precedence as the legacy engine
+        # body below).
         graph_direction = getattr(graph, "direction", None)
-        if graph_direction in {"TB", "BT", "LR", "RL"}:
+        if config.direction == "TB" and graph_direction in {"TB", "BT", "LR", "RL"}:
             config.direction = graph_direction
 
     if config.algorithm is not None:
