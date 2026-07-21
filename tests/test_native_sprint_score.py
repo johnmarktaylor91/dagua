@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -369,3 +370,71 @@ def test_score_position_trips_on_sizeless_graph(tmp_path: Path) -> None:
 
     assert row["score_origin"] == "fresh_positions"
     assert row["metrics"]["node_occlusion_score"] is not None
+
+
+@pytest.mark.parametrize(
+    "name,tags",
+    [
+        ("plain_unit", {"directed"}),
+        ("weighted_unit", {"weighted"}),
+        ("tree_unit", {"tree"}),
+    ],
+)
+def test_score_position_v2_stays_unchanged(
+    name: str,
+    tags: set[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default scoring and explicit V2 return identical old composites."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_node("c")
+    graph.add_edge("a", "b", weight=2.0)
+    graph.add_edge("b", "c", weight=5.0)
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name=name, graph=graph, tags=tags)
+    pos_path = tmp_path / f"{name}.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=torch.float32), pos_path)
+    metrics = {"score": 42.0, "node_occlusion_score": 1.0}
+    metrics.update({key: 1.0 for key in scorer.CLUSTER_SCORE_KEYS})
+    calls: list[dict[str, Any]] = []
+
+    def fake_full(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Return stable V2 metrics and capture call arguments."""
+        calls.append(dict(kwargs))
+        return dict(metrics)
+
+    monkeypatch.setattr(scorer, "full", fake_full)
+    monkeypatch.setattr(scorer, "composite_auto", _score_from_payload)
+
+    default_row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig")
+    explicit_v2_row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig", ruler="v2")
+
+    assert default_row["old_composite"] == explicit_v2_row["old_composite"] == 42.0
+    assert default_row["extended_composite"] == explicit_v2_row["extended_composite"] == 42.0
+    assert calls and calls[0]["node_sizes"] is graph.node_sizes
+
+
+def test_score_position_v3_scores(tmp_path: Path) -> None:
+    """V3 scoring returns finite composites and publication facet records."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_node("c")
+    graph.add_edge("a", "b", weight=2.0)
+    graph.add_edge("b", "c", weight=5.0)
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="weighted_unit", graph=graph, tags={"weighted"})
+    pos_path = tmp_path / "v3.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=torch.float32), pos_path)
+
+    v3_row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig", ruler="v3")
+
+    assert "old_composite" not in v3_row
+    assert math.isfinite(v3_row["v3_tiered"])
+    assert math.isfinite(v3_row["v3_equal"])
+    assert math.isfinite(v3_row["v3_tier1_only"])
+    assert v3_row["v3_facets"]
+    assert v3_row["v3_applicability"]
