@@ -355,7 +355,7 @@ def test_measured_cost_plan_does_not_double_charge_warmup(
 def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pressured small row uses the largest fitting integer step count, not a coarse tier."""
+    """A pressured small row keeps modeled shape independent of shadow timing."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -402,10 +402,12 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
     )
 
     assert plan is not None
-    assert plan.steps == 30
-    assert plan.steps not in {24, 18, 12, 6, 3, 2, 1}
+    assert plan.steps == 36
     assert plan.checkpoints == 2
-    assert plan.predicted_s == pytest.approx(3.02)
+    assert plan.predicted_s == pytest.approx(
+        plan.seeds * (plan.steps * 0.0437 + plan.checkpoints * 0.019)
+    )
+    assert plan.shadow_step_s == pytest.approx(0.1)
 
 
 def test_tiny_measured_cost_plan_uses_deterministic_budget_units(
@@ -461,6 +463,72 @@ def test_tiny_measured_cost_plan_uses_deterministic_budget_units(
     )
     assert plans[0].measured_step_s == pytest.approx(plans[1].measured_step_s)
     assert plans[0].referee_s == pytest.approx(plans[1].referee_s)
+
+
+def test_w5_modeled_plan_shape_is_stable_across_shadow_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Modeled W5 sizing keeps plan shape independent of probe timing noise."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+
+    def plan_for_size(node_count: int, timings: tuple[float, float]) -> tuple[int, int, int]:
+        """Return a W5 plan shape for one synthetic graph size.
+
+        Parameters
+        ----------
+        node_count : int
+            Number of nodes in the synthetic row.
+        timings : tuple[float, float]
+            Shadow step and warmup timings returned by the probe.
+
+        Returns
+        -------
+        tuple[int, int, int]
+            Planned seeds, steps, and checkpoints.
+        """
+        pos = torch.stack(
+            (
+                torch.arange(node_count, dtype=torch.float32),
+                torch.zeros(node_count, dtype=torch.float32),
+            ),
+            dim=1,
+        )
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+        node_sizes = torch.full((node_count, 2), 2.0)
+        topo_depth = torch.zeros(node_count, dtype=torch.long)
+        config = LayoutConfig()
+        config._dagua_native_total_budget_s = 300.0
+        config._dagua_native_deterministic_budget_s = 300.0
+
+        def fake_measure(*args: object) -> object:
+            """Return deliberately varied shadow timings."""
+            del args
+            return native_finisher.W5StepMeasurement(step_s=timings[0], warmup_s=timings[1])
+
+        monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
+        plan = native_finisher._measured_cost_plan(
+            seeds=[W5Seed("a", pos), W5Seed("b", pos + 1.0), W5Seed("c", pos + 2.0)],
+            edge_index=edge_index,
+            node_sizes=node_sizes,
+            topo_depth=topo_depth,
+            routed_mode="barrier_2d",
+            slice_s=20.0,
+            config=config,
+            started_perf=0.0,
+            started_process=0.0,
+            remaining_entry=300.0,
+            honest_axes=None,
+        )
+        assert plan is not None
+        return plan.seeds, plan.steps, plan.checkpoints
+
+    for node_count in (4, 200, 500):
+        assert plan_for_size(node_count, (0.001, 0.001)) == plan_for_size(
+            node_count,
+            (0.9, 1.7),
+        )
 
 
 def test_tiny_w5_deterministic_costs_use_installed_ledger() -> None:
@@ -586,10 +654,10 @@ def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
     assert events.count("stress build") == 1
 
 
-def test_w5_finisher_does_not_build_stress_sample_when_pass_two_denied(
+def test_w5_finisher_runs_pass_two_despite_process_spend_noise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deadline or cap return after pass 1 must not run pass-2-only prep."""
+    """Modeled W5 execution does not truncate pass 2 on process-spend noise."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -629,11 +697,9 @@ def test_w5_finisher_does_not_build_stress_sample_when_pass_two_denied(
         pass_id: int = 1,
         stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
-        """Record that only pass 1 ran before cap exhaustion."""
+        """Record both planned passes even when process spend appears exhausted."""
         del edge_work, size_work, topo_depth, mode, deadline, honest_axes
         del max_steps, max_checkpoints
-        assert pass_id == 1
-        assert stress_sample is None
         events.append(f"{seed.name} pass {pass_id}")
         return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
 
@@ -642,15 +708,16 @@ def test_w5_finisher_does_not_build_stress_sample_when_pass_two_denied(
         del config_arg, started_perf
         return 0.0 if events != ["plan", "seed_a pass 1"] else 999.0
 
-    def forbidden_build_stress_sample(*args: object, **kwargs: object) -> None:
-        """Fail if denied pass 2 still prepares the stress sample."""
+    def fake_build_stress_sample(*args: object, **kwargs: object) -> None:
+        """Record pass-2 sample construction."""
         del args, kwargs
-        raise AssertionError("pass-2-only stress sample built before admission")
+        events.append("stress build")
+        return None
 
     monkeypatch.setattr(native_finisher, "_measured_cost_plan", fake_plan)
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
     monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
-    monkeypatch.setattr(native_finisher, "_build_w5_stress_sample", forbidden_build_stress_sample)
+    monkeypatch.setattr(native_finisher, "_build_w5_stress_sample", fake_build_stress_sample)
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -664,15 +731,15 @@ def test_w5_finisher_does_not_build_stress_sample_when_pass_two_denied(
         config=config,
     )
 
-    assert events == ["plan", "seed_a pass 1"]
-    assert result.deadline_returned is True
-    assert result.steps == 1
+    assert events == ["plan", "seed_a pass 1", "stress build", "seed_a_p1 pass 2"]
+    assert result.deadline_returned is False
+    assert result.steps == 2
 
 
 def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rgg_500 boundary fixture selects one seed, five steps, and terminal scoring."""
+    """The rgg_500 boundary fixture is modeled rather than probe-sized."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -719,11 +786,11 @@ def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
     )
 
     assert plan is not None
-    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 5, 1)
-    assert plan.referee_s == pytest.approx(0.432)
+    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 21, 1)
+    assert plan.referee_s == pytest.approx(0.019)
     assert plan.budget_usable_s == pytest.approx(0.950)
-    assert plan.predicted_s == pytest.approx(0.932)
-    assert native_finisher._checkpoint_steps(5, 1) == {5}
+    assert plan.predicted_s == pytest.approx(0.9367)
+    assert native_finisher._checkpoint_steps(21, 1) == {21}
 
 
 def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
@@ -830,10 +897,10 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
     assert all(seen is sample for seen in pass_two_samples)
 
 
-def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
+def test_w5_finisher_slow_shadow_probe_does_not_force_skip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured cost sizing skips when one seed and checkpoint cannot fit."""
+    """A slow shadow probe cannot change modeled W5 admission."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -844,8 +911,8 @@ def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
     config._dagua_native_w5_referee_cost_s = 0.4
     config._dagua_native_w5_measured_sizing = True
 
-    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
-        """Fail if a measured-cost skip accidentally scores a candidate.
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a non-dominating score for modeled W5 candidates.
 
         Parameters
         ----------
@@ -855,10 +922,10 @@ def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
         Returns
         -------
         W5ScorePair
-            Never returned.
+            Non-dominating score pair.
         """
         del candidate
-        raise AssertionError("measured-cost skip should not call score_fn")
+        return _pair(0.0, 0.0)
 
     def slow_measure(*args: object) -> object:
         """Return a surrogate-step cost that exceeds the tiny W5 budget."""
@@ -873,18 +940,18 @@ def test_w5_finisher_measured_cost_skip_returns_exact_incumbent(
         seeds=[W5Seed("incumbent", pos)],
         edge_index=edge_index,
         node_sizes=node_sizes,
-        score_fn=forbidden_score_fn,
+        score_fn=score_fn,
         is_semantically_directed=False,
         declared_hierarchical=False,
         config=config,
     )
 
-    assert result.skipped_reason == "predicted_cost_measured"
-    assert result.deadline_returned is True
+    assert result.skipped_reason in {"no_checkpoint", "no_checkpoint_improved"}
+    assert result.deadline_returned is False
     assert torch.equal(result.winner_pos, pos)
     assert result.cost_plan is not None
-    assert result.cost_plan.steps == 0
-    assert result.cost_plan.predicted_s > result.cost_plan.budget_usable_s
+    assert result.cost_plan.steps > 0
+    assert result.cost_plan.shadow_step_s == pytest.approx(0.7)
 
 
 def test_w5_finisher_accumulated_cap_returns_exact_incumbent() -> None:
@@ -1341,7 +1408,7 @@ def test_measured_terminal_w5_bypasses_late_entry_prediction() -> None:
 def test_w5_first_score_epilogue_scores_terminal_once_with_wall_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The score-loop spend guard scores exactly one terminal checkpoint epilogue."""
+    """Removed process-spend guards no longer force a single-score epilogue."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -1349,7 +1416,6 @@ def test_w5_first_score_epilogue_scores_terminal_once_with_wall_headroom(
     early_pos = pos + 1.0
     terminal_pos = pos + 2.0
     score_calls: list[torch.Tensor] = []
-    spent_calls = {"count": 0}
 
     def fake_optimize_seed(
         seed: W5Seed,
@@ -1370,19 +1436,12 @@ def test_w5_first_score_epilogue_scores_terminal_once_with_wall_headroom(
         del max_steps, max_checkpoints, pass_id, stress_sample
         return terminal_pos, 7, 10.0, [(3, early_pos, 4.0), (7, terminal_pos, 1.0)]
 
-    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
-        """Trip the spend guard only when checkpoint scoring begins."""
-        del config, started_perf
-        spent_calls["count"] += 1
-        return 0.0 if spent_calls["count"] == 1 else 999.0
-
     def score_fn(candidate: torch.Tensor) -> W5ScorePair:
         """Record honest score calls and return a dominating score."""
         score_calls.append(candidate.detach().cpu())
         return _pair(2.0, 2.0)
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -1395,24 +1454,25 @@ def test_w5_first_score_epilogue_scores_terminal_once_with_wall_headroom(
         declared_hierarchical=False,
     )
 
-    assert len(score_calls) == 1
-    assert torch.equal(score_calls[0], terminal_pos)
-    assert len(result.checkpoints) == 1
-    assert result.checkpoints[0].step == 7
-    assert result.checkpoints[0].accepted is True
-    assert result.deadline_returned is True
+    assert len(score_calls) == 4
+    assert torch.equal(score_calls[-1], terminal_pos)
+    assert len(result.checkpoints) == 4
+    assert result.checkpoints[-1].step == 7
+    assert any(checkpoint.accepted for checkpoint in result.checkpoints)
+    assert result.deadline_returned is False
 
 
 def test_w5_first_score_epilogue_requires_wall_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first-score epilogue does not fire without benchmark wall headroom."""
+    """The wall hard-reserve backstop can still stop checkpoint scoring."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
     pos, edge_index, node_sizes = _tiny_layout()
     terminal_pos = pos + 2.0
-    spent_calls = {"count": 0}
+    config = LayoutConfig()
+    config._dagua_native_deadline_s = time.perf_counter() + 1.0
 
     def fake_optimize_seed(
         seed: W5Seed,
@@ -1433,24 +1493,12 @@ def test_w5_first_score_epilogue_requires_wall_headroom(
         del max_steps, max_checkpoints, pass_id, stress_sample
         return terminal_pos, 7, 10.0, [(7, terminal_pos, 1.0)]
 
-    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
-        """Trip the spend guard only when checkpoint scoring begins."""
-        del config, started_perf
-        spent_calls["count"] += 1
-        return 0.0 if spent_calls["count"] == 1 else 999.0
-
     def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
         """Fail if the no-headroom terminal checkpoint reaches scoring."""
         del candidate
         raise AssertionError("first-score epilogue should not run without wall headroom")
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
-    monkeypatch.setattr(
-        native_finisher,
-        "_w5_first_score_epilogue_has_wall_headroom",
-        lambda config: False,
-    )
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -1461,10 +1509,11 @@ def test_w5_first_score_epilogue_requires_wall_headroom(
         score_fn=forbidden_score_fn,
         is_semantically_directed=False,
         declared_hierarchical=False,
+        config=config,
     )
 
     assert result.checkpoints == ()
-    assert result.skipped_reason == "no_checkpoint"
+    assert result.skipped_reason == "no_budget"
     assert result.deadline_returned is True
     assert torch.equal(result.winner_pos, pos)
 
@@ -1472,7 +1521,7 @@ def test_w5_first_score_epilogue_requires_wall_headroom(
 def test_w5_first_score_epilogue_never_runs_after_checkpoint_scored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A normal first checkpoint makes the epilogue a no-op for green rows."""
+    """Process-spend noise after a checkpoint does not truncate planned scoring."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -1480,7 +1529,6 @@ def test_w5_first_score_epilogue_never_runs_after_checkpoint_scored(
     early_pos = pos + 1.0
     terminal_pos = pos + 2.0
     score_calls: list[torch.Tensor] = []
-    spent_calls = {"count": 0}
 
     def fake_optimize_seed(
         seed: W5Seed,
@@ -1501,19 +1549,12 @@ def test_w5_first_score_epilogue_never_runs_after_checkpoint_scored(
         del max_steps, max_checkpoints, pass_id, stress_sample
         return terminal_pos, 7, 10.0, [(3, early_pos, 4.0), (7, terminal_pos, 1.0)]
 
-    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
-        """Allow one normal checkpoint score, then trip the spend guard."""
-        del config, started_perf
-        spent_calls["count"] += 1
-        return 0.0 if spent_calls["count"] <= 2 else 999.0
-
     def score_fn(candidate: torch.Tensor) -> W5ScorePair:
         """Record honest score calls and return a non-dominating score."""
         score_calls.append(candidate.detach().cpu())
         return _pair(0.0, 0.0)
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -1526,11 +1567,11 @@ def test_w5_first_score_epilogue_never_runs_after_checkpoint_scored(
         declared_hierarchical=False,
     )
 
-    assert len(score_calls) == 1
+    assert len(score_calls) == 4
     assert torch.equal(score_calls[0], early_pos)
-    assert len(result.checkpoints) == 1
+    assert len(result.checkpoints) == 4
     assert result.checkpoints[0].step == 3
-    assert result.deadline_returned is True
+    assert result.deadline_returned is False
 
 
 def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
@@ -1543,7 +1584,6 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
 
     pos, edge_index, node_sizes = _tiny_layout()
     worse_pos = pos + 1000.0
-    spent_calls = {"count": 0}
 
     def fake_optimize_seed(
         seed: W5Seed,
@@ -1575,24 +1615,12 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
         )
         return worse_pos, 1, 1.0, [(1, worse_pos, 2.0)]
 
-    def fake_w5_spent_s(config: object, started_perf: object = None) -> float:
-        """Exhaust the W5 cap only after the seed optimizer has run."""
-        del config, started_perf
-        spent_calls["count"] += 1
-        return 0.0 if spent_calls["count"] == 1 else 999.0
-
-    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
-        """Fail if a budget-exhausted checkpoint is scored or accepted."""
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Score the planned checkpoint below the incumbent."""
         del candidate
-        raise AssertionError("budget-exhausted checkpoint should not be scored")
+        return _pair(0.0, 0.0)
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
-    monkeypatch.setattr(native_finisher, "_w5_process_spent_s", fake_w5_spent_s)
-    monkeypatch.setattr(
-        native_finisher,
-        "_w5_first_score_epilogue_has_wall_headroom",
-        lambda config: False,
-    )
 
     result = run_w5_finisher(
         incumbent_pos=pos,
@@ -1600,13 +1628,13 @@ def test_w5_finisher_budget_exhaustion_after_worse_checkpoint_returns_incumbent(
         seeds=[W5Seed("incumbent", pos)],
         edge_index=edge_index,
         node_sizes=node_sizes,
-        score_fn=forbidden_score_fn,
+        score_fn=score_fn,
         is_semantically_directed=False,
         declared_hierarchical=False,
     )
 
-    assert result.steps == 1
-    assert result.deadline_returned is True
+    assert result.steps == 2
+    assert result.deadline_returned is False
     assert torch.equal(result.winner_pos, pos)
     assert result.winner_score_pair == _pair(10.0, 10.0)
     assert result.accepted == ()
