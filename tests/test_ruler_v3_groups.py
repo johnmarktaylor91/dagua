@@ -766,6 +766,32 @@ def test_g2_slot_a_two_engine_unit_fairness() -> None:
         assert unit_250.facets[code].score == unit_1.facets[code].score
 
 
+def test_g2_cluster_exclusion_is_diagnostic_after_sec_2_3_audit() -> None:
+    """Assert the redundant G2 exclusion facet is reported but unweighted.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _cluster_probe()
+    result = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    exclusion = result.facets["G2_cluster_exclusion"]
+
+    assert exclusion.score is not None
+    assert exclusion.applicable is False
+    assert exclusion.effective_weight == 0.0
+    assert exclusion.metadata["diagnostic_only"] is True
+    assert exclusion.metadata["audit_demotion"] == "sec_2_3_redundant_with_C4_clean_units_field"
+    assert result.facets["G2_cluster_sibling_overlap"].effective_weight == pytest.approx(0.8)
+    assert result.facets["G2_cluster_nesting_fidelity"].effective_weight == pytest.approx(0.4)
+    assert result.facets["G2_cluster_edge_intrusion"].effective_weight == pytest.approx(0.4)
+    assert result.facets["G2_cluster_label_occlusion"].effective_weight == pytest.approx(0.4)
+
+
 def test_g2_slot_a_degenerate_intrinsic_ruler_guard() -> None:
     """Assert zero node heights pin ``s`` to 1 and raise the existing row flag.
 
