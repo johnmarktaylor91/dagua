@@ -17,16 +17,43 @@ CostTerms = dict[str, tuple[float, float]]
 CostTable = dict[tuple[str, str], CostTerms]
 
 PROVENANCE_REF = (
-    "C1-2026-07-20: frozen from idle fidelity/runtime telemetry plus bounded "
-    "directed-prior modeling; see docs/native_cost_model_calibration_2026-07-20.md."
+    "C1-2026-07-20 idle fidelity/runtime telemetry plus bounded directed-prior "
+    "modeling (docs/native_cost_model_calibration_2026-07-20.md); fCoSE terms "
+    "refit C2-2026-07-21 with a piecewise exact/Barnes-Hut regime split "
+    "(docs/native_cost_model_calibration_2026-07-21.md)."
 )
 
-# Frozen modeled wall-second constants. Existing tiny-row W5 and scale-row fCoSE
-# priors are retained as protective measured/model anchors; directed flat arms
-# use P90 idle telemetry with per-family sibling-load envelopes.
+# Mirrors FCoSEConfig.max_exact_repulsion_nodes (the marketplace seam calls
+# layout_fcose_pipeline with the default cap). At or below this node count the
+# spring embedder uses exact vectorized pairwise repulsion and a full
+# 2500-step arm costs ~0.2-0.6s on the calibration box; above it the per-step
+# Barnes-Hut tree pass dominates and real cost jumps 3-4 orders of magnitude
+# (~6.5 s/step at n=1000). One linear (alpha, beta) pair cannot represent both
+# regimes: the old single line, anchored to price the n=1000 row out,
+# over-priced small/medium rows 90-7000x and starved the winning fCoSE arms
+# (the M2 4-row regression class).
+FCOSE_EXACT_REPULSION_NODE_CAP = 512
+
+# Frozen modeled wall-second constants. Tiny-row W5 priors are retained as
+# protective measured/model anchors; directed flat arms use P90 idle telemetry
+# with per-family sibling-load envelopes. fCoSE generation is piecewise by
+# node count: "force" (exact-repulsion regime, N <= 512, intercept-slope fit)
+# vs "force_bh" (Barnes-Hut regime, N > 512, zero-intercept rate fit from
+# short-step samples). C2 constants are verbatim calibrate output on the
+# 2026-07-21 telemetry (c2_fcose_telemetry_{exact,bh}.jsonl, envelope 2.0);
+# the Barnes-Hut term keeps r8_nested_scale_1k_budget priced out by >100x
+# budget, preserving the fCoSE-skip / Arm-S-admit scale anchor.
 FROZEN_COST_TABLE: CostTable = {
-    ("fcose", "cpu"): {"force": (0.0020, 2.0), "score": (0.000015, 1.0)},
-    ("fcose", "cuda"): {"force": (0.0012, 1.5), "score": (0.000012, 1.0)},
+    ("fcose", "cpu"): {
+        "force": (5.49172932331e-06, 0.2094),
+        "force_bh": (0.00164199078341, 0.0),
+        "score": (0.000015, 1.0),
+    },
+    ("fcose", "cuda"): {
+        "force": (3.12987012987e-07, 0.3726),
+        "force_bh": (0.00427751152074, 0.0),
+        "score": (0.000012, 1.0),
+    },
     ("stress", "cpu"): {"pairs": (0.000010, 1.0), "score": (0.000015, 1.0)},
     ("stress", "cuda"): {"pairs": (0.000006, 0.8), "score": (0.000012, 0.8)},
     ("apsp", "cpu"): {"apsp": (0.000002, 0.5)},
@@ -414,9 +441,15 @@ def estimate_native_work_cost(
         steps = _steps(knobs, 250)
         force_volume = fcose_force_volume(size.num_nodes, size.num_edges, steps)
         score_volume = ruler_sample_volume(size.num_nodes, size.num_edges, knobs.get("samples"))  # type: ignore[arg-type]
-        generation = _term_cost(terms, "force", force_volume)
+        # Piecewise regime split mirroring FCoSEConfig.max_exact_repulsion_nodes.
+        # Missing "force_bh" in a custom table falls back to the exact-regime
+        # term rather than an accidental zero-cost (free-admission) estimate.
+        barnes_hut = size.num_nodes > FCOSE_EXACT_REPULSION_NODE_CAP
+        force_term = "force_bh" if barnes_hut and "force_bh" in terms else "force"
+        generation = _term_cost(terms, force_term, force_volume)
         reserved = _term_cost(terms, "score", score_volume)
-        metadata["terms"] = {"force": force_volume, "score": score_volume}
+        metadata["terms"] = {force_term: force_volume, "score": score_volume}
+        metadata["fcose_regime"] = "barnes_hut" if barnes_hut else "exact"
     elif normalized_family in {"stress", "arm_s"}:
         steps = _steps(knobs, 50)
         pair_volume = stress_pair_volume(size.num_nodes, steps, knobs.get("sample_pairs"))  # type: ignore[arg-type]
@@ -481,6 +514,7 @@ def estimate_native_work_cost(
 
 
 __all__ = [
+    "FCOSE_EXACT_REPULSION_NODE_CAP",
     "FROZEN_COST_TABLE",
     "NativeWorkCost",
     "PROVENANCE_REF",

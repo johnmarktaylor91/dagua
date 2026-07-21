@@ -342,3 +342,30 @@ def test_every_clustered_raw_row_must_be_fresh(
     bad_rows[1]["score_origin"] = "legacy_cache_g2_noncluster"
     with pytest.raises(RuntimeError, match="clustered raw row is not fresh"):
         scorer.validate_raw_integrity(bad_rows, {graph.name: graph}, [graph.name], "sig")
+
+
+def test_score_position_trips_on_sizeless_graph(tmp_path: Path) -> None:
+    """Scoring a graph built without ``compute_node_sizes()`` hard-fails.
+
+    The 2026-07-21 S1/M2 tally incident: bare ``get_test_graphs()`` graphs
+    carried ``node_sizes=None``, silently nulling ``node_occlusion_score`` and
+    renormalizing the composite ~0.5-3.5 pts low. ``score_position`` must
+    refuse to score a nulled-occlusion composite; graphs with measured sizes
+    keep working.
+    """
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    test_graph = TestGraph(name="sizeless", graph=graph, tags={"directed"})
+    pos_path = _position_file(tmp_path, test_graph)
+    assert graph.node_sizes is None
+
+    with pytest.raises(RuntimeError, match="node_sizes is None"):
+        scorer.score_position(test_graph, str(pos_path), "dagua", "sig")
+
+    graph.compute_node_sizes()
+    row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig")
+
+    assert row["score_origin"] == "fresh_positions"
+    assert row["metrics"]["node_occlusion_score"] is not None
