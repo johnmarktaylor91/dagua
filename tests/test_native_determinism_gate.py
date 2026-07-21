@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scripts import native_determinism_gate as gate
 
 
@@ -129,6 +131,7 @@ def test_parse_args_accepts_new_acceptance_flags() -> None:
             "r8_nested_scale_1k_budget",
             "--expect-no-skip",
             "arm_s",
+            "--expect-stable-fallback",
             "--min-score",
             "80",
             "--run-timeout-margin",
@@ -137,6 +140,7 @@ def test_parse_args_accepts_new_acceptance_flags() -> None:
     )
 
     assert args.expect_no_skip == ["arm_s"]
+    assert args.expect_stable_fallback is True
     assert args.min_score == 80.0
     assert args.run_timeout_margin == 120.0
 
@@ -146,3 +150,50 @@ def test_parse_args_uses_large_default_timeout_margin() -> None:
     args = gate.parse_args(["r8_nested_scale_1k_budget"])
 
     assert args.run_timeout_margin == 180.0
+
+
+def test_parse_args_accepts_parity_replay_subcommand() -> None:
+    """Parity replay has a cheap subcommand with explicit expected diffs."""
+    args = gate.parse_args(
+        [
+            "parity-replay",
+            "rgg_500",
+            "r8_nested_scale_1k_budget",
+            "--expected-diff",
+            "r8_nested_scale_1k_budget",
+        ]
+    )
+
+    assert args.command == "parity-replay"
+    assert args.graphs == ["rgg_500", "r8_nested_scale_1k_budget"]
+    assert args.expected_diff == ["r8_nested_scale_1k_budget"]
+
+
+def test_stable_fallback_rejects_high_score_branch() -> None:
+    """Fallback assertion fails if a run reaches the high-score floor."""
+    run = _gate_run(score=84.2, telemetry=[], marketplace_arms=[])
+
+    failures = gate._assert_stable_fallback([run], 80.0)
+
+    assert failures == [
+        "stable fallback requested but at least one run reached the high-score floor 80.0000"
+    ]
+
+
+def test_parity_replay_row_reports_expected_diff_structure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Parity replay output includes the documented expected-diff list."""
+    row = gate.ParityReplayRow(
+        graph="r8_nested_scale_1k_budget",
+        baseline_signature="skip:fCoSE",
+        replay_signature="admit:arm_s",
+        matches=False,
+        expected_diff=True,
+    )
+
+    gate._print_parity_rows([row], ["r8_nested_scale_1k_budget"])
+    captured = capsys.readouterr()
+
+    assert '"event": "native_parity_replay"' in captured.out
+    assert '"expected_diffs": ["r8_nested_scale_1k_budget"]' in captured.out
