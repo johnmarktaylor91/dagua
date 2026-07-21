@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import math
 import signal
-from typing import Any, Dict, List, Mapping, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 import pytest
 import torch
 
+from dagua.eval.drawing import routes_to_curves
 from dagua.eval.ruler_v3 import renormalized_score, score_core_v3
-from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
+from dagua.eval.ruler_v3_groups import CANONICAL_NODE_HEIGHT_REF, evaluate_conditional_groups
+from dagua.metrics import (
+    cluster_edge_intrusion_score,
+    cluster_exclusion_score,
+    cluster_label_occlusion_score,
+    cluster_nesting_fidelity_score,
+    cluster_sibling_overlap_score,
+    composite_drawing,
+)
 
 
 def _sizes(count: int) -> torch.Tensor:
@@ -332,6 +341,50 @@ def _facet_score(result: object, code: str) -> float:
     return float(score)
 
 
+G2_SLOT_A_FACETS = (
+    "G2_cluster_exclusion",
+    "G2_cluster_sibling_overlap",
+    "G2_cluster_nesting_fidelity",
+    "G2_cluster_edge_intrusion",
+    "G2_cluster_label_occlusion",
+)
+
+
+def _canonical_unit_sizes(count: int) -> torch.Tensor:
+    """Return default-corpus node boxes with the frozen canonical height.
+
+    Parameters
+    ----------
+    count : int
+        Number of nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Node sizes with shape ``[N, 2]`` and median height ``34.0``.
+    """
+    return torch.tensor([[44.0, CANONICAL_NODE_HEIGHT_REF]] * count, dtype=torch.float64)
+
+
+def _continuous_exact_or_tiny_relative(base: float, scaled: float) -> None:
+    """Assert continuous GG-5a equality with the documented fallback tolerance.
+
+    Parameters
+    ----------
+    base : float
+        Baseline facet value.
+    scaled : float
+        Scaled facet value.
+
+    Returns
+    -------
+    None
+    """
+    if scaled == base:
+        return
+    assert abs(scaled - base) <= 1e-12 * max(1.0, abs(base))
+
+
 def test_applicability_gates_are_input_only() -> None:
     """Assert G1, G3, and G6 gates fire only on declared metadata.
 
@@ -598,7 +651,7 @@ def test_g2_g4_position_scale_invariance_and_size_anchoring(alpha: float) -> Non
     )
 
     anchored_pos = torch.tensor(
-        [[-5.0, 0.0], [0.0, 0.0], [5.0, 0.0], [15.0, 0.0], [20.0, 0.0], [25.0, 0.0]],
+        [[0.0, 0.0], [0.2, 0.0], [0.4, 0.0], [0.6, 0.0], [0.8, 0.0], [1.0, 0.0]],
         dtype=torch.float64,
     )
     anchored_edges = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long)
@@ -632,15 +685,147 @@ def test_g2_g4_position_scale_invariance_and_size_anchoring(alpha: float) -> Non
             "G2_cluster_label_occlusion",
         )
     )
+    assert moved_slot_a
+
+    compactness_pos = torch.tensor(
+        [[-5.0, 0.0], [0.0, 0.0], [5.0, 0.0], [15.0, 0.0], [20.0, 0.0], [25.0, 0.0]],
+        dtype=torch.float64,
+    )
+    base_compactness = score_core_v3(
+        compactness_pos,
+        anchored_edges,
+        anchored_sizes,
+        graph_meta=anchored_meta,
+    )
+    scaled_compactness = score_core_v3(
+        alpha * compactness_pos,
+        anchored_edges,
+        anchored_sizes,
+        graph_meta=anchored_meta,
+    )
     compactness_moved = (
         abs(
-            float(scaled_anchored.facets["G2_cluster_compactness_log_band"].score or 0.0)
-            - float(base_anchored.facets["G2_cluster_compactness_log_band"].score or 0.0)
+            float(scaled_compactness.facets["G2_cluster_compactness_log_band"].score or 0.0)
+            - float(base_compactness.facets["G2_cluster_compactness_log_band"].score or 0.0)
         )
         > 1e-6
     )
-    assert moved_slot_a
     assert compactness_moved
+
+
+def test_g2_slot_a_unit_invariance_gg5a_alpha_battery() -> None:
+    """Assert G2 Slot A is exact under joint unit scaling.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _cluster_probe()
+    baseline = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    alphas = (0.02, 0.1, 1.0, 10.0, 50.0)
+    for alpha in alphas:
+        scaled = score_core_v3(alpha * pos, edges, alpha * sizes, graph_meta=meta)
+        for code in G2_SLOT_A_FACETS:
+            _continuous_exact_or_tiny_relative(
+                _facet_score(baseline, code),
+                _facet_score(scaled, code),
+            )
+        assert _facet_score(scaled, "G2_cluster_sibling_overlap") == 1.0
+
+
+def test_g2_slot_a_two_engine_unit_fairness() -> None:
+    """Assert identical cluster drawings at different units receive identical Slot A scores.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _cluster_probe()
+    unit_1 = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    unit_250 = score_core_v3(250.0 * pos, edges, 250.0 * sizes, graph_meta=meta)
+    for code in G2_SLOT_A_FACETS:
+        assert unit_250.facets[code].score == unit_1.facets[code].score
+
+
+def test_g2_slot_a_degenerate_intrinsic_ruler_guard() -> None:
+    """Assert zero node heights pin ``s`` to 1 and raise the existing row flag.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _cluster_probe()
+    zero_sizes = torch.zeros_like(sizes)
+    groups = evaluate_conditional_groups(pos, edges, zero_sizes, meta)
+    assert groups["G2"].metadata["flags"] == ("DEGENERATE_SCALE",)
+    for code in G2_SLOT_A_FACETS:
+        facet = groups["G2"].facets[code]
+        assert facet.score is not None
+        assert facet.metadata["intrinsic_ruler_scale"] == 1.0
+        assert facet.metadata["intrinsic_ruler_degenerate"] is True
+
+
+def test_g2_slot_a_projection_off_matches_frozen_metric_calls() -> None:
+    """Assert canonical-unit Slot A wrappers are bit-identical to frozen metric calls.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    rows = [
+        _cluster_probe(),
+        (
+            torch.tensor(
+                [[-5.0, 0.0], [0.0, 0.0], [5.0, 0.0], [15.0, 0.0], [20.0, 0.0], [25.0, 0.0]],
+                dtype=torch.float64,
+            ),
+            torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long),
+            _sizes(6),
+            {"clusters": {"a": [0, 1, 2], "b": [3, 4, 5]}, "cluster_labels": {"a": "A", "b": "B"}},
+        ),
+    ]
+    for pos, edges, _sizes_in, meta in rows:
+        sizes = _canonical_unit_sizes(int(pos.shape[0]))
+        result = score_core_v3(pos, edges, sizes, graph_meta=meta)
+        clusters = cast(Mapping[str, List[int]], meta["clusters"])
+        parents: Mapping[str, Optional[str]] = {}
+        labels = cast(Mapping[str, str], meta["cluster_labels"])
+        direct = {
+            "G2_cluster_exclusion": cluster_exclusion_score(pos, sizes, clusters, parents, labels)[
+                "cluster_exclusion_score"
+            ],
+            "G2_cluster_sibling_overlap": cluster_sibling_overlap_score(
+                pos, sizes, clusters, parents, labels
+            )["cluster_sibling_overlap_score"],
+            "G2_cluster_nesting_fidelity": cluster_nesting_fidelity_score(
+                pos, sizes, clusters, parents, labels
+            )["cluster_nesting_fidelity_score"],
+            "G2_cluster_edge_intrusion": cluster_edge_intrusion_score(
+                pos, edges, sizes, clusters, parents, labels
+            )["cluster_edge_intrusion_score"],
+            "G2_cluster_label_occlusion": cluster_label_occlusion_score(
+                pos, sizes, clusters, parents, labels
+            )["cluster_label_occlusion_score"],
+        }
+        for code, score in direct.items():
+            assert result.facets[code].metadata["intrinsic_ruler_scale"] == 1.0
+            assert result.facets[code].score == score
 
 
 def test_g1_axis_anchored_declared_transform() -> None:
@@ -772,6 +957,73 @@ def test_g7_port_compliance_cap_routed_curves_and_scale_invariance() -> None:
         compliance.score,
         abs=1e-6,
     )
+
+
+def test_g7_routed_quality_unit_invariance_gg5a_alpha_battery() -> None:
+    """Assert G7 routed quality is exact under joint unit scaling.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes, meta = _ported_probe(routed=True)
+    baseline = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    for alpha in (0.02, 0.1, 1.0, 10.0, 50.0):
+        scaled_pos, _scaled_edges, _scaled_sizes, scaled_meta = _ported_probe(
+            routed=True,
+            scale=alpha,
+        )
+        scaled = score_core_v3(scaled_pos, edges, alpha * sizes, graph_meta=scaled_meta)
+        _continuous_exact_or_tiny_relative(
+            _facet_score(baseline, "G7_routed_curve_quality"),
+            _facet_score(scaled, "G7_routed_curve_quality"),
+        )
+        _continuous_exact_or_tiny_relative(
+            _facet_score(baseline, "G7_routed_bend_terminal_economy"),
+            _facet_score(scaled, "G7_routed_bend_terminal_economy"),
+        )
+
+
+def test_g7_routed_quality_projection_off_reuses_frozen_composite() -> None:
+    """Assert canonical-unit G7 routed wrapper passes unchanged inputs to V2 composite.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, _sizes_in, meta = _ported_probe(routed=True)
+    sizes = _canonical_unit_sizes(int(pos.shape[0]))
+    result = score_core_v3(pos, edges, sizes, graph_meta=meta)
+    routes = cast(List[List[Tuple[float, float]]], meta["route_paths"])
+    curves = routes_to_curves(routes, pos, edges)
+    assert curves is not None
+    direct = composite_drawing(
+        pos,
+        edges,
+        sizes,
+        curves,
+        label_positions=cast(List[Optional[Tuple[float, float]]], meta["label_positions"]),
+        edge_labels=cast(List[Any], meta["routed_labels"]),
+        seed=0,
+    )
+    reuse = result.facets["G7_routed_curve_quality"].metadata["composite_drawing_reuse"]
+    assert result.facets["G7_routed_curve_quality"].metadata["intrinsic_ruler_scale"] == 1.0
+    for key in (
+        "drawing_term_crossing",
+        "drawing_term_edge_node",
+        "drawing_term_label_node",
+        "drawing_term_label_label",
+        "drawing_term_bend",
+    ):
+        assert reuse[key] == direct[key]
 
 
 def test_g5_requires_declared_graph_change_and_ignores_best_static_metadata() -> None:

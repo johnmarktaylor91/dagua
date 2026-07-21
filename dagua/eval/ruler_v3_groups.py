@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -56,6 +56,12 @@ NONDEGENERATE_WEIGHT_CV = 1e-9
 LOCAL_WEIGHT_MONOTONICITY_NODE_BUDGET = 512
 G6_WEIGHTED_STRESS_SOURCE_BUDGET = 200
 G6_WEIGHTED_STRESS_TARGET_BUDGET = 1000
+
+# Frozen intrinsic-ruler reference. Provenance: DaguaGraph.compute_node_sizes()
+# with the corpus-default NodeStyle (font_size=9.0, padding=(11.0, 9.0),
+# roundrect, shrink_text) yields a default short-label node box [44.0, 34.0].
+CANONICAL_NODE_HEIGHT_REF = 34.0
+INTRINSIC_RULER_FLAG = "DEGENERATE_SCALE"
 
 
 @dataclass(frozen=True)
@@ -143,6 +149,31 @@ class GroupEvaluation:
     applicability_reason: str
     facets: Mapping[str, GroupFacetScore]
     metadata: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class IntrinsicRulerCanonicalization:
+    """Per-drawing canonical-frame scale for reused V2 machinery.
+
+    Parameters
+    ----------
+    unit_ruler : float
+        Median node-box height in the drawing's input units.
+    reference_height : float
+        Frozen canonical node-box height used by V3.
+    scale : float
+        ``unit_ruler / reference_height`` or ``1.0`` for degenerate drawings.
+    degenerate : bool
+        Whether the non-positive ruler guard fired.
+    flags : Tuple[str, ...]
+        Row flags contributed by this canonicalization.
+    """
+
+    unit_ruler: float
+    reference_height: float
+    scale: float
+    degenerate: bool
+    flags: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -269,6 +300,197 @@ def _slot_metadata(slots: Sequence[GroupSlot]) -> Tuple[Dict[str, Any], ...]:
         }
         for slot in slots
     )
+
+
+def _intrinsic_ruler_canonicalization(sizes: torch.Tensor) -> IntrinsicRulerCanonicalization:
+    """Return the single V3 intrinsic-ruler scale for a drawing.
+
+    Parameters
+    ----------
+    sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]`` in drawing units.
+
+    Returns
+    -------
+    IntrinsicRulerCanonicalization
+        Frozen median-height ruler and the canonical-frame divisor.
+    """
+    size_tensor = _ensure_cpu(sizes).to(dtype=torch.float64)
+    if size_tensor.ndim != 2 or int(size_tensor.shape[1]) != 2 or int(size_tensor.shape[0]) == 0:
+        unit_ruler = 0.0
+    else:
+        unit_ruler = float(torch.median(size_tensor[:, 1]).item())
+    degenerate = not math.isfinite(unit_ruler) or unit_ruler <= 0.0
+    scale = 1.0 if degenerate else unit_ruler / CANONICAL_NODE_HEIGHT_REF
+    return IntrinsicRulerCanonicalization(
+        unit_ruler=unit_ruler,
+        reference_height=CANONICAL_NODE_HEIGHT_REF,
+        scale=scale,
+        degenerate=degenerate,
+        flags=(INTRINSIC_RULER_FLAG,) if degenerate else tuple(),
+    )
+
+
+def _canonicalization_metadata(
+    canonicalization: IntrinsicRulerCanonicalization,
+) -> Dict[str, Any]:
+    """Serialize intrinsic-ruler canonicalization metadata.
+
+    Parameters
+    ----------
+    canonicalization : IntrinsicRulerCanonicalization
+        Per-drawing canonicalization record.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Publication metadata for canonicalized wrapper facets.
+    """
+    return {
+        "intrinsic_ruler": "median_node_box_height",
+        "intrinsic_ruler_value": canonicalization.unit_ruler,
+        "intrinsic_ruler_reference_height": canonicalization.reference_height,
+        "intrinsic_ruler_scale": canonicalization.scale,
+        "intrinsic_ruler_degenerate": canonicalization.degenerate,
+        "intrinsic_ruler_guard": "s:=1_and_DEGENERATE_SCALE_when_median_node_height_non_positive",
+        "intrinsic_ruler_reference_provenance": (
+            "DaguaGraph.compute_node_sizes default NodeStyle short-label node height"
+        ),
+    }
+
+
+def _canonicalize_tensor(
+    tensor: torch.Tensor,
+    canonicalization: IntrinsicRulerCanonicalization,
+) -> torch.Tensor:
+    """Divide tensor coordinates or extents into the canonical frame.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor expressed in drawing units.
+    canonicalization : IntrinsicRulerCanonicalization
+        Per-drawing canonicalization record.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor expressed in canonical node-height units.
+    """
+    return tensor / canonicalization.scale
+
+
+def _canonicalize_point(
+    point: Tuple[float, float],
+    canonicalization: IntrinsicRulerCanonicalization,
+) -> Tuple[float, float]:
+    """Divide one point into the canonical frame.
+
+    Parameters
+    ----------
+    point : Tuple[float, float]
+        Point in drawing units.
+    canonicalization : IntrinsicRulerCanonicalization
+        Per-drawing canonicalization record.
+
+    Returns
+    -------
+    Tuple[float, float]
+        Point in canonical node-height units.
+    """
+    return (float(point[0]) / canonicalization.scale, float(point[1]) / canonicalization.scale)
+
+
+def _canonicalize_curves(
+    curves: Sequence[Any],
+    canonicalization: IntrinsicRulerCanonicalization,
+) -> Tuple[Any, ...]:
+    """Divide routed curves into the canonical frame.
+
+    Parameters
+    ----------
+    curves : Sequence[Any]
+        BezierCurve-compatible routed curves.
+    canonicalization : IntrinsicRulerCanonicalization
+        Per-drawing canonicalization record.
+
+    Returns
+    -------
+    Tuple[Any, ...]
+        Curves in canonical node-height units.
+    """
+    from dagua.edges import BezierCurve
+
+    canonical_curves = []
+    for curve in curves:
+        waypoints = getattr(curve, "waypoints", None)
+        canonical_waypoints = (
+            tuple(_canonicalize_point(point, canonicalization) for point in waypoints)
+            if waypoints is not None
+            else None
+        )
+        canonical_curves.append(
+            BezierCurve(
+                _canonicalize_point(curve.p0, canonicalization),
+                _canonicalize_point(curve.cp1, canonicalization),
+                _canonicalize_point(curve.cp2, canonicalization),
+                _canonicalize_point(curve.p1, canonicalization),
+                waypoints=canonical_waypoints,
+                routing=getattr(curve, "routing", "bezier"),
+                direction=getattr(curve, "direction", "TB"),
+                step_fraction=getattr(curve, "step_fraction", None),
+            )
+        )
+    return tuple(canonical_curves)
+
+
+def _canonicalize_label_positions(
+    label_positions: Any,
+    canonicalization: IntrinsicRulerCanonicalization,
+) -> Any:
+    """Divide optional edge-label positions into the canonical frame.
+
+    Parameters
+    ----------
+    label_positions : Any
+        Optional sequence of label positions or ``None`` entries.
+    canonicalization : IntrinsicRulerCanonicalization
+        Per-drawing canonicalization record.
+
+    Returns
+    -------
+    Any
+        Label positions in canonical node-height units.
+    """
+    if label_positions is None:
+        return None
+    if isinstance(label_positions, torch.Tensor):
+        return _canonicalize_tensor(label_positions, canonicalization)
+    return [
+        None if point is None else _canonicalize_point(point, canonicalization)
+        for point in label_positions
+    ]
+
+
+def _merge_flags(*flag_groups: Sequence[str]) -> Tuple[str, ...]:
+    """Return unique row flags preserving first-seen order.
+
+    Parameters
+    ----------
+    *flag_groups : Sequence[str]
+        Flag sequences to merge.
+
+    Returns
+    -------
+    Tuple[str, ...]
+        Unique flags.
+    """
+    flags: List[str] = []
+    for group in flag_groups:
+        for flag in group:
+            if flag not in flags:
+                flags.append(flag)
+    return tuple(flags)
 
 
 def _tier_weight(tier: int) -> float:
@@ -674,10 +896,17 @@ def _score_g2(
         clusters,
     )
     reason = "applicable:declared_cluster_metadata"
+    slot_a_canonicalization = _intrinsic_ruler_canonicalization(sizes)
     common = {
         "gate": "declared_clusters_or_cluster_parents_only",
         "cluster_count": cluster_count,
-        "invariance_slot_a": "size_anchored_position_scale_sensitive_by_design",
+        "flags": slot_a_canonicalization.flags,
+        "invariance_slot_a": (
+            "translation_invariant;rotation_reflection_axis_anchored_aabb;"
+            "position_only_scale_sensitive_by_design;unit_scale_invariant_exact_via_"
+            "intrinsic_ruler_canonicalization;anisotropic_not_invariant;"
+            "node_relabel_invariant;canonical_unit_f3_honesty"
+        ),
         "invariance_slot_b_ari": "translation_rotation_reflection_position_scale_invariant",
         "invariance_slot_b_compactness": "size_anchored_position_scale_sensitive_by_design",
         "deformation_monotonicity_probe": "implemented_by_tests/test_ruler_v3_groups.py",
@@ -690,6 +919,7 @@ def _score_g2(
         clusters,
         cluster_parents,
         cluster_labels,
+        canonicalization=slot_a_canonicalization,
     )
     active_slot_a_total = sum(
         slot_weight
@@ -716,8 +946,19 @@ def _score_g2(
                 **metadata,
                 "slot": "G2_A_containment_hygiene",
                 "slot_internal_weight": slot_weight,
-                "normalization": "reused frozen dagua.metrics AABB cluster scorer",
-                "invariance": "size_anchored_position_scale_sensitive_by_design",
+                "normalization": (
+                    "reused frozen dagua.metrics AABB cluster scorer in canonical node-height frame"
+                ),
+                "invariance": (
+                    "translation_invariant;rotation_reflection_axis_anchored_aabb;"
+                    "position_only_scale_sensitive_by_design;unit_scale_invariant_exact_via_"
+                    "intrinsic_ruler_canonicalization;anisotropic_not_invariant;"
+                    "node_relabel_invariant"
+                ),
+                "f3_note": (
+                    "G2 Slot A compared projection-off; canonicalization delta published per "
+                    "the unit-invariance ruling"
+                ),
             },
         )
     ari_score = None if ari_raw is None else max(0.0, min(1.0, ari_raw))
@@ -1114,7 +1355,11 @@ def _score_g7(
     compliance = _port_compliance_score(positions, edges, ports, curves)
     severe = bool(compliance["severe_side_violation_count"] > 0)
     group_cap = G7_SEVERE_PORT_CAP if severe else 1.0
-    flags = ("PORT_VIOLATION",) if compliance["hard_compliance"] < 1.0 else tuple()
+    routed_canonicalization = _intrinsic_ruler_canonicalization(sizes)
+    flags = _merge_flags(
+        ("PORT_VIOLATION",) if compliance["hard_compliance"] < 1.0 else tuple(),
+        routed_canonicalization.flags if curves is not None else tuple(),
+    )
     reason = "applicable:declared_ports_or_routing"
     common = {
         "gate": "declared_ports_or_routing_only",
@@ -1123,7 +1368,12 @@ def _score_g7(
         "normalization": "hard discrete compliance plus decomposed frozen routed drawing terms",
         "invariance_compliance": "discrete_side_and_order_satisfaction_position_scale_invariant",
         "invariance_approach_angle": "rotation_anchored_to_declared_port_side_by_design",
-        "invariance_clearance_congestion": "size_anchored_position_scale_sensitive_by_design",
+        "invariance_clearance_congestion": (
+            "translation_invariant;rotation_reflection_axis_anchored_aabb;"
+            "position_only_scale_sensitive_by_design;unit_scale_invariant_exact_via_"
+            "intrinsic_ruler_canonicalization;anisotropic_not_invariant;"
+            "node_relabel_invariant;canonical_unit_f3_honesty"
+        ),
         "deformation_monotonicity_probe": "implemented_by_tests/test_ruler_v3_groups.py",
     }
     compliance_score = min(float(compliance["hard_compliance"]), group_cap)
@@ -1141,7 +1391,16 @@ def _score_g7(
             metadata={**common, **compliance, "slot": "G7_port_compliance"},
         )
     if curves is not None:
-        routed = _g7_routed_bundle_scores(positions, edges, sizes, curves, ports, meta, group_cap)
+        routed = _g7_routed_bundle_scores(
+            positions,
+            edges,
+            sizes,
+            curves,
+            ports,
+            meta,
+            group_cap,
+            canonicalization=routed_canonicalization,
+        )
         for code, name, score, metadata in routed:
             facets[code] = GroupFacetScore(
                 code=code,
@@ -1796,6 +2055,8 @@ def _g7_routed_bundle_scores(
     ports: Sequence[Mapping[str, Any]],
     meta: Mapping[str, Any],
     group_cap: float,
+    *,
+    canonicalization: IntrinsicRulerCanonicalization,
 ) -> Tuple[Tuple[str, str, float, Dict[str, Any]], ...]:
     """Return G7 routed bundle facet tuples.
 
@@ -1815,6 +2076,8 @@ def _g7_routed_bundle_scores(
         Declared graph metadata.
     group_cap : float
         Severe-violation cap applied to G7 facets.
+    canonicalization : IntrinsicRulerCanonicalization
+        Shared per-drawing ruler used to canonicalize the frozen V2 composite seam.
 
     Returns
     -------
@@ -1823,20 +2086,30 @@ def _g7_routed_bundle_scores(
     """
     labels = meta.get("edge_labels", meta.get("routed_labels"))
     label_positions = meta.get("label_positions")
+    canonical_positions = _canonicalize_tensor(positions, canonicalization)
+    canonical_sizes = _canonicalize_tensor(sizes, canonicalization)
+    canonical_curves = _canonicalize_curves(curves, canonicalization)
+    canonical_label_positions = _canonicalize_label_positions(label_positions, canonicalization)
     drawing = composite_drawing(
-        positions,
+        canonical_positions,
         edges,
-        sizes,
-        curves,
-        label_positions=label_positions,
+        canonical_sizes,
+        canonical_curves,
+        label_positions=canonical_label_positions,
         edge_labels=labels,
         seed=0,
     )
     routed_crossings = routed_crossing_rate(curves, edges, seed=0)
     bends = bend_count(curves)
-    port_ar = port_angular_resolution(curves, edges)
-    side_approach = _port_approach_angle_score(positions, edges, ports, curves)
-    terminal = _terminal_congestion_score(positions, sizes, edges, ports, curves)
+    port_ar = port_angular_resolution(canonical_curves, edges)
+    side_approach = _port_approach_angle_score(canonical_positions, edges, ports, canonical_curves)
+    terminal = _terminal_congestion_score(
+        canonical_positions,
+        canonical_sizes,
+        edges,
+        ports,
+        canonical_curves,
+    )
     label_terms = [
         drawing.get("drawing_term_label_node"),
         drawing.get("drawing_term_label_label"),
@@ -1870,6 +2143,18 @@ def _g7_routed_bundle_scores(
                 "terminal_congestion_score": terminal,
                 "routed_crossing_rate": routed_crossings["routed_crossing_rate"],
                 "composite_drawing_reuse": drawing,
+                "normalization": ("reused frozen composite_drawing in canonical node-height frame"),
+                "invariance": (
+                    "translation_invariant;rotation_reflection_axis_anchored_aabb;"
+                    "position_only_scale_sensitive_by_design;unit_scale_invariant_exact_via_"
+                    "intrinsic_ruler_canonicalization;anisotropic_not_invariant;"
+                    "node_relabel_invariant"
+                ),
+                "f3_note": (
+                    "G7 routed-quality compared projection-off; canonicalization delta "
+                    "published per the unit-invariance ruling"
+                ),
+                **_canonicalization_metadata(canonicalization),
             },
         ),
         (
@@ -2251,6 +2536,8 @@ def _g2_slot_a_scores(
     clusters: Mapping[str, Sequence[int]],
     cluster_parents: Mapping[str, Optional[str]],
     cluster_labels: Mapping[str, str],
+    *,
+    canonicalization: IntrinsicRulerCanonicalization,
 ) -> Tuple[Tuple[str, str, Optional[float], float, Dict[str, Any]], ...]:
     """Return reused G2 Slot A AABB hygiene scores.
 
@@ -2268,25 +2555,36 @@ def _g2_slot_a_scores(
         Declared cluster nesting parents.
     cluster_labels : Mapping[str, str]
         Explicit cluster labels.
+    canonicalization : IntrinsicRulerCanonicalization
+        Shared per-drawing ruler used to canonicalize the frozen V2 cluster seam.
 
     Returns
     -------
     Tuple[Tuple[str, str, Optional[float], float, Dict[str, Any]], ...]
         Slot A facet tuples.
     """
-    exclusion = cluster_exclusion_score(positions, sizes, clusters, cluster_parents, cluster_labels)
+    canonical_positions = _canonicalize_tensor(positions, canonicalization)
+    canonical_sizes = _canonicalize_tensor(sizes, canonicalization)
+    shared_metadata = _canonicalization_metadata(canonicalization)
+    exclusion = cluster_exclusion_score(
+        canonical_positions,
+        canonical_sizes,
+        clusters,
+        cluster_parents,
+        cluster_labels,
+    )
     sibling = cluster_sibling_overlap_score(
-        positions, sizes, clusters, cluster_parents, cluster_labels
+        canonical_positions, canonical_sizes, clusters, cluster_parents, cluster_labels
     )
     nesting = cluster_nesting_fidelity_score(
-        positions, sizes, clusters, cluster_parents, cluster_labels
+        canonical_positions, canonical_sizes, clusters, cluster_parents, cluster_labels
     )
     intrusion = cluster_edge_intrusion_score(
-        positions, edges, sizes, clusters, cluster_parents, cluster_labels
+        canonical_positions, edges, canonical_sizes, clusters, cluster_parents, cluster_labels
     )
     labels = cluster_label_occlusion_score(
-        positions,
-        sizes,
+        canonical_positions,
+        canonical_sizes,
         clusters,
         cluster_parents,
         cluster_labels,
@@ -2297,35 +2595,35 @@ def _g2_slot_a_scores(
             "cluster_exclusion",
             _optional_score(exclusion["cluster_exclusion_score"]),
             2.0,
-            exclusion,
+            {**exclusion, **shared_metadata},
         ),
         (
             "G2_cluster_sibling_overlap",
             "cluster_sibling_overlap",
             _optional_score(sibling["cluster_sibling_overlap_score"]),
             2.0,
-            sibling,
+            {**sibling, **shared_metadata},
         ),
         (
             "G2_cluster_nesting_fidelity",
             "cluster_nesting_fidelity",
             _optional_score(nesting["cluster_nesting_fidelity_score"]),
             1.0,
-            nesting,
+            {**nesting, **shared_metadata},
         ),
         (
             "G2_cluster_edge_intrusion",
             "cluster_edge_intrusion",
             _optional_score(intrusion["cluster_edge_intrusion_score"]),
             1.0,
-            intrusion,
+            {**intrusion, **shared_metadata},
         ),
         (
             "G2_cluster_label_occlusion",
             "cluster_label_occlusion",
             _optional_score(labels["cluster_label_occlusion_score"]),
             1.0,
-            labels,
+            {**labels, **shared_metadata},
         ),
     )
 
