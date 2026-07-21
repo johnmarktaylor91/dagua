@@ -960,7 +960,7 @@ def test_g7_port_compliance_cap_routed_curves_and_scale_invariance() -> None:
 
 
 def test_g7_routed_quality_unit_invariance_gg5a_alpha_battery() -> None:
-    """Assert G7 routed quality is exact under joint unit scaling.
+    """Assert G7 routed quality and hard compliance are exact under joint unit scaling.
 
     Parameters
     ----------
@@ -978,6 +978,10 @@ def test_g7_routed_quality_unit_invariance_gg5a_alpha_battery() -> None:
             scale=alpha,
         )
         scaled = score_core_v3(scaled_pos, edges, alpha * sizes, graph_meta=scaled_meta)
+        _continuous_exact_or_tiny_relative(
+            _facet_score(baseline, "G7_port_hard_compliance"),
+            _facet_score(scaled, "G7_port_hard_compliance"),
+        )
         _continuous_exact_or_tiny_relative(
             _facet_score(baseline, "G7_routed_curve_quality"),
             _facet_score(scaled, "G7_routed_curve_quality"),
@@ -1208,7 +1212,7 @@ def test_g7_route_only_has_no_compliance_and_routed_facets_are_row_level() -> No
 
 
 def test_g7_port_order_with_port_sides_fills_node_before_lookup() -> None:
-    """Probe port_sides plus port_order declarations.
+    """Probe port_sides plus port_order declarations without geometry.
 
     Parameters
     ----------
@@ -1226,8 +1230,46 @@ def test_g7_port_order_with_port_sides_fills_node_before_lookup() -> None:
     }
     result = score_core_v3(pos, edges, _sizes(3), graph_meta=meta)
     compliance = result.facets["G7_port_hard_compliance"]
+    assert compliance.metadata["order_checks"] == 0
+    assert compliance.metadata["compliance_checks"] == 2
+
+
+def test_g7_reversed_port_order_detected_with_resolvable_positions() -> None:
+    """Probe port order violation when explicit port positions are declared.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos = torch.tensor([[0.0, 0.0], [4.0, -1.0], [4.0, 1.0]], dtype=torch.float64)
+    edges = torch.tensor([[0, 0], [1, 2]], dtype=torch.long)
+    meta: Dict[str, object] = {
+        "ports": [
+            {
+                "edge": 0,
+                "endpoint": "source",
+                "side": "E",
+                "order": 1,
+                "position": (0.1, -1.0),
+            },
+            {
+                "edge": 1,
+                "endpoint": "source",
+                "side": "E",
+                "order": 0,
+                "position": (0.1, 1.0),
+            },
+        ],
+    }
+    result = score_core_v3(pos, edges, _sizes(3), graph_meta=meta)
+    compliance = result.facets["G7_port_hard_compliance"]
     assert compliance.metadata["order_checks"] == 2
-    assert compliance.metadata["compliance_checks"] == 4
+    assert compliance.metadata["order_satisfied"] == 0
+    assert compliance.score is not None and compliance.score < 1.0
 
 
 def test_g4_layered_contour_separation_uses_node_sizes() -> None:
@@ -1291,10 +1333,71 @@ def test_g7_exit_stub_does_not_satisfy_wrong_route_direction() -> None:
         "routing_declared": True,
         "route_paths": [[(0.0, 0.0), (0.05, 0.0), (-6.0, 0.0), (4.0, -1.0)]],
     }
-    result = score_core_v3(pos, edges, _sizes(2), graph_meta=meta)
+    result = score_core_v3(pos, edges, _canonical_unit_sizes(2), graph_meta=meta)
     compliance = result.facets["G7_port_hard_compliance"]
     assert compliance.metadata["side_violation_count"] == 1
     assert compliance.score is not None and compliance.score < 1.0
+
+
+def test_g7_exit_stub_detected_at_realistic_units() -> None:
+    """Probe exit-stub side violations across realistic joint unit scales.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    base_pos = torch.tensor([[0.0, 0.0], [4.0, -1.0]], dtype=torch.float64)
+    edges = torch.tensor([[0], [1]], dtype=torch.long)
+    base_route = [(0.0, 0.0), (0.05, 0.0), (-6.0, 0.0), (4.0, -1.0)]
+    for alpha in (1.0, 34.0, 250.0):
+        meta: Dict[str, object] = {
+            "ports": [{"edge": 0, "endpoint": "source", "side": "E"}],
+            "routing_declared": True,
+            "route_paths": [
+                [(alpha * x_value, alpha * y_value) for x_value, y_value in base_route]
+            ],
+        }
+        result = score_core_v3(
+            alpha * base_pos,
+            edges,
+            alpha * _canonical_unit_sizes(2),
+            graph_meta=meta,
+        )
+        compliance = result.facets["G7_port_hard_compliance"]
+        assert compliance.metadata["side_violation_count"] == 1
+        assert compliance.score is not None and compliance.score < 1.0
+
+
+def test_g4_single_child_parent_centering_unit_invariance_gg5a() -> None:
+    """Assert single-child parent centering is exact under joint unit scaling.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    base_pos = torch.tensor([[0.0, 0.0], [0.5, 1.0]], dtype=torch.float64)
+    edges = torch.tensor([[0], [1]], dtype=torch.long)
+    meta: Dict[str, object] = {"declared_tree": True, "root": 0, "tree_convention": "layered"}
+    baseline = score_core_v3(base_pos, edges, _canonical_unit_sizes(2), graph_meta=meta)
+    for alpha in (0.02, 0.1, 1.0, 10.0, 50.0):
+        scaled = score_core_v3(
+            alpha * base_pos,
+            edges,
+            alpha * _canonical_unit_sizes(2),
+            graph_meta=meta,
+        )
+        _continuous_exact_or_tiny_relative(
+            _facet_score(baseline, "G4_layered_parent_centering"),
+            _facet_score(scaled, "G4_layered_parent_centering"),
+        )
 
 
 def test_g4_sibling_order_preserves_edge_insertion_order() -> None:
