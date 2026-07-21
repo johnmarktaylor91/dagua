@@ -14,6 +14,16 @@ from typing import Any, Callable, Optional, Sequence
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.ops.pipelines.native_budget import (
+    DETERMINISTIC_BUDGET_ATTR,
+    PROCESS_DEADLINE_ATTR,
+    charge,
+    remaining_dwu,
+    remaining_process_s,
+    remaining_wall_s,
+    wall_reserve_exhausted,
+)
+from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.pipelines.native_shape_geometry import (
     NativeShapeGeometry,
     pairwise_shape_signed_gap,
@@ -51,14 +61,51 @@ _MEASURED_COST_TINY_REFEREE_S = 0.05
 _MEASURED_COST_TINY_MAX_N = 64
 _MEASURED_COST_TINY_STEPS = 96
 _TINY_ROW_CONTINUATION_CAP_S = 2.0
+_TINY_ROW_DETERMINISTIC_STEP_COST_S = 0.0437
+_TINY_ROW_DETERMINISTIC_REFEREE_COST_S = 0.019
 _MEASURED_COST_DEFAULT_REFEREE_S = 0.40
 _MEASURED_COST_SURROGATE_STEPS = 4
 _W5_STRESS_MAX_SOURCES = 200
 _W5_STRESS_MAX_PAIRS = 100_000
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
-_PROCESS_DEADLINE_ATTR = "_dagua_native_process_deadline_s"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
+
+
+def _runtime_telemetry_payload(
+    *,
+    config: Optional[LayoutConfig],
+    wall_s: Optional[float],
+    process_s: Optional[float],
+    use_deterministic_costs: bool,
+) -> dict[str, Optional[float] | int | str | bool]:
+    """Return environment metadata for native timing telemetry.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying device and budget metadata.
+    wall_s : float, optional
+        Wall-clock seconds for the measured work.
+    process_s : float, optional
+        Process CPU seconds for the measured work.
+    use_deterministic_costs : bool
+        Whether this record used deterministic tiny-row cost units.
+
+    Returns
+    -------
+    dict[str, float | int | str | bool | None]
+        JSON-ready runtime metadata for cross-machine interpretation.
+    """
+    cpu_wall_ratio = None
+    if wall_s is not None and process_s is not None and wall_s > 0.0:
+        cpu_wall_ratio = float(process_s) / float(wall_s)
+    return {
+        "use_deterministic_costs": bool(use_deterministic_costs),
+        "cpu_wall_ratio": cpu_wall_ratio,
+        "torch_num_threads": int(torch.get_num_threads()),
+        "device": str(getattr(config, "device", "unknown")) if config is not None else "unknown",
+    }
 
 
 @dataclass(frozen=True)
@@ -193,7 +240,7 @@ class W5Seed:
 
 @dataclass(frozen=True)
 class W5CostPlan:
-    """Measured W5 work bounds admitted by the shared spend cap.
+    """Modeled W5 work bounds admitted by the shared ledger.
 
     Parameters
     ----------
@@ -204,18 +251,24 @@ class W5CostPlan:
     checkpoints : int
         Maximum honest-scored checkpoints per seed, capped at two.
     measured_step_s : float
-        Wall-clock seconds for one post-warmup surrogate step.
+        Modeled wall-second cost for one optimizer step. The historical field
+        name is retained for telemetry compatibility.
     warmup_s : float
-        One-time wall-clock warmup charge from the first surrogate step.
+        Shadow wall-clock warmup observed by the surrogate probe.
     referee_s : float
-        Wall-clock seconds for one honest referee score, measured on the
-        incumbent before W5 entry.
+        Modeled wall-second cost for one honest referee score.
     budget_s : float
         Wall-clock seconds available under the shared W5 spend cap.
     budget_usable_s : float
         Wall-clock seconds available after the explicit return reserve.
     predicted_s : float
         Conservative wall-clock cost estimate for the admitted plan.
+    shadow_step_s : float, optional
+        Measured surrogate step wall seconds, retained for calibration audits
+        and never used for plan sizing.
+    shadow_warmup_s : float, optional
+        Measured surrogate first-step wall seconds, retained for calibration
+        audits and never used for plan sizing.
     """
 
     seeds: int
@@ -227,6 +280,8 @@ class W5CostPlan:
     budget_s: float
     budget_usable_s: float
     predicted_s: float
+    shadow_step_s: Optional[float] = None
+    shadow_warmup_s: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +399,8 @@ class W5FinisherResult:
         Work slice granted to this invocation.
     spent_s : float
         Wall-clock seconds spent in this invocation.
+    process_spent_s : float
+        Process CPU seconds spent in this invocation.
     remaining_entry_s : float, optional
         Benchmark seconds remaining at entry.
     remaining_exit_s : float, optional
@@ -385,6 +442,7 @@ class W5FinisherResult:
     skipped_reason: Optional[str] = None
     slice_s: Optional[float] = None
     spent_s: float = 0.0
+    process_spent_s: float = 0.0
     remaining_entry_s: Optional[float] = None
     remaining_exit_s: Optional[float] = None
     node_count: int = 0
@@ -479,14 +537,11 @@ def _remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
     float or None
         Remaining seconds, or ``None`` outside benchmark deadline mode.
     """
-    deadline = getattr(config, "_dagua_native_deadline_s", None) if config is not None else None
-    if deadline is None:
-        return None
-    return float(deadline) - time.perf_counter()
+    return remaining_wall_s(config)
 
 
-def _w5_first_score_epilogue_has_wall_headroom(config: Optional[LayoutConfig]) -> bool:
-    """Return whether one terminal checkpoint score has benchmark wall headroom.
+def _w5_first_score_epilogue_has_budget(config: Optional[LayoutConfig]) -> bool:
+    """Return whether one terminal checkpoint score has deterministic budget.
 
     Parameters
     ----------
@@ -496,17 +551,35 @@ def _w5_first_score_epilogue_has_wall_headroom(config: Optional[LayoutConfig]) -
     Returns
     -------
     bool
-        ``True`` when no benchmark wall deadline exists, or when the measured
-        remaining wall time can fit one referee score with a safety margin.
+        ``True`` when no benchmark budget exists, or when the deterministic
+        process-time budget can fit one referee score with a safety margin.
+        Wall-clock only vetoes when the hard return reserve is already gone.
     """
-    wall_remaining = _remaining_s(config)
-    if wall_remaining is None:
-        return True
+    if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
+        return False
     referee_s = float(
         getattr(config, "_dagua_native_w5_referee_cost_s", _MEASURED_COST_DEFAULT_REFEREE_S)
     )
     referee_s = max(1.0e-6, referee_s)
-    return wall_remaining > 2.0 * referee_s + 1.0
+    process_remaining = _process_remaining_s(config)
+    return process_remaining is None or process_remaining > 2.0 * referee_s + 1.0
+
+
+def _w5_first_score_epilogue_has_wall_headroom(config: Optional[LayoutConfig]) -> bool:
+    """Return whether one terminal checkpoint score may run.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying benchmark deadline metadata.
+
+    Returns
+    -------
+    bool
+        Alias for the deterministic epilogue budget gate, kept for existing
+        tests and callers that monkeypatch the historical helper name.
+    """
+    return _w5_first_score_epilogue_has_budget(config)
 
 
 def _stack_graph_name() -> Optional[str]:
@@ -580,17 +653,7 @@ def _process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
         Process CPU seconds remaining, or ``None`` without benchmark budget
         metadata.
     """
-    if config is None:
-        return None
-    process_deadline = getattr(config, _PROCESS_DEADLINE_ATTR, None)
-    if process_deadline is None:
-        remaining = _remaining_s(config)
-        if remaining is None:
-            return None
-        process_deadline = time.process_time() + max(0.0, float(remaining))
-        setattr(config, _PROCESS_DEADLINE_ATTR, process_deadline)
-        return float(remaining)
-    return float(process_deadline) - time.process_time()
+    return remaining_process_s(config)
 
 
 def _w5_disabled_by_env() -> bool:
@@ -606,20 +669,20 @@ def _w5_disabled_by_env() -> bool:
 
 
 def _w5_spend_cap_s(config: Optional[LayoutConfig], remaining: Optional[float]) -> float:
-    """Return the per-layout accumulated W5 wall-clock cap.
+    """Return the per-layout accumulated W5 deterministic spend cap.
 
     Parameters
     ----------
     config : LayoutConfig, optional
         Prepared layout configuration carrying benchmark budget metadata.
     remaining : float, optional
-        Remaining benchmark seconds, used as a fallback budget outside normal
-        benchmark configuration.
+        Remaining deterministic benchmark seconds, used as a fallback budget
+        outside normal benchmark configuration.
 
     Returns
     -------
     float
-        Maximum total seconds W5 may spend for this layout invocation.
+        Maximum total process seconds W5 may spend for this layout invocation.
     """
     if config is None or (
         remaining is None and not hasattr(config, "_dagua_native_total_budget_s")
@@ -675,6 +738,98 @@ def _w5_process_spent_s(
     return previous + max(0.0, time.process_time() - started_process)
 
 
+def _use_tiny_row_deterministic_w5_costs(
+    config: Optional[LayoutConfig],
+    node_count: int,
+) -> bool:
+    """Return whether tiny-row W5 admission should use fixed cost units.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration carrying optional benchmark metadata.
+    node_count : int
+        Number of layout nodes in the W5 seed.
+
+    Returns
+    -------
+    bool
+        ``True`` for tiny benchmark-budgeted rows where measured process-time
+        step costs are too small and noisy to be a stable admission unit.
+    """
+    if config is None or int(node_count) > _MEASURED_COST_TINY_MAX_N:
+        return False
+    if remaining_dwu(config) is not None:
+        return True
+    return (
+        getattr(config, DETERMINISTIC_BUDGET_ATTR, None) is not None
+        and getattr(config, PROCESS_DEADLINE_ATTR, None) is not None
+    )
+
+
+def _native_device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the native cost-model device class for a W5 config.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA devices, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
+
+
+def _charge_w5_owner_plan(
+    config: Optional[LayoutConfig],
+    node_count: int,
+    edge_count: int,
+    mode: str,
+    cost_plan: W5CostPlan,
+) -> None:
+    """Charge the deterministic W5 owner package for an admitted plan.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying an optional ledger.
+    node_count : int
+        Number of layout nodes.
+    edge_count : int
+        Number of layout edges.
+    mode : str
+        Routed W5 mode for the first admitted plan.
+    cost_plan : W5CostPlan
+        Deterministic W5 plan containing seeds, steps, and checkpoints.
+
+    Returns
+    -------
+    None
+        The function charges the ledger when installed and marks the plan so
+        repeated local checks do not double-debit it.
+    """
+    if config is None or bool(getattr(config, "_dagua_native_w5_owner_charged", False)):
+        return
+    problem = {"num_nodes": int(node_count), "num_edges": int(edge_count)}
+    cost = estimate_native_work_cost(
+        problem,
+        "w5",
+        {
+            "mode": mode,
+            "steps": int(cost_plan.steps),
+            "seeds": int(cost_plan.seeds),
+            "checkpoints": int(cost_plan.checkpoints),
+        },
+        _native_device_class(config),
+    )
+    charge(config, cost.generation_dwu + cost.reserved_score_dwu, "mandatory_w5_owner")
+    setattr(config, "_dagua_native_w5_owner_charged", True)
+
+
 def w5_predicted_skip_reason(
     node_count: int,
     edge_count: int,
@@ -723,25 +878,21 @@ def _finisher_slice_s(config: Optional[LayoutConfig]) -> Optional[float]:
     """
     if _w5_disabled_by_env():
         return None
-    wall_remaining = _remaining_s(config)
     process_remaining = _process_remaining_s(config)
-    if wall_remaining is None and process_remaining is None:
+    if process_remaining is None and _remaining_s(config) is None:
         return _DEFAULT_FINISHER_SLICE_S
-    if wall_remaining is not None and wall_remaining < _ABSOLUTE_DEADLINE_RESERVE_S:
+    if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
         return None
-    remaining = wall_remaining if process_remaining is None else process_remaining
-    assert remaining is not None
-    if remaining < _MIN_BENCHMARK_REMAINING_S:
+    if process_remaining is None:
         return None
-    wall_available = (
-        float("inf") if wall_remaining is None else wall_remaining - _ABSOLUTE_DEADLINE_RESERVE_S
-    )
-    process_available = remaining - _ABSOLUTE_DEADLINE_RESERVE_S
-    available = min(wall_available, process_available)
+    if process_remaining < _MIN_BENCHMARK_REMAINING_S:
+        return None
+    available = max(0.0, float(process_remaining) - _ABSOLUTE_DEADLINE_RESERVE_S)
     if available < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
         return None
-    spend_cap = _w5_spend_cap_s(config, wall_remaining)
-    spent = _w5_spent_s(config)
+    spend_cap = _w5_spend_cap_s(config, process_remaining)
+    ledger_remaining = remaining_dwu(config)
+    spent = 0.0 if ledger_remaining is not None else _w5_process_spent_s(config)
     remaining_w5_budget = spend_cap - spent
     if remaining_w5_budget < _MIN_FINISHER_ENTRY_S + _FINISHER_SCORE_RESERVE_S:
         return None
@@ -1634,7 +1785,7 @@ def _optimize_seed(
         step_wall_s = max(1.0e-6, time.perf_counter() - step_started_perf)
         if step_timing_hook is not None:
             step_timing_hook(step, step_wall_s)
-        if step == 1:
+        if step == 1 and math.isfinite(float(deadline)):
             remaining_step_budget = max(0.0, deadline - time.monotonic())
             steps_that_fit = 1 + int(remaining_step_budget / step_wall_s)
             effective_max_steps = max(1, min(desired_steps, steps_that_fit))
@@ -1846,11 +1997,12 @@ def _measured_cost_plan(
     slice_s: float,
     config: Optional[LayoutConfig],
     started_perf: float,
+    started_process: float,
     remaining_entry: Optional[float],
     honest_axes: Optional[W5HonestAxes],
     shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> Optional[W5CostPlan]:
-    """Return a measured W5 plan that fits the shared wall-clock cap.
+    """Return a modeled W5 plan that fits the deterministic ledger cap.
 
     Parameters
     ----------
@@ -1870,8 +2022,10 @@ def _measured_cost_plan(
         Prepared configuration carrying spend and referee measurements.
     started_perf : float
         ``time.perf_counter()`` value captured at W5 entry.
+    started_process : float
+        ``time.process_time()`` value captured at W5 entry.
     remaining_entry : float, optional
-        Benchmark wall seconds remaining at W5 entry.
+        Benchmark process seconds remaining at W5 entry.
     honest_axes : W5HonestAxes, optional
         Honest incumbent axes used by barrier weighting.
     shape_geometry : NativeShapeGeometry, optional
@@ -1881,19 +2035,12 @@ def _measured_cost_plan(
     -------
     W5CostPlan or None
         Admitted plan, or ``None`` when one seed and one checkpoint cannot fit.
+        The live surrogate probe is retained as shadow telemetry and does not
+        affect the returned plan shape or modeled costs.
     """
-    referee_s = float(
-        getattr(config, "_dagua_native_w5_referee_cost_s", _MEASURED_COST_DEFAULT_REFEREE_S)
-    )
-    referee_s = max(1.0e-6, referee_s)
-    pre_measure_cap_remaining = _w5_spend_cap_s(config, remaining_entry) - _w5_spent_s(
-        config,
-        started_perf,
-    )
-    measurement_budget_s = max(
-        1.0e-6,
-        min(float(slice_s), pre_measure_cap_remaining) - _PREDICTED_COST_RETURN_RESERVE_S,
-    )
+    node_count = int(seeds[0].pos.shape[0])
+    edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+    measurement_budget_s = max(1.0e-6, min(float(slice_s), _MEASURED_COST_SURROGATE_STEPS * 0.25))
     step_measurement = _measure_one_surrogate_step_s(
         seeds[0],
         edge_index,
@@ -1904,45 +2051,20 @@ def _measured_cost_plan(
         measurement_budget_s,
         shape_geometry,
     )
-    spend_cap = _w5_spend_cap_s(config, remaining_entry)
-    cap_remaining = spend_cap - _w5_spent_s(config, started_perf)
+    del started_perf, started_process
+    ledger_remaining = remaining_dwu(config)
+    cap_remaining = _w5_spend_cap_s(config, remaining_entry)
+    if ledger_remaining is not None:
+        cap_remaining = min(cap_remaining, float(ledger_remaining))
     budget_s = max(0.0, min(float(slice_s), cap_remaining))
-    # Invariant: measured plan cost and budget are both wall seconds.
-    # ``process_time`` is telemetry-only; admission matches the wall-based
-    # deadline, slice, and optimizer step guards below.
     usable_s = budget_s - _PREDICTED_COST_RETURN_RESERVE_S
-    step_s = step_measurement.step_s
-    warmup_s = step_measurement.warmup_s
-    minimum_predicted_s = step_s + referee_s
-    if usable_s < minimum_predicted_s:
-        if config is not None:
-            setattr(
-                config,
-                "_dagua_native_w5_cost_plan",
-                W5CostPlan(
-                    seeds=0,
-                    steps=0,
-                    checkpoints=0,
-                    measured_step_s=step_s,
-                    warmup_s=warmup_s,
-                    referee_s=referee_s,
-                    budget_s=budget_s,
-                    budget_usable_s=usable_s,
-                    predicted_s=minimum_predicted_s,
-                ),
-            )
-        return None
-    node_count = int(seeds[0].pos.shape[0])
-    is_tiny_referee = (
-        node_count <= _MEASURED_COST_TINY_MAX_N and referee_s < _MEASURED_COST_TINY_REFEREE_S
-    )
     base_steps = 24 if node_count >= 300 else 36
     base_seeds = min(3, len(seeds))
     base_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
     max_checkpoints = base_checkpoints
 
     def build_plan(seed_count: int, steps: int, checkpoints: int) -> W5CostPlan:
-        """Build a wall-denominated plan payload for candidate work bounds.
+        """Build a model-denominated plan payload for candidate work bounds.
 
         Parameters
         ----------
@@ -1956,25 +2078,47 @@ def _measured_cost_plan(
         Returns
         -------
         W5CostPlan
-            Cost plan for post-probe work under the remaining wall budget.
+            Cost plan priced solely by the frozen W5 cost model.
         """
-        predicted_s = seed_count * (steps * step_s + checkpoints * referee_s)
+        cost = estimate_native_work_cost(
+            {"num_nodes": node_count, "num_edges": edge_count},
+            "w5",
+            {
+                "mode": routed_mode,
+                "steps": steps,
+                "seeds": seed_count,
+                "checkpoints": checkpoints,
+            },
+            _native_device_class(config),
+        )
+        predicted_s = cost.generation_dwu + cost.reserved_score_dwu
+        step_volume = max(1, steps * max(seed_count, 1))
+        referee_volume = max(1, checkpoints * max(seed_count, 1))
+        step_s = cost.generation_dwu / float(step_volume)
+        referee_s = cost.reserved_score_dwu / float(referee_volume)
         return W5CostPlan(
             seeds=seed_count,
             steps=steps,
             checkpoints=checkpoints,
             measured_step_s=step_s,
-            warmup_s=warmup_s,
+            warmup_s=step_measurement.warmup_s,
             referee_s=referee_s,
             budget_s=budget_s,
             budget_usable_s=usable_s,
             predicted_s=predicted_s,
+            shadow_step_s=step_measurement.step_s,
+            shadow_warmup_s=step_measurement.warmup_s,
         )
+
+    minimum_plan = build_plan(1, 1, 1)
+    if usable_s < minimum_plan.predicted_s:
+        if config is not None:
+            setattr(config, "_dagua_native_w5_cost_plan", minimum_plan)
+        return None
 
     base_plan = build_plan(base_seeds, base_steps, base_checkpoints)
     if base_plan.predicted_s <= usable_s:
-        if is_tiny_referee:
-            raised_usable_s = min(usable_s, base_plan.predicted_s + _TINY_ROW_CONTINUATION_CAP_S)
+        if node_count <= _MEASURED_COST_TINY_MAX_N:
             for steps in range(_MEASURED_COST_TINY_STEPS, base_steps - 1, -1):
                 for checkpoints in range(
                     _MEASURED_COST_TINY_MAX_CHECKPOINTS,
@@ -1982,7 +2126,7 @@ def _measured_cost_plan(
                     -1,
                 ):
                     raised_plan = build_plan(base_seeds, steps, checkpoints)
-                    if raised_plan.predicted_s <= raised_usable_s:
+                    if raised_plan.predicted_s <= usable_s:
                         if config is not None:
                             setattr(config, "_dagua_native_w5_cost_plan", raised_plan)
                         return raised_plan
@@ -2057,7 +2201,7 @@ def run_w5_finisher(
     """
     started_perf = time.perf_counter()
     started_process = time.process_time()
-    remaining_entry = _remaining_s(config)
+    remaining_entry = _process_remaining_s(config)
     slice_s = _finisher_slice_s(config)
     node_count = int(incumbent_pos.shape[0])
     edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
@@ -2130,11 +2274,11 @@ def run_w5_finisher(
             winner_name = "incumbent"
             skipped_reason = "clamped_to_incumbent"
         spent_s = max(0.0, time.perf_counter() - started_perf)
+        process_spent_s = max(0.0, time.process_time() - started_process)
         if config is not None:
             previous_spent = float(getattr(config, "_dagua_native_w5_spent_s", 0.0))
             setattr(config, "_dagua_native_w5_spent_s", previous_spent + spent_s)
             previous_process_spent = float(getattr(config, "_dagua_native_w5_process_spent_s", 0.0))
-            process_spent_s = max(0.0, time.process_time() - started_process)
             setattr(
                 config,
                 "_dagua_native_w5_process_spent_s",
@@ -2154,6 +2298,7 @@ def run_w5_finisher(
             skipped_reason=skipped_reason,
             slice_s=slice_s,
             spent_s=spent_s,
+            process_spent_s=process_spent_s,
             remaining_entry_s=remaining_entry,
             remaining_exit_s=_remaining_s(config),
             node_count=node_count,
@@ -2242,6 +2387,7 @@ def run_w5_finisher(
             slice_s=float(slice_s),
             config=config,
             started_perf=started_perf,
+            started_process=started_process,
             remaining_entry=remaining_entry,
             honest_axes=incumbent_axes,
             shape_geometry=shape_work,
@@ -2263,6 +2409,13 @@ def run_w5_finisher(
                 steps=0,
                 skipped_reason="predicted_cost_measured",
             )
+        _charge_w5_owner_plan(
+            config,
+            node_count,
+            edge_count,
+            first_mode,
+            cost_plan,
+        )
         kept_seeds = kept_seeds[: cost_plan.seeds]
         max_steps = cost_plan.steps
         max_checkpoints = cost_plan.checkpoints
@@ -2282,10 +2435,7 @@ def run_w5_finisher(
     first_score_epilogue_attempted = False
     for seed in kept_seeds:
         seed_accepted_entry = len(accepted)
-        if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(config, remaining_entry):
-            deadline_returned = True
-            break
-        if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
+        if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
             deadline_returned = True
             break
         route_started = time.perf_counter()
@@ -2302,13 +2452,7 @@ def run_w5_finisher(
         for ladder_index, mode in enumerate(
             _mode_ladder(mode, is_semantically_directed=is_semantically_directed)
         ):
-            if ladder_index > 0 and _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
-                config,
-                remaining_entry,
-            ):
-                deadline_returned = True
-                break
-            if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
+            if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
                 deadline_returned = True
                 break
             routed_mode = mode
@@ -2322,13 +2466,7 @@ def run_w5_finisher(
                 if pass_id == 2:
                     if deadline_returned:
                         break
-                    if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
-                        config,
-                        remaining_entry,
-                    ):
-                        deadline_returned = True
-                        break
-                    if time.monotonic() >= deadline - _FINISHER_SCORE_RESERVE_S:
+                    if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
                         deadline_returned = True
                         break
                     if not stress_sample_ready:
@@ -2351,7 +2489,7 @@ def run_w5_finisher(
                         size_work,
                         topo_depth,
                         mode,
-                        deadline - _FINISHER_SCORE_RESERVE_S,
+                        float("inf") if use_measured_cost else deadline - _FINISHER_SCORE_RESERVE_S,
                         incumbent_axes,
                         max_steps=max_steps if use_measured_cost else None,
                         max_checkpoints=max_checkpoints,
@@ -2396,22 +2534,9 @@ def run_w5_finisher(
                     scored_points.append((steps, final_pos, final_loss))
                 for step, checkpoint_pos, checkpoint_loss in scored_points[:max_checkpoints]:
                     epilogue_scoring = False
-                    if _w5_spent_s(config, started_perf) >= _w5_spend_cap_s(
-                        config,
-                        remaining_entry,
+                    if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S) or (
+                        not use_measured_cost and time.monotonic() >= deadline
                     ):
-                        deadline_returned = True
-                        if (
-                            checkpoints
-                            or first_score_epilogue_attempted
-                            or not scored_points
-                            or not _w5_first_score_epilogue_has_wall_headroom(config)
-                        ):
-                            break
-                        step, checkpoint_pos, checkpoint_loss = scored_points[-1]
-                        first_score_epilogue_attempted = True
-                        epilogue_scoring = True
-                    if not epilogue_scoring and time.monotonic() >= deadline:
                         deadline_returned = True
                         if (
                             checkpoints
@@ -2620,9 +2745,16 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
         "declared_hierarchical": result.declared_hierarchical,
         "slice_s": result.slice_s,
         "spent_s": result.spent_s,
+        "process_spent_s": result.process_spent_s,
         "remaining_entry_s": result.remaining_entry_s,
         "remaining_exit_s": result.remaining_exit_s,
         "measured_step_s": (None if result.cost_plan is None else result.cost_plan.measured_step_s),
+        "shadow_measured_step_s": (
+            None if result.cost_plan is None else result.cost_plan.shadow_step_s
+        ),
+        "shadow_measured_warmup_s": (
+            None if result.cost_plan is None else result.cost_plan.shadow_warmup_s
+        ),
         "warmup_s": None if result.cost_plan is None else result.cost_plan.warmup_s,
         "referee_s": None if result.cost_plan is None else result.cost_plan.referee_s,
         "budget_usable_s": (None if result.cost_plan is None else result.cost_plan.budget_usable_s),
@@ -2676,6 +2808,17 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
             for checkpoint in result.checkpoints
         ],
     }
+    payload.update(
+        _runtime_telemetry_payload(
+            config=config,
+            wall_s=result.spent_s,
+            process_s=result.process_spent_s,
+            use_deterministic_costs=(
+                result.cost_plan is not None
+                and _use_tiny_row_deterministic_w5_costs(config, result.node_count)
+            ),
+        )
+    )
     if config is not None:
         existing = list(getattr(config, "_dagua_native_w5_telemetry", []))
         existing.append(payload)
