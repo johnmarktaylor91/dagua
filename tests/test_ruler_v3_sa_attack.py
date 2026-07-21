@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Tuple
 
 import pytest
+import torch
 
 from scripts.ceremony_sa_attack import (
     AttackConfig,
@@ -13,6 +16,7 @@ from scripts.ceremony_sa_attack import (
     ScoreConfig,
     build_probe_families,
     run_all_attacks,
+    run_diagnostics,
     run_family_attack,
 )
 
@@ -115,3 +119,41 @@ def test_gg3_sa_attack_is_deterministic_for_same_seed() -> None:
     assert tuple(_result_signature(result) for result in first) == tuple(
         _result_signature(result) for result in second
     )
+    for left, right in zip(first, second):
+        assert torch.equal(left.best_positions, right.best_positions)
+
+
+def test_gg3_diagnostics_writes_requested_artifacts(tmp_path: Path) -> None:
+    """Assert diagnostics expose positions and save re-score artifacts.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Temporary directory supplied by pytest.
+
+    Returns
+    -------
+    None
+    """
+    results = run_diagnostics(
+        seed=101,
+        families=("dag",),
+        attack_config=AttackConfig(iterations=4, restarts=1),
+        score_config=ScoreConfig(
+            crossing_samples=1_000,
+            neighborhood_samples=64,
+            stress_sources=16,
+            stress_targets=64,
+        ),
+        output_dir=tmp_path,
+    )
+    assert len(results) == 1
+    result = results[0]
+    assert result.best_positions.shape == result.best_positions.detach().clone().shape
+    for suffix in ("baseline.pt", "morph.pt", "facets.json", "compare.png"):
+        assert (tmp_path / f"dag_{suffix}").exists()
+
+    payload = json.loads((tmp_path / "dag_facets.json").read_text(encoding="utf-8"))
+    assert set(payload) >= {"baseline", "morph", "decomposition"}
+    assert {"tiered", "equal", "tier1_only"} <= set(payload["morph"]["scores"])
+    assert any(record["code"] == "C1" for record in payload["morph"]["facets"])
