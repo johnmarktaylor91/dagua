@@ -32,6 +32,22 @@ DEFAULT_ENVELOPE_FACTORS: dict[str, float] = {
     "w5": 1.2,
     "opaque": 2.0,
 }
+# Mirrors FCoSEConfig.max_exact_repulsion_nodes: at or below this node count the
+# fCoSE spring embedder uses exact vectorized pairwise repulsion (cheap,
+# overhead-dominated); above it the per-step Barnes-Hut tree pass dominates and
+# real cost jumps by 3-4 orders of magnitude (C2 telemetry, 2026-07-21).
+FCOSE_EXACT_REPULSION_NODE_CAP = 512
+# Per-term fit modes. "intercept_slope" subtracts the raw P10 overhead before
+# computing rates, so full-arm reference-step samples with heterogeneous
+# volumes do not double-count the flat per-arm overhead into alpha (the C1
+# "p90_rate" fit anchored alpha on tiny-row rates, over-pricing large exact
+# rows ~200x). "rate" is a pure zero-intercept fit for short-step samples that
+# extrapolate linearly in planned steps (Barnes-Hut regime). Everything else
+# keeps the C1 "p90_rate" methodology.
+TERM_FIT_MODES: dict[str, str] = {
+    "force": "intercept_slope",
+    "force_bh": "rate",
+}
 
 
 @dataclass(frozen=True)
@@ -136,6 +152,9 @@ def _term_from_payload(payload: Mapping[str, Any], family: str) -> str:
     if "score" in event or "referee" in event:
         return "score"
     if family == "fcose":
+        num_nodes = int(_positive_float(payload.get("num_nodes", payload.get("n", 0)), 0.0))
+        if num_nodes > FCOSE_EXACT_REPULSION_NODE_CAP:
+            return "force_bh"
         return "force"
     if family == "arm_s":
         return "stress_pairs"
@@ -176,8 +195,8 @@ def _volume_from_payload(payload: Mapping[str, Any], family: str, term: str) -> 
     num_edges = int(_positive_float(payload.get("num_edges", payload.get("e", 0)), 0.0))
     if family == "w5":
         return float(max(steps * seeds if term == "step" else checkpoints * seeds, 1))
-    if term in {"force", "samples"}:
-        base = num_nodes + num_edges if term == "force" else max(num_edges * num_edges, num_nodes)
+    if term in {"force", "force_bh", "samples"}:
+        base = max(num_edges * num_edges, num_nodes) if term == "samples" else num_nodes + num_edges
         return float(max(base * max(steps, 1), 1))
     if term in {"pairs", "stress_pairs"}:
         pairs = num_nodes * max(num_nodes - 1, 0) // 2
@@ -306,7 +325,11 @@ def percentile(values: Sequence[float], q: float) -> float:
     return ordered[index]
 
 
-def fit_term(records: Sequence[TelemetryRecord], envelope_factor: float) -> tuple[float, float]:
+def fit_term(
+    records: Sequence[TelemetryRecord],
+    envelope_factor: float,
+    mode: str = "p90_rate",
+) -> tuple[float, float]:
     """Fit a conservative ``alpha, beta`` pair for one term.
 
     Parameters
@@ -314,7 +337,15 @@ def fit_term(records: Sequence[TelemetryRecord], envelope_factor: float) -> tupl
     records : Sequence[TelemetryRecord]
         Runtime observations for one family/device/term.
     envelope_factor : float
-        Per-family load-envelope multiplier applied after the P90-idle fit.
+        Per-family load-envelope multiplier applied after the idle fit.
+    mode : str, default="p90_rate"
+        Fit shape. ``"p90_rate"`` is the C1 methodology (P90 raw rate plus P10
+        overhead; both carry the overhead, which is conservative for
+        homogeneous-volume samples). ``"intercept_slope"`` subtracts the raw
+        P10 overhead before computing rates so heterogeneous full-arm samples
+        do not fold the flat per-arm overhead into ``alpha``.
+        ``"rate"`` is a zero-intercept P90-rate fit for short-step samples
+        whose cost extrapolates linearly in planned steps.
 
     Returns
     -------
@@ -323,11 +354,20 @@ def fit_term(records: Sequence[TelemetryRecord], envelope_factor: float) -> tupl
     """
     if not records:
         return (0.0, 0.0)
+    envelope = max(float(envelope_factor), 0.0)
+    seconds = [record.seconds for record in records]
+    if mode == "rate":
+        rates = [record.seconds / max(record.volume, 1.0) for record in records]
+        return (percentile(rates, 0.90) * envelope, 0.0)
+    if mode == "intercept_slope":
+        raw_beta = percentile(seconds, 0.10)
+        residual_rates = [
+            max(0.0, record.seconds - raw_beta) / max(record.volume, 1.0) for record in records
+        ]
+        return (percentile(residual_rates, 0.90) * envelope, raw_beta * envelope)
     rates = [record.seconds / max(record.volume, 1.0) for record in records]
-    alpha = percentile(rates, 0.90) * max(float(envelope_factor), 0.0)
-    beta = percentile([record.seconds for record in records], 0.10) * max(
-        float(envelope_factor), 0.0
-    )
+    alpha = percentile(rates, 0.90) * envelope
+    beta = percentile(seconds, 0.10) * envelope
     return (alpha, beta)
 
 
@@ -356,7 +396,8 @@ def fit_table(
     table: dict[tuple[str, str], dict[str, tuple[float, float]]] = defaultdict(dict)
     for (family, device, term), term_records in grouped.items():
         factor = envelope_factors.get(family, envelope_factors.get("opaque", 2.0))
-        table[(family, device)][term] = fit_term(term_records, factor)
+        mode = TERM_FIT_MODES.get(term, "p90_rate")
+        table[(family, device)][term] = fit_term(term_records, factor, mode)
     return dict(table)
 
 
