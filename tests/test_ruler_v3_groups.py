@@ -511,9 +511,20 @@ def test_doc4_no_impute_and_g1_weighted_renormalization() -> None:
     assert with_g1.coverage["applicable_groups"] == 1
     assert "G1_directed_flow" in with_g1.facets
     assert "G1_depth_order" in with_g1.facets
+    g1_slots = with_g1.metadata["conditional_groups"]["G1"].metadata["tier_slots"]
+    assert tuple(slot["facet_name"] for slot in g1_slots) == ("G1_directed_flow",)
+    assert with_g1.facets["G1_depth_order"].applicable is False
+    assert with_g1.facets["G1_depth_order"].effective_weight == 0.0
+    assert with_g1.facets["G1_depth_order"].metadata["diagnostic_only"] is True
     values = {code: facet.score for code, facet in with_g1.facets.items()}
     weights = {code: facet.effective_weight for code, facet in with_g1.facets.items()}
     assert with_g1.scores["tiered"] == pytest.approx(renormalized_score(values, weights))
+    directed_only_weights = {
+        code: weight for code, weight in weights.items() if code != "G1_depth_order"
+    }
+    assert with_g1.scores["tiered"] == pytest.approx(
+        renormalized_score(values, directed_only_weights)
+    )
 
 
 def test_doc4_no_impute_for_g2_and_g4_rows() -> None:

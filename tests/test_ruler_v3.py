@@ -11,10 +11,15 @@ import torch
 from dagua.eval.ruler_v3 import (
     CORE_TIERS,
     PURE_GEOMETRY_FACETS,
+    TIER1_TRADEOFF_FLAG,
     WHITESPACE_RATIO_HI,
+    RulerV3Facet,
+    RulerV3Result,
     crossing_weight_multiplier,
     renormalized_score,
     score_core_v3,
+    tier1_tradeoff_flags,
+    with_tier1_tradeoff_flag,
 )
 
 
@@ -115,6 +120,64 @@ def _grid_layout(side: int, gap: float = 3.0) -> Tuple[torch.Tensor, torch.Tenso
         torch.tensor(coords, dtype=torch.float64),
         edge_index,
         torch.ones((side * side, 2), dtype=torch.float64),
+    )
+
+
+def _synthetic_tradeoff_result(
+    *,
+    tiered: float,
+    c1_score: float,
+) -> RulerV3Result:
+    """Create a minimal RulerV3Result for W7 comparison tests.
+
+    Parameters
+    ----------
+    tiered : float
+        Synthetic tiered composite score.
+    c1_score : float
+        Synthetic T1 facet score.
+
+    Returns
+    -------
+    RulerV3Result
+        Minimal result with one T1 facet and one T2 facet.
+    """
+    facets = {
+        "C1": RulerV3Facet(
+            code="C1",
+            name="ksm_stress",
+            tier=1,
+            score=c1_score,
+            base_weight=4.0,
+            effective_weight=4.0,
+            applicable=True,
+            applicability_reason="synthetic",
+            metadata={},
+        ),
+        "C4": RulerV3Facet(
+            code="C4",
+            name="node_occlusion",
+            tier=2,
+            score=1.0,
+            base_weight=2.0,
+            effective_weight=2.0,
+            applicable=True,
+            applicability_reason="synthetic",
+            metadata={},
+        ),
+    }
+    return RulerV3Result(
+        facets=facets,
+        scores={"tiered": tiered, "equal": tiered, "tier1_only": 100.0 * c1_score},
+        flags=tuple(),
+        applicability={code: facet.applicable for code, facet in facets.items()},
+        coverage={
+            "applicable_facets": 2,
+            "total_facets": 2,
+            "tier1_applicable_facets": 1,
+            "applicable_groups": 0,
+        },
+        metadata={},
     )
 
 
@@ -345,6 +408,28 @@ def _jittered_rotated_disconnected_chain_layout() -> Tuple[
         dtype=torch.float64,
     )
     return pos @ rotation.T, edge_index, node_sizes
+
+
+def test_w7_tier1_tradeoff_flag_is_score_neutral() -> None:
+    """W7 should flag aggregate-held T1 losses without changing composites.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    baseline = _synthetic_tradeoff_result(tiered=90.0, c1_score=0.95)
+    candidate = _synthetic_tradeoff_result(tiered=91.0, c1_score=0.89)
+
+    assert tier1_tradeoff_flags(baseline, candidate) == (TIER1_TRADEOFF_FLAG,)
+    flagged = with_tier1_tradeoff_flag(baseline, candidate)
+
+    assert flagged.scores == candidate.scores
+    assert flagged.facets == candidate.facets
+    assert flagged.flags == (TIER1_TRADEOFF_FLAG,)
 
 
 def test_unit_invariance_for_all_core_facets() -> None:

@@ -801,10 +801,15 @@ def _score_g1(
             tier=3,
             score=depth_score,
             base_weight=_tier_weight(3),
-            effective_weight=_tier_weight(3) * frac_acyclic,
-            applicable=depth_score is not None,
-            applicability_reason=reason,
-            metadata={**common_meta, **depth_meta},
+            effective_weight=0.0,
+            applicable=False,
+            applicability_reason="diagnostic_only:redundant_with_G1_directed_flow_and_G4_depth",
+            metadata={
+                **common_meta,
+                **depth_meta,
+                "diagnostic_only": True,
+                "audit_demotion": "sec_2_3_redundant_T3_scale_invariant_facet",
+            },
         ),
     }
     return GroupEvaluation(
@@ -4443,10 +4448,7 @@ GROUP_REGISTRY: Dict[str, ConditionalGroup] = {
     "G1": ConditionalGroup(
         key="G1",
         applicability_gate=_declared_hierarchy_gate,
-        tier_slots=(
-            GroupSlot("G1_directed_flow", 2, 1.0),
-            GroupSlot("G1_depth_order", 3, 1.0),
-        ),
+        tier_slots=(GroupSlot("G1_directed_flow", 2, 1.0),),
         score_fn=_score_g1,
     ),
     "G2": ConditionalGroup(
