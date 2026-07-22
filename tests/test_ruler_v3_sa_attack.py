@@ -13,6 +13,7 @@ import scripts.ceremony_sa_attack as sa_attack
 from dagua.eval.ruler_v3 import RulerV3Facet, RulerV3Result, severe_g6_floor_breach
 from scripts.ceremony_sa_attack import (
     AGGREGATE_TOLERANCE_FRACTION,
+    ATTACK_THE_FIX_OBJECTIVE_MODES,
     GG3_BLOCK_AGGREGATE_DELTA_FRACTION,
     GG3_VERDICT_BLOCK,
     GG3_VERDICT_PASS_DEGENERATE_ESCAPE,
@@ -27,11 +28,15 @@ from scripts.ceremony_sa_attack import (
     _gg3_gate_verdict,
     _objective,
     build_probe_families,
+    eligibility_surface_abuse_check,
+    format_attack_the_fix_table,
     format_results_table,
     primary_faithfulness_drop,
     probe_by_family,
     procrustes_shape_distance,
     run_all_attacks,
+    run_attack_the_fix_battery,
+    run_c2_angle_riding_teeth_check,
     run_diagnostics,
     run_family_attack,
     two_layout_buyback_decomposition,
@@ -90,6 +95,9 @@ def _result_signature(
         result.blockregion_shape_distance,
         result.blockregion_aggregate_delta_fraction,
         result.blockregion_primary_faithfulness_drop,
+        result.blockregion_two_layout_buyback,
+        result.blockregion_row_severe_g6_floor_breach,
+        result.blockregion_survives_condition5,
         result.blockregion_severe_g6_floor_breach,
         result.buyback_headroom,
         result.two_layout_buyback,
@@ -1305,3 +1313,226 @@ def test_tier1_loss_bounded_generic_force_retarget_no_longer_blocks() -> None:
     assert result.two_layout_buyback < TWO_LAYOUT_BUYBACK_BAR
     assert result.gate_verdict != GG3_VERDICT_BLOCK
     assert not result.blocked
+
+
+def test_attack_the_fix_modes_are_registered() -> None:
+    """Assert every named attack-the-fix objective is accepted by the harness.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    baseline, morph, baseline_pos, morph_pos, edges = _load_saved_case("weighted")
+    shape_distance = procrustes_shape_distance(baseline_pos, morph_pos)
+    aggregate_delta = _aggregate_delta_fraction(
+        float(morph.scores["tiered"]),
+        float(baseline.scores["tiered"]),
+    )
+    faithfulness_drop = primary_faithfulness_drop(baseline, morph)
+
+    for mode in ATTACK_THE_FIX_OBJECTIVE_MODES:
+        value = _objective(
+            shape_distance,
+            aggregate_delta,
+            faithfulness_drop,
+            AttackConfig(objective_mode=mode),
+            baseline_result=baseline,
+            candidate_result=morph,
+            baseline_pos=baseline_pos,
+            edges=edges,
+        )
+        assert isinstance(value, float)
+
+
+def test_condition5_survival_reports_same_blockregion_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assert attack results publish row-local condition-5 survival metrics.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest monkeypatch fixture.
+
+    Returns
+    -------
+    None
+    """
+    probe = _synthetic_square_probe()
+    baseline = _synthetic_result_with_gain(
+        tiered=100.0,
+        tier1_only=100.0,
+        c1=0.9,
+        c3=0.95,
+        c7=0.2,
+    )
+    survivor = _synthetic_result_with_gain(
+        tiered=99.0,
+        tier1_only=94.0,
+        c1=0.9,
+        c3=0.86,
+        c7=0.9,
+    )
+    survivor_verdict = sa_attack.GG3GateVerdict(
+        verdict=GG3_VERDICT_BLOCK,
+        blocked=True,
+        tier1_tradeoff=True,
+        tier1_only_drop=6.0,
+        severe_g6_floor_breach=False,
+        degenerate_escape=False,
+        shape_changed=True,
+        aggregate_held=True,
+        material_tier1_loss=True,
+        two_layout_buyback=4.0,
+        material_buyback=True,
+    )
+
+    def fake_score_probe(
+        scored_probe: ProbeFamily,
+        positions: torch.Tensor,
+        score_config: ScoreConfig,
+    ) -> RulerV3Result:
+        """Return the synthetic baseline for a patched attack.
+
+        Parameters
+        ----------
+        scored_probe : ProbeFamily
+            Ignored probe argument.
+        positions : torch.Tensor
+            Ignored positions.
+        score_config : ScoreConfig
+            Ignored score configuration.
+
+        Returns
+        -------
+        RulerV3Result
+            Synthetic baseline result.
+        """
+        del scored_probe, positions, score_config
+        return baseline
+
+    def fake_measure_candidate(
+        scored_probe: ProbeFamily,
+        positions: torch.Tensor,
+        *,
+        attack_config: AttackConfig,
+        score_config: ScoreConfig,
+        baseline_result: RulerV3Result,
+        baseline_score: float,
+    ) -> sa_attack.CandidateMeasurement:
+        """Return a synthetic surviving row.
+
+        Parameters
+        ----------
+        scored_probe : ProbeFamily
+            Ignored probe argument.
+        positions : torch.Tensor
+            Proposed positions.
+        attack_config : AttackConfig
+            Ignored attack configuration.
+        score_config : ScoreConfig
+            Ignored score configuration.
+        baseline_result : RulerV3Result
+            Ignored baseline result.
+        baseline_score : float
+            Ignored baseline score.
+
+        Returns
+        -------
+        scripts.ceremony_sa_attack.CandidateMeasurement
+            Synthetic condition-5 survivor measurement.
+        """
+        del scored_probe, attack_config, score_config, baseline_result, baseline_score
+        return sa_attack.CandidateMeasurement(
+            positions=positions,
+            result=survivor,
+            score=99.0,
+            shape_distance=0.5,
+            aggregate_delta_fraction=0.01,
+            primary_faithfulness_drop=0.09,
+            objective=10.0,
+            gate_verdict=survivor_verdict,
+            buyback_headroom=4.0,
+            two_layout_buyback=4.0,
+        )
+
+    monkeypatch.setattr(sa_attack, "_score_probe", fake_score_probe)
+    monkeypatch.setattr(sa_attack, "_measure_candidate", fake_measure_candidate)
+
+    result = run_family_attack(
+        probe,
+        seed=123,
+        attack_config=AttackConfig(iterations=1, restarts=1, objective_mode="free_clause_dodging"),
+        score_config=ScoreConfig(),
+    )
+
+    assert result.blockregion_survives_condition5
+    assert result.max_blockregion_tier1_only_drop == pytest.approx(6.0)
+    assert result.blockregion_two_layout_buyback == pytest.approx(4.0)
+    assert torch.equal(result.blockregion_positions, result.best_positions)
+
+
+def test_c2_angle_riding_teeth_check_finds_old_win_and_fixed_loss() -> None:
+    """Assert the archived C2' objective wins pre-fix and loses now.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    check = run_c2_angle_riding_teeth_check()
+    assert check.added_crossings > 0
+    assert check.old_attack_found
+    assert check.fixed_attack_loses
+    assert check.old_delta > 0.0
+    assert check.fixed_delta < 0.0
+
+
+def test_eligibility_surface_abuse_check_does_not_find_key_failure() -> None:
+    """Assert severe-G6 least-breach fallback cannot outrank compliance.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    assert not eligibility_surface_abuse_check()
+
+
+def test_attack_the_fix_battery_formats_max_achievable_rows() -> None:
+    """Assert the attack-the-fix aggregation exposes max-achievable numbers.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    results = run_attack_the_fix_battery(
+        seed=7,
+        attack_config=AttackConfig(iterations=1, restarts=1),
+        score_config=ScoreConfig(
+            crossing_samples=1_000,
+            neighborhood_samples=64,
+            stress_sources=16,
+            stress_targets=64,
+        ),
+        seeds_per_family=3,
+    )
+    table = format_attack_the_fix_table(results)
+
+    assert len(results) >= len(ATTACK_THE_FIX_OBJECTIVE_MODES)
+    assert "max in-band T1 drop" in table
+    assert "SURVIVING condition-5 hold?" in table
