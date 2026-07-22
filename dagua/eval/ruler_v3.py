@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from dagua.eval.ruler_v3_frozen import FROZEN_CONSTANTS
-from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
+from dagua.eval.ruler_v3_groups import G6_SEVERE_FLOOR, evaluate_conditional_groups
 from dagua.metrics import (
     _all_pairs_unweighted,
     _build_csr,
@@ -38,6 +38,9 @@ TIER_3_WEIGHT = 1.0
 TIER1_TRADEOFF_FLAG = "TIER1_TRADEOFF"
 TIER1_TRADEOFF_TOLERANCE = 0.05
 TIER1_TRADEOFF_AGGREGATE_TOLERANCE_FRACTION = 0.05
+G6_FLOOR_DROP = 0.05
+SEVERE_G6_BREACH_FLAG = "severe_g6_breach"
+SEVERE_G6_FACETS = ("G6_weighted_ksm", "G6_local_weight_monotonicity")
 
 CORE_TIERS: Dict[str, int] = {
     "C1": 1,
@@ -118,6 +121,116 @@ class RulerV3Result:
     applicability: Mapping[str, bool]
     coverage: Mapping[str, int]
     metadata: Mapping[str, Any]
+
+
+def _applicable_facet_score(result: RulerV3Result, code: str) -> Optional[float]:
+    """Return a finite applicable facet score.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 result to inspect.
+    code : str
+        Facet code to read.
+
+    Returns
+    -------
+    Optional[float]
+        Finite score for an applicable facet, otherwise ``None``.
+    """
+    facet = result.facets.get(code)
+    if facet is None or facet.score is None or not facet.applicable:
+        return None
+    score = float(facet.score)
+    return score if math.isfinite(score) else None
+
+
+def severe_g6_breach(result: RulerV3Result) -> bool:
+    """Return whether one layout violates the absolute severe-G6 contract.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 result to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` when any applicable declared-weight semantics facet is below
+        the frozen severe floor. Inapplicable G6 facets do not breach.
+    """
+    return any(
+        score is not None and score < G6_SEVERE_FLOOR
+        for score in (_applicable_facet_score(result, code) for code in SEVERE_G6_FACETS)
+    )
+
+
+def severe_g6_breach_depth(result: RulerV3Result) -> float:
+    """Return the maximum absolute severe-G6 floor debt for one layout.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 result to inspect.
+
+    Returns
+    -------
+    float
+        Maximum ``G6_SEVERE_FLOOR - score`` over applicable severe-G6 facets,
+        clipped at zero.
+    """
+    depths = [
+        max(0.0, G6_SEVERE_FLOOR - score)
+        for code in SEVERE_G6_FACETS
+        if (score := _applicable_facet_score(result, code)) is not None
+    ]
+    return max(depths) if depths else 0.0
+
+
+def severe_g6_floor_breach(
+    baseline: RulerV3Result,
+    candidate: RulerV3Result,
+) -> bool:
+    """Return the GG-3 pair-form severe-G6 floor breach predicate.
+
+    Parameters
+    ----------
+    baseline : RulerV3Result
+        Baseline V3 result.
+    candidate : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    bool
+        ``True`` when an applicable candidate G6 facet is below the frozen
+        severe floor and the same facet dropped by at least ``G6_FLOOR_DROP``.
+    """
+    for code in SEVERE_G6_FACETS:
+        baseline_score = _applicable_facet_score(baseline, code)
+        candidate_score = _applicable_facet_score(candidate, code)
+        if baseline_score is None or candidate_score is None:
+            continue
+        if candidate_score < G6_SEVERE_FLOOR and baseline_score - candidate_score >= G6_FLOOR_DROP:
+            return True
+    return False
+
+
+def referee_eligibility_key(result: RulerV3Result) -> Tuple[int, float]:
+    """Return the V3 native-selection eligibility prefix for one layout.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 result to rank.
+
+    Returns
+    -------
+    Tuple[int, float]
+        Lexicographic prefix where compliant rows outrank any severe-G6 breach,
+        and all-breaching candidate sets fall back to the least breach depth.
+    """
+    return (0 if severe_g6_breach(result) else 1, -severe_g6_breach_depth(result))
 
 
 def tier_weight(tier: int) -> float:
@@ -351,6 +464,7 @@ def score_core_v3(
         occlusion_score=raw_scores["C4"],
         whitespace_ratio=float(c5["whitespace_ratio"]),
         conditional_group_flags=_conditional_group_flags(group_results),
+        severe_g6_breach_flag=_severe_g6_breach_from_facets(facets),
     )
     return RulerV3Result(
         facets=facets,
@@ -2378,6 +2492,7 @@ def _row_flags(
     occlusion_score: Optional[float],
     whitespace_ratio: float,
     conditional_group_flags: Sequence[str] = tuple(),
+    severe_g6_breach_flag: bool = False,
 ) -> Tuple[str, ...]:
     """Return hard row flags for floor violations.
 
@@ -2391,6 +2506,8 @@ def _row_flags(
         C5 ``visual_area / area_floor`` ratio.
     conditional_group_flags : Sequence[str], optional
         Row flags raised by applicable conditional groups.
+    severe_g6_breach_flag : bool, default=False
+        Whether the absolute severe-G6 contract flag fired.
 
     Returns
     -------
@@ -2404,10 +2521,36 @@ def _row_flags(
         flags.append("OCCLUSION_FLOOR")
     if whitespace_ratio > WHITESPACE_RATIO_HI * SPRAWL_RATIO_FACTOR:
         flags.append("SPRAWL")
+    if severe_g6_breach_flag:
+        flags.append(SEVERE_G6_BREACH_FLAG)
     for flag in conditional_group_flags:
         if flag not in flags:
             flags.append(flag)
     return tuple(flags)
+
+
+def _severe_g6_breach_from_facets(facets: Mapping[str, RulerV3Facet]) -> bool:
+    """Return the absolute severe-G6 flag from already-built facets.
+
+    Parameters
+    ----------
+    facets : Mapping[str, RulerV3Facet]
+        Facets for a single V3 result.
+
+    Returns
+    -------
+    bool
+        ``True`` when an applicable severe-G6 facet score is below the frozen
+        severe floor.
+    """
+    for code in SEVERE_G6_FACETS:
+        facet = facets.get(code)
+        if facet is None or facet.score is None or not facet.applicable:
+            continue
+        score = float(facet.score)
+        if math.isfinite(score) and score < G6_SEVERE_FLOOR:
+            return True
+    return False
 
 
 def _conditional_group_flags(group_results: Mapping[str, Any]) -> Tuple[str, ...]:
@@ -2439,6 +2582,9 @@ __all__ = [
     "PURE_GEOMETRY_FACETS",
     "RulerV3Facet",
     "RulerV3Result",
+    "G6_FLOOR_DROP",
+    "SEVERE_G6_BREACH_FLAG",
+    "SEVERE_G6_FACETS",
     "SPRAWL_RATIO_FACTOR",
     "TIER1_TRADEOFF_FLAG",
     "WHITESPACE_RATIO_HI",
@@ -2449,7 +2595,11 @@ __all__ = [
     "crossing_weight_multiplier",
     "multi_radius_neighborhood_preservation",
     "renormalized_score",
+    "referee_eligibility_key",
     "score_core_v3",
+    "severe_g6_breach",
+    "severe_g6_breach_depth",
+    "severe_g6_floor_breach",
     "tier1_tradeoff_flags",
     "tier_weight",
     "with_tier1_tradeoff_flag",

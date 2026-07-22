@@ -29,7 +29,13 @@ import torch
 
 from dagua.eval.benchmark import _declares_hierarchy
 from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_directed
-from dagua.eval.ruler_v3 import RulerV3Result, score_core_v3
+from dagua.eval.ruler_v3 import (
+    SEVERE_G6_BREACH_FLAG,
+    RulerV3Result,
+    referee_eligibility_key,
+    score_core_v3,
+    severe_g6_breach,
+)
 from dagua.eval.size_policy import set_size_aware_externals
 from dagua.metrics import DEGENERATE_SCALE_RATIO, composite_auto, full
 from dagua.render.mpl import _density_scaled_node_sizes, _layout_extent_pt
@@ -445,6 +451,10 @@ def scoring_signature() -> str:
             "dagua/metrics.py": sha256_file(root / "dagua" / "metrics.py"),
             "dagua/layout/ops/cluster_geometry.py": sha256_file(
                 root / "dagua" / "layout" / "ops" / "cluster_geometry.py"
+            ),
+            "dagua/eval/ruler_v3.py": sha256_file(root / "dagua" / "eval" / "ruler_v3.py"),
+            "dagua/eval/ruler_v3_groups.py": sha256_file(
+                root / "dagua" / "eval" / "ruler_v3_groups.py"
             ),
         },
     }
@@ -986,6 +996,7 @@ def score_position(
             graph_meta=graph_meta,
         )
         row_flags = merged_row_flags(result.flags, unit_normalization.flags)
+        eligibility_key = referee_eligibility_key(result)
         return {
             "graph": test_graph.name,
             "engine": engine,
@@ -999,6 +1010,8 @@ def score_position(
             "v3_tiered": float(result.scores["tiered"]),
             "v3_equal": float(result.scores["equal"]),
             "v3_tier1_only": float(result.scores["tier1_only"]),
+            "v3_referee_eligibility_key": list(eligibility_key),
+            "v3_severe_g6_breach": severe_g6_breach(result),
             "v3_facets": _v3_facet_records(result),
             "v3_applicability": dict(result.applicability),
             "v3_row_flags": list(row_flags),
@@ -1349,9 +1362,64 @@ def best_rows_by_graph(
         if engine is None and row_engine == "dagua":
             continue
         graph_name = str(row["graph"])
-        if graph_name not in best or float(row[score_key]) > float(best[graph_name][score_key]):
+        row_key = _selection_key(row, score_key, native_selection=engine == "dagua")
+        best_key = (
+            None
+            if graph_name not in best
+            else _selection_key(best[graph_name], score_key, native_selection=engine == "dagua")
+        )
+        if best_key is None or row_key > best_key:
             best[graph_name] = dict(row)
     return best
+
+
+def _selection_key(
+    row: Mapping[str, Any],
+    score_key: str,
+    *,
+    native_selection: bool,
+) -> Tuple[Tuple[int, float], float]:
+    """Return the score-neutral row-selection key.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Raw score row.
+    score_key : str
+        Score column to maximize.
+    native_selection : bool
+        Whether severe-G6 eligibility is binding for this comparison.
+
+    Returns
+    -------
+    Tuple[Tuple[int, float], float]
+        Lexicographic selection key. Native V3 rows use the shared referee
+        eligibility prefix; field rows and non-V3 rows are annotated only.
+    """
+    eligibility = _row_referee_eligibility_key(row) if native_selection else (1, -0.0)
+    return (eligibility, float(row[score_key]))
+
+
+def _row_referee_eligibility_key(row: Mapping[str, Any]) -> Tuple[int, float]:
+    """Return a persisted referee eligibility key for a raw row.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Raw score row.
+
+    Returns
+    -------
+    Tuple[int, float]
+        Persisted severe-G6 eligibility prefix, or the compliant default for
+        legacy/non-V3 rows that cannot carry a declared-weight breach.
+    """
+    raw_key = row.get("v3_referee_eligibility_key")
+    if isinstance(raw_key, Sequence) and len(raw_key) == 2:
+        return (int(raw_key[0]), float(raw_key[1]))
+    if SEVERE_G6_BREACH_FLAG in {str(flag) for flag in row.get("v3_row_flags", [])}:
+        return (0, -0.0)
+    return (1, -0.0)
 
 
 def cluster_components(row: Optional[Mapping[str, Any]], prefix: str) -> Dict[str, Any]:
@@ -1589,6 +1657,40 @@ def validate_table_integrity(
             raise RuntimeError(f"field_best_path mismatch for {graph_name}")
 
 
+def assert_native_runtime_referee_tripwire(rows: Sequence[Mapping[str, Any]]) -> None:
+    """Assert the deferred runtime G6 referee remains safe.
+
+    Parameters
+    ----------
+    rows : Sequence[Mapping[str, Any]]
+        Raw scorer rows from the mandated re-baseline.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    RuntimeError
+        If a native row carries the score-neutral severe-G6 breach flag. That
+        result means the in-pipeline runtime referee must be wired before V3
+        freeze, even though this patch intentionally leaves it untouched because
+        ``composite_auto`` has no G6 reward term.
+    """
+    offenders = [
+        f"{row.get('graph')}:{row.get('position_path')}"
+        for row in rows
+        if row.get("engine") == "dagua"
+        and SEVERE_G6_BREACH_FLAG in {str(flag) for flag in row.get("v3_row_flags", [])}
+    ]
+    if offenders:
+        preview = ", ".join(offenders[:5])
+        raise RuntimeError(
+            "native severe-G6 breach flag landed during re-baseline; wire the runtime "
+            f"referee eligibility key before freeze. Offenders: {preview}"
+        )
+
+
 def validate_outputs(
     old_table: Mapping[str, Any],
     extended_table: Mapping[str, Any],
@@ -1636,6 +1738,7 @@ def validate_outputs(
     validate_raw_integrity(rows, graphs, extended_names, signature)
     validate_table_integrity(old_table, rows, old_names)
     validate_table_integrity(extended_table, rows, extended_names)
+    assert_native_runtime_referee_tripwire(rows)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

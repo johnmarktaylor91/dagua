@@ -11,17 +11,24 @@ import torch
 from dagua.eval.ruler_v3 import (
     CORE_TIERS,
     PURE_GEOMETRY_FACETS,
+    SEVERE_G6_BREACH_FLAG,
+    SEVERE_G6_FACETS,
     TIER1_TRADEOFF_FLAG,
     WHITESPACE_RATIO_HI,
     RulerV3Facet,
     RulerV3Result,
     angle_weighted_crossing_score,
     crossing_weight_multiplier,
+    referee_eligibility_key,
     renormalized_score,
     score_core_v3,
+    severe_g6_breach,
+    severe_g6_breach_depth,
+    severe_g6_floor_breach,
     tier1_tradeoff_flags,
     with_tier1_tradeoff_flag,
 )
+from dagua.eval.ruler_v3_groups import G6_SEVERE_FLOOR
 
 
 def _single_crossing_probe(
@@ -246,6 +253,62 @@ def _synthetic_tradeoff_result(
             "total_facets": 2,
             "tier1_applicable_facets": 1,
             "applicable_groups": 0,
+        },
+        metadata={},
+    )
+
+
+def _g6_result(
+    *,
+    weighted_ksm: float | None = None,
+    local_weight_monotonicity: float | None = None,
+    tiered: float = 50.0,
+) -> RulerV3Result:
+    """Create a synthetic V3 result with optional severe-G6 facets.
+
+    Parameters
+    ----------
+    weighted_ksm : float | None, optional
+        Synthetic ``G6_weighted_ksm`` score.
+    local_weight_monotonicity : float | None, optional
+        Synthetic ``G6_local_weight_monotonicity`` score.
+    tiered : float, default=50.0
+        Synthetic composite score.
+
+    Returns
+    -------
+    RulerV3Result
+        Result with only the requested applicable G6 facets.
+    """
+    values = {
+        "G6_weighted_ksm": weighted_ksm,
+        "G6_local_weight_monotonicity": local_weight_monotonicity,
+    }
+    facets = {
+        code: RulerV3Facet(
+            code=code,
+            name=code,
+            tier=1 if code == "G6_weighted_ksm" else 3,
+            score=float(score),
+            base_weight=4.0 if code == "G6_weighted_ksm" else 1.0,
+            effective_weight=4.0 if code == "G6_weighted_ksm" else 1.0,
+            applicable=True,
+            applicability_reason="synthetic",
+            metadata={},
+        )
+        for code, score in values.items()
+        if score is not None
+    }
+    return RulerV3Result(
+        facets=facets,
+        scores={"tiered": tiered, "equal": tiered, "tier1_only": tiered},
+        flags=tuple(),
+        applicability={code: True for code in facets},
+        coverage={
+            "applicable_facets": len(facets),
+            "total_facets": len(facets),
+            "tier1_applicable_facets": sum(1 for facet in facets.values() if facet.tier == 1),
+            "applicable_groups": 1 if facets else 0,
         },
         metadata={},
     )
@@ -894,3 +957,72 @@ def test_triple_view_composite_and_tier_weights_are_published() -> None:
     assert 0.0 <= result.scores["equal"] <= 100.0
     assert 0.0 <= result.scores["tiered"] <= 100.0
     assert 0.0 <= result.scores["tier1_only"] <= 100.0
+
+
+def test_severe_g6_contract_exports_single_floor_and_pair_form() -> None:
+    """Shared G6 helpers use the frozen group floor for both absolute and pair forms."""
+    assert SEVERE_G6_FACETS == ("G6_weighted_ksm", "G6_local_weight_monotonicity")
+    assert G6_SEVERE_FLOOR == pytest.approx(0.55)
+    baseline = _g6_result(weighted_ksm=0.70, local_weight_monotonicity=0.95)
+    dropped = _g6_result(weighted_ksm=0.50, local_weight_monotonicity=0.95)
+    already_low = _g6_result(weighted_ksm=0.54, local_weight_monotonicity=0.95)
+    small_drop = _g6_result(weighted_ksm=0.56, local_weight_monotonicity=0.95)
+
+    assert severe_g6_breach(dropped)
+    assert severe_g6_breach_depth(dropped) == pytest.approx(0.05)
+    assert severe_g6_floor_breach(baseline, dropped)
+    assert not severe_g6_floor_breach(already_low, dropped)
+    assert not severe_g6_floor_breach(baseline, small_drop)
+
+
+def test_referee_eligibility_key_hard_ineligible_and_least_breach_fallback() -> None:
+    """Native selection prefix makes severe G6 breach hard-ineligible before score."""
+    compliant_low_score = _g6_result(weighted_ksm=0.55, tiered=1.0)
+    breaching_high_score = _g6_result(weighted_ksm=0.10, tiered=100.0)
+    shallow_breach = _g6_result(weighted_ksm=0.54, tiered=10.0)
+    deep_breach = _g6_result(weighted_ksm=0.30, tiered=99.0)
+    inapplicable = _g6_result(tiered=0.0)
+
+    assert (referee_eligibility_key(compliant_low_score), compliant_low_score.scores["tiered"]) > (
+        referee_eligibility_key(breaching_high_score),
+        breaching_high_score.scores["tiered"],
+    )
+    assert (referee_eligibility_key(shallow_breach), shallow_breach.scores["tiered"]) > (
+        referee_eligibility_key(deep_breach),
+        deep_breach.scores["tiered"],
+    )
+    assert referee_eligibility_key(inapplicable) == (1, -0.0)
+
+
+def test_severe_g6_flag_plumbing_is_score_neutral() -> None:
+    """Absolute severe-G6 breach publishes a row flag without changing composites."""
+    pos = torch.tensor(
+        [[0.0, 0.0], [100.0, 0.0], [101.0, 0.0]],
+        dtype=torch.float64,
+    )
+    edges = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    sizes = torch.ones((3, 2), dtype=torch.float64)
+    meta = {"edge_weights": [1.0, 100.0], "weight_mode": "distance"}
+
+    result = score_core_v3(pos, edges, sizes, graph_meta=meta)
+
+    assert severe_g6_breach(result)
+    assert SEVERE_G6_BREACH_FLAG in result.flags
+    assert result.scores == {
+        "tiered": result.scores["tiered"],
+        "equal": result.scores["equal"],
+        "tier1_only": result.scores["tier1_only"],
+    }
+
+
+def test_severe_g6_flag_absent_on_compliant_weighted_row() -> None:
+    """Compliant declared-weight rows do not carry the severe-G6 flag."""
+    pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [101.0, 0.0]], dtype=torch.float64)
+    edges = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    sizes = torch.ones((3, 2), dtype=torch.float64)
+    meta = {"edge_weights": [1.0, 100.0], "weight_mode": "distance"}
+
+    result = score_core_v3(pos, edges, sizes, graph_meta=meta)
+
+    assert not severe_g6_breach(result)
+    assert SEVERE_G6_BREACH_FLAG not in result.flags

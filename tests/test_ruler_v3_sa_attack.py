@@ -10,7 +10,7 @@ import pytest
 import torch
 
 import scripts.ceremony_sa_attack as sa_attack
-from dagua.eval.ruler_v3 import RulerV3Facet, RulerV3Result
+from dagua.eval.ruler_v3 import RulerV3Facet, RulerV3Result, severe_g6_floor_breach
 from scripts.ceremony_sa_attack import (
     AGGREGATE_TOLERANCE_FRACTION,
     GG3_BLOCK_AGGREGATE_DELTA_FRACTION,
@@ -53,6 +53,8 @@ FAMILY_SEEDS = {
     "ported": 53,
 }
 SAVED_GG3_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_fresh"
+E1_GG3_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_battery_diag"
+E1_CLUSTERED_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_clustered_forensics"
 OFFICIAL_GG3_DIAG_DIR = Path(__file__).resolve().parents[1] / "tmp/sol_gg3_diag"
 
 
@@ -160,6 +162,36 @@ def _load_saved_case(
     baseline_pt = torch.load(SAVED_GG3_DIR / f"{family}_baseline.pt", map_location="cpu")
     morph_pt = torch.load(SAVED_GG3_DIR / f"{family}_morph.pt", map_location="cpu")
     return (
+        _result_from_saved_payload(facets_payload["baseline"]),
+        _result_from_saved_payload(facets_payload["morph"]),
+        baseline_pt["positions"],
+        morph_pt["positions"],
+        baseline_pt["edges"],
+    )
+
+
+def _load_e1_case(
+    family: str,
+) -> Tuple[dict, RulerV3Result, RulerV3Result, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Load an archived E1 battery row.
+
+    Parameters
+    ----------
+    family : str
+        E1 family name.
+
+    Returns
+    -------
+    Tuple[dict, RulerV3Result, RulerV3Result, torch.Tensor, torch.Tensor, torch.Tensor]
+        Persisted attack payload, baseline result, morph result, baseline
+        positions, morph positions, and edge index.
+    """
+    case_dir = E1_CLUSTERED_DIR if family == "clustered" else E1_GG3_DIR
+    facets_payload = json.loads((case_dir / f"{family}_facets.json").read_text())
+    baseline_pt = torch.load(case_dir / f"{family}_baseline.pt", map_location="cpu")
+    morph_pt = torch.load(case_dir / f"{family}_morph.pt", map_location="cpu")
+    return (
+        facets_payload,
         _result_from_saved_payload(facets_payload["baseline"]),
         _result_from_saved_payload(facets_payload["morph"]),
         baseline_pt["positions"],
@@ -519,6 +551,91 @@ def test_joint_gg3_gate_saved_weighted_passes_as_degenerate_escape() -> None:
     assert verdict.degenerate_escape
     assert verdict.tier1_only_drop < 0.0
     assert not verdict.severe_g6_floor_breach
+
+
+@pytest.mark.parametrize(
+    ("family", "expected_verdict", "expected_severe"),
+    (
+        ("weighted", GG3_VERDICT_BLOCK, True),
+        ("clustered", GG3_VERDICT_PASS_WITH_T1_TRADEOFF, False),
+    ),
+)
+def test_e1_archived_gate_rows_keep_pair_form_parity(
+    family: str,
+    expected_verdict: str,
+    expected_severe: bool,
+) -> None:
+    """Archived E1 row verdicts remain unchanged after importing the shared helper.
+
+    Parameters
+    ----------
+    family : str
+        Archived E1 family name.
+    expected_verdict : str
+        Persisted pre-fix verdict.
+    expected_severe : bool
+        Persisted pre-fix severe-G6 pair predicate value.
+
+    Returns
+    -------
+    None
+    """
+    payload, baseline, morph, baseline_pos, morph_pos, edges = _load_e1_case(family)
+    shape_distance = procrustes_shape_distance(baseline_pos, morph_pos)
+    aggregate_delta = _aggregate_delta_fraction(
+        float(morph.scores["tiered"]),
+        float(baseline.scores["tiered"]),
+    )
+    verdict = _gg3_gate_verdict(
+        shape_distance=shape_distance,
+        aggregate_delta_fraction=aggregate_delta,
+        faithfulness_drop=primary_faithfulness_drop(baseline, morph),
+        baseline_result=baseline,
+        candidate_result=morph,
+        baseline_pos=baseline_pos,
+        edges=edges,
+    )
+
+    assert severe_g6_floor_breach(baseline, morph) is expected_severe
+    assert payload["attack"]["gate_verdict"] == expected_verdict
+    assert payload["attack"]["blockregion_severe_g6_floor_breach"] is expected_severe
+    assert verdict.verdict == expected_verdict
+    assert verdict.severe_g6_floor_breach is expected_severe
+
+
+def test_severe_g6_contract_single_sourced_in_gate_and_native_scorer() -> None:
+    """Gate and native scorer import shared severe-G6 helpers without local copies."""
+    root = Path(__file__).resolve().parents[1]
+    ceremony_source = (root / "scripts" / "ceremony_sa_attack.py").read_text()
+    native_source = (root / "scripts" / "native_sprint_score.py").read_text()
+    ruler_source = (root / "dagua" / "eval" / "ruler_v3.py").read_text()
+    local_predicate_literal = "def " + "_severe_g6_floor_breach"
+    ceremony_floor_literal = "G6" + "_FLOOR = 0.55"
+    ceremony_drop_literal = "G6" + "_FLOOR_DROP = 0.05"
+
+    assert local_predicate_literal not in ceremony_source
+    assert ceremony_floor_literal not in ceremony_source
+    assert ceremony_drop_literal not in ceremony_source
+    assert "severe_g6_floor_breach as severe_g6_pair_floor_breach" in ceremony_source
+    assert "referee_eligibility_key" in native_source
+    assert ruler_source.count("def severe_g6_floor_breach(") == 1
+    assert ruler_source.count(ceremony_drop_literal) == 1
+
+
+def test_saved_morph_composites_are_bit_identical_after_contract_checks() -> None:
+    """Severe-G6 contract helpers do not mutate persisted composite scores."""
+    families = ("weighted", "clustered", "dag", "generic_force")
+    before_after = []
+    for family in families:
+        _payload, baseline, morph, _baseline_pos, _morph_pos, _edges = _load_e1_case(family)
+        before = (dict(baseline.scores), dict(morph.scores))
+        _ = severe_g6_floor_breach(baseline, morph)
+        _ = primary_faithfulness_drop(baseline, morph)
+        after = (dict(baseline.scores), dict(morph.scores))
+        before_after.append((before, after))
+
+    for before, after in before_after:
+        assert after == before
 
 
 def test_joint_gg3_gate_blocks_material_tier1_only_drop() -> None:
