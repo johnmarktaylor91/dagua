@@ -18,6 +18,9 @@ from dagua.eval.ruler_v3 import (
     tier1_tradeoff_flags,
     with_tier1_tradeoff_flag,
 )
+from dagua.eval.ruler_v3 import (
+    severe_g6_floor_breach as severe_g6_pair_floor_breach,
+)
 
 AGGREGATE_TOLERANCE_FRACTION = 0.05
 GG3_BLOCK_AGGREGATE_DELTA_FRACTION = 0.02
@@ -29,8 +32,6 @@ PRIMARY_FAITHFULNESS_FACETS = ("C1", "C3", "G6_weighted_ksm")
 RETARGETED_OBJECTIVE_MODES = ("tier1_loss", "g6_damage")
 # FROZEN -- pre-registered before the deciding measurement; do not post-hoc ratchet.
 TIER1_ONLY_MATERIALITY_DROP = 5.0
-G6_FLOOR = 0.55
-G6_FLOOR_DROP = 0.05
 DEGENERATE_PCA_RATIO = 0.05
 DEGENERATE_HUB_ARC_DEG = 10.0
 DEGENERATE_TIER1_TOLERANCE = 1.0
@@ -854,35 +855,6 @@ def _baseline_shape_degenerate(pos: torch.Tensor, edges: torch.Tensor) -> bool:
     )
 
 
-def _severe_g6_floor_breach(
-    baseline_result: RulerV3Result,
-    candidate_result: RulerV3Result,
-) -> bool:
-    """Return whether a G6 facet crosses the hard GG-3 damage floor.
-
-    Parameters
-    ----------
-    baseline_result : RulerV3Result
-        Baseline V3 result.
-    candidate_result : RulerV3Result
-        Candidate V3 result.
-
-    Returns
-    -------
-    bool
-        ``True`` only when an applicable G6 facet is below ``G6_FLOOR`` and
-        that same facet dropped by at least ``G6_FLOOR_DROP`` from baseline.
-    """
-    for code in ("G6_weighted_ksm", "G6_local_weight_monotonicity"):
-        baseline_score = _facet_score(baseline_result, code)
-        candidate_score = _facet_score(candidate_result, code)
-        if baseline_score is None or candidate_score is None:
-            continue
-        if candidate_score < G6_FLOOR and baseline_score - candidate_score >= G6_FLOOR_DROP:
-            return True
-    return False
-
-
 def _degenerate_escape(
     baseline_result: RulerV3Result,
     candidate_result: RulerV3Result,
@@ -961,7 +933,7 @@ def _gg3_gate_verdict(
     shape_changed = shape_distance >= SHAPE_DISTANCE_THRESHOLD
     aggregate_held = aggregate_delta_fraction <= GG3_BLOCK_AGGREGATE_DELTA_FRACTION
     tier1_drop = _tier1_only_drop(baseline_result, candidate_result)
-    severe_g6_floor_breach = _severe_g6_floor_breach(baseline_result, candidate_result)
+    severe_g6_floor_breach = severe_g6_pair_floor_breach(baseline_result, candidate_result)
     degenerate_escape = _degenerate_escape(
         baseline_result,
         candidate_result,

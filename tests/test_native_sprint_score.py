@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from dagua.eval.graphs import TestGraph
-from dagua.eval.ruler_v3 import RulerV3Result
+from dagua.eval.ruler_v3 import RulerV3Facet, RulerV3Result
 from dagua.graph import DaguaGraph
 from scripts import native_sprint_score as scorer
 from scripts import ruler_v3_freeze_part_b as part_b
@@ -515,6 +515,130 @@ def test_score_position_v3_merges_scoring_degenerate_flag(
 
     assert row["v3_row_flags"] == ["DEGENERATE_SCALE"]
     assert row["metrics"]["v3_flags"] == ["DEGENERATE_SCALE"]
+
+
+def test_score_position_v3_publishes_severe_g6_flag_and_eligibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V3 raw rows carry the score-neutral severe-G6 flag and referee key."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b", weight=1.0)
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="weighted_breach", graph=graph, tags={"weighted"})
+    pos_path = tmp_path / "weighted_breach.pt"
+    torch.save(torch.zeros((2, 2), dtype=torch.float32), pos_path)
+
+    def fake_score_core_v3(*args: Any, **kwargs: Any) -> RulerV3Result:
+        """Return a V3 result with an absolute severe-G6 breach."""
+        del args, kwargs
+        facet = RulerV3Facet(
+            code="G6_weighted_ksm",
+            name="weighted_shortest_path_isotonic_ksm",
+            tier=1,
+            score=0.50,
+            base_weight=4.0,
+            effective_weight=8.0,
+            applicable=True,
+            applicability_reason="synthetic",
+            metadata={},
+        )
+        return RulerV3Result(
+            facets={"G6_weighted_ksm": facet},
+            scores={"tiered": 10.0, "equal": 20.0, "tier1_only": 30.0},
+            flags=("severe_g6_breach",),
+            applicability={"G6_weighted_ksm": True},
+            coverage={},
+            metadata={},
+        )
+
+    monkeypatch.setattr(scorer, "score_core_v3", fake_score_core_v3)
+
+    row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig", ruler="v3")
+
+    assert row["v3_row_flags"] == ["severe_g6_breach", "DEGENERATE_SCALE"]
+    assert row["v3_referee_eligibility_key"] == [0, pytest.approx(-0.05)]
+    assert row["v3_severe_g6_breach"] is True
+
+
+def test_best_rows_by_graph_applies_native_severe_g6_eligibility_only() -> None:
+    """Native best-row selection uses eligibility; field rows remain annotated only."""
+    rows = [
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 100.0,
+            "v3_referee_eligibility_key": [0, -0.40],
+            "v3_row_flags": ["severe_g6_breach"],
+            "position_path": "native_bad.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 1.0,
+            "v3_referee_eligibility_key": [1, -0.0],
+            "v3_row_flags": [],
+            "position_path": "native_ok.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "elk_layered",
+            "v3_tiered": 2.0,
+            "v3_referee_eligibility_key": [1, -0.0],
+            "v3_row_flags": [],
+            "position_path": "field_ok.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "dagre",
+            "v3_tiered": 99.0,
+            "v3_referee_eligibility_key": [0, -0.40],
+            "v3_row_flags": ["severe_g6_breach"],
+            "position_path": "field_flagged.pt",
+        },
+    ]
+
+    native = scorer.best_rows_by_graph(rows, "v3_tiered", engine="dagua")
+    field = scorer.best_rows_by_graph(rows, "v3_tiered", engine=None)
+
+    assert native["g"]["position_path"] == "native_ok.pt"
+    assert field["g"]["position_path"] == "field_flagged.pt"
+
+
+def test_best_rows_by_graph_uses_least_breach_fallback_for_native() -> None:
+    """When all native rows breach, the least breach wins before composite tie-break."""
+    rows = [
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 99.0,
+            "v3_referee_eligibility_key": [0, -0.30],
+            "position_path": "deep.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 20.0,
+            "v3_referee_eligibility_key": [0, -0.01],
+            "position_path": "shallow.pt",
+        },
+    ]
+
+    native = scorer.best_rows_by_graph(rows, "v3_tiered", engine="dagua")
+
+    assert native["g"]["position_path"] == "shallow.pt"
+
+
+def test_native_runtime_referee_tripwire_fires_only_on_native_rows() -> None:
+    """Re-baseline tripwire ignores field annotations and fails native severe-G6 rows."""
+    field_rows = [{"engine": "dagre", "graph": "g", "v3_row_flags": ["severe_g6_breach"]}]
+    native_rows = [{"engine": "dagua", "graph": "g", "v3_row_flags": ["severe_g6_breach"]}]
+
+    scorer.assert_native_runtime_referee_tripwire(field_rows)
+    with pytest.raises(RuntimeError, match="wire the runtime referee eligibility key"):
+        scorer.assert_native_runtime_referee_tripwire(native_rows)
 
 
 def test_gg6_block_signal_respects_tie_band_and_flags() -> None:
