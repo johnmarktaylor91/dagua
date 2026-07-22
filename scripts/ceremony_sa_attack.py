@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -26,6 +26,7 @@ PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.05
 SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.08
 SOL_AGGREGATE_DELTA_TIERED_POINTS = 3.0
 PRIMARY_FAITHFULNESS_FACETS = ("C1", "C3", "G6_weighted_ksm")
+RETARGETED_OBJECTIVE_MODES = ("tier1_loss", "g6_damage")
 # FROZEN -- pre-registered before the deciding measurement; do not post-hoc ratchet.
 TIER1_ONLY_MATERIALITY_DROP = 5.0
 G6_FLOOR = 0.55
@@ -40,6 +41,7 @@ GG3_VERDICT_PASS_DEGENERATE_ESCAPE = "PASS_DEGENERATE_ESCAPE"
 GG3_VERDICT_PASS = "PASS"
 DEFAULT_ITERATIONS = 450
 DEFAULT_RESTARTS = 4
+DEFAULT_BATTERY_SEEDS_PER_FAMILY = 3
 HIGH_FACET_FLOOR = 0.8
 FOOLED_FACET_MAX_DROP = 0.05
 OBJECTIVE_PENALTY = 10.0
@@ -149,6 +151,10 @@ class AttackResult:
     ----------
     family : str
         Stable family label.
+    objective_mode : str
+        Objective mode used for this attack leg.
+    seed : int
+        Deterministic SA seed used for this attack leg.
     baseline_score : float
         Good-layout V3 tiered aggregate.
     best_score : float
@@ -171,6 +177,24 @@ class AttackResult:
         Structured joint GG-3 verdict label.
     tier1_only_drop : float
         Baseline-minus-morph ``tier1_only`` score movement in points.
+    max_blockregion_tier1_only_drop : float
+        Maximum raw ``tier1_only`` drop encountered among candidates that were
+        simultaneously shape-material, within the frozen 2% tiered hold, and
+        outside the degeneracy escape.
+    blockregion_shape_distance : float
+        Shape distance of the candidate that produced
+        ``max_blockregion_tier1_only_drop``.
+    blockregion_aggregate_delta_fraction : float
+        Tiered aggregate drift fraction of the candidate that produced
+        ``max_blockregion_tier1_only_drop``.
+    blockregion_primary_faithfulness_drop : float
+        Primary faithfulness drop of the candidate that produced
+        ``max_blockregion_tier1_only_drop``.
+    blockregion_severe_g6_floor_breach : bool
+        Whether any block-region candidate breached the hard G6 floor.
+    buyback_headroom : float
+        Reporting-only tier2/3 linear buyback corridor,
+        ``sum effective_weight * (1 - score)``.
     severe_g6_floor_breach : bool
         Whether a G6 facet crossed the hard pre-registered floor after a
         material baseline-relative drop.
@@ -183,6 +207,8 @@ class AttackResult:
     """
 
     family: str
+    objective_mode: str
+    seed: int
     baseline_score: float
     best_score: float
     best_shape_distance: float
@@ -193,10 +219,53 @@ class AttackResult:
     tier1_tradeoff: bool
     gate_verdict: str
     tier1_only_drop: float
+    max_blockregion_tier1_only_drop: float
+    blockregion_shape_distance: float
+    blockregion_aggregate_delta_fraction: float
+    blockregion_primary_faithfulness_drop: float
+    blockregion_severe_g6_floor_breach: bool
+    buyback_headroom: float
     severe_g6_floor_breach: bool
     degenerate_escape: bool
     fooled_facets: Tuple[str, ...]
     best_positions: torch.Tensor
+
+
+@dataclass(frozen=True)
+class CandidateMeasurement:
+    """Measured attack-candidate state used for objective and gate tracking.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    result : RulerV3Result
+        V3 score result for ``positions``.
+    score : float
+        Candidate tiered score.
+    shape_distance : float
+        Candidate shape distance from the baseline.
+    aggregate_delta_fraction : float
+        Absolute tiered aggregate drift fraction from the baseline.
+    primary_faithfulness_drop : float
+        Maximum primary faithfulness facet drop.
+    objective : float
+        SA objective value used for search acceptance.
+    gate_verdict : GG3GateVerdict
+        Per-candidate GG-3 verdict under the frozen gate.
+    buyback_headroom : float
+        Reporting-only tier2/3 buyback headroom for this candidate.
+    """
+
+    positions: torch.Tensor
+    result: RulerV3Result
+    score: float
+    shape_distance: float
+    aggregate_delta_fraction: float
+    primary_faithfulness_drop: float
+    objective: float
+    gate_verdict: GG3GateVerdict
+    buyback_headroom: float
 
 
 @dataclass(frozen=True)
@@ -948,6 +1017,164 @@ def _sol_variant_blocked(
     )
 
 
+def _objective_hold_fraction(attack_config: AttackConfig) -> float:
+    """Return the mode-specific aggregate hold band used by the objective.
+
+    Parameters
+    ----------
+    attack_config : AttackConfig
+        Attack thresholds and objective mode.
+
+    Returns
+    -------
+    float
+        Aggregate hold fraction for objective penalties and best-valid
+        publishing.
+    """
+    if attack_config.objective_mode in RETARGETED_OBJECTIVE_MODES:
+        return GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+    return attack_config.aggregate_tolerance_fraction
+
+
+def _buyback_headroom(result: RulerV3Result) -> float:
+    """Return reporting-only tier2/3 linear buyback headroom.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    float
+        Sum of ``effective_weight * (1 - score)`` over applicable tier2/3
+        facets. This is intentionally not normalized because the converged
+        diagnostic requested the raw linear corridor.
+    """
+    headroom = 0.0
+    for facet in result.facets.values():
+        if int(facet.tier) <= 1 or facet.score is None or not bool(facet.applicable):
+            continue
+        score = min(1.0, max(0.0, float(facet.score)))
+        headroom += float(facet.effective_weight) * (1.0 - score)
+    return headroom
+
+
+def _measure_candidate(
+    probe: ProbeFamily,
+    positions: torch.Tensor,
+    *,
+    attack_config: AttackConfig,
+    score_config: ScoreConfig,
+    baseline_result: RulerV3Result,
+    baseline_score: float,
+) -> CandidateMeasurement:
+    """Score and gate one candidate drawing.
+
+    Parameters
+    ----------
+    probe : ProbeFamily
+        Frozen family probe.
+    positions : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    attack_config : AttackConfig
+        Attack thresholds and objective mode.
+    score_config : ScoreConfig
+        Deterministic V3 scoring budget.
+    baseline_result : RulerV3Result
+        Baseline V3 result for ``probe.pos``.
+    baseline_score : float
+        Baseline tiered score.
+
+    Returns
+    -------
+    CandidateMeasurement
+        Complete measurement for objective selection and constrained gate
+        co-tracking.
+    """
+    candidate_result = _score_probe(probe, positions, score_config)
+    candidate_score = float(candidate_result.scores["tiered"])
+    shape_distance = procrustes_shape_distance(probe.pos, positions)
+    aggregate_delta = _aggregate_delta_fraction(candidate_score, baseline_score)
+    faithfulness_drop = primary_faithfulness_drop(baseline_result, candidate_result)
+    objective = _objective(
+        shape_distance,
+        aggregate_delta,
+        faithfulness_drop,
+        attack_config,
+        baseline_result=baseline_result,
+        candidate_result=candidate_result,
+        baseline_pos=probe.pos,
+        edges=probe.edges,
+    )
+    gate_verdict = _gg3_gate_verdict(
+        shape_distance=shape_distance,
+        aggregate_delta_fraction=aggregate_delta,
+        faithfulness_drop=faithfulness_drop,
+        baseline_result=baseline_result,
+        candidate_result=candidate_result,
+        baseline_pos=probe.pos,
+        edges=probe.edges,
+    )
+    return CandidateMeasurement(
+        positions=positions.detach().clone(),
+        result=candidate_result,
+        score=candidate_score,
+        shape_distance=shape_distance,
+        aggregate_delta_fraction=aggregate_delta,
+        primary_faithfulness_drop=faithfulness_drop,
+        objective=objective,
+        gate_verdict=gate_verdict,
+        buyback_headroom=_buyback_headroom(candidate_result),
+    )
+
+
+def _is_blockregion_candidate(measurement: CandidateMeasurement) -> bool:
+    """Return whether a candidate belongs to the GG-3 BLOCK-eligible region.
+
+    Parameters
+    ----------
+    measurement : CandidateMeasurement
+        Candidate measurement to classify.
+
+    Returns
+    -------
+    bool
+        ``True`` when the candidate is shape-material, inside the frozen 2%
+        tiered hold, and outside the degenerate escape.
+    """
+    return (
+        measurement.shape_distance >= SHAPE_DISTANCE_THRESHOLD
+        and measurement.aggregate_delta_fraction <= GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+        and not measurement.gate_verdict.degenerate_escape
+    )
+
+
+def _blockregion_decision_blocks(
+    max_blockregion_tier1_only_drop: float,
+    blockregion_severe_g6_floor_breach: bool,
+) -> bool:
+    """Return the aggregate GG-3 decision for one attack leg.
+
+    Parameters
+    ----------
+    max_blockregion_tier1_only_drop : float
+        Maximum raw tier1-only drop observed inside the block region.
+    blockregion_severe_g6_floor_breach : bool
+        Whether any block-region candidate breached the hard G6 floor.
+
+    Returns
+    -------
+    bool
+        ``True`` when the deciding quantity trips the material T1 bar or the
+        severe G6 floor breach trips.
+    """
+    return (
+        max_blockregion_tier1_only_drop >= TIER1_ONLY_MATERIALITY_DROP
+        or blockregion_severe_g6_floor_breach
+    )
+
+
 def _objective(
     shape_distance: float,
     aggregate_delta_fraction: float,
@@ -988,11 +1215,7 @@ def _objective(
     mode = attack_config.objective_mode
     if mode not in {"shape", "tier1_loss", "g6_damage"}:
         raise ValueError(f"unknown GG-3 objective mode: {mode!r}")
-    hold_fraction = (
-        GG3_BLOCK_AGGREGATE_DELTA_FRACTION
-        if mode in {"tier1_loss", "g6_damage"}
-        else attack_config.aggregate_tolerance_fraction
-    )
+    hold_fraction = _objective_hold_fraction(attack_config)
     excess = aggregate_delta_fraction - hold_fraction
     penalty = 0.0
     if excess > 0.0:
@@ -1254,12 +1477,16 @@ def run_family_attack(
     """
     baseline_result = _score_probe(probe, probe.pos, score_config)
     baseline_score = float(baseline_result.scores["tiered"])
-    best_valid_result = baseline_result
-    best_valid_positions = probe.pos.detach().clone()
-    best_valid_shape = 0.0
-    best_valid_score = baseline_score
-    best_valid_faithfulness_drop = 0.0
-    best_valid_objective = _objective(
+    baseline_gate_verdict = _gg3_gate_verdict(
+        shape_distance=0.0,
+        aggregate_delta_fraction=0.0,
+        faithfulness_drop=0.0,
+        baseline_result=baseline_result,
+        candidate_result=baseline_result,
+        baseline_pos=probe.pos,
+        edges=probe.edges,
+    )
+    baseline_objective = _objective(
         0.0,
         0.0,
         0.0,
@@ -1269,113 +1496,118 @@ def run_family_attack(
         baseline_pos=probe.pos,
         edges=probe.edges,
     )
+    best_valid = CandidateMeasurement(
+        positions=probe.pos.detach().clone(),
+        result=baseline_result,
+        score=baseline_score,
+        shape_distance=0.0,
+        aggregate_delta_fraction=0.0,
+        primary_faithfulness_drop=0.0,
+        objective=baseline_objective,
+        gate_verdict=baseline_gate_verdict,
+        buyback_headroom=_buyback_headroom(baseline_result),
+    )
+    baseline_measurement = best_valid
+    best_blockregion: Optional[CandidateMeasurement] = None
+    blockregion_severe_g6_floor_breach = False
+    best_valid_hold_fraction = _objective_hold_fraction(attack_config)
+    # NOTE-FOR-REVIEW: retargeted modes publish only from the frozen 2% hold
+    # band, while shape mode keeps the legacy 5% exploratory tolerance. The
+    # separate block-region tracker below is the ceremony decision quantity and
+    # deliberately ignores the hold_bonus used only to guide SA search.
     rng = np.random.default_rng(seed)
 
     for _restart in range(attack_config.restarts):
-        current = probe.pos.detach().clone()
-        current_result = baseline_result
-        current_score = baseline_score
-        current_shape = 0.0
-        current_delta = 0.0
-        current_faithfulness_drop = 0.0
-        current_objective = _objective(
-            current_shape,
-            current_delta,
-            current_faithfulness_drop,
-            attack_config,
-            baseline_result=baseline_result,
-            candidate_result=current_result,
-            baseline_pos=probe.pos,
-            edges=probe.edges,
-        )
+        current = baseline_measurement
         for step in range(attack_config.iterations):
             temperature = _temperature(step, attack_config)
-            proposed = _propose_positions(current, probe.pos, rng, temperature)
-            proposed_result = _score_probe(probe, proposed, score_config)
-            proposed_score = float(proposed_result.scores["tiered"])
-            proposed_shape = procrustes_shape_distance(probe.pos, proposed)
-            proposed_delta = _aggregate_delta_fraction(proposed_score, baseline_score)
-            proposed_faithfulness_drop = primary_faithfulness_drop(
-                baseline_result,
-                proposed_result,
-            )
-            proposed_objective = _objective(
-                proposed_shape,
-                proposed_delta,
-                proposed_faithfulness_drop,
-                attack_config,
+            proposed_positions = _propose_positions(current.positions, probe.pos, rng, temperature)
+            proposed = _measure_candidate(
+                probe,
+                proposed_positions,
+                attack_config=attack_config,
+                score_config=score_config,
                 baseline_result=baseline_result,
-                candidate_result=proposed_result,
-                baseline_pos=probe.pos,
-                edges=probe.edges,
+                baseline_score=baseline_score,
             )
-            objective_gain = proposed_objective - current_objective
+            if _is_blockregion_candidate(proposed):
+                blockregion_severe_g6_floor_breach = (
+                    blockregion_severe_g6_floor_breach
+                    or proposed.gate_verdict.severe_g6_floor_breach
+                )
+                if (
+                    best_blockregion is None
+                    or proposed.gate_verdict.tier1_only_drop
+                    > best_blockregion.gate_verdict.tier1_only_drop
+                ):
+                    best_blockregion = proposed
+            objective_gain = proposed.objective - current.objective
             accept = objective_gain >= 0.0 or rng.random() < math.exp(
                 max(-700.0, objective_gain / max(1.0e-12, temperature))
             )
             if accept:
                 current = proposed
-                current_result = proposed_result
-                current_score = proposed_score
-                current_shape = proposed_shape
-                current_delta = proposed_delta
-                current_faithfulness_drop = proposed_faithfulness_drop
-                current_objective = proposed_objective
             if (
-                proposed_delta <= attack_config.aggregate_tolerance_fraction
-                and proposed_objective > best_valid_objective
+                proposed.aggregate_delta_fraction <= best_valid_hold_fraction
+                and proposed.objective > best_valid.objective
             ):
-                best_valid_result = proposed_result
-                best_valid_positions = proposed.detach().clone()
-                best_valid_shape = proposed_shape
-                best_valid_score = proposed_score
-                best_valid_faithfulness_drop = proposed_faithfulness_drop
-                best_valid_objective = proposed_objective
+                best_valid = proposed
             if (
-                current_delta <= attack_config.aggregate_tolerance_fraction
-                and current_objective > best_valid_objective
+                current.aggregate_delta_fraction <= best_valid_hold_fraction
+                and current.objective > best_valid.objective
             ):
-                best_valid_result = current_result
-                best_valid_positions = current.detach().clone()
-                best_valid_shape = current_shape
-                best_valid_score = current_score
-                best_valid_faithfulness_drop = current_faithfulness_drop
-                best_valid_objective = current_objective
+                best_valid = current
 
-    best_delta = _aggregate_delta_fraction(best_valid_score, baseline_score)
-    aggregate_drop_points = max(0.0, baseline_score - best_valid_score)
-    gate_verdict = _gg3_gate_verdict(
-        shape_distance=best_valid_shape,
-        aggregate_delta_fraction=best_delta,
-        faithfulness_drop=best_valid_faithfulness_drop,
-        baseline_result=baseline_result,
-        candidate_result=best_valid_result,
-        baseline_pos=probe.pos,
-        edges=probe.edges,
+    max_blockregion_tier1_only_drop = (
+        0.0 if best_blockregion is None else best_blockregion.gate_verdict.tier1_only_drop
     )
+    blockregion_shape_distance = (
+        0.0 if best_blockregion is None else best_blockregion.shape_distance
+    )
+    blockregion_aggregate_delta_fraction = (
+        0.0 if best_blockregion is None else best_blockregion.aggregate_delta_fraction
+    )
+    blockregion_primary_faithfulness_drop = (
+        0.0 if best_blockregion is None else best_blockregion.primary_faithfulness_drop
+    )
+    aggregate_drop_points = max(0.0, baseline_score - best_valid.score)
+    gate_verdict = best_valid.gate_verdict
+    aggregate_decision_blocked = _blockregion_decision_blocks(
+        max_blockregion_tier1_only_drop,
+        blockregion_severe_g6_floor_breach,
+    )
+    published_verdict = GG3_VERDICT_BLOCK if aggregate_decision_blocked else gate_verdict.verdict
     sol_variant_blocked = _sol_variant_blocked(
-        shape_distance=best_valid_shape,
+        shape_distance=best_valid.shape_distance,
         aggregate_delta_points=aggregate_drop_points,
-        faithfulness_drop=best_valid_faithfulness_drop,
+        faithfulness_drop=best_valid.primary_faithfulness_drop,
     )
     return AttackResult(
         family=probe.family,
+        objective_mode=attack_config.objective_mode,
+        seed=seed,
         baseline_score=baseline_score,
-        best_score=best_valid_score,
-        best_shape_distance=best_valid_shape,
-        aggregate_delta_fraction=best_delta,
-        blocked=gate_verdict.blocked,
-        primary_faithfulness_drop=best_valid_faithfulness_drop,
+        best_score=best_valid.score,
+        best_shape_distance=best_valid.shape_distance,
+        aggregate_delta_fraction=best_valid.aggregate_delta_fraction,
+        blocked=aggregate_decision_blocked,
+        primary_faithfulness_drop=best_valid.primary_faithfulness_drop,
         sol_variant_blocked=sol_variant_blocked,
         tier1_tradeoff=gate_verdict.tier1_tradeoff,
-        gate_verdict=gate_verdict.verdict,
+        gate_verdict=published_verdict,
         tier1_only_drop=gate_verdict.tier1_only_drop,
+        max_blockregion_tier1_only_drop=max_blockregion_tier1_only_drop,
+        blockregion_shape_distance=blockregion_shape_distance,
+        blockregion_aggregate_delta_fraction=blockregion_aggregate_delta_fraction,
+        blockregion_primary_faithfulness_drop=blockregion_primary_faithfulness_drop,
+        blockregion_severe_g6_floor_breach=blockregion_severe_g6_floor_breach,
+        buyback_headroom=best_valid.buyback_headroom,
         severe_g6_floor_breach=gate_verdict.severe_g6_floor_breach,
         degenerate_escape=gate_verdict.degenerate_escape,
-        fooled_facets=fooled_facets(baseline_result, best_valid_result)
-        if gate_verdict.blocked
+        fooled_facets=fooled_facets(baseline_result, best_valid.result)
+        if aggregate_decision_blocked
         else (),
-        best_positions=best_valid_positions,
+        best_positions=best_valid.positions,
     )
 
 
@@ -1834,6 +2066,19 @@ def _write_family_diagnostics(
     )
     payload = {
         "family": probe.family,
+        "attack": {
+            "objective_mode": result.objective_mode,
+            "seed": result.seed,
+            "gate_verdict": result.gate_verdict,
+            "blocked": result.blocked,
+            "tier1_only_drop": result.tier1_only_drop,
+            "max_blockregion_tier1_only_drop": result.max_blockregion_tier1_only_drop,
+            "blockregion_shape_distance": result.blockregion_shape_distance,
+            "blockregion_aggregate_delta_fraction": result.blockregion_aggregate_delta_fraction,
+            "blockregion_primary_faithfulness_drop": (result.blockregion_primary_faithfulness_drop),
+            "blockregion_severe_g6_floor_breach": result.blockregion_severe_g6_floor_breach,
+            "buyback_headroom": result.buyback_headroom,
+        },
         "baseline": {
             "scores": dict(baseline_result.scores),
             "coverage": dict(baseline_result.coverage),
@@ -2003,6 +2248,174 @@ def run_all_attacks(
     return tuple(results)
 
 
+def _required_battery_modes(probe: ProbeFamily) -> Tuple[str, ...]:
+    """Return the required GG-3 battery objective modes for one family.
+
+    Parameters
+    ----------
+    probe : ProbeFamily
+        Frozen family probe.
+
+    Returns
+    -------
+    Tuple[str, ...]
+        Objective modes required before a freeze-facing PASS may be reported.
+    """
+    modes = ["shape", "tier1_loss"]
+    if probe.family == "weighted" or _baseline_shape_degenerate(probe.pos, probe.edges):
+        modes.append("g6_damage")
+    return tuple(modes)
+
+
+def run_gg3_battery(
+    *,
+    seed: int,
+    families: Optional[Iterable[str]] = None,
+    attack_config: AttackConfig = AttackConfig(),
+    score_config: ScoreConfig = ScoreConfig(),
+    seeds_per_family: int = DEFAULT_BATTERY_SEEDS_PER_FAMILY,
+) -> Tuple[AttackResult, ...]:
+    """Run the required freeze-facing GG-3 attack battery.
+
+    Parameters
+    ----------
+    seed : int
+        Base deterministic seed.
+    families : Optional[Iterable[str]], optional
+        Family names to run. Defaults to all frozen probes.
+    attack_config : AttackConfig, optional
+        SA budget and thresholds used for each leg.
+    score_config : ScoreConfig, optional
+        Deterministic V3 scoring budget.
+    seeds_per_family : int, optional
+        Number of independent seeds per family/mode leg. The ceremony schema
+        requires at least three so a single lucky retarget cannot certify PASS.
+
+    Returns
+    -------
+    Tuple[AttackResult, ...]
+        Attack outcomes for every required family/mode/seed leg.
+    """
+    if seeds_per_family < DEFAULT_BATTERY_SEEDS_PER_FAMILY:
+        raise ValueError("GG-3 battery requires at least three seeds per family")
+    selected = set(families) if families is not None else None
+    results: List[AttackResult] = []
+    for family_index, probe in enumerate(build_probe_families()):
+        if selected is not None and probe.family not in selected:
+            continue
+        for mode_index, objective_mode in enumerate(_required_battery_modes(probe)):
+            mode_config = replace(attack_config, objective_mode=objective_mode)
+            for seed_index in range(seeds_per_family):
+                # Widely spaced deterministic offsets keep legs reproducible
+                # while avoiding accidental seed reuse across family/mode axes.
+                family_seed = seed + 10_003 * family_index + 1_000_003 * mode_index
+                family_seed += 10_000_019 * seed_index
+                results.append(
+                    run_family_attack(
+                        probe,
+                        seed=family_seed,
+                        attack_config=mode_config,
+                        score_config=score_config,
+                    )
+                )
+    return tuple(results)
+
+
+def gg3_battery_passed(
+    results: Sequence[AttackResult],
+    *,
+    families: Optional[Iterable[str]] = None,
+    seeds_per_family: int = DEFAULT_BATTERY_SEEDS_PER_FAMILY,
+) -> bool:
+    """Return whether a complete GG-3 battery permits a freeze PASS.
+
+    Parameters
+    ----------
+    results : Sequence[AttackResult]
+        Battery attack outcomes.
+    families : Optional[Iterable[str]], optional
+        Family names expected in the battery. Defaults to all frozen probes.
+    seeds_per_family : int, optional
+        Required independent seed count for each family/mode leg.
+
+    Returns
+    -------
+    bool
+        ``True`` only when every required mode/seed is present and no result's
+        constrained deciding quantity or severe G6 floor breach blocks.
+    """
+    selected = set(families) if families is not None else None
+    expected: Dict[Tuple[str, str], int] = {}
+    for probe in build_probe_families():
+        if selected is not None and probe.family not in selected:
+            continue
+        for mode in _required_battery_modes(probe):
+            expected[(probe.family, mode)] = seeds_per_family
+    observed: Dict[Tuple[str, str], int] = {}
+    for result in results:
+        key = (result.family, result.objective_mode)
+        observed[key] = observed.get(key, 0) + 1
+    complete = all(observed.get(key, 0) >= count for key, count in expected.items())
+    return complete and not any(result.blocked for result in results)
+
+
+def format_battery_summary(
+    results: Sequence[AttackResult],
+    *,
+    families: Optional[Iterable[str]] = None,
+    seeds_per_family: int = DEFAULT_BATTERY_SEEDS_PER_FAMILY,
+) -> str:
+    """Format a freeze-facing GG-3 battery completeness and decision summary.
+
+    Parameters
+    ----------
+    results : Sequence[AttackResult]
+        Battery attack outcomes.
+    families : Optional[Iterable[str]], optional
+        Family names expected in the battery. Defaults to all frozen probes.
+    seeds_per_family : int, optional
+        Required independent seed count for each family/mode leg.
+
+    Returns
+    -------
+    str
+        Markdown table that cannot say PASS when a required mode is missing or
+        any constrained deciding quantity trips.
+    """
+    selected = set(families) if families is not None else None
+    by_key: Dict[Tuple[str, str], List[AttackResult]] = {}
+    for result in results:
+        by_key.setdefault((result.family, result.objective_mode), []).append(result)
+    lines = [
+        "| family | objective mode | seeds run | max block-region T1 drop | "
+        "G6 floor breach | decision |",
+        "|---|---|---:|---:|---|---|",
+    ]
+    for probe in build_probe_families():
+        if selected is not None and probe.family not in selected:
+            continue
+        for mode in _required_battery_modes(probe):
+            legs = by_key.get((probe.family, mode), [])
+            max_drop = max(
+                (leg.max_blockregion_tier1_only_drop for leg in legs),
+                default=0.0,
+            )
+            severe = any(leg.blockregion_severe_g6_floor_breach for leg in legs)
+            complete = len(legs) >= seeds_per_family
+            blocked = any(leg.blocked for leg in legs)
+            if not complete:
+                decision = "REQUIRED_MISSING"
+            elif blocked:
+                decision = GG3_VERDICT_BLOCK
+            else:
+                decision = GG3_VERDICT_PASS
+            lines.append(
+                f"| {probe.family} | {mode} | {len(legs)} | {max_drop:.4f} | "
+                f"{'yes' if severe else 'no'} | {decision} |"
+            )
+    return "\n".join(lines)
+
+
 def _fable_verdict(result: AttackResult) -> str:
     """Return the Fable GG-3 verdict label for one attack result.
 
@@ -2067,19 +2480,28 @@ def format_results_table(
     if sensitivity_variant not in {"fable", "sol"}:
         raise ValueError(f"unknown GG-3 sensitivity variant: {sensitivity_variant}")
     lines = [
-        "| family | best shape dist | primary faith drop | aggregate delta | "
-        "tiered delta | W7 | verdict | fooled facets |",
-        "|---|---:|---:|---:|---:|---|---|---|",
+        "| family | objective | seed | best shape dist | primary faith drop | aggregate delta | "
+        "tiered delta | T1 drop | max block-region T1 drop | block-region shape | "
+        "block-region agg | block-region primary | buyback headroom | W7 | verdict | "
+        "fooled facets |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
     for result in results:
         verdict = _fable_verdict(result) if sensitivity_variant == "fable" else _sol_verdict(result)
         facets = ", ".join(result.fooled_facets) if result.fooled_facets else "-"
         signed_tiered_drop = result.baseline_score - result.best_score
         lines.append(
-            f"| {result.family} | {result.best_shape_distance:.4f} | "
+            f"| {result.family} | {result.objective_mode} | {result.seed} | "
+            f"{result.best_shape_distance:.4f} | "
             f"{result.primary_faithfulness_drop:.4f} | "
             f"{100.0 * result.aggregate_delta_fraction:.2f}% | "
             f"{signed_tiered_drop:.2f} | "
+            f"{result.tier1_only_drop:.4f} | "
+            f"{result.max_blockregion_tier1_only_drop:.4f} | "
+            f"{result.blockregion_shape_distance:.4f} | "
+            f"{100.0 * result.blockregion_aggregate_delta_fraction:.2f}% | "
+            f"{result.blockregion_primary_faithfulness_drop:.4f} | "
+            f"{result.buyback_headroom:.4f} | "
             f"{'yes' if result.tier1_tradeoff else 'no'} | {verdict} | {facets} |"
         )
     return "\n".join(lines)
@@ -2124,9 +2546,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--objective-mode",
-        choices=("shape", "tier1_loss", "g6_damage"),
-        default="shape",
-        help="SA objective mode; default preserves the legacy shape-targeted attack",
+        choices=("battery", "shape", "tier1_loss", "g6_damage"),
+        default="battery",
+        help="SA objective mode; default runs the required freeze-facing GG-3 battery",
+    )
+    parser.add_argument(
+        "--battery-seeds",
+        type=int,
+        default=DEFAULT_BATTERY_SEEDS_PER_FAMILY,
+        help="independent seeds per family/mode leg for --objective-mode battery",
     )
     return parser.parse_args()
 
@@ -2140,14 +2568,27 @@ def main() -> int:
         Process exit code. ``1`` means at least one family blocked.
     """
     args = _parse_args()
+    objective_mode = str(args.objective_mode)
+    if objective_mode == "battery" and bool(args.diagnostics):
+        raise ValueError(
+            "battery diagnostics would overwrite per-family artifacts; use a single mode"
+        )
     attack_config = AttackConfig(
         iterations=int(args.iterations),
         restarts=int(args.restarts),
         aggregate_tolerance_fraction=float(args.aggregate_tolerance),
         shape_distance_threshold=float(args.shape_threshold),
-        objective_mode=str(args.objective_mode),
+        objective_mode="shape" if objective_mode == "battery" else objective_mode,
     )
-    if bool(args.diagnostics):
+    if objective_mode == "battery":
+        results = run_gg3_battery(
+            seed=int(args.seed),
+            families=args.family,
+            attack_config=attack_config,
+            score_config=ScoreConfig(),
+            seeds_per_family=int(args.battery_seeds),
+        )
+    elif bool(args.diagnostics):
         results = run_diagnostics(
             seed=int(args.seed),
             families=args.family,
@@ -2162,6 +2603,16 @@ def main() -> int:
             attack_config=attack_config,
             score_config=ScoreConfig(),
         )
+    if objective_mode == "battery":
+        print("GG-3 required battery summary")
+        print(
+            format_battery_summary(
+                results,
+                families=args.family,
+                seeds_per_family=int(args.battery_seeds),
+            )
+        )
+        print()
     print("Fable GG-3 criterion")
     print(format_results_table(results, sensitivity_variant="fable"))
     print()
@@ -2176,9 +2627,17 @@ def main() -> int:
         f"sol_primary_faithfulness_drop={SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD:.2f}, "
         f"sol_aggregate_delta={SOL_AGGREGATE_DELTA_TIERED_POINTS:.1f}pt, "
         f"shape_distance={attack_config.shape_distance_threshold:.2f}, "
-        f"objective_mode={attack_config.objective_mode}, "
+        f"objective_mode={objective_mode}, "
+        f"battery_seeds={int(args.battery_seeds)}, "
         f"budget={attack_config.restarts}x{attack_config.iterations}"
     )
+    if objective_mode == "battery":
+        passed = gg3_battery_passed(
+            results,
+            families=args.family,
+            seeds_per_family=int(args.battery_seeds),
+        )
+        return 0 if passed else 1
     return 1 if any(result.blocked for result in results) else 0
 
 
