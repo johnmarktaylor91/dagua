@@ -15,12 +15,55 @@ from dagua.eval.ruler_v3 import (
     WHITESPACE_RATIO_HI,
     RulerV3Facet,
     RulerV3Result,
+    angle_weighted_crossing_score,
     crossing_weight_multiplier,
     renormalized_score,
     score_core_v3,
     tier1_tradeoff_flags,
     with_tier1_tradeoff_flag,
 )
+
+
+def _single_crossing_probe(
+    angle_degrees: float, *, crossed: bool
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Create a two-edge probe with a controlled crossing angle.
+
+    Parameters
+    ----------
+    angle_degrees : float
+        Desired crossing angle in degrees.
+    crossed : bool
+        Whether the two edges should cross.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        Positions with shape ``[4, 2]`` and edge index with shape ``[2, 2]``.
+    """
+    theta = math.radians(angle_degrees)
+    if crossed:
+        pos = torch.tensor(
+            [
+                (-1.0, 0.0),
+                (1.0, 0.0),
+                (-math.cos(theta), -math.sin(theta)),
+                (math.cos(theta), math.sin(theta)),
+            ],
+            dtype=torch.float64,
+        )
+    else:
+        pos = torch.tensor(
+            [
+                (-1.0, 0.0),
+                (1.0, 0.0),
+                (-math.cos(theta), 1.0 + math.sin(theta)),
+                (math.cos(theta), 1.0 + 2.0 * math.sin(theta)),
+            ],
+            dtype=torch.float64,
+        )
+    edges = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+    return pos, edges
 
 
 def _probe_layout() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -444,6 +487,80 @@ def test_unit_invariance_for_all_core_facets() -> None:
         assert scaled.scores["tiered"] == pytest.approx(baseline.scores["tiered"], abs=1e-9)
 
 
+@pytest.mark.parametrize("angle", (15.0, 45.0, 75.0, 90.0))
+def test_c2_angle_weighted_crossing_is_strictly_negative_per_crossing(angle: float) -> None:
+    """Assert adding one crossing lowers C2' at every tested angle.
+
+    Parameters
+    ----------
+    angle : float
+        Crossing angle in degrees.
+
+    Returns
+    -------
+    None
+    """
+    clear_pos, clear_edges = _single_crossing_probe(angle, crossed=False)
+    crossed_pos, crossed_edges = _single_crossing_probe(angle, crossed=True)
+    clear = angle_weighted_crossing_score(clear_pos, clear_edges)
+    crossed = angle_weighted_crossing_score(crossed_pos, crossed_edges)
+    assert crossed["crossing_angle_weight_mean"] >= 0.5
+    assert crossed["crossing_angle_weight_mean"] <= 1.5
+    assert crossed["edge_crossing_score"] < clear["edge_crossing_score"]
+
+
+def test_changed_core_facets_keep_unit_scale_invariance() -> None:
+    """Assert Phase-A core facet changes are exactly unit-scale invariant.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes = _probe_layout()
+    labels = torch.full_like(sizes, 0.25)
+    offsets = torch.full_like(sizes, 0.1)
+    base = score_core_v3(pos, edges, sizes, label_sizes=labels, label_offsets=offsets)
+    scaled = score_core_v3(
+        13.0 * pos,
+        edges,
+        13.0 * sizes,
+        label_sizes=13.0 * labels,
+        label_offsets=13.0 * offsets,
+    )
+    for code in ("C2", "C4", "C6", "C8"):
+        assert scaled.facets[code].score == pytest.approx(base.facets[code].score, abs=1e-12)
+
+
+def test_c8_tree_row_demotion_is_materially_unchanged() -> None:
+    """Assert C8 is emitted diagnostically without moving a clean tree row.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    pos, edges, sizes = _chain_layout(6, gap=3.0)
+    result = score_core_v3(pos, edges, sizes)
+    weights = {
+        code: (2.0 if code == "C8" else facet.effective_weight)
+        for code, facet in result.facets.items()
+        if facet.applicable
+    }
+    restored = renormalized_score(
+        {code: facet.score for code, facet in result.facets.items()}, weights
+    )
+    assert result.facets["C8"].effective_weight == 0.0
+    assert result.facets["C8"].score == pytest.approx(1.0)
+    assert abs(restored - result.scores["tiered"]) <= 0.25
+
+
 def test_position_only_scale_invariance_for_pure_geometry_facets() -> None:
     """Pure-geometry facets must ignore position-only scale changes."""
     pos, edge_index, node_sizes = _probe_layout()
@@ -626,9 +743,12 @@ def test_triple_view_composite_and_tier_weights_are_published() -> None:
     assert result.facets["C1"].base_weight == pytest.approx(4.0)
     assert result.facets["C5"].base_weight == pytest.approx(2.0)
     assert result.facets["C9"].base_weight == pytest.approx(1.0)
+    assert result.facets["C2"].base_weight == pytest.approx(6.0)
     assert result.facets["C2"].effective_weight == pytest.approx(
-        4.0 * crossing_weight_multiplier(pos.shape[0])
+        6.0 * crossing_weight_multiplier(pos.shape[0])
     )
+    assert result.facets["C6"].effective_weight == pytest.approx(0.0)
+    assert result.facets["C8"].effective_weight == pytest.approx(0.0)
     assert sum(1 for tier in CORE_TIERS.values() if tier == 1) == 3
     assert result.coverage["applicable_facets"] == 10
     assert 0.0 <= result.scores["equal"] <= 100.0

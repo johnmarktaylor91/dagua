@@ -11,7 +11,12 @@ import torch
 
 from dagua.eval.drawing import routes_to_curves
 from dagua.eval.ruler_v3 import renormalized_score, score_core_v3
-from dagua.eval.ruler_v3_groups import CANONICAL_NODE_HEIGHT_REF, evaluate_conditional_groups
+from dagua.eval.ruler_v3_groups import (
+    CANONICAL_NODE_HEIGHT_REF,
+    G6_SEVERE_WEIGHT_MULTIPLIER,
+    _g6_severe_weight_ramp,
+    evaluate_conditional_groups,
+)
 from dagua.metrics import (
     cluster_edge_intrusion_score,
     cluster_exclusion_score,
@@ -1644,6 +1649,46 @@ def test_g2_compactness_log_ratio_band_discriminates_sprawl() -> None:
     assert twenty_score is not None
     assert hundred_score is not None
     assert twenty_score > hundred_score + 0.05
+
+
+def test_g2_compactness_lower_guard_removes_sublegible_packing_credit() -> None:
+    """Assert compactness gives no credit below legible node spacing.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    _base_pos, edges, sizes, meta = _cluster_probe()
+    packed_pos = torch.tensor(
+        [[-0.02, 0.0], [0.0, 0.0], [0.02, 0.0], [1.0, 0.0], [1.02, 0.0], [1.04, 0.0]],
+        dtype=torch.float64,
+    )
+    result = score_core_v3(packed_pos, edges, sizes, graph_meta=meta)
+    facet = result.facets["G2_cluster_compactness_log_band"]
+    assert facet.score == pytest.approx(0.0)
+    assert min(facet.metadata["cluster_compactness_min_spacing_ratios"]) < 1.0
+
+
+def test_g6_severe_weight_ramp_is_monotone_and_capped() -> None:
+    """Assert the G6 severe-breach multiplier ramps monotonically to 2x.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    scores = (0.65, 0.60, 0.575, 0.55, 0.40)
+    ramps = tuple(_g6_severe_weight_ramp(score) for score in scores)
+    assert ramps == tuple(sorted(ramps))
+    assert ramps[0] == pytest.approx(1.0)
+    assert ramps[-1] == pytest.approx(G6_SEVERE_WEIGHT_MULTIPLIER)
 
 
 def test_print_g2_g4_g5_g7_publication_records(capsys: pytest.CaptureFixture[str]) -> None:

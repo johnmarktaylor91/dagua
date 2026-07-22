@@ -759,15 +759,20 @@ def test_f10_manifest_covers_required_constants() -> None:
     required = {
         "tier_multipliers",
         "c2_size_decay",
+        "c2_angle_weighted_crossing_cost",
         "c3_graph_distance_radii",
+        "c4_smooth_clearance_band",
         "c5_primary_form",
         "c5_band_and_decay",
         "c6_crossing_angle_ideal_degrees",
+        "diagnostic_core_weights",
         "canonical_node_height_ref",
         "deterministic_seed_default",
         "core_sampling_budgets",
         "hac_rule",
         "g5_quality_band",
+        "gg3_buyback_gate",
+        "margin_audit_tripwire",
         "g7_port_and_route_thresholds",
         "frac_acyclic_grading",
     }
@@ -1148,7 +1153,7 @@ def _g2_compactness_deformation(step: int) -> Probe:
     Probe
         G2 compactness probe.
     """
-    scale = (1.0, 3.0, 20.0, 100.0)[step]
+    scale = (2.0, 3.0, 20.0, 100.0)[step]
     return _cluster_probe(scale=scale)
 
 
