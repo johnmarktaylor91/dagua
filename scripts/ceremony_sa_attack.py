@@ -13,14 +13,19 @@ import numpy as np
 import torch
 
 from dagua.eval.ruler_v3 import (
+    RulerV3Facet,
     RulerV3Result,
+    angle_weighted_crossing_score,
+    referee_eligibility_key,
     score_core_v3,
+    severe_g6_breach,
     tier1_tradeoff_flags,
     with_tier1_tradeoff_flag,
 )
 from dagua.eval.ruler_v3 import (
     severe_g6_floor_breach as severe_g6_pair_floor_breach,
 )
+from dagua.eval.ruler_v3_groups import G6_SEVERE_FLOOR, G6_SOFT_FLOOR
 
 AGGREGATE_TOLERANCE_FRACTION = 0.05
 GG3_BLOCK_AGGREGATE_DELTA_FRACTION = 0.02
@@ -29,7 +34,19 @@ PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.05
 SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.08
 SOL_AGGREGATE_DELTA_TIERED_POINTS = 3.0
 PRIMARY_FAITHFULNESS_FACETS = ("C1", "C3", "G6_weighted_ksm")
-RETARGETED_OBJECTIVE_MODES = ("tier1_loss", "g6_damage")
+ATTACK_THE_FIX_OBJECTIVE_MODES = (
+    "g6_subsevere_corridor",
+    "clustered_g2_push",
+    "c2_perpendicularize",
+    "c4_g6_band_edge",
+    "eligibility_surface_abuse",
+    "free_clause_dodging",
+)
+RETARGETED_OBJECTIVE_MODES = (
+    "tier1_loss",
+    "g6_damage",
+    *ATTACK_THE_FIX_OBJECTIVE_MODES,
+)
 # FROZEN -- pre-registered before the deciding measurement; do not post-hoc ratchet.
 TIER1_ONLY_MATERIALITY_DROP = 5.0
 DEGENERATE_PCA_RATIO = 0.05
@@ -48,6 +65,12 @@ FOOLED_FACET_MAX_DROP = 0.05
 OBJECTIVE_PENALTY = 10.0
 MIN_BASELINE_SCORE = 1.0e-12
 DEFAULT_DIAGNOSTICS_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_diagnostics"
+DEFAULT_ATTACK_THE_FIX_RESULTS_PATH = (
+    Path.home() / ".claude/research/dagua/megasprint/attack_the_fix_results.md"
+)
+DEFAULT_ATTACK_THE_FIX_ARTIFACT_DIR = (
+    Path.home() / ".claude/research/dagua/megasprint/attack_the_fix_artifacts"
+)
 PHASE1_CLEAN_ROWS_STORE = (
     Path.home() / ".claude/research/dagua/megasprint/PHASE1_CLEAN_REAL_ROWS_V3.json"
 )
@@ -199,6 +222,15 @@ class AttackResult:
     blockregion_primary_faithfulness_drop : float
         Primary faithfulness drop of the candidate that produced
         ``max_blockregion_tier1_only_drop``.
+    blockregion_two_layout_buyback : float
+        Two-layout buyback measured on the same block-region candidate that
+        produced ``max_blockregion_tier1_only_drop``.
+    blockregion_row_severe_g6_floor_breach : bool
+        Whether the same block-region candidate that produced
+        ``max_blockregion_tier1_only_drop`` breached the severe-G6 floor.
+    blockregion_survives_condition5 : bool
+        Whether the best block-region candidate satisfies the frozen
+        condition-5 survival predicate without a severe-G6 or degeneracy block.
     blockregion_severe_g6_floor_breach : bool
         Whether any block-region candidate breached the hard G6 floor.
     buyback_headroom : float
@@ -213,6 +245,9 @@ class AttackResult:
         Facets that stayed high on a blocking morph.
     best_positions : torch.Tensor
         Position tensor with shape ``[N, 2]`` for the best valid morph.
+    blockregion_positions : torch.Tensor
+        Position tensor with shape ``[N, 2]`` for the best block-region T1 row,
+        or the baseline positions when no block-region row was found.
     """
 
     family: str
@@ -232,6 +267,9 @@ class AttackResult:
     blockregion_shape_distance: float
     blockregion_aggregate_delta_fraction: float
     blockregion_primary_faithfulness_drop: float
+    blockregion_two_layout_buyback: float
+    blockregion_row_severe_g6_floor_breach: bool
+    blockregion_survives_condition5: bool
     blockregion_severe_g6_floor_breach: bool
     buyback_headroom: float
     two_layout_buyback: float
@@ -245,6 +283,77 @@ class AttackResult:
     fooled_facets: Tuple[str, ...]
     gaining_facets: Tuple[str, ...]
     best_positions: torch.Tensor
+    blockregion_positions: torch.Tensor
+
+
+@dataclass(frozen=True)
+class AttackTheFixResult:
+    """Published result for one attack-the-fix objective/family leg.
+
+    Parameters
+    ----------
+    objective : str
+        Named adversarial objective.
+    family : str
+        Probe family attacked by the objective.
+    seeds_run : int
+        Number of independent SA seeds included in the row.
+    max_in_band_tier1_drop : float
+        Maximum same-row T1-only drop inside the condition-5 shape and tiered
+        band before clause/degen disqualification.
+    max_buyback : float
+        Same-row two-layout buyback for the row that set
+        ``max_in_band_tier1_drop``.
+    best_shape_distance : float
+        Same-row shape distance for the row that set
+        ``max_in_band_tier1_drop``.
+    severe_g6_floor_breach : bool
+        Whether any seed found a severe-G6 floor breach in the block region.
+    survives_condition5 : bool
+        Whether any seed found a clause-silent non-degenerate condition-5
+        survivor.
+    best_seed : int
+        Seed for the row that set ``max_in_band_tier1_drop``.
+    best_result : AttackResult
+        Full per-seed result for artifact and audit use.
+    """
+
+    objective: str
+    family: str
+    seeds_run: int
+    max_in_band_tier1_drop: float
+    max_buyback: float
+    best_shape_distance: float
+    severe_g6_floor_breach: bool
+    survives_condition5: bool
+    best_seed: int
+    best_result: AttackResult
+
+
+@dataclass(frozen=True)
+class C2AngleRidingCheck:
+    """Fixed-vs-archived C2' teeth check outcome.
+
+    Parameters
+    ----------
+    old_delta : float
+        Archived pre-fix C2' delta for two perpendicular crossings versus one
+        shallow crossing.
+    fixed_delta : float
+        Current fixed C2' delta for the same construction.
+    added_crossings : int
+        Crossing-count increase in the perpendicularized construction.
+    old_attack_found : bool
+        Whether the archived formula rewards the added-crossing angle ride.
+    fixed_attack_loses : bool
+        Whether the fixed formula rejects the same added-crossing ride.
+    """
+
+    old_delta: float
+    fixed_delta: float
+    added_crossings: int
+    old_attack_found: bool
+    fixed_attack_loses: bool
 
 
 @dataclass(frozen=True)
@@ -719,6 +828,41 @@ def _facet_score(result: RulerV3Result, code: str) -> Optional[float]:
         return None
     score = float(facet.score)
     return score if math.isfinite(score) else None
+
+
+def _facet_metadata_float(
+    result: RulerV3Result,
+    code: str,
+    key: str,
+    default: float = 0.0,
+) -> float:
+    """Return a numeric facet metadata field.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 result to inspect.
+    code : str
+        Facet code.
+    key : str
+        Metadata key.
+    default : float, optional
+        Value returned when the facet or metadata field is absent.
+
+    Returns
+    -------
+    float
+        Finite metadata value, otherwise ``default``.
+    """
+    facet = result.facets.get(code)
+    if facet is None:
+        return default
+    value = facet.metadata.get(key, default)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
 
 
 def _tier1_only_drop(
@@ -1346,6 +1490,30 @@ def _blockregion_decision_blocks(
     ) or blockregion_severe_g6_floor_breach
 
 
+def _survives_condition5(measurement: CandidateMeasurement) -> bool:
+    """Return whether one measured row survives frozen condition 5.
+
+    Parameters
+    ----------
+    measurement : CandidateMeasurement
+        Same-row candidate measurement to classify.
+
+    Returns
+    -------
+    bool
+        ``True`` only when the row satisfies the shape, 2% tiered band,
+        T1-only materiality, two-layout buyback, severe-G6 clause, and
+        degenerate-escape predicates exactly as pre-registered.
+    """
+    return (
+        _is_blockregion_candidate(measurement)
+        and measurement.gate_verdict.tier1_only_drop >= TIER1_ONLY_MATERIALITY_DROP
+        and measurement.two_layout_buyback >= TWO_LAYOUT_BUYBACK_BAR
+        and not measurement.gate_verdict.severe_g6_floor_breach
+        and not measurement.gate_verdict.degenerate_escape
+    )
+
+
 def _objective(
     shape_distance: float,
     aggregate_delta_fraction: float,
@@ -1384,7 +1552,7 @@ def _objective(
         Value to maximize during SA.
     """
     mode = attack_config.objective_mode
-    if mode not in {"shape", "tier1_loss", "g6_damage"}:
+    if mode not in {"shape", "tier1_loss", "g6_damage", *ATTACK_THE_FIX_OBJECTIVE_MODES}:
         raise ValueError(f"unknown GG-3 objective mode: {mode!r}")
     hold_fraction = _objective_hold_fraction(attack_config)
     excess = aggregate_delta_fraction - hold_fraction
@@ -1399,6 +1567,96 @@ def _objective(
         # while enforcing the same 2% tiered-hold band used by the BLOCK gate.
         hold_bonus = 0.0 if excess > 0.0 else 0.1 * (1.0 - aggregate_delta_fraction / hold_fraction)
         return _tier1_only_drop(baseline_result, candidate_result) + hold_bonus - penalty
+    if mode in ATTACK_THE_FIX_OBJECTIVE_MODES:
+        if (
+            baseline_result is None
+            or candidate_result is None
+            or baseline_pos is None
+            or edges is None
+        ):
+            raise ValueError(
+                f"{mode} objective requires baseline_result, candidate_result, "
+                "baseline_pos, and edges"
+            )
+        tier1_drop = _tier1_only_drop(baseline_result, candidate_result)
+        buyback = two_layout_buyback_decomposition(baseline_result, candidate_result)["buyback"]
+        shape_bonus = min(1.0, shape_distance / max(1.0e-12, SHAPE_DISTANCE_THRESHOLD))
+        severe_pair = severe_g6_pair_floor_breach(baseline_result, candidate_result)
+        degenerate = _degenerate_escape(
+            baseline_result,
+            candidate_result,
+            baseline_pos,
+            edges,
+            severe_pair,
+        )
+        clause_penalty = OBJECTIVE_PENALTY if severe_pair else 0.0
+        degenerate_penalty = OBJECTIVE_PENALTY if degenerate else 0.0
+        material_core = tier1_drop + 0.35 * buyback + 0.5 * shape_bonus
+        if mode == "g6_subsevere_corridor":
+            g6_floor_debt = 0.0
+            ramp_edge_bonus = 0.0
+            for code in ("G6_weighted_ksm", "G6_local_weight_monotonicity"):
+                score = _facet_score(candidate_result, code)
+                if score is None:
+                    continue
+                g6_floor_debt += max(0.0, G6_SEVERE_FLOOR - score)
+                if G6_SEVERE_FLOOR <= score < G6_SOFT_FLOOR:
+                    ramp_edge_bonus += G6_SOFT_FLOOR - score
+            return (
+                material_core
+                + 8.0 * ramp_edge_bonus
+                - 80.0 * g6_floor_debt
+                - penalty
+                - clause_penalty
+                - degenerate_penalty
+            )
+        if mode == "clustered_g2_push":
+            g2_financing = 0.0
+            for code in ("C10", "G2_cluster_hac_ari", "G2_cluster_compactness_log_band"):
+                baseline_score = _facet_score(baseline_result, code)
+                candidate_score = _facet_score(candidate_result, code)
+                if baseline_score is not None and candidate_score is not None:
+                    g2_financing += max(0.0, candidate_score - baseline_score)
+            return (
+                material_core + 3.0 * g2_financing - penalty - clause_penalty - degenerate_penalty
+            )
+        if mode == "c2_perpendicularize":
+            baseline_c2 = _facet_score(baseline_result, "C2") or 0.0
+            candidate_c2 = _facet_score(candidate_result, "C2") or 0.0
+            baseline_count = _facet_metadata_float(baseline_result, "C2", "crossing_count")
+            candidate_count = _facet_metadata_float(candidate_result, "C2", "crossing_count")
+            added_crossings = max(0.0, candidate_count - baseline_count)
+            return (
+                12.0 * (candidate_c2 - baseline_c2)
+                + 0.5 * added_crossings
+                + material_core
+                - penalty
+                - clause_penalty
+                - degenerate_penalty
+            )
+        if mode == "c4_g6_band_edge":
+            c4_score = _facet_score(candidate_result, "C4")
+            c4_edge_bonus = 0.0 if c4_score is None else max(0.0, 1.0 - c4_score)
+            g6_ramp_bonus = 0.0
+            for code in ("G6_weighted_ksm", "G6_local_weight_monotonicity"):
+                score = _facet_score(candidate_result, code)
+                if score is not None and G6_SEVERE_FLOOR <= score < G6_SOFT_FLOOR:
+                    g6_ramp_bonus += G6_SOFT_FLOOR - score
+            return (
+                material_core
+                + 2.0 * c4_edge_bonus
+                + 6.0 * g6_ramp_bonus
+                - penalty
+                - clause_penalty
+                - degenerate_penalty
+            )
+        if mode == "eligibility_surface_abuse":
+            eligibility = referee_eligibility_key(candidate_result)
+            breach_bonus = 1.0 - float(severe_g6_breach(candidate_result))
+            least_breach_bonus = eligibility[1]
+            return material_core + breach_bonus + least_breach_bonus - penalty - degenerate_penalty
+        if mode == "free_clause_dodging":
+            return material_core - penalty - clause_penalty - degenerate_penalty
     if mode == "g6_damage":
         if (
             baseline_result is None
@@ -1792,6 +2050,20 @@ def run_family_attack(
     blockregion_primary_faithfulness_drop = (
         0.0 if best_blockregion is None else best_blockregion.primary_faithfulness_drop
     )
+    blockregion_two_layout_buyback = (
+        0.0 if best_blockregion is None else best_blockregion.two_layout_buyback
+    )
+    blockregion_row_severe_g6_floor_breach = (
+        False if best_blockregion is None else best_blockregion.gate_verdict.severe_g6_floor_breach
+    )
+    blockregion_survives_condition5 = (
+        False if best_blockregion is None else _survives_condition5(best_blockregion)
+    )
+    blockregion_positions = (
+        probe.pos.detach().clone()
+        if best_blockregion is None
+        else best_blockregion.positions.detach().clone()
+    )
     aggregate_drop_points = max(0.0, baseline_score - best_valid.score)
     gate_verdict = best_valid.gate_verdict
     aggregate_decision_blocked = _blockregion_decision_blocks(
@@ -1837,6 +2109,9 @@ def run_family_attack(
         blockregion_shape_distance=blockregion_shape_distance,
         blockregion_aggregate_delta_fraction=blockregion_aggregate_delta_fraction,
         blockregion_primary_faithfulness_drop=blockregion_primary_faithfulness_drop,
+        blockregion_two_layout_buyback=blockregion_two_layout_buyback,
+        blockregion_row_severe_g6_floor_breach=blockregion_row_severe_g6_floor_breach,
+        blockregion_survives_condition5=blockregion_survives_condition5,
         blockregion_severe_g6_floor_breach=blockregion_severe_g6_floor_breach,
         buyback_headroom=reporting_candidate.buyback_headroom,
         two_layout_buyback=buyback_decomposition["buyback"],
@@ -1852,6 +2127,7 @@ def run_family_attack(
         else (),
         gaining_facets=gaining_facets(baseline_result, reporting_candidate.result),
         best_positions=best_valid.positions,
+        blockregion_positions=blockregion_positions,
     )
 
 
@@ -2315,6 +2591,9 @@ def _write_family_diagnostics(
             "blockregion_shape_distance": result.blockregion_shape_distance,
             "blockregion_aggregate_delta_fraction": result.blockregion_aggregate_delta_fraction,
             "blockregion_primary_faithfulness_drop": (result.blockregion_primary_faithfulness_drop),
+            "blockregion_two_layout_buyback": result.blockregion_two_layout_buyback,
+            "blockregion_row_severe_g6_floor_breach": result.blockregion_row_severe_g6_floor_breach,
+            "blockregion_survives_condition5": result.blockregion_survives_condition5,
             "blockregion_severe_g6_floor_breach": result.blockregion_severe_g6_floor_breach,
             "buyback_headroom": result.buyback_headroom,
             "two_layout_buyback": result.two_layout_buyback,
@@ -2608,6 +2887,401 @@ def gg3_battery_passed(
     return complete and not any(result.blocked for result in results)
 
 
+def _best_attack_the_fix_leg(results: Sequence[AttackResult]) -> AttackResult:
+    """Return the best report row, preferring actual survivors.
+
+    Parameters
+    ----------
+    results : Sequence[AttackResult]
+        Per-seed attack results for one objective/family pair.
+
+    Returns
+    -------
+    AttackResult
+        Best surviving row by T1-only drop when a survivor exists; otherwise
+        the best block-region row by T1-only drop.
+    """
+    if not results:
+        raise ValueError("cannot select a best attack-the-fix leg from no results")
+    survivor_results = [result for result in results if result.blockregion_survives_condition5]
+    candidates = survivor_results or list(results)
+    return max(
+        candidates,
+        key=lambda result: (
+            result.max_blockregion_tier1_only_drop,
+            result.blockregion_two_layout_buyback,
+            result.blockregion_shape_distance,
+        ),
+    )
+
+
+def run_attack_the_fix_battery(
+    *,
+    seed: int,
+    attack_config: AttackConfig = AttackConfig(),
+    score_config: ScoreConfig = ScoreConfig(),
+    seeds_per_family: int = DEFAULT_BATTERY_SEEDS_PER_FAMILY,
+) -> Tuple[AttackTheFixResult, ...]:
+    """Run the named post-fix adversarial objectives.
+
+    Parameters
+    ----------
+    seed : int
+        Base deterministic seed.
+    attack_config : AttackConfig, optional
+        SA budget used for each attack leg.
+    score_config : ScoreConfig, optional
+        Deterministic V3 scoring budget.
+    seeds_per_family : int, optional
+        Independent seeds per objective/family pair. Must be at least three for
+        the pre-registered attack-the-fix round.
+
+    Returns
+    -------
+    Tuple[AttackTheFixResult, ...]
+        Aggregated max-achievable rows for every named objective/family pair.
+    """
+    if seeds_per_family < DEFAULT_BATTERY_SEEDS_PER_FAMILY:
+        raise ValueError("attack-the-fix battery requires at least three seeds per objective")
+    families_by_objective = {
+        "g6_subsevere_corridor": ("weighted",),
+        "clustered_g2_push": ("clustered",),
+        "c2_perpendicularize": ("generic_force",),
+        "c4_g6_band_edge": ("weighted", "generic_force"),
+        "eligibility_surface_abuse": ("weighted",),
+        "free_clause_dodging": tuple(probe.family for probe in build_probe_families()),
+    }
+    probe_by_name = {probe.family: probe for probe in build_probe_families()}
+    aggregated: List[AttackTheFixResult] = []
+    for objective_index, objective in enumerate(ATTACK_THE_FIX_OBJECTIVE_MODES):
+        for family_index, family in enumerate(families_by_objective[objective]):
+            probe = probe_by_name[family]
+            legs: List[AttackResult] = []
+            mode_config = replace(attack_config, objective_mode=objective)
+            for seed_index in range(seeds_per_family):
+                family_seed = seed + 2_000_003 * objective_index + 200_003 * family_index
+                family_seed += 10_000_019 * seed_index
+                legs.append(
+                    run_family_attack(
+                        probe,
+                        seed=family_seed,
+                        attack_config=mode_config,
+                        score_config=score_config,
+                    )
+                )
+            best = _best_attack_the_fix_leg(legs)
+            aggregated.append(
+                AttackTheFixResult(
+                    objective=objective,
+                    family=family,
+                    seeds_run=len(legs),
+                    max_in_band_tier1_drop=best.max_blockregion_tier1_only_drop,
+                    max_buyback=best.blockregion_two_layout_buyback,
+                    best_shape_distance=best.blockregion_shape_distance,
+                    severe_g6_floor_breach=best.blockregion_row_severe_g6_floor_breach,
+                    survives_condition5=any(leg.blockregion_survives_condition5 for leg in legs),
+                    best_seed=best.seed,
+                    best_result=best,
+                )
+            )
+    return tuple(aggregated)
+
+
+def format_attack_the_fix_table(results: Sequence[AttackTheFixResult]) -> str:
+    """Format the attack-the-fix max-achievable results table.
+
+    Parameters
+    ----------
+    results : Sequence[AttackTheFixResult]
+        Aggregated attack-the-fix rows.
+
+    Returns
+    -------
+    str
+        Markdown table requested by the pre-freeze confidence gate.
+    """
+    lines = [
+        "| objective | family | seeds | max in-band T1 drop | max buyback | "
+        "best shape | severe-G6? | SURVIVING condition-5 hold? | best seed |",
+        "|---|---|---:|---:|---:|---:|---|---|---:|",
+    ]
+    for result in results:
+        lines.append(
+            f"| {result.objective} | {result.family} | {result.seeds_run} | "
+            f"{result.max_in_band_tier1_drop:.4f} | {result.max_buyback:.4f} | "
+            f"{result.best_shape_distance:.4f} | "
+            f"{'yes' if result.severe_g6_floor_breach else 'no'} | "
+            f"{'YES' if result.survives_condition5 else 'no'} | {result.best_seed} |"
+        )
+    return "\n".join(lines)
+
+
+def _c2_counterexample_layouts() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return the archived one-shallow versus two-perpendicular C2' probe.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Edge index, one-shallow layout, and two-perpendicular layout.
+    """
+    edges = torch.tensor([[0, 2, 4], [1, 3, 5]], dtype=torch.long)
+    one_shallow = torch.tensor(
+        [
+            [0.8353381566711482, -1.0993437673106923],
+            [1.3500512486651401, -0.7385221705893695],
+            [-1.6376227294973686, 0.8472125848570669],
+            [-0.3236051039641243, 1.0049758493947827],
+            [-1.7353746109554686, 0.8531447547286918],
+            [0.23303430345011902, 1.044852294675133],
+        ],
+        dtype=torch.float64,
+    )
+    two_perpendicular = torch.tensor(
+        [
+            [0.2910327299230801, -0.8581254109036337],
+            [0.15620328357839547, 0.8183790749837612],
+            [1.017022075537967, 0.37468995055029247],
+            [-0.2584253542881093, 0.26551331656227545],
+            [0.3173615316656587, -0.7338447788947672],
+            [0.17999323883164786, 0.7824427852386611],
+        ],
+        dtype=torch.float64,
+    )
+    return edges, one_shallow, two_perpendicular
+
+
+def _archived_prefix_c2_score(measurement: Mapping[str, float]) -> float:
+    """Return the archived pre-fix C2' score for one fixed measurement.
+
+    Parameters
+    ----------
+    measurement : Mapping[str, float]
+        Current C2 measurement dictionary containing crossing cost and capacity.
+
+    Returns
+    -------
+    float
+        Pre-fix score using weighted crossing cost over crossing capacity.
+    """
+    denominator = max(1.0, float(measurement["crossing_c_max"]))
+    cost = float(measurement["crossing_angle_weighted_cost"])
+    return max(0.0, min(1.0, 1.0 - math.sqrt(min(1.0, cost / denominator))))
+
+
+def run_c2_angle_riding_teeth_check() -> C2AngleRidingCheck:
+    """Run the old-vs-fixed C2' perpendicularization teeth check.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    C2AngleRidingCheck
+        Numeric proof that the archived objective wins pre-fix and loses now.
+    """
+    edges, one_shallow, two_perpendicular = _c2_counterexample_layouts()
+    shallow = angle_weighted_crossing_score(one_shallow, edges)
+    perpendicular = angle_weighted_crossing_score(two_perpendicular, edges)
+    old_delta = _archived_prefix_c2_score(perpendicular) - _archived_prefix_c2_score(shallow)
+    fixed_delta = float(perpendicular["edge_crossing_score"]) - float(
+        shallow["edge_crossing_score"]
+    )
+    added_crossings = int(perpendicular["crossing_count"]) - int(shallow["crossing_count"])
+    return C2AngleRidingCheck(
+        old_delta=old_delta,
+        fixed_delta=fixed_delta,
+        added_crossings=added_crossings,
+        old_attack_found=old_delta > 0.0 and added_crossings > 0,
+        fixed_attack_loses=fixed_delta < 0.0 and added_crossings > 0,
+    )
+
+
+def eligibility_surface_abuse_check() -> bool:
+    """Return whether synthetic least-breach abuse can beat compliance.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` when a breaching high-score candidate can outrank a compliant
+        low-score candidate under the exported referee key.
+    """
+    compliant = _synthetic_key_result(tiered=1.0, g6_weighted_ksm=0.56)
+    shallow_breach = _synthetic_key_result(tiered=100.0, g6_weighted_ksm=0.54)
+    deep_breach = _synthetic_key_result(tiered=100.0, g6_weighted_ksm=0.30)
+    compliant_keyed = (referee_eligibility_key(compliant), compliant.scores["tiered"])
+    shallow_keyed = (referee_eligibility_key(shallow_breach), shallow_breach.scores["tiered"])
+    deep_keyed = (referee_eligibility_key(deep_breach), deep_breach.scores["tiered"])
+    return shallow_keyed > compliant_keyed or deep_keyed > shallow_keyed
+
+
+def _synthetic_key_result(*, tiered: float, g6_weighted_ksm: float) -> RulerV3Result:
+    """Create a compact weighted result for eligibility-key abuse checks.
+
+    Parameters
+    ----------
+    tiered : float
+        Synthetic tiered score.
+    g6_weighted_ksm : float
+        Synthetic applicable G6 weighted-KSM facet score.
+
+    Returns
+    -------
+    RulerV3Result
+        Minimal result accepted by the shared severe-G6 helpers.
+    """
+    facet = RulerV3Facet(
+        code="G6_weighted_ksm",
+        name="weighted_shortest_path_isotonic_ksm",
+        tier=1,
+        score=g6_weighted_ksm,
+        base_weight=4.0,
+        effective_weight=4.0,
+        applicable=True,
+        applicability_reason="synthetic",
+        metadata={},
+    )
+    return RulerV3Result(
+        facets={"G6_weighted_ksm": facet},
+        scores={"tiered": tiered, "equal": tiered, "tier1_only": tiered},
+        flags=tuple(),
+        applicability={"G6_weighted_ksm": True},
+        coverage={"applicable_facets": 1, "total_facets": 1, "tier1_applicable_facets": 1},
+        metadata={},
+    )
+
+
+def save_attack_the_fix_survivor_artifacts(
+    results: Sequence[AttackTheFixResult],
+    *,
+    output_dir: Path,
+    score_config: ScoreConfig = ScoreConfig(),
+) -> Tuple[Path, ...]:
+    """Save artifacts for every surviving condition-5 hold.
+
+    Parameters
+    ----------
+    results : Sequence[AttackTheFixResult]
+        Aggregated attack-the-fix rows.
+    output_dir : pathlib.Path
+        Directory receiving survivor artifacts.
+    score_config : ScoreConfig, optional
+        Deterministic V3 scorer configuration.
+
+    Returns
+    -------
+    Tuple[pathlib.Path, ...]
+        Paths written for survivor artifacts.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    probes = {probe.family: probe for probe in build_probe_families()}
+    written: List[Path] = []
+    for result in results:
+        if not result.survives_condition5:
+            continue
+        probe = probes[result.family]
+        baseline_result = _score_probe(probe, probe.pos, score_config)
+        morph_result = with_tier1_tradeoff_flag(
+            baseline_result,
+            _score_probe(probe, result.best_result.blockregion_positions, score_config),
+        )
+        prefix = f"{result.objective}_{result.family}_{result.best_seed}"
+        pt_path = output_dir / f"{prefix}.pt"
+        png_path = output_dir / f"{prefix}_compare.png"
+        torch.save(
+            {
+                "objective": result.objective,
+                "family": result.family,
+                "seed": result.best_seed,
+                "positions": result.best_result.blockregion_positions,
+                "baseline_positions": probe.pos,
+                "edges": probe.edges,
+                "scores": dict(morph_result.scores),
+                "facets": _facet_records(morph_result),
+            },
+            pt_path,
+        )
+        _render_comparison_png(
+            png_path,
+            probe,
+            probe.pos,
+            result.best_result.blockregion_positions,
+            baseline_result,
+            morph_result,
+            result.best_shape_distance,
+        )
+        written.extend((pt_path, png_path))
+    return tuple(written)
+
+
+def write_attack_the_fix_report(
+    results: Sequence[AttackTheFixResult],
+    *,
+    output_path: Path,
+    c2_check: C2AngleRidingCheck,
+    eligibility_abuse_found: bool,
+    survivor_artifacts: Sequence[Path],
+) -> None:
+    """Write the attack-the-fix markdown report.
+
+    Parameters
+    ----------
+    results : Sequence[AttackTheFixResult]
+        Aggregated attack rows.
+    output_path : pathlib.Path
+        Markdown path to write.
+    c2_check : C2AngleRidingCheck
+        Old-vs-fixed C2' teeth-check outcome.
+    eligibility_abuse_found : bool
+        Whether the synthetic eligibility abuse check found a key failure.
+    survivor_artifacts : Sequence[pathlib.Path]
+        Artifact paths written for surviving holds.
+
+    Returns
+    -------
+    None
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ramp_rows = [row for row in results if row.objective == "g6_subsevere_corridor"]
+    clustered_rows = [row for row in results if row.objective == "clustered_g2_push"]
+    ramp_profitable = any(row.survives_condition5 for row in ramp_rows)
+    clustered_crossed = any(row.survives_condition5 for row in clustered_rows)
+    max_clustered = max((row.max_in_band_tier1_drop for row in clustered_rows), default=0.0)
+    artifact_lines = (
+        "\n".join(f"- {path}" for path in survivor_artifacts) if survivor_artifacts else "- none"
+    )
+    text = "\n\n".join(
+        (
+            "# Attack-The-Fix Results",
+            format_attack_the_fix_table(results),
+            "## Deciders\n"
+            f"- RAMP DECIDER: {'profitable corridor' if ramp_profitable else 'barren'}.\n"
+            f"- CLUSTERED DECIDER: {'crossed 5.0' if clustered_crossed else 'did not cross 5.0'} "
+            f"(max clustered T1 drop {max_clustered:.4f}).",
+            "## Teeth Checks\n"
+            "- E1 weighted severe-G6 hold: checked by archived E1 parity/unit test and severe "
+            "path diagnostics.\n"
+            f"- C2' pre-fix angle riding old_delta={c2_check.old_delta:.6f}, "
+            f"fixed_delta={c2_check.fixed_delta:.6f}, "
+            f"added_crossings={c2_check.added_crossings}, "
+            f"old_found={'yes' if c2_check.old_attack_found else 'no'}, "
+            f"fixed_loses={'yes' if c2_check.fixed_attack_loses else 'no'}.\n"
+            "- Eligibility least-breach abuse found: "
+            f"{'yes' if eligibility_abuse_found else 'no'}.",
+            f"## Survivor Artifacts\n{artifact_lines}",
+        )
+    )
+    output_path.write_text(text + "\n", encoding="utf-8")
+
+
 def format_battery_summary(
     results: Sequence[AttackResult],
     *,
@@ -2650,7 +3324,7 @@ def format_battery_summary(
                 default=0.0,
             )
             severe = any(leg.blockregion_severe_g6_floor_breach for leg in legs)
-            max_buyback = max((leg.two_layout_buyback for leg in legs), default=0.0)
+            max_buyback = max((leg.blockregion_two_layout_buyback for leg in legs), default=0.0)
             complete = len(legs) >= seeds_per_family
             blocked = any(leg.blocked for leg in legs)
             if not complete:
@@ -2732,7 +3406,8 @@ def format_results_table(
     lines = [
         "| family | objective | seed | best shape dist | primary faith drop | aggregate delta | "
         "tiered delta | T1 drop | max block-region T1 drop | block-region shape | "
-        "block-region agg | block-region primary | two-layout buyback | buyback pass-through | "
+        "block-region agg | block-region primary | block-region buyback | two-layout buyback | "
+        "buyback pass-through | "
         "margin audit | W7 | verdict | gaining facets |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
@@ -2755,6 +3430,7 @@ def format_results_table(
             f"{result.blockregion_shape_distance:.4f} | "
             f"{100.0 * result.blockregion_aggregate_delta_fraction:.2f}% | "
             f"{result.blockregion_primary_faithfulness_drop:.4f} | "
+            f"{result.blockregion_two_layout_buyback:.4f} | "
             f"{result.two_layout_buyback:.4f} | "
             f"{result.buyback_pass_through:.4f} | "
             f"{margin_text} | "
@@ -2802,7 +3478,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--objective-mode",
-        choices=("battery", "shape", "tier1_loss", "g6_damage"),
+        choices=("battery", "attack_the_fix", "shape", "tier1_loss", "g6_damage")
+        + ATTACK_THE_FIX_OBJECTIVE_MODES,
         default="battery",
         help="SA objective mode; default runs the required freeze-facing GG-3 battery",
     )
@@ -2811,6 +3488,18 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_BATTERY_SEEDS_PER_FAMILY,
         help="independent seeds per family/mode leg for --objective-mode battery",
+    )
+    parser.add_argument(
+        "--results-path",
+        type=Path,
+        default=DEFAULT_ATTACK_THE_FIX_RESULTS_PATH,
+        help="markdown output path for --objective-mode attack_the_fix",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=DEFAULT_ATTACK_THE_FIX_ARTIFACT_DIR,
+        help="surviving-hold artifact directory for --objective-mode attack_the_fix",
     )
     return parser.parse_args()
 
@@ -2825,16 +3514,18 @@ def main() -> int:
     """
     args = _parse_args()
     objective_mode = str(args.objective_mode)
-    if objective_mode == "battery" and bool(args.diagnostics):
+    if objective_mode in {"battery", "attack_the_fix"} and bool(args.diagnostics):
         raise ValueError(
-            "battery diagnostics would overwrite per-family artifacts; use a single mode"
+            "aggregate diagnostics would overwrite per-family artifacts; use a single mode"
         )
     attack_config = AttackConfig(
         iterations=int(args.iterations),
         restarts=int(args.restarts),
         aggregate_tolerance_fraction=float(args.aggregate_tolerance),
         shape_distance_threshold=float(args.shape_threshold),
-        objective_mode="shape" if objective_mode == "battery" else objective_mode,
+        objective_mode=(
+            "shape" if objective_mode in {"battery", "attack_the_fix"} else objective_mode
+        ),
     )
     if objective_mode == "battery":
         results = run_gg3_battery(
@@ -2844,6 +3535,41 @@ def main() -> int:
             score_config=ScoreConfig(),
             seeds_per_family=int(args.battery_seeds),
         )
+    elif objective_mode == "attack_the_fix":
+        attack_results = run_attack_the_fix_battery(
+            seed=int(args.seed),
+            attack_config=attack_config,
+            score_config=ScoreConfig(),
+            seeds_per_family=int(args.battery_seeds),
+        )
+        c2_check = run_c2_angle_riding_teeth_check()
+        eligibility_abuse_found = eligibility_surface_abuse_check()
+        artifacts = save_attack_the_fix_survivor_artifacts(
+            attack_results,
+            output_dir=Path(args.artifact_dir),
+            score_config=ScoreConfig(),
+        )
+        write_attack_the_fix_report(
+            attack_results,
+            output_path=Path(args.results_path),
+            c2_check=c2_check,
+            eligibility_abuse_found=eligibility_abuse_found,
+            survivor_artifacts=artifacts,
+        )
+        print("ATTACK-THE-FIX results")
+        print(format_attack_the_fix_table(attack_results))
+        print()
+        print(
+            "teeth: "
+            f"C2_old_delta={c2_check.old_delta:.6f}, "
+            f"C2_fixed_delta={c2_check.fixed_delta:.6f}, "
+            f"old_found={'yes' if c2_check.old_attack_found else 'no'}, "
+            f"fixed_loses={'yes' if c2_check.fixed_attack_loses else 'no'}, "
+            f"eligibility_abuse={'yes' if eligibility_abuse_found else 'no'}"
+        )
+        print(f"results_path={Path(args.results_path)}")
+        print(f"survivor_artifacts={len(artifacts)}")
+        return 1 if any(result.survives_condition5 for result in attack_results) else 0
     elif bool(args.diagnostics):
         results = run_diagnostics(
             seed=int(args.seed),
