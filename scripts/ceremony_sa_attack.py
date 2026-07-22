@@ -26,6 +26,18 @@ PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.05
 SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD = 0.08
 SOL_AGGREGATE_DELTA_TIERED_POINTS = 3.0
 PRIMARY_FAITHFULNESS_FACETS = ("C1", "C3", "G6_weighted_ksm")
+# FROZEN -- pre-registered before the deciding measurement; do not post-hoc ratchet.
+TIER1_ONLY_MATERIALITY_DROP = 5.0
+G6_FLOOR = 0.55
+G6_FLOOR_DROP = 0.05
+DEGENERATE_PCA_RATIO = 0.05
+DEGENERATE_HUB_ARC_DEG = 10.0
+DEGENERATE_TIER1_TOLERANCE = 1.0
+DEGENERATE_C3_IMPROVE = 0.05
+GG3_VERDICT_BLOCK = "BLOCK"
+GG3_VERDICT_PASS_WITH_T1_TRADEOFF = "PASS_WITH_T1_TRADEOFF"
+GG3_VERDICT_PASS_DEGENERATE_ESCAPE = "PASS_DEGENERATE_ESCAPE"
+GG3_VERDICT_PASS = "PASS"
 DEFAULT_ITERATIONS = 450
 DEFAULT_RESTARTS = 4
 HIGH_FACET_FLOOR = 0.8
@@ -79,6 +91,11 @@ class AttackConfig:
         Initial Metropolis temperature.
     final_temperature : float
         Final Metropolis temperature.
+    objective_mode : str
+        SA objective selector. ``"shape"`` preserves the legacy shape-targeted
+        attack, ``"tier1_loss"`` retargets the search to T1-only loss under
+        the frozen GG-3 2% tiered hold, and ``"g6_damage"`` stresses weighted
+        G6 damage inside the degeneracy-escape geometry.
     """
 
     iterations: int = DEFAULT_ITERATIONS
@@ -87,6 +104,7 @@ class AttackConfig:
     shape_distance_threshold: float = SHAPE_DISTANCE_THRESHOLD
     initial_temperature: float = 1.0
     final_temperature: float = 0.02
+    objective_mode: str = "shape"
 
 
 @dataclass(frozen=True)
@@ -149,6 +167,15 @@ class AttackResult:
         thresholds.
     tier1_tradeoff : bool
         Whether W7 flags the morph as an aggregate-held T1 tradeoff.
+    gate_verdict : str
+        Structured joint GG-3 verdict label.
+    tier1_only_drop : float
+        Baseline-minus-morph ``tier1_only`` score movement in points.
+    severe_g6_floor_breach : bool
+        Whether a G6 facet crossed the hard pre-registered floor after a
+        material baseline-relative drop.
+    degenerate_escape : bool
+        Whether the morph qualifies for the narrow weighted-degeneracy escape.
     fooled_facets : Tuple[str, ...]
         Facets that stayed high on a blocking morph.
     best_positions : torch.Tensor
@@ -164,8 +191,51 @@ class AttackResult:
     primary_faithfulness_drop: float
     sol_variant_blocked: bool
     tier1_tradeoff: bool
+    gate_verdict: str
+    tier1_only_drop: float
+    severe_g6_floor_breach: bool
+    degenerate_escape: bool
     fooled_facets: Tuple[str, ...]
     best_positions: torch.Tensor
+
+
+@dataclass(frozen=True)
+class GG3GateVerdict:
+    """Joint GG-3 gate verdict and its blocking predicates.
+
+    Parameters
+    ----------
+    verdict : str
+        One of ``BLOCK``, ``PASS_WITH_T1_TRADEOFF``,
+        ``PASS_DEGENERATE_ESCAPE``, or ``PASS``.
+    blocked : bool
+        Whether the joint gate blocks the freeze ceremony.
+    tier1_tradeoff : bool
+        Whether W7 emitted its score-neutral tradeoff flag.
+    tier1_only_drop : float
+        Baseline-minus-morph ``tier1_only`` movement in score points.
+    severe_g6_floor_breach : bool
+        Whether a G6 facet dropped through the hard floor.
+    degenerate_escape : bool
+        Whether the morph satisfies the narrow baseline-degeneracy waiver.
+    shape_changed : bool
+        Whether Procrustes shape distance exceeds the materiality threshold.
+    aggregate_held : bool
+        Whether the tiered aggregate stayed within the 2% GG-3 hold band.
+    material_tier1_loss : bool
+        Whether primary-facet loss and ``tier1_only`` point loss both exceed
+        the pre-registered materiality bars.
+    """
+
+    verdict: str
+    blocked: bool
+    tier1_tradeoff: bool
+    tier1_only_drop: float
+    severe_g6_floor_breach: bool
+    degenerate_escape: bool
+    shape_changed: bool
+    aggregate_held: bool
+    material_tier1_loss: bool
 
 
 @dataclass(frozen=True)
@@ -523,13 +593,261 @@ def primary_faithfulness_drop(
     return max(drops) if drops else 0.0
 
 
-def _gg3_blocked(
+def _score_value(result: RulerV3Result, score_name: str) -> float:
+    """Return a named composite score as a finite float.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 result containing composite views.
+    score_name : str
+        Name of the score to read.
+
+    Returns
+    -------
+    float
+        Composite score value.
+    """
+    return float(result.scores[score_name])
+
+
+def _facet_score(result: RulerV3Result, code: str) -> Optional[float]:
+    """Return an applicable facet score, or ``None`` when absent.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 score result.
+    code : str
+        Facet code to inspect.
+
+    Returns
+    -------
+    Optional[float]
+        Finite score for an applicable facet, otherwise ``None``.
+    """
+    facet = result.facets.get(code)
+    if facet is None or facet.score is None or not facet.applicable:
+        return None
+    score = float(facet.score)
+    return score if math.isfinite(score) else None
+
+
+def _tier1_only_drop(
+    baseline_result: RulerV3Result,
+    candidate_result: RulerV3Result,
+) -> float:
+    """Return baseline-minus-candidate ``tier1_only`` score movement.
+
+    Parameters
+    ----------
+    baseline_result : RulerV3Result
+        Baseline V3 result.
+    candidate_result : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    float
+        Positive values mean T1-only faithfulness dropped.
+    """
+    return _score_value(baseline_result, "tier1_only") - _score_value(
+        candidate_result,
+        "tier1_only",
+    )
+
+
+def _pca_minor_major_ratio(pos: torch.Tensor) -> float:
+    """Return the PCA minor/major standard-deviation ratio for positions.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        ``sqrt(min_eigenvalue / max_eigenvalue)`` of the mean-centered
+        coordinate covariance. Degenerate zero-spread drawings return ``0``.
+    """
+    points = pos.detach().cpu().numpy().astype(np.float64)
+    if points.shape[0] < 2:
+        return 0.0
+    centered = points - points.mean(axis=0, keepdims=True)
+    covariance = centered.T @ centered / float(max(1, points.shape[0] - 1))
+    eigenvalues = np.linalg.eigvalsh(covariance)
+    major = max(float(eigenvalues[-1]), 0.0)
+    minor = max(float(eigenvalues[0]), 0.0)
+    if major <= 0.0:
+        return 0.0
+    return math.sqrt(minor / major)
+
+
+def _minimal_circular_arc_degrees(angles: Sequence[float]) -> float:
+    """Return the smallest circular arc covering all angles.
+
+    Parameters
+    ----------
+    angles : Sequence[float]
+        Incident-edge directions in degrees on ``[0, 360)``.
+
+    Returns
+    -------
+    float
+        Width in degrees of the smallest arc containing every direction.
+    """
+    if len(angles) <= 1:
+        return 0.0
+    sorted_angles = sorted(float(angle) % 360.0 for angle in angles)
+    wrapped = [*sorted_angles, sorted_angles[0] + 360.0]
+    largest_gap = max(wrapped[index + 1] - wrapped[index] for index in range(len(sorted_angles)))
+    return 360.0 - largest_gap
+
+
+def _incident_edge_arc_degrees(pos: torch.Tensor, edges: torch.Tensor) -> float:
+    """Return the narrowest qualifying high-degree incident-edge arc.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge index tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Minimum arc width among nodes of degree at least three, or
+        ``inf`` when no such hub exists.
+    """
+    count = int(pos.shape[0])
+    directions: List[List[float]] = [[] for _index in range(count)]
+    edge_pairs = edges.detach().cpu().t().tolist() if edges.numel() else []
+    coordinates = pos.detach().cpu().numpy().astype(np.float64)
+    for raw_source, raw_target in edge_pairs:
+        source = int(raw_source)
+        target = int(raw_target)
+        delta_st = coordinates[target] - coordinates[source]
+        delta_ts = coordinates[source] - coordinates[target]
+        if float(np.linalg.norm(delta_st)) > 0.0:
+            directions[source].append(math.degrees(math.atan2(delta_st[1], delta_st[0])) % 360.0)
+        if float(np.linalg.norm(delta_ts)) > 0.0:
+            directions[target].append(math.degrees(math.atan2(delta_ts[1], delta_ts[0])) % 360.0)
+    arcs = [
+        _minimal_circular_arc_degrees(node_directions)
+        for node_directions in directions
+        if len(node_directions) >= 3
+    ]
+    return min(arcs) if arcs else math.inf
+
+
+def _baseline_shape_degenerate(pos: torch.Tensor, edges: torch.Tensor) -> bool:
+    """Return whether baseline geometry has the weighted escape signature.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Baseline positions with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge index tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    bool
+        ``True`` for a globally near-collinear baseline with a degree-three
+        hub whose incident edge rays are compressed into a 10-degree arc.
+    """
+    # The waiver is intentionally geometric and narrow: a long path can have a
+    # tiny PCA ratio, but without a collapsed high-degree hub it is not the
+    # weighted star escape that both labs agreed to exempt.
+    return (
+        _pca_minor_major_ratio(pos) < DEGENERATE_PCA_RATIO
+        and _incident_edge_arc_degrees(pos, edges) <= DEGENERATE_HUB_ARC_DEG
+    )
+
+
+def _severe_g6_floor_breach(
+    baseline_result: RulerV3Result,
+    candidate_result: RulerV3Result,
+) -> bool:
+    """Return whether a G6 facet crosses the hard GG-3 damage floor.
+
+    Parameters
+    ----------
+    baseline_result : RulerV3Result
+        Baseline V3 result.
+    candidate_result : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    bool
+        ``True`` only when an applicable G6 facet is below ``G6_FLOOR`` and
+        that same facet dropped by at least ``G6_FLOOR_DROP`` from baseline.
+    """
+    for code in ("G6_weighted_ksm", "G6_local_weight_monotonicity"):
+        baseline_score = _facet_score(baseline_result, code)
+        candidate_score = _facet_score(candidate_result, code)
+        if baseline_score is None or candidate_score is None:
+            continue
+        if candidate_score < G6_FLOOR and baseline_score - candidate_score >= G6_FLOOR_DROP:
+            return True
+    return False
+
+
+def _degenerate_escape(
+    baseline_result: RulerV3Result,
+    candidate_result: RulerV3Result,
+    baseline_pos: torch.Tensor,
+    edges: torch.Tensor,
+    severe_g6_floor_breach: bool,
+) -> bool:
+    """Return whether a morph qualifies for the weighted degeneracy waiver.
+
+    Parameters
+    ----------
+    baseline_result : RulerV3Result
+        Baseline V3 result.
+    candidate_result : RulerV3Result
+        Candidate V3 result.
+    baseline_pos : torch.Tensor
+        Baseline positions with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge index tensor with shape ``[2, E]``.
+    severe_g6_floor_breach : bool
+        Precomputed G6 floor breach predicate.
+
+    Returns
+    -------
+    bool
+        ``True`` only for the narrow agreed weighted mis-flag escape.
+    """
+    baseline_c3 = _facet_score(baseline_result, "C3")
+    candidate_c3 = _facet_score(candidate_result, "C3")
+    if baseline_c3 is None or candidate_c3 is None:
+        return False
+    baseline_tier1 = _score_value(baseline_result, "tier1_only")
+    candidate_tier1 = _score_value(candidate_result, "tier1_only")
+    return (
+        _baseline_shape_degenerate(baseline_pos, edges)
+        and candidate_tier1 >= baseline_tier1 - DEGENERATE_TIER1_TOLERANCE
+        and candidate_c3 - baseline_c3 >= DEGENERATE_C3_IMPROVE
+        and not severe_g6_floor_breach
+    )
+
+
+def _gg3_gate_verdict(
     *,
     shape_distance: float,
     aggregate_delta_fraction: float,
     faithfulness_drop: float,
-) -> bool:
-    """Return whether the Fable GG-3 recalibrated BLOCK gate fires.
+    baseline_result: RulerV3Result,
+    candidate_result: RulerV3Result,
+    baseline_pos: torch.Tensor,
+    edges: torch.Tensor,
+) -> GG3GateVerdict:
+    """Return the converged joint GG-3 gate verdict.
 
     Parameters
     ----------
@@ -539,17 +857,64 @@ def _gg3_blocked(
         Absolute tiered-aggregate drift as a baseline fraction.
     faithfulness_drop : float
         Maximum primary faithfulness facet drop.
+    baseline_result : RulerV3Result
+        Baseline V3 result.
+    candidate_result : RulerV3Result
+        Candidate V3 result.
+    baseline_pos : torch.Tensor
+        Baseline positions with shape ``[N, 2]``.
+    edges : torch.Tensor
+        Edge index tensor with shape ``[2, E]``.
 
     Returns
     -------
-    bool
-        ``True`` only for material shape movement, material primary
-        faithfulness loss, and non-material aggregate movement.
+    GG3GateVerdict
+        Structured BLOCK/PASS variant plus the score-neutral W7 flag.
     """
-    return (
-        shape_distance >= SHAPE_DISTANCE_THRESHOLD
+    shape_changed = shape_distance >= SHAPE_DISTANCE_THRESHOLD
+    aggregate_held = aggregate_delta_fraction <= GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+    tier1_drop = _tier1_only_drop(baseline_result, candidate_result)
+    severe_g6_floor_breach = _severe_g6_floor_breach(baseline_result, candidate_result)
+    degenerate_escape = _degenerate_escape(
+        baseline_result,
+        candidate_result,
+        baseline_pos,
+        edges,
+        severe_g6_floor_breach,
+    )
+    material_tier1_loss = (
+        faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
+        and tier1_drop >= TIER1_ONLY_MATERIALITY_DROP
+    )
+    blocked = (
+        shape_changed
+        and aggregate_held
+        and (severe_g6_floor_breach or (material_tier1_loss and not degenerate_escape))
+    )
+    tier1_tradeoff = bool(tier1_tradeoff_flags(baseline_result, candidate_result))
+    if blocked:
+        verdict = GG3_VERDICT_BLOCK
+    elif shape_changed and aggregate_held and degenerate_escape:
+        verdict = GG3_VERDICT_PASS_DEGENERATE_ESCAPE
+    elif (
+        shape_changed
+        and aggregate_held
         and faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
-        and aggregate_delta_fraction <= GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+        and tier1_tradeoff
+    ):
+        verdict = GG3_VERDICT_PASS_WITH_T1_TRADEOFF
+    else:
+        verdict = GG3_VERDICT_PASS
+    return GG3GateVerdict(
+        verdict=verdict,
+        blocked=blocked,
+        tier1_tradeoff=tier1_tradeoff,
+        tier1_only_drop=tier1_drop,
+        severe_g6_floor_breach=severe_g6_floor_breach,
+        degenerate_escape=degenerate_escape,
+        shape_changed=shape_changed,
+        aggregate_held=aggregate_held,
+        material_tier1_loss=material_tier1_loss,
     )
 
 
@@ -588,6 +953,11 @@ def _objective(
     aggregate_delta_fraction: float,
     faithfulness_drop: float,
     attack_config: AttackConfig,
+    *,
+    baseline_result: Optional[RulerV3Result] = None,
+    candidate_result: Optional[RulerV3Result] = None,
+    baseline_pos: Optional[torch.Tensor] = None,
+    edges: Optional[torch.Tensor] = None,
 ) -> float:
     """Return the adversarial SA objective with a hard tolerance penalty.
 
@@ -601,25 +971,83 @@ def _objective(
         Maximum primary faithfulness score drop.
     attack_config : AttackConfig
         Attack thresholds.
+    baseline_result : Optional[RulerV3Result], optional
+        Baseline result, required by retargeted objective modes.
+    candidate_result : Optional[RulerV3Result], optional
+        Candidate result, required by retargeted objective modes.
+    baseline_pos : Optional[torch.Tensor], optional
+        Baseline positions with shape ``[N, 2]`` for degeneracy gating.
+    edges : Optional[torch.Tensor], optional
+        Edge index with shape ``[2, E]`` for degeneracy gating.
 
     Returns
     -------
     float
         Value to maximize during SA.
     """
-    excess = aggregate_delta_fraction - attack_config.aggregate_tolerance_fraction
+    mode = attack_config.objective_mode
+    if mode not in {"shape", "tier1_loss", "g6_damage"}:
+        raise ValueError(f"unknown GG-3 objective mode: {mode!r}")
+    hold_fraction = (
+        GG3_BLOCK_AGGREGATE_DELTA_FRACTION
+        if mode in {"tier1_loss", "g6_damage"}
+        else attack_config.aggregate_tolerance_fraction
+    )
+    excess = aggregate_delta_fraction - hold_fraction
+    penalty = 0.0
+    if excess > 0.0:
+        excess_ratio = excess / max(MIN_BASELINE_SCORE, hold_fraction)
+        penalty = OBJECTIVE_PENALTY * (1.0 + excess_ratio * excess_ratio)
+    if mode == "tier1_loss":
+        if baseline_result is None or candidate_result is None:
+            raise ValueError("tier1_loss objective requires baseline_result and candidate_result")
+        # This is the deciding GG-3 retarget: attack T1-only loss directly
+        # while enforcing the same 2% tiered-hold band used by the BLOCK gate.
+        hold_bonus = 0.0 if excess > 0.0 else 0.1 * (1.0 - aggregate_delta_fraction / hold_fraction)
+        return _tier1_only_drop(baseline_result, candidate_result) + hold_bonus - penalty
+    if mode == "g6_damage":
+        if (
+            baseline_result is None
+            or candidate_result is None
+            or baseline_pos is None
+            or edges is None
+        ):
+            raise ValueError(
+                "g6_damage objective requires baseline_result, candidate_result, "
+                "baseline_pos, and edges"
+            )
+        damage = 0.0
+        for code in ("G6_weighted_ksm", "G6_local_weight_monotonicity"):
+            baseline_score = _facet_score(baseline_result, code)
+            candidate_score = _facet_score(candidate_result, code)
+            if baseline_score is not None and candidate_score is not None:
+                damage = max(damage, baseline_score - candidate_score)
+        geometry_penalty = 0.0
+        # The G6-damage probe is allowed to search for floor breaches, so this
+        # constraint omits the "not severe floor breach" part of the waiver.
+        if not _baseline_shape_degenerate(baseline_pos, edges):
+            geometry_penalty += OBJECTIVE_PENALTY
+        baseline_c3 = _facet_score(baseline_result, "C3")
+        candidate_c3 = _facet_score(candidate_result, "C3")
+        if baseline_c3 is None or candidate_c3 is None:
+            geometry_penalty += OBJECTIVE_PENALTY
+        elif candidate_c3 - baseline_c3 < DEGENERATE_C3_IMPROVE:
+            geometry_penalty += OBJECTIVE_PENALTY * (
+                1.0 + DEGENERATE_C3_IMPROVE - (candidate_c3 - baseline_c3)
+            )
+        if (
+            _score_value(candidate_result, "tier1_only")
+            < _score_value(baseline_result, "tier1_only") - DEGENERATE_TIER1_TOLERANCE
+        ):
+            geometry_penalty += OBJECTIVE_PENALTY
+        return damage + 0.05 * shape_distance - penalty - geometry_penalty
     if excess <= 0.0:
         aggregate_hold_bonus = max(
             0.0,
-            1.0 - aggregate_delta_fraction / attack_config.aggregate_tolerance_fraction,
+            1.0 - aggregate_delta_fraction / hold_fraction,
         )
         return shape_distance + 0.25 * max(0.0, faithfulness_drop) + 0.1 * aggregate_hold_bonus
-    excess_ratio = excess / max(MIN_BASELINE_SCORE, attack_config.aggregate_tolerance_fraction)
-    return (
-        shape_distance
-        + 0.25 * max(0.0, faithfulness_drop)
-        - OBJECTIVE_PENALTY * (1.0 + excess_ratio * excess_ratio)
-    )
+    return shape_distance + 0.25 * max(0.0, faithfulness_drop) - penalty
 
 
 def _temperature(step: int, attack_config: AttackConfig) -> float:
@@ -831,7 +1259,16 @@ def run_family_attack(
     best_valid_shape = 0.0
     best_valid_score = baseline_score
     best_valid_faithfulness_drop = 0.0
-    best_valid_objective = _objective(0.0, 0.0, 0.0, attack_config)
+    best_valid_objective = _objective(
+        0.0,
+        0.0,
+        0.0,
+        attack_config,
+        baseline_result=baseline_result,
+        candidate_result=baseline_result,
+        baseline_pos=probe.pos,
+        edges=probe.edges,
+    )
     rng = np.random.default_rng(seed)
 
     for _restart in range(attack_config.restarts):
@@ -846,6 +1283,10 @@ def run_family_attack(
             current_delta,
             current_faithfulness_drop,
             attack_config,
+            baseline_result=baseline_result,
+            candidate_result=current_result,
+            baseline_pos=probe.pos,
+            edges=probe.edges,
         )
         for step in range(attack_config.iterations):
             temperature = _temperature(step, attack_config)
@@ -863,6 +1304,10 @@ def run_family_attack(
                 proposed_delta,
                 proposed_faithfulness_drop,
                 attack_config,
+                baseline_result=baseline_result,
+                candidate_result=proposed_result,
+                baseline_pos=probe.pos,
+                edges=probe.edges,
             )
             objective_gain = proposed_objective - current_objective
             accept = objective_gain >= 0.0 or rng.random() < math.exp(
@@ -899,35 +1344,37 @@ def run_family_attack(
 
     best_delta = _aggregate_delta_fraction(best_valid_score, baseline_score)
     aggregate_drop_points = max(0.0, baseline_score - best_valid_score)
-    tier1_tradeoff = bool(tier1_tradeoff_flags(baseline_result, best_valid_result))
-    blocked = _gg3_blocked(
+    gate_verdict = _gg3_gate_verdict(
         shape_distance=best_valid_shape,
         aggregate_delta_fraction=best_delta,
         faithfulness_drop=best_valid_faithfulness_drop,
+        baseline_result=baseline_result,
+        candidate_result=best_valid_result,
+        baseline_pos=probe.pos,
+        edges=probe.edges,
     )
     sol_variant_blocked = _sol_variant_blocked(
         shape_distance=best_valid_shape,
         aggregate_delta_points=aggregate_drop_points,
         faithfulness_drop=best_valid_faithfulness_drop,
     )
-    tradeoff_region_blocked = (
-        best_valid_shape >= SHAPE_DISTANCE_THRESHOLD
-        and best_valid_faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
-        and GG3_BLOCK_AGGREGATE_DELTA_FRACTION < best_delta < AGGREGATE_TOLERANCE_FRACTION
-        and not tier1_tradeoff
-    )
-    blocked = blocked or tradeoff_region_blocked
     return AttackResult(
         family=probe.family,
         baseline_score=baseline_score,
         best_score=best_valid_score,
         best_shape_distance=best_valid_shape,
         aggregate_delta_fraction=best_delta,
-        blocked=blocked,
+        blocked=gate_verdict.blocked,
         primary_faithfulness_drop=best_valid_faithfulness_drop,
         sol_variant_blocked=sol_variant_blocked,
-        tier1_tradeoff=tier1_tradeoff,
-        fooled_facets=fooled_facets(baseline_result, best_valid_result) if blocked else (),
+        tier1_tradeoff=gate_verdict.tier1_tradeoff,
+        gate_verdict=gate_verdict.verdict,
+        tier1_only_drop=gate_verdict.tier1_only_drop,
+        severe_g6_floor_breach=gate_verdict.severe_g6_floor_breach,
+        degenerate_escape=gate_verdict.degenerate_escape,
+        fooled_facets=fooled_facets(baseline_result, best_valid_result)
+        if gate_verdict.blocked
+        else (),
         best_positions=best_valid_positions,
     )
 
@@ -1567,19 +2014,9 @@ def _fable_verdict(result: AttackResult) -> str:
     Returns
     -------
     str
-        ``BLOCK``, ``PASS-with-signal``, or ``PASS``.
+        Structured joint GG-3 verdict label.
     """
-    if result.blocked:
-        return "BLOCK"
-    signaled = (
-        result.best_shape_distance >= SHAPE_DISTANCE_THRESHOLD
-        and result.primary_faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
-        and GG3_BLOCK_AGGREGATE_DELTA_FRACTION
-        < result.aggregate_delta_fraction
-        <= AGGREGATE_TOLERANCE_FRACTION
-        and result.tier1_tradeoff
-    )
-    return "PASS-with-signal" if signaled else "PASS"
+    return result.gate_verdict
 
 
 def _sol_verdict(result: AttackResult) -> str:
@@ -1685,6 +2122,12 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_DIAGNOSTICS_DIR,
         help="directory for diagnostics .pt, .json, and .png artifacts",
     )
+    parser.add_argument(
+        "--objective-mode",
+        choices=("shape", "tier1_loss", "g6_damage"),
+        default="shape",
+        help="SA objective mode; default preserves the legacy shape-targeted attack",
+    )
     return parser.parse_args()
 
 
@@ -1702,6 +2145,7 @@ def main() -> int:
         restarts=int(args.restarts),
         aggregate_tolerance_fraction=float(args.aggregate_tolerance),
         shape_distance_threshold=float(args.shape_threshold),
+        objective_mode=str(args.objective_mode),
     )
     if bool(args.diagnostics):
         results = run_diagnostics(
@@ -1732,6 +2176,7 @@ def main() -> int:
         f"sol_primary_faithfulness_drop={SOL_PRIMARY_FAITHFULNESS_DROP_THRESHOLD:.2f}, "
         f"sol_aggregate_delta={SOL_AGGREGATE_DELTA_TIERED_POINTS:.1f}pt, "
         f"shape_distance={attack_config.shape_distance_threshold:.2f}, "
+        f"objective_mode={attack_config.objective_mode}, "
         f"budget={attack_config.restarts}x{attack_config.iterations}"
     )
     return 1 if any(result.blocked for result in results) else 0
