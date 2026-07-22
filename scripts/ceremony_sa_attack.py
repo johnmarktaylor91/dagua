@@ -47,6 +47,13 @@ FOOLED_FACET_MAX_DROP = 0.05
 OBJECTIVE_PENALTY = 10.0
 MIN_BASELINE_SCORE = 1.0e-12
 DEFAULT_DIAGNOSTICS_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_diagnostics"
+PHASE1_CLEAN_ROWS_STORE = (
+    Path.home() / ".claude/research/dagua/megasprint/PHASE1_CLEAN_REAL_ROWS_V3.json"
+)
+MARGIN_AUDIT_FALLBACK = 12.2
+# Fable's pre-registered 1.0 bar is deliberately lower than Sol's 1.5 note,
+# biasing the structural backstop toward review/block on unknown valves.
+TWO_LAYOUT_BUYBACK_BAR = 1.0
 
 
 @dataclass(frozen=True)
@@ -225,9 +232,16 @@ class AttackResult:
     blockregion_primary_faithfulness_drop: float
     blockregion_severe_g6_floor_breach: bool
     buyback_headroom: float
+    two_layout_buyback: float
+    buyback_pass_through: float
+    tiered_drop: float
+    margin_audit_flag: bool
+    margin_audit_margin: float
+    margin_audit_allowance: float
     severe_g6_floor_breach: bool
     degenerate_escape: bool
     fooled_facets: Tuple[str, ...]
+    gaining_facets: Tuple[str, ...]
     best_positions: torch.Tensor
 
 
@@ -266,6 +280,7 @@ class CandidateMeasurement:
     objective: float
     gate_verdict: GG3GateVerdict
     buyback_headroom: float
+    two_layout_buyback: float
 
 
 @dataclass(frozen=True)
@@ -305,6 +320,8 @@ class GG3GateVerdict:
     shape_changed: bool
     aggregate_held: bool
     material_tier1_loss: bool
+    two_layout_buyback: float
+    material_buyback: bool
 
 
 @dataclass(frozen=True)
@@ -955,10 +972,14 @@ def _gg3_gate_verdict(
         faithfulness_drop >= PRIMARY_FAITHFULNESS_DROP_THRESHOLD
         and tier1_drop >= TIER1_ONLY_MATERIALITY_DROP
     )
-    blocked = (
+    buyback = two_layout_buyback_decomposition(baseline_result, candidate_result)["buyback"]
+    material_buyback = buyback >= TWO_LAYOUT_BUYBACK_BAR
+    blocked = severe_g6_floor_breach or (
         shape_changed
         and aggregate_held
-        and (severe_g6_floor_breach or (material_tier1_loss and not degenerate_escape))
+        and material_tier1_loss
+        and material_buyback
+        and not degenerate_escape
     )
     tier1_tradeoff = bool(tier1_tradeoff_flags(baseline_result, candidate_result))
     if blocked:
@@ -984,6 +1005,8 @@ def _gg3_gate_verdict(
         shape_changed=shape_changed,
         aggregate_held=aggregate_held,
         material_tier1_loss=material_tier1_loss,
+        two_layout_buyback=buyback,
+        material_buyback=material_buyback,
     )
 
 
@@ -1060,6 +1083,132 @@ def _buyback_headroom(result: RulerV3Result) -> float:
     return headroom
 
 
+def _tier1_weight_share(result: RulerV3Result) -> float:
+    """Return the Tier-1 share of applicable tiered weight.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        Baseline V3 result.
+
+    Returns
+    -------
+    float
+        ``W1 / Wtotal`` for applicable tiered facets.
+    """
+    total = 0.0
+    tier1 = 0.0
+    for facet in result.facets.values():
+        if facet.score is None or not bool(facet.applicable):
+            continue
+        weight = float(facet.effective_weight)
+        total += weight
+        if int(facet.tier) == 1:
+            tier1 += weight
+    return 0.0 if total <= 0.0 else tier1 / total
+
+
+def two_layout_buyback_decomposition(
+    baseline_result: RulerV3Result,
+    candidate_result: RulerV3Result,
+) -> Dict[str, float]:
+    """Return the converged GG-3 two-layout buyback decomposition.
+
+    Parameters
+    ----------
+    baseline_result : RulerV3Result
+        Good-layout baseline score.
+    candidate_result : RulerV3Result
+        Morph score.
+
+    Returns
+    -------
+    Dict[str, float]
+        ``tier1_drop``, ``tier1_weight_share``, ``pass_through``,
+        ``tiered_drop``, and ``buyback`` in 0--100 score points.
+    """
+    tier1_drop = _tier1_only_drop(baseline_result, candidate_result)
+    tiered_drop = _score_value(baseline_result, "tiered") - _score_value(candidate_result, "tiered")
+    tier1_weight_share = _tier1_weight_share(baseline_result)
+    pass_through = tier1_drop * tier1_weight_share
+    # Buyback is the net Tier-2/3 gain needed to hold the tiered score against
+    # the linear pass-through loss from Tier 1. It is not the older one-layout
+    # "buyback headroom" corridor and must stay baseline-vs-morph differential.
+    return {
+        "tier1_drop": tier1_drop,
+        "tier1_weight_share": tier1_weight_share,
+        "pass_through": pass_through,
+        "tiered_drop": tiered_drop,
+        "buyback": pass_through - tiered_drop,
+    }
+
+
+def _load_margin_envelopes() -> Tuple[Dict[str, float], str]:
+    """Load score-neutral margin audit envelopes from the frozen corpus store.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    Tuple[Dict[str, float], str]
+        Per-family allowances and a provenance note.
+    """
+    try:
+        payload = json.loads(PHASE1_CLEAN_ROWS_STORE.read_text(encoding="utf-8"))
+        rows = payload["rows"]
+        by_family: Dict[str, List[float]] = {}
+        all_margins: List[float] = []
+        for row in rows:
+            family = str(row["graph"])
+            tiered = float(row.get("v3_tiered", row["metrics"]["v3_scores"]["tiered"]))
+            tier1_only = float(row.get("v3_tier1_only", row["metrics"]["v3_scores"]["tier1_only"]))
+            margin = tiered - tier1_only
+            by_family.setdefault(family, []).append(margin)
+            all_margins.append(margin)
+        envelopes = {
+            family: float(np.percentile(margins, 95)) + 1.0
+            for family, margins in by_family.items()
+            if margins
+        }
+        envelopes["__fallback__"] = (
+            float(np.percentile(all_margins, 99)) if all_margins else MARGIN_AUDIT_FALLBACK
+        )
+        return envelopes, "frozen_corpus_p95_plus_1"
+    except Exception as error:  # pragma: no cover - exercised only when the local store is absent.
+        return (
+            {"__fallback__": MARGIN_AUDIT_FALLBACK},
+            f"NOTE-FOR-REVIEW: margin envelope store unreadable ({error!r}); using fallback",
+        )
+
+
+MARGIN_AUDIT_ENVELOPES, MARGIN_AUDIT_NOTE = _load_margin_envelopes()
+
+
+def _margin_audit(result: RulerV3Result, family: str) -> Tuple[bool, float, float]:
+    """Return the score-neutral margin tripwire state for one row.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 result to audit.
+    family : str
+        Family or graph key used to look up ``A_f``.
+
+    Returns
+    -------
+    Tuple[bool, float, float]
+        Flag, observed margin, and allowance.
+    """
+    margin = _score_value(result, "tiered") - _score_value(result, "tier1_only")
+    allowance = MARGIN_AUDIT_ENVELOPES.get(
+        family,
+        MARGIN_AUDIT_ENVELOPES.get("__fallback__", MARGIN_AUDIT_FALLBACK),
+    )
+    return margin > allowance, margin, allowance
+
+
 def _measure_candidate(
     probe: ProbeFamily,
     positions: torch.Tensor,
@@ -1126,6 +1275,7 @@ def _measure_candidate(
         objective=objective,
         gate_verdict=gate_verdict,
         buyback_headroom=_buyback_headroom(candidate_result),
+        two_layout_buyback=gate_verdict.two_layout_buyback,
     )
 
 
@@ -1152,6 +1302,7 @@ def _is_blockregion_candidate(measurement: CandidateMeasurement) -> bool:
 
 def _blockregion_decision_blocks(
     max_blockregion_tier1_only_drop: float,
+    blockregion_material_buyback: bool,
     blockregion_severe_g6_floor_breach: bool,
 ) -> bool:
     """Return the aggregate GG-3 decision for one attack leg.
@@ -1160,6 +1311,9 @@ def _blockregion_decision_blocks(
     ----------
     max_blockregion_tier1_only_drop : float
         Maximum raw tier1-only drop observed inside the block region.
+    blockregion_material_buyback : bool
+        Whether any block-region candidate simultaneously met the T1 drop and
+        two-layout buyback bars.
     blockregion_severe_g6_floor_breach : bool
         Whether any block-region candidate breached the hard G6 floor.
 
@@ -1171,8 +1325,8 @@ def _blockregion_decision_blocks(
     """
     return (
         max_blockregion_tier1_only_drop >= TIER1_ONLY_MATERIALITY_DROP
-        or blockregion_severe_g6_floor_breach
-    )
+        and blockregion_material_buyback
+    ) or blockregion_severe_g6_floor_breach
 
 
 def _objective(
@@ -1450,6 +1604,34 @@ def fooled_facets(
     return tuple(sorted(held))
 
 
+def gaining_facets(
+    baseline_result: RulerV3Result,
+    candidate_result: RulerV3Result,
+) -> Tuple[str, ...]:
+    """Return facets that gained score on an adversarial candidate.
+
+    Parameters
+    ----------
+    baseline_result : RulerV3Result
+        Good-layout score result.
+    candidate_result : RulerV3Result
+        Candidate score result.
+
+    Returns
+    -------
+    Tuple[str, ...]
+        Facet codes whose candidate score increased versus baseline.
+    """
+    baseline = _facet_scores(baseline_result)
+    candidate = _facet_scores(candidate_result)
+    gained = [
+        code
+        for code, candidate_score in candidate.items()
+        if baseline.get(code) is not None and candidate_score > float(baseline[code]) + 1.0e-12
+    ]
+    return tuple(sorted(gained))
+
+
 def run_family_attack(
     probe: ProbeFamily,
     *,
@@ -1506,10 +1688,12 @@ def run_family_attack(
         objective=baseline_objective,
         gate_verdict=baseline_gate_verdict,
         buyback_headroom=_buyback_headroom(baseline_result),
+        two_layout_buyback=baseline_gate_verdict.two_layout_buyback,
     )
     baseline_measurement = best_valid
     best_blockregion: Optional[CandidateMeasurement] = None
     blockregion_severe_g6_floor_breach = False
+    blockregion_material_buyback = False
     best_valid_hold_fraction = _objective_hold_fraction(attack_config)
     # NOTE-FOR-REVIEW: retargeted modes publish only from the frozen 2% hold
     # band, while shape mode keeps the legacy 5% exploratory tolerance. The
@@ -1534,6 +1718,10 @@ def run_family_attack(
                 blockregion_severe_g6_floor_breach = (
                     blockregion_severe_g6_floor_breach
                     or proposed.gate_verdict.severe_g6_floor_breach
+                )
+                blockregion_material_buyback = blockregion_material_buyback or (
+                    proposed.gate_verdict.tier1_only_drop >= TIER1_ONLY_MATERIALITY_DROP
+                    and proposed.two_layout_buyback >= TWO_LAYOUT_BUYBACK_BAR
                 )
                 if (
                     best_blockregion is None
@@ -1574,6 +1762,7 @@ def run_family_attack(
     gate_verdict = best_valid.gate_verdict
     aggregate_decision_blocked = _blockregion_decision_blocks(
         max_blockregion_tier1_only_drop,
+        blockregion_material_buyback,
         blockregion_severe_g6_floor_breach,
     )
     published_verdict = GG3_VERDICT_BLOCK if aggregate_decision_blocked else gate_verdict.verdict
@@ -1582,6 +1771,8 @@ def run_family_attack(
         aggregate_delta_points=aggregate_drop_points,
         faithfulness_drop=best_valid.primary_faithfulness_drop,
     )
+    buyback_decomposition = two_layout_buyback_decomposition(baseline_result, best_valid.result)
+    margin_flag, margin, margin_allowance = _margin_audit(best_valid.result, probe.family)
     return AttackResult(
         family=probe.family,
         objective_mode=attack_config.objective_mode,
@@ -1602,11 +1793,18 @@ def run_family_attack(
         blockregion_primary_faithfulness_drop=blockregion_primary_faithfulness_drop,
         blockregion_severe_g6_floor_breach=blockregion_severe_g6_floor_breach,
         buyback_headroom=best_valid.buyback_headroom,
+        two_layout_buyback=buyback_decomposition["buyback"],
+        buyback_pass_through=buyback_decomposition["pass_through"],
+        tiered_drop=buyback_decomposition["tiered_drop"],
+        margin_audit_flag=margin_flag,
+        margin_audit_margin=margin,
+        margin_audit_allowance=margin_allowance,
         severe_g6_floor_breach=gate_verdict.severe_g6_floor_breach,
         degenerate_escape=gate_verdict.degenerate_escape,
         fooled_facets=fooled_facets(baseline_result, best_valid.result)
         if aggregate_decision_blocked
         else (),
+        gaining_facets=gaining_facets(baseline_result, best_valid.result),
         best_positions=best_valid.positions,
     )
 
@@ -1945,30 +2143,25 @@ def _decomposition_summary(
         One-line decomposition summary.
     """
     diffs = _facet_diffs(baseline_result, morph_result)
-    held = [
-        diff.code
-        for diff in diffs
-        if diff.drop is not None
-        and diff.morph_score is not None
-        and diff.morph_score >= HIGH_FACET_FLOOR
-        and diff.drop <= FOOLED_FACET_MAX_DROP
-    ]
+    gaining = [diff.code for diff in diffs if diff.drop is not None and diff.drop < 0.0]
     dropped = [
         diff.code for diff in diffs if diff.drop is not None and diff.drop > FOOLED_FACET_MAX_DROP
     ]
-    held_codes = set(held)
-    held_weight = sum(
-        diff.weight for diff in diffs if diff.code in held_codes and diff.morph_applicable
+    gaining_codes = set(gaining)
+    gaining_weight = sum(
+        diff.weight for diff in diffs if diff.code in gaining_codes and diff.morph_applicable
     )
     applicability_changes = sum(
         1 for diff in diffs if diff.baseline_applicable != diff.morph_applicable
     )
-    held_text = ", ".join(held) if held else "none"
+    gaining_text = ", ".join(gaining) if gaining else "none"
     dropped_text = ", ".join(dropped) if dropped else "none"
     return (
         f"aggregate held within {100.0 * result.aggregate_delta_fraction:.2f}% because "
-        f"facets {{{held_text}}} (total weight {held_weight:.4f}) stayed high while "
-        f"facets {{{dropped_text}}} dropped; {applicability_changes} facets changed applicability."
+        f"facets {{{gaining_text}}} (total weight {gaining_weight:.4f}) gained against "
+        f"facets {{{dropped_text}}} dropping; buyback={result.two_layout_buyback:.4f}, "
+        f"pass-through={result.buyback_pass_through:.4f}; "
+        f"{applicability_changes} facets changed applicability."
     )
 
 
@@ -2078,6 +2271,16 @@ def _write_family_diagnostics(
             "blockregion_primary_faithfulness_drop": (result.blockregion_primary_faithfulness_drop),
             "blockregion_severe_g6_floor_breach": result.blockregion_severe_g6_floor_breach,
             "buyback_headroom": result.buyback_headroom,
+            "two_layout_buyback": result.two_layout_buyback,
+            "buyback_pass_through": result.buyback_pass_through,
+            "tiered_drop": result.tiered_drop,
+            "gaining_facets": list(result.gaining_facets),
+            "margin_audit": {
+                "flag": result.margin_audit_flag,
+                "margin": result.margin_audit_margin,
+                "allowance": result.margin_audit_allowance,
+                "source": MARGIN_AUDIT_NOTE,
+            },
         },
         "baseline": {
             "scores": dict(baseline_result.scores),
@@ -2388,8 +2591,8 @@ def format_battery_summary(
         by_key.setdefault((result.family, result.objective_mode), []).append(result)
     lines = [
         "| family | objective mode | seeds run | max block-region T1 drop | "
-        "G6 floor breach | decision |",
-        "|---|---|---:|---:|---|---|",
+        "max two-layout buyback | G6 floor breach | decision |",
+        "|---|---|---:|---:|---:|---|---|",
     ]
     for probe in build_probe_families():
         if selected is not None and probe.family not in selected:
@@ -2401,6 +2604,7 @@ def format_battery_summary(
                 default=0.0,
             )
             severe = any(leg.blockregion_severe_g6_floor_breach for leg in legs)
+            max_buyback = max((leg.two_layout_buyback for leg in legs), default=0.0)
             complete = len(legs) >= seeds_per_family
             blocked = any(leg.blocked for leg in legs)
             if not complete:
@@ -2411,7 +2615,7 @@ def format_battery_summary(
                 decision = GG3_VERDICT_PASS
             lines.append(
                 f"| {probe.family} | {mode} | {len(legs)} | {max_drop:.4f} | "
-                f"{'yes' if severe else 'no'} | {decision} |"
+                f"{max_buyback:.4f} | {'yes' if severe else 'no'} | {decision} |"
             )
     return "\n".join(lines)
 
@@ -2482,14 +2686,18 @@ def format_results_table(
     lines = [
         "| family | objective | seed | best shape dist | primary faith drop | aggregate delta | "
         "tiered delta | T1 drop | max block-region T1 drop | block-region shape | "
-        "block-region agg | block-region primary | buyback headroom | W7 | verdict | "
-        "fooled facets |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
+        "block-region agg | block-region primary | two-layout buyback | buyback pass-through | "
+        "margin audit | W7 | verdict | gaining facets |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
     for result in results:
         verdict = _fable_verdict(result) if sensitivity_variant == "fable" else _sol_verdict(result)
-        facets = ", ".join(result.fooled_facets) if result.fooled_facets else "-"
+        facets = ", ".join(result.gaining_facets) if result.gaining_facets else "-"
         signed_tiered_drop = result.baseline_score - result.best_score
+        margin_text = (
+            f"{'yes' if result.margin_audit_flag else 'no'} "
+            f"({result.margin_audit_margin:.2f}/{result.margin_audit_allowance:.2f})"
+        )
         lines.append(
             f"| {result.family} | {result.objective_mode} | {result.seed} | "
             f"{result.best_shape_distance:.4f} | "
@@ -2501,7 +2709,9 @@ def format_results_table(
             f"{result.blockregion_shape_distance:.4f} | "
             f"{100.0 * result.blockregion_aggregate_delta_fraction:.2f}% | "
             f"{result.blockregion_primary_faithfulness_drop:.4f} | "
-            f"{result.buyback_headroom:.4f} | "
+            f"{result.two_layout_buyback:.4f} | "
+            f"{result.buyback_pass_through:.4f} | "
+            f"{margin_text} | "
             f"{'yes' if result.tier1_tradeoff else 'no'} | {verdict} | {facets} |"
         )
     return "\n".join(lines)

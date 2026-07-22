@@ -18,6 +18,7 @@ from scripts.ceremony_sa_attack import (
     GG3_VERDICT_PASS_DEGENERATE_ESCAPE,
     GG3_VERDICT_PASS_WITH_T1_TRADEOFF,
     PRIMARY_FAITHFULNESS_DROP_THRESHOLD,
+    TWO_LAYOUT_BUYBACK_BAR,
     AttackConfig,
     AttackResult,
     ProbeFamily,
@@ -28,10 +29,12 @@ from scripts.ceremony_sa_attack import (
     build_probe_families,
     format_results_table,
     primary_faithfulness_drop,
+    probe_by_family,
     procrustes_shape_distance,
     run_all_attacks,
     run_diagnostics,
     run_family_attack,
+    two_layout_buyback_decomposition,
 )
 
 TEST_ATTACK_CONFIG = AttackConfig(iterations=90, restarts=2)
@@ -50,6 +53,7 @@ FAMILY_SEEDS = {
     "ported": 53,
 }
 SAVED_GG3_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_fresh"
+OFFICIAL_GG3_DIAG_DIR = Path("/tmp/sol_gg3_diag")
 
 
 def _result_signature(
@@ -86,9 +90,16 @@ def _result_signature(
         result.blockregion_primary_faithfulness_drop,
         result.blockregion_severe_g6_floor_breach,
         result.buyback_headroom,
+        result.two_layout_buyback,
+        result.buyback_pass_through,
+        result.tiered_drop,
+        result.margin_audit_flag,
+        result.margin_audit_margin,
+        result.margin_audit_allowance,
         result.severe_g6_floor_breach,
         result.degenerate_escape,
         result.fooled_facets,
+        result.gaining_facets,
     )
 
 
@@ -155,6 +166,52 @@ def _load_saved_case(
         morph_pt["positions"],
         baseline_pt["edges"],
     )
+
+
+def _load_official_diag_results(family: str) -> Tuple[RulerV3Result, RulerV3Result]:
+    """Load official-seed GG-3 facet diagnostics for one family.
+
+    Parameters
+    ----------
+    family : str
+        Saved family name.
+
+    Returns
+    -------
+    Tuple[RulerV3Result, RulerV3Result]
+        Baseline and morph result reconstructed from official diagnostics.
+    """
+    facets_payload = json.loads(
+        (OFFICIAL_GG3_DIAG_DIR / family / f"{family}_facets.json").read_text()
+    )
+    return (
+        _result_from_saved_payload(facets_payload["baseline"]),
+        _result_from_saved_payload(facets_payload["morph"]),
+    )
+
+
+def _load_official_diag_positions(family: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Load official-seed GG-3 baseline and morph positions for one family.
+
+    Parameters
+    ----------
+    family : str
+        Saved family name.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        Baseline and morph position tensors with shape ``[N, 2]``.
+    """
+    baseline_pt = torch.load(
+        OFFICIAL_GG3_DIAG_DIR / family / f"{family}_baseline.pt",
+        map_location="cpu",
+    )
+    morph_pt = torch.load(
+        OFFICIAL_GG3_DIAG_DIR / family / f"{family}_morph.pt",
+        map_location="cpu",
+    )
+    return baseline_pt["positions"], morph_pt["positions"]
 
 
 def _synthetic_result(
@@ -245,12 +302,12 @@ def test_gg3_sa_attack_per_family_passes_or_reports_block(probe: ProbeFamily) ->
         score_config=TEST_SCORE_CONFIG,
     )
     if result.blocked:
-        facets = ", ".join(result.fooled_facets) if result.fooled_facets else "none"
+        facets = ", ".join(result.gaining_facets) if result.gaining_facets else "none"
         pytest.xfail(
             "GG-3 BLOCK: "
             f"{result.family} shape={result.best_shape_distance:.4f}, "
             f"aggregate_delta={100.0 * result.aggregate_delta_fraction:.2f}%, "
-            f"fooled_facets={facets}"
+            f"gaining_facets={facets}"
         )
     assert result.aggregate_delta_fraction <= TEST_ATTACK_CONFIG.aggregate_tolerance_fraction
     material_shape = result.best_shape_distance >= TEST_ATTACK_CONFIG.shape_distance_threshold
@@ -262,10 +319,13 @@ def test_gg3_sa_attack_per_family_passes_or_reports_block(probe: ProbeFamily) ->
         < AGGREGATE_TOLERANCE_FRACTION
     )
     if material_shape and material_faith and aggregate_held:
-        assert result.gate_verdict in {
-            GG3_VERDICT_PASS_DEGENERATE_ESCAPE,
-            GG3_VERDICT_PASS_WITH_T1_TRADEOFF,
-        }
+        if result.two_layout_buyback >= TWO_LAYOUT_BUYBACK_BAR:
+            assert result.gate_verdict == GG3_VERDICT_BLOCK
+        else:
+            assert result.gate_verdict in {
+                GG3_VERDICT_PASS_DEGENERATE_ESCAPE,
+                GG3_VERDICT_PASS_WITH_T1_TRADEOFF,
+            }
     if material_shape and material_faith and tradeoff_band:
         assert result.tier1_tradeoff
 
@@ -434,7 +494,40 @@ def test_joint_gg3_gate_blocks_material_tier1_only_drop() -> None:
     )
     assert verdict.verdict == GG3_VERDICT_BLOCK
     assert verdict.material_tier1_loss
+    assert verdict.material_buyback
     assert not verdict.degenerate_escape
+
+
+def test_joint_gg3_gate_passes_low_buyback_tier1_tradeoff() -> None:
+    """Assert material T1 loss needs material two-layout buyback to block.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    baseline = _synthetic_result(tiered=90.0, tier1_only=95.0, c1=0.9, c3=0.95)
+    morph = _synthetic_result(tiered=84.8, tier1_only=89.5, c1=0.9, c3=0.87)
+    baseline_pos = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        dtype=torch.float64,
+    )
+    edges = torch.tensor([[0, 1, 2], [1, 3, 3]], dtype=torch.int64)
+    verdict = _gg3_gate_verdict(
+        shape_distance=0.5,
+        aggregate_delta_fraction=0.01,
+        faithfulness_drop=primary_faithfulness_drop(baseline, morph),
+        baseline_result=baseline,
+        candidate_result=morph,
+        baseline_pos=baseline_pos,
+        edges=edges,
+    )
+    assert verdict.material_tier1_loss
+    assert verdict.two_layout_buyback < TWO_LAYOUT_BUYBACK_BAR
+    assert verdict.verdict != GG3_VERDICT_BLOCK
 
 
 def test_joint_gg3_gate_blocks_degenerate_escape_with_g6_floor_breach() -> None:
@@ -477,6 +570,72 @@ def test_joint_gg3_gate_blocks_degenerate_escape_with_g6_floor_breach() -> None:
     assert verdict.verdict == GG3_VERDICT_BLOCK
     assert verdict.severe_g6_floor_breach
     assert not verdict.degenerate_escape
+
+
+@pytest.mark.parametrize(
+    ("family", "expected"),
+    (
+        ("dag", 0.60),
+        ("clustered", 3.84),
+        ("generic_force", 2.97),
+        ("weighted", 3.29),
+    ),
+)
+def test_two_layout_buyback_reproduces_saved_gg3_morphs(
+    family: str,
+    expected: float,
+) -> None:
+    """Assert saved GG-3 morph buyback matches the pre-registered table.
+
+    Parameters
+    ----------
+    family : str
+        Saved GG-3 morph family.
+    expected : float
+        Expected buyback from Fable Section 2.
+
+    Returns
+    -------
+    None
+    """
+    baseline, morph = _load_official_diag_results(family)
+    decomposition = two_layout_buyback_decomposition(baseline, morph)
+    assert decomposition["buyback"] == pytest.approx(expected, abs=0.25)
+
+
+@pytest.mark.parametrize(
+    ("family", "minimum_delta"),
+    (
+        ("dag", 1.5),
+        ("clustered", 4.0),
+        ("generic_force", 4.0),
+        ("weighted", 3.0),
+    ),
+)
+def test_saved_gg3_morphs_rescore_below_baseline_after_phase_a(
+    family: str,
+    minimum_delta: float,
+) -> None:
+    """Assert current V3 scoring drops the saved GG-3 morphs as predicted.
+
+    Parameters
+    ----------
+    family : str
+        Saved GG-3 morph family.
+    minimum_delta : float
+        Minimum baseline-minus-morph tiered drop in score points.
+
+    Returns
+    -------
+    None
+    """
+    baseline_pos, morph_pos = _load_official_diag_positions(family)
+    probe = probe_by_family(family)
+    score_config = ScoreConfig()
+    baseline_result = sa_attack._score_probe(probe, baseline_pos, score_config)
+    morph_result = sa_attack._score_probe(probe, morph_pos, score_config)
+    delta = float(baseline_result.scores["tiered"]) - float(morph_result.scores["tiered"])
+    assert delta >= minimum_delta
 
 
 def test_retargeted_objective_modes_are_wired_and_distinct() -> None:
@@ -735,8 +894,8 @@ def test_tier1_loss_blockregion_respects_shape_gate(
     assert not result.blocked
 
 
-def test_tier1_loss_bounded_generic_force_retarget_blocks() -> None:
-    """Assert the bounded generic-force retarget trips the GG-3 trapdoor.
+def test_tier1_loss_bounded_generic_force_retarget_no_longer_blocks() -> None:
+    """Assert the fixed generic-force retarget no longer trips the trapdoor.
 
     Parameters
     ----------
@@ -753,6 +912,6 @@ def test_tier1_loss_bounded_generic_force_retarget_blocks() -> None:
         attack_config=AttackConfig(iterations=250, restarts=2, objective_mode="tier1_loss"),
         score_config=ScoreConfig(),
     )
-    assert result.max_blockregion_tier1_only_drop >= 5.0
-    assert result.gate_verdict == GG3_VERDICT_BLOCK
-    assert result.blocked
+    assert result.two_layout_buyback < TWO_LAYOUT_BUYBACK_BAR
+    assert result.gate_verdict != GG3_VERDICT_BLOCK
+    assert not result.blocked
