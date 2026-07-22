@@ -48,9 +48,17 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
     ),
     "c2_angle_weighted_crossing_cost": FrozenConstant(
         name="c2_angle_weighted_crossing_cost",
-        value={"min": 0.5, "max": 1.5, "best_angle_degrees": 90.0},
+        value={
+            "min": 0.5,
+            "max": 1.5,
+            "best_angle_degrees": 90.0,
+            "total_refinement_step_fraction": 0.49,
+        },
         source="dagua/eval/ruler_v3.py:angle_weighted_crossing_score",
-        note="V3 C2' per-crossing cost; C6 is diagnostic so crossings never add score.",
+        note=(
+            "V3 C2' count-dominant crossing score; angle readability is a bounded-total "
+            "within-count refinement and C6 is diagnostic."
+        ),
     ),
     "c3_graph_distance_radii": FrozenConstant(
         name="c3_graph_distance_radii",

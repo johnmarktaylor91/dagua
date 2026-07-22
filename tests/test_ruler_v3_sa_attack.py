@@ -53,7 +53,7 @@ FAMILY_SEEDS = {
     "ported": 53,
 }
 SAVED_GG3_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_fresh"
-OFFICIAL_GG3_DIAG_DIR = Path("/tmp/sol_gg3_diag")
+OFFICIAL_GG3_DIAG_DIR = Path(__file__).resolve().parents[1] / "tmp/sol_gg3_diag"
 
 
 def _result_signature(
@@ -282,6 +282,62 @@ def _synthetic_result(
     )
 
 
+def _synthetic_result_with_gain(
+    *,
+    tiered: float,
+    tier1_only: float,
+    c1: float,
+    c3: float,
+    c7: float,
+) -> RulerV3Result:
+    """Create a synthetic result with one Tier-2 gain facet.
+
+    Parameters
+    ----------
+    tiered : float
+        Synthetic tiered score.
+    tier1_only : float
+        Synthetic tier1-only score.
+    c1 : float
+        Synthetic C1 score.
+    c3 : float
+        Synthetic C3 score.
+    c7 : float
+        Synthetic C7 score used to distinguish published gaining facets.
+
+    Returns
+    -------
+    RulerV3Result
+        Minimal score result containing C1, C3, and C7.
+    """
+    result = _synthetic_result(tiered=tiered, tier1_only=tier1_only, c1=c1, c3=c3)
+    facets = dict(result.facets)
+    facets["C7"] = RulerV3Facet(
+        code="C7",
+        name="C7",
+        tier=2,
+        score=c7,
+        base_weight=2.0,
+        effective_weight=2.0,
+        applicable=True,
+        applicability_reason="synthetic",
+        metadata={},
+    )
+    return RulerV3Result(
+        facets=facets,
+        scores=dict(result.scores),
+        flags=result.flags,
+        applicability={code: True for code in facets},
+        coverage={
+            "applicable_facets": len(facets),
+            "total_facets": len(facets),
+            "tier1_applicable_facets": sum(1 for facet in facets.values() if facet.tier == 1),
+            "applicable_groups": 0,
+        },
+        metadata={},
+    )
+
+
 @pytest.mark.parametrize("probe", build_probe_families(), ids=lambda probe: probe.family)
 def test_gg3_sa_attack_per_family_passes_or_reports_block(probe: ProbeFamily) -> None:
     """Assert per-family robustness or xfail with explicit block diagnostics.
@@ -498,6 +554,173 @@ def test_joint_gg3_gate_blocks_material_tier1_only_drop() -> None:
     assert not verdict.degenerate_escape
 
 
+def test_run_family_attack_reports_blocking_candidate_decomposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assert BLOCK reports describe the candidate that tripped the block region.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest monkeypatch fixture.
+
+    Returns
+    -------
+    None
+    """
+    probe = probe_by_family("dag")
+    baseline = _synthetic_result_with_gain(
+        tiered=90.0,
+        tier1_only=95.0,
+        c1=0.90,
+        c3=0.95,
+        c7=0.10,
+    )
+    search_best = _synthetic_result_with_gain(
+        tiered=90.0,
+        tier1_only=94.0,
+        c1=0.90,
+        c3=0.94,
+        c7=0.20,
+    )
+    blocker = _synthetic_result_with_gain(
+        tiered=89.5,
+        tier1_only=88.5,
+        c1=0.90,
+        c3=0.86,
+        c7=0.80,
+    )
+    search_best_verdict = sa_attack.GG3GateVerdict(
+        verdict=GG3_VERDICT_PASS_WITH_T1_TRADEOFF,
+        blocked=False,
+        tier1_tradeoff=True,
+        tier1_only_drop=1.0,
+        severe_g6_floor_breach=False,
+        degenerate_escape=False,
+        shape_changed=True,
+        aggregate_held=True,
+        material_tier1_loss=False,
+        two_layout_buyback=1.0,
+        material_buyback=True,
+    )
+    blocker_verdict = sa_attack.GG3GateVerdict(
+        verdict=GG3_VERDICT_BLOCK,
+        blocked=True,
+        tier1_tradeoff=True,
+        tier1_only_drop=6.5,
+        severe_g6_floor_breach=False,
+        degenerate_escape=False,
+        shape_changed=True,
+        aggregate_held=True,
+        material_tier1_loss=True,
+        two_layout_buyback=4.7,
+        material_buyback=True,
+    )
+    candidates = iter(
+        (
+            sa_attack.CandidateMeasurement(
+                positions=probe.pos + 0.1,
+                result=search_best,
+                score=90.0,
+                shape_distance=0.40,
+                aggregate_delta_fraction=0.0,
+                primary_faithfulness_drop=0.01,
+                objective=10.0,
+                gate_verdict=search_best_verdict,
+                buyback_headroom=1.0,
+                two_layout_buyback=1.0,
+            ),
+            sa_attack.CandidateMeasurement(
+                positions=probe.pos + 0.2,
+                result=blocker,
+                score=89.5,
+                shape_distance=0.50,
+                aggregate_delta_fraction=0.005,
+                primary_faithfulness_drop=0.09,
+                objective=5.0,
+                gate_verdict=blocker_verdict,
+                buyback_headroom=9.0,
+                two_layout_buyback=4.7,
+            ),
+        )
+    )
+
+    def fake_score_probe(
+        probe: ProbeFamily,
+        pos: torch.Tensor,
+        score_config: ScoreConfig,
+    ) -> RulerV3Result:
+        """Return the synthetic baseline for the patched attack.
+
+        Parameters
+        ----------
+        probe : ProbeFamily
+            Ignored probe argument.
+        pos : torch.Tensor
+            Ignored positions.
+        score_config : ScoreConfig
+            Ignored score configuration.
+
+        Returns
+        -------
+        RulerV3Result
+            Synthetic baseline result.
+        """
+        return baseline
+
+    def fake_measure_candidate(
+        probe: ProbeFamily,
+        positions: torch.Tensor,
+        *,
+        attack_config: AttackConfig,
+        score_config: ScoreConfig,
+        baseline_result: RulerV3Result,
+        baseline_score: float,
+    ) -> sa_attack.CandidateMeasurement:
+        """Return queued synthetic candidates for the patched attack.
+
+        Parameters
+        ----------
+        probe : ProbeFamily
+            Ignored probe argument.
+        positions : torch.Tensor
+            Ignored proposed positions.
+        attack_config : AttackConfig
+            Ignored attack configuration.
+        score_config : ScoreConfig
+            Ignored score configuration.
+        baseline_result : RulerV3Result
+            Ignored baseline result.
+        baseline_score : float
+            Ignored baseline score.
+
+        Returns
+        -------
+        scripts.ceremony_sa_attack.CandidateMeasurement
+            Next queued candidate measurement.
+        """
+        return next(candidates)
+
+    monkeypatch.setattr(sa_attack, "_score_probe", fake_score_probe)
+    monkeypatch.setattr(sa_attack, "_measure_candidate", fake_measure_candidate)
+
+    result = run_family_attack(
+        probe,
+        seed=123,
+        attack_config=AttackConfig(iterations=2, restarts=1),
+        score_config=TEST_SCORE_CONFIG,
+    )
+
+    assert result.blocked
+    assert result.best_score == pytest.approx(90.0)
+    assert result.tier1_only_drop == pytest.approx(6.5)
+    assert result.two_layout_buyback == pytest.approx(4.7)
+    assert result.buyback_pass_through == pytest.approx(5.2)
+    assert result.tiered_drop == pytest.approx(0.5)
+    assert result.buyback_headroom == pytest.approx(9.0)
+    assert result.gaining_facets == ("C7",)
+
+
 def test_joint_gg3_gate_passes_low_buyback_tier1_tradeoff() -> None:
     """Assert material T1 loss needs material two-layout buyback to block.
 
@@ -601,6 +824,56 @@ def test_two_layout_buyback_reproduces_saved_gg3_morphs(
     baseline, morph = _load_official_diag_results(family)
     decomposition = two_layout_buyback_decomposition(baseline, morph)
     assert decomposition["buyback"] == pytest.approx(expected, abs=0.25)
+
+
+def test_margin_audit_uses_per_family_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assert battery-family margin audits do not fall through to p99 fallback.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest monkeypatch fixture.
+
+    Returns
+    -------
+    None
+    """
+    result = _synthetic_result(tiered=92.0, tier1_only=86.0, c1=0.9, c3=0.9)
+    monkeypatch.setattr(
+        sa_attack,
+        "MARGIN_AUDIT_ENVELOPES",
+        {"clustered": 4.5, "__fallback__": 12.2},
+    )
+
+    flag, margin, allowance = sa_attack._margin_audit(result, "clustered")
+    fallback_flag, _fallback_margin, fallback_allowance = sa_attack._margin_audit(
+        result,
+        "unseen_family",
+    )
+
+    assert margin == pytest.approx(6.0)
+    assert allowance == pytest.approx(4.5)
+    assert flag
+    assert fallback_allowance == pytest.approx(12.2)
+    assert not fallback_flag
+
+
+def test_loaded_margin_envelopes_include_probe_families() -> None:
+    """Assert the clean-row store populates family-level A_f keys.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    envelopes, _note = sa_attack._load_margin_envelopes()
+    fallback = envelopes["__fallback__"]
+    for family in sa_attack.MARGIN_AUDIT_FAMILIES:
+        assert family in envelopes
+        assert envelopes[family] != pytest.approx(fallback)
 
 
 @pytest.mark.parametrize(

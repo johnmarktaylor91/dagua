@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Tuple
+from typing import Dict, Sequence, Tuple
 
 import pytest
 import torch
@@ -64,6 +64,33 @@ def _single_crossing_probe(
         )
     edges = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
     return pos, edges
+
+
+def _matching_layout_from_permutation(
+    permutation: Sequence[int],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Create a bipartite matching layout whose crossings equal inversions.
+
+    Parameters
+    ----------
+    permutation : Sequence[int]
+        Right-side vertical order for each left-side matched edge.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        Positions with shape ``[2N, 2]`` and matching edge index with shape
+        ``[2, N]``.
+    """
+    count = len(permutation)
+    left = [(0.0, float(index)) for index in range(count)]
+    right = [(1.0, float(permutation[index])) for index in range(count)]
+    pos = torch.tensor([*left, *right], dtype=torch.float64)
+    edges = torch.tensor(
+        [[index, count + index] for index in range(count)],
+        dtype=torch.long,
+    ).t()
+    return pos, edges.contiguous()
 
 
 def _probe_layout() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -507,6 +534,119 @@ def test_c2_angle_weighted_crossing_is_strictly_negative_per_crossing(angle: flo
     assert crossed["crossing_angle_weight_mean"] >= 0.5
     assert crossed["crossing_angle_weight_mean"] <= 1.5
     assert crossed["edge_crossing_score"] < clear["edge_crossing_score"]
+
+
+def test_c2_sol_counterexample_is_count_monotone() -> None:
+    """Assert two perpendicular crossings cannot outrank one shallow crossing.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    edges = torch.tensor([[0, 2, 4], [1, 3, 5]], dtype=torch.long)
+    one_shallow = torch.tensor(
+        [
+            [0.8353381566711482, -1.0993437673106923],
+            [1.3500512486651401, -0.7385221705893695],
+            [-1.6376227294973686, 0.8472125848570669],
+            [-0.3236051039641243, 1.0049758493947827],
+            [-1.7353746109554686, 0.8531447547286918],
+            [0.23303430345011902, 1.044852294675133],
+        ],
+        dtype=torch.float64,
+    )
+    two_perpendicular = torch.tensor(
+        [
+            [0.2910327299230801, -0.8581254109036337],
+            [0.15620328357839547, 0.8183790749837612],
+            [1.017022075537967, 0.37468995055029247],
+            [-0.2584253542881093, 0.26551331656227545],
+            [0.3173615316656587, -0.7338447788947672],
+            [0.17999323883164786, 0.7824427852386611],
+        ],
+        dtype=torch.float64,
+    )
+
+    shallow = angle_weighted_crossing_score(one_shallow, edges)
+    perpendicular = angle_weighted_crossing_score(two_perpendicular, edges)
+
+    assert shallow["crossing_count"] == 1
+    assert perpendicular["crossing_count"] == 2
+    assert perpendicular["edge_crossing_score"] < shallow["edge_crossing_score"]
+
+
+def test_c2_retains_angle_readability_with_equal_crossing_count() -> None:
+    """Assert angle quality remains a within-count C2 refinement.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    shallow_pos, edges = _single_crossing_probe(15.0, crossed=True)
+    perpendicular_pos, _ = _single_crossing_probe(90.0, crossed=True)
+    shallow = angle_weighted_crossing_score(shallow_pos, edges)
+    perpendicular = angle_weighted_crossing_score(perpendicular_pos, edges)
+
+    assert shallow["crossing_count"] == perpendicular["crossing_count"] == 1
+    assert perpendicular["edge_crossing_score"] > shallow["edge_crossing_score"]
+
+
+def test_c2_count_monotonicity_over_random_same_graph_layouts() -> None:
+    """Assert higher crossing count strictly lowers C2 across same-graph layouts.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    generator = torch.Generator().manual_seed(7741)
+    edges = torch.tensor([[0, 2, 4, 6], [1, 3, 5, 7]], dtype=torch.long)
+    measurements: list[Dict[str, float]] = []
+    for _index in range(160):
+        pos = torch.randn((8, 2), generator=generator, dtype=torch.float64)
+        result = angle_weighted_crossing_score(pos, edges)
+        measurements.append(result)
+
+    comparable_pairs = 0
+    for left in measurements:
+        for right in measurements:
+            if right["crossing_count"] > left["crossing_count"]:
+                comparable_pairs += 1
+                assert right["edge_crossing_score"] < left["edge_crossing_score"]
+    assert comparable_pairs > 0
+
+
+def test_c2_has_no_neutral_floor_at_high_crossing_count() -> None:
+    """Assert high crossing counts remain strictly ordered above zero.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    five_pos, edges = _matching_layout_from_permutation((3, 2, 0, 1))
+    six_pos, _ = _matching_layout_from_permutation((3, 2, 1, 0))
+    five = angle_weighted_crossing_score(five_pos, edges)
+    six = angle_weighted_crossing_score(six_pos, edges)
+
+    assert five["crossing_count"] == 5
+    assert six["crossing_count"] == 6
+    assert six["edge_crossing_score"] > 0.0
+    assert six["edge_crossing_score"] < five["edge_crossing_score"]
 
 
 def test_changed_core_facets_keep_unit_scale_invariance() -> None:
