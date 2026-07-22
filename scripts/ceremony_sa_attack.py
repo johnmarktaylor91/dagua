@@ -51,6 +51,7 @@ PHASE1_CLEAN_ROWS_STORE = (
     Path.home() / ".claude/research/dagua/megasprint/PHASE1_CLEAN_REAL_ROWS_V3.json"
 )
 MARGIN_AUDIT_FALLBACK = 12.2
+MARGIN_AUDIT_FAMILIES = ("tree", "dag", "clustered", "generic_force", "weighted", "ported")
 # Fable's pre-registered 1.0 bar is deliberately lower than Sol's 1.5 note,
 # biasing the structural backstop toward review/block on unknown valves.
 TWO_LAYOUT_BUYBACK_BAR = 1.0
@@ -1143,6 +1144,48 @@ def two_layout_buyback_decomposition(
     }
 
 
+def _margin_family_for_row(row: Mapping[str, Any]) -> str:
+    """Return the GG-3 probe-family bucket for one honest-corpus row.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Frozen clean-row payload from ``PHASE1_CLEAN_ROWS_STORE``.
+
+    Returns
+    -------
+    str
+        One of the six battery family labels used by the score-neutral
+        margin-audit tripwire.
+    """
+    graph = str(row.get("graph", "")).lower()
+    meta_raw = row.get("graph_meta", {})
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    if "ports" in meta or "routing_declared" in meta or "route_paths" in meta or "port" in graph:
+        return "ported"
+    if "edge_weights" in meta or "weight_mode" in meta or "weighted" in graph:
+        return "weighted"
+    if bool(meta.get("declared_tree")) or "tree" in graph:
+        return "tree"
+    if (
+        "clusters" in meta
+        or "cluster_parents" in meta
+        or "planted_partition" in meta
+        or "cluster" in graph
+        or "community" in graph
+    ):
+        return "clustered"
+    if (
+        bool(meta.get("declared_hierarchical"))
+        or meta.get("flow_direction") in {"TB", "BT", "LR", "RL"}
+        or "dag" in graph
+        or "dependency" in graph
+        or "citation" in graph
+    ):
+        return "dag"
+    return "generic_force"
+
+
 def _load_margin_envelopes() -> Tuple[Dict[str, float], str]:
     """Load score-neutral margin audit envelopes from the frozen corpus store.
 
@@ -1161,10 +1204,12 @@ def _load_margin_envelopes() -> Tuple[Dict[str, float], str]:
         by_family: Dict[str, List[float]] = {}
         all_margins: List[float] = []
         for row in rows:
-            family = str(row["graph"])
+            graph_key = str(row["graph"])
+            family = _margin_family_for_row(row)
             tiered = float(row.get("v3_tiered", row["metrics"]["v3_scores"]["tiered"]))
             tier1_only = float(row.get("v3_tier1_only", row["metrics"]["v3_scores"]["tier1_only"]))
             margin = tiered - tier1_only
+            by_family.setdefault(graph_key, []).append(margin)
             by_family.setdefault(family, []).append(margin)
             all_margins.append(margin)
         envelopes = {
@@ -1692,6 +1737,8 @@ def run_family_attack(
     )
     baseline_measurement = best_valid
     best_blockregion: Optional[CandidateMeasurement] = None
+    best_blockregion_material_buyback: Optional[CandidateMeasurement] = None
+    best_blockregion_severe_g6: Optional[CandidateMeasurement] = None
     blockregion_severe_g6_floor_breach = False
     blockregion_material_buyback = False
     best_valid_hold_fraction = _objective_hold_fraction(attack_config)
@@ -1715,13 +1762,16 @@ def run_family_attack(
                 baseline_score=baseline_score,
             )
             if _is_blockregion_candidate(proposed):
-                blockregion_severe_g6_floor_breach = (
-                    blockregion_severe_g6_floor_breach
-                    or proposed.gate_verdict.severe_g6_floor_breach
-                )
-                blockregion_material_buyback = blockregion_material_buyback or (
+                proposed_severe_g6 = proposed.gate_verdict.severe_g6_floor_breach
+                proposed_material_buyback = (
                     proposed.gate_verdict.tier1_only_drop >= TIER1_ONLY_MATERIALITY_DROP
                     and proposed.two_layout_buyback >= TWO_LAYOUT_BUYBACK_BAR
+                )
+                blockregion_severe_g6_floor_breach = (
+                    blockregion_severe_g6_floor_breach or proposed_severe_g6
+                )
+                blockregion_material_buyback = (
+                    blockregion_material_buyback or proposed_material_buyback
                 )
                 if (
                     best_blockregion is None
@@ -1729,6 +1779,18 @@ def run_family_attack(
                     > best_blockregion.gate_verdict.tier1_only_drop
                 ):
                     best_blockregion = proposed
+                if proposed_material_buyback and (
+                    best_blockregion_material_buyback is None
+                    or proposed.gate_verdict.tier1_only_drop
+                    > best_blockregion_material_buyback.gate_verdict.tier1_only_drop
+                ):
+                    best_blockregion_material_buyback = proposed
+                if proposed_severe_g6 and (
+                    best_blockregion_severe_g6 is None
+                    or proposed.primary_faithfulness_drop
+                    > best_blockregion_severe_g6.primary_faithfulness_drop
+                ):
+                    best_blockregion_severe_g6 = proposed
             objective_gain = proposed.objective - current.objective
             accept = objective_gain >= 0.0 or rng.random() < math.exp(
                 max(-700.0, objective_gain / max(1.0e-12, temperature))
@@ -1766,13 +1828,25 @@ def run_family_attack(
         blockregion_severe_g6_floor_breach,
     )
     published_verdict = GG3_VERDICT_BLOCK if aggregate_decision_blocked else gate_verdict.verdict
+    reporting_candidate = best_valid
+    if aggregate_decision_blocked:
+        reporting_candidate = (
+            best_blockregion_material_buyback
+            or best_blockregion_severe_g6
+            or best_blockregion
+            or best_valid
+        )
+        gate_verdict = reporting_candidate.gate_verdict
     sol_variant_blocked = _sol_variant_blocked(
         shape_distance=best_valid.shape_distance,
         aggregate_delta_points=aggregate_drop_points,
         faithfulness_drop=best_valid.primary_faithfulness_drop,
     )
-    buyback_decomposition = two_layout_buyback_decomposition(baseline_result, best_valid.result)
-    margin_flag, margin, margin_allowance = _margin_audit(best_valid.result, probe.family)
+    buyback_decomposition = two_layout_buyback_decomposition(
+        baseline_result,
+        reporting_candidate.result,
+    )
+    margin_flag, margin, margin_allowance = _margin_audit(reporting_candidate.result, probe.family)
     return AttackResult(
         family=probe.family,
         objective_mode=attack_config.objective_mode,
@@ -1792,7 +1866,7 @@ def run_family_attack(
         blockregion_aggregate_delta_fraction=blockregion_aggregate_delta_fraction,
         blockregion_primary_faithfulness_drop=blockregion_primary_faithfulness_drop,
         blockregion_severe_g6_floor_breach=blockregion_severe_g6_floor_breach,
-        buyback_headroom=best_valid.buyback_headroom,
+        buyback_headroom=reporting_candidate.buyback_headroom,
         two_layout_buyback=buyback_decomposition["buyback"],
         buyback_pass_through=buyback_decomposition["pass_through"],
         tiered_drop=buyback_decomposition["tiered_drop"],
@@ -1801,10 +1875,10 @@ def run_family_attack(
         margin_audit_allowance=margin_allowance,
         severe_g6_floor_breach=gate_verdict.severe_g6_floor_breach,
         degenerate_escape=gate_verdict.degenerate_escape,
-        fooled_facets=fooled_facets(baseline_result, best_valid.result)
+        fooled_facets=fooled_facets(baseline_result, reporting_candidate.result)
         if aggregate_decision_blocked
         else (),
-        gaining_facets=gaining_facets(baseline_result, best_valid.result),
+        gaining_facets=gaining_facets(baseline_result, reporting_candidate.result),
         best_positions=best_valid.positions,
     )
 

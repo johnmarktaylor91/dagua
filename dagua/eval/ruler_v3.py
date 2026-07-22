@@ -89,6 +89,7 @@ EDGE_LENGTH_RATIO_LO = 0.75
 EDGE_LENGTH_RATIO_HI = 16.0
 C2_ANGLE_COST_MIN = 0.5
 C2_ANGLE_COST_MAX = 1.5
+C2_ANGLE_REFINEMENT_STEP_FRACTION = 0.49
 C4_CLEARANCE_BAND_NODE_DIAGONALS = 0.5
 
 
@@ -656,6 +657,9 @@ def angle_weighted_crossing_score(
             "crossing_angle_weight_mean": 0.0,
             "crossing_angle_weight_min": C2_ANGLE_COST_MIN,
             "crossing_angle_weight_max": C2_ANGLE_COST_MAX,
+            "crossing_count_base_score": 1.0,
+            "crossing_angle_refinement": 0.0,
+            "crossing_angle_refinement_budget": 0.0,
             "edge_crossing_score": 1.0,
             "edge_crossing_score_se": 0.0,
         }
@@ -674,11 +678,15 @@ def angle_weighted_crossing_score(
         else:
             weighted_estimated_total = weighted_rate * eligible_pairs
         crossing_estimated_total = int(rate * eligible_pairs)
-        denominator = float(c_max)
-        # The denominator remains the frozen degree-corrected crossing capacity:
-        # the pre-registered [0.5, 1.5] angle term is the new per-crossing cost,
-        # while the separate log-size aggregate multiplier stays unchanged.
-        score = 1.0 - math.sqrt(min(1.0, weighted_estimated_total / denominator))
+        count_capacity = max(1, int(max(float(c_max), eligible_pairs)))
+        base_score = _c2_count_base_score(crossing_estimated_total)
+        refinement_budget = _c2_angle_refinement_budget(count_capacity)
+        angle_badness = _c2_angle_badness_from_weight_mean(weight_mean)
+        # Crossing count is the lexicographic term. The total angle penalty is
+        # bounded below one count step, so angles can only refine equal-count
+        # layouts and cannot buy back an added crossing.
+        angle_refinement = refinement_budget * angle_badness
+        score = base_score - angle_refinement
         return {
             "crossing_rate": rate,
             "crossing_se": 0.0,
@@ -691,6 +699,9 @@ def angle_weighted_crossing_score(
             "crossing_angle_weight_mean": weight_mean,
             "crossing_angle_weight_min": C2_ANGLE_COST_MIN,
             "crossing_angle_weight_max": C2_ANGLE_COST_MAX,
+            "crossing_count_base_score": base_score,
+            "crossing_angle_refinement": angle_refinement,
+            "crossing_angle_refinement_budget": refinement_budget,
             "edge_crossing_score": max(0.0, min(1.0, score)),
             "edge_crossing_score_se": 0.0,
         }
@@ -706,9 +717,68 @@ def angle_weighted_crossing_score(
         "crossing_angle_weight_mean": weight_mean,
         "crossing_angle_weight_min": C2_ANGLE_COST_MIN,
         "crossing_angle_weight_max": C2_ANGLE_COST_MAX,
+        "crossing_count_base_score": 1.0,
+        "crossing_angle_refinement": 0.0,
+        "crossing_angle_refinement_budget": 0.0,
         "edge_crossing_score": 1.0,
         "edge_crossing_score_se": 0.0,
     }
+
+
+def _c2_count_base_score(crossing_count: int) -> float:
+    """Return the strictly count-monotone C2 base score.
+
+    Parameters
+    ----------
+    crossing_count : int
+        Estimated total number of non-adjacent edge crossings.
+
+    Returns
+    -------
+    float
+        Positive score in ``(0, 1]`` that strictly decreases for every added
+        crossing and never saturates at a neutral floor.
+    """
+    return 1.0 / (1.0 + max(0, int(crossing_count)))
+
+
+def _c2_angle_refinement_budget(count_capacity: int) -> float:
+    """Return the total C2 angle-refinement budget for one graph.
+
+    Parameters
+    ----------
+    count_capacity : int
+        Upper bound on eligible crossing pairs for the graph.
+
+    Returns
+    -------
+    float
+        A budget strictly smaller than the smallest one-crossing step of
+        ``_c2_count_base_score`` over the graph's crossing-count range.
+    """
+    capped_capacity = max(1, int(count_capacity))
+    smallest_count_step = 1.0 / (float(capped_capacity) * float(capped_capacity + 1))
+    return C2_ANGLE_REFINEMENT_STEP_FRACTION * smallest_count_step
+
+
+def _c2_angle_badness_from_weight_mean(weight_mean: float) -> float:
+    """Return normalized C2 shallow-angle badness from the mean angle cost.
+
+    Parameters
+    ----------
+    weight_mean : float
+        Mean crossing angle cost in ``[C2_ANGLE_COST_MIN, C2_ANGLE_COST_MAX]``.
+
+    Returns
+    -------
+    float
+        ``0`` for near-perpendicular crossings and ``1`` for the shallowest
+        crossings represented by the V3 angle-cost band.
+    """
+    span = C2_ANGLE_COST_MAX - C2_ANGLE_COST_MIN
+    if span <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, (float(weight_mean) - C2_ANGLE_COST_MIN) / span))
 
 
 def _crossing_angle_costs(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
@@ -1271,6 +1341,8 @@ def _smooth_clearance_occlusion_score(
         }
     penalties: List[float] = []
     mean_diag = _mean_node_diagonal(sizes)
+    # NOTE-FOR-REVIEW: this O(N^2) Python loop is a corpus-phase perf target;
+    # vectorize only with a bit-identical pre-freeze proof.
     band = max(1.0e-12, C4_CLEARANCE_BAND_NODE_DIAGONALS * mean_diag)
     centers_cpu = _ensure_cpu(centers).to(dtype=torch.float64)
     sizes_cpu = _ensure_cpu(sizes).to(dtype=torch.float64)
