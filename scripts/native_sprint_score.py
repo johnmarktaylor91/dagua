@@ -1008,6 +1008,7 @@ def score_position(
                 "v3_coverage": dict(result.coverage),
             },
             "v3_tiered": float(result.scores["tiered"]),
+            "v3_tiered_linear": float(result.scores["tiered_linear"]),
             "v3_equal": float(result.scores["equal"]),
             "v3_tier1_only": float(result.scores["tier1_only"]),
             "v3_referee_eligibility_key": list(eligibility_key),
