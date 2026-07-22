@@ -241,9 +241,29 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
     ),
     "margin_audit_tripwire": FrozenConstant(
         name="margin_audit_tripwire",
-        value={"family_envelope": "p95_honest_margin_plus_1", "fallback": 12.2},
-        source="scripts/ceremony_sa_attack.py:_load_margin_envelopes",
-        note="Score-neutral flag for tiered-minus-tier1 margin beyond family honest envelope.",
+        value={
+            "family_envelope": "p95_honest_margin_plus_1",
+            "fallback": 12.2209,
+            "softmin_tau": 1.0,
+            "de_ramped_tier1_instrument": True,
+            "A_f": {
+                "weighted": 8.5915,
+                "clustered": 9.3004,
+                "dag": 7.7785,
+                "generic_force": 10.6493,
+                "tree": 12.2476,
+                "ported": 2.8026,
+            },
+        },
+        source=(
+            "dagua/eval/ruler_v3.py:FAMILY_MARGIN_ALLOWANCES/FAMILY_SOFTMIN_TAU; "
+            "scripts/ceremony_sa_attack.py:_load_margin_envelopes"
+        ),
+        note=(
+            "Family-normalized softmin cap over tiered vs tier1_only + A_f. "
+            "A_f was re-frozen on the de-ramped Tier-1 measurement instrument; "
+            "only weighted moved from 9.5072 to 8.5915."
+        ),
     ),
     "g7_port_and_route_thresholds": FrozenConstant(
         name="g7_port_and_route_thresholds",

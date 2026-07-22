@@ -523,11 +523,11 @@ def test_doc4_no_impute_and_g1_weighted_renormalization() -> None:
     assert with_g1.facets["G1_depth_order"].metadata["diagnostic_only"] is True
     values = {code: facet.score for code, facet in with_g1.facets.items()}
     weights = {code: facet.effective_weight for code, facet in with_g1.facets.items()}
-    assert with_g1.scores["tiered"] == pytest.approx(renormalized_score(values, weights))
+    assert with_g1.scores["tiered_linear"] == pytest.approx(renormalized_score(values, weights))
     directed_only_weights = {
         code: weight for code, weight in weights.items() if code != "G1_depth_order"
     }
-    assert with_g1.scores["tiered"] == pytest.approx(
+    assert with_g1.scores["tiered_linear"] == pytest.approx(
         renormalized_score(values, directed_only_weights)
     )
 
@@ -550,7 +550,7 @@ def test_doc4_no_impute_for_g2_and_g4_rows() -> None:
     assert not any(code.startswith("G2_") for code in tree_result.facets)
     values = {code: facet.score for code, facet in tree_result.facets.items()}
     weights = {code: facet.effective_weight for code, facet in tree_result.facets.items()}
-    assert tree_result.scores["tiered"] == pytest.approx(renormalized_score(values, weights))
+    assert tree_result.scores["tiered_linear"] == pytest.approx(renormalized_score(values, weights))
 
     cluster_pos, cluster_edges, cluster_sizes, cluster_meta = _cluster_probe()
     cluster_result = score_core_v3(
@@ -564,7 +564,9 @@ def test_doc4_no_impute_for_g2_and_g4_rows() -> None:
     assert not any(code.startswith("G4_") for code in cluster_result.facets)
     values = {code: facet.score for code, facet in cluster_result.facets.items()}
     weights = {code: facet.effective_weight for code, facet in cluster_result.facets.items()}
-    assert cluster_result.scores["tiered"] == pytest.approx(renormalized_score(values, weights))
+    assert cluster_result.scores["tiered_linear"] == pytest.approx(
+        renormalized_score(values, weights)
+    )
 
 
 def test_doc4_no_impute_for_plain_graph_g5_g7_absent() -> None:
@@ -585,7 +587,7 @@ def test_doc4_no_impute_for_plain_graph_g5_g7_absent() -> None:
     assert not any(code.startswith("G7_") for code in result.facets)
     values = {code: facet.score for code, facet in result.facets.items()}
     weights = {code: facet.effective_weight for code, facet in result.facets.items()}
-    assert result.scores["tiered"] == pytest.approx(renormalized_score(values, weights))
+    assert result.scores["tiered_linear"] == pytest.approx(renormalized_score(values, weights))
 
 
 @pytest.mark.parametrize("alpha", [0.1, 10.0, 50.0])
