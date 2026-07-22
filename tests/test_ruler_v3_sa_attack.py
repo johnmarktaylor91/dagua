@@ -31,6 +31,7 @@ from scripts.ceremony_sa_attack import (
     eligibility_surface_abuse_check,
     format_attack_the_fix_table,
     format_results_table,
+    pool_level_eligibility_check,
     primary_faithfulness_drop,
     probe_by_family,
     procrustes_shape_distance,
@@ -1348,10 +1349,10 @@ def test_attack_the_fix_modes_are_registered() -> None:
         assert isinstance(value, float)
 
 
-def test_condition5_survival_reports_same_blockregion_row(
+def test_condition5_survival_blocks_pair_ineligible_blockregion_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Assert attack results publish row-local condition-5 survival metrics.
+    """Assert pair-aware ineligibility prevents condition-5 survival.
 
     Parameters
     ----------
@@ -1470,7 +1471,7 @@ def test_condition5_survival_reports_same_blockregion_row(
         score_config=ScoreConfig(),
     )
 
-    assert result.blockregion_survives_condition5
+    assert not result.blockregion_survives_condition5
     assert result.max_blockregion_tier1_only_drop == pytest.approx(6.0)
     assert result.blockregion_two_layout_buyback == pytest.approx(4.0)
     assert torch.equal(result.blockregion_positions, result.best_positions)
@@ -1509,6 +1510,20 @@ def test_eligibility_surface_abuse_check_does_not_find_key_failure() -> None:
     assert not eligibility_surface_abuse_check()
 
 
+def test_pool_level_eligibility_check_does_not_find_fallback_abuse() -> None:
+    """Assert mixed and all-breach pools obey eligibility fallback ordering.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    assert not pool_level_eligibility_check()
+
+
 def test_attack_the_fix_battery_formats_max_achievable_rows() -> None:
     """Assert the attack-the-fix aggregation exposes max-achievable numbers.
 
@@ -1535,4 +1550,5 @@ def test_attack_the_fix_battery_formats_max_achievable_rows() -> None:
 
     assert len(results) >= len(ATTACK_THE_FIX_OBJECTIVE_MODES)
     assert "max in-band T1 drop" in table
+    assert "clause-blocked?" in table
     assert "SURVIVING condition-5 hold?" in table
