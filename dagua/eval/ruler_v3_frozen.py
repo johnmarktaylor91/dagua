@@ -207,16 +207,33 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
             "weighted_stress_sources": 200,
             "weighted_stress_targets": 1000,
             "severe_floor": 0.55,
+            "severe_floor_drop": 0.05,
             "soft_floor": 0.60,
             "severe_weight_multiplier": 2.0,
+            "severe_breach_facets": ("G6_weighted_ksm", "G6_local_weight_monotonicity"),
         },
-        source="dagua/eval/ruler_v3_groups.py:WEIGHT_CV_*, LOCAL_WEIGHT_*, G6_WEIGHTED_*",
-        note="Weighted-group graded gate, deterministic budgets, and severe-breach weight ramp.",
+        source=(
+            "dagua/eval/ruler_v3_groups.py:WEIGHT_CV_*, LOCAL_WEIGHT_*, G6_WEIGHTED_*; "
+            "dagua/eval/ruler_v3.py:SEVERE_G6_FACETS/G6_FLOOR_DROP"
+        ),
+        note=(
+            "Weighted-group graded gate, deterministic budgets, severe-breach weight ramp, "
+            "and shared severe-G6 contract surface."
+        ),
+    ),
+    "severe_g6_breach_flag": FrozenConstant(
+        name="severe_g6_breach_flag",
+        value="severe_g6_breach",
+        source="dagua/eval/ruler_v3.py:SEVERE_G6_BREACH_FLAG",
+        note="Score-neutral row flag for the absolute severe declared-weight semantics contract.",
     ),
     "gg3_buyback_gate": FrozenConstant(
         name="gg3_buyback_gate",
         value={"tier1_materiality": 5.0, "buyback_bar": 1.0, "hold_band_fraction": 0.02},
-        source="scripts/ceremony_sa_attack.py:TIER1_ONLY_MATERIALITY_DROP/TWO_LAYOUT_BUYBACK_BAR",
+        source=(
+            "scripts/ceremony_sa_attack.py:TIER1_ONLY_MATERIALITY_DROP/TWO_LAYOUT_BUYBACK_BAR; "
+            "dagua/eval/ruler_v3.py:severe_g6_floor_breach"
+        ),
         note=(
             "BLOCK requires material T1 drop plus two-layout buyback, "
             "or an independent severe G6 breach."
