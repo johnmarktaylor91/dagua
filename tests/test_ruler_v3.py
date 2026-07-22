@@ -10,6 +10,8 @@ import torch
 
 from dagua.eval.ruler_v3 import (
     CORE_TIERS,
+    FAMILY_MARGIN_ALLOWANCES,
+    FAMILY_SOFTMIN_TAU,
     PURE_GEOMETRY_FACETS,
     SEVERE_G6_BREACH_FLAG,
     SEVERE_G6_FACETS,
@@ -19,12 +21,15 @@ from dagua.eval.ruler_v3 import (
     RulerV3Result,
     angle_weighted_crossing_score,
     crossing_weight_multiplier,
+    material_hold_ineligible,
     referee_eligibility_key,
     renormalized_score,
     score_core_v3,
     severe_g6_breach,
     severe_g6_breach_depth,
     severe_g6_floor_breach,
+    sol_declared_weight_subcontract,
+    tier1_measurement_weight,
     tier1_tradeoff_flags,
     with_tier1_tradeoff_flag,
 )
@@ -938,11 +943,11 @@ def test_applicability_renormalization_excludes_missing_facets() -> None:
 
 
 def test_triple_view_composite_and_tier_weights_are_published() -> None:
-    """V3 should publish equal, tiered, and Tier-1-only scoring views."""
+    """V3 should publish capped, audit-linear, equal, and Tier-1-only views."""
     pos, edge_index, node_sizes = _probe_layout()
     result = score_core_v3(pos, edge_index, node_sizes)
 
-    assert set(result.scores) == {"tiered", "equal", "tier1_only"}
+    assert set(result.scores) == {"tiered", "tiered_linear", "equal", "tier1_only"}
     assert result.facets["C1"].base_weight == pytest.approx(4.0)
     assert result.facets["C5"].base_weight == pytest.approx(2.0)
     assert result.facets["C9"].base_weight == pytest.approx(1.0)
@@ -956,6 +961,7 @@ def test_triple_view_composite_and_tier_weights_are_published() -> None:
     assert result.coverage["applicable_facets"] == 10
     assert 0.0 <= result.scores["equal"] <= 100.0
     assert 0.0 <= result.scores["tiered"] <= 100.0
+    assert 0.0 <= result.scores["tiered_linear"] <= 100.0
     assert 0.0 <= result.scores["tier1_only"] <= 100.0
 
 
@@ -994,6 +1000,127 @@ def test_referee_eligibility_key_hard_ineligible_and_least_breach_fallback() -> 
     assert referee_eligibility_key(inapplicable) == (1, -0.0)
 
 
+def test_referee_eligibility_key_all_material_hold_pool_uses_least_breach() -> None:
+    """All-ineligible pair pools fall back to least breach without restoring eligibility."""
+    baseline = _synthetic_tradeoff_result(tiered=100.0, c1_score=1.0)
+    shallow_hold = _synthetic_tradeoff_result(tiered=99.0, c1_score=0.94)
+    deep_hold = _synthetic_tradeoff_result(tiered=99.0, c1_score=0.80)
+
+    shallow_key = referee_eligibility_key(
+        shallow_hold,
+        baseline=baseline,
+        shape_distance=0.40,
+        aggregate_delta_fraction=0.01,
+        two_layout_buyback=1.1,
+    )
+    deep_key = referee_eligibility_key(
+        deep_hold,
+        baseline=baseline,
+        shape_distance=0.40,
+        aggregate_delta_fraction=0.01,
+        two_layout_buyback=1.1,
+    )
+
+    assert material_hold_ineligible(
+        baseline,
+        shallow_hold,
+        shape_distance=0.40,
+        aggregate_delta_fraction=0.01,
+        two_layout_buyback=1.1,
+    )
+    assert shallow_key[0] == 0
+    assert deep_key[0] == 0
+    assert shallow_key > deep_key
+
+
+def test_pair_material_hold_never_outranks_compliant_candidate() -> None:
+    """Pair-aware ineligibility remains a prefix before score tie-breaking."""
+    baseline = _synthetic_tradeoff_result(tiered=100.0, c1_score=1.0)
+    compliant_low_score = _synthetic_tradeoff_result(tiered=1.0, c1_score=0.99)
+    material_hold_high_score = _synthetic_tradeoff_result(tiered=99.0, c1_score=0.90)
+
+    compliant_keyed = (
+        referee_eligibility_key(
+            compliant_low_score,
+            baseline=baseline,
+            shape_distance=0.40,
+            aggregate_delta_fraction=0.01,
+            two_layout_buyback=1.1,
+        ),
+        compliant_low_score.scores["tiered"],
+    )
+    hold_keyed = (
+        referee_eligibility_key(
+            material_hold_high_score,
+            baseline=baseline,
+            shape_distance=0.40,
+            aggregate_delta_fraction=0.01,
+            two_layout_buyback=1.1,
+        ),
+        material_hold_high_score.scores["tiered"],
+    )
+
+    assert compliant_keyed > hold_keyed
+
+
+def test_tier1_measurement_weight_removes_g6_ramp_only_from_instrument() -> None:
+    """G6 severe-ramp pricing stays audit-visible while Tier-1 measurement de-ramps."""
+    facet = RulerV3Facet(
+        code="G6_weighted_ksm",
+        name="weighted_shortest_path_isotonic_ksm",
+        tier=1,
+        score=0.575,
+        base_weight=4.0,
+        effective_weight=6.0,
+        applicable=True,
+        applicability_reason="synthetic",
+        metadata={"severe_weight_ramp": 1.5},
+    )
+    ordinary = RulerV3Facet(
+        code="C1",
+        name="ksm_stress",
+        tier=1,
+        score=0.9,
+        base_weight=4.0,
+        effective_weight=4.0,
+        applicable=True,
+        applicability_reason="synthetic",
+        metadata={},
+    )
+
+    assert tier1_measurement_weight(facet) == pytest.approx(4.0)
+    assert tier1_measurement_weight(ordinary) == pytest.approx(4.0)
+
+
+def test_softmin_cap_publishes_linear_audit_view_and_family_metadata() -> None:
+    """The tiered headline is the family cap and the linear score stays auditable."""
+    pos, edge_index, node_sizes = _probe_layout()
+    result = score_core_v3(
+        pos,
+        edge_index,
+        node_sizes,
+        graph_meta={"ruler_family": "clustered"},
+    )
+    allowance = FAMILY_MARGIN_ALLOWANCES["clustered"]
+    expected = min(result.scores["tiered_linear"], result.scores["tier1_only"] + allowance)
+
+    assert result.metadata["softmin_family"] == "clustered"
+    assert result.metadata["softmin_tau"] == pytest.approx(FAMILY_SOFTMIN_TAU)
+    assert result.scores["tiered"] <= result.scores["tiered_linear"]
+    assert result.scores["tiered"] <= result.scores["tier1_only"] + allowance
+    assert result.scores["tiered"] == pytest.approx(expected, abs=1.0)
+
+
+def test_sol_declared_weight_subcontract_is_named_not_standalone_floor() -> None:
+    """The G6 corridor guard identifies sub-severe baseline-relative damage."""
+    baseline = _g6_result(weighted_ksm=0.70)
+    corridor = _g6_result(weighted_ksm=0.58)
+    tiny_drop = _g6_result(weighted_ksm=0.58)
+
+    assert sol_declared_weight_subcontract(baseline, corridor)
+    assert not sol_declared_weight_subcontract(_g6_result(weighted_ksm=0.61), tiny_drop)
+
+
 def test_severe_g6_flag_plumbing_is_score_neutral() -> None:
     """Absolute severe-G6 breach publishes a row flag without changing composites."""
     pos = torch.tensor(
@@ -1010,6 +1137,7 @@ def test_severe_g6_flag_plumbing_is_score_neutral() -> None:
     assert SEVERE_G6_BREACH_FLAG in result.flags
     assert result.scores == {
         "tiered": result.scores["tiered"],
+        "tiered_linear": result.scores["tiered_linear"],
         "equal": result.scores["equal"],
         "tier1_only": result.scores["tier1_only"],
     }

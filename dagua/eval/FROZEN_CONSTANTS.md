@@ -8,8 +8,10 @@ Phase A updates for the converged GG-3 compensation fix:
 - C8 path continuity is diagnostic-only with effective weight `0.0`.
 - C4 uses a smooth clearance band below `0.5` mean node diagonals and includes labels when label geometry is supplied.
 - G2 compactness gives no credit below `2.0` mean node-diagonal cluster-member spacing.
-- G6 severe-breach ramp is `1.0x` at score `0.60`, linearly increasing to `2.0x` at score `0.55`.
+- G6 severe-breach ramp is `1.0x` at score `0.60`, linearly increasing to `2.0x` at score `0.55`; it remains tiered pricing only and is removed from the `tier1_only` measurement instrument.
 - Severe-G6 declared-weight breach uses the shared facets `G6_weighted_ksm` and `G6_local_weight_monotonicity`, severe floor `0.55`, and GG-3 pair-form floor drop `0.05`.
 - Score-neutral row flag vocabulary includes `severe_g6_breach`.
 - GG-3 BLOCK requires `tier1_only` drop `>= 5.0` and two-layout buyback `>= 1.0`, or an independent severe-G6-floor breach from `dagua.eval.ruler_v3.severe_g6_floor_breach`.
-- Margin audit is score-neutral: flag `tiered - tier1_only > A_f`, where `A_f` is family p95 honest margin plus `1.0`; fallback is `12.2`.
+- Tiered headline uses family-normalized `softmin(tiered_linear, tier1_only + A_f; tau=1.0)`; `tiered_linear` remains published as the audit view.
+- Re-frozen `A_f` envelopes on the de-ramped instrument: weighted `8.5915` (from `9.5072`), clustered `9.3004`, dag `7.7785`, generic_force `10.6493`, tree `12.2476`, ported `2.8026`; fallback is `12.2209`.
+- Margin audit uses the same family p95 honest margin plus `1.0` envelopes as the softmin cap.

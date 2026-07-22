@@ -41,6 +41,21 @@ TIER1_TRADEOFF_AGGREGATE_TOLERANCE_FRACTION = 0.05
 G6_FLOOR_DROP = 0.05
 SEVERE_G6_BREACH_FLAG = "severe_g6_breach"
 SEVERE_G6_FACETS = ("G6_weighted_ksm", "G6_local_weight_monotonicity")
+PAIR_MATERIAL_HOLD_FLAG = "pair_material_hold_ineligible"
+PAIR_MATERIAL_HOLD_SHAPE_DISTANCE = 0.35
+PAIR_MATERIAL_HOLD_AGGREGATE_FRACTION = 0.02
+PAIR_MATERIAL_HOLD_TIER1_DROP = 5.0
+PAIR_MATERIAL_HOLD_BUYBACK = 1.0
+FAMILY_SOFTMIN_TAU = 1.0
+FAMILY_MARGIN_ALLOWANCES: Dict[str, float] = {
+    "weighted": 8.5915,
+    "clustered": 9.3004,
+    "dag": 7.7785,
+    "generic_force": 10.6493,
+    "tree": 12.2476,
+    "ported": 2.8026,
+    "__fallback__": 12.2209,
+}
 
 CORE_TIERS: Dict[str, int] = {
     "C1": 1,
@@ -216,21 +231,149 @@ def severe_g6_floor_breach(
     return False
 
 
-def referee_eligibility_key(result: RulerV3Result) -> Tuple[int, float]:
-    """Return the V3 native-selection eligibility prefix for one layout.
+def referee_eligibility_key(
+    result: RulerV3Result,
+    *,
+    baseline: Optional[RulerV3Result] = None,
+    shape_distance: Optional[float] = None,
+    aggregate_delta_fraction: Optional[float] = None,
+    two_layout_buyback: Optional[float] = None,
+) -> Tuple[int, float]:
+    """Return the V3 native-selection eligibility prefix.
 
     Parameters
     ----------
     result : RulerV3Result
         V3 result to rank.
+    baseline : Optional[RulerV3Result], optional
+        Baseline result for pair-aware condition-5 ineligibility. When absent,
+        the single-layout severe-G6 contract is unchanged.
+    shape_distance : Optional[float], optional
+        Pair shape distance used by the material-hold predicate.
+    aggregate_delta_fraction : Optional[float], optional
+        Absolute tiered-headline movement as a baseline fraction.
+    two_layout_buyback : Optional[float], optional
+        Pair buyback in score points on the de-ramped Tier-1 instrument.
 
     Returns
     -------
     Tuple[int, float]
-        Lexicographic prefix where compliant rows outrank any severe-G6 breach,
-        and all-breaching candidate sets fall back to the least breach depth.
+        Lexicographic prefix where compliant rows outrank ineligible rows, and
+        all-ineligible candidate sets fall back to least breach depth. The
+        optional pair prefix promotes the frozen full condition-5 material hold
+        predicate to ineligibility wherever a baseline pair exists.
     """
+    if material_hold_ineligible(
+        baseline,
+        result,
+        shape_distance=shape_distance,
+        aggregate_delta_fraction=aggregate_delta_fraction,
+        two_layout_buyback=two_layout_buyback,
+    ):
+        return (0, -material_hold_breach_depth(baseline, result))
     return (0 if severe_g6_breach(result) else 1, -severe_g6_breach_depth(result))
+
+
+def material_hold_ineligible(
+    baseline: Optional[RulerV3Result],
+    candidate: RulerV3Result,
+    *,
+    shape_distance: Optional[float],
+    aggregate_delta_fraction: Optional[float],
+    two_layout_buyback: Optional[float],
+) -> bool:
+    """Return whether a pair fires the frozen condition-5 material hold predicate.
+
+    Parameters
+    ----------
+    baseline : Optional[RulerV3Result]
+        Baseline V3 result. ``None`` disables the pair-aware prefix.
+    candidate : RulerV3Result
+        Candidate V3 result to test.
+    shape_distance : Optional[float]
+        Pair shape distance.
+    aggregate_delta_fraction : Optional[float]
+        Absolute tiered-headline movement as a baseline fraction.
+    two_layout_buyback : Optional[float]
+        Pair buyback in score points on the de-ramped Tier-1 instrument.
+
+    Returns
+    -------
+    bool
+        ``True`` only for shape-material, in-band, material Tier-1 drops with
+        material buyback, evaluated against a supplied baseline pair.
+    """
+    if (
+        baseline is None
+        or shape_distance is None
+        or aggregate_delta_fraction is None
+        or two_layout_buyback is None
+    ):
+        return False
+    return (
+        float(shape_distance) >= PAIR_MATERIAL_HOLD_SHAPE_DISTANCE
+        and float(aggregate_delta_fraction) <= PAIR_MATERIAL_HOLD_AGGREGATE_FRACTION
+        and tier1_only_drop(baseline, candidate) >= PAIR_MATERIAL_HOLD_TIER1_DROP
+        and float(two_layout_buyback) >= PAIR_MATERIAL_HOLD_BUYBACK
+    )
+
+
+def material_hold_breach_depth(
+    baseline: Optional[RulerV3Result],
+    candidate: RulerV3Result,
+) -> float:
+    """Return least-breach ordering depth for material-hold ineligibility.
+
+    Parameters
+    ----------
+    baseline : Optional[RulerV3Result]
+        Baseline V3 result for the Tier-1 drop. ``None`` yields zero depth.
+    candidate : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    float
+        Non-negative Tier-1 materiality excess. This is used only to order
+        all-ineligible pools and never restores eligibility.
+    """
+    if baseline is None:
+        return 0.0
+    return max(0.0, tier1_only_drop(baseline, candidate) - PAIR_MATERIAL_HOLD_TIER1_DROP)
+
+
+def sol_declared_weight_subcontract(
+    baseline: RulerV3Result,
+    candidate: RulerV3Result,
+) -> bool:
+    """Return Sol's named G6 declared-weight corridor guard.
+
+    Parameters
+    ----------
+    baseline : RulerV3Result
+        Baseline V3 result.
+    candidate : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    bool
+        ``True`` when any applicable declared-weight facet is below the soft
+        floor but above the severe floor, with at least a 0.05 baseline-relative
+        drop. This named sub-contract is attribution inside the broad
+        condition-5 predicate, not an extra standalone row floor.
+    """
+    for code in SEVERE_G6_FACETS:
+        baseline_score = _applicable_facet_score(baseline, code)
+        candidate_score = _applicable_facet_score(candidate, code)
+        if baseline_score is None or candidate_score is None:
+            continue
+        if (
+            G6_SEVERE_FLOOR <= candidate_score < 0.60
+            and baseline_score - candidate_score >= G6_FLOOR_DROP
+        ):
+            return True
+    return False
 
 
 def tier_weight(tier: int) -> float:
@@ -306,6 +449,54 @@ def renormalized_score(
     if total_weight <= 0.0:
         return 0.0
     return 100.0 * sum(weight * value for weight, value in applicable) / total_weight
+
+
+def tier1_only_drop(
+    baseline: RulerV3Result,
+    candidate: RulerV3Result,
+) -> float:
+    """Return baseline-minus-candidate de-ramped Tier-1 movement.
+
+    Parameters
+    ----------
+    baseline : RulerV3Result
+        Baseline V3 result.
+    candidate : RulerV3Result
+        Candidate V3 result.
+
+    Returns
+    -------
+    float
+        Positive values mean the candidate lost Tier-1 score under the frozen
+        de-ramped measurement instrument.
+    """
+    return float(baseline.scores["tier1_only"]) - float(candidate.scores["tier1_only"])
+
+
+def tier1_measurement_weight(facet: RulerV3Facet) -> float:
+    """Return a facet weight for the de-ramped Tier-1 instrument.
+
+    Parameters
+    ----------
+    facet : RulerV3Facet
+        Facet publication record.
+
+    Returns
+    -------
+    float
+        Effective weight with the G6 severe-ramp multiplier removed for the
+        measurement instrument. Tiered pricing continues to use
+        ``facet.effective_weight`` unchanged.
+    """
+    ramp = 1.0
+    if facet.code in SEVERE_G6_FACETS and isinstance(facet.metadata, Mapping):
+        try:
+            ramp = float(facet.metadata.get("severe_weight_ramp", 1.0))
+        except (TypeError, ValueError):
+            ramp = 1.0
+    if not math.isfinite(ramp) or ramp <= 0.0:
+        ramp = 1.0
+    return float(facet.effective_weight) / ramp
 
 
 def score_core_v3(
@@ -458,7 +649,7 @@ def score_core_v3(
     )
     group_results = evaluate_conditional_groups(positions, edges, sizes, graph_meta)
     facets = _merge_conditional_group_facets(facets, group_results)
-    scores = _triple_view_scores(facets)
+    scores = _triple_view_scores(facets, graph_meta)
     flags = _row_flags(
         degenerate_scale=degenerate_scale,
         occlusion_score=raw_scores["C4"],
@@ -484,6 +675,8 @@ def score_core_v3(
             "num_edges": int(edges.shape[1]) if edges.numel() else 0,
             "frozen_constants_manifest": "dagua.eval.ruler_v3_frozen.FROZEN_CONSTANTS",
             "frozen_constant_count": len(FROZEN_CONSTANTS),
+            "softmin_family": _score_family(facets, graph_meta),
+            "softmin_tau": FAMILY_SOFTMIN_TAU,
             "default_node_sizes": used_default_sizes,
             "node_diag_mean": node_diag_mean,
             "edge_length_mean": float(length_stats["edge_length_mean"]),
@@ -2413,13 +2606,19 @@ def _merge_conditional_group_facets(
     return facets
 
 
-def _triple_view_scores(facets: Mapping[str, RulerV3Facet]) -> Dict[str, float]:
-    """Compute equal, tiered, and Tier-1-only composite views.
+def _triple_view_scores(
+    facets: Mapping[str, RulerV3Facet],
+    graph_meta: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, float]:
+    """Compute equal, capped tiered, linear tiered, and Tier-1-only views.
 
     Parameters
     ----------
     facets : Mapping[str, RulerV3Facet]
         Facet publication records keyed by V3 facet code.
+    graph_meta : Optional[Mapping[str, Any]], optional
+        Declared graph metadata used only to identify the family envelope for
+        the pre-registered softmin cap.
 
     Returns
     -------
@@ -2430,13 +2629,88 @@ def _triple_view_scores(facets: Mapping[str, RulerV3Facet]) -> Dict[str, float]:
     tiered_weights = {code: facet.effective_weight for code, facet in facets.items()}
     equal_weights = _equal_view_weights(facets)
     tier1_weights = {
-        code: facet.effective_weight for code, facet in facets.items() if facet.tier == 1
+        code: tier1_measurement_weight(facet) for code, facet in facets.items() if facet.tier == 1
     }
+    tiered_linear = renormalized_score(values, tiered_weights)
+    tier1_only = renormalized_score(values, tier1_weights)
+    family = _score_family(facets, graph_meta)
+    allowance = FAMILY_MARGIN_ALLOWANCES.get(
+        family,
+        FAMILY_MARGIN_ALLOWANCES["__fallback__"],
+    )
+    tiered_capped = _family_softmin(
+        tiered_linear,
+        tier1_only + allowance,
+        tau=FAMILY_SOFTMIN_TAU,
+    )
     return {
-        "tiered": renormalized_score(values, tiered_weights),
+        "tiered": tiered_capped,
+        "tiered_linear": tiered_linear,
         "equal": renormalized_score(values, equal_weights),
-        "tier1_only": renormalized_score(values, tier1_weights),
+        "tier1_only": tier1_only,
     }
+
+
+def _family_softmin(first: float, second: float, *, tau: float) -> float:
+    """Return a numerically stable two-way soft minimum.
+
+    Parameters
+    ----------
+    first : float
+        First score candidate.
+    second : float
+        Second score candidate.
+    tau : float
+        Softmin temperature in score points.
+
+    Returns
+    -------
+    float
+        ``softmin(first, second; tau)``. Non-positive ``tau`` falls back to the
+        exact minimum.
+    """
+    if tau <= 0.0:
+        return min(float(first), float(second))
+    low = min(float(first), float(second))
+    high = max(float(first), float(second))
+    return low - float(tau) * math.log1p(math.exp(-(high - low) / float(tau)))
+
+
+def _score_family(
+    facets: Mapping[str, RulerV3Facet],
+    graph_meta: Optional[Mapping[str, Any]] = None,
+) -> str:
+    """Infer the frozen family envelope key for one scored row.
+
+    Parameters
+    ----------
+    facets : Mapping[str, RulerV3Facet]
+        Facet publication records.
+    graph_meta : Optional[Mapping[str, Any]], optional
+        Declared graph metadata. Explicit ``family`` or ``ruler_family`` values
+        take precedence when supplied by corpus tooling.
+
+    Returns
+    -------
+    str
+        One of the frozen A_f family keys.
+    """
+    meta = {} if graph_meta is None else graph_meta
+    for key in ("ruler_family", "family", "v3_family"):
+        value = meta.get(key)
+        if isinstance(value, str) and value in FAMILY_MARGIN_ALLOWANCES:
+            return value
+    if any(code.startswith("G7_") for code in facets):
+        return "ported"
+    if any(code.startswith("G6_") for code in facets):
+        return "weighted"
+    if any(code.startswith("G4_") for code in facets):
+        return "tree"
+    if any(code.startswith("G2_") or code.startswith("G3_") for code in facets):
+        return "clustered"
+    if any(code.startswith("G1_") for code in facets):
+        return "dag"
+    return "generic_force"
 
 
 def _equal_view_weights(facets: Mapping[str, RulerV3Facet]) -> Dict[str, float]:
@@ -2583,6 +2857,9 @@ __all__ = [
     "RulerV3Facet",
     "RulerV3Result",
     "G6_FLOOR_DROP",
+    "FAMILY_MARGIN_ALLOWANCES",
+    "FAMILY_SOFTMIN_TAU",
+    "PAIR_MATERIAL_HOLD_FLAG",
     "SEVERE_G6_BREACH_FLAG",
     "SEVERE_G6_FACETS",
     "SPRAWL_RATIO_FACTOR",
@@ -2593,6 +2870,7 @@ __all__ = [
     "composite_v3",
     "crossing_angle_90_score",
     "crossing_weight_multiplier",
+    "material_hold_ineligible",
     "multi_radius_neighborhood_preservation",
     "renormalized_score",
     "referee_eligibility_key",
@@ -2600,6 +2878,9 @@ __all__ = [
     "severe_g6_breach",
     "severe_g6_breach_depth",
     "severe_g6_floor_breach",
+    "sol_declared_weight_subcontract",
+    "tier1_measurement_weight",
+    "tier1_only_drop",
     "tier1_tradeoff_flags",
     "tier_weight",
     "with_tier1_tradeoff_flag",
