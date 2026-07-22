@@ -9,6 +9,7 @@ from typing import Tuple
 import pytest
 import torch
 
+import scripts.ceremony_sa_attack as sa_attack
 from dagua.eval.ruler_v3 import RulerV3Facet, RulerV3Result
 from scripts.ceremony_sa_attack import (
     AGGREGATE_TOLERANCE_FRACTION,
@@ -25,6 +26,7 @@ from scripts.ceremony_sa_attack import (
     _gg3_gate_verdict,
     _objective,
     build_probe_families,
+    format_results_table,
     primary_faithfulness_drop,
     procrustes_shape_distance,
     run_all_attacks,
@@ -52,7 +54,7 @@ SAVED_GG3_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_fresh"
 
 def _result_signature(
     result: AttackResult,
-) -> Tuple[str, float, float, float, bool, float, bool, bool, Tuple[str, ...]]:
+) -> Tuple[object, ...]:
     """Return the deterministic fields compared by the tests.
 
     Parameters
@@ -67,6 +69,8 @@ def _result_signature(
     """
     return (
         result.family,
+        result.objective_mode,
+        result.seed,
         result.best_score,
         result.best_shape_distance,
         result.aggregate_delta_fraction,
@@ -76,6 +80,12 @@ def _result_signature(
         result.tier1_tradeoff,
         result.gate_verdict,
         result.tier1_only_drop,
+        result.max_blockregion_tier1_only_drop,
+        result.blockregion_shape_distance,
+        result.blockregion_aggregate_delta_fraction,
+        result.blockregion_primary_faithfulness_drop,
+        result.blockregion_severe_g6_floor_breach,
+        result.buyback_headroom,
         result.severe_g6_floor_breach,
         result.degenerate_escape,
         result.fooled_facets,
@@ -324,6 +334,10 @@ def test_gg3_diagnostics_writes_requested_artifacts(tmp_path: Path) -> None:
     assert set(payload) >= {"baseline", "morph", "decomposition"}
     assert {"tiered", "equal", "tier1_only"} <= set(payload["morph"]["scores"])
     assert any(record["code"] == "C1" for record in payload["morph"]["facets"])
+    assert payload["attack"]["max_blockregion_tier1_only_drop"] == pytest.approx(
+        result.max_blockregion_tier1_only_drop
+    )
+    assert "max block-region T1 drop" in format_results_table(results)
 
 
 def test_joint_gg3_gate_saved_generic_force_passes_with_t1_tradeoff() -> None:
@@ -517,8 +531,212 @@ def test_retargeted_objective_modes_are_wired_and_distinct() -> None:
     assert g6_value != pytest.approx(shape_value)
 
 
-def test_tier1_loss_objective_bounded_smoke_improves_over_identity() -> None:
-    """Run a tiny retargeted SA smoke and assert T1 loss beats identity.
+def _synthetic_square_probe() -> ProbeFamily:
+    """Return a compact square probe for monkeypatched SA candidate tests.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    ProbeFamily
+        Four-node square probe with non-degenerate baseline geometry.
+    """
+    return ProbeFamily(
+        family="generic_force",
+        pos=torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            dtype=torch.float64,
+        ),
+        edges=torch.tensor([[0, 1, 2], [1, 3, 3]], dtype=torch.int64),
+        sizes=torch.ones((4, 2), dtype=torch.float64) * 0.1,
+        meta={},
+    )
+
+
+def test_tier1_loss_reports_in_band_constrained_best(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assert 5% exploratory candidates cannot suppress the 2% held best.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest monkeypatch fixture.
+
+    Returns
+    -------
+    None
+    """
+    probe = _synthetic_square_probe()
+    in_band = probe.pos.detach().clone()
+    in_band[1, 0] = 2.0
+    out_of_band = probe.pos.detach().clone()
+    out_of_band[1, 0] = 3.0
+    proposals = iter((in_band, out_of_band))
+
+    def fake_propose_positions(
+        current: torch.Tensor,
+        reference: torch.Tensor,
+        rng: object,
+        temperature: float,
+    ) -> torch.Tensor:
+        """Return the next scripted proposal.
+
+        Parameters
+        ----------
+        current : torch.Tensor
+            Current positions with shape ``[N, 2]``.
+        reference : torch.Tensor
+            Baseline positions with shape ``[N, 2]``.
+        rng : object
+            Unused deterministic RNG.
+        temperature : float
+            Unused SA temperature.
+
+        Returns
+        -------
+        torch.Tensor
+            Scripted candidate positions.
+        """
+        del current, reference, rng, temperature
+        return next(proposals)
+
+    def fake_score_probe(
+        scored_probe: ProbeFamily,
+        positions: torch.Tensor,
+        score_config: ScoreConfig,
+    ) -> RulerV3Result:
+        """Return synthetic scores keyed by the scripted candidate.
+
+        Parameters
+        ----------
+        scored_probe : ProbeFamily
+            Probe being scored.
+        positions : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+        score_config : ScoreConfig
+            Unused score budget.
+
+        Returns
+        -------
+        RulerV3Result
+            Synthetic V3 result.
+        """
+        del scored_probe, score_config
+        marker = float(positions[1, 0].item())
+        if abs(marker - 2.0) < 1.0e-12:
+            return _synthetic_result(tiered=98.0, tier1_only=94.0, c1=0.9, c3=0.85)
+        if abs(marker - 3.0) < 1.0e-12:
+            return _synthetic_result(tiered=97.0, tier1_only=80.0, c1=0.9, c3=0.85)
+        return _synthetic_result(tiered=100.0, tier1_only=100.0, c1=0.9, c3=0.95)
+
+    monkeypatch.setattr(sa_attack, "_propose_positions", fake_propose_positions)
+    monkeypatch.setattr(sa_attack, "_score_probe", fake_score_probe)
+    result = run_family_attack(
+        probe,
+        seed=1,
+        attack_config=AttackConfig(iterations=2, restarts=1, objective_mode="tier1_loss"),
+        score_config=ScoreConfig(),
+    )
+    assert result.aggregate_delta_fraction == pytest.approx(0.02)
+    assert result.tier1_only_drop == pytest.approx(6.0)
+    assert result.max_blockregion_tier1_only_drop == pytest.approx(6.0)
+    assert result.blockregion_aggregate_delta_fraction == pytest.approx(0.02)
+    assert result.gate_verdict == GG3_VERDICT_BLOCK
+    assert result.blocked
+
+
+def test_tier1_loss_blockregion_respects_shape_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assert high-drop low-shape candidates are excluded from the deciding max.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Pytest monkeypatch fixture.
+
+    Returns
+    -------
+    None
+    """
+    probe = _synthetic_square_probe()
+    low_shape = probe.pos.detach().clone()
+    low_shape[1, 0] = 1.2
+
+    def fake_propose_positions(
+        current: torch.Tensor,
+        reference: torch.Tensor,
+        rng: object,
+        temperature: float,
+    ) -> torch.Tensor:
+        """Return the scripted low-shape candidate.
+
+        Parameters
+        ----------
+        current : torch.Tensor
+            Current positions with shape ``[N, 2]``.
+        reference : torch.Tensor
+            Baseline positions with shape ``[N, 2]``.
+        rng : object
+            Unused deterministic RNG.
+        temperature : float
+            Unused SA temperature.
+
+        Returns
+        -------
+        torch.Tensor
+            Scripted candidate positions.
+        """
+        del current, reference, rng, temperature
+        return low_shape
+
+    def fake_score_probe(
+        scored_probe: ProbeFamily,
+        positions: torch.Tensor,
+        score_config: ScoreConfig,
+    ) -> RulerV3Result:
+        """Return a high T1 drop candidate below the shape gate.
+
+        Parameters
+        ----------
+        scored_probe : ProbeFamily
+            Probe being scored.
+        positions : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+        score_config : ScoreConfig
+            Unused score budget.
+
+        Returns
+        -------
+        RulerV3Result
+            Synthetic V3 result.
+        """
+        del scored_probe, score_config
+        marker = float(positions[1, 0].item())
+        if abs(marker - 1.2) < 1.0e-12:
+            return _synthetic_result(tiered=99.0, tier1_only=80.0, c1=0.9, c3=0.85)
+        return _synthetic_result(tiered=100.0, tier1_only=100.0, c1=0.9, c3=0.95)
+
+    monkeypatch.setattr(sa_attack, "_propose_positions", fake_propose_positions)
+    monkeypatch.setattr(sa_attack, "_score_probe", fake_score_probe)
+    result = run_family_attack(
+        probe,
+        seed=1,
+        attack_config=AttackConfig(iterations=1, restarts=1, objective_mode="tier1_loss"),
+        score_config=ScoreConfig(),
+    )
+    assert result.best_shape_distance < 0.35
+    assert result.tier1_only_drop == pytest.approx(20.0)
+    assert result.max_blockregion_tier1_only_drop == pytest.approx(0.0)
+    assert result.gate_verdict != GG3_VERDICT_BLOCK
+    assert not result.blocked
+
+
+def test_tier1_loss_bounded_generic_force_retarget_blocks() -> None:
+    """Assert the bounded generic-force retarget trips the GG-3 trapdoor.
 
     Parameters
     ----------
@@ -532,12 +750,9 @@ def test_tier1_loss_objective_bounded_smoke_improves_over_identity() -> None:
     result = run_family_attack(
         probe,
         seed=43,
-        attack_config=AttackConfig(iterations=12, restarts=1, objective_mode="tier1_loss"),
-        score_config=ScoreConfig(
-            crossing_samples=1_000,
-            neighborhood_samples=64,
-            stress_sources=16,
-            stress_targets=64,
-        ),
+        attack_config=AttackConfig(iterations=250, restarts=2, objective_mode="tier1_loss"),
+        score_config=ScoreConfig(),
     )
-    assert result.tier1_only_drop > 0.0
+    assert result.max_blockregion_tier1_only_drop >= 5.0
+    assert result.gate_verdict == GG3_VERDICT_BLOCK
+    assert result.blocked
