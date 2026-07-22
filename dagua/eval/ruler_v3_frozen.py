@@ -46,6 +46,12 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
         source="dagua/eval/ruler_v3.py:crossing_weight_multiplier",
         note="Applied to C2 effective aggregate weight only, not to raw crossing score.",
     ),
+    "c2_angle_weighted_crossing_cost": FrozenConstant(
+        name="c2_angle_weighted_crossing_cost",
+        value={"min": 0.5, "max": 1.5, "best_angle_degrees": 90.0},
+        source="dagua/eval/ruler_v3.py:angle_weighted_crossing_score",
+        note="V3 C2' per-crossing cost; C6 is diagnostic so crossings never add score.",
+    ),
     "c3_graph_distance_radii": FrozenConstant(
         name="c3_graph_distance_radii",
         value=(1, 2, 3),
@@ -82,7 +88,22 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
         name="c6_crossing_angle_ideal_degrees",
         value=90.0,
         source="dagua/eval/ruler_v3.py:crossing_angle_90_score",
-        note="Crossing-angle ideal; zero crossings publish vacuous 1.0.",
+        note="Diagnostic-only crossing-angle ideal; zero crossings publish vacuous 1.0.",
+    ),
+    "diagnostic_core_weights": FrozenConstant(
+        name="diagnostic_core_weights",
+        value={"C2": 6.0, "C6": 0.0, "C8": 0.0},
+        source="dagua/eval/ruler_v3.py:CORE_DIAGNOSTIC_WEIGHTS/CORE_WEIGHT_OVERRIDES",
+        note="C6 folded into C2' weight and formula; C8 retained only as diagnostic.",
+    ),
+    "c4_smooth_clearance_band": FrozenConstant(
+        name="c4_smooth_clearance_band",
+        value={"clearance_band_node_diagonals": 0.5, "label_inclusive_when_supplied": True},
+        source="dagua/eval/ruler_v3.py:_smooth_clearance_occlusion_score",
+        note=(
+            "Smooth C4 clearance debt below half a mean node diagonal, "
+            "label-inclusive when rendered."
+        ),
     ),
     "canonical_node_height_ref": FrozenConstant(
         name="canonical_node_height_ref",
@@ -142,9 +163,14 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
     ),
     "g2_compactness_band": FrozenConstant(
         name="g2_compactness_band",
-        value={"plateau_hi": 8.0, "log_decay": 1.0},
+        value={
+            "plateau_hi": 8.0,
+            "log_decay": 1.0,
+            "legible_spacing_guard": 2.0,
+            "legible_spacing_eps": 1e-12,
+        },
         source="dagua/eval/ruler_v3_groups.py:COMPACTNESS_*",
-        note="Cluster compactness log-ratio band.",
+        note="Cluster compactness log-ratio band with no credit below node-diagonal spacing.",
     ),
     "g4_slot_weights_and_extent_band": FrozenConstant(
         name="g4_slot_weights_and_extent_band",
@@ -172,9 +198,27 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
             "local_node_budget": 512,
             "weighted_stress_sources": 200,
             "weighted_stress_targets": 1000,
+            "severe_floor": 0.55,
+            "soft_floor": 0.60,
+            "severe_weight_multiplier": 2.0,
         },
         source="dagua/eval/ruler_v3_groups.py:WEIGHT_CV_*, LOCAL_WEIGHT_*, G6_WEIGHTED_*",
-        note="Weighted-group graded gate and deterministic budgets.",
+        note="Weighted-group graded gate, deterministic budgets, and severe-breach weight ramp.",
+    ),
+    "gg3_buyback_gate": FrozenConstant(
+        name="gg3_buyback_gate",
+        value={"tier1_materiality": 5.0, "buyback_bar": 1.0, "hold_band_fraction": 0.02},
+        source="scripts/ceremony_sa_attack.py:TIER1_ONLY_MATERIALITY_DROP/TWO_LAYOUT_BUYBACK_BAR",
+        note=(
+            "BLOCK requires material T1 drop plus two-layout buyback, "
+            "or an independent severe G6 breach."
+        ),
+    ),
+    "margin_audit_tripwire": FrozenConstant(
+        name="margin_audit_tripwire",
+        value={"family_envelope": "p95_honest_margin_plus_1", "fallback": 12.2},
+        source="scripts/ceremony_sa_attack.py:_load_margin_envelopes",
+        note="Score-neutral flag for tiered-minus-tier1 margin beyond family honest envelope.",
     ),
     "g7_port_and_route_thresholds": FrozenConstant(
         name="g7_port_and_route_thresholds",

@@ -24,7 +24,6 @@ from dagua.metrics import (
     _deterministic_sample_indices,
     _ensure_cpu,
     angular_resolution_score,
-    edge_crossing_score,
     edge_length_cv,
     edge_length_deviation_score,
     gabriel_score,
@@ -51,6 +50,13 @@ CORE_TIERS: Dict[str, int] = {
     "C8": 2,
     "C9": 3,
     "C10": 3,
+}
+CORE_DIAGNOSTIC_WEIGHTS: Dict[str, float] = {
+    "C6": 0.0,
+    "C8": 0.0,
+}
+CORE_WEIGHT_OVERRIDES: Dict[str, float] = {
+    "C2": TIER_1_WEIGHT + TIER_2_WEIGHT,
 }
 CORE_NAMES: Dict[str, str] = {
     "C1": "ksm_stress",
@@ -81,6 +87,9 @@ WHITESPACE_SPRAWL_DECAY = 1.25
 SPRAWL_RATIO_FACTOR = 4.0
 EDGE_LENGTH_RATIO_LO = 0.75
 EDGE_LENGTH_RATIO_HI = 16.0
+C2_ANGLE_COST_MIN = 0.5
+C2_ANGLE_COST_MAX = 1.5
+C4_CLEARANCE_BAND_NODE_DIAGONALS = 0.5
 
 
 @dataclass(frozen=True)
@@ -257,7 +266,7 @@ def score_core_v3(
         stress_targets=stress_targets,
         all_pairs_dist=all_pairs_dist,
     )
-    c2 = edge_crossing_score(
+    c2 = angle_weighted_crossing_score(
         positions,
         edges,
         n_samples=crossing_samples,
@@ -599,6 +608,182 @@ def crossing_angle_90_score(
         "crossing_angle_n_pairs": int(crossing.numel()),
         "crossing_angle_ideal_degrees": 90.0,
     }
+
+
+def angle_weighted_crossing_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: int = 1_000_000,
+    *,
+    seed: int = 0,
+    _geometry: Optional[Any] = None,
+) -> Dict[str, float]:
+    """Score crossings with V3-owned angle-weighted per-crossing cost.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : int, optional
+        Frozen edge-pair sampling budget.
+    seed : int, optional
+        Frozen sampling seed.
+    _geometry : Optional[Any], optional
+        Optional crossing geometry from the frozen crossing enumerator.
+
+    Returns
+    -------
+    Dict[str, float]
+        Crossing count/cost estimate and C2' score.
+    """
+    geometry = _geometry or _crossing_pair_geometry(pos, edge_index, n_samples=n_samples, seed=seed)
+    p1, p2, p3, p4, crossing = geometry[:5]
+    c_max = _degree_corrected_crossing_max_v3(edge_index, int(pos.shape[0]))
+    crossing_count = int(crossing.sum().item())
+    eligible_pairs = _eligible_pair_estimate(geometry)
+    if c_max <= 0 or int(crossing.numel()) == 0:
+        return {
+            "crossing_rate": 0.0,
+            "crossing_se": 0.0,
+            "crossing_estimated_total": 0,
+            "crossing_n_samples": int(crossing.numel()),
+            "crossing_eligible_pairs": eligible_pairs,
+            "crossing_count": 0,
+            "crossing_c_max": c_max,
+            "crossing_angle_weighted_cost": 0.0,
+            "crossing_angle_weight_mean": 0.0,
+            "crossing_angle_weight_min": C2_ANGLE_COST_MIN,
+            "crossing_angle_weight_max": C2_ANGLE_COST_MAX,
+            "edge_crossing_score": 1.0,
+            "edge_crossing_score_se": 0.0,
+        }
+    if crossing_count == 0:
+        weighted_estimated_total = 0.0
+        weight_mean = 0.0
+    else:
+        first = p2[crossing] - p1[crossing]
+        second = p4[crossing] - p3[crossing]
+        weights = _crossing_angle_costs(first, second)
+        weight_mean = float(weights.mean().item())
+        rate = crossing_count / max(1.0, float(crossing.numel()))
+        weighted_rate = float(weights.sum().item()) / max(1.0, float(crossing.numel()))
+        if bool(getattr(geometry, "pair_space_exhausted")):
+            weighted_estimated_total = float(weights.sum().item())
+        else:
+            weighted_estimated_total = weighted_rate * eligible_pairs
+        crossing_estimated_total = int(rate * eligible_pairs)
+        denominator = float(c_max)
+        # The denominator remains the frozen degree-corrected crossing capacity:
+        # the pre-registered [0.5, 1.5] angle term is the new per-crossing cost,
+        # while the separate log-size aggregate multiplier stays unchanged.
+        score = 1.0 - math.sqrt(min(1.0, weighted_estimated_total / denominator))
+        return {
+            "crossing_rate": rate,
+            "crossing_se": 0.0,
+            "crossing_estimated_total": crossing_estimated_total,
+            "crossing_n_samples": int(crossing.numel()),
+            "crossing_eligible_pairs": eligible_pairs,
+            "crossing_count": crossing_estimated_total,
+            "crossing_c_max": c_max,
+            "crossing_angle_weighted_cost": weighted_estimated_total,
+            "crossing_angle_weight_mean": weight_mean,
+            "crossing_angle_weight_min": C2_ANGLE_COST_MIN,
+            "crossing_angle_weight_max": C2_ANGLE_COST_MAX,
+            "edge_crossing_score": max(0.0, min(1.0, score)),
+            "edge_crossing_score_se": 0.0,
+        }
+    return {
+        "crossing_rate": 0.0,
+        "crossing_se": 0.0,
+        "crossing_estimated_total": 0,
+        "crossing_n_samples": int(crossing.numel()),
+        "crossing_eligible_pairs": eligible_pairs,
+        "crossing_count": 0,
+        "crossing_c_max": c_max,
+        "crossing_angle_weighted_cost": weighted_estimated_total,
+        "crossing_angle_weight_mean": weight_mean,
+        "crossing_angle_weight_min": C2_ANGLE_COST_MIN,
+        "crossing_angle_weight_max": C2_ANGLE_COST_MAX,
+        "edge_crossing_score": 1.0,
+        "edge_crossing_score_se": 0.0,
+    }
+
+
+def _crossing_angle_costs(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    """Return V3 per-crossing costs from crossing angles.
+
+    Parameters
+    ----------
+    first : torch.Tensor
+        First edge direction vectors with shape ``[K, 2]``.
+    second : torch.Tensor
+        Second edge direction vectors with shape ``[K, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Costs in ``[0.5, 1.5]``; near-perpendicular crossings are cheapest.
+    """
+    norms = torch.linalg.vector_norm(first, dim=1) * torch.linalg.vector_norm(second, dim=1)
+    cosine = torch.where(
+        norms > 1e-12,
+        (first * second).sum(dim=1).abs() / norms.clamp(min=1e-12),
+        torch.ones_like(norms),
+    ).clamp(0.0, 1.0)
+    angles = torch.acos(cosine)
+    angle_fraction = torch.clamp(angles / (math.pi / 2.0), 0.0, 1.0)
+    return C2_ANGLE_COST_MAX - (C2_ANGLE_COST_MAX - C2_ANGLE_COST_MIN) * angle_fraction
+
+
+def _degree_corrected_crossing_max_v3(edge_index: torch.Tensor, num_nodes: int) -> int:
+    """Return V3-local degree-corrected crossing capacity.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    int
+        Degree-corrected non-adjacent edge-pair capacity.
+    """
+    edges = _ensure_cpu(edge_index).to(dtype=torch.long)
+    edge_count = int(edges.shape[1]) if edges.numel() else 0
+    degree = torch.zeros(num_nodes, dtype=torch.long)
+    if edges.numel():
+        degree.scatter_add_(0, edges[0], torch.ones(edge_count, dtype=torch.long))
+        degree.scatter_add_(0, edges[1], torch.ones(edge_count, dtype=torch.long))
+    adjacent_pairs = int((degree * (degree - 1) // 2).sum().item())
+    return max(0, edge_count * (edge_count - 1) // 2 - adjacent_pairs)
+
+
+def _eligible_pair_estimate(geometry: Any) -> float:
+    """Return the eligible edge-pair estimate for crossing geometry.
+
+    Parameters
+    ----------
+    geometry : Any
+        Frozen crossing geometry object from ``dagua.metrics``.
+
+    Returns
+    -------
+    float
+        Exact eligible count for exhaustive geometry or sampled estimate.
+    """
+    crossing = geometry.crossing
+    n_valid = int(crossing.numel())
+    if n_valid == 0:
+        return 0.0
+    if bool(getattr(geometry, "pair_space_exhausted")):
+        return float(n_valid)
+    return float(getattr(geometry, "total_pairs")) * (
+        float(n_valid) / float(getattr(geometry, "candidate_pairs"))
+    )
 
 
 def whitespace_sprawl_score(
@@ -1038,10 +1223,80 @@ def _visual_occlusion_score(
         Label-inclusive overlap count and C4 score.
     """
     if label_sizes is None or label_offsets is None:
-        return node_occlusion_score(pos, node_sizes, seed=seed)
-    boxes = _node_visual_boxes(pos, node_sizes, label_sizes, label_offsets)
-    centers, sizes = _boxes_to_centers_sizes(boxes)
-    return node_occlusion_score(centers, sizes, seed=seed)
+        centers, sizes = pos, node_sizes
+        label_inclusive = False
+    else:
+        boxes = _node_visual_boxes(pos, node_sizes, label_sizes, label_offsets)
+        centers, sizes = _boxes_to_centers_sizes(boxes)
+        label_inclusive = True
+    return _smooth_clearance_occlusion_score(
+        centers, sizes, label_inclusive=label_inclusive, seed=seed
+    )
+
+
+def _smooth_clearance_occlusion_score(
+    centers: torch.Tensor,
+    sizes: torch.Tensor,
+    *,
+    label_inclusive: bool,
+    seed: Optional[int],
+) -> Dict[str, float]:
+    """Score C4 with a smooth sub-node-diagonal clearance band.
+
+    Parameters
+    ----------
+    centers : torch.Tensor
+        Visual box centers with shape ``[N, 2]``.
+    sizes : torch.Tensor
+        Visual box sizes with shape ``[N, 2]``.
+    label_inclusive : bool
+        Whether the visual boxes include labels.
+    seed : Optional[int]
+        Frozen seed for the legacy overlap count metadata.
+
+    Returns
+    -------
+    Dict[str, float]
+        C4 score and overlap/clearance diagnostics.
+    """
+    legacy = node_occlusion_score(centers, sizes, seed=seed)
+    count = int(centers.shape[0])
+    if count < 2:
+        return {
+            **legacy,
+            "node_occlusion_score": 1.0,
+            "clearance_penalty": 0.0,
+            "clearance_band_node_diagonals": C4_CLEARANCE_BAND_NODE_DIAGONALS,
+            "label_inclusive": label_inclusive,
+        }
+    penalties: List[float] = []
+    mean_diag = _mean_node_diagonal(sizes)
+    band = max(1.0e-12, C4_CLEARANCE_BAND_NODE_DIAGONALS * mean_diag)
+    centers_cpu = _ensure_cpu(centers).to(dtype=torch.float64)
+    sizes_cpu = _ensure_cpu(sizes).to(dtype=torch.float64)
+    for left in range(count):
+        for right in range(left + 1, count):
+            delta = torch.abs(centers_cpu[left] - centers_cpu[right])
+            gap_xy = delta - (sizes_cpu[left] + sizes_cpu[right]) / 2.0
+            if bool(torch.any(gap_xy > 0.0).item()):
+                positive_gap = torch.clamp(gap_xy, min=0.0)
+                clearance = float(torch.linalg.vector_norm(positive_gap).item())
+                if clearance < band:
+                    # Smooth debt removes the old cliff where nearly touching
+                    # boxes received full C4 credit despite unreadable spacing.
+                    penalties.append((1.0 - clearance / band) ** 2)
+            else:
+                penalties.append(1.0)
+    clearance_penalty = float(sum(penalties))
+    score = 1.0 / (1.0 + 2.0 * clearance_penalty / max(1, count))
+    return {
+        **legacy,
+        "node_occlusion_score": max(0.0, min(1.0, score)),
+        "legacy_node_occlusion_score": float(legacy["node_occlusion_score"]),
+        "clearance_penalty": clearance_penalty,
+        "clearance_band_node_diagonals": C4_CLEARANCE_BAND_NODE_DIAGONALS,
+        "label_inclusive": label_inclusive,
+    }
 
 
 def _node_visual_boxes(
@@ -1899,7 +2154,10 @@ def _build_facets(
     for code in CORE_TIERS:
         score = scores.get(code)
         tier = CORE_TIERS[code]
-        base_weight = tier_weight(tier)
+        base_weight = CORE_DIAGNOSTIC_WEIGHTS.get(
+            code,
+            CORE_WEIGHT_OVERRIDES.get(code, tier_weight(tier)),
+        )
         effective_weight = base_weight
         if code == "C2":
             effective_weight *= crossing_weight_multiplier(num_nodes)
@@ -2113,6 +2371,7 @@ __all__ = [
     "TIER1_TRADEOFF_FLAG",
     "WHITESPACE_RATIO_HI",
     "WHITESPACE_RATIO_LO",
+    "angle_weighted_crossing_score",
     "composite_v3",
     "crossing_angle_90_score",
     "crossing_weight_multiplier",

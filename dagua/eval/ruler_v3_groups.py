@@ -46,6 +46,8 @@ G4_SLOT_A_TOTAL = 5.0
 G4_SLOT_B_TOTAL = 5.0
 COMPACTNESS_RATIO_PLATEAU_HI = 8.0
 COMPACTNESS_LOG_DECAY = 1.0
+COMPACTNESS_LEGIBLE_SPACING_GUARD = 2.0
+COMPACTNESS_LEGIBLE_SPACING_EPS = 1e-12
 TREE_RATIO_PLATEAU_LO = 0.5
 TREE_RATIO_PLATEAU_HI = 2.0
 TREE_RATIO_LOG_DECAY = 1.0
@@ -58,6 +60,9 @@ NONDEGENERATE_WEIGHT_CV = 1e-9
 LOCAL_WEIGHT_MONOTONICITY_NODE_BUDGET = 512
 G6_WEIGHTED_STRESS_SOURCE_BUDGET = 200
 G6_WEIGHTED_STRESS_TARGET_BUDGET = 1000
+G6_SEVERE_FLOOR = 0.55
+G6_SOFT_FLOOR = 0.60
+G6_SEVERE_WEIGHT_MULTIPLIER = 2.0
 
 # Frozen intrinsic-ruler reference. Provenance: DaguaGraph.compute_node_sizes()
 # with the corpus-default NodeStyle (font_size=9.0, padding=(11.0, 9.0),
@@ -1210,19 +1215,26 @@ def _score_g6(
         "weight_cv_gate": cv_gate,
         "invariance": "translation_rotation_reflection_position_scale_and_unit_scale_invariant",
     }
+    ksm_score = float(ksm["weighted_ksm_score"])
+    local_score = float(local["local_weight_monotonicity_score"])
+    ksm_ramp = _g6_severe_weight_ramp(ksm_score)
+    local_ramp = _g6_severe_weight_ramp(local_score)
     facets = {
         "G6_weighted_ksm": GroupFacetScore(
             code="G6_weighted_ksm",
             name="weighted_shortest_path_isotonic_ksm",
             tier=1,
-            score=float(ksm["weighted_ksm_score"]),
+            score=ksm_score,
             base_weight=_tier_weight(1),
-            effective_weight=_tier_weight(1) * cv_gate,
+            effective_weight=_tier_weight(1) * cv_gate * ksm_ramp,
             applicable=True,
             applicability_reason=reason,
             metadata={
                 **common,
                 **ksm,
+                "severe_weight_ramp": ksm_ramp,
+                "severe_floor": G6_SEVERE_FLOOR,
+                "soft_floor": G6_SOFT_FLOOR,
                 "normalization": "aspect-preserving isotonic KSM on weighted APSP distances",
                 "replaces_core": "C1",
             },
@@ -1232,14 +1244,17 @@ def _score_g6(
             code="G6_local_weight_monotonicity",
             name="local_weight_monotonicity",
             tier=3,
-            score=float(local["local_weight_monotonicity_score"]),
+            score=local_score,
             base_weight=_tier_weight(3),
-            effective_weight=_tier_weight(3) * cv_gate,
+            effective_weight=_tier_weight(3) * cv_gate * local_ramp,
             applicable=True,
             applicability_reason=reason,
             metadata={
                 **common,
                 **local,
+                "severe_weight_ramp": local_ramp,
+                "severe_floor": G6_SEVERE_FLOOR,
+                "soft_floor": G6_SOFT_FLOOR,
                 "normalization": "mean incident-edge Spearman remapped as (rho+1)/2",
             },
         ),
@@ -1251,6 +1266,29 @@ def _score_g6(
         facets=facets,
         metadata={"tier_slots": _slot_metadata(GROUP_REGISTRY["G6"].tier_slots), **common},
     )
+
+
+def _g6_severe_weight_ramp(score: float) -> float:
+    """Return the severe-breach G6 effective-weight multiplier.
+
+    Parameters
+    ----------
+    score : float
+        G6 facet score in ``[0, 1]``.
+
+    Returns
+    -------
+    float
+        Linear ramp from ``1x`` at the soft floor to ``2x`` at the severe floor.
+    """
+    if score >= G6_SOFT_FLOOR:
+        return 1.0
+    if score <= G6_SEVERE_FLOOR:
+        return G6_SEVERE_WEIGHT_MULTIPLIER
+    fraction = (G6_SOFT_FLOOR - score) / (G6_SOFT_FLOOR - G6_SEVERE_FLOOR)
+    # G6 encodes declared edge-weight semantics, so breach severity is priced
+    # as a contract violation rather than a discretionary readability bonus.
+    return 1.0 + fraction * (G6_SEVERE_WEIGHT_MULTIPLIER - 1.0)
 
 
 def _score_g5(
@@ -2768,6 +2806,7 @@ def _cluster_log_ratio_compactness(
     boxes_min = positions - sizes / 2.0
     boxes_max = positions + sizes / 2.0
     ratios: list[float] = []
+    spacing_ratios: list[float] = []
     for members in clusters.values():
         valid = [int(index) for index in members if 0 <= int(index) < int(positions.shape[0])]
         if len(valid) < 2:
@@ -2778,6 +2817,7 @@ def _cluster_log_ratio_compactness(
         member_area = float(torch.prod(torch.clamp(sizes[valid], min=1e-12), dim=1).sum().item())
         if member_area > 1e-12:
             ratios.append(cluster_area / member_area)
+            spacing_ratios.append(_cluster_min_spacing_ratio(positions, sizes, valid))
     if not ratios:
         return None, {"cluster_compactness_log_mean_ratio": None, "sample_count": 0}
     # Scores intentionally floor at 0 beyond the 100x log-band cutoff; 100x is maximally bad.
@@ -2792,12 +2832,72 @@ def _cluster_log_ratio_compactness(
         )
         for ratio in ratios
     ]
-    return float(np.mean(scores)), {
+    guarded_scores = [
+        0.0
+        if spacing < COMPACTNESS_LEGIBLE_SPACING_GUARD - COMPACTNESS_LEGIBLE_SPACING_EPS
+        else score
+        for score, spacing in zip(scores, spacing_ratios)
+    ]
+    return float(np.mean(guarded_scores)), {
         "cluster_compactness_log_mean_ratio": float(np.mean(ratios)),
         "cluster_compactness_log_ratios": tuple(float(ratio) for ratio in ratios),
+        "cluster_compactness_min_spacing_ratios": tuple(float(ratio) for ratio in spacing_ratios),
         "sample_count": len(ratios),
         "plateau_hi": COMPACTNESS_RATIO_PLATEAU_HI,
+        "legible_spacing_guard": COMPACTNESS_LEGIBLE_SPACING_GUARD,
     }
+
+
+def _cluster_min_spacing_ratio(
+    positions: torch.Tensor,
+    sizes: torch.Tensor,
+    members: Sequence[int],
+) -> float:
+    """Return minimum cluster-member spacing in node-diagonal units.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+    members : Sequence[int]
+        Valid node indices in one declared cluster.
+
+    Returns
+    -------
+    float
+        Minimum pairwise center distance divided by mean member node diagonal.
+    """
+    if len(members) < 2:
+        return float("inf")
+    member_pos = positions[list(members)]
+    mean_diag = _mean_node_diagonal(sizes[list(members)])
+    min_distance = float("inf")
+    for left in range(len(members)):
+        for right in range(left + 1, len(members)):
+            distance = float(torch.linalg.vector_norm(member_pos[left] - member_pos[right]).item())
+            min_distance = min(min_distance, distance)
+    return min_distance / max(1.0e-12, mean_diag)
+
+
+def _mean_node_diagonal(sizes: torch.Tensor) -> float:
+    """Return mean node-box diagonal length.
+
+    Parameters
+    ----------
+    sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Mean diagonal length, or ``1.0`` for empty input.
+    """
+    if sizes.numel() == 0:
+        return 1.0
+    diagonals = torch.linalg.vector_norm(sizes.to(dtype=torch.float64), dim=1)
+    return max(1.0e-12, float(diagonals.mean().item()))
 
 
 def _tree_forest(edge_index: torch.Tensor, num_nodes: int, meta: Mapping[str, Any]) -> TreeForest:
