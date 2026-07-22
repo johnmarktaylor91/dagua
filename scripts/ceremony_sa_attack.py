@@ -13,12 +13,15 @@ import numpy as np
 import torch
 
 from dagua.eval.ruler_v3 import (
+    FAMILY_MARGIN_ALLOWANCES,
     RulerV3Facet,
     RulerV3Result,
     angle_weighted_crossing_score,
     referee_eligibility_key,
     score_core_v3,
     severe_g6_breach,
+    tier1_measurement_weight,
+    tier1_only_drop,
     tier1_tradeoff_flags,
     with_tier1_tradeoff_flag,
 )
@@ -883,10 +886,7 @@ def _tier1_only_drop(
     float
         Positive values mean T1-only faithfulness dropped.
     """
-    return _score_value(baseline_result, "tier1_only") - _score_value(
-        candidate_result,
-        "tier1_only",
-    )
+    return tier1_only_drop(baseline_result, candidate_result)
 
 
 def _pca_minor_major_ratio(pos: torch.Tensor) -> float:
@@ -1091,12 +1091,24 @@ def _gg3_gate_verdict(
     )
     buyback = two_layout_buyback_decomposition(baseline_result, candidate_result)["buyback"]
     material_buyback = buyback >= TWO_LAYOUT_BUYBACK_BAR
-    blocked = severe_g6_floor_breach or (
-        shape_changed
-        and aggregate_held
-        and material_tier1_loss
-        and material_buyback
-        and not degenerate_escape
+    pair_eligibility = referee_eligibility_key(
+        candidate_result,
+        baseline=baseline_result,
+        shape_distance=shape_distance,
+        aggregate_delta_fraction=aggregate_delta_fraction,
+        two_layout_buyback=buyback,
+    )
+    material_hold_ineligible = pair_eligibility[0] == 0 and not severe_g6_breach(candidate_result)
+    blocked = (
+        severe_g6_floor_breach
+        or (
+            shape_changed
+            and aggregate_held
+            and material_tier1_loss
+            and material_buyback
+            and not degenerate_escape
+        )
+        or (material_hold_ineligible and not degenerate_escape)
     )
     tier1_tradeoff = bool(tier1_tradeoff_flags(baseline_result, candidate_result))
     if blocked:
@@ -1218,7 +1230,7 @@ def _tier1_weight_share(result: RulerV3Result) -> float:
     for facet in result.facets.values():
         if facet.score is None or not bool(facet.applicable):
             continue
-        weight = float(facet.effective_weight)
+        weight = tier1_measurement_weight(facet)
         total += weight
         if int(facet.tier) == 1:
             tier1 += weight
@@ -1333,10 +1345,8 @@ def _load_margin_envelopes() -> Tuple[Dict[str, float], str]:
             for family, margins in by_family.items()
             if margins
         }
-        envelopes["__fallback__"] = (
-            float(np.percentile(all_margins, 99)) if all_margins else MARGIN_AUDIT_FALLBACK
-        )
-        return envelopes, "frozen_corpus_p95_plus_1"
+        envelopes.update(FAMILY_MARGIN_ALLOWANCES)
+        return envelopes, "frozen_corpus_p95_plus_1_with_deramped_family_refreeze"
     except Exception as error:  # pragma: no cover - exercised only when the local store is absent.
         return (
             {"__fallback__": MARGIN_AUDIT_FALLBACK},

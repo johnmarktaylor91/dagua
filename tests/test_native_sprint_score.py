@@ -502,7 +502,12 @@ def test_score_position_v3_merges_scoring_degenerate_flag(
         del args, kwargs
         return RulerV3Result(
             facets={},
-            scores={"tiered": 1.0, "equal": 1.0, "tier1_only": 1.0},
+            scores={
+                "tiered": 1.0,
+                "tiered_linear": 1.0,
+                "equal": 1.0,
+                "tier1_only": 1.0,
+            },
             flags=tuple(),
             applicability={},
             coverage={},
@@ -547,7 +552,12 @@ def test_score_position_v3_publishes_severe_g6_flag_and_eligibility(
         )
         return RulerV3Result(
             facets={"G6_weighted_ksm": facet},
-            scores={"tiered": 10.0, "equal": 20.0, "tier1_only": 30.0},
+            scores={
+                "tiered": 10.0,
+                "tiered_linear": 10.0,
+                "equal": 20.0,
+                "tier1_only": 30.0,
+            },
             flags=("severe_g6_breach",),
             applicability={"G6_weighted_ksm": True},
             coverage={},
