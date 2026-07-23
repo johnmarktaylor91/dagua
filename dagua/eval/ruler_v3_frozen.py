@@ -131,6 +131,24 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
         source="dagua/eval/ruler_v3.py:DEGENERATE_SCALE_RATIO/OCCLUSION_FLOOR_THRESHOLD",
         note="Frozen row-flag thresholds for scale degeneracy and C4 floor.",
     ),
+    "sprawl_collapse_c4_max": FrozenConstant(
+        name="sprawl_collapse_c4_max",
+        value=1.0,
+        source="dagua/eval/ruler_v3.py:SPRAWL_COLLAPSE_C4_MAX",
+        note="SPRAWL_COLLAPSE fires when the SPRAWL flag is set and C4 is below this boundary.",
+    ),
+    "coincident_collapse_radius": FrozenConstant(
+        name="coincident_collapse_radius",
+        value=0.25,
+        source="dagua/eval/ruler_v3.py:COINCIDENT_COLLAPSE_RADIUS",
+        note="Nearest-neighbor radius as a fraction of mean node diagonal for cf.",
+    ),
+    "coincident_collapse_fraction": FrozenConstant(
+        name="coincident_collapse_fraction",
+        value=0.30,
+        source="dagua/eval/ruler_v3.py:COINCIDENT_COLLAPSE_FRACTION",
+        note="Champion-eligibility threshold for COINCIDENT_COLLAPSE row flags.",
+    ),
     "deterministic_seed_default": FrozenConstant(
         name="deterministic_seed_default",
         value=0,
