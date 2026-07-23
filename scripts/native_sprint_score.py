@@ -42,6 +42,9 @@ from dagua.render.mpl import _density_scaled_node_sizes, _layout_extent_pt
 
 TIE_BAND = 0.5
 RULER_SCHEMA = "r8-cluster-extended-v1"
+DEGENERACY_CHAMPION_INELIGIBLE_FLAGS = frozenset(
+    {"DEGENERATE_SCALE", "SPRAWL_COLLAPSE", "COINCIDENT_COLLAPSE"}
+)
 RAW_CACHE_FILENAME = "R8_EVENTA_RAW_SCORES_V1.json"
 LEGACY_FIELD_CACHE_SHA256 = (
     "019c777c64b914e7b402d981378bb6aa4e3216000f5921bbc0184f8f0fe936ee"  # pragma: allowlist secret
@@ -443,6 +446,7 @@ def scoring_signature() -> str:
     root = Path(__file__).resolve().parents[1]
     payload = {
         "ruler_schema": RULER_SCHEMA,
+        "signature_bump": "degen-consume-v1",
         "policy": _FULL_POLICY,
         "source_hashes": {
             "scripts/native_sprint_score.py": sha256_file(
@@ -1017,6 +1021,9 @@ def score_position(
             "v3_tier1_only": float(result.scores["tier1_only"]),
             "v3_referee_eligibility_key": list(eligibility_key),
             "v3_severe_g6_breach": severe_g6_breach(result),
+            "v3_coincident_collapse_fraction": float(
+                result.metadata.get("coincident_collapse_fraction", 0.0)
+            ),
             "v3_facets": _v3_facet_records(result),
             "v3_applicability": dict(result.applicability),
             "v3_row_flags": list(row_flags),
@@ -1383,7 +1390,7 @@ def _selection_key(
     score_key: str,
     *,
     native_selection: bool,
-) -> Tuple[Tuple[int, float], float]:
+) -> Tuple[int, Tuple[int, float], float]:
     """Return the score-neutral row-selection key.
 
     Parameters
@@ -1397,12 +1404,31 @@ def _selection_key(
 
     Returns
     -------
-    Tuple[Tuple[int, float], float]
-        Lexicographic selection key. Native V3 rows use the shared referee
-        eligibility prefix; field rows and non-V3 rows are annotated only.
+    Tuple[int, Tuple[int, float], float]
+        Lexicographic selection key. Degeneracy eligibility applies to both
+        native and field rows; native V3 rows then use the shared severe-G6
+        referee eligibility prefix.
     """
-    eligibility = _row_referee_eligibility_key(row) if native_selection else (1, -0.0)
-    return (eligibility, float(row[score_key]))
+    degeneracy_eligible = _row_degeneracy_eligibility_key(row)
+    referee_eligibility = _row_referee_eligibility_key(row) if native_selection else (1, -0.0)
+    return (degeneracy_eligible, referee_eligibility, float(row[score_key]))
+
+
+def _row_degeneracy_eligibility_key(row: Mapping[str, Any]) -> int:
+    """Return the row-local degeneracy champion eligibility prefix.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Raw score row.
+
+    Returns
+    -------
+    int
+        ``1`` when the row can be selected as champion, otherwise ``0``.
+    """
+    flags = {str(flag) for flag in row.get("v3_row_flags", [])}
+    return int(flags.isdisjoint(DEGENERACY_CHAMPION_INELIGIBLE_FLAGS))
 
 
 def _row_referee_eligibility_key(row: Mapping[str, Any]) -> Tuple[int, float]:

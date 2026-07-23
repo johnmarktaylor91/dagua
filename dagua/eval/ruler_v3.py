@@ -95,6 +95,9 @@ CROSSING_DECAY_S = 0.2
 DEFAULT_NODE_WIDTH = 1.0
 DEFAULT_NODE_HEIGHT = 1.0
 DEGENERATE_SCALE_RATIO = 0.25
+SPRAWL_COLLAPSE_C4_MAX = 1.0
+COINCIDENT_COLLAPSE_RADIUS = 0.25
+COINCIDENT_COLLAPSE_FRACTION = 0.30
 OCCLUSION_FLOOR_THRESHOLD = 0.75
 WHITESPACE_CONTENT_MULTIPLIER = 2.0
 WHITESPACE_STRUCTURE_SEPARATION = 3.0
@@ -608,6 +611,8 @@ def score_core_v3(
     length_stats = edge_length_cv(positions, edges)
 
     node_diag_mean = _mean_node_diagonal(sizes)
+    whitespace_ratio = float(c5["whitespace_ratio"])
+    coincident_collapse_fraction = _coincident_collapse_fraction(positions, sizes)
     degenerate_scale = _is_degenerate_scale(
         float(length_stats["edge_length_mean"]),
         node_diag_mean,
@@ -650,10 +655,25 @@ def score_core_v3(
     group_results = evaluate_conditional_groups(positions, edges, sizes, graph_meta)
     facets = _merge_conditional_group_facets(facets, group_results)
     scores = _triple_view_scores(facets, graph_meta)
+    sprawl_collapse = _is_sprawl_collapse(
+        occlusion_score=raw_scores["C4"],
+        whitespace_ratio=whitespace_ratio,
+    )
+    scores = _apply_headline_degeneracy_fold(
+        scores,
+        edge_length_mean=float(length_stats["edge_length_mean"]),
+        node_diag_mean=node_diag_mean,
+        degenerate_scale=degenerate_scale,
+        sprawl_collapse=sprawl_collapse,
+        occlusion_score=raw_scores["C4"],
+        whitespace_ratio=whitespace_ratio,
+    )
     flags = _row_flags(
         degenerate_scale=degenerate_scale,
         occlusion_score=raw_scores["C4"],
-        whitespace_ratio=float(c5["whitespace_ratio"]),
+        whitespace_ratio=whitespace_ratio,
+        sprawl_collapse=sprawl_collapse,
+        coincident_collapse_fraction=coincident_collapse_fraction,
         conditional_group_flags=_conditional_group_flags(group_results),
         severe_g6_breach_flag=_severe_g6_breach_from_facets(facets),
     )
@@ -680,6 +700,15 @@ def score_core_v3(
             "default_node_sizes": used_default_sizes,
             "node_diag_mean": node_diag_mean,
             "edge_length_mean": float(length_stats["edge_length_mean"]),
+            "coincident_collapse_fraction": coincident_collapse_fraction,
+            "headline_degeneracy_fold": _headline_degeneracy_fold(
+                edge_length_mean=float(length_stats["edge_length_mean"]),
+                node_diag_mean=node_diag_mean,
+                degenerate_scale=degenerate_scale,
+                sprawl_collapse=sprawl_collapse,
+                occlusion_score=raw_scores["C4"],
+                whitespace_ratio=whitespace_ratio,
+            ),
             "crossing_weight_multiplier": crossing_weight_multiplier(num_nodes),
             "conditional_groups": group_results,
         },
@@ -2488,6 +2517,167 @@ def _is_degenerate_scale(edge_length_mean: float, node_diag_mean: float) -> bool
     return edge_length_mean < DEGENERATE_SCALE_RATIO * node_diag_mean
 
 
+def _clamp_float(value: float, lower: float, upper: float) -> float:
+    """Clamp a scalar float into a closed interval.
+
+    Parameters
+    ----------
+    value : float
+        Input scalar.
+    lower : float
+        Inclusive lower bound.
+    upper : float
+        Inclusive upper bound.
+
+    Returns
+    -------
+    float
+        Clamped scalar.
+    """
+    return min(upper, max(lower, value))
+
+
+def _coincident_collapse_fraction(positions: torch.Tensor, sizes: torch.Tensor) -> float:
+    """Return the fraction of nodes collapsed onto a near neighbor.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node center positions with shape ``[N, 2]``.
+    sizes : torch.Tensor
+        Node box sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Fraction of nodes whose nearest-neighbor center distance is below
+        ``COINCIDENT_COLLAPSE_RADIUS * mean_node_diagonal``.
+    """
+    num_nodes = int(positions.shape[0])
+    if num_nodes < 2:
+        return 0.0
+    mean_diag = _mean_node_diagonal(sizes)
+    if mean_diag <= 1e-8:
+        return 0.0
+    threshold = COINCIDENT_COLLAPSE_RADIUS * mean_diag
+    distances = torch.cdist(positions.to(dtype=torch.float64), positions.to(dtype=torch.float64))
+    distances.fill_diagonal_(float("inf"))
+    nearest = distances.min(dim=1).values
+    return float((nearest < threshold).to(dtype=torch.float64).mean().item())
+
+
+def _is_sprawl_collapse(occlusion_score: Optional[float], whitespace_ratio: float) -> bool:
+    """Detect the sprawl-plus-clearance-debt row predicate.
+
+    Parameters
+    ----------
+    occlusion_score : Optional[float]
+        C4 node-occlusion score.
+    whitespace_ratio : float
+        C5 ``visual_area / area_floor`` ratio.
+
+    Returns
+    -------
+    bool
+        ``True`` when the row is broadly sprawled and C4 is below the frozen
+        pure-sprawl release boundary.
+    """
+    sprawl = whitespace_ratio > WHITESPACE_RATIO_HI * SPRAWL_RATIO_FACTOR
+    return sprawl and occlusion_score is not None and occlusion_score < SPRAWL_COLLAPSE_C4_MAX
+
+
+def _headline_degeneracy_fold(
+    *,
+    edge_length_mean: float,
+    node_diag_mean: float,
+    degenerate_scale: bool,
+    sprawl_collapse: bool,
+    occlusion_score: Optional[float],
+    whitespace_ratio: float,
+) -> float:
+    """Compute the post-composite headline degeneracy multiplier.
+
+    Parameters
+    ----------
+    edge_length_mean : float
+        Mean center-to-center edge length.
+    node_diag_mean : float
+        Mean node-box diagonal.
+    degenerate_scale : bool
+        Whether the degenerate-scale flag fired.
+    sprawl_collapse : bool
+        Whether the SPRAWL_COLLAPSE predicate fired.
+    occlusion_score : Optional[float]
+        C4 node-occlusion score.
+    whitespace_ratio : float
+        C5 ``visual_area / area_floor`` ratio.
+
+    Returns
+    -------
+    float
+        Multiplier for published headline views. Equal and Tier-1-only
+        diagnostic views consume no degeneracy fold.
+    """
+    k_values: List[float] = []
+    if degenerate_scale and node_diag_mean > 1e-8:
+        elr = edge_length_mean / node_diag_mean
+        k_values.append(_clamp_float(elr / DEGENERATE_SCALE_RATIO, 0.25, 0.5))
+    if sprawl_collapse and occlusion_score is not None:
+        depth = min(1.0, (SPRAWL_COLLAPSE_C4_MAX - float(occlusion_score)) / 0.1)
+        k_sprawl = _clamp_float(64.0 / max(float(whitespace_ratio), 1e-12), 0.25, 1.0)
+        k_values.append(1.0 - depth * (1.0 - k_sprawl))
+    return min(k_values) if k_values else 1.0
+
+
+def _apply_headline_degeneracy_fold(
+    scores: Mapping[str, float],
+    *,
+    edge_length_mean: float,
+    node_diag_mean: float,
+    degenerate_scale: bool,
+    sprawl_collapse: bool,
+    occlusion_score: Optional[float],
+    whitespace_ratio: float,
+) -> Dict[str, float]:
+    """Apply the degeneracy fold to headline score views only.
+
+    Parameters
+    ----------
+    scores : Mapping[str, float]
+        Composite score views from ``_triple_view_scores``.
+    edge_length_mean : float
+        Mean center-to-center edge length.
+    node_diag_mean : float
+        Mean node-box diagonal.
+    degenerate_scale : bool
+        Whether the degenerate-scale flag fired.
+    sprawl_collapse : bool
+        Whether the SPRAWL_COLLAPSE predicate fired.
+    occlusion_score : Optional[float]
+        C4 node-occlusion score.
+    whitespace_ratio : float
+        C5 ``visual_area / area_floor`` ratio.
+
+    Returns
+    -------
+    Dict[str, float]
+        Score views with only tiered headline publications folded.
+    """
+    folded = dict(scores)
+    k = _headline_degeneracy_fold(
+        edge_length_mean=edge_length_mean,
+        node_diag_mean=node_diag_mean,
+        degenerate_scale=degenerate_scale,
+        sprawl_collapse=sprawl_collapse,
+        occlusion_score=occlusion_score,
+        whitespace_ratio=whitespace_ratio,
+    )
+    for key in ("tiered", "tiered_linear", "tiered_capped", "tiered_hold_instrument"):
+        if key in folded:
+            folded[key] *= k
+    return folded
+
+
 def _optional_float(value: Any) -> Optional[float]:
     """Convert a possibly missing score value to ``Optional[float]``.
 
@@ -2771,6 +2961,8 @@ def _row_flags(
     degenerate_scale: bool,
     occlusion_score: Optional[float],
     whitespace_ratio: float,
+    sprawl_collapse: bool = False,
+    coincident_collapse_fraction: float = 0.0,
     conditional_group_flags: Sequence[str] = tuple(),
     severe_g6_breach_flag: bool = False,
 ) -> Tuple[str, ...]:
@@ -2784,6 +2976,12 @@ def _row_flags(
         C4 node-occlusion score.
     whitespace_ratio : float
         C5 ``visual_area / area_floor`` ratio.
+    sprawl_collapse : bool, default=False
+        Whether the row has both the SPRAWL flag and C4 below the pure-sprawl
+        release boundary.
+    coincident_collapse_fraction : float, default=0.0
+        Fraction of nodes whose nearest neighbor is inside the coincident
+        collapse radius.
     conditional_group_flags : Sequence[str], optional
         Row flags raised by applicable conditional groups.
     severe_g6_breach_flag : bool, default=False
@@ -2801,6 +2999,10 @@ def _row_flags(
         flags.append("OCCLUSION_FLOOR")
     if whitespace_ratio > WHITESPACE_RATIO_HI * SPRAWL_RATIO_FACTOR:
         flags.append("SPRAWL")
+    if sprawl_collapse:
+        flags.append("SPRAWL_COLLAPSE")
+    if coincident_collapse_fraction >= COINCIDENT_COLLAPSE_FRACTION:
+        flags.append("COINCIDENT_COLLAPSE")
     if severe_g6_breach_flag:
         flags.append(SEVERE_G6_BREACH_FLAG)
     for flag in conditional_group_flags:
@@ -2858,6 +3060,8 @@ def _conditional_group_flags(group_results: Mapping[str, Any]) -> Tuple[str, ...
 __all__ = [
     "CORE_NAMES",
     "CORE_TIERS",
+    "COINCIDENT_COLLAPSE_FRACTION",
+    "COINCIDENT_COLLAPSE_RADIUS",
     "OCCLUSION_FLOOR_THRESHOLD",
     "PURE_GEOMETRY_FACETS",
     "RulerV3Facet",
@@ -2868,6 +3072,7 @@ __all__ = [
     "PAIR_MATERIAL_HOLD_FLAG",
     "SEVERE_G6_BREACH_FLAG",
     "SEVERE_G6_FACETS",
+    "SPRAWL_COLLAPSE_C4_MAX",
     "SPRAWL_RATIO_FACTOR",
     "TIER1_TRADEOFF_FLAG",
     "WHITESPACE_RATIO_HI",
