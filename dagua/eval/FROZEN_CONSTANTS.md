@@ -12,6 +12,7 @@ Phase A updates for the converged GG-3 compensation fix:
 - Severe-G6 declared-weight breach uses the shared facets `G6_weighted_ksm` and `G6_local_weight_monotonicity`, severe floor `0.55`, and GG-3 pair-form floor drop `0.05`.
 - Score-neutral row flag vocabulary includes `severe_g6_breach`.
 - GG-3 BLOCK requires `tier1_only` drop `>= 5.0` and two-layout buyback `>= 1.0`, or an independent severe-G6-floor breach from `dagua.eval.ruler_v3.severe_g6_floor_breach`.
-- Tiered headline uses family-normalized `softmin(tiered_linear, tier1_only + A_f; tau=1.0)`; `tiered_linear` remains published as the audit view.
-- Re-frozen `A_f` envelopes on the de-ramped instrument: weighted `8.5915` (from `9.5072`), clustered `9.3004`, dag `7.7785`, generic_force `10.6493`, tree `12.2476`, ported `2.8026`; fallback is `12.2209`.
-- Margin audit uses the same family p95 honest margin plus `1.0` envelopes as the softmin cap.
+- Tiered headline is now the uncapped `tiered_linear` composite; `tiered == tiered_linear` for corpus and single-row reporting.
+- The clustered softmin `softmin(tiered_linear, tier1_only + 9.3004; tau=1.0)` is retained only as the GG-3/E1 adjudication hold instrument and as the audit columns `tiered_capped` / `tiered_hold_instrument`.
+- Condition-5 aggregate deltas and material-hold ineligibility callers must compute the aggregate leg on the capped hold-instrument view, not the linear headline.
+- Re-frozen `A_f` envelope table remains documented for audit provenance, but the frozen pre-freeze cap consumed by hold adjudication is the resolved-family clustered entry `9.3004`; no bars moved.
