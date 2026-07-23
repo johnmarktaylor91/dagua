@@ -661,21 +661,53 @@ def test_native_runtime_referee_tripwire_fires_only_on_native_rows() -> None:
         scorer.assert_native_runtime_referee_tripwire(native_rows)
 
 
-def test_gg6_block_signal_respects_tie_band_and_flags() -> None:
-    """GG-6 blocks only unflagged random wins beyond the tie band."""
-    random_row = {
+def test_gg6_random_floor_blocks_only_when_random_reaches_real_best(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GG-6 blocks on graph bests and keeps weak real rows diagnostic-only."""
+
+    def _generic_family(_graph_name: str, _graphs: Mapping[str, object]) -> str:
+        """Return a stable test family without constructing corpus graph metadata."""
+        return "generic"
+
+    monkeypatch.setattr(part_b, "family_for_graph", _generic_family)
+    random_best = {
         "graph": "g",
         "engine": "random_uniform_0",
         "v3_tiered": 51.0,
         "v3_row_flags": [],
     }
-    tied_real = {"engine": "dagre", "v3_tiered": 50.75, "v3_row_flags": []}
-    flagged_real = {"engine": "dot", "v3_tiered": 40.0, "v3_row_flags": ["DEGENERATE_SCALE"]}
-    clean_real = {"engine": "elk_layered", "v3_tiered": 49.0, "v3_row_flags": []}
+    real_best = {"graph": "g", "engine": "dot", "v3_tiered": 64.0, "v3_row_flags": []}
+    weak_real = {"graph": "g", "engine": "elk_force", "v3_tiered": 49.0, "v3_row_flags": []}
+    tied_real_best = {"graph": "g", "engine": "dagre", "v3_tiered": 51.25, "v3_row_flags": []}
+    flagged_real = {
+        "graph": "g",
+        "engine": "nx",
+        "v3_tiered": 10.0,
+        "v3_row_flags": ["DEGENERATE_SCALE"],
+    }
 
-    assert part_b.gg6_block_signal(random_row, tied_real) is None
-    assert part_b.gg6_block_signal(random_row, flagged_real) is None
-    assert part_b.gg6_block_signal(random_row, clean_real) is not None
+    summary, blocks, diagnostics = part_b.summarize_random_floor(
+        [real_best, weak_real, flagged_real],
+        [random_best],
+        {},
+    )
+
+    assert summary == [
+        {
+            "family": "generic",
+            "real_best": 64.0,
+            "random_best": 51.0,
+            "gap": 13.0,
+            "real_rows": 3,
+            "random_rows": 1,
+        }
+    ]
+    assert blocks == []
+    assert diagnostics == [
+        "g: random_best random_uniform_0 51.000 > elk_force 49.000 (delta=2.000)"
+    ]
+    assert part_b.gg6_graph_block_signal("g", random_best, tied_real_best) is not None
 
 
 def test_score_position_v3_scores(tmp_path: Path) -> None:

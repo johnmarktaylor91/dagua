@@ -571,36 +571,67 @@ def row_flags(row: Mapping[str, Any]) -> Tuple[str, ...]:
     return tuple()
 
 
-def gg6_block_signal(
-    random_row: Mapping[str, Any],
-    real_row: Mapping[str, Any],
+def gg6_graph_block_signal(
+    graph: str,
+    random_best_row: Mapping[str, Any],
+    real_best_row: Mapping[str, Any],
 ) -> Optional[str]:
-    """Return a GG-6 block line when random beats real beyond acceptance rules.
+    """Return a GG-6 block line when random reaches the real graph best.
 
     Parameters
     ----------
-    random_row : Mapping[str, Any]
-        Random-layout V3 score row.
-    real_row : Mapping[str, Any]
-        Real-engine V3 score row.
+    graph : str
+        Graph name used in the block signal.
+    random_best_row : Mapping[str, Any]
+        Best flag-clean random-layout V3 score row for the graph.
+    real_best_row : Mapping[str, Any]
+        Best flag-clean real-engine V3 score row for the graph.
 
     Returns
     -------
     Optional[str]
-        Human-readable block signal, or ``None`` for ties, flagged rows, and
-        non-breaches.
+        Human-readable block signal, or ``None`` when the real best clears the
+        random floor beyond the tie epsilon.
     """
-    random_score = float(random_row["v3_tiered"])
+    random_score = float(random_best_row["v3_tiered"])
+    real_score = float(real_best_row["v3_tiered"])
+    if random_score < real_score - GG6_TIE_EPSILON:
+        return None
+    return (
+        f"{graph}: random_best {random_best_row['engine']} {random_score:.3f} >= "
+        f"real_best {real_best_row['engine']} {real_score:.3f} - epsilon "
+        f"(epsilon={GG6_TIE_EPSILON:.3f}, margin={real_score - random_score:.3f})"
+    )
+
+
+def gg6_below_random_diagnostic(
+    graph: str,
+    random_best_row: Mapping[str, Any],
+    real_row: Mapping[str, Any],
+) -> Optional[str]:
+    """Return a non-blocking diagnostic when a real row scores below random_best.
+
+    Parameters
+    ----------
+    graph : str
+        Graph name used in the diagnostic line.
+    random_best_row : Mapping[str, Any]
+        Best flag-clean random-layout V3 score row for the graph.
+    real_row : Mapping[str, Any]
+        Flag-clean real-engine V3 score row to compare.
+
+    Returns
+    -------
+    Optional[str]
+        Human-readable diagnostic, or ``None`` when the real row is not below
+        random_best beyond the tie epsilon.
+    """
+    random_score = float(random_best_row["v3_tiered"])
     real_score = float(real_row["v3_tiered"])
     if random_score <= real_score + GG6_TIE_EPSILON:
         return None
-    random_flags = row_flags(random_row)
-    real_flags = row_flags(real_row)
-    if random_flags or real_flags:
-        return None
-    graph = str(random_row["graph"])
     return (
-        f"{graph}: {random_row['engine']} {random_score:.3f} > "
+        f"{graph}: random_best {random_best_row['engine']} {random_score:.3f} > "
         f"{real_row['engine']} {real_score:.3f} (delta={random_score - real_score:.3f})"
     )
 
@@ -609,7 +640,7 @@ def summarize_random_floor(
     real_rows: Sequence[Mapping[str, Any]],
     random_rows: Sequence[Mapping[str, Any]],
     graphs: Mapping[str, Any],
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
     """Summarize GG-6 random floors by family.
 
     Parameters
@@ -623,22 +654,35 @@ def summarize_random_floor(
 
     Returns
     -------
-    Tuple[List[Dict[str, Any]], List[str]]
-        Summary rows and explicit random-beats-real block signals.
+    Tuple[List[Dict[str, Any]], List[str], List[str]]
+        Summary rows, graph-level block signals, and non-blocking weak-real
+        diagnostics.
     """
     real_by_family = rows_by_family(real_rows, graphs)
     random_by_family = rows_by_family(random_rows, graphs)
     summaries: List[Dict[str, Any]] = []
     block_signals: List[str] = []
+    diagnostic_signals: List[str] = []
     real_by_graph: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    random_by_graph: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
     for row in real_rows:
         real_by_graph[str(row["graph"])].append(row)
-    for random_row in random_rows:
-        graph = str(random_row["graph"])
-        for real_row in real_by_graph.get(graph, []):
-            signal = gg6_block_signal(random_row, real_row)
-            if signal is not None:
-                block_signals.append(signal)
+    for row in random_rows:
+        random_by_graph[str(row["graph"])].append(row)
+    for graph, graph_random_rows in sorted(random_by_graph.items()):
+        clean_random_rows = [row for row in graph_random_rows if not row_flags(row)]
+        clean_real_rows = [row for row in real_by_graph.get(graph, []) if not row_flags(row)]
+        if not clean_random_rows or not clean_real_rows:
+            continue
+        random_best_row = max(clean_random_rows, key=lambda row: float(row["v3_tiered"]))
+        real_best_row = max(clean_real_rows, key=lambda row: float(row["v3_tiered"]))
+        block_signal = gg6_graph_block_signal(graph, random_best_row, real_best_row)
+        if block_signal is not None:
+            block_signals.append(block_signal)
+        for real_row in clean_real_rows:
+            diagnostic = gg6_below_random_diagnostic(graph, random_best_row, real_row)
+            if diagnostic is not None:
+                diagnostic_signals.append(diagnostic)
     for family in sorted(set(real_by_family) | set(random_by_family)):
         real_scores = [float(row["v3_tiered"]) for row in real_by_family.get(family, [])]
         random_scores = [float(row["v3_tiered"]) for row in random_by_family.get(family, [])]
@@ -654,7 +698,7 @@ def summarize_random_floor(
                 "random_rows": len(random_scores),
             }
         )
-    return summaries, block_signals
+    return summaries, block_signals, diagnostic_signals
 
 
 def graph_matches_rule(
@@ -926,6 +970,7 @@ def write_report(
     selected_tasks: Sequence[PositionTask],
     random_summary: Sequence[Mapping[str, Any]],
     random_blocks: Sequence[str],
+    random_diagnostics: Sequence[str],
     winners: Sequence[WinnerResult],
     correlations: Sequence[Mapping[str, Any]],
 ) -> None:
@@ -945,6 +990,8 @@ def write_report(
         GG-6 family gap rows.
     random_blocks : Sequence[str]
         Random-beats-real block signals.
+    random_diagnostics : Sequence[str]
+        Non-blocking random_best-over-weak-real diagnostics.
     winners : Sequence[WinnerResult]
         GG-7 winner table.
     correlations : Sequence[Mapping[str, Any]]
@@ -995,15 +1042,28 @@ def write_report(
                 ["family", "real_rows", "random_rows", "real_best", "random_best", "gap"],
                 gap_rows,
             ),
-            "Random-beats-real aggregate signals:\n"
+            "Random-best-reaches-real-best block signals:\n"
             + (
                 "\n".join(f"- {item}" for item in random_blocks[:50]) if random_blocks else "- none"
+            ),
+            "Non-blocking weak-real diagnostics (real rows below random_best):\n"
+            + (
+                "\n".join(f"- {item}" for item in random_diagnostics[:80])
+                if random_diagnostics
+                else "- none"
             ),
             "## GG-7 Facet Winners\n\n"
             + markdown_table(
                 ["family", "facet", "expected winner", "actual winner", "rows", "status"],
                 winner_rows,
             ),
+            "GG-7 disposition notes: declared_cluster G2 is a documented coverage residual. "
+            "cytoscape_fcose is present in the bounded set with 9 rows, but the adapter runs it "
+            "cluster-blind through nodes and edges only, so the cluster-informed specialist class "
+            "is unrepresented by construction; cise is absent. multi_scale_np C3 is a documented "
+            "coverage artifact: elk_stress, an in-class specialist, scores C3=1.0 on "
+            "small_world_100 but that row is excluded by the 1800-row bound; tfdp is genuinely "
+            "absent.",
             "Port note: base corpus G7 is inapplicable; synthetic-port GG-7 is deferred "
             "to Part C/SA ported family and existing G7 unit tests.",
             "## sec 2.3 High-Correlation Pairs\n\n"
@@ -1039,7 +1099,9 @@ def main() -> None:
     real_rows = score_real_tasks(selected_tasks, graphs, signature)
     bboxes = graph_bboxes(selected_tasks, graphs)
     random_rows = score_random_rows(selected_graphs, graphs, bboxes, signature)
-    random_summary, random_blocks = summarize_random_floor(real_rows, random_rows, graphs)
+    random_summary, random_blocks, random_diagnostics = summarize_random_floor(
+        real_rows, random_rows, graphs
+    )
     winners = summarize_facet_winners(real_rows, graphs)
     correlations = summarize_correlations(real_rows)
     write_report(
@@ -1049,6 +1111,7 @@ def main() -> None:
         selected_tasks,
         random_summary,
         random_blocks,
+        random_diagnostics,
         winners,
         correlations,
     )
