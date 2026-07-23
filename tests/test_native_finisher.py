@@ -17,6 +17,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     W5Seed,
     log_w5_telemetry,
     run_w5_finisher,
+    w5_dominates,
     w5_predicted_skip_reason,
 )
 
@@ -58,6 +59,98 @@ def _tiny_layout() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
     node_sizes = torch.full((4, 2), 2.0)
     return pos, edge_index, node_sizes
+
+
+def test_w5_dominates_uses_referee_prefix_before_scores() -> None:
+    """Severe-G6 keys are senior to the unchanged W5 score comparison."""
+    compliant_low = _pair(1.0, 1.0)
+    breaching_high = _pair(100.0, 100.0)
+    deep_breach = _pair(100.0, 100.0)
+    shallow_breach = _pair(1.0, 1.0)
+
+    assert not w5_dominates(
+        breaching_high,
+        compliant_low,
+        candidate_referee_key=(0, -0.50),
+        incumbent_referee_key=(1, -0.0),
+    )
+    assert w5_dominates(
+        compliant_low,
+        breaching_high,
+        candidate_referee_key=(1, -0.0),
+        incumbent_referee_key=(0, -0.50),
+    )
+    assert w5_dominates(
+        shallow_breach,
+        deep_breach,
+        candidate_referee_key=(0, -0.10),
+        incumbent_referee_key=(0, -0.50),
+    )
+    assert w5_dominates(_pair(10.2, 10.2), _pair(10.0, 10.0))
+
+
+def test_w5_finisher_demotes_referee_breaching_high_score_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A breaching W5 checkpoint cannot replace a compliant incumbent."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos, edge_index, node_sizes = _tiny_layout()
+    candidate_pos = pos + 5.0
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return one high-score checkpoint that the referee must demote."""
+        del (
+            seed,
+            edge_work,
+            size_work,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+        )
+        return candidate_pos, 1, 2.0, [(1, candidate_pos, 1.0)]
+
+    def referee_key_fn(candidate: torch.Tensor) -> tuple[int, float]:
+        """Mark only the checkpoint tensor as a severe-G6 breacher."""
+        return (0, -0.50) if torch.equal(candidate.cpu(), candidate_pos) else (1, -0.0)
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    result = run_w5_finisher(
+        incumbent_pos=pos,
+        incumbent_score_pair=_pair(10.0, 10.0),
+        seeds=[W5Seed("incumbent", pos)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=lambda candidate: _pair(100.0, 100.0),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        referee_key_fn=referee_key_fn,
+    )
+
+    assert torch.equal(result.winner_pos, pos)
+    assert result.accepted == ()
+    assert result.checkpoints
+    assert result.checkpoints[0].reason == "does_not_dominate_both"
 
 
 def test_w5_finisher_returns_exact_incumbent_when_candidates_are_worse() -> None:
@@ -1689,9 +1782,12 @@ def test_w5_finisher_finish_clamps_non_dominant_winner_to_incumbent(
         candidate: W5ScorePair,
         incumbent: W5ScorePair,
         margin: float = 0.05,
+        *,
+        candidate_referee_key: tuple[int, float] = (1, -0.0),
+        incumbent_referee_key: tuple[int, float] = (1, -0.0),
     ) -> bool:
         """Accept inside the loop, then force the final clamp branch."""
-        del candidate, incumbent, margin
+        del candidate, incumbent, margin, candidate_referee_key, incumbent_referee_key
         dominance_calls["count"] += 1
         return dominance_calls["count"] == 1
 

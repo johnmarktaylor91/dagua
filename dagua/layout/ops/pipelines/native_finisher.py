@@ -9,7 +9,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Tuple
 
 import torch
 
@@ -499,6 +499,9 @@ def w5_dominates(
     candidate: W5ScorePair,
     incumbent: W5ScorePair,
     margin: float = _W5_ACCEPT_MARGIN,
+    *,
+    candidate_referee_key: Tuple[int, float] = (1, -0.0),
+    incumbent_referee_key: Tuple[int, float] = (1, -0.0),
 ) -> bool:
     """Return whether ``candidate`` beats ``incumbent`` under both rulers.
 
@@ -510,12 +513,19 @@ def w5_dominates(
         Current winner directed and undirected scores.
     margin : float, default=0.05
         Required improvement in both score components.
+    candidate_referee_key : tuple[int, float], default=(1, -0.0)
+        Severe-G6 eligibility prefix for the candidate. The neutral default
+        preserves the historical score-only W5 gate.
+    incumbent_referee_key : tuple[int, float], default=(1, -0.0)
+        Severe-G6 eligibility prefix for the incumbent/current winner.
 
     Returns
     -------
     bool
         ``True`` only when both finite components clear ``margin``.
     """
+    if candidate_referee_key != incumbent_referee_key:
+        return candidate_referee_key > incumbent_referee_key
     return (
         math.isfinite(candidate.directed)
         and math.isfinite(candidate.undirected)
@@ -2161,6 +2171,7 @@ def run_w5_finisher(
     accept_margin: float = _W5_ACCEPT_MARGIN,
     incumbent_axes: Optional[W5HonestAxes] = None,
     shape_geometry: Optional[NativeShapeGeometry] = None,
+    referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
 ) -> W5FinisherResult:
     """Run the W5 finisher and return the anytime honest winner.
 
@@ -2193,6 +2204,9 @@ def run_w5_finisher(
         produced ``incumbent_score_pair``.
     shape_geometry : NativeShapeGeometry, optional
         Optional non-box shape descriptors for overlap loss and viability.
+    referee_key_fn : Callable[[torch.Tensor], tuple[int, float]], optional
+        Severe-G6 referee-key scorer. When omitted, all candidates use the
+        neutral prefix and W5 remains the historical dual-composite gate.
 
     Returns
     -------
@@ -2207,6 +2221,9 @@ def run_w5_finisher(
     edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
     predicted_skip_reason = w5_predicted_skip_reason(node_count, edge_count, config)
     cost_plan: Optional[W5CostPlan] = None
+    incumbent_referee_key = (
+        referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    )
     if slice_s is None and predicted_skip_reason != "disabled_by_env":
         predicted_skip_reason = None
     if predicted_skip_reason is not None:
@@ -2264,10 +2281,15 @@ def run_w5_finisher(
         W5FinisherResult
             Finalized W5 result.
         """
+        winner_referee_key = (
+            referee_key_fn(winner_pos) if referee_key_fn is not None else incumbent_referee_key
+        )
         if winner_pos is not incumbent_pos and not w5_dominates(
             winner_score_pair,
             incumbent_score_pair,
             float(accept_margin),
+            candidate_referee_key=winner_referee_key,
+            incumbent_referee_key=incumbent_referee_key,
         ):
             winner_pos = incumbent_pos
             winner_score_pair = incumbent_score_pair
@@ -2422,6 +2444,7 @@ def run_w5_finisher(
     winner_pos = incumbent_pos
     winner_score_pair = incumbent_score_pair
     winner_name = "incumbent"
+    winner_referee_key = incumbent_referee_key
     accepted: list[W5Candidate] = []
     rejected: list[W5Checkpoint] = []
     checkpoints: list[W5Checkpoint] = []
@@ -2603,7 +2626,18 @@ def run_w5_finisher(
                     directed_delta = honest.directed - winner_score_pair.directed
                     undirected_delta = honest.undirected - winner_score_pair.undirected
                     surrogate_delta = start_loss - checkpoint_loss
-                    is_accepted = w5_dominates(honest, winner_score_pair, float(accept_margin))
+                    checkpoint_referee_key = (
+                        referee_key_fn(score_pos)
+                        if referee_key_fn is not None
+                        else winner_referee_key
+                    )
+                    is_accepted = w5_dominates(
+                        honest,
+                        winner_score_pair,
+                        float(accept_margin),
+                        candidate_referee_key=checkpoint_referee_key,
+                        incumbent_referee_key=winner_referee_key,
+                    )
                     reason = "dominates" if is_accepted else "does_not_dominate_both"
                     checkpoint = W5Checkpoint(
                         seed=seed.name,
@@ -2627,6 +2661,7 @@ def run_w5_finisher(
                         )
                         winner_score_pair = honest
                         winner_name = name
+                        winner_referee_key = checkpoint_referee_key
                         accepted_candidate = W5Candidate(
                             name=name,
                             pos=winner_pos,
