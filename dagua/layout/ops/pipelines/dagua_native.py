@@ -2025,6 +2025,7 @@ def _run_native_problem(
             cluster_ids=cluster_ids,
             polish_battery=str(getattr(config, "_dagua_native_polish_battery", "full")),
             config=config,
+            edge_weights=problem.edge_weights,
         )
     return result
 
@@ -4885,6 +4886,68 @@ def _unshear_bimodal_edges(
     return pos @ transform.T
 
 
+def _w5_referee_key_fn(
+    *,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
+    direction: str,
+) -> Optional[Callable[[torch.Tensor], tuple[int, float]]]:
+    """Build a severe-G6 referee-key scorer for weighted W5 gates.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes represented by candidate positions.
+    node_sizes : torch.Tensor, optional
+        Node-size tensor with shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Declared edge weights with shape ``[E]``.
+    direction : str
+        Layout direction stored on the synthetic runtime problem.
+
+    Returns
+    -------
+    Callable[[torch.Tensor], tuple[int, float]] or None
+        Referee-key scorer when declared weights are non-degenerate, otherwise
+        ``None`` so W5 keeps the neutral score-only path.
+    """
+    from dagua.layout.ops.pipelines.native_directed import (
+        _runtime_referee_telemetry,
+        _weighted_referee_active,
+    )
+
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=int(num_nodes),
+        node_sizes=node_sizes,
+        edge_weights=edge_weights,
+        direction=direction,
+    )
+    if not _weighted_referee_active(problem):
+        return None
+
+    def referee_key(pos: torch.Tensor) -> tuple[int, float]:
+        """Return the severe-G6 referee prefix for one W5 candidate.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        tuple[int, float]
+            Eligibility key from the frozen severe-G6 referee.
+        """
+        return _runtime_referee_telemetry(pos, problem)[0]
+
+    return referee_key
+
+
 def _best_of_polish(
     base_pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -4899,6 +4962,7 @@ def _best_of_polish(
     polish_battery: str = "full",
     config: Optional[LayoutConfig] = None,
     w5_seed_positions: Optional[Sequence[tuple[str, torch.Tensor]]] = None,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Try named polish candidates; return the best by composite.
 
@@ -4948,6 +5012,8 @@ def _best_of_polish(
     w5_seed_positions : Sequence[tuple[str, torch.Tensor]], optional
         Extra warm starts to include in the W5 seed bank after the final
         honest winner. Used by outer contests that defer child-local W5.
+    edge_weights : torch.Tensor, optional
+        Declared edge weights with shape ``[E]`` for the severe-G6 W5 referee.
 
     Returns
     -------
@@ -5443,19 +5509,29 @@ def _best_of_polish(
                         for rank, index in enumerate(ranked_seed_indices[:2], start=1)
                     )
                 incumbent_score_pair, incumbent_axes = honest_score_payload(honest_best_pos)
-                w5_result = run_w5_finisher(
-                    incumbent_pos=honest_best_pos,
-                    incumbent_score_pair=incumbent_score_pair,
-                    seeds=seed_bank,
+                referee_key_fn = _w5_referee_key_fn(
                     edge_index=edge_index,
+                    num_nodes=int(honest_best_pos.shape[0]),
                     node_sizes=node_sizes,
-                    score_fn=honest_score,
-                    is_semantically_directed=is_semantically_directed,
-                    declared_hierarchical=declared_hierarchical,
-                    direction_is_declared=direction_is_declared,
-                    config=config,
-                    incumbent_axes=incumbent_axes,
+                    edge_weights=edge_weights,
+                    direction=direction,
                 )
+                w5_kwargs: dict[str, Any] = {
+                    "incumbent_pos": honest_best_pos,
+                    "incumbent_score_pair": incumbent_score_pair,
+                    "seeds": seed_bank,
+                    "edge_index": edge_index,
+                    "node_sizes": node_sizes,
+                    "score_fn": honest_score,
+                    "is_semantically_directed": is_semantically_directed,
+                    "declared_hierarchical": declared_hierarchical,
+                    "direction_is_declared": direction_is_declared,
+                    "config": config,
+                    "incumbent_axes": incumbent_axes,
+                }
+                if referee_key_fn is not None:
+                    w5_kwargs["referee_key_fn"] = referee_key_fn
+                w5_result = run_w5_finisher(**w5_kwargs)
                 log_w5_telemetry(w5_result, config)
                 # W5 is intentionally downstream of honest selection: this gate
                 # compares against the final honest winner, so the returned
@@ -5464,6 +5540,14 @@ def _best_of_polish(
                     w5_result.winner_score_pair,
                     incumbent_score_pair,
                     0.05,
+                    candidate_referee_key=(
+                        referee_key_fn(w5_result.winner_pos)
+                        if referee_key_fn is not None
+                        else (1, -0.0)
+                    ),
+                    incumbent_referee_key=(
+                        referee_key_fn(honest_best_pos) if referee_key_fn is not None else (1, -0.0)
+                    ),
                 ):
                     register_anytime_best = getattr(
                         config,
@@ -5612,6 +5696,7 @@ def _terminal_w5_polish(
     *,
     edge_index: torch.Tensor,
     node_sizes: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor] = None,
     config: LayoutConfig,
     structure: Optional[GraphStructure],
     direction: str,
@@ -5633,6 +5718,8 @@ def _terminal_w5_polish(
     node_sizes : torch.Tensor, optional
         Node-size tensor with shape ``[N, 2]``. Missing sizes fall back to the
         configured node separation for W5 geometry checks.
+    edge_weights : torch.Tensor, optional
+        Declared edge weights with shape ``[E]`` for the severe-G6 W5 referee.
     config : LayoutConfig
         Prepared config owned by the outer native pipeline invocation.
     structure : GraphStructure, optional
@@ -5817,28 +5904,44 @@ def _terminal_w5_polish(
                 for seed_name, seed_pos in extra_seeds
             )
 
-        w5_result = run_w5_finisher(
-            incumbent_pos=final_pos,
-            incumbent_score_pair=incumbent_score_pair,
-            seeds=seed_bank,
-            edge_index=edge_index,
-            node_sizes=cpu_node_sizes.to(device=edge_index.device),
-            shape_geometry=shape_geometry,
-            score_fn=honest_score,
-            is_semantically_directed=is_semantically_directed,
-            declared_hierarchical=declared_hierarchical,
-            direction_is_declared=direction_is_declared,
-            config=config,
-            incumbent_axes=incumbent_axes,
+        referee_key_fn = _w5_referee_key_fn(
+            edge_index=cpu_edge_index,
+            num_nodes=int(final_pos.shape[0]),
+            node_sizes=cpu_node_sizes,
+            edge_weights=edge_weights,
+            direction=direction,
         )
+        w5_kwargs: dict[str, Any] = {
+            "incumbent_pos": final_pos,
+            "incumbent_score_pair": incumbent_score_pair,
+            "seeds": seed_bank,
+            "edge_index": edge_index,
+            "node_sizes": cpu_node_sizes.to(device=edge_index.device),
+            "shape_geometry": shape_geometry,
+            "score_fn": honest_score,
+            "is_semantically_directed": is_semantically_directed,
+            "declared_hierarchical": declared_hierarchical,
+            "direction_is_declared": direction_is_declared,
+            "config": config,
+            "incumbent_axes": incumbent_axes,
+        }
+        if referee_key_fn is not None:
+            w5_kwargs["referee_key_fn"] = referee_key_fn
+        w5_result = run_w5_finisher(**w5_kwargs)
         log_w5_telemetry(w5_result, config)
         # W5 runs once, sentinel-owned, on the true final tensor, monotone,
-        # fidelity no-op. The unchanged dual-ruler gate preserves the terminal
-        # winner unless a candidate dominates that exact incumbent.
+        # fidelity no-op. Weighted inputs add the severe-G6 prefix before the
+        # unchanged dual-ruler comparison.
         if w5_result.accepted and w5_dominates(
             w5_result.winner_score_pair,
             incumbent_score_pair,
             0.05,
+            candidate_referee_key=(
+                referee_key_fn(w5_result.winner_pos) if referee_key_fn is not None else (1, -0.0)
+            ),
+            incumbent_referee_key=(
+                referee_key_fn(final_pos) if referee_key_fn is not None else (1, -0.0)
+            ),
         ):
             if register_anytime_best is not None:
                 register_anytime_best(w5_result.winner_pos, "terminal_w5_accept")
@@ -6127,6 +6230,7 @@ def layout_dagua_native_pipeline(
                     legacy_pos,
                     edge_index=edge_index,
                     node_sizes=node_sizes,
+                    edge_weights=edge_weights,
                     config=effective_config,
                     structure=graph_structure,
                     direction=effective_config.direction,
@@ -6248,6 +6352,7 @@ def layout_dagua_native_pipeline(
                                         )
                                     ),
                                     config=effective_config,
+                                    edge_weights=edge_weights,
                                 )
                             if dot_cluster_fidelity:
                                 stress_pos = _apply_dot_cluster_fidelity_layout(
@@ -6264,6 +6369,7 @@ def layout_dagua_native_pipeline(
                                         stress_pos,
                                         edge_index=edge_index,
                                         node_sizes=node_sizes,
+                                        edge_weights=edge_weights,
                                         config=effective_config,
                                         structure=graph_structure,
                                         direction=effective_config.direction,
@@ -6344,6 +6450,7 @@ def layout_dagua_native_pipeline(
                     best_pos,
                     edge_index=edge_index,
                     node_sizes=node_sizes,
+                    edge_weights=edge_weights,
                     config=effective_config,
                     structure=contest_structure,
                     direction=effective_config.direction,
@@ -6628,6 +6735,7 @@ def layout_dagua_native_pipeline(
                         getattr(prepared_config, "_dagua_native_polish_battery", "full")
                     ),
                     config=prepared_config,
+                    edge_weights=prepared_edge_weights,
                 )
                 register_anytime_best(result, "post_polish_accept")
             risk_state = ComponentTilingCrossingRisk(
@@ -6658,6 +6766,7 @@ def layout_dagua_native_pipeline(
                     result,
                     edge_index=prepared_edge_index,
                     node_sizes=normalized_node_sizes,
+                    edge_weights=prepared_edge_weights,
                     config=prepared_config,
                     structure=problem.structure,
                     direction=prepared_config.direction,
@@ -6684,6 +6793,7 @@ def layout_dagua_native_pipeline(
                 result,
                 edge_index=prepared_edge_index,
                 node_sizes=normalized_node_sizes,
+                edge_weights=prepared_edge_weights,
                 config=prepared_config,
                 structure=problem.structure,
                 direction=prepared_config.direction,

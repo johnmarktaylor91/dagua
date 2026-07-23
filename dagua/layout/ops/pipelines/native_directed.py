@@ -514,6 +514,7 @@ def _directed_ordering_candidate_dual_dominates(
     problem: LayoutProblem,
     cluster_ids: Optional[torch.Tensor],
     all_pairs_dist: Optional[np.ndarray],
+    incumbent_referee_key: Tuple[int, float] = (1, -0.0),
 ) -> tuple[bool, "W5ScorePair"]:
     """Return whether an ordering candidate may enter the winner contest.
 
@@ -529,6 +530,8 @@ def _directed_ordering_candidate_dual_dominates(
         Per-node cluster ids with shape ``[N]``.
     all_pairs_dist : numpy.ndarray, optional
         Cached unweighted shortest paths with shape ``[N, N]``.
+    incumbent_referee_key : tuple[int, float], default=(1, -0.0)
+        Severe-G6 eligibility prefix for the incumbent/current winner.
 
     Returns
     -------
@@ -544,7 +547,16 @@ def _directed_ordering_candidate_dual_dominates(
         cluster_ids,
         all_pairs_dist,
     )
-    return w5_dominates(candidate_pair, incumbent_pair), candidate_pair
+    candidate_referee_key = _runtime_referee_telemetry(candidate, problem)[0]
+    return (
+        w5_dominates(
+            candidate_pair,
+            incumbent_pair,
+            candidate_referee_key=candidate_referee_key,
+            incumbent_referee_key=incumbent_referee_key,
+        ),
+        candidate_pair,
+    )
 
 
 def _select_directed_winner(
@@ -3423,12 +3435,17 @@ def layout_native_directed_portfolio(
                                 cluster_ids,
                                 all_pairs_dist,
                             )
+                        best_referee_key_for_ordering = _runtime_referee_telemetry(
+                            best_position,
+                            problem,
+                        )[0]
                         dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
                             candidate,
                             best_pair_for_ordering,
                             problem,
                             cluster_ids,
                             all_pairs_dist,
+                            best_referee_key_for_ordering,
                         )
                         if dominates:
                             name = f"{best_name}_rank_local_zero_crossing_swap"
@@ -3479,15 +3496,30 @@ def layout_native_directed_portfolio(
                 """
                 return _score_directed_candidate_pair(pos, problem, cluster_ids, all_pairs_dist)
 
+            def referee_key_w5_candidate(pos: torch.Tensor) -> Tuple[int, float]:
+                """Return the severe-G6 referee prefix for one W5 checkpoint.
+
+                Parameters
+                ----------
+                pos : torch.Tensor
+                    Candidate positions with shape ``[N, 2]``.
+
+                Returns
+                -------
+                tuple[int, float]
+                    Senior eligibility key from the frozen severe-G6 referee.
+                """
+                return _runtime_referee_telemetry(pos, problem)[0]
+
             w5_sizes = (
                 cpu_sizes
                 if cpu_sizes is not None
                 else torch.full((n, 2), float(config.node_sep), dtype=torch.float32)
             )
-            w5_result = run_w5_finisher(
-                incumbent_pos=best_position,
-                incumbent_score_pair=best_pair,
-                seeds=[
+            w5_kwargs: Dict[str, Any] = {
+                "incumbent_pos": best_position,
+                "incumbent_score_pair": best_pair,
+                "seeds": [
                     W5Seed("directed_winner", best_position),
                     W5Seed(
                         "directed_ordering",
@@ -3498,17 +3530,35 @@ def layout_native_directed_portfolio(
                         incumbent.to(device=best_position.device, dtype=best_position.dtype),
                     ),
                 ],
-                edge_index=cpu_edges,
-                node_sizes=w5_sizes,
-                score_fn=score_w5_candidate,
-                is_semantically_directed=True,
-                declared_hierarchical=True,
-                direction_is_declared=True,
-                config=config,
-                incumbent_axes=best_axes,
-            )
+                "edge_index": cpu_edges,
+                "node_sizes": w5_sizes,
+                "score_fn": score_w5_candidate,
+                "is_semantically_directed": True,
+                "declared_hierarchical": True,
+                "direction_is_declared": True,
+                "config": config,
+                "incumbent_axes": best_axes,
+            }
+            if _weighted_referee_active(problem):
+                w5_kwargs["referee_key_fn"] = referee_key_w5_candidate
+            w5_result = run_w5_finisher(**w5_kwargs)
             log_w5_telemetry(w5_result, config)
-            if w5_result.accepted and w5_dominates(w5_result.winner_score_pair, best_pair, 0.05):
+            w5_referee_key_fn = (
+                referee_key_w5_candidate if _weighted_referee_active(problem) else None
+            )
+            if w5_result.accepted and w5_dominates(
+                w5_result.winner_score_pair,
+                best_pair,
+                0.05,
+                candidate_referee_key=(
+                    w5_referee_key_fn(w5_result.winner_pos)
+                    if w5_referee_key_fn is not None
+                    else (1, -0.0)
+                ),
+                incumbent_referee_key=(
+                    w5_referee_key_fn(best_position) if w5_referee_key_fn is not None else (1, -0.0)
+                ),
+            ):
                 best_name = w5_result.winner_name
                 best_position = w5_result.winner_pos
                 scores[best_name] = w5_result.winner_score_pair.directed
