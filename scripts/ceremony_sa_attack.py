@@ -779,6 +779,23 @@ def _aggregate_delta_fraction(score: float, baseline_score: float) -> float:
     return abs(score - baseline_score) / denominator
 
 
+def _hold_instrument_score(result: RulerV3Result) -> float:
+    """Return the capped GG-3 hold/adjudication aggregate.
+
+    Parameters
+    ----------
+    result : RulerV3Result
+        V3 score result with published composite views.
+
+    Returns
+    -------
+    float
+        Capped hold-instrument score. Older synthetic fixtures fall back to the
+        headline so focused predicate tests do not need unrelated audit fields.
+    """
+    return float(result.scores.get("tiered_hold_instrument", result.scores["tiered"]))
+
+
 def primary_faithfulness_drop(
     baseline_result: RulerV3Result,
     candidate_result: RulerV3Result,
@@ -1432,7 +1449,7 @@ def _measure_candidate(
         co-tracking.
     """
     candidate_result = _score_probe(probe, positions, score_config)
-    candidate_score = float(candidate_result.scores["tiered"])
+    candidate_score = _hold_instrument_score(candidate_result)
     shape_distance = procrustes_shape_distance(probe.pos, positions)
     aggregate_delta = _aggregate_delta_fraction(candidate_score, baseline_score)
     faithfulness_drop = primary_faithfulness_drop(baseline_result, candidate_result)
@@ -2093,7 +2110,7 @@ def run_family_attack(
         Best valid morph and PASS/BLOCK verdict for the family.
     """
     baseline_result = _score_probe(probe, probe.pos, score_config)
-    baseline_score = float(baseline_result.scores["tiered"])
+    baseline_score = _hold_instrument_score(baseline_result)
     baseline_gate_verdict = _gg3_gate_verdict(
         shape_distance=0.0,
         aggregate_delta_fraction=0.0,
@@ -2879,11 +2896,11 @@ def run_diagnostics(
             score_config,
         )
         diffs = _facet_diffs(baseline_result, morph_result)
-        independent_delta = abs(float(morph_result.scores["tiered"]) - result.best_score)
+        independent_delta = abs(_hold_instrument_score(morph_result) - result.best_score)
         if independent_delta > 1.0e-9:
             raise AssertionError(
                 f"{probe.family} tiered score drift: attack={result.best_score}, "
-                f"recomputed={morph_result.scores['tiered']}"
+                f"recomputed={_hold_instrument_score(morph_result)}"
             )
         print(f"\n## {probe.family}")
         print(_format_facet_table(diffs))
