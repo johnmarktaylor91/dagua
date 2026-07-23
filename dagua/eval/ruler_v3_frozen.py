@@ -242,10 +242,13 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
     "margin_audit_tripwire": FrozenConstant(
         name="margin_audit_tripwire",
         value={
-            "family_envelope": "p95_honest_margin_plus_1",
+            "headline": "tiered_linear",
+            "family_envelope": "adjudication_instrument_only",
             "fallback": 12.2209,
             "softmin_tau": 1.0,
             "de_ramped_tier1_instrument": True,
+            "audit_column": "tiered_capped",
+            "hold_instrument_column": "tiered_hold_instrument",
             "A_f": {
                 "weighted": 8.5915,
                 "clustered": 9.3004,
@@ -260,9 +263,10 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
             "scripts/ceremony_sa_attack.py:_load_margin_envelopes"
         ),
         note=(
-            "Family-normalized softmin cap over tiered vs tier1_only + A_f. "
-            "A_f was re-frozen on the de-ramped Tier-1 measurement instrument; "
-            "only weighted moved from 9.5072 to 8.5915."
+            "Corpus headline tiered is the uncapped tiered_linear score. The "
+            "clustered A=9.3004, tau=1.0 softmin is retained only for the "
+            "GG-3/E1 hold adjudication instrument and audit publication; "
+            "condition-5 aggregate deltas are computed on that capped view."
         ),
     ),
     "g7_port_and_route_thresholds": FrozenConstant(

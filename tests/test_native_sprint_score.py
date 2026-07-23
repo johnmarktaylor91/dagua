@@ -78,6 +78,16 @@ def _cluster_metrics(score: float = 10.0) -> dict[str, Any]:
     return metrics
 
 
+def test_gg7_multiscale_c3_expected_winner_uses_stress_neighborhood_class() -> None:
+    """GG-7 C3 expects measured neighborhood/stress optimizers, not t-SNE/UMAP."""
+    rule = next(
+        rule for rule in part_b.SPECIALIST_RULES if rule[0] == "multi_scale_np" and rule[1] == "C3"
+    )
+
+    assert {"tfdp", "sgd2", "elk_stress", "ogdf_stress"}.issubset(set(rule[2]))
+    assert not {"tsnet", "tsne", "umap"} & set(rule[2])
+
+
 def _score_from_payload(metrics: Mapping[str, Any], _is_directed: bool) -> float:
     """Return the test score embedded in a metrics payload.
 

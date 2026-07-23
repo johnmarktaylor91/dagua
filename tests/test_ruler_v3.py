@@ -943,11 +943,18 @@ def test_applicability_renormalization_excludes_missing_facets() -> None:
 
 
 def test_triple_view_composite_and_tier_weights_are_published() -> None:
-    """V3 should publish capped, audit-linear, equal, and Tier-1-only views."""
+    """V3 should publish linear headline, capped audit, equal, and T1 views."""
     pos, edge_index, node_sizes = _probe_layout()
     result = score_core_v3(pos, edge_index, node_sizes)
 
-    assert set(result.scores) == {"tiered", "tiered_linear", "equal", "tier1_only"}
+    assert set(result.scores) == {
+        "tiered",
+        "tiered_linear",
+        "tiered_capped",
+        "tiered_hold_instrument",
+        "equal",
+        "tier1_only",
+    }
     assert result.facets["C1"].base_weight == pytest.approx(4.0)
     assert result.facets["C5"].base_weight == pytest.approx(2.0)
     assert result.facets["C9"].base_weight == pytest.approx(1.0)
@@ -962,7 +969,9 @@ def test_triple_view_composite_and_tier_weights_are_published() -> None:
     assert 0.0 <= result.scores["equal"] <= 100.0
     assert 0.0 <= result.scores["tiered"] <= 100.0
     assert 0.0 <= result.scores["tiered_linear"] <= 100.0
+    assert 0.0 <= result.scores["tiered_capped"] <= 100.0
     assert 0.0 <= result.scores["tier1_only"] <= 100.0
+    assert result.scores["tiered"] == pytest.approx(result.scores["tiered_linear"])
 
 
 def test_severe_g6_contract_exports_single_floor_and_pair_form() -> None:
@@ -1093,7 +1102,7 @@ def test_tier1_measurement_weight_removes_g6_ramp_only_from_instrument() -> None
 
 
 def test_softmin_cap_publishes_linear_audit_view_and_family_metadata() -> None:
-    """The tiered headline is the family cap and the linear score stays auditable."""
+    """The tiered headline is linear and the clustered cap stays auditable."""
     pos, edge_index, node_sizes = _probe_layout()
     result = score_core_v3(
         pos,
@@ -1106,9 +1115,51 @@ def test_softmin_cap_publishes_linear_audit_view_and_family_metadata() -> None:
 
     assert result.metadata["softmin_family"] == "clustered"
     assert result.metadata["softmin_tau"] == pytest.approx(FAMILY_SOFTMIN_TAU)
-    assert result.scores["tiered"] <= result.scores["tiered_linear"]
-    assert result.scores["tiered"] <= result.scores["tier1_only"] + allowance
-    assert result.scores["tiered"] == pytest.approx(expected, abs=1.0)
+    assert result.scores["tiered"] == pytest.approx(result.scores["tiered_linear"])
+    assert result.scores["tiered_capped"] <= result.scores["tiered_linear"]
+    assert result.scores["tiered_capped"] <= result.scores["tier1_only"] + allowance
+    assert result.scores["tiered_capped"] == pytest.approx(expected, abs=1.0)
+
+
+def test_condition5_aggregate_uses_capped_hold_instrument_not_headline() -> None:
+    """Clustered survivor arithmetic is out-of-band only on the capped view."""
+    baseline = _synthetic_tradeoff_result(tiered=66.996, c1_score=1.0)
+    candidate = _synthetic_tradeoff_result(tiered=66.996, c1_score=0.50)
+    candidate_scores = dict(candidate.scores)
+    candidate_scores["tiered_capped"] = 59.365914
+    candidate_scores["tiered_hold_instrument"] = 59.365914
+    candidate = RulerV3Result(
+        facets=candidate.facets,
+        scores=candidate_scores,
+        flags=candidate.flags,
+        applicability=candidate.applicability,
+        coverage=candidate.coverage,
+        metadata=candidate.metadata,
+    )
+    linear_delta = (
+        abs(candidate.scores["tiered"] - baseline.scores["tiered"]) / baseline.scores["tiered"]
+    )
+    capped_delta = (
+        abs(candidate.scores["tiered_hold_instrument"] - baseline.scores["tiered"])
+        / baseline.scores["tiered"]
+    )
+
+    assert linear_delta == pytest.approx(0.0)
+    assert capped_delta > 0.02
+    assert material_hold_ineligible(
+        baseline,
+        candidate,
+        shape_distance=0.40,
+        aggregate_delta_fraction=linear_delta,
+        two_layout_buyback=1.1,
+    )
+    assert not material_hold_ineligible(
+        baseline,
+        candidate,
+        shape_distance=0.40,
+        aggregate_delta_fraction=capped_delta,
+        two_layout_buyback=1.1,
+    )
 
 
 def test_sol_declared_weight_subcontract_is_named_not_standalone_floor() -> None:
@@ -1138,6 +1189,8 @@ def test_severe_g6_flag_plumbing_is_score_neutral() -> None:
     assert result.scores == {
         "tiered": result.scores["tiered"],
         "tiered_linear": result.scores["tiered_linear"],
+        "tiered_capped": result.scores["tiered_capped"],
+        "tiered_hold_instrument": result.scores["tiered_hold_instrument"],
         "equal": result.scores["equal"],
         "tier1_only": result.scores["tier1_only"],
     }

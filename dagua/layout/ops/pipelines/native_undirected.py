@@ -50,6 +50,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -240,11 +241,141 @@ class _ClusterScoreTelemetry:
         Composite after removing only the six R8 cluster-quality terms.
     metrics : dict[str, float]
         Numeric metric payload used for scoring.
+    v3_referee_eligibility_key : tuple[int, float]
+        Severe-G6 referee prefix. It is neutral ``(1, -0.0)`` when the input
+        graph is outside the declared-weight gate.
+    v3_severe_g6_breach : bool
+        Whether the frozen V3 severe-G6 oracle found an absolute breach.
+    v3_referee_ineligibility_reason : str
+        Human-readable telemetry reason for the selected prefix.
     """
 
     extended_score: float
     old_score: float
     metrics: Dict[str, float]
+    v3_referee_eligibility_key: Tuple[int, float] = (1, -0.0)
+    v3_severe_g6_breach: bool = False
+    v3_referee_ineligibility_reason: str = "not_weighted_input"
+
+
+def _weighted_referee_active(problem: LayoutProblem) -> bool:
+    """Return whether the runtime severe-G6 referee applies to a problem.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Candidate contest problem.
+
+    Returns
+    -------
+    bool
+        ``True`` only for declared weighted inputs with non-degenerate positive
+        weight variation.
+    """
+    weights = problem.edge_weights
+    if weights is None or int(weights.numel()) < 2:
+        return False
+    cpu_weights = weights.detach().to(device="cpu", dtype=torch.float64).flatten()
+    if not bool(torch.isfinite(cpu_weights).all()) or bool((cpu_weights <= 0.0).any()):
+        return False
+    mean = float(cpu_weights.mean().item())
+    if not math.isfinite(mean) or mean <= 0.0:
+        return False
+    cv = float(cpu_weights.std(unbiased=False).item()) / mean
+    return cv > 1.0e-12
+
+
+def _runtime_referee_graph_meta(problem: LayoutProblem) -> Dict[str, Any]:
+    """Return input-only V3 metadata for runtime severe-G6 scoring.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Candidate contest problem with optional edge weights.
+
+    Returns
+    -------
+    dict[str, Any]
+        Metadata sufficient for the frozen V3 G6 group oracle.
+    """
+    meta: Dict[str, Any] = {}
+    if problem.edge_weights is not None:
+        meta["edge_weights"] = (
+            problem.edge_weights.detach().to(device="cpu", dtype=torch.float64).flatten().tolist()
+        )
+        meta["weight_mode"] = "distance"
+    return meta
+
+
+def _runtime_referee_telemetry(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+) -> Tuple[Tuple[int, float], bool, str]:
+    """Return severe-G6 referee telemetry for one undirected finalist.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Candidate contest problem.
+
+    Returns
+    -------
+    tuple[tuple[int, float], bool, str]
+        Eligibility prefix, breach flag, and telemetry reason.
+    """
+    if not _weighted_referee_active(problem):
+        return (1, -0.0), False, "not_weighted_input"
+    from dagua.eval.ruler_v3 import (
+        SEVERE_G6_FACETS,
+        RulerV3Facet,
+        RulerV3Result,
+        referee_eligibility_key,
+        severe_g6_breach,
+    )
+    from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
+
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    node_sizes = (
+        torch.ones((int(problem.num_nodes), 2), dtype=torch.float32)
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    group_results = evaluate_conditional_groups(
+        cpu_pos,
+        problem.edge_index.detach().to(device="cpu"),
+        node_sizes,
+        _runtime_referee_graph_meta(problem),
+    )
+    facets: Dict[str, RulerV3Facet] = {}
+    for group in group_results.values():
+        for code, group_facet in group.facets.items():
+            if code not in SEVERE_G6_FACETS:
+                continue
+            facets[code] = RulerV3Facet(
+                code=group_facet.code,
+                name=group_facet.name,
+                tier=group_facet.tier,
+                score=group_facet.score,
+                base_weight=group_facet.base_weight,
+                effective_weight=group_facet.effective_weight,
+                applicable=group_facet.applicable,
+                applicability_reason=group_facet.applicability_reason,
+                metadata=group_facet.metadata,
+            )
+    result = RulerV3Result(
+        facets=facets,
+        scores={"tiered": 0.0, "equal": 0.0, "tier1_only": 0.0},
+        flags=tuple(),
+        applicability={code: facet.applicable for code, facet in facets.items()},
+        coverage={},
+        metadata={"runtime_referee": "severe_g6_only"},
+    )
+    key = referee_eligibility_key(result)
+    breached = severe_g6_breach(result)
+    reason = "severe_g6_breach" if breached else "compliant"
+    return key, breached, reason
 
 
 def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
@@ -1299,11 +1430,15 @@ def _score_undirected_candidate_payload(
             profile=aesthetic_profile,
         )
     telemetry = None
-    if problem.clusters:
+    v3_key, v3_breach, v3_reason = _runtime_referee_telemetry(pos, problem)
+    if problem.clusters or _weighted_referee_active(problem):
         telemetry = _ClusterScoreTelemetry(
             extended_score=score,
             old_score=old_score,
             metrics=numeric,
+            v3_referee_eligibility_key=v3_key,
+            v3_severe_g6_breach=v3_breach,
+            v3_referee_ineligibility_reason=v3_reason,
         )
     return score, telemetry
 
@@ -1342,7 +1477,12 @@ def _select_undirected_winner(
             best_telemetry = telemetry.get(best_name)
             if candidate_telemetry is None or best_telemetry is None:
                 continue
-            if candidate_telemetry.old_score > best_telemetry.old_score:
+            candidate_key = (
+                candidate_telemetry.v3_referee_eligibility_key,
+                candidate_telemetry.old_score,
+            )
+            best_key = (best_telemetry.v3_referee_eligibility_key, best_telemetry.old_score)
+            if candidate_key > best_key:
                 best_name = name
         elif score > scores[best_name]:
             best_name = name
@@ -3239,16 +3379,30 @@ def layout_native_undirected_portfolio(
     else:
         release_tail_reservation(config, finalist_tail_reservation, "finalist_tail_entered_scoring")
         charge(config, finalist_tail_charge, "mandatory_finalist_tail")
-        scores = {
-            name: _score_undirected_candidate_cached(
-                positions[name],
-                problem,
-                cluster_ids,
-                aesthetic_profile,
-                all_pairs_dist,
-            )
-            for name in finalist_names
-        }
+        if _weighted_referee_active(problem):
+            scores = {}
+            for name in finalist_names:
+                score, score_telemetry = _score_undirected_candidate_payload(
+                    positions[name],
+                    problem,
+                    cluster_ids,
+                    aesthetic_profile,
+                    all_pairs_dist,
+                )
+                scores[name] = score
+                if score_telemetry is not None:
+                    cluster_score_telemetry[name] = score_telemetry
+        else:
+            scores = {
+                name: _score_undirected_candidate_cached(
+                    positions[name],
+                    problem,
+                    cluster_ids,
+                    aesthetic_profile,
+                    all_pairs_dist,
+                )
+                for name in finalist_names
+            }
 
     # Argmax selection; strict inequality means ties go to the incumbent.
     best_name = _select_undirected_winner(scores, cluster_score_telemetry)
