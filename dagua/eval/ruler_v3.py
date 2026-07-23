@@ -2621,7 +2621,10 @@ def _headline_degeneracy_fold(
     k_values: List[float] = []
     if degenerate_scale and node_diag_mean > 1e-8:
         elr = edge_length_mean / node_diag_mean
-        k_values.append(_clamp_float(elr / DEGENERATE_SCALE_RATIO, 0.25, 0.5))
+        # Round-1-adopted "sevhalf" DS fold curve (both labs, 2026-07-23): least-cliffy,
+        # zero DS-above-readable residual pairs. NOT clamp(elr/.25, .25, .5) (a reverse-
+        # engineered third curve matching a mis-pasted rejected-`sev` exemplar).
+        k_values.append(0.5 * _clamp_float(elr / DEGENERATE_SCALE_RATIO, 0.5, 1.0))
     if sprawl_collapse and occlusion_score is not None:
         depth = min(1.0, (SPRAWL_COLLAPSE_C4_MAX - float(occlusion_score)) / 0.1)
         k_sprawl = _clamp_float(64.0 / max(float(whitespace_ratio), 1e-12), 0.25, 1.0)

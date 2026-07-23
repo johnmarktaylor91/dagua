@@ -7,7 +7,12 @@ from typing import List, Tuple
 import pytest
 import torch
 
-from dagua.eval.ruler_v3 import RulerV3Result, _triple_view_scores, score_core_v3
+from dagua.eval.ruler_v3 import (
+    RulerV3Result,
+    _headline_degeneracy_fold,
+    _triple_view_scores,
+    score_core_v3,
+)
 from scripts import freeze_v3_rebaseline, native_sprint_score
 
 _FAST_SCORE_KWARGS = {
@@ -95,6 +100,32 @@ def test_degenerate_scale_folds_headline_but_not_diagnostics() -> None:
     )
     assert result.scores["equal"] == pytest.approx(raw["equal"])
     assert result.scores["tier1_only"] == pytest.approx(raw["tier1_only"])
+
+
+def test_ds_fold_curve_is_sevhalf() -> None:
+    """Pin the DS fold to the round-1-adopted sevhalf curve at points where curves diverge.
+
+    Guards against regressing to the rejected ``sev`` curve or the reverse-engineered
+    ``clamp(elr/.25, .25, .5)`` third curve (both give k=0.4357 at the sparse_pair point,
+    vs sevhalf's 0.25).
+    """
+
+    def k_ds(elr: float) -> float:
+        return _headline_degeneracy_fold(
+            edge_length_mean=elr,
+            node_diag_mean=1.0,
+            degenerate_scale=True,
+            sprawl_collapse=False,
+            occlusion_score=None,
+            whitespace_ratio=1.0,
+        )
+
+    # sparse_pair operating point: sevhalf floors to 0.25 (rejected/accidental curves -> 0.4357).
+    assert k_ds(0.1089) == pytest.approx(0.25)
+    # mid-band divergence: sevhalf ramps to 0.4 (accidental clamp(.,.25,.5) curve -> 0.5).
+    assert k_ds(0.2) == pytest.approx(0.4)
+    # DS-flag boundary: half fold.
+    assert k_ds(0.25) == pytest.approx(0.5)
 
 
 def test_sprawl_collapse_folds_and_pure_sprawl_releases() -> None:
