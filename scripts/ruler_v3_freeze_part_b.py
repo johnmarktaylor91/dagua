@@ -50,7 +50,10 @@ SPECIALIST_RULES: Tuple[Tuple[str, str, Tuple[str, ...], Tuple[str, ...]], ...] 
     (
         "multi_scale_np",
         "C3",
-        ("tsnet", "tsne", "umap"),
+        # Defensibility correction: backfill rows show tsne_graph/umap_graph
+        # exist but lose C3; neighborhood/stress optimizers are the measured
+        # specialist class for multi-radius graph neighborhoods.
+        ("tfdp", "sgd2", "elk_stress", "ogdf_stress", "stress"),
         ("scale", "large-sparse", "small-world", "scale-free"),
     ),
     ("declared_cluster", "G2", ("cise", "fcose"), ("clustered",)),

@@ -251,7 +251,7 @@ def referee_eligibility_key(
     shape_distance : Optional[float], optional
         Pair shape distance used by the material-hold predicate.
     aggregate_delta_fraction : Optional[float], optional
-        Absolute tiered-headline movement as a baseline fraction.
+        Absolute capped hold-instrument movement as a baseline fraction.
     two_layout_buyback : Optional[float], optional
         Pair buyback in score points on the de-ramped Tier-1 instrument.
 
@@ -293,7 +293,7 @@ def material_hold_ineligible(
     shape_distance : Optional[float]
         Pair shape distance.
     aggregate_delta_fraction : Optional[float]
-        Absolute tiered-headline movement as a baseline fraction.
+        Absolute tiered hold-instrument movement as a baseline fraction.
     two_layout_buyback : Optional[float]
         Pair buyback in score points on the de-ramped Tier-1 instrument.
 
@@ -2610,7 +2610,7 @@ def _triple_view_scores(
     facets: Mapping[str, RulerV3Facet],
     graph_meta: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, float]:
-    """Compute equal, capped tiered, linear tiered, and Tier-1-only views.
+    """Compute equal, headline tiered, capped audit, and Tier-1-only views.
 
     Parameters
     ----------
@@ -2618,12 +2618,14 @@ def _triple_view_scores(
         Facet publication records keyed by V3 facet code.
     graph_meta : Optional[Mapping[str, Any]], optional
         Declared graph metadata used only to identify the family envelope for
-        the pre-registered softmin cap.
+        the adjudication-instrument softmin cap.
 
     Returns
     -------
     Dict[str, float]
-        Composite views on a 0--100 scale.
+        Composite views on a 0--100 scale. The headline ``tiered`` view is the
+        uncapped linear composite; ``tiered_capped`` is retained only as the
+        hold/adjudication instrument.
     """
     values = {code: facet.score for code, facet in facets.items()}
     tiered_weights = {code: facet.effective_weight for code, facet in facets.items()}
@@ -2638,14 +2640,18 @@ def _triple_view_scores(
         family,
         FAMILY_MARGIN_ALLOWANCES["__fallback__"],
     )
-    tiered_capped = _family_softmin(
-        tiered_linear,
-        tier1_only + allowance,
-        tau=FAMILY_SOFTMIN_TAU,
-    )
+    tiered_capped = tiered_linear
+    if family == "clustered":
+        tiered_capped = _family_softmin(
+            tiered_linear,
+            tier1_only + allowance,
+            tau=FAMILY_SOFTMIN_TAU,
+        )
     return {
-        "tiered": tiered_capped,
+        "tiered": tiered_linear,
         "tiered_linear": tiered_linear,
+        "tiered_capped": tiered_capped,
+        "tiered_hold_instrument": tiered_capped,
         "equal": renormalized_score(values, equal_weights),
         "tier1_only": tier1_only,
     }
