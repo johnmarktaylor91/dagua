@@ -118,6 +118,8 @@ def test_ds_fold_curve_is_sevhalf() -> None:
             sprawl_collapse=False,
             occlusion_score=None,
             whitespace_ratio=1.0,
+            overlap_count=0,
+            num_nodes=4,
         )
 
     # sparse_pair operating point: sevhalf floors to 0.25 (rejected/accidental curves -> 0.4357).
@@ -173,19 +175,21 @@ def test_coincident_collapse_detector_flags_without_headline_fold() -> None:
     assert "COINCIDENT_COLLAPSE" in cf_only_consumed.flags
     assert "DEGENERATE_SCALE" not in cf_only_consumed.flags
     assert "SPRAWL_COLLAPSE" not in cf_only_consumed.flags
-    assert cf_only_consumed.metadata["headline_degeneracy_fold"] == pytest.approx(1.0)
-    assert cf_only_consumed.scores["tiered"] == pytest.approx(cf_raw["tiered"])
+    assert cf_only_consumed.facets["C4"].metadata["overlap_count"] == 1
+    assert cf_only_consumed.metadata["headline_degeneracy_fold"] == pytest.approx(0.9375)
+    assert cf_only_consumed.scores["tiered"] == pytest.approx(cf_raw["tiered"] * 0.9375)
 
 
 def test_occlusion_floor_only_row_is_not_folded() -> None:
     """OCCLUSION_FLOOR remains a published diagnostic flag only."""
     result = _score(
-        [(0.0, 0.0), (0.8, 0.0), (3.0, 0.0), (5.0, 0.0)],
+        [(0.0, 0.0), (1.1, 0.0), (3.0, 0.0), (5.0, 0.0)],
         [(0, 1), (1, 2), (2, 3)],
     )
     raw = _raw_scores(result)
 
     assert result.flags == ("OCCLUSION_FLOOR",)
+    assert result.facets["C4"].metadata["overlap_count"] == 0
     assert result.metadata["headline_degeneracy_fold"] == pytest.approx(1.0)
     assert result.scores["tiered"] == pytest.approx(raw["tiered"])
 
