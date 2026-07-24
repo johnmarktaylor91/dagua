@@ -667,6 +667,8 @@ def score_core_v3(
         sprawl_collapse=sprawl_collapse,
         occlusion_score=raw_scores["C4"],
         whitespace_ratio=whitespace_ratio,
+        overlap_count=int(c4["overlap_count"]),
+        num_nodes=num_nodes,
     )
     flags = _row_flags(
         degenerate_scale=degenerate_scale,
@@ -708,6 +710,8 @@ def score_core_v3(
                 sprawl_collapse=sprawl_collapse,
                 occlusion_score=raw_scores["C4"],
                 whitespace_ratio=whitespace_ratio,
+                overlap_count=int(c4["overlap_count"]),
+                num_nodes=num_nodes,
             ),
             "crossing_weight_multiplier": crossing_weight_multiplier(num_nodes),
             "conditional_groups": group_results,
@@ -2594,8 +2598,10 @@ def _headline_degeneracy_fold(
     sprawl_collapse: bool,
     occlusion_score: Optional[float],
     whitespace_ratio: float,
+    overlap_count: int,
+    num_nodes: int,
 ) -> float:
-    """Compute the post-composite headline degeneracy multiplier.
+    """Compute the post-composite co-signed headline degeneracy multiplier.
 
     Parameters
     ----------
@@ -2611,24 +2617,31 @@ def _headline_degeneracy_fold(
         C4 node-occlusion score.
     whitespace_ratio : float
         C5 ``visual_area / area_floor`` ratio.
+    overlap_count : int
+        Count of overlapping node visual-box pairs from C4 metadata.
+    num_nodes : int
+        Number of graph nodes used to normalize overlap density.
 
     Returns
     -------
     float
         Multiplier for published headline views. Equal and Tier-1-only
-        diagnostic views consume no degeneracy fold.
+        diagnostic views consume no degeneracy fold. The co-signed curve is
+        ``min(k_OV, k_DS, k_SPRAWL)`` where ``k_OV`` is identity at zero
+        overlaps, ``k_DS`` is the ungated scale-continuity leg, and
+        ``k_SPRAWL`` is the frozen sprawl leg.
     """
     k_values: List[float] = []
-    if degenerate_scale and node_diag_mean > 1e-8:
+    _ = degenerate_scale
+    if node_diag_mean > 1e-8:
         elr = edge_length_mean / node_diag_mean
-        # Round-1-adopted "sevhalf" DS fold curve (both labs, 2026-07-23): least-cliffy,
-        # zero DS-above-readable residual pairs. NOT clamp(elr/.25, .25, .5) (a reverse-
-        # engineered third curve matching a mis-pasted rejected-`sev` exemplar).
-        k_values.append(0.5 * _clamp_float(elr / DEGENERATE_SCALE_RATIO, 0.5, 1.0))
+        k_values.append(_clamp_float(2.0 * elr, 0.25, 1.0))
     if sprawl_collapse and occlusion_score is not None:
         depth = min(1.0, (SPRAWL_COLLAPSE_C4_MAX - float(occlusion_score)) / 0.1)
         k_sprawl = _clamp_float(64.0 / max(float(whitespace_ratio), 1e-12), 0.25, 1.0)
         k_values.append(1.0 - depth * (1.0 - k_sprawl))
+    q = overlap_count / max(num_nodes, 1)
+    k_values.append(1.0 - 0.5 * _clamp_float(q / 0.5, 0.0, 1.0) ** 3)
     return min(k_values) if k_values else 1.0
 
 
@@ -2641,6 +2654,8 @@ def _apply_headline_degeneracy_fold(
     sprawl_collapse: bool,
     occlusion_score: Optional[float],
     whitespace_ratio: float,
+    overlap_count: int,
+    num_nodes: int,
 ) -> Dict[str, float]:
     """Apply the degeneracy fold to headline score views only.
 
@@ -2660,6 +2675,10 @@ def _apply_headline_degeneracy_fold(
         C4 node-occlusion score.
     whitespace_ratio : float
         C5 ``visual_area / area_floor`` ratio.
+    overlap_count : int
+        Count of overlapping node visual-box pairs from C4 metadata.
+    num_nodes : int
+        Number of graph nodes used to normalize overlap density.
 
     Returns
     -------
@@ -2674,6 +2693,8 @@ def _apply_headline_degeneracy_fold(
         sprawl_collapse=sprawl_collapse,
         occlusion_score=occlusion_score,
         whitespace_ratio=whitespace_ratio,
+        overlap_count=overlap_count,
+        num_nodes=num_nodes,
     )
     for key in ("tiered", "tiered_linear", "tiered_capped", "tiered_hold_instrument"):
         if key in folded:
