@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -10,8 +11,10 @@ import pytest
 import torch
 
 from dagua.eval.graphs import TestGraph
+from dagua.eval.ruler_v3 import RulerV3Facet, RulerV3Result
 from dagua.graph import DaguaGraph
 from scripts import native_sprint_score as scorer
+from scripts import ruler_v3_freeze_part_b as part_b
 
 
 def _make_noncluster_graph(name: str) -> TestGraph:
@@ -73,6 +76,16 @@ def _cluster_metrics(score: float = 10.0) -> dict[str, Any]:
     metrics: dict[str, Any] = {"score": score}
     metrics.update({key: 1.0 for key in scorer.CLUSTER_SCORE_KEYS})
     return metrics
+
+
+def test_gg7_multiscale_c3_expected_winner_uses_stress_neighborhood_class() -> None:
+    """GG-7 C3 expects measured neighborhood/stress optimizers, not t-SNE/UMAP."""
+    rule = next(
+        rule for rule in part_b.SPECIALIST_RULES if rule[0] == "multi_scale_np" and rule[1] == "C3"
+    )
+
+    assert {"tfdp", "sgd2", "elk_stress", "ogdf_stress"}.issubset(set(rule[2]))
+    assert not {"tsnet", "tsne", "umap"} & set(rule[2])
 
 
 def _score_from_payload(metrics: Mapping[str, Any], _is_directed: bool) -> float:
@@ -369,3 +382,352 @@ def test_score_position_trips_on_sizeless_graph(tmp_path: Path) -> None:
 
     assert row["score_origin"] == "fresh_positions"
     assert row["metrics"]["node_occlusion_score"] is not None
+
+
+@pytest.mark.parametrize(
+    "name,tags",
+    [
+        ("plain_unit", {"directed"}),
+        ("weighted_unit", {"weighted"}),
+        ("tree_unit", {"tree"}),
+    ],
+)
+def test_score_position_v2_stays_unchanged(
+    name: str,
+    tags: set[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default scoring and explicit V2 return identical old composites."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_node("c")
+    graph.add_edge("a", "b", weight=2.0)
+    graph.add_edge("b", "c", weight=5.0)
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name=name, graph=graph, tags=tags)
+    pos_path = tmp_path / f"{name}.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=torch.float32), pos_path)
+    metrics = {"score": 42.0, "node_occlusion_score": 1.0}
+    metrics.update({key: 1.0 for key in scorer.CLUSTER_SCORE_KEYS})
+    calls: list[dict[str, Any]] = []
+
+    def fake_full(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Return stable V2 metrics and capture call arguments."""
+        calls.append(dict(kwargs))
+        return dict(metrics)
+
+    monkeypatch.setattr(scorer, "full", fake_full)
+    monkeypatch.setattr(scorer, "composite_auto", _score_from_payload)
+
+    default_row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig")
+    explicit_v2_row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig", ruler="v2")
+
+    assert default_row["old_composite"] == explicit_v2_row["old_composite"] == 42.0
+    assert default_row["extended_composite"] == explicit_v2_row["extended_composite"] == 42.0
+    assert calls and calls[0]["node_sizes"] is graph.node_sizes
+
+
+def test_score_position_v2_converts_native_units(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V2 scoring receives renderer point-space positions for native-unit stores."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="native_units", graph=graph, tags={"directed"})
+    pos_path = tmp_path / "native.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [2.0, 0.0]], dtype=torch.float32), pos_path)
+    captured: dict[str, Any] = {}
+
+    def fake_full(positions: torch.Tensor, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Capture scorer inputs and return stable V2 metrics."""
+        del args
+        captured["positions"] = positions.detach().clone()
+        captured["node_sizes"] = kwargs["node_sizes"]
+        return {"score": 10.0, "node_occlusion_score": 1.0}
+
+    monkeypatch.setattr(scorer, "full", fake_full)
+    monkeypatch.setattr(scorer, "composite_auto", _score_from_payload)
+
+    row = scorer.score_position(test_graph, str(pos_path), "dot", "sig", ruler="v2")
+
+    assert float(captured["positions"][1, 0] - captured["positions"][0, 0]) == pytest.approx(144.0)
+    assert graph.node_sizes is not None
+    assert captured["node_sizes"].shape == graph.node_sizes.shape
+    assert row["scoring_units"]["position_scale"] == pytest.approx(72.0)
+    assert row["scoring_units"]["rendered_span"] == pytest.approx(144.0)
+
+
+def test_score_position_v2_keeps_point_scale_engines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point-scale stores are not rescaled before V2 scoring."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="point_units", graph=graph, tags={"directed"})
+    pos_path = tmp_path / "points.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [144.0, 0.0]], dtype=torch.float32), pos_path)
+    captured: dict[str, Any] = {}
+
+    def fake_full(positions: torch.Tensor, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Capture scorer inputs and return stable V2 metrics."""
+        del args, kwargs
+        captured["positions"] = positions.detach().clone()
+        return {"score": 10.0, "node_occlusion_score": 1.0}
+
+    monkeypatch.setattr(scorer, "full", fake_full)
+    monkeypatch.setattr(scorer, "composite_auto", _score_from_payload)
+
+    row = scorer.score_position(test_graph, str(pos_path), "graphviz_dot", "sig", ruler="v2")
+
+    assert float(captured["positions"][1, 0] - captured["positions"][0, 0]) == pytest.approx(144.0)
+    assert row["scoring_units"]["position_scale"] == pytest.approx(1.0)
+
+
+def test_score_position_v3_merges_scoring_degenerate_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V3 rows carry scoring-path degeneracy flags without ruler changes."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b")
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="degenerate", graph=graph, tags={"directed"})
+    pos_path = tmp_path / "degenerate.pt"
+    torch.save(torch.zeros((2, 2), dtype=torch.float32), pos_path)
+
+    def fake_score_core_v3(*args: Any, **kwargs: Any) -> RulerV3Result:
+        """Return a V3 result with no ruler-side flags."""
+        del args, kwargs
+        return RulerV3Result(
+            facets={},
+            scores={
+                "tiered": 1.0,
+                "tiered_linear": 1.0,
+                "equal": 1.0,
+                "tier1_only": 1.0,
+            },
+            flags=tuple(),
+            applicability={},
+            coverage={},
+            metadata={},
+        )
+
+    monkeypatch.setattr(scorer, "score_core_v3", fake_score_core_v3)
+
+    row = scorer.score_position(test_graph, str(pos_path), "graphviz_dot", "sig", ruler="v3")
+
+    assert row["v3_row_flags"] == ["DEGENERATE_SCALE"]
+    assert row["metrics"]["v3_flags"] == ["DEGENERATE_SCALE"]
+
+
+def test_score_position_v3_publishes_severe_g6_flag_and_eligibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V3 raw rows carry the score-neutral severe-G6 flag and referee key."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_edge("a", "b", weight=1.0)
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="weighted_breach", graph=graph, tags={"weighted"})
+    pos_path = tmp_path / "weighted_breach.pt"
+    torch.save(torch.zeros((2, 2), dtype=torch.float32), pos_path)
+
+    def fake_score_core_v3(*args: Any, **kwargs: Any) -> RulerV3Result:
+        """Return a V3 result with an absolute severe-G6 breach."""
+        del args, kwargs
+        facet = RulerV3Facet(
+            code="G6_weighted_ksm",
+            name="weighted_shortest_path_isotonic_ksm",
+            tier=1,
+            score=0.50,
+            base_weight=4.0,
+            effective_weight=8.0,
+            applicable=True,
+            applicability_reason="synthetic",
+            metadata={},
+        )
+        return RulerV3Result(
+            facets={"G6_weighted_ksm": facet},
+            scores={
+                "tiered": 10.0,
+                "tiered_linear": 10.0,
+                "equal": 20.0,
+                "tier1_only": 30.0,
+            },
+            flags=("severe_g6_breach",),
+            applicability={"G6_weighted_ksm": True},
+            coverage={},
+            metadata={},
+        )
+
+    monkeypatch.setattr(scorer, "score_core_v3", fake_score_core_v3)
+
+    row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig", ruler="v3")
+
+    assert row["v3_row_flags"] == ["severe_g6_breach", "DEGENERATE_SCALE"]
+    assert row["v3_referee_eligibility_key"] == [0, pytest.approx(-0.05)]
+    assert row["v3_severe_g6_breach"] is True
+
+
+def test_best_rows_by_graph_applies_native_severe_g6_eligibility_only() -> None:
+    """Native best-row selection uses eligibility; field rows remain annotated only."""
+    rows = [
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 100.0,
+            "v3_referee_eligibility_key": [0, -0.40],
+            "v3_row_flags": ["severe_g6_breach"],
+            "position_path": "native_bad.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 1.0,
+            "v3_referee_eligibility_key": [1, -0.0],
+            "v3_row_flags": [],
+            "position_path": "native_ok.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "elk_layered",
+            "v3_tiered": 2.0,
+            "v3_referee_eligibility_key": [1, -0.0],
+            "v3_row_flags": [],
+            "position_path": "field_ok.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "dagre",
+            "v3_tiered": 99.0,
+            "v3_referee_eligibility_key": [0, -0.40],
+            "v3_row_flags": ["severe_g6_breach"],
+            "position_path": "field_flagged.pt",
+        },
+    ]
+
+    native = scorer.best_rows_by_graph(rows, "v3_tiered", engine="dagua")
+    field = scorer.best_rows_by_graph(rows, "v3_tiered", engine=None)
+
+    assert native["g"]["position_path"] == "native_ok.pt"
+    assert field["g"]["position_path"] == "field_flagged.pt"
+
+
+def test_best_rows_by_graph_uses_least_breach_fallback_for_native() -> None:
+    """When all native rows breach, the least breach wins before composite tie-break."""
+    rows = [
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 99.0,
+            "v3_referee_eligibility_key": [0, -0.30],
+            "position_path": "deep.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "dagua",
+            "v3_tiered": 20.0,
+            "v3_referee_eligibility_key": [0, -0.01],
+            "position_path": "shallow.pt",
+        },
+    ]
+
+    native = scorer.best_rows_by_graph(rows, "v3_tiered", engine="dagua")
+
+    assert native["g"]["position_path"] == "shallow.pt"
+
+
+def test_native_runtime_referee_tripwire_fires_only_on_native_rows() -> None:
+    """Re-baseline tripwire ignores field annotations and fails native severe-G6 rows."""
+    field_rows = [{"engine": "dagre", "graph": "g", "v3_row_flags": ["severe_g6_breach"]}]
+    native_rows = [{"engine": "dagua", "graph": "g", "v3_row_flags": ["severe_g6_breach"]}]
+
+    scorer.assert_native_runtime_referee_tripwire(field_rows)
+    with pytest.raises(RuntimeError, match="wire the runtime referee eligibility key"):
+        scorer.assert_native_runtime_referee_tripwire(native_rows)
+
+
+def test_gg6_random_floor_blocks_only_when_random_reaches_real_best(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GG-6 blocks on graph bests and keeps weak real rows diagnostic-only."""
+
+    def _generic_family(_graph_name: str, _graphs: Mapping[str, object]) -> str:
+        """Return a stable test family without constructing corpus graph metadata."""
+        return "generic"
+
+    monkeypatch.setattr(part_b, "family_for_graph", _generic_family)
+    random_best = {
+        "graph": "g",
+        "engine": "random_uniform_0",
+        "v3_tiered": 51.0,
+        "v3_row_flags": [],
+    }
+    real_best = {"graph": "g", "engine": "dot", "v3_tiered": 64.0, "v3_row_flags": []}
+    weak_real = {"graph": "g", "engine": "elk_force", "v3_tiered": 49.0, "v3_row_flags": []}
+    tied_real_best = {"graph": "g", "engine": "dagre", "v3_tiered": 51.25, "v3_row_flags": []}
+    flagged_real = {
+        "graph": "g",
+        "engine": "nx",
+        "v3_tiered": 10.0,
+        "v3_row_flags": ["DEGENERATE_SCALE"],
+    }
+
+    summary, blocks, diagnostics = part_b.summarize_random_floor(
+        [real_best, weak_real, flagged_real],
+        [random_best],
+        {},
+    )
+
+    assert summary == [
+        {
+            "family": "generic",
+            "real_best": 64.0,
+            "random_best": 51.0,
+            "gap": 13.0,
+            "real_rows": 3,
+            "random_rows": 1,
+        }
+    ]
+    assert blocks == []
+    assert diagnostics == [
+        "g: random_best random_uniform_0 51.000 > elk_force 49.000 (delta=2.000)"
+    ]
+    assert part_b.gg6_graph_block_signal("g", random_best, tied_real_best) is not None
+
+
+def test_score_position_v3_scores(tmp_path: Path) -> None:
+    """V3 scoring returns finite composites and publication facet records."""
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_node("c")
+    graph.add_edge("a", "b", weight=2.0)
+    graph.add_edge("b", "c", weight=5.0)
+    graph.compute_node_sizes()
+    test_graph = TestGraph(name="weighted_unit", graph=graph, tags={"weighted"})
+    pos_path = tmp_path / "v3.pt"
+    torch.save(torch.tensor([[0.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=torch.float32), pos_path)
+
+    v3_row = scorer.score_position(test_graph, str(pos_path), "dagua", "sig", ruler="v3")
+
+    assert "old_composite" not in v3_row
+    assert math.isfinite(v3_row["v3_tiered"])
+    assert math.isfinite(v3_row["v3_equal"])
+    assert math.isfinite(v3_row["v3_tier1_only"])
+    assert v3_row["v3_facets"]
+    assert v3_row["v3_applicability"]
