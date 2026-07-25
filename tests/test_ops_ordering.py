@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -21,6 +23,21 @@ from dagua.layout.ops.ordering import (
 )
 from dagua.layout.ops.preprocess import BuildAdjacency
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
+
+
+def _semantic_dag_structure() -> SimpleNamespace:
+    """Return the native graph-structure signal for semantic DAG ordering tests.
+
+    Returns
+    -------
+    SimpleNamespace
+        Structure-like object carrying native's directed-acyclic routing flags.
+    """
+    return SimpleNamespace(
+        is_semantically_directed=True,
+        is_directed_acyclic=True,
+        is_acyclic=True,
+    )
 
 
 def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
@@ -266,7 +283,12 @@ def test_transpose_heuristic_swaps_crossing_pair() -> None:
 
 def test_keep_lower_crossing_order_adopts_dagre_candidate_when_lower() -> None:
     """KeepLowerCrossingOrder should adopt a Dagre candidate with fewer crossings."""
-    problem = LayoutProblem(edge_index=_edge_index([(0, 3), (1, 2)]), num_nodes=4, seed=7)
+    problem = LayoutProblem(
+        edge_index=_edge_index([(0, 3), (1, 2)]),
+        num_nodes=4,
+        structure=_semantic_dag_structure(),
+        seed=7,
+    )
     layers = torch.tensor([0, 0, 1, 1], dtype=torch.long)
     state = SolveState(
         layers=layers,
@@ -284,7 +306,12 @@ def test_keep_lower_crossing_order_adopts_dagre_candidate_when_lower() -> None:
 
 def test_keep_lower_crossing_order_keeps_incumbent_on_tie() -> None:
     """KeepLowerCrossingOrder should keep bit-identical incumbent order on ties."""
-    problem = LayoutProblem(edge_index=_edge_index([(0, 2), (1, 3)]), num_nodes=4, seed=7)
+    problem = LayoutProblem(
+        edge_index=_edge_index([(0, 2), (1, 3)]),
+        num_nodes=4,
+        structure=_semantic_dag_structure(),
+        seed=7,
+    )
     layers = torch.tensor([0, 0, 1, 1], dtype=torch.long)
     incumbent = torch.tensor([0, 1, 0, 1], dtype=torch.long)
     state = SolveState(layers=layers, ordering=incumbent.clone())
@@ -296,6 +323,51 @@ def test_keep_lower_crossing_order_keeps_incumbent_on_tie() -> None:
     assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["selected"] == "native"
     assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["native_crossings"] == 0
     assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["dagre_crossings"] == 0
+
+
+@pytest.mark.parametrize(
+    ("structure", "edges"),
+    [
+        (
+            SimpleNamespace(
+                is_semantically_directed=False,
+                is_directed_acyclic=True,
+                is_acyclic=True,
+            ),
+            [(0, 3), (1, 2)],
+        ),
+        (
+            SimpleNamespace(
+                is_semantically_directed=True,
+                is_directed_acyclic=False,
+                is_acyclic=False,
+            ),
+            [(0, 3), (1, 2), (3, 0)],
+        ),
+    ],
+)
+def test_keep_lower_crossing_order_is_inert_without_semantic_dag_structure(
+    structure: SimpleNamespace,
+    edges: list[tuple[int, int]],
+) -> None:
+    """KeepLowerCrossingOrder should not run on undirected or cyclic graph classes."""
+    problem = LayoutProblem(
+        edge_index=_edge_index(edges),
+        num_nodes=4,
+        structure=structure,
+        seed=7,
+    )
+    incumbent = torch.tensor([0, 1, 0, 1], dtype=torch.long)
+    state = SolveState(
+        layers=torch.tensor([0, 0, 1, 1], dtype=torch.long),
+        ordering=incumbent.clone(),
+    )
+
+    result = KeepLowerCrossingOrder().apply(problem, state, RuntimeContext())
+
+    assert result.ordering is not None
+    assert torch.equal(result.ordering.cpu(), incumbent)
+    assert LOWER_CROSSING_ORDER_STATS_KEY not in result.extras
 
 
 def test_indexed_layered_crossing_count_matches_bruteforce_random_bilayers() -> None:
@@ -329,6 +401,7 @@ def test_keep_lower_crossing_order_is_deterministic_for_same_seed() -> None:
     problem = LayoutProblem(
         edge_index=_edge_index([(0, 3), (1, 2), (0, 5), (1, 4)]),
         num_nodes=6,
+        structure=_semantic_dag_structure(),
         seed=99,
     )
     layers = torch.tensor([0, 0, 1, 1, 1, 1], dtype=torch.long)
@@ -378,7 +451,12 @@ def test_keep_lower_crossing_order_uses_in_house_dagre_op_not_pipeline(
     monkeypatch.setattr(dagre_pipeline, "build_dagre_pipeline", fail_pipeline, raising=False)
     monkeypatch.setattr(ordering_module.DagreNormalizeEdges, "apply", trace_normalize)
 
-    problem = LayoutProblem(edge_index=_edge_index([(0, 3), (1, 2)]), num_nodes=4, seed=7)
+    problem = LayoutProblem(
+        edge_index=_edge_index([(0, 3), (1, 2)]),
+        num_nodes=4,
+        structure=_semantic_dag_structure(),
+        seed=7,
+    )
     state = SolveState(
         layers=torch.tensor([0, 0, 1, 1], dtype=torch.long),
         ordering=torch.tensor([0, 1, 0, 1], dtype=torch.long),

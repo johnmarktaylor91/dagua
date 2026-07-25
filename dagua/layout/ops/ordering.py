@@ -1105,6 +1105,52 @@ def _passes_cluster_order_structure_gate(problem: LayoutProblem, cluster_count: 
     return cluster_count >= 5 and problem.num_nodes <= 120
 
 
+def _has_semantic_directed_acyclic_structure(problem: LayoutProblem) -> bool:
+    """Return whether native classified this graph as semantic-directed-acyclic.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs carrying the native graph-structure
+        classification.
+
+    Returns
+    -------
+    bool
+        ``True`` only when the graph is semantically directed and acyclic.
+    """
+    structure = problem.structure
+    if structure is None:
+        return False
+    is_semantically_directed = bool(getattr(structure, "is_semantically_directed", True))
+    is_directed_acyclic = bool(
+        getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+    )
+    return is_semantically_directed and is_directed_acyclic
+
+
+def _is_genuine_dag_layering(edge_index: torch.Tensor, layers: torch.Tensor) -> bool:
+    """Return whether all realized edges move strictly forward through layers.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        CPU layer assignment tensor with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when every edge goes from a lower layer to a higher layer.
+    """
+    if edge_index.numel() == 0:
+        return True
+    source_layers = layers[edge_index[0]]
+    target_layers = layers[edge_index[1]]
+    return bool(torch.all(source_layers < target_layers).item())
+
+
 def _cluster_children(
     cluster_names: Sequence[str],
     cluster_parents: Optional[Mapping[str, Optional[str]]],
@@ -1643,6 +1689,11 @@ class KeepLowerCrossingOrder(Op):
 
         started_at = time.perf_counter()
         edge_index_cpu, layers_cpu, num_nodes = _resolve_active_layered_graph(problem, state)
+        if not _has_semantic_directed_acyclic_structure(problem) or not _is_genuine_dag_layering(
+            edge_index=edge_index_cpu,
+            layers=layers_cpu,
+        ):
+            return state
         incumbent_ordering = _resolve_initial_ordering(
             layers_cpu=layers_cpu,
             state=state,
