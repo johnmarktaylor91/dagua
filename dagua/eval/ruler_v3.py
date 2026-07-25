@@ -2729,14 +2729,17 @@ def _headline_degeneracy_fold(
         k_sprawl = _clamp_float(64.0 / max(float(whitespace_ratio), 1e-12), 0.25, 1.0)
         k_values.append(1.0 - depth * (1.0 - k_sprawl))
     _ = overlap_count
-    if not (
+    invalid_contacts = clearance_contact_pairs < 0 or (
+        clearance_contact_pairs == 0 and clearance_penalty != 0.0
+    )
+    if invalid_contacts or not (
         math.isfinite(overlap_area_severity)
         and math.isfinite(clearance_penalty)
         and math.isfinite(visual_packing_fill)
     ):
         severity = OVERLAP_SEVERITY_SATURATION
     else:
-        contact_denominator = max(0, clearance_contact_pairs) + OVERLAP_CONTACT_SHRINKAGE
+        contact_denominator = clearance_contact_pairs + OVERLAP_CONTACT_SHRINKAGE
         clearance_mean = (
             0.0 if clearance_contact_pairs <= 0 else clearance_penalty / contact_denominator
         )

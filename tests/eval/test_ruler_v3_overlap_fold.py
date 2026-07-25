@@ -246,6 +246,18 @@ def test_overlap_contact_shrinkage_kappa_is_two() -> None:
     assert one_pair != pytest.approx(ten_pairs)
 
 
+@pytest.mark.parametrize("clearance_contact_pairs", [0, -1])
+def test_inconsistent_overlap_contacts_saturate_ov_fold(clearance_contact_pairs: int) -> None:
+    """Pin inconsistent clearance telemetry to the saturated OV fold."""
+    assert _fold(
+        overlap_count=1,
+        overlap_area_severity=0.0,
+        clearance_penalty=0.25,
+        clearance_contact_pairs=clearance_contact_pairs,
+        visual_packing_fill=0.75,
+    ) == pytest.approx(0.5)
+
+
 def test_seam_clearance_is_l2_positive_part_norm() -> None:
     """Pin the diagonal-gap seam debt to the L2 positive-part norm."""
     out_of_band = _c4_probe(
