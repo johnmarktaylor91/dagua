@@ -20,7 +20,8 @@ def _fold(
     whitespace_ratio: float = 1.0,
     overlap_count: int = 0,
     overlap_area_severity: float = 0.0,
-    packed_seam_severity: float = 0.0,
+    clearance_penalty: float = 0.0,
+    clearance_contact_pairs: int = 0,
     visual_packing_fill: float = 1.0,
     num_nodes: int = 100,
 ) -> float:
@@ -44,8 +45,10 @@ def _fold(
         Count of overlapping node visual-box pairs from C4 metadata.
     overlap_area_severity : float, optional
         Exact strict-overlap area severity harvested from C4 metadata.
-    packed_seam_severity : float, optional
-        Production-decomposed packed-seam severity harvested from C4 metadata.
+    clearance_penalty : float, optional
+        Total sub-band contact penalty harvested from C4 metadata.
+    clearance_contact_pairs : int, optional
+        Number of sub-band contact pairs that contributed to ``clearance_penalty``.
     visual_packing_fill : float, optional
         Sum of visual-box area divided by union bounding-box area.
     num_nodes : int, optional
@@ -65,7 +68,8 @@ def _fold(
         whitespace_ratio=whitespace_ratio,
         overlap_count=overlap_count,
         overlap_area_severity=overlap_area_severity,
-        packed_seam_severity=packed_seam_severity,
+        clearance_penalty=clearance_penalty,
+        clearance_contact_pairs=clearance_contact_pairs,
         visual_packing_fill=visual_packing_fill,
         num_nodes=num_nodes,
     )
@@ -94,18 +98,32 @@ def _c4_probe(centers: torch.Tensor, sizes: torch.Tensor) -> dict[str, float]:
     )
 
 
-@pytest.mark.parametrize("num_nodes", [0, 1, 7, 100])
-def test_zero_overlap_leg_is_exact_identity(num_nodes: int) -> None:
-    """Pin ``overlap_count == 0`` to an exact identity multiplier."""
+@pytest.mark.parametrize("fill", [0.0, 0.55, 0.60])
+def test_zero_overlap_low_fill_is_exact_identity_by_construction(fill: float) -> None:
+    """Pin ``ov == 0`` and ``F <= 0.60`` to an exact identity multiplier."""
     assert (
         _fold(
             edge_length_mean=1.0,
             node_diag_mean=2.0,
             overlap_count=0,
-            num_nodes=num_nodes,
+            overlap_area_severity=0.0,
+            clearance_penalty=0.0,
+            clearance_contact_pairs=0,
+            visual_packing_fill=fill,
         )
         == 1.0
     )
+
+
+def test_zero_overlap_high_fill_can_penalize_clearance_contacts() -> None:
+    """Pin removal of the old ``overlap_count == 0`` identity branch."""
+    assert _fold(
+        overlap_count=0,
+        overlap_area_severity=0.0,
+        clearance_penalty=0.25,
+        clearance_contact_pairs=1,
+        visual_packing_fill=0.75,
+    ) == pytest.approx(0.9814814814814815)
 
 
 def test_exact_intersection_bounds_nested_box_severity() -> None:
@@ -116,6 +134,7 @@ def test_exact_intersection_bounds_nested_box_severity() -> None:
     )
 
     assert result["overlap_count"] == 1
+    assert result["clearance_contact_pairs"] == 1
     assert result["overlap_area_severity"] * 2.0 == pytest.approx(1.0)
     assert result["overlap_area_severity"] * 2.0 != pytest.approx(30.25)
 
@@ -141,15 +160,16 @@ def test_pair_overlap_fraction_is_bounded_by_construction(
     )
 
     assert result["overlap_count"] == 1
+    assert result["clearance_contact_pairs"] == 1
     assert 0.0 < result["overlap_area_severity"] * 2.0 <= 1.0
 
 
 @pytest.mark.parametrize(
     ("fill", "expected"),
     [
-        (0.40, 1.0),
-        (0.50, 1.0),
-        (0.625, 0.9375),
+        (0.55, 1.0),
+        (0.60, 1.0),
+        (0.675, 0.9375),
         (0.75, 0.5),
         (0.90, 0.5),
     ],
@@ -158,7 +178,8 @@ def test_overlap_packing_fill_gate(fill: float, expected: float) -> None:
     """Pin the co-signed P(F) gate at the frozen fill landmarks."""
     assert _fold(
         overlap_count=1,
-        packed_seam_severity=0.25,
+        clearance_penalty=1.0,
+        clearance_contact_pairs=2,
         visual_packing_fill=fill,
     ) == pytest.approx(expected)
 
@@ -196,12 +217,33 @@ def test_clearance_penalty_decomposition_invariant() -> None:
     )
 
     assert result["overlap_count"] == 1
+    assert result["clearance_contact_pairs"] == 4
     assert result["clearance_abut_count"] == 1
     assert result["clearance_penalty"] == pytest.approx(
         result["packed_seam_severity"] * 4.0
         + result["overlap_count"]
         + result["clearance_abut_count"]
     )
+
+
+def test_overlap_contact_shrinkage_kappa_is_two() -> None:
+    """Pin ``Cbar = clearance_penalty / (clearance_contact_pairs + 2)``."""
+    one_pair = _fold(
+        overlap_count=1,
+        clearance_penalty=0.25,
+        clearance_contact_pairs=1,
+        visual_packing_fill=0.75,
+    )
+    ten_pairs = _fold(
+        overlap_count=1,
+        clearance_penalty=0.25,
+        clearance_contact_pairs=10,
+        visual_packing_fill=0.75,
+    )
+
+    assert one_pair == pytest.approx(0.9814814814814815)
+    assert ten_pairs == pytest.approx(0.9997106481481481)
+    assert one_pair != pytest.approx(ten_pairs)
 
 
 def test_seam_clearance_is_l2_positive_part_norm() -> None:
@@ -217,12 +259,14 @@ def test_seam_clearance_is_l2_positive_part_norm() -> None:
 
     assert out_of_band["packed_seam_severity"] == 0.0
     assert out_of_band["clearance_penalty"] == 0.0
+    assert out_of_band["clearance_contact_pairs"] == 0
     assert in_band["packed_seam_severity"] == pytest.approx(0.07999999999999996)
     assert in_band["clearance_penalty"] == pytest.approx(0.15999999999999992)
+    assert in_band["clearance_contact_pairs"] == 1
 
 
 @pytest.mark.parametrize(
-    ("overlap_area_severity", "packed_seam_severity", "visual_packing_fill"),
+    ("overlap_area_severity", "clearance_penalty", "visual_packing_fill"),
     [
         (float("nan"), 0.0, 1.0),
         (0.0, float("nan"), 1.0),
@@ -234,14 +278,15 @@ def test_seam_clearance_is_l2_positive_part_norm() -> None:
 )
 def test_nonfinite_overlap_severity_saturates_nonzero_ov_fold(
     overlap_area_severity: float,
-    packed_seam_severity: float,
+    clearance_penalty: float,
     visual_packing_fill: float,
 ) -> None:
     """Pin non-finite OV telemetry to the saturated penalty, not identity."""
     assert _fold(
         overlap_count=1,
         overlap_area_severity=overlap_area_severity,
-        packed_seam_severity=packed_seam_severity,
+        clearance_penalty=clearance_penalty,
+        clearance_contact_pairs=1,
         visual_packing_fill=visual_packing_fill,
     ) == pytest.approx(0.5)
 
@@ -287,6 +332,7 @@ def test_c4_empty_geometry_remains_identity() -> None:
 
     assert result["overlap_count"] == 0
     assert result["node_occlusion_score"] == 1.0
+    assert result["clearance_contact_pairs"] == 0
     assert result["visual_packing_fill"] == 0.0
 
 

@@ -113,8 +113,9 @@ C2_ANGLE_COST_MAX = 1.5
 C2_ANGLE_REFINEMENT_STEP_FRACTION = 0.49
 C4_CLEARANCE_BAND_NODE_DIAGONALS = 0.5
 OVERLAP_SEVERITY_SATURATION = 0.25
-OVERLAP_PACKING_FILL_LO = 0.50
+OVERLAP_PACKING_FILL_LO = 0.60
 OVERLAP_PACKING_FILL_HI = 0.75
+OVERLAP_CONTACT_SHRINKAGE = 2
 
 
 @dataclass(frozen=True)
@@ -672,7 +673,8 @@ def score_core_v3(
         whitespace_ratio=whitespace_ratio,
         overlap_count=int(c4["overlap_count"]),
         overlap_area_severity=float(c4["overlap_area_severity"]),
-        packed_seam_severity=float(c4["packed_seam_severity"]),
+        clearance_penalty=float(c4["clearance_penalty"]),
+        clearance_contact_pairs=int(c4["clearance_contact_pairs"]),
         visual_packing_fill=float(c4["visual_packing_fill"]),
         num_nodes=num_nodes,
     )
@@ -718,7 +720,8 @@ def score_core_v3(
                 whitespace_ratio=whitespace_ratio,
                 overlap_count=int(c4["overlap_count"]),
                 overlap_area_severity=float(c4["overlap_area_severity"]),
-                packed_seam_severity=float(c4["packed_seam_severity"]),
+                clearance_penalty=float(c4["clearance_penalty"]),
+                clearance_contact_pairs=int(c4["clearance_contact_pairs"]),
                 visual_packing_fill=float(c4["visual_packing_fill"]),
                 num_nodes=num_nodes,
             ),
@@ -1691,6 +1694,7 @@ def _smooth_clearance_occlusion_score(
             **legacy,
             "node_occlusion_score": 1.0,
             "clearance_penalty": 0.0,
+            "clearance_contact_pairs": 0,
             "clearance_band_node_diagonals": C4_CLEARANCE_BAND_NODE_DIAGONALS,
             "overlap_area_severity": 0.0,
             "packed_seam_severity": 0.0,
@@ -1758,6 +1762,7 @@ def _smooth_clearance_occlusion_score(
                 else:
                     n_abut += 1
     clearance_penalty = float(sum(penalties))
+    clearance_contact_pairs = len(penalties)
     packed_seam_severity = seam_severity_sum / max(1, count)
     assert math.isclose(
         clearance_penalty,
@@ -1772,6 +1777,7 @@ def _smooth_clearance_occlusion_score(
         "node_occlusion_score": max(0.0, min(1.0, score)),
         "legacy_node_occlusion_score": float(legacy["node_occlusion_score"]),
         "clearance_penalty": clearance_penalty,
+        "clearance_contact_pairs": clearance_contact_pairs,
         "clearance_band_node_diagonals": C4_CLEARANCE_BAND_NODE_DIAGONALS,
         "overlap_area_severity": area_severity_sum / max(1, count),
         "packed_seam_severity": packed_seam_severity,
@@ -2670,7 +2676,8 @@ def _headline_degeneracy_fold(
     whitespace_ratio: float,
     overlap_count: int,
     overlap_area_severity: float,
-    packed_seam_severity: float,
+    clearance_penalty: float,
+    clearance_contact_pairs: int,
     visual_packing_fill: float,
     num_nodes: int,
 ) -> float:
@@ -2694,8 +2701,10 @@ def _headline_degeneracy_fold(
         Count of overlapping node visual-box pairs from C4 metadata.
     overlap_area_severity : float
         Exact strict-overlap area severity ``A`` harvested from C4 metadata.
-    packed_seam_severity : float
-        Production-decomposed packed-seam severity ``J`` harvested from C4 metadata.
+    clearance_penalty : float
+        Total sub-band clearance and overlap contact penalty harvested from C4 metadata.
+    clearance_contact_pairs : int
+        Number of sub-band contact pairs that contributed to ``clearance_penalty``.
     visual_packing_fill : float
         Sum of visual-box area divided by union bounding-box area.
     num_nodes : int
@@ -2707,8 +2716,8 @@ def _headline_degeneracy_fold(
         Multiplier for published headline views. Equal and Tier-1-only
         diagnostic views consume no degeneracy fold. The co-signed curve is
         ``min(k_OV, k_DS, k_SPRAWL)`` where ``k_OV`` is identity at zero
-        overlaps, ``k_DS`` is the ungated scale-continuity leg, and
-        ``k_SPRAWL`` is the frozen sprawl leg.
+        overlap area and low packing fill by construction, ``k_DS`` is the
+        ungated scale-continuity leg, and ``k_SPRAWL`` is the frozen sprawl leg.
     """
     k_values: List[float] = []
     _ = degenerate_scale
@@ -2719,26 +2728,26 @@ def _headline_degeneracy_fold(
         depth = min(1.0, (SPRAWL_COLLAPSE_C4_MAX - float(occlusion_score)) / 0.1)
         k_sprawl = _clamp_float(64.0 / max(float(whitespace_ratio), 1e-12), 0.25, 1.0)
         k_values.append(1.0 - depth * (1.0 - k_sprawl))
-    if overlap_count == 0:
-        k_values.append(1.0)
+    _ = overlap_count
+    if not (
+        math.isfinite(overlap_area_severity)
+        and math.isfinite(clearance_penalty)
+        and math.isfinite(visual_packing_fill)
+    ):
+        severity = OVERLAP_SEVERITY_SATURATION
     else:
-        if not (
-            math.isfinite(overlap_area_severity)
-            and math.isfinite(packed_seam_severity)
-            and math.isfinite(visual_packing_fill)
-        ):
-            severity = OVERLAP_SEVERITY_SATURATION
-        else:
-            fill_gate = _clamp_float(
-                (visual_packing_fill - OVERLAP_PACKING_FILL_LO)
-                / (OVERLAP_PACKING_FILL_HI - OVERLAP_PACKING_FILL_LO),
-                0.0,
-                1.0,
-            )
-            severity = overlap_area_severity + packed_seam_severity * fill_gate
-        k_values.append(
-            1.0 - 0.5 * _clamp_float(severity / OVERLAP_SEVERITY_SATURATION, 0.0, 1.0) ** 3
+        contact_denominator = max(0, clearance_contact_pairs) + OVERLAP_CONTACT_SHRINKAGE
+        clearance_mean = (
+            0.0 if clearance_contact_pairs <= 0 else clearance_penalty / contact_denominator
         )
+        fill_gate = _clamp_float(
+            (visual_packing_fill - OVERLAP_PACKING_FILL_LO)
+            / (OVERLAP_PACKING_FILL_HI - OVERLAP_PACKING_FILL_LO),
+            0.0,
+            1.0,
+        )
+        severity = overlap_area_severity + clearance_mean * fill_gate
+    k_values.append(1.0 - 0.5 * _clamp_float(severity / OVERLAP_SEVERITY_SATURATION, 0.0, 1.0) ** 3)
     return min(k_values) if k_values else 1.0
 
 
@@ -2753,7 +2762,8 @@ def _apply_headline_degeneracy_fold(
     whitespace_ratio: float,
     overlap_count: int,
     overlap_area_severity: float,
-    packed_seam_severity: float,
+    clearance_penalty: float,
+    clearance_contact_pairs: int,
     visual_packing_fill: float,
     num_nodes: int,
 ) -> Dict[str, float]:
@@ -2779,8 +2789,10 @@ def _apply_headline_degeneracy_fold(
         Count of overlapping node visual-box pairs from C4 metadata.
     overlap_area_severity : float
         Exact strict-overlap area severity ``A`` harvested from C4 metadata.
-    packed_seam_severity : float
-        Production-decomposed packed-seam severity ``J`` harvested from C4 metadata.
+    clearance_penalty : float
+        Total sub-band clearance and overlap contact penalty harvested from C4 metadata.
+    clearance_contact_pairs : int
+        Number of sub-band contact pairs that contributed to ``clearance_penalty``.
     visual_packing_fill : float
         Sum of visual-box area divided by union bounding-box area.
     num_nodes : int
@@ -2801,7 +2813,8 @@ def _apply_headline_degeneracy_fold(
         whitespace_ratio=whitespace_ratio,
         overlap_count=overlap_count,
         overlap_area_severity=overlap_area_severity,
-        packed_seam_severity=packed_seam_severity,
+        clearance_penalty=clearance_penalty,
+        clearance_contact_pairs=clearance_contact_pairs,
         visual_packing_fill=visual_packing_fill,
         num_nodes=num_nodes,
     )
