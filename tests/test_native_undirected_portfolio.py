@@ -173,6 +173,56 @@ def test_undirected_cluster_dual_ruler_rejects_old_regression() -> None:
     )
 
 
+def test_undirected_runtime_referee_preserves_non_weighted_selection() -> None:
+    """Neutral severe-G6 keys leave non-weighted undirected selection unchanged."""
+    incumbent = _ClusterScoreTelemetry(
+        extended_score=10.0,
+        old_score=10.0,
+        metrics={},
+        v3_referee_eligibility_key=(1, -0.0),
+    )
+    challenger = _ClusterScoreTelemetry(
+        extended_score=11.0,
+        old_score=11.0,
+        metrics={},
+        v3_referee_eligibility_key=(1, -0.0),
+    )
+
+    assert (
+        _select_undirected_winner(
+            {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
+            {"incumbent": incumbent, "challenger": challenger},
+        )
+        == "challenger"
+    )
+
+
+def test_undirected_runtime_referee_demotes_weighted_severe_g6_breach() -> None:
+    """Weighted undirected selection ranks eligibility before composite score."""
+    incumbent = _ClusterScoreTelemetry(
+        extended_score=10.0,
+        old_score=10.0,
+        metrics={},
+        v3_referee_eligibility_key=(1, -0.0),
+    )
+    challenger = _ClusterScoreTelemetry(
+        extended_score=99.0,
+        old_score=99.0,
+        metrics={},
+        v3_referee_eligibility_key=(0, -0.20),
+        v3_severe_g6_breach=True,
+        v3_referee_ineligibility_reason="severe_g6_breach",
+    )
+
+    assert (
+        _select_undirected_winner(
+            {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
+            {"incumbent": incumbent, "challenger": challenger},
+        )
+        == "incumbent"
+    )
+
+
 def test_declared_undirected_routes_to_portfolio() -> None:
     """A declared-undirected graph selects the portfolio route."""
     graph = _ring_with_chords()
