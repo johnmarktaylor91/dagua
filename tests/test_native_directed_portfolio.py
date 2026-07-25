@@ -124,6 +124,56 @@ def test_directed_cluster_dual_ruler_rejects_old_regression() -> None:
     )
 
 
+def test_directed_runtime_referee_preserves_non_weighted_selection() -> None:
+    """Neutral severe-G6 keys leave non-weighted directed selection unchanged."""
+    incumbent = _DirectedClusterScoreTelemetry(
+        extended_score=10.0,
+        old_score=10.0,
+        metrics={},
+        v3_referee_eligibility_key=(1, -0.0),
+    )
+    challenger = _DirectedClusterScoreTelemetry(
+        extended_score=11.0,
+        old_score=11.0,
+        metrics={},
+        v3_referee_eligibility_key=(1, -0.0),
+    )
+
+    assert (
+        _select_directed_winner(
+            {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
+            {"incumbent": incumbent, "challenger": challenger},
+        )
+        == "challenger"
+    )
+
+
+def test_directed_runtime_referee_demotes_weighted_severe_g6_breach() -> None:
+    """Weighted directed selection ranks eligibility before composite score."""
+    incumbent = _DirectedClusterScoreTelemetry(
+        extended_score=10.0,
+        old_score=10.0,
+        metrics={},
+        v3_referee_eligibility_key=(1, -0.0),
+    )
+    challenger = _DirectedClusterScoreTelemetry(
+        extended_score=99.0,
+        old_score=99.0,
+        metrics={},
+        v3_referee_eligibility_key=(0, -0.20),
+        v3_severe_g6_breach=True,
+        v3_referee_ineligibility_reason="severe_g6_breach",
+    )
+
+    assert (
+        _select_directed_winner(
+            {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
+            {"incumbent": incumbent, "challenger": challenger},
+        )
+        == "incumbent"
+    )
+
+
 def _run_with_watchdog(func: Callable[[], _T], timeout_s: float) -> _T:
     """Run a callable with a wall-clock alarm in the current process.
 
@@ -1193,6 +1243,62 @@ def test_directed_ordering_dual_gate_rejects_single_ruler_win(
 
     assert not dominates
     assert pair == W5ScorePair(directed=11.0, undirected=9.0)
+
+
+def test_directed_ordering_dual_gate_demotes_referee_breacher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A severe-G6-breaching ordering candidate cannot replace a compliant winner."""
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    edge_index = torch.tensor([[0, 1], [3, 2]], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0),
+        edge_weights=torch.tensor([1.0, 3.0], dtype=torch.float32),
+    )
+    incumbent_pair = W5ScorePair(directed=10.0, undirected=10.0)
+    candidate = torch.tensor(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    def fake_pair(*args: object, **kwargs: object) -> W5ScorePair:
+        """Return a dual-ruler improvement that only the referee can reject."""
+        del args, kwargs
+        return W5ScorePair(directed=100.0, undirected=100.0)
+
+    def fake_referee(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+    ) -> tuple[tuple[int, float], bool, str]:
+        """Mark the ordering candidate as the only severe-G6 breacher."""
+        del problem
+        if torch.equal(pos, candidate):
+            return (0, -0.50), True, "severe_g6_breach"
+        return (1, -0.0), False, "compliant"
+
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_pair)
+    monkeypatch.setattr(native_directed, "_runtime_referee_telemetry", fake_referee)
+
+    dominates, pair = _directed_ordering_candidate_dual_dominates(
+        candidate,
+        incumbent_pair,
+        problem,
+        None,
+        None,
+        (1, -0.0),
+    )
+
+    assert not dominates
+    assert pair == W5ScorePair(directed=100.0, undirected=100.0)
 
 
 def test_directed_incumbent_config_is_not_deadline_weakened(monkeypatch: object) -> None:
