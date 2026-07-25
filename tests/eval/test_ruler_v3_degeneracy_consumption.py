@@ -120,7 +120,8 @@ def test_ds_fold_curve_is_sevhalf() -> None:
             whitespace_ratio=1.0,
             overlap_count=0,
             overlap_area_severity=0.0,
-            packed_seam_severity=0.0,
+            clearance_penalty=0.0,
+            clearance_contact_pairs=0,
             visual_packing_fill=1.0,
             num_nodes=4,
         )
@@ -183,8 +184,8 @@ def test_coincident_collapse_detector_flags_without_headline_fold() -> None:
     assert cf_only_consumed.scores["tiered"] == pytest.approx(cf_raw["tiered"] * 0.744)
 
 
-def test_occlusion_floor_only_row_is_not_folded() -> None:
-    """OCCLUSION_FLOOR remains a published diagnostic flag only."""
+def test_occlusion_floor_flag_is_not_fold_input_but_contacts_can_fold() -> None:
+    """OCCLUSION_FLOOR remains diagnostic while zero-overlap contacts can fold."""
     result = _score(
         [(0.0, 0.0), (1.1, 0.0), (3.0, 0.0), (5.0, 0.0)],
         [(0, 1), (1, 2), (2, 3)],
@@ -193,8 +194,12 @@ def test_occlusion_floor_only_row_is_not_folded() -> None:
 
     assert result.flags == ("OCCLUSION_FLOOR",)
     assert result.facets["C4"].metadata["overlap_count"] == 0
-    assert result.metadata["headline_degeneracy_fold"] == pytest.approx(1.0)
-    assert result.scores["tiered"] == pytest.approx(raw["tiered"])
+    assert result.facets["C4"].metadata["clearance_contact_pairs"] == 1
+    assert result.metadata["headline_degeneracy_fold"] == pytest.approx(0.9583208215578847)
+    assert result.scores["tiered"] == pytest.approx(
+        raw["tiered"] * result.metadata["headline_degeneracy_fold"]
+    )
+    assert result.scores["equal"] == pytest.approx(raw["equal"])
 
 
 def test_degeneracy_eligibility_precedes_referee_and_score_keys() -> None:
