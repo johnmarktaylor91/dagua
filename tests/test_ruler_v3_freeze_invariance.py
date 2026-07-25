@@ -764,6 +764,7 @@ def test_f10_manifest_covers_required_constants() -> None:
         "c4_smooth_clearance_band",
         "overlap_severity_saturation",
         "overlap_packing_fill_gate",
+        "overlap_contact_shrinkage",
         "c5_primary_form",
         "c5_band_and_decay",
         "c6_crossing_angle_ideal_degrees",
