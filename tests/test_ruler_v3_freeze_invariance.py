@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import pytest
 import torch
 
+import dagua.eval.ruler_v3 as ruler_v3
+import dagua.eval.ruler_v3_groups as ruler_v3_groups
 from dagua.eval.ruler_v3 import score_core_v3, whitespace_sprawl_score
 from dagua.eval.ruler_v3_frozen import FROZEN_CONSTANTS
 from dagua.eval.ruler_v3_groups import CANONICAL_NODE_HEIGHT_REF
@@ -785,6 +787,181 @@ def test_f10_manifest_covers_required_constants() -> None:
     for key in sorted(FROZEN_CONSTANTS):
         record = FROZEN_CONSTANTS[key]
         print(f"{record.name}: {record.value!r} [{record.source}]")
+
+
+def test_f10_manifest_values_match_live_constants() -> None:
+    """Assert each frozen manifest value is bound to the live scorer constant.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    score_defaults = score_core_v3.__kwdefaults__ or {}
+    c3_defaults = ruler_v3.multi_radius_neighborhood_preservation.__kwdefaults__ or {}
+    g2_slots = ruler_v3_groups.GROUP_REGISTRY["G2"].tier_slots
+    live_values: Dict[str, Any] = {
+        "tier_multipliers": {
+            "T1": ruler_v3.TIER_1_WEIGHT,
+            "T2": ruler_v3.TIER_2_WEIGHT,
+            "T3": ruler_v3.TIER_3_WEIGHT,
+        },
+        "c2_size_decay": {
+            "N_mid": ruler_v3.CROSSING_DECAY_N_MID,
+            "s": ruler_v3.CROSSING_DECAY_S,
+            "floor_multiplier": 0.5,
+        },
+        "c2_angle_weighted_crossing_cost": {
+            "min": ruler_v3.C2_ANGLE_COST_MIN,
+            "max": ruler_v3.C2_ANGLE_COST_MAX,
+            "best_angle_degrees": 90.0,
+            "total_refinement_step_fraction": ruler_v3.C2_ANGLE_REFINEMENT_STEP_FRACTION,
+        },
+        "c3_graph_distance_radii": tuple(c3_defaults["radii"]),
+        "c5_primary_form": "structure_floor_area_band",
+        "c5_band_and_decay": {
+            "content_multiplier": ruler_v3.WHITESPACE_CONTENT_MULTIPLIER,
+            "structure_separation": ruler_v3.WHITESPACE_STRUCTURE_SEPARATION,
+            "ratio_lo": ruler_v3.WHITESPACE_RATIO_LO,
+            "ratio_hi": ruler_v3.WHITESPACE_RATIO_HI,
+            "crowding_decay": ruler_v3.WHITESPACE_CROWDING_DECAY,
+            "sprawl_decay": ruler_v3.WHITESPACE_SPRAWL_DECAY,
+            "sprawl_ratio_factor": ruler_v3.SPRAWL_RATIO_FACTOR,
+        },
+        "c5_fallback_edge_length_band": {
+            "ratio_lo": ruler_v3.EDGE_LENGTH_RATIO_LO,
+            "ratio_hi": ruler_v3.EDGE_LENGTH_RATIO_HI,
+        },
+        "c6_crossing_angle_ideal_degrees": 90.0,
+        "diagnostic_core_weights": {
+            "C2": ruler_v3.CORE_WEIGHT_OVERRIDES["C2"],
+            "C6": ruler_v3.CORE_DIAGNOSTIC_WEIGHTS["C6"],
+            "C8": ruler_v3.CORE_DIAGNOSTIC_WEIGHTS["C8"],
+        },
+        "c4_smooth_clearance_band": {
+            "clearance_band_node_diagonals": ruler_v3.C4_CLEARANCE_BAND_NODE_DIAGONALS,
+            "label_inclusive_when_supplied": True,
+        },
+        "overlap_severity_saturation": ruler_v3.OVERLAP_SEVERITY_SATURATION,
+        "overlap_packing_fill_gate": {
+            "fill_lo": ruler_v3.OVERLAP_PACKING_FILL_LO,
+            "fill_hi": ruler_v3.OVERLAP_PACKING_FILL_HI,
+        },
+        "overlap_contact_shrinkage": ruler_v3.OVERLAP_CONTACT_SHRINKAGE,
+        "canonical_node_height_ref": ruler_v3_groups.CANONICAL_NODE_HEIGHT_REF,
+        "default_node_box": {
+            "width": ruler_v3.DEFAULT_NODE_WIDTH,
+            "height": ruler_v3.DEFAULT_NODE_HEIGHT,
+        },
+        "degenerate_scale_and_occlusion_flags": {
+            "degenerate_scale_ratio": ruler_v3.DEGENERATE_SCALE_RATIO,
+            "occlusion_floor_threshold": ruler_v3.OCCLUSION_FLOOR_THRESHOLD,
+        },
+        "sprawl_collapse_c4_max": ruler_v3.SPRAWL_COLLAPSE_C4_MAX,
+        "coincident_collapse_radius": ruler_v3.COINCIDENT_COLLAPSE_RADIUS,
+        "coincident_collapse_fraction": ruler_v3.COINCIDENT_COLLAPSE_FRACTION,
+        "deterministic_seed_default": score_defaults["seed"],
+        "core_sampling_budgets": {
+            "stress_sources": score_defaults["stress_sources"],
+            "stress_targets": score_defaults["stress_targets"],
+            "crossing_samples": score_defaults["crossing_samples"],
+            "neighborhood_samples": score_defaults["neighborhood_samples"],
+        },
+        "g2_slot_weights": {
+            "slot_a_total": ruler_v3_groups.G2_SLOT_A_TOTAL,
+            "slot_b_total": ruler_v3_groups.G2_SLOT_B_TOTAL,
+            "slot_a_split": tuple(
+                int(slot.weight_within_slot * ruler_v3_groups.G2_SLOT_A_TOTAL)
+                for slot in g2_slots[:4]
+            ),
+            "slot_b_split": tuple(
+                int(slot.weight_within_slot * ruler_v3_groups.G2_SLOT_B_TOTAL)
+                for slot in g2_slots[4:]
+            ),
+        },
+        "hac_rule": {
+            "linkage": "average",
+            "metric": "euclidean",
+            "cluster_count": "number_of_unique_declared_labels",
+        },
+        "g2_compactness_band": {
+            "plateau_hi": ruler_v3_groups.COMPACTNESS_RATIO_PLATEAU_HI,
+            "log_decay": ruler_v3_groups.COMPACTNESS_LOG_DECAY,
+            "legible_spacing_guard": ruler_v3_groups.COMPACTNESS_LEGIBLE_SPACING_GUARD,
+            "legible_spacing_eps": ruler_v3_groups.COMPACTNESS_LEGIBLE_SPACING_EPS,
+        },
+        "g4_slot_weights_and_extent_band": {
+            "slot_a_total": ruler_v3_groups.G4_SLOT_A_TOTAL,
+            "slot_b_total": ruler_v3_groups.G4_SLOT_B_TOTAL,
+            "extent_ratio_lo": ruler_v3_groups.TREE_RATIO_PLATEAU_LO,
+            "extent_ratio_hi": ruler_v3_groups.TREE_RATIO_PLATEAU_HI,
+            "extent_log_decay": ruler_v3_groups.TREE_RATIO_LOG_DECAY,
+        },
+        "g5_quality_band": {
+            "delta": ruler_v3_groups.G5_QUALITY_BAND_DELTA,
+            "change_epsilon": ruler_v3_groups.G5_CHANGE_EPSILON,
+            "zero_change_scale": ruler_v3_groups.G5_ZERO_CHANGE_SCALE,
+        },
+        "g6_weighted_budgets_and_cv": {
+            "weight_cv_saturation": ruler_v3_groups.WEIGHT_CV_SATURATION,
+            "nondegenerate_weight_cv": ruler_v3_groups.NONDEGENERATE_WEIGHT_CV,
+            "local_node_budget": ruler_v3_groups.LOCAL_WEIGHT_MONOTONICITY_NODE_BUDGET,
+            "weighted_stress_sources": ruler_v3_groups.G6_WEIGHTED_STRESS_SOURCE_BUDGET,
+            "weighted_stress_targets": ruler_v3_groups.G6_WEIGHTED_STRESS_TARGET_BUDGET,
+            "severe_floor": ruler_v3_groups.G6_SEVERE_FLOOR,
+            "severe_floor_drop": ruler_v3.G6_FLOOR_DROP,
+            "soft_floor": ruler_v3_groups.G6_SOFT_FLOOR,
+            "severe_weight_multiplier": ruler_v3_groups.G6_SEVERE_WEIGHT_MULTIPLIER,
+            "severe_breach_facets": ruler_v3.SEVERE_G6_FACETS,
+        },
+        "severe_g6_breach_flag": ruler_v3.SEVERE_G6_BREACH_FLAG,
+        "gg3_buyback_gate": {
+            "tier1_materiality": ruler_v3.PAIR_MATERIAL_HOLD_TIER1_DROP,
+            "buyback_bar": ruler_v3.PAIR_MATERIAL_HOLD_BUYBACK,
+            "hold_band_fraction": ruler_v3.PAIR_MATERIAL_HOLD_AGGREGATE_FRACTION,
+        },
+        "margin_audit_tripwire": {
+            "headline": "tiered_linear",
+            "family_envelope": "adjudication_instrument_only",
+            "fallback": ruler_v3.FAMILY_MARGIN_ALLOWANCES["__fallback__"],
+            "softmin_tau": ruler_v3.FAMILY_SOFTMIN_TAU,
+            "de_ramped_tier1_instrument": True,
+            "audit_column": "tiered_capped",
+            "hold_instrument_column": "tiered_hold_instrument",
+            "A_f": {
+                "weighted": ruler_v3.FAMILY_MARGIN_ALLOWANCES["weighted"],
+                "clustered": ruler_v3.FAMILY_MARGIN_ALLOWANCES["clustered"],
+                "dag": ruler_v3.FAMILY_MARGIN_ALLOWANCES["dag"],
+                "generic_force": ruler_v3.FAMILY_MARGIN_ALLOWANCES["generic_force"],
+                "tree": ruler_v3.FAMILY_MARGIN_ALLOWANCES["tree"],
+                "ported": ruler_v3.FAMILY_MARGIN_ALLOWANCES["ported"],
+            },
+        },
+        "g7_port_and_route_thresholds": {
+            "severe_port_cap": ruler_v3_groups.G7_SEVERE_PORT_CAP,
+            "side_cosine_threshold": 2**-0.5,
+            "route_sample_canonical_distance": ruler_v3_groups.G7_ROUTE_SAMPLE_CANONICAL_DISTANCE,
+            "terminal_separation_fraction": ruler_v3_groups.G7_TERMINAL_SEPARATION_FRACTION,
+        },
+        "frac_acyclic_grading": (
+            "effective_weight *= fraction_of_hierarchy_edges_after_declared_feedback_removal"
+        ),
+        "freeze_probe_thresholds": {
+            "unit_alphas": ALPHAS,
+            "position_scale_alphas": ALPHAS,
+            "continuous_relative_tolerance": 1e-12,
+            "crater_10x_max_score": 0.5,
+            "crater_50x_max_score": 0.05,
+            "legit_sprawl_min_score": 0.99,
+        },
+    }
+
+    assert set(live_values) == set(FROZEN_CONSTANTS)
+    for key, value in live_values.items():
+        assert FROZEN_CONSTANTS[key].value == value
 
 
 def test_gg4_deformation_monotonicity_sweep(capsys: pytest.CaptureFixture[str]) -> None:

@@ -457,6 +457,9 @@ def scoring_signature() -> str:
                 root / "dagua" / "layout" / "ops" / "cluster_geometry.py"
             ),
             "dagua/eval/ruler_v3.py": sha256_file(root / "dagua" / "eval" / "ruler_v3.py"),
+            "dagua/eval/ruler_v3_frozen.py": sha256_file(
+                root / "dagua" / "eval" / "ruler_v3_frozen.py"
+            ),
             "dagua/eval/ruler_v3_groups.py": sha256_file(
                 root / "dagua" / "eval" / "ruler_v3_groups.py"
             ),

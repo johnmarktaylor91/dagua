@@ -187,9 +187,9 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
     "g2_slot_weights": FrozenConstant(
         name="g2_slot_weights",
         value={
-            "slot_a_total": 7.0,
+            "slot_a_total": 5.0,
             "slot_b_total": 3.0,
-            "slot_a_split": (2, 2, 1, 1, 1),
+            "slot_a_split": (2, 1, 1, 1),
             "slot_b_split": (2, 1),
         },
         source="dagua/eval/ruler_v3_groups.py:G2_SLOT_* and GROUP_REGISTRY['G2']",
