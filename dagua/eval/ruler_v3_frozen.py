@@ -121,9 +121,15 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
     ),
     "overlap_packing_fill_gate": FrozenConstant(
         name="overlap_packing_fill_gate",
-        value={"fill_lo": 0.50, "fill_hi": 0.75},
+        value={"fill_lo": 0.60, "fill_hi": 0.75},
         source="dagua/eval/ruler_v3.py:OVERLAP_PACKING_FILL_*",
         note="Co-signed packed-seam fill gate for the V3 headline overlap fold.",
+    ),
+    "overlap_contact_shrinkage": FrozenConstant(
+        name="overlap_contact_shrinkage",
+        value=2,
+        source="dagua/eval/ruler_v3.py:OVERLAP_CONTACT_SHRINKAGE",
+        note="Co-signed contact-pair denominator shrinkage for the V3 headline overlap fold.",
     ),
     "canonical_node_height_ref": FrozenConstant(
         name="canonical_node_height_ref",
