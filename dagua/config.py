@@ -220,6 +220,10 @@ class LayoutConfig:
     # Median and transpose run only on acyclic graphs and can be disabled
     # quickly if a narrow DAG family regresses.
     use_native_median_transpose: bool = True
+    # Universal keep-lower-crossing selector for native layered ordering.
+    # Computes a Dagre-style in-house ordering candidate and keeps it only
+    # when its realized crossing count beats the incumbent native order.
+    use_lower_crossing_order: bool = True
     native_median_passes: int = 4
     native_transpose_passes: int = 8
     # X-only Brandes-Koepf compaction after native ordering.
