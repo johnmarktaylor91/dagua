@@ -119,6 +119,9 @@ def test_ds_fold_curve_is_sevhalf() -> None:
             occlusion_score=None,
             whitespace_ratio=1.0,
             overlap_count=0,
+            overlap_area_severity=0.0,
+            packed_seam_severity=0.0,
+            visual_packing_fill=1.0,
             num_nodes=4,
         )
 
@@ -176,8 +179,8 @@ def test_coincident_collapse_detector_flags_without_headline_fold() -> None:
     assert "DEGENERATE_SCALE" not in cf_only_consumed.flags
     assert "SPRAWL_COLLAPSE" not in cf_only_consumed.flags
     assert cf_only_consumed.facets["C4"].metadata["overlap_count"] == 1
-    assert cf_only_consumed.metadata["headline_degeneracy_fold"] == pytest.approx(0.9375)
-    assert cf_only_consumed.scores["tiered"] == pytest.approx(cf_raw["tiered"] * 0.9375)
+    assert cf_only_consumed.metadata["headline_degeneracy_fold"] == pytest.approx(0.744)
+    assert cf_only_consumed.scores["tiered"] == pytest.approx(cf_raw["tiered"] * 0.744)
 
 
 def test_occlusion_floor_only_row_is_not_folded() -> None:

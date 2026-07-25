@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Optional
 
 import pytest
+import torch
 
-from dagua.eval.ruler_v3 import _headline_degeneracy_fold
+from dagua.eval.ruler_v3 import _headline_degeneracy_fold, _smooth_clearance_occlusion_score
 
 
 def _fold(
@@ -18,6 +19,9 @@ def _fold(
     occlusion_score: Optional[float] = None,
     whitespace_ratio: float = 1.0,
     overlap_count: int = 0,
+    overlap_area_severity: float = 0.0,
+    packed_seam_severity: float = 0.0,
+    visual_packing_fill: float = 1.0,
     num_nodes: int = 100,
 ) -> float:
     """Evaluate the headline fold with explicit defaults for isolated leg tests.
@@ -38,6 +42,12 @@ def _fold(
         C5 ``visual_area / area_floor`` ratio.
     overlap_count : int, optional
         Count of overlapping node visual-box pairs from C4 metadata.
+    overlap_area_severity : float, optional
+        Exact strict-overlap area severity harvested from C4 metadata.
+    packed_seam_severity : float, optional
+        Production-decomposed packed-seam severity harvested from C4 metadata.
+    visual_packing_fill : float, optional
+        Sum of visual-box area divided by union bounding-box area.
     num_nodes : int, optional
         Number of graph nodes used to normalize overlap density.
 
@@ -54,7 +64,33 @@ def _fold(
         occlusion_score=occlusion_score,
         whitespace_ratio=whitespace_ratio,
         overlap_count=overlap_count,
+        overlap_area_severity=overlap_area_severity,
+        packed_seam_severity=packed_seam_severity,
+        visual_packing_fill=visual_packing_fill,
         num_nodes=num_nodes,
+    )
+
+
+def _c4_probe(centers: torch.Tensor, sizes: torch.Tensor) -> dict[str, float]:
+    """Evaluate C4 metadata for synthetic visual boxes.
+
+    Parameters
+    ----------
+    centers : torch.Tensor
+        Visual box centers with shape ``[N, 2]``.
+    sizes : torch.Tensor
+        Visual box sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    dict[str, float]
+        C4 score metadata from the production clearance loop.
+    """
+    return _smooth_clearance_occlusion_score(
+        centers.to(dtype=torch.float64),
+        sizes.to(dtype=torch.float64),
+        label_inclusive=True,
+        seed=0,
     )
 
 
@@ -72,18 +108,100 @@ def test_zero_overlap_leg_is_exact_identity(num_nodes: int) -> None:
     )
 
 
+def test_exact_intersection_bounds_nested_box_severity() -> None:
+    """Pin nested-box intersection to the smaller box area, not gap product."""
+    result = _c4_probe(
+        torch.tensor([[0.0, 0.0], [0.0, 0.0]]),
+        torch.tensor([[100.0, 100.0], [10.0, 10.0]]),
+    )
+
+    assert result["overlap_count"] == 1
+    assert result["overlap_area_severity"] * 2.0 == pytest.approx(1.0)
+    assert result["overlap_area_severity"] * 2.0 != pytest.approx(30.25)
+
+
 @pytest.mark.parametrize(
-    ("overlap_count", "expected"),
+    ("center", "size"),
     [
-        (0, 1.0),
-        (25, 0.9375),
-        (50, 0.5),
-        (100, 0.5),
+        ((0.0, 0.0), (1.0, 1.0)),
+        ((0.25, 0.0), (1.0, 1.0)),
+        ((0.25, 0.25), (2.0, 1.0)),
+        ((0.0, 0.0), (10.0, 10.0)),
+        ((0.3, -0.4), (0.5, 4.0)),
     ],
 )
-def test_overlap_fold_curve_values(overlap_count: int, expected: float) -> None:
-    """Pin the co-signed cubic overlap leg at q = 0, 0.25, 0.5, and 1.0."""
-    assert _fold(overlap_count=overlap_count, num_nodes=100) == pytest.approx(expected)
+def test_pair_overlap_fraction_is_bounded_by_construction(
+    center: tuple[float, float],
+    size: tuple[float, float],
+) -> None:
+    """Pin ``f_ij <= 1`` across representative overlap geometries."""
+    result = _c4_probe(
+        torch.tensor([[0.0, 0.0], center]),
+        torch.tensor([[1.0, 1.0], size]),
+    )
+
+    assert result["overlap_count"] == 1
+    assert 0.0 < result["overlap_area_severity"] * 2.0 <= 1.0
+
+
+@pytest.mark.parametrize(
+    ("fill", "expected"),
+    [
+        (0.40, 1.0),
+        (0.50, 1.0),
+        (0.625, 0.9375),
+        (0.75, 0.5),
+        (0.90, 0.5),
+    ],
+)
+def test_overlap_packing_fill_gate(fill: float, expected: float) -> None:
+    """Pin the co-signed P(F) gate at the frozen fill landmarks."""
+    assert _fold(
+        overlap_count=1,
+        packed_seam_severity=0.25,
+        visual_packing_fill=fill,
+    ) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("severity", "expected"),
+    [
+        (0.0, 1.0),
+        (0.125, 0.9375),
+        (0.25, 0.5),
+        (0.5, 0.5),
+    ],
+)
+def test_overlap_severity_curve_values(severity: float, expected: float) -> None:
+    """Pin S composition and k_OV saturation at S = 0, 0.125, 0.25, and 0.5."""
+    assert _fold(
+        overlap_count=1,
+        overlap_area_severity=severity,
+        visual_packing_fill=1.0,
+    ) == pytest.approx(expected)
+
+
+def test_clearance_penalty_decomposition_invariant() -> None:
+    """Pin ``clearance_penalty == J*n + overlap_count + n_abut``."""
+    result = _c4_probe(
+        torch.tensor(
+            [
+                [0.0, 0.0],
+                [0.5, 0.0],
+                [1.5, 0.0],
+                [2.4, 1.4],
+            ]
+        ),
+        torch.ones((4, 2)),
+    )
+
+    assert result["overlap_count"] == 1
+    assert result["clearance_abut_count"] == 1
+    assert result["clearance_penalty"] == pytest.approx(
+        result["packed_seam_severity"] * 4.0
+        + result["overlap_count"]
+        + result["clearance_abut_count"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -114,7 +232,12 @@ def test_old_ds_flag_no_longer_gates_scale_fold() -> None:
 
 def test_min_composition_selects_smallest_leg() -> None:
     """Pin ``min(k_OV, k_DS, k_SPRAWL)`` composition across the three legs."""
-    assert _fold(edge_length_mean=1.0, node_diag_mean=1.0, overlap_count=50) == pytest.approx(0.5)
+    assert _fold(
+        edge_length_mean=1.0,
+        node_diag_mean=1.0,
+        overlap_count=1,
+        overlap_area_severity=0.25,
+    ) == pytest.approx(0.5)
     assert _fold(edge_length_mean=0.10, node_diag_mean=1.0, overlap_count=0) == pytest.approx(0.25)
     assert _fold(
         edge_length_mean=1.0,

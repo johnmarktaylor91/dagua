@@ -112,6 +112,9 @@ C2_ANGLE_COST_MIN = 0.5
 C2_ANGLE_COST_MAX = 1.5
 C2_ANGLE_REFINEMENT_STEP_FRACTION = 0.49
 C4_CLEARANCE_BAND_NODE_DIAGONALS = 0.5
+OVERLAP_SEVERITY_SATURATION = 0.25
+OVERLAP_PACKING_FILL_LO = 0.50
+OVERLAP_PACKING_FILL_HI = 0.75
 
 
 @dataclass(frozen=True)
@@ -668,6 +671,9 @@ def score_core_v3(
         occlusion_score=raw_scores["C4"],
         whitespace_ratio=whitespace_ratio,
         overlap_count=int(c4["overlap_count"]),
+        overlap_area_severity=float(c4["overlap_area_severity"]),
+        packed_seam_severity=float(c4["packed_seam_severity"]),
+        visual_packing_fill=float(c4["visual_packing_fill"]),
         num_nodes=num_nodes,
     )
     flags = _row_flags(
@@ -711,6 +717,9 @@ def score_core_v3(
                 occlusion_score=raw_scores["C4"],
                 whitespace_ratio=whitespace_ratio,
                 overlap_count=int(c4["overlap_count"]),
+                overlap_area_severity=float(c4["overlap_area_severity"]),
+                packed_seam_severity=float(c4["packed_seam_severity"]),
+                visual_packing_fill=float(c4["visual_packing_fill"]),
                 num_nodes=num_nodes,
             ),
             "crossing_weight_multiplier": crossing_weight_multiplier(num_nodes),
@@ -1677,6 +1686,10 @@ def _smooth_clearance_occlusion_score(
             "node_occlusion_score": 1.0,
             "clearance_penalty": 0.0,
             "clearance_band_node_diagonals": C4_CLEARANCE_BAND_NODE_DIAGONALS,
+            "overlap_area_severity": 0.0,
+            "packed_seam_severity": 0.0,
+            "clearance_abut_count": 0,
+            "visual_packing_fill": 1.0 if count == 1 else 0.0,
             "label_inclusive": label_inclusive,
         }
     penalties: List[float] = []
@@ -1686,6 +1699,17 @@ def _smooth_clearance_occlusion_score(
     band = max(1.0e-12, C4_CLEARANCE_BAND_NODE_DIAGONALS * mean_diag)
     centers_cpu = _ensure_cpu(centers).to(dtype=torch.float64)
     sizes_cpu = _ensure_cpu(sizes).to(dtype=torch.float64)
+    area_sum = float(torch.prod(sizes_cpu, dim=1).sum().item())
+    mins = centers_cpu - sizes_cpu / 2.0
+    maxes = centers_cpu + sizes_cpu / 2.0
+    bbox_min = torch.min(mins, dim=0).values
+    bbox_max = torch.max(maxes, dim=0).values
+    bbox_size = torch.clamp(bbox_max - bbox_min, min=1.0e-12)
+    bbox_area = float((bbox_size[0] * bbox_size[1]).item())
+    area_severity_sum = 0.0
+    seam_severity_sum = 0.0
+    strict_overlap_count = 0
+    n_abut = 0
     for left in range(count):
         for right in range(left + 1, count):
             delta = torch.abs(centers_cpu[left] - centers_cpu[right])
@@ -1696,17 +1720,46 @@ def _smooth_clearance_occlusion_score(
                 if clearance < band:
                     # Smooth debt removes the old cliff where nearly touching
                     # boxes received full C4 credit despite unreadable spacing.
-                    penalties.append((1.0 - clearance / band) ** 2)
+                    seam_ij = (1.0 - clearance / band) ** 2
+                    penalties.append(seam_ij)
+                    seam_severity_sum += seam_ij
             else:
                 penalties.append(1.0)
+                if bool(torch.all(gap_xy < 0.0).item()):
+                    strict_overlap_count += 1
+                    intersection = min(
+                        -float(gap_xy[0].item()),
+                        *map(float, sizes_cpu[[left, right], 0]),
+                    )
+                    intersection *= min(
+                        -float(gap_xy[1].item()),
+                        *map(float, sizes_cpu[[left, right], 1]),
+                    )
+                    left_area = float((sizes_cpu[left, 0] * sizes_cpu[left, 1]).item())
+                    right_area = float((sizes_cpu[right, 0] * sizes_cpu[right, 1]).item())
+                    area_severity_sum += intersection / min(left_area, right_area)
+                else:
+                    n_abut += 1
     clearance_penalty = float(sum(penalties))
+    packed_seam_severity = seam_severity_sum / max(1, count)
+    assert math.isclose(
+        clearance_penalty,
+        packed_seam_severity * count + strict_overlap_count + n_abut,
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-12,
+    )
     score = 1.0 / (1.0 + 2.0 * clearance_penalty / max(1, count))
     return {
         **legacy,
+        "overlap_count": strict_overlap_count,
         "node_occlusion_score": max(0.0, min(1.0, score)),
         "legacy_node_occlusion_score": float(legacy["node_occlusion_score"]),
         "clearance_penalty": clearance_penalty,
         "clearance_band_node_diagonals": C4_CLEARANCE_BAND_NODE_DIAGONALS,
+        "overlap_area_severity": area_severity_sum / max(1, count),
+        "packed_seam_severity": packed_seam_severity,
+        "clearance_abut_count": n_abut,
+        "visual_packing_fill": area_sum / bbox_area,
         "label_inclusive": label_inclusive,
     }
 
@@ -2599,6 +2652,9 @@ def _headline_degeneracy_fold(
     occlusion_score: Optional[float],
     whitespace_ratio: float,
     overlap_count: int,
+    overlap_area_severity: float,
+    packed_seam_severity: float,
+    visual_packing_fill: float,
     num_nodes: int,
 ) -> float:
     """Compute the post-composite co-signed headline degeneracy multiplier.
@@ -2619,6 +2675,12 @@ def _headline_degeneracy_fold(
         C5 ``visual_area / area_floor`` ratio.
     overlap_count : int
         Count of overlapping node visual-box pairs from C4 metadata.
+    overlap_area_severity : float
+        Exact strict-overlap area severity ``A`` harvested from C4 metadata.
+    packed_seam_severity : float
+        Production-decomposed packed-seam severity ``J`` harvested from C4 metadata.
+    visual_packing_fill : float
+        Sum of visual-box area divided by union bounding-box area.
     num_nodes : int
         Number of graph nodes used to normalize overlap density.
 
@@ -2640,8 +2702,19 @@ def _headline_degeneracy_fold(
         depth = min(1.0, (SPRAWL_COLLAPSE_C4_MAX - float(occlusion_score)) / 0.1)
         k_sprawl = _clamp_float(64.0 / max(float(whitespace_ratio), 1e-12), 0.25, 1.0)
         k_values.append(1.0 - depth * (1.0 - k_sprawl))
-    q = overlap_count / max(num_nodes, 1)
-    k_values.append(1.0 - 0.5 * _clamp_float(q / 0.5, 0.0, 1.0) ** 3)
+    if overlap_count == 0:
+        k_values.append(1.0)
+    else:
+        fill_gate = _clamp_float(
+            (visual_packing_fill - OVERLAP_PACKING_FILL_LO)
+            / (OVERLAP_PACKING_FILL_HI - OVERLAP_PACKING_FILL_LO),
+            0.0,
+            1.0,
+        )
+        severity = overlap_area_severity + packed_seam_severity * fill_gate
+        k_values.append(
+            1.0 - 0.5 * _clamp_float(severity / OVERLAP_SEVERITY_SATURATION, 0.0, 1.0) ** 3
+        )
     return min(k_values) if k_values else 1.0
 
 
@@ -2655,6 +2728,9 @@ def _apply_headline_degeneracy_fold(
     occlusion_score: Optional[float],
     whitespace_ratio: float,
     overlap_count: int,
+    overlap_area_severity: float,
+    packed_seam_severity: float,
+    visual_packing_fill: float,
     num_nodes: int,
 ) -> Dict[str, float]:
     """Apply the degeneracy fold to headline score views only.
@@ -2677,6 +2753,12 @@ def _apply_headline_degeneracy_fold(
         C5 ``visual_area / area_floor`` ratio.
     overlap_count : int
         Count of overlapping node visual-box pairs from C4 metadata.
+    overlap_area_severity : float
+        Exact strict-overlap area severity ``A`` harvested from C4 metadata.
+    packed_seam_severity : float
+        Production-decomposed packed-seam severity ``J`` harvested from C4 metadata.
+    visual_packing_fill : float
+        Sum of visual-box area divided by union bounding-box area.
     num_nodes : int
         Number of graph nodes used to normalize overlap density.
 
@@ -2694,6 +2776,9 @@ def _apply_headline_degeneracy_fold(
         occlusion_score=occlusion_score,
         whitespace_ratio=whitespace_ratio,
         overlap_count=overlap_count,
+        overlap_area_severity=overlap_area_severity,
+        packed_seam_severity=packed_seam_severity,
+        visual_packing_fill=visual_packing_fill,
         num_nodes=num_nodes,
     )
     for key in ("tiered", "tiered_linear", "tiered_capped", "tiered_hold_instrument"):

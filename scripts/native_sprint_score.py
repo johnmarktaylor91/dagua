@@ -446,7 +446,7 @@ def scoring_signature() -> str:
     root = Path(__file__).resolve().parents[1]
     payload = {
         "ruler_schema": RULER_SCHEMA,
-        "signature_bump": "overlap-fold-v1",
+        "signature_bump": "overlap-fold-v2",
         "policy": _FULL_POLICY,
         "source_hashes": {
             "scripts/native_sprint_score.py": sha256_file(
