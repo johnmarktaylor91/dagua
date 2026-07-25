@@ -113,6 +113,18 @@ FROZEN_CONSTANTS: Dict[str, FrozenConstant] = {
             "label-inclusive when rendered."
         ),
     ),
+    "overlap_severity_saturation": FrozenConstant(
+        name="overlap_severity_saturation",
+        value=0.25,
+        source="dagua/eval/ruler_v3.py:OVERLAP_SEVERITY_SATURATION",
+        note="Co-signed overlap-severity saturation point for the V3 headline fold.",
+    ),
+    "overlap_packing_fill_gate": FrozenConstant(
+        name="overlap_packing_fill_gate",
+        value={"fill_lo": 0.50, "fill_hi": 0.75},
+        source="dagua/eval/ruler_v3.py:OVERLAP_PACKING_FILL_*",
+        note="Co-signed packed-seam fill gate for the V3 headline overlap fold.",
+    ),
     "canonical_node_height_ref": FrozenConstant(
         name="canonical_node_height_ref",
         value=34.0,
