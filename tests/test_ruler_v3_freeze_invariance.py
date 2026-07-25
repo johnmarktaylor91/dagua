@@ -762,6 +762,8 @@ def test_f10_manifest_covers_required_constants() -> None:
         "c2_angle_weighted_crossing_cost",
         "c3_graph_distance_radii",
         "c4_smooth_clearance_band",
+        "overlap_severity_saturation",
+        "overlap_packing_fill_gate",
         "c5_primary_form",
         "c5_band_and_decay",
         "c6_crossing_angle_ideal_degrees",

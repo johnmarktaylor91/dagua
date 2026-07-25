@@ -204,6 +204,92 @@ def test_clearance_penalty_decomposition_invariant() -> None:
     )
 
 
+def test_seam_clearance_is_l2_positive_part_norm() -> None:
+    """Pin the diagonal-gap seam debt to the L2 positive-part norm."""
+    out_of_band = _c4_probe(
+        torch.tensor([[0.0, 0.0], [1.6, 1.6]]),
+        torch.ones((2, 2)),
+    )
+    in_band = _c4_probe(
+        torch.tensor([[0.0, 0.0], [1.3, 1.3]]),
+        torch.ones((2, 2)),
+    )
+
+    assert out_of_band["packed_seam_severity"] == 0.0
+    assert out_of_band["clearance_penalty"] == 0.0
+    assert in_band["packed_seam_severity"] == pytest.approx(0.07999999999999996)
+    assert in_band["clearance_penalty"] == pytest.approx(0.15999999999999992)
+
+
+@pytest.mark.parametrize(
+    ("overlap_area_severity", "packed_seam_severity", "visual_packing_fill"),
+    [
+        (float("nan"), 0.0, 1.0),
+        (0.0, float("nan"), 1.0),
+        (0.0, 0.0, float("nan")),
+        (float("inf"), 0.0, 1.0),
+        (0.0, float("-inf"), 1.0),
+        (0.0, 0.0, float("inf")),
+    ],
+)
+def test_nonfinite_overlap_severity_saturates_nonzero_ov_fold(
+    overlap_area_severity: float,
+    packed_seam_severity: float,
+    visual_packing_fill: float,
+) -> None:
+    """Pin non-finite OV telemetry to the saturated penalty, not identity."""
+    assert _fold(
+        overlap_count=1,
+        overlap_area_severity=overlap_area_severity,
+        packed_seam_severity=packed_seam_severity,
+        visual_packing_fill=visual_packing_fill,
+    ) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("centers", "sizes", "match"),
+    [
+        (
+            torch.tensor([[0.0, 0.0], [float("nan"), 0.0]]),
+            torch.ones((2, 2)),
+            "centers",
+        ),
+        (
+            torch.tensor([[0.0, 0.0], [0.0, 0.0]]),
+            torch.tensor([[1.0, 1.0], [float("inf"), 1.0]]),
+            "sizes",
+        ),
+        (
+            torch.tensor([[0.0, 0.0], [0.0, 0.0]]),
+            torch.tensor([[1.0, 1.0], [0.0, 1.0]]),
+            "sizes",
+        ),
+        (
+            torch.tensor([[0.0, 0.0], [0.0, 0.0]]),
+            torch.full((2, 2), 1.0e-200, dtype=torch.float64),
+            "areas",
+        ),
+    ],
+)
+def test_c4_rejects_unusable_visual_box_geometry(
+    centers: torch.Tensor,
+    sizes: torch.Tensor,
+    match: str,
+) -> None:
+    """Pin invalid visual boxes to fail closed before severity accumulation."""
+    with pytest.raises(ValueError, match=match):
+        _c4_probe(centers, sizes)
+
+
+def test_c4_empty_geometry_remains_identity() -> None:
+    """Pin the n=0 C4 branch to an identity score with no box-area work."""
+    result = _c4_probe(torch.empty((0, 2)), torch.empty((0, 2)))
+
+    assert result["overlap_count"] == 0
+    assert result["node_occlusion_score"] == 1.0
+    assert result["visual_packing_fill"] == 0.0
+
+
 @pytest.mark.parametrize(
     ("elr", "expected"),
     [
