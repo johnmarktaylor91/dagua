@@ -6,15 +6,18 @@ import pytest
 import torch
 
 from dagua.layout.ops.ordering import (
+    LOWER_CROSSING_ORDER_STATS_KEY,
     BarycenterSweep,
     BarycenterSweepConfig,
     ClusterContiguousOrder,
     ClusterContiguousOrderConfig,
+    KeepLowerCrossingOrder,
     MedianSweep,
     MedianSweepConfig,
     SpectralOrder,
     TransposeHeuristic,
     TransposeHeuristicConfig,
+    indexed_layered_crossing_count,
 )
 from dagua.layout.ops.preprocess import BuildAdjacency
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -136,6 +139,75 @@ def _assert_layerwise_permutation(layers: torch.Tensor, ordering: torch.Tensor) 
         assert torch.equal(actual, expected)
 
 
+def _ordered_layers_from_ordering(layers: torch.Tensor, ordering: torch.Tensor) -> list[list[int]]:
+    """Build layer groups sorted by an ordering tensor.
+
+    Parameters
+    ----------
+    layers : torch.Tensor
+        Layer assignment tensor with shape ``[N]``.
+    ordering : torch.Tensor
+        Per-node in-layer ordering tensor with shape ``[N]``.
+
+    Returns
+    -------
+    list[list[int]]
+        Node ids grouped by layer and sorted left-to-right.
+    """
+    ordered_layers: list[list[int]] = []
+    for layer_id in range(int(layers.max().item()) + 1):
+        nodes = torch.nonzero(layers == layer_id, as_tuple=False).flatten().tolist()
+        nodes.sort(key=lambda node: (int(ordering[node].item()), node))
+        ordered_layers.append(nodes)
+    return ordered_layers
+
+
+def _brute_force_layered_crossing_count(
+    edge_index: torch.Tensor,
+    ordered_layers: list[list[int]],
+) -> int:
+    """Count crossings by pairwise edge comparison for test oracles.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    ordered_layers : list[list[int]]
+        Node ids grouped by layer in left-to-right order.
+
+    Returns
+    -------
+    int
+        Unweighted crossing count across adjacent realized layers.
+    """
+    layer_by_node: dict[int, int] = {}
+    order_by_node: dict[int, int] = {}
+    for layer_index, layer_nodes in enumerate(ordered_layers):
+        for order, node in enumerate(layer_nodes):
+            layer_by_node[node] = layer_index
+            order_by_node[node] = order
+
+    adjacent_edges: list[tuple[int, int, int]] = []
+    for source, target in edge_index.t().tolist():
+        source_layer = layer_by_node[int(source)]
+        target_layer = layer_by_node[int(target)]
+        if target_layer != source_layer + 1:
+            continue
+        adjacent_edges.append((source_layer, int(source), int(target)))
+
+    crossings = 0
+    for index, first in enumerate(adjacent_edges):
+        first_layer, first_source, first_target = first
+        for second_layer, second_source, second_target in adjacent_edges[index + 1 :]:
+            if first_layer != second_layer:
+                continue
+            source_delta = order_by_node[first_source] - order_by_node[second_source]
+            target_delta = order_by_node[first_target] - order_by_node[second_target]
+            if source_delta * target_delta < 0:
+                crossings += 1
+    return crossings
+
+
 def test_barycenter_sweep_reorders_middle_layer_on_three_layer_dag() -> None:
     """BarycenterSweep should move the middle layer toward parent barycenters."""
     problem = _layered_problem()
@@ -190,6 +262,131 @@ def test_transpose_heuristic_swaps_crossing_pair() -> None:
         layer_order = result.ordering[layer_nodes]
         expected = torch.arange(layer_nodes.numel(), dtype=torch.long)
         assert torch.equal(torch.sort(layer_order).values.cpu(), expected)
+
+
+def test_keep_lower_crossing_order_adopts_dagre_candidate_when_lower() -> None:
+    """KeepLowerCrossingOrder should adopt a Dagre candidate with fewer crossings."""
+    problem = LayoutProblem(edge_index=_edge_index([(0, 3), (1, 2)]), num_nodes=4, seed=7)
+    layers = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    state = SolveState(
+        layers=layers,
+        ordering=torch.tensor([0, 1, 0, 1], dtype=torch.long),
+    )
+
+    result = KeepLowerCrossingOrder().apply(problem, state, RuntimeContext())
+
+    assert result.ordering is not None
+    assert result.ordering.tolist() == [0, 1, 1, 0]
+    assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["selected"] == "dagre"
+    assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["native_crossings"] == 1
+    assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["dagre_crossings"] == 0
+
+
+def test_keep_lower_crossing_order_keeps_incumbent_on_tie() -> None:
+    """KeepLowerCrossingOrder should keep bit-identical incumbent order on ties."""
+    problem = LayoutProblem(edge_index=_edge_index([(0, 2), (1, 3)]), num_nodes=4, seed=7)
+    layers = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    incumbent = torch.tensor([0, 1, 0, 1], dtype=torch.long)
+    state = SolveState(layers=layers, ordering=incumbent.clone())
+
+    result = KeepLowerCrossingOrder().apply(problem, state, RuntimeContext())
+
+    assert result.ordering is not None
+    assert torch.equal(result.ordering.cpu(), incumbent)
+    assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["selected"] == "native"
+    assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["native_crossings"] == 0
+    assert result.extras[LOWER_CROSSING_ORDER_STATS_KEY]["dagre_crossings"] == 0
+
+
+def test_indexed_layered_crossing_count_matches_bruteforce_random_bilayers() -> None:
+    """Indexed crossing count should match brute force on random bilayers."""
+    generator = torch.Generator().manual_seed(123)
+    for north_count, south_count, edge_count in [(2, 3, 4), (4, 5, 11), (7, 6, 24)]:
+        layers = torch.tensor([0] * north_count + [1] * south_count, dtype=torch.long)
+        ordering = torch.cat(
+            [
+                torch.randperm(north_count, generator=generator),
+                torch.randperm(south_count, generator=generator),
+            ]
+        )
+        sources = torch.randint(0, north_count, (edge_count,), generator=generator)
+        targets = torch.randint(
+            north_count,
+            north_count + south_count,
+            (edge_count,),
+            generator=generator,
+        )
+        edge_index = torch.stack([sources, targets], dim=0)
+        ordered_layers = _ordered_layers_from_ordering(layers, ordering)
+
+        assert indexed_layered_crossing_count(edge_index, ordered_layers) == (
+            _brute_force_layered_crossing_count(edge_index, ordered_layers)
+        )
+
+
+def test_keep_lower_crossing_order_is_deterministic_for_same_seed() -> None:
+    """KeepLowerCrossingOrder should produce identical ordering across runs."""
+    problem = LayoutProblem(
+        edge_index=_edge_index([(0, 3), (1, 2), (0, 5), (1, 4)]),
+        num_nodes=6,
+        seed=99,
+    )
+    layers = torch.tensor([0, 0, 1, 1, 1, 1], dtype=torch.long)
+    ordering = torch.tensor([0, 1, 0, 1, 2, 3], dtype=torch.long)
+
+    first = KeepLowerCrossingOrder().apply(
+        problem,
+        SolveState(layers=layers.clone(), ordering=ordering.clone()),
+        RuntimeContext(),
+    )
+    second = KeepLowerCrossingOrder().apply(
+        problem,
+        SolveState(layers=layers.clone(), ordering=ordering.clone()),
+        RuntimeContext(),
+    )
+
+    assert first.ordering is not None
+    assert second.ordering is not None
+    assert torch.equal(first.ordering.cpu(), second.ordering.cpu())
+
+
+def test_keep_lower_crossing_order_uses_in_house_dagre_op_not_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """KeepLowerCrossingOrder should use Dagre ordering ops without pipeline delegation."""
+    from dagua.layout.ops import ordering as ordering_module
+    from dagua.layout.ops.pipelines import dagre as dagre_pipeline
+
+    normalize_calls = 0
+    original_normalize = ordering_module.DagreNormalizeEdges.apply
+
+    def fail_pipeline(*args: object, **kwargs: object) -> None:
+        """Fail if the dagre pipeline is delegated to at runtime."""
+        raise AssertionError("dagre pipeline must not be called by native ordering")
+
+    def trace_normalize(
+        self: ordering_module.DagreNormalizeEdges,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Count use of the in-house Dagre normalization op."""
+        nonlocal normalize_calls
+        normalize_calls += 1
+        return original_normalize(self, problem, state, ctx)
+
+    monkeypatch.setattr(dagre_pipeline, "build_dagre_pipeline", fail_pipeline, raising=False)
+    monkeypatch.setattr(ordering_module.DagreNormalizeEdges, "apply", trace_normalize)
+
+    problem = LayoutProblem(edge_index=_edge_index([(0, 3), (1, 2)]), num_nodes=4, seed=7)
+    state = SolveState(
+        layers=torch.tensor([0, 0, 1, 1], dtype=torch.long),
+        ordering=torch.tensor([0, 1, 0, 1], dtype=torch.long),
+    )
+
+    KeepLowerCrossingOrder().apply(problem, state, RuntimeContext())
+
+    assert normalize_calls == 1
 
 
 def test_spectral_order_returns_per_layer_permutations() -> None:

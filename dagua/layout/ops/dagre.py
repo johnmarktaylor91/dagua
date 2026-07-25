@@ -1838,7 +1838,7 @@ def _sort_rank(
 
 
 def _cross_count(graph: _DagreGraph, layers: Sequence[Sequence[NodeId]]) -> float:
-    """Return Dagre's weighted crossing count.
+    """Return Dagre's weighted crossing count with indexed bilayer scans.
 
     Parameters
     ----------
@@ -1863,10 +1863,23 @@ def _cross_count(graph: _DagreGraph, layers: Sequence[Sequence[NodeId]]) -> floa
                 if edge.target in south_positions
             ]
             entries.extend(sorted(node_entries, key=lambda entry: entry[0]))
-        for entry_index, (position, weight) in enumerate(entries):
-            for later_position, later_weight in entries[entry_index + 1 :]:
-                if later_position < position:
-                    crossings += weight * later_weight
+        if len(entries) < 2:
+            continue
+
+        tree = [0.0] * (len(south_positions) + 1)
+        seen_weight = 0.0
+        for position, weight in entries:
+            index = position + 1
+            prefix_weight = 0.0
+            scan = index
+            while scan > 0:
+                prefix_weight += tree[scan]
+                scan -= scan & -scan
+            crossings += weight * (seen_weight - prefix_weight)
+            while index < len(tree):
+                tree[index] += weight
+                index += index & -index
+            seen_weight += weight
     return crossings
 
 
