@@ -1319,6 +1319,8 @@ def _normalize_node_sizes(
     sizes = _ensure_cpu(node_sizes).to(dtype=torch.float64)
     if sizes.shape != (num_nodes, 2):
         raise ValueError("node_sizes must have shape [N, 2]")
+    if not bool(torch.isfinite(sizes).all().item()):
+        raise ValueError("node_sizes must be finite")
     if bool((sizes <= 0).any().item()):
         raise ValueError("node_sizes must be positive")
     return sizes, False
@@ -1350,6 +1352,8 @@ def _normalize_label_geometry(
     labels = _ensure_cpu(label_sizes).to(dtype=torch.float64)
     if labels.shape != (num_nodes, 2):
         raise ValueError("label_sizes must have shape [N, 2]")
+    if not bool(torch.isfinite(labels).all().item()):
+        raise ValueError("label_sizes must be finite")
     if bool((labels < 0).any().item()):
         raise ValueError("label_sizes must be non-negative")
     if label_offsets is None:
@@ -1358,6 +1362,8 @@ def _normalize_label_geometry(
         offsets = _ensure_cpu(label_offsets).to(dtype=torch.float64)
         if offsets.shape != (num_nodes, 2):
             raise ValueError("label_offsets must have shape [N, 2]")
+        if not bool(torch.isfinite(offsets).all().item()):
+            raise ValueError("label_offsets must be finite")
     return labels, offsets
 
 
@@ -1699,13 +1705,24 @@ def _smooth_clearance_occlusion_score(
     band = max(1.0e-12, C4_CLEARANCE_BAND_NODE_DIAGONALS * mean_diag)
     centers_cpu = _ensure_cpu(centers).to(dtype=torch.float64)
     sizes_cpu = _ensure_cpu(sizes).to(dtype=torch.float64)
-    area_sum = float(torch.prod(sizes_cpu, dim=1).sum().item())
+    if not bool(torch.isfinite(centers_cpu).all().item()):
+        raise ValueError("visual box centers must be finite")
+    if not bool(torch.isfinite(sizes_cpu).all().item()):
+        raise ValueError("visual box sizes must be finite")
+    if bool((sizes_cpu <= 0.0).any().item()):
+        raise ValueError("visual box sizes must be positive")
+    box_areas = torch.prod(sizes_cpu, dim=1)
+    if not bool(torch.isfinite(box_areas).all().item()) or bool((box_areas <= 0.0).any().item()):
+        raise ValueError("visual box areas must be finite and positive")
+    area_sum = float(box_areas.sum().item())
     mins = centers_cpu - sizes_cpu / 2.0
     maxes = centers_cpu + sizes_cpu / 2.0
     bbox_min = torch.min(mins, dim=0).values
     bbox_max = torch.max(maxes, dim=0).values
-    bbox_size = torch.clamp(bbox_max - bbox_min, min=1.0e-12)
+    bbox_size = bbox_max - bbox_min
     bbox_area = float((bbox_size[0] * bbox_size[1]).item())
+    if not math.isfinite(bbox_area) or bbox_area <= 0.0:
+        raise ValueError("visual union bounding-box area must be finite and positive")
     area_severity_sum = 0.0
     seam_severity_sum = 0.0
     strict_overlap_count = 0
@@ -1735,8 +1752,8 @@ def _smooth_clearance_occlusion_score(
                         -float(gap_xy[1].item()),
                         *map(float, sizes_cpu[[left, right], 1]),
                     )
-                    left_area = float((sizes_cpu[left, 0] * sizes_cpu[left, 1]).item())
-                    right_area = float((sizes_cpu[right, 0] * sizes_cpu[right, 1]).item())
+                    left_area = float(box_areas[left].item())
+                    right_area = float(box_areas[right].item())
                     area_severity_sum += intersection / min(left_area, right_area)
                 else:
                     n_abut += 1
@@ -2705,13 +2722,20 @@ def _headline_degeneracy_fold(
     if overlap_count == 0:
         k_values.append(1.0)
     else:
-        fill_gate = _clamp_float(
-            (visual_packing_fill - OVERLAP_PACKING_FILL_LO)
-            / (OVERLAP_PACKING_FILL_HI - OVERLAP_PACKING_FILL_LO),
-            0.0,
-            1.0,
-        )
-        severity = overlap_area_severity + packed_seam_severity * fill_gate
+        if not (
+            math.isfinite(overlap_area_severity)
+            and math.isfinite(packed_seam_severity)
+            and math.isfinite(visual_packing_fill)
+        ):
+            severity = OVERLAP_SEVERITY_SATURATION
+        else:
+            fill_gate = _clamp_float(
+                (visual_packing_fill - OVERLAP_PACKING_FILL_LO)
+                / (OVERLAP_PACKING_FILL_HI - OVERLAP_PACKING_FILL_LO),
+                0.0,
+                1.0,
+            )
+            severity = overlap_area_severity + packed_seam_severity * fill_gate
         k_values.append(
             1.0 - 0.5 * _clamp_float(severity / OVERLAP_SEVERITY_SATURATION, 0.0, 1.0) ** 3
         )
