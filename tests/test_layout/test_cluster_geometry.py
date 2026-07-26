@@ -15,6 +15,7 @@ from dagua.layout.ops.cluster_geometry import (
     cluster_subtree,
     compute_cluster_placement_bbox,
 )
+from dagua.layout.ops.pipelines.native_finisher import build_cluster_tightening_candidates
 from dagua.layout.ops.state import LayoutProblem
 
 
@@ -195,6 +196,40 @@ def test_layout_problem_lazily_memoizes_cluster_tree() -> None:
     assert tree is not None
     assert tree is problem.get_cluster_tree()
     assert cluster_leaves_only_at_level(tree, "outer") == frozenset({0})
+
+
+def test_cluster_tightening_candidates_follow_structural_gate() -> None:
+    """Terminal cluster tightening should fire only for declared clustered structure."""
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [8.0, 0.0],
+            [10.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    node_sizes = torch.ones((4, 2), dtype=torch.float32)
+
+    plain = build_cluster_tightening_candidates(positions, node_sizes, None, None)
+    clustered = build_cluster_tightening_candidates(
+        positions,
+        node_sizes,
+        {"left": [0, 1], "right": [2, 3]},
+        {"left": None, "right": None},
+    )
+    nested = build_cluster_tightening_candidates(
+        positions,
+        node_sizes,
+        {"outer": [0, 1, 2], "inner": [1, 2]},
+        {"outer": None, "inner": "outer"},
+    )
+
+    assert plain == ()
+    assert clustered
+    assert clustered[0].gate_reason == "multi_cluster"
+    assert nested
+    assert nested[0].max_depth == 1
 
 
 def test_sibling_clusters_do_not_overlap_badly(clustered_graph: DaguaGraph) -> None:
