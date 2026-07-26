@@ -34,10 +34,11 @@ import tempfile
 import time
 from collections import deque
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, MutableMapping, Optional, Sequence
+from typing import Any, Iterator, MutableMapping, Optional, Sequence
 
 import torch
 
@@ -209,6 +210,8 @@ class WorkItem:
         Whether worker results should persist ``[N, 2]`` tensors.
     git_sha : str
         Git commit SHA captured once by the parent benchmark process.
+    deterministic_native : bool
+        Whether native dagua work should force deterministic torch execution.
     """
 
     graph_name: str
@@ -218,6 +221,7 @@ class WorkItem:
     output_dir: str
     save_positions: bool
     git_sha: str
+    deterministic_native: bool = False
 
     @property
     def key(self) -> str:
@@ -621,6 +625,15 @@ def parse_args() -> argparse.Namespace:
             "ADDITIVE: base engines are kept in addition to their variant "
             "expansions. Without this flag, --variants is substitutive (default "
             "behavior)."
+        ),
+    )
+    parser.add_argument(
+        "--deterministic-native",
+        action="store_true",
+        help=(
+            "Run dagua native benchmark items with deterministic torch algorithms, "
+            "single-thread CPU kernels, and full seed resets. Production layout "
+            "defaults are unchanged."
         ),
     )
     return parser.parse_args()
@@ -1615,6 +1628,70 @@ def set_runtime_seed(seed: Optional[int]) -> None:
         pass
 
 
+@contextmanager
+def deterministic_native_runtime(enabled: bool, seed: Optional[int]) -> Iterator[None]:
+    """Temporarily force deterministic torch execution for native measurement.
+
+    Parameters
+    ----------
+    enabled : bool
+        Whether to apply deterministic runtime settings.
+    seed : int | None
+        Fixed seed for Python, NumPy, CPU torch, and CUDA torch RNGs. ``None``
+        uses the native adapter's benchmark default of ``42``.
+
+    Yields
+    ------
+    None
+        Control while deterministic settings are active.
+    """
+    if not enabled:
+        yield
+        return
+
+    deterministic_seed = seed if seed is not None else 42
+    previous_threads = torch.get_num_threads()
+    try:
+        previous_interop_threads: Optional[int] = torch.get_num_interop_threads()
+    except RuntimeError:
+        previous_interop_threads = None
+    previous_deterministic = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    previous_cublas = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    previous_cuda_is_available = torch.cuda.is_available
+    previous_cuda_device_count = torch.cuda.device_count
+
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.cuda.is_available = lambda: False  # type: ignore[method-assign]
+    torch.cuda.device_count = lambda: 0  # type: ignore[method-assign]
+    random.seed(deterministic_seed)
+    torch.manual_seed(deterministic_seed)
+    try:
+        import numpy as np
+
+        np.random.seed(deterministic_seed)
+    except ImportError:
+        pass
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.set_num_threads(1)
+    if previous_interop_threads is not None:
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(previous_deterministic, warn_only=previous_warn_only)
+        torch.set_num_threads(previous_threads)
+        torch.cuda.is_available = previous_cuda_is_available  # type: ignore[method-assign]
+        torch.cuda.device_count = previous_cuda_device_count  # type: ignore[method-assign]
+        if previous_cublas is None:
+            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+        else:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = previous_cublas
+
+
 def _ensure_worker_cache() -> tuple[dict[str, Any], dict[str, Any]]:
     """Lazy-initialize competitor and graph caches inside a worker process.
 
@@ -1783,7 +1860,21 @@ def _run_single_work_item(work_item: WorkItem) -> dict[str, Any]:
     set_runtime_seed(work_item.seed)
     try:
         start = time.perf_counter()
-        result = competitor.layout(graph, timeout=work_item.timeout_seconds, seed=work_item.seed)
+        deterministic_native = work_item.deterministic_native and work_item.engine_name == "dagua"
+        with deterministic_native_runtime(deterministic_native, work_item.seed):
+            if deterministic_native:
+                result = competitor.layout(
+                    graph,
+                    timeout=work_item.timeout_seconds,
+                    seed=work_item.seed,
+                    deterministic_native=True,
+                )
+            else:
+                result = competitor.layout(
+                    graph,
+                    timeout=work_item.timeout_seconds,
+                    seed=work_item.seed,
+                )
         elapsed = result.runtime_seconds
         if result.error is not None and result.error.lower() == "timeout":
             record = _record_with_pairings(
@@ -2344,6 +2435,7 @@ def manifest_payload(
             "output_dir": str(args.output_dir),
             "save_positions": not bool(args.no_positions),
             "variants": use_variants,
+            "deterministic_native": bool(args.deterministic_native),
         },
         "seed_values": list(range(int(args.seed_start), int(args.seed_start) + int(args.seeds))),
         "stochastic_engines": sorted(
@@ -2561,6 +2653,7 @@ def main() -> int:
                         output_dir=str(output_dir),
                         save_positions=not args.no_positions,
                         git_sha=git_sha,
+                        deterministic_native=bool(args.deterministic_native),
                     )
                 )
 

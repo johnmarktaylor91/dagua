@@ -777,6 +777,28 @@ def _use_tiny_row_deterministic_w5_costs(
     )
 
 
+def _use_deterministic_w5_costs(config: Optional[LayoutConfig], node_count: int) -> bool:
+    """Return whether W5 cost planning is independent of wall-clock timings.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional deterministic budget
+        metadata.
+    node_count : int
+        Number of layout nodes in the W5 seed.
+
+    Returns
+    -------
+    bool
+        ``True`` when a modeled-work ledger is installed, or when the legacy
+        tiny-row deterministic process-budget path is active.
+    """
+    if remaining_dwu(config) is not None:
+        return True
+    return _use_tiny_row_deterministic_w5_costs(config, node_count)
+
+
 def _native_device_class(config: Optional[LayoutConfig]) -> str:
     """Return the native cost-model device class for a W5 config.
 
@@ -2848,10 +2870,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
             config=config,
             wall_s=result.spent_s,
             process_s=result.process_spent_s,
-            use_deterministic_costs=(
-                result.cost_plan is not None
-                and _use_tiny_row_deterministic_w5_costs(config, result.node_count)
-            ),
+            use_deterministic_costs=_use_deterministic_w5_costs(config, result.node_count),
         )
     )
     if config is not None:
