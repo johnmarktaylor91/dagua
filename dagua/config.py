@@ -403,6 +403,9 @@ class LayoutConfig:
     # dagua.layout.aesthetics.resolve_aesthetic_profile.
     prioritize: Optional[str] = None
     aesthetic_weights: Optional[Dict[str, float]] = None
+    # Phase-2 Wave-2: build the directed fan-compaction challenger only for
+    # clean fan-bundle DAGs, then accept it through a drawing-property guard.
+    use_fan_compaction_arm: bool = True
 
     def __post_init__(self) -> None:
         """Normalize public quality/time fields after dataclass construction.

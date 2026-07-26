@@ -64,6 +64,8 @@ DIRECTED_RECOMBINANT_MIN_NODES = 80
 DIRECTED_RECOMBINANT_MAX_NODES = 600
 DIRECTED_RECOMBINANT_MAX_CANDIDATES = 6
 DIRECTED_RECOMBINANT_PRIOR_S = 15.0
+DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
+DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
 DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
 DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
@@ -907,6 +909,83 @@ def _directed_recombinant_layered_enabled(problem: LayoutProblem) -> bool:
     )
 
 
+def _clean_fan_bundle_for_compaction(problem: LayoutProblem) -> bool:
+    """Return whether the directed fan-compaction arm may be built.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem whose topology is inspected.
+
+    Returns
+    -------
+    bool
+        ``True`` only for clean hub-spoke/fan-bundle DAGs where dominant hubs
+        own many one-hop spoke branches that reconverge downstream. The
+        predicate is a runtime-cost pre-filter only; acceptance is guarded by
+        drawing properties after the candidate is built.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < 6 or n > DIRECTED_RECOMBINANT_MAX_NODES or edge_count == 0:
+        return False
+    structure = problem.structure
+    if structure is not None:
+        if not bool(
+            getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+        ):
+            return False
+        if getattr(structure, "is_semantically_directed", True) is False:
+            return False
+        tags = set(getattr(structure, "topology_tags", ()))
+        if tags.intersection({"planar_dag", "lattice_like", "bipartite_dag", "wide_layered"}):
+            return False
+
+    edges = [
+        (int(src), int(dst))
+        for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist()
+        if int(src) != int(dst) and 0 <= int(src) < n and 0 <= int(dst) < n
+    ]
+    if not edges:
+        return False
+    successors: list[list[int]] = [[] for _ in range(n)]
+    predecessors: list[list[int]] = [[] for _ in range(n)]
+    for src, dst in edges:
+        successors[src].append(dst)
+        predecessors[dst].append(src)
+
+    fan_hub_count = 0
+    fan_spoke_count = 0
+    has_non_spoke_continuation = False
+    for hub, children in enumerate(successors):
+        if len(children) < DIRECTED_FAN_COMPACTION_MIN_SPOKES:
+            continue
+        sink_counts: dict[int, int] = {}
+        spoke_children: set[int] = set()
+        for child in children:
+            child_successors = successors[child]
+            if len(child_successors) != 1 or len(predecessors[child]) != 1:
+                continue
+            sink = int(child_successors[0])
+            sink_counts[sink] = sink_counts.get(sink, 0) + 1
+            spoke_children.add(child)
+        best_spokes = max(sink_counts.values(), default=0)
+        if best_spokes < DIRECTED_FAN_COMPACTION_MIN_SPOKES:
+            continue
+        fan_hub_count += 1
+        fan_spoke_count += best_spokes
+        has_non_spoke_continuation = has_non_spoke_continuation or any(
+            child not in spoke_children for child in children
+        )
+
+    if fan_hub_count == 0:
+        return False
+    spoke_fraction = float(fan_spoke_count) / max(float(n), 1.0)
+    if spoke_fraction < DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION:
+        return False
+    return fan_hub_count >= 2 or has_non_spoke_continuation
+
+
 def _recombinant_layered_specs() -> tuple[_RecombinantLayeredSpec, ...]:
     """Return the curated bounded IDEA-2 layered-stage crosses.
 
@@ -1427,6 +1506,176 @@ def _directed_recombinant_layered_candidates(
             continue
         candidates[spec.name] = candidate
     return candidates
+
+
+def _fan_compaction_visual_box_area(pos: torch.Tensor, problem: LayoutProblem) -> float:
+    """Return the node visual-box bounding area for fan-arm admission.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed layout problem carrying optional node sizes.
+
+    Returns
+    -------
+    float
+        Axis-aligned area enclosing all node boxes.
+    """
+    n = int(problem.num_nodes)
+    if n == 0:
+        return 0.0
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float64)
+    if problem.node_sizes is None:
+        sizes = torch.ones((n, 2), dtype=torch.float64)
+    else:
+        sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float64)
+    mins = cpu_pos - sizes / 2.0
+    maxes = cpu_pos + sizes / 2.0
+    bbox_min = torch.min(mins, dim=0).values
+    bbox_max = torch.max(maxes, dim=0).values
+    bbox_size = torch.clamp(bbox_max - bbox_min, min=0.0)
+    return float((bbox_size[0] * bbox_size[1]).item())
+
+
+def _fan_compaction_overlap_count(pos: torch.Tensor, problem: LayoutProblem) -> int:
+    """Return node-overlap count for fan-arm admission.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed layout problem carrying optional node sizes.
+
+    Returns
+    -------
+    int
+        Count of strictly overlapping node boxes.
+    """
+    from dagua.metrics import count_overlaps_detailed
+
+    n = int(problem.num_nodes)
+    if problem.node_sizes is None:
+        sizes = torch.ones((n, 2), dtype=torch.float32)
+    else:
+        sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    return int(
+        count_overlaps_detailed(
+            pos.detach().to(device="cpu", dtype=torch.float32),
+            sizes,
+            seed=int(problem.seed) if problem.seed is not None else None,
+        )["overlap_count"]
+    )
+
+
+def _fan_compaction_candidate_is_accepted(
+    incumbent: torch.Tensor,
+    candidate: torch.Tensor,
+    problem: LayoutProblem,
+) -> bool:
+    """Return whether the fan-compaction arm replaces the incumbent.
+
+    Parameters
+    ----------
+    incumbent : torch.Tensor
+        Current directed incumbent positions with shape ``[N, 2]``.
+    candidate : torch.Tensor
+        Fan-compaction challenger positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed layout problem.
+
+    Returns
+    -------
+    bool
+        ``True`` only when visual-box whitespace at least halves, exact edge
+        crossings do not increase, and node overlaps do not increase.
+    """
+    incumbent_area = _fan_compaction_visual_box_area(incumbent, problem)
+    candidate_area = _fan_compaction_visual_box_area(candidate, problem)
+    if not (
+        math.isfinite(incumbent_area)
+        and math.isfinite(candidate_area)
+        and candidate_area <= 0.5 * incumbent_area
+    ):
+        return False
+    incumbent_crossings = _exact_crossing_count(incumbent, problem.edge_index)
+    candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
+    if candidate_crossings > incumbent_crossings:
+        return False
+    incumbent_overlaps = _fan_compaction_overlap_count(incumbent, problem)
+    candidate_overlaps = _fan_compaction_overlap_count(candidate, problem)
+    return candidate_overlaps <= incumbent_overlaps
+
+
+def _build_fan_compaction_candidate(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> Optional[torch.Tensor]:
+    """Build the single co-signed fan-compaction candidate arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current directed incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+
+    Returns
+    -------
+    torch.Tensor or None
+        ``recomb_ns_median_lp`` candidate positions when construction succeeds,
+        otherwise ``None``.
+    """
+    spec = _RecombinantLayeredSpec(
+        name="recomb_ns_median_lp",
+        layering="network_simplex_tightened",
+        ordering="median",
+        xcoord="dot_lp",
+    )
+    return _build_recombinant_layered_candidate(spec, problem, incumbent, config)
+
+
+def _maybe_accept_fan_compaction_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> torch.Tensor:
+    """Return incumbent or the accepted directed fan-compaction arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current directed incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying the public kill switch.
+
+    Returns
+    -------
+    torch.Tensor
+        The accepted ``recomb_ns_median_lp`` fan arm, or the original incumbent
+        when the pre-filter is closed or the drawing-property comparator fails.
+    """
+    setattr(config, "_dagua_native_fan_compaction_built", False)
+    setattr(config, "_dagua_native_fan_compaction_accepted", False)
+    if not bool(getattr(config, "use_fan_compaction_arm", True)):
+        return incumbent
+    if not _clean_fan_bundle_for_compaction(problem):
+        return incumbent
+    setattr(config, "_dagua_native_fan_compaction_built", True)
+    candidate = _build_fan_compaction_candidate(problem, incumbent, config)
+    if candidate is None:
+        return incumbent
+    if not _fan_compaction_candidate_is_accepted(incumbent, candidate, problem):
+        return incumbent
+    setattr(config, "_dagua_native_fan_compaction_accepted", True)
+    return candidate
 
 
 def _register_recombinant_layered_candidates(
@@ -2773,7 +3022,14 @@ def layout_native_directed_portfolio(
         getattr(incumbent_config, "_dagua_native_terminal_w5_seed_bank", [])
     ):
         _append_terminal_w5_seed(config, f"directed_incumbent_{seed_name}", seed_pos)
+    incumbent = _maybe_accept_fan_compaction_arm(problem, incumbent, config)
     arm_timings["incumbent"] = (incumbent_started, time.perf_counter())
+    if bool(getattr(config, "_dagua_native_fan_compaction_accepted", False)):
+        _LOGGER.info(
+            "Directed contest gate=fan_compaction winner=recomb_ns_median_lp wall_time_s=%.3f",
+            time.perf_counter() - started,
+        )
+        return incumbent
     n = int(problem.num_nodes)
 
     positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
