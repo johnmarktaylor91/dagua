@@ -23,6 +23,8 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
+    _build_fan_compaction_candidate,
+    _clean_fan_bundle_for_compaction,
     _crossing_edge_pairs,
     _directed_cluster_candidate_is_dual_admissible,
     _directed_mrtree_enabled,
@@ -34,8 +36,10 @@ from dagua.layout.ops.pipelines.native_directed import (
     _DirectedClusterScoreTelemetry,
     _exact_crossing_count,
     _exact_crossing_count_loop,
+    _fan_compaction_candidate_is_accepted,
     _force_challengers_enabled,
     _full_sugiyama_grid_enabled,
+    _maybe_accept_fan_compaction_arm,
     _ordering_cost_admissible,
     _rank_local_zero_crossing_swap_candidate,
     _rank_to_nodes_from_incumbent_y,
@@ -49,6 +53,249 @@ from dagua.layout.ops.pipelines.native_directed import (
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 _T = TypeVar("_T")
+
+
+def _fan_bundle_problem() -> LayoutProblem:
+    """Return a clean multi-hub fan-bundle problem.
+
+    Returns
+    -------
+    LayoutProblem
+        Directed hub-spoke DAG with two dominant fan hubs.
+    """
+    edges: list[tuple[int, int]] = []
+    entry = 0
+    exit_node = 1
+    next_node = 2
+    hubs: list[int] = []
+    for _hub_index in range(2):
+        hub = next_node
+        next_node += 1
+        hubs.append(hub)
+        edges.append((entry, hub))
+        for _spoke_index in range(5):
+            spoke = next_node
+            next_node += 1
+            edges.append((hub, spoke))
+            edges.append((spoke, exit_node))
+    edges.append((hubs[0], hubs[1]))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=next_node,
+        node_sizes=torch.ones((next_node, 2), dtype=torch.float32),
+        seed=7,
+    )
+
+
+def _wide_single_layer_problem() -> LayoutProblem:
+    """Return the plain wide-layer canary shape.
+
+    Returns
+    -------
+    LayoutProblem
+        Single source and sink around a wide middle layer.
+    """
+    edges: list[tuple[int, int]] = []
+    source = 0
+    sink = 1
+    for node in range(2, 12):
+        edges.append((source, node))
+        edges.append((node, sink))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=12,
+        node_sizes=torch.ones((12, 2), dtype=torch.float32),
+        seed=7,
+    )
+
+
+def _random_bipartite_problem() -> LayoutProblem:
+    """Return a deterministic random-bipartite canary shape.
+
+    Returns
+    -------
+    LayoutProblem
+        Bipartite DAG whose middle nodes do not reconverge as fan spokes.
+    """
+    edges = [
+        (left, 10 + ((left * 7 + offset * 3) % 10)) for left in range(10) for offset in range(3)
+    ]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=20,
+        node_sizes=torch.ones((20, 2), dtype=torch.float32),
+        seed=7,
+    )
+
+
+def test_directed_fan_compaction_prefilter_builds_only_clean_fan_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fan arm builds only after the clean fan-bundle pre-filter opens."""
+    built = 0
+    incumbent = torch.zeros((_fan_bundle_problem().num_nodes, 2), dtype=torch.float32)
+
+    def fake_candidate(
+        problem: LayoutProblem,
+        incumbent_pos: torch.Tensor,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Record fan-arm construction and return a rejected finite candidate."""
+        nonlocal built
+        del problem, config
+        built += 1
+        return incumbent_pos + 1.0
+
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(native_directed, "_build_fan_compaction_candidate", fake_candidate)
+    monkeypatch.setattr(
+        native_directed,
+        "_fan_compaction_candidate_is_accepted",
+        lambda *args: False,
+    )
+
+    fan_problem = _fan_bundle_problem()
+    assert _clean_fan_bundle_for_compaction(fan_problem)
+    assert not _clean_fan_bundle_for_compaction(_wide_single_layer_problem())
+    assert not _clean_fan_bundle_for_compaction(_random_bipartite_problem())
+
+    _maybe_accept_fan_compaction_arm(fan_problem, incumbent, LayoutConfig())
+    _maybe_accept_fan_compaction_arm(
+        _wide_single_layer_problem(),
+        torch.zeros((12, 2), dtype=torch.float32),
+        LayoutConfig(),
+    )
+    _maybe_accept_fan_compaction_arm(
+        _random_bipartite_problem(),
+        torch.zeros((20, 2), dtype=torch.float32),
+        LayoutConfig(),
+    )
+
+    assert built == 1
+
+
+def test_directed_fan_compaction_comparator_requires_halved_area_and_no_debt() -> None:
+    """Fan-arm acceptance uses visual area, crossings, and overlaps only."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 2], [1, 3]], dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.ones((4, 2), dtype=torch.float32),
+    )
+    incumbent = torch.tensor(
+        [[-10.0, 0.0], [10.0, 0.0], [-10.0, 5.0], [10.0, 5.0]],
+        dtype=torch.float32,
+    )
+    compact = incumbent * 0.25
+    not_compact_enough = incumbent * 0.75
+    crossing_candidate = torch.tensor(
+        [[-2.5, 0.0], [2.5, 5.0], [-2.5, 5.0], [2.5, 0.0]],
+        dtype=torch.float32,
+    )
+    overlapping_candidate = torch.zeros((4, 2), dtype=torch.float32)
+
+    assert _fan_compaction_candidate_is_accepted(incumbent, compact, problem)
+    assert not _fan_compaction_candidate_is_accepted(incumbent, not_compact_enough, problem)
+    assert not _fan_compaction_candidate_is_accepted(incumbent, crossing_candidate, problem)
+    assert not _fan_compaction_candidate_is_accepted(incumbent, overlapping_candidate, problem)
+
+
+def test_directed_fan_compaction_reject_keeps_incumbent_bit_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-improving fan candidate returns the exact incumbent tensor."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+    challenger = incumbent + 100.0
+
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(
+        native_directed,
+        "_build_fan_compaction_candidate",
+        lambda *args: challenger,
+    )
+    monkeypatch.setattr(
+        native_directed,
+        "_fan_compaction_candidate_is_accepted",
+        lambda *args: False,
+    )
+
+    returned = _maybe_accept_fan_compaction_arm(problem, incumbent, LayoutConfig())
+
+    assert returned.data_ptr() == incumbent.data_ptr()
+    assert torch.equal(returned, incumbent)
+
+
+def test_directed_fan_compaction_acceptance_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An accepted fan arm returns before scorer-selected arms can replace it."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+    challenger = torch.ones((problem.num_nodes, 2), dtype=torch.float32)
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic incumbent for the directed portfolio."""
+        del args, kwargs
+        return incumbent
+
+    def fake_accept(
+        accepted_problem: LayoutProblem,
+        incumbent_pos: torch.Tensor,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Mark the fan arm accepted and return the compact challenger."""
+        del accepted_problem, incumbent_pos
+        config._dagua_native_fan_compaction_accepted = True
+        return challenger
+
+    def fail_score(*args: object, **kwargs: object) -> float:
+        """Fail if terminal fan acceptance falls through to scoring."""
+        del args, kwargs
+        raise AssertionError("accepted fan arm must be terminal")
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_maybe_accept_fan_compaction_arm", fake_accept)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_cached", fail_score)
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert torch.equal(returned, challenger)
+
+
+def test_directed_fan_compaction_builder_is_deterministic_without_competitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real fan arm is deterministic and does not call competitor pipelines."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+
+    def fail_competitor(*args: object, **kwargs: object) -> torch.Tensor:
+        """Fail if the fan arm delegates to the Sugiyama competitor pipeline."""
+        del args, kwargs
+        raise AssertionError("competitor pipeline must not be called")
+
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fail_competitor)
+
+    first = _build_fan_compaction_candidate(problem, incumbent, LayoutConfig())
+    second = _build_fan_compaction_candidate(problem, incumbent, LayoutConfig())
+
+    assert first is not None
+    assert second is not None
+    assert torch.equal(first, second)
 
 
 def test_directed_referee_forwards_extended_cluster_metadata(
