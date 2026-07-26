@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import signal
 import time
 from types import SimpleNamespace
@@ -23,7 +24,9 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
+    _bounded_connected_nested_dag_for_stress,
     _build_fan_compaction_candidate,
+    _build_nested_stress_candidate,
     _clean_fan_bundle_for_compaction,
     _crossing_edge_pairs,
     _directed_cluster_candidate_is_dual_admissible,
@@ -40,6 +43,8 @@ from dagua.layout.ops.pipelines.native_directed import (
     _force_challengers_enabled,
     _full_sugiyama_grid_enabled,
     _maybe_accept_fan_compaction_arm,
+    _maybe_accept_nested_stress_arm,
+    _nested_stress_candidate_pareto_admissible,
     _ordering_cost_admissible,
     _rank_local_zero_crossing_swap_candidate,
     _rank_to_nodes_from_incumbent_y,
@@ -129,6 +134,171 @@ def _random_bipartite_problem() -> LayoutProblem:
         node_sizes=torch.ones((20, 2), dtype=torch.float32),
         seed=7,
     )
+
+
+def _nested_dag_problem() -> LayoutProblem:
+    """Return a connected compound DAG for nested-stress arm tests.
+
+    Returns
+    -------
+    LayoutProblem
+        Runtime-declared nested DAG with two child clusters under a parent.
+    """
+    edge_index = torch.tensor(
+        [[0, 0, 1, 2, 3, 4, 5], [1, 2, 3, 3, 4, 5, 6]],
+        dtype=torch.long,
+    )
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 10.0, dtype=torch.float32),
+        seed=11,
+        clusters={"root": list(range(7)), "left": [0, 1, 3], "right": [2, 4, 5, 6]},
+        cluster_parents={"root": None, "left": "root", "right": "root"},
+        direction="TB",
+    )
+
+
+def test_nested_stress_prefilter_builds_only_runtime_nested_connected_dag() -> None:
+    """The nested-stress arm opens only for bounded connected compound DAGs."""
+    nested = _nested_dag_problem()
+    plain = LayoutProblem(
+        edge_index=nested.edge_index,
+        num_nodes=nested.num_nodes,
+        node_sizes=nested.node_sizes,
+    )
+    cyclic = LayoutProblem(
+        edge_index=torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.ones((3, 2), dtype=torch.float32),
+        clusters={"root": [0, 1, 2], "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    disconnected = LayoutProblem(
+        edge_index=torch.tensor([[0, 2], [1, 3]], dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.ones((4, 2), dtype=torch.float32),
+        clusters={"root": [0, 1, 2, 3], "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+
+    assert _bounded_connected_nested_dag_for_stress(nested)
+    assert not _bounded_connected_nested_dag_for_stress(plain)
+    assert not _bounded_connected_nested_dag_for_stress(cyclic)
+    assert not _bounded_connected_nested_dag_for_stress(disconnected)
+
+
+def test_nested_stress_strict_pareto_rejects_nondominating_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-dominating nested-stress candidate keeps the incumbent unchanged."""
+    problem = _nested_dag_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+    challenger = incumbent + 10.0
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+
+    metrics = [
+        {
+            "dag_consistency": 1.0,
+            "directed_flow_score": 0.8,
+            "neighborhood_preservation_score": 0.9,
+            "edge_length_deviation_score": 0.7,
+        },
+        {
+            "dag_consistency": 1.0,
+            "directed_flow_score": 0.9,
+            "neighborhood_preservation_score": 0.89,
+            "edge_length_deviation_score": 0.8,
+        },
+    ]
+
+    def fake_metrics(*args: object, **kwargs: object) -> dict[str, float]:
+        """Return incumbent metrics first, then candidate metrics."""
+        del args, kwargs
+        return metrics.pop(0)
+
+    monkeypatch.setattr(native_directed, "_build_nested_stress_candidate", lambda *args: challenger)
+    monkeypatch.setattr(native_directed, "_nested_stress_raw_metrics", fake_metrics)
+
+    returned = _maybe_accept_nested_stress_arm(
+        problem,
+        incumbent,
+        LayoutConfig(),
+        cluster_ids=torch.zeros((problem.num_nodes,), dtype=torch.long),
+        all_pairs_dist=None,
+        seed=11,
+    )
+
+    assert returned.data_ptr() == incumbent.data_ptr()
+    assert torch.equal(returned, incumbent)
+
+
+def test_nested_stress_comparator_requires_dag_floor_and_strict_pareto() -> None:
+    """Nested-stress admission has no tolerance and enforces the DAG floor."""
+    incumbent = {
+        "dag_consistency": 0.9,
+        "ksm_score": 0.7,
+        "neighborhood_preservation_score": 0.6,
+    }
+    equal = dict(incumbent)
+    below_floor = {
+        "dag_consistency": 0.49,
+        "ksm_score": 1.0,
+        "neighborhood_preservation_score": 1.0,
+    }
+    dominating = {
+        "dag_consistency": 0.9,
+        "ksm_score": 0.8,
+        "neighborhood_preservation_score": 0.6,
+    }
+
+    assert not _nested_stress_candidate_pareto_admissible(equal, incumbent)
+    assert not _nested_stress_candidate_pareto_admissible(below_floor, incumbent)
+    assert _nested_stress_candidate_pareto_admissible(dominating, incumbent)
+
+
+def test_nested_stress_warm_starts_from_live_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Stress-SGD arm receives the live incumbent as ``init_pos``."""
+    problem = _nested_dag_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+    captured: dict[str, torch.Tensor] = {}
+    stress_sgd = importlib.import_module("dagua.layout.ops.pipelines.stress_sgd")
+
+    def fake_stress_sgd(**kwargs: object) -> torch.Tensor:
+        """Capture warm-start coordinates and return a finite candidate."""
+        init_pos = kwargs["init_pos"]
+        assert isinstance(init_pos, torch.Tensor)
+        captured["init_pos"] = init_pos.clone()
+        return init_pos + 1.0
+
+    monkeypatch.setattr(stress_sgd, "layout_stress_sgd_pipeline", fake_stress_sgd)
+
+    _build_nested_stress_candidate(problem, incumbent, LayoutConfig(), seed=19)
+
+    assert torch.equal(captured["init_pos"], incumbent)
+
+
+def test_nested_stress_builder_is_deterministic_without_competitor_import() -> None:
+    """The real nested-stress builder is deterministic and in-house only."""
+    problem = _nested_dag_problem()
+    incumbent = torch.stack(
+        [torch.arange(problem.num_nodes, dtype=torch.float32), torch.zeros(problem.num_nodes)],
+        dim=1,
+    )
+    first = _build_nested_stress_candidate(problem, incumbent, LayoutConfig(), seed=23)
+    second = _build_nested_stress_candidate(problem, incumbent, LayoutConfig(), seed=23)
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+
+    assert torch.equal(first, second)
+    assert "Competitor" not in inspect.getsource(native_directed._build_nested_stress_candidate)
 
 
 def test_directed_fan_compaction_prefilter_builds_only_clean_fan_bundle(

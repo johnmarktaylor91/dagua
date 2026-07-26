@@ -66,9 +66,24 @@ DIRECTED_RECOMBINANT_MAX_CANDIDATES = 6
 DIRECTED_RECOMBINANT_PRIOR_S = 15.0
 DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
 DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
+DIRECTED_NESTED_STRESS_MIN_NODES = 6
+DIRECTED_NESTED_STRESS_MAX_NODES = 2000
+DIRECTED_NESTED_STRESS_STEPS = 100
+DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER = 4.0
+DIRECTED_NESTED_STRESS_DAG_FLOOR = 0.50
 DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
 DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
+DIRECTED_NESTED_STRESS_PARETO_KEYS = (
+    "ksm_score",
+    "edge_crossing_score",
+    "node_occlusion_score",
+    "neighborhood_preservation_score",
+    "edge_length_deviation_score",
+    "gabriel_score",
+    "crossing_angle_score",
+    "angular_resolution_score",
+)
 SCALED_SUGIYAMA_RANK_SEP = 72.0
 SCALED_SUGIYAMA_NODE_SEP = 18.0
 EXACT_CROSSING_COUNT_VECTOR_PAIR_CAP = 5_000_000
@@ -1676,6 +1691,470 @@ def _maybe_accept_fan_compaction_arm(
         return incumbent
     setattr(config, "_dagua_native_fan_compaction_accepted", True)
     return candidate
+
+
+def _directed_edges_are_acyclic(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether directed edges form an acyclic graph.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when Kahn traversal can consume every node.
+    """
+    if num_nodes <= 0:
+        return True
+    outgoing: list[list[int]] = [[] for _ in range(num_nodes)]
+    indegree = [0] * num_nodes
+    for src, dst in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i == dst_i or not (0 <= src_i < num_nodes and 0 <= dst_i < num_nodes):
+            continue
+        outgoing[src_i].append(dst_i)
+        indegree[dst_i] += 1
+    queue = [node for node, degree in enumerate(indegree) if degree == 0]
+    cursor = 0
+    while cursor < len(queue):
+        src = queue[cursor]
+        cursor += 1
+        for dst in outgoing[src]:
+            indegree[dst] -= 1
+            if indegree[dst] == 0:
+                queue.append(dst)
+    return cursor == num_nodes
+
+
+def _directed_edges_are_weakly_connected(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether all nodes belong to one weak component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when every node is reachable after treating edges as
+        undirected.
+    """
+    if num_nodes <= 1:
+        return True
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    for src, dst in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i == dst_i or not (0 <= src_i < num_nodes and 0 <= dst_i < num_nodes):
+            continue
+        adjacency[src_i].append(dst_i)
+        adjacency[dst_i].append(src_i)
+    if any(not neighbors for neighbors in adjacency):
+        return False
+    seen = {0}
+    queue = [0]
+    cursor = 0
+    while cursor < len(queue):
+        node = queue[cursor]
+        cursor += 1
+        for neighbor in adjacency[node]:
+            if neighbor in seen:
+                continue
+            seen.add(neighbor)
+            queue.append(neighbor)
+    return len(seen) == num_nodes
+
+
+def _nested_compound_structure_declared(problem: LayoutProblem) -> bool:
+    """Return whether runtime graph metadata declares compound nesting.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem with optional cluster metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when cluster membership and a nested or parented compound
+        structure are available from the input graph.
+    """
+    if not problem.clusters:
+        return False
+    if problem.cluster_parents:
+        parents = [parent for parent in problem.cluster_parents.values() if parent is not None]
+        return bool(parents) or len(problem.cluster_parents) >= 2
+    return len(problem.clusters) >= 2
+
+
+def _bounded_connected_nested_dag_for_stress(problem: LayoutProblem) -> bool:
+    """Return whether the nested-DAG stress arm may be constructed.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem inspected using runtime-computable topology and
+        compound metadata only.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded, weakly connected, acyclic compound DAGs.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if (
+        n < DIRECTED_NESTED_STRESS_MIN_NODES
+        or n > DIRECTED_NESTED_STRESS_MAX_NODES
+        or edge_count == 0
+        or not _nested_compound_structure_declared(problem)
+    ):
+        return False
+    structure = problem.structure
+    if structure is not None:
+        if not bool(
+            getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+        ):
+            return False
+        if getattr(structure, "is_semantically_directed", True) is False:
+            return False
+    if not _directed_edges_are_acyclic(problem.edge_index, n):
+        return False
+    return _directed_edges_are_weakly_connected(problem.edge_index, n)
+
+
+def _median_node_box_diagonal(node_sizes: Optional[torch.Tensor], fallback: float) -> float:
+    """Return a finite median node-box diagonal.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor, optional
+        Node boxes with shape ``[N, 2]``.
+    fallback : float
+        Fallback width/height when explicit node sizes are unavailable.
+
+    Returns
+    -------
+    float
+        Positive median diagonal in drawing units.
+    """
+    if node_sizes is None or node_sizes.numel() == 0:
+        return math.sqrt(2.0) * max(float(fallback), 1.0)
+    sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    diagonals = torch.linalg.vector_norm(sizes, dim=1)
+    finite = diagonals[torch.isfinite(diagonals) & (diagonals > 0.0)]
+    if finite.numel() == 0:
+        return math.sqrt(2.0) * max(float(fallback), 1.0)
+    return float(finite.median().item())
+
+
+def _scale_to_median_edge_length(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    target_length: float,
+) -> torch.Tensor:
+    """Scale positions so the median drawn edge length reaches the target.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    target_length : float
+        Desired median edge length in drawing units.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered and uniformly scaled positions with shape ``[N, 2]``.
+    """
+    out = positions.detach().to(device="cpu", dtype=torch.float32).clone()
+    if out.numel() == 0 or edge_index.numel() == 0:
+        return out
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    lengths = torch.linalg.vector_norm(out[edges[0]] - out[edges[1]], dim=1)
+    finite = lengths[torch.isfinite(lengths) & (lengths > 1.0e-6)]
+    if finite.numel() == 0:
+        return out - out.mean(dim=0, keepdim=True)
+    current = float(finite.median().item())
+    if not math.isfinite(current) or current <= 1.0e-6:
+        return out - out.mean(dim=0, keepdim=True)
+    centered = out - out.mean(dim=0, keepdim=True)
+    return centered * (max(float(target_length), 1.0e-6) / current)
+
+
+def _d4_oriented_by_declared_flow(candidate: torch.Tensor, problem: LayoutProblem) -> torch.Tensor:
+    """Return the D4 transform with the strongest declared-flow properties.
+
+    Parameters
+    ----------
+    candidate : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed problem carrying edges and drawing direction.
+
+    Returns
+    -------
+    torch.Tensor
+        Axis-flipped or rotated candidate maximizing ``dag_consistency`` then
+        ``directed_flow_score``.
+    """
+    from dagua.metrics import dag_consistency, directed_flow_score
+
+    base = candidate.detach().to(device="cpu", dtype=torch.float32)
+    transforms = (
+        base,
+        torch.stack([-base[:, 1], base[:, 0]], dim=1),
+        -base,
+        torch.stack([base[:, 1], -base[:, 0]], dim=1),
+        torch.stack([-base[:, 0], base[:, 1]], dim=1),
+        torch.stack([base[:, 0], -base[:, 1]], dim=1),
+        torch.stack([base[:, 1], base[:, 0]], dim=1),
+        torch.stack([-base[:, 1], -base[:, 0]], dim=1),
+    )
+    best = transforms[0]
+    best_key = (-math.inf, -math.inf)
+    for transformed in transforms:
+        dag_value = float(
+            dag_consistency(
+                transformed,
+                problem.edge_index.detach().to(device="cpu"),
+                direction=problem.direction,
+            )["dag_consistency"]
+        )
+        flow_value = float(
+            directed_flow_score(
+                transformed,
+                problem.edge_index.detach().to(device="cpu"),
+                direction=problem.direction,
+            )["directed_flow_score"]
+        )
+        key = (dag_value, flow_value)
+        if key > best_key:
+            best = transformed
+            best_key = key
+    return best
+
+
+def _nested_stress_raw_metrics(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> Dict[str, float]:
+    """Return raw drawing-property metrics for nested-stress admission.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed nested-DAG problem.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, float]
+        Numeric raw drawing properties from ``dagua.metrics.full``.
+    """
+    from dagua.metrics import full
+
+    raw = full(
+        pos.detach().to(device="cpu", dtype=torch.float32),
+        problem.edge_index.detach().to(device="cpu"),
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        cluster_ids=cluster_ids,
+        direction=problem.direction,
+        label_positions=problem.label_positions,
+        edge_labels=problem.edge_labels,
+        all_pairs_dist=all_pairs_dist,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+        cluster_labels=problem.cluster_labels,
+    )
+    return {key: float(value) for key, value in raw.items() if isinstance(value, (int, float))}
+
+
+def _nested_stress_candidate_pareto_admissible(
+    candidate_metrics: Dict[str, float],
+    incumbent_metrics: Dict[str, float],
+) -> bool:
+    """Return whether a nested-stress candidate strictly Pareto-dominates.
+
+    Parameters
+    ----------
+    candidate_metrics : dict[str, float]
+        Raw drawing-property metrics for the Stress-SGD candidate.
+    incumbent_metrics : dict[str, float]
+        Raw drawing-property metrics for the live production incumbent.
+
+    Returns
+    -------
+    bool
+        ``True`` iff all shared raw properties are no worse, at least one is
+        strictly better, and ``dag_consistency`` satisfies the hard floor.
+    """
+    dag_value = candidate_metrics.get("dag_consistency")
+    if (
+        dag_value is None
+        or not math.isfinite(dag_value)
+        or dag_value < DIRECTED_NESTED_STRESS_DAG_FLOOR
+    ):
+        return False
+    comparable_keys = [
+        key
+        for key in DIRECTED_NESTED_STRESS_PARETO_KEYS
+        if key in candidate_metrics
+        and key in incumbent_metrics
+        and math.isfinite(candidate_metrics[key])
+        and math.isfinite(incumbent_metrics[key])
+    ]
+    if not comparable_keys:
+        return False
+    if any(candidate_metrics[key] < incumbent_metrics[key] for key in comparable_keys):
+        return False
+    return any(candidate_metrics[key] > incumbent_metrics[key] for key in comparable_keys)
+
+
+def _build_nested_stress_candidate(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    seed: int,
+) -> torch.Tensor:
+    """Build the warm-started nested-DAG Stress-SGD candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed nested-DAG problem.
+    incumbent : torch.Tensor
+        Live production incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+    seed : int
+        Deterministic Stress-SGD seed.
+
+    Returns
+    -------
+    torch.Tensor
+        D4-oriented, point-calibrated Stress-SGD candidate with shape
+        ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.stress_sgd import layout_stress_sgd_pipeline
+
+    n = int(problem.num_nodes)
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    stress = layout_stress_sgd_pipeline(
+        edge_index=problem.edge_index.detach().to(device="cpu"),
+        num_nodes=n,
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        init_pos=incumbent.detach().to(device="cpu", dtype=torch.float32).clone(),
+        steps=DIRECTED_NESTED_STRESS_STEPS,
+        seed=seed,
+        edge_weights=(
+            None
+            if problem.edge_weights is None
+            else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        ),
+    )
+    if isinstance(stress, tuple):
+        stress = stress[0]
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    calibrated = _scale_to_median_edge_length(stress, problem.edge_index, target)
+    return _d4_oriented_by_declared_flow(calibrated, problem)
+
+
+def _maybe_accept_nested_stress_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    seed: int,
+) -> torch.Tensor:
+    """Return incumbent or the accepted nested-DAG stress-relaxation arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Live production incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying ``use_nested_stress_arm``.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    seed : int
+        Deterministic Stress-SGD seed.
+
+    Returns
+    -------
+    torch.Tensor
+        Accepted stress candidate, or the original incumbent tensor when the
+        pre-filter is closed or strict raw Pareto admission fails.
+    """
+    setattr(config, "_dagua_native_nested_stress_built", False)
+    setattr(config, "_dagua_native_nested_stress_accepted", False)
+    if not bool(getattr(config, "use_nested_stress_arm", True)):
+        return incumbent
+    if not _bounded_connected_nested_dag_for_stress(problem):
+        return incumbent
+    setattr(config, "_dagua_native_nested_stress_built", True)
+    candidate = _build_nested_stress_candidate(problem, incumbent, config, seed)
+    if (
+        candidate.shape != incumbent.detach().to(device="cpu").shape
+        or not torch.isfinite(candidate).all()
+    ):
+        return incumbent
+    incumbent_metrics = _nested_stress_raw_metrics(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    candidate_metrics = _nested_stress_raw_metrics(
+        candidate,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    setattr(
+        config,
+        "_dagua_native_nested_stress_nbp",
+        (
+            incumbent_metrics.get("neighborhood_preservation_score"),
+            candidate_metrics.get("neighborhood_preservation_score"),
+        ),
+    )
+    if not _nested_stress_candidate_pareto_admissible(candidate_metrics, incumbent_metrics):
+        return incumbent
+    setattr(config, "_dagua_native_nested_stress_accepted", True)
+    return candidate.to(device=incumbent.device, dtype=incumbent.dtype)
 
 
 def _register_recombinant_layered_candidates(
@@ -3713,6 +4192,26 @@ def layout_native_directed_portfolio(
             except Exception as exc:  # noqa: BLE001 -- late ordering cannot sink the winner
                 _reraise_worker_timeout(exc)
                 _LOGGER.warning("directed late rank-local swap challenger failed", exc_info=True)
+    nested_started = time.perf_counter()
+    try:
+        nested_candidate = _maybe_accept_nested_stress_arm(
+            problem,
+            best_position,
+            config,
+            cluster_ids,
+            all_pairs_dist,
+            seed,
+        )
+        arm_timings["nested_stress"] = (nested_started, time.perf_counter())
+        if bool(getattr(config, "_dagua_native_nested_stress_accepted", False)):
+            _LOGGER.info(
+                "Directed contest gate=nested_stress winner=nested_stress_sgd wall_time_s=%.3f",
+                time.perf_counter() - started,
+            )
+            return nested_candidate
+    except Exception as exc:  # noqa: BLE001 -- stress arm cannot sink the incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed nested stress challenger failed", exc_info=True)
     if ordering_w5_seed is not None and not bool(getattr(config, "_dagua_native_defer_w5", False)):
         try:
             from dagua.layout.ops.pipelines.native_finisher import (
