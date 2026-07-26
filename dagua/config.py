@@ -406,6 +406,9 @@ class LayoutConfig:
     # Phase-2 Wave-2: build the directed fan-compaction challenger only for
     # clean fan-bundle DAGs, then accept it through a drawing-property guard.
     use_fan_compaction_arm: bool = True
+    # Phase-2 Wave-3: bounded connected nested DAGs may try a warm-started
+    # Stress-SGD relaxation arm, admitted only by raw drawing-property Pareto.
+    use_nested_stress_arm: bool = True
 
     def __post_init__(self) -> None:
         """Normalize public quality/time fields after dataclass construction.
