@@ -54,6 +54,10 @@ GEODESIC_DENSE_WORK_BYTES_CAP = 200 * 1024 * 1024
 GEODESIC_DENSE_WORK_ELEMENT_CAP = GEODESIC_MAX_NODES * GEODESIC_MAX_NODES
 # Default spacing used when node sizes are unavailable (points).
 DEFAULT_TARGET_EDGE_LENGTH = 54.0
+MESH_REGULARIZATION_STEPS = 240
+MESH_REGULARIZATION_EDGE_WEIGHT = 4.0
+MESH_REGULARIZATION_ANGLE_WEIGHT = 1.0
+MESH_REGULARIZATION_STRESS_WEIGHT = 0.08
 
 
 @dataclass(frozen=True)
@@ -610,6 +614,274 @@ def _smacof_stress_descent(
     return final
 
 
+def layout_regular_mesh_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    config: Optional[Any] = None,
+    seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
+    steps: int = MESH_REGULARIZATION_STEPS,
+    node_sep: Optional[float] = None,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """Run geodesic stress followed by local mesh regularization.
+
+    The seed is the existing geodesic-MDS stress route. The second stage is a
+    deterministic local relaxation: equalize graph edge lengths, spread each
+    node's incident edge angles toward ``2*pi/degree``, and keep a small
+    all-pairs geodesic-stress tether so the mesh does not lose its global
+    neighborhood order. The result is an ordinary contest challenger; the
+    undirected portfolio still decides by drawing metrics.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]`` (direction ignored).
+    num_nodes : int
+        Number of nodes.
+    node_sizes : torch.Tensor, optional
+        Node bounding boxes shaped ``[N, 2]``.
+    config : Any, optional
+        Optional layout configuration carrying ``node_sep``.
+    seed : int, default=42
+        Deterministic seed used by the geodesic fallback only.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge distance costs shaped ``[E]``.
+    steps : int, default=MESH_REGULARIZATION_STEPS
+        Adam relaxation steps.
+    node_sep : float, optional
+        Node separation override in points.
+    **kwargs : Any
+        Compatibility keywords accepted by generic dispatchers.
+
+    Returns
+    -------
+    torch.Tensor
+        Finite positions shaped ``[N, 2]`` in point units.
+    """
+    del kwargs
+    if num_nodes <= 2 or edge_index.numel() == 0:
+        return layout_geodesic_stress_pipeline(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            config=config,
+            seed=seed,
+            edge_weights=edge_weights,
+            node_sep=node_sep,
+        )
+    base = layout_geodesic_stress_pipeline(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        config=config,
+        seed=seed,
+        edge_weights=edge_weights,
+        node_sep=node_sep,
+    )
+    if steps <= 0:
+        return base
+
+    from dagua.layout.ops.graph_utils import shortest_path_distances
+
+    distances_np = shortest_path_distances(edge_index, num_nodes, edge_weights)
+    distances = torch.tensor(distances_np, dtype=torch.float64)
+    distances = torch.nan_to_num(distances, nan=1.0, posinf=1.0, neginf=1.0).clamp_min(0.0)
+    solution = base.detach().to(dtype=torch.float64).clone().requires_grad_(True)
+    optimizer = torch.optim.Adam([solution], lr=0.03)
+    undirected_edges = _canonical_undirected_edges(edge_index)
+    if undirected_edges.numel() == 0:
+        return base
+    pair_index = torch.triu_indices(num_nodes, num_nodes, offset=1)
+    pair_targets = distances[pair_index[0], pair_index[1]].clamp_min(1.0e-9)
+    pair_weights = pair_targets.pow(-2.0)
+    best = solution.detach().clone()
+    best_loss = float("inf")
+    for _step in range(int(steps)):
+        optimizer.zero_grad()
+        edge_loss = _mesh_edge_length_loss(solution, undirected_edges)
+        angle_loss = _mesh_angular_gap_loss(solution, undirected_edges, num_nodes)
+        stress_loss = _mesh_stress_tether_loss(solution, pair_index, pair_targets, pair_weights)
+        loss = (
+            MESH_REGULARIZATION_EDGE_WEIGHT * edge_loss
+            + MESH_REGULARIZATION_ANGLE_WEIGHT * angle_loss
+            + MESH_REGULARIZATION_STRESS_WEIGHT * stress_loss
+        )
+        if not bool(torch.isfinite(loss).item()):
+            break
+        if float(loss.item()) < best_loss:
+            best_loss = float(loss.item())
+            best = solution.detach().clone()
+        loss.backward()
+        optimizer.step()
+    regularized = best.to(dtype=torch.float32)
+    if not bool(torch.isfinite(regularized).all().item()):
+        return base
+
+    target_length = _target_edge_length(
+        node_sizes,
+        float(node_sep if node_sep is not None else getattr(config, "node_sep", 36.0) or 36.0),
+    )
+    lengths = torch.linalg.vector_norm(
+        regularized[undirected_edges[1]] - regularized[undirected_edges[0]],
+        dim=1,
+    )
+    mean_edge_length = float(lengths.mean().item())
+    if mean_edge_length > 1.0e-9 and math.isfinite(mean_edge_length):
+        regularized = regularized * (target_length / mean_edge_length)
+    return regularized - regularized.mean(dim=0, keepdim=True)
+
+
+def _canonical_undirected_edges(edge_index: torch.Tensor) -> torch.Tensor:
+    """Return deduplicated undirected edges as a CPU tensor.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Canonical edge tensor shaped ``[2, M]`` with ``source < target``.
+    """
+    if edge_index.numel() == 0:
+        return torch.zeros((2, 0), dtype=torch.long)
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    lo = torch.minimum(edges[0], edges[1])
+    hi = torch.maximum(edges[0], edges[1])
+    keep = lo != hi
+    lo = lo[keep]
+    hi = hi[keep]
+    if lo.numel() == 0:
+        return torch.zeros((2, 0), dtype=torch.long)
+    stride = int(max(int(lo.max().item()), int(hi.max().item()))) + 1
+    keys = torch.unique(lo * stride + hi)
+    return torch.stack([torch.div(keys, stride, rounding_mode="floor"), keys % stride])
+
+
+def _mesh_edge_length_loss(pos: torch.Tensor, edges: torch.Tensor) -> torch.Tensor:
+    """Return scale-invariant edge-length variance for mesh edges.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions shaped ``[N, 2]``.
+    edges : torch.Tensor
+        Canonical undirected edges shaped ``[2, M]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar coefficient-of-variation-squared loss.
+    """
+    deltas = pos[edges[1]] - pos[edges[0]]
+    lengths = torch.linalg.vector_norm(deltas, dim=1).clamp_min(1.0e-9)
+    mean_length = lengths.mean().clamp_min(1.0e-9)
+    return ((lengths / mean_length) - 1.0).pow(2).mean()
+
+
+def _mesh_angular_gap_loss(
+    pos: torch.Tensor,
+    edges: torch.Tensor,
+    num_nodes: int,
+) -> torch.Tensor:
+    """Return incident-angle gap regularity loss.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions shaped ``[N, 2]``.
+    edges : torch.Tensor
+        Canonical undirected edges shaped ``[2, M]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar angular gap loss, normalized by full-circle radians.
+    """
+    terms: list[torch.Tensor] = []
+    two_pi = 2.0 * math.pi
+    adjacency = _incident_neighbors(edges, num_nodes)
+    for node, neighbors in enumerate(adjacency):
+        degree = len(neighbors)
+        if degree < 2:
+            continue
+        neighbor_index = torch.tensor(neighbors, dtype=torch.long, device=pos.device)
+        vectors = pos[neighbor_index] - pos[node].unsqueeze(0)
+        angles = torch.atan2(vectors[:, 1], vectors[:, 0]) % two_pi
+        sorted_angles = torch.sort(angles).values
+        gaps = torch.cat(
+            [
+                sorted_angles[1:] - sorted_angles[:-1],
+                (sorted_angles[:1] + two_pi) - sorted_angles[-1:],
+            ]
+        )
+        target = torch.full_like(gaps, two_pi / float(degree))
+        terms.append(((gaps - target) / two_pi).pow(2).mean())
+    if not terms:
+        return pos.new_tensor(0.0)
+    return torch.stack(terms).mean()
+
+
+def _incident_neighbors(edges: torch.Tensor, num_nodes: int) -> list[list[int]]:
+    """Return incident neighbor ids for a canonical edge tensor.
+
+    Parameters
+    ----------
+    edges : torch.Tensor
+        Canonical undirected edges shaped ``[2, M]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Sorted neighbor lists.
+    """
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    for source, target in zip(edges[0].tolist(), edges[1].tolist()):
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+    return [sorted(neighbors) for neighbors in adjacency]
+
+
+def _mesh_stress_tether_loss(
+    pos: torch.Tensor,
+    pair_index: torch.Tensor,
+    pair_targets: torch.Tensor,
+    pair_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Return the light geodesic-stress tether for regularized meshes.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions shaped ``[N, 2]``.
+    pair_index : torch.Tensor
+        Upper-triangle pair indices shaped ``[2, P]``.
+    pair_targets : torch.Tensor
+        Graph-distance targets shaped ``[P]``.
+    pair_weights : torch.Tensor
+        SMACOF inverse-square weights shaped ``[P]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar normalized stress loss.
+    """
+    lengths = torch.linalg.vector_norm(
+        pos[pair_index[0]] - pos[pair_index[1]],
+        dim=1,
+    ).clamp_min(1.0e-9)
+    scale = (lengths * pair_targets).sum() / lengths.pow(2).sum().clamp_min(1.0e-9)
+    normalized_lengths = lengths * scale.clamp_min(1.0e-9)
+    return (pair_weights * (normalized_lengths - pair_targets).pow(2)).mean()
+
+
 def layout_native_lattice_grid_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -677,4 +949,5 @@ __all__ = [
     "certify_rect_grid",
     "layout_geodesic_stress_pipeline",
     "layout_native_lattice_grid_pipeline",
+    "layout_regular_mesh_pipeline",
 ]

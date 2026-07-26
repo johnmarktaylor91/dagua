@@ -27,6 +27,7 @@ from dagua.layout.ops.pipelines.dagua_native import (
     _choose_native_pipeline,
     _community_features_strong,
     _mesh_features_strong,
+    _regular_mesh_features_strong,
     _undirected_route_shortlist,
 )
 from dagua.layout.ops.pipelines.native_community import (
@@ -38,8 +39,12 @@ from dagua.layout.ops.pipelines.native_lattice_grid import (
     geodesic_dense_work_is_allowed,
     layout_geodesic_stress_pipeline,
     layout_native_lattice_grid_pipeline,
+    layout_regular_mesh_pipeline,
 )
-from dagua.layout.ops.pipelines.native_undirected import _never_nan_winner
+from dagua.layout.ops.pipelines.native_undirected import (
+    _never_nan_winner,
+    _regular_mesh_clearance_expansion,
+)
 from dagua.layout.ops.state import LayoutProblem
 
 
@@ -93,6 +98,56 @@ def _brick_honeycomb_edges(rows: int, cols: int) -> torch.Tensor:
             if col + 1 < cols and col % 2 == row % 2:
                 edges.append((node, node + 1))
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _triangular_lattice_edges(rows: int, cols: int) -> torch.Tensor:
+    """Return an ascending-oriented triangular lattice patch.
+
+    Parameters
+    ----------
+    rows : int
+        Lattice rows.
+    cols : int
+        Lattice columns.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    """
+    edges: list[tuple[int, int]] = []
+    for row in range(rows):
+        for col in range(cols):
+            node = row * cols + col
+            if col + 1 < cols:
+                edges.append((node, node + 1))
+            if row + 1 < rows:
+                edges.append((node, node + cols))
+            if row + 1 < rows and col + 1 < cols:
+                edges.append((node, node + cols + 1))
+    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _ring_lattice_edges(num_nodes: int) -> torch.Tensor:
+    """Return a degree-four ring lattice control graph.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Ring node count.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    """
+    edges: list[tuple[int, int]] = []
+    for node in range(num_nodes):
+        for offset in (1, 2):
+            target = (node + offset) % num_nodes
+            edges.append((min(node, target), max(node, target)))
+    unique = sorted(set(edges))
+    return torch.tensor(unique, dtype=torch.long).t().contiguous()
 
 
 def _planted_blocks_edges(block_size: int, num_blocks: int) -> torch.Tensor:
@@ -326,6 +381,28 @@ def test_lattice_grid_pipeline_prefers_certificate_for_exact_grids() -> None:
     assert float(extent.min().item()) > 0.0
 
 
+def test_regular_mesh_pipeline_improves_triangular_edge_uniformity() -> None:
+    """The mesh regularizer improves local edge regularity on fresh triangles."""
+    edge_index = _triangular_lattice_edges(6, 6)
+    node_sizes = torch.full((36, 2), 20.0)
+
+    geodesic = layout_geodesic_stress_pipeline(
+        edge_index=edge_index,
+        num_nodes=36,
+        node_sizes=node_sizes,
+        seed=42,
+    )
+    regularized = layout_regular_mesh_pipeline(
+        edge_index=edge_index,
+        num_nodes=36,
+        node_sizes=node_sizes,
+        seed=42,
+    )
+
+    assert bool(torch.isfinite(regularized).all().item())
+    assert _edge_length_cv(regularized, edge_index) < _edge_length_cv(geodesic, edge_index)
+
+
 # ---------------------------------------------------------------------------
 # Community structure
 # ---------------------------------------------------------------------------
@@ -417,6 +494,7 @@ def test_shortlist_matches_structure_classes() -> None:
     assert "mesh" in grid_shortlist.classes
     assert "lattice_cert" in grid_shortlist.candidates
     assert "geodesic_stress" in grid_shortlist.candidates
+    assert "mesh_regularized" in grid_shortlist.candidates
     assert "community_scaffold" not in grid_shortlist.candidates
 
     block_structure = classify_graph(_planted_blocks_edges(10, 3), 30)
@@ -430,6 +508,51 @@ def test_shortlist_matches_structure_classes() -> None:
         _undirected_route_shortlist(None, 5000, has_edge_weights=False)
     )
     assert not _undirected_route_shortlist(None, 5000, has_edge_weights=False).candidates
+
+
+def test_regular_mesh_gate_excludes_ring_lattice_controls() -> None:
+    """Long ring lattices do not receive the local 2D mesh regularizer."""
+    mesh_structure = classify_graph(
+        _triangular_lattice_edges(6, 6),
+        36,
+        graph=_DeclaredUndirected(),
+    )
+    assert _mesh_features_strong(mesh_structure, 36)
+    assert _regular_mesh_features_strong(mesh_structure, 36)
+
+    ring_structure = classify_graph(_ring_lattice_edges(100), 100, graph=_DeclaredUndirected())
+    assert _mesh_features_strong(ring_structure, 100)
+    assert not _regular_mesh_features_strong(ring_structure, 100)
+    ring_shortlist = _undirected_route_shortlist(ring_structure, 100, has_edge_weights=False)
+    assert "mesh_regularized" not in ring_shortlist.candidates
+
+
+def test_regular_mesh_clearance_expands_only_tight_meshes() -> None:
+    """Regular meshes expand only when graph edges are too close to node boxes."""
+    edge_index = _triangular_lattice_edges(6, 6)
+    structure = classify_graph(edge_index, 36, graph=_DeclaredUndirected())
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=36,
+        node_sizes=torch.full((36, 2), 20.0),
+        structure=structure,
+    )
+    tight = layout_regular_mesh_pipeline(
+        edge_index=edge_index,
+        num_nodes=36,
+        node_sizes=problem.node_sizes,
+        seed=42,
+    )
+    tight = tight * 0.4
+    expanded = _regular_mesh_clearance_expansion(tight, problem)
+
+    assert expanded is not tight
+    assert float(torch.linalg.vector_norm(expanded, dim=1).max().item()) > float(
+        torch.linalg.vector_norm(tight, dim=1).max().item()
+    )
+
+    loose = tight * 3.0
+    assert _regular_mesh_clearance_expansion(loose, problem) is loose
 
 
 def test_out_of_corpus_probes_route_like_their_family() -> None:
