@@ -9,7 +9,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 import torch
 
@@ -70,6 +70,34 @@ _W5_STRESS_MAX_PAIRS = 100_000
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
+_CLUSTER_TIGHTEN_MIN_SIBLING_GAP_FACTOR = 0.55
+_CLUSTER_TIGHTEN_MILD_FACTORS = (0.99, 0.92)
+_CLUSTER_TIGHTEN_MAX_NODES = 2_000
+
+
+@dataclass(frozen=True)
+class ClusterTighteningCandidate:
+    """Deterministic terminal candidate for declared clustered graphs.
+
+    Parameters
+    ----------
+    name : str
+        Stable candidate label.
+    pos : torch.Tensor
+        Tightened positions with shape ``[N, 2]``.
+    gate_reason : str
+        Structural reason the candidate generator fired.
+    cluster_count : int
+        Number of non-empty declared clusters.
+    max_depth : int
+        Maximum declared nesting depth among valid clusters.
+    """
+
+    name: str
+    pos: torch.Tensor
+    gate_reason: str
+    cluster_count: int
+    max_depth: int
 
 
 def _runtime_telemetry_payload(
@@ -220,6 +248,343 @@ def w5_honest_axes_from_metrics(numeric: dict[str, Any]) -> W5HonestAxes:
         ksm=finite_float("ksm_score"),
         edge_length=finite_float("edge_length_deviation_score"),
     )
+
+
+def _valid_cluster_members(
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    num_nodes: int,
+) -> dict[str, tuple[int, ...]]:
+    """Return non-empty declared cluster memberships.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Sequence[int]] or None
+        Declared cluster membership keyed by cluster name.
+    num_nodes : int
+        Number of layout nodes.
+
+    Returns
+    -------
+    dict[str, tuple[int, ...]]
+        Sorted in-range node indices keyed by stable string cluster names.
+    """
+    if not clusters:
+        return {}
+    valid: dict[str, tuple[int, ...]] = {}
+    for name, members in clusters.items():
+        indices = sorted({int(index) for index in members if 0 <= int(index) < num_nodes})
+        if indices:
+            valid[str(name)] = tuple(indices)
+    return valid
+
+
+def _cluster_depth_lookup(
+    cluster_names: Sequence[str],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> dict[str, int]:
+    """Return declared nesting depths for valid clusters.
+
+    Parameters
+    ----------
+    cluster_names : Sequence[str]
+        Valid cluster names.
+    cluster_parents : Mapping[str, Optional[str]] or None
+        Optional declared parent lookup.
+
+    Returns
+    -------
+    dict[str, int]
+        Depth per cluster, with roots at zero.
+    """
+    names = set(cluster_names)
+    parents = {
+        name: (
+            str(cluster_parents.get(name))
+            if cluster_parents is not None and cluster_parents.get(name) in names
+            else None
+        )
+        for name in cluster_names
+    }
+    depths: dict[str, int] = {}
+
+    def depth(name: str) -> int:
+        """Resolve one cluster depth with memoization.
+
+        Parameters
+        ----------
+        name : str
+            Cluster name.
+
+        Returns
+        -------
+        int
+            Declared nesting depth.
+        """
+        if name in depths:
+            return depths[name]
+        parent = parents[name]
+        depths[name] = 0 if parent is None else depth(parent) + 1
+        return depths[name]
+
+    for cluster_name in cluster_names:
+        depth(cluster_name)
+    return depths
+
+
+def _cluster_tightening_gate(
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    num_nodes: int,
+) -> tuple[bool, str, dict[str, tuple[int, ...]], dict[str, int]]:
+    """Return whether terminal cluster tightening should generate candidates.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Sequence[int]] or None
+        Declared cluster membership keyed by cluster name.
+    cluster_parents : Mapping[str, Optional[str]] or None
+        Optional declared parent lookup.
+    num_nodes : int
+        Number of layout nodes.
+
+    Returns
+    -------
+    tuple[bool, str, dict[str, tuple[int, ...]], dict[str, int]]
+        Gate verdict, reason, valid members, and nesting depth lookup.
+    """
+    members = _valid_cluster_members(clusters, num_nodes)
+    depths = _cluster_depth_lookup(tuple(sorted(members)), cluster_parents)
+    max_depth = max(depths.values(), default=0)
+    if num_nodes > _CLUSTER_TIGHTEN_MAX_NODES:
+        return False, "too_large", members, depths
+    if len(members) >= 2:
+        return True, "multi_cluster", members, depths
+    if max_depth >= 1:
+        return True, "nested_cluster", members, depths
+    return False, "no_declared_multi_or_nested_cluster", members, depths
+
+
+def _cluster_bounds(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    members: Sequence[int],
+) -> tuple[float, float, float, float]:
+    """Return a rendered AABB for a cluster's descendants.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    members : Sequence[int]
+        Descendant node indices.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounds as ``(left, right, bottom, top)``.
+    """
+    idx = torch.tensor(tuple(members), dtype=torch.long, device=pos.device)
+    lower = pos[idx] - node_sizes[idx] * 0.5
+    upper = pos[idx] + node_sizes[idx] * 0.5
+    return (
+        float(lower[:, 0].min().item()),
+        float(upper[:, 0].max().item()),
+        float(lower[:, 1].min().item()),
+        float(upper[:, 1].max().item()),
+    )
+
+
+def _compact_cluster_descendants(
+    pos: torch.Tensor,
+    members_by_name: Mapping[str, tuple[int, ...]],
+    depths: Mapping[str, int],
+    factor: float,
+    target_depth: Optional[int] = None,
+) -> torch.Tensor:
+    """Compact each cluster's descendants toward their current centroid.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Input positions with shape ``[N, 2]``.
+    members_by_name : Mapping[str, tuple[int, ...]]
+        Valid cluster memberships.
+    depths : Mapping[str, int]
+        Declared cluster depths.
+    factor : float
+        Centroid shrink factor in ``(0, 1]``.
+    target_depth : int or None, optional
+        When set, only clusters at this declared nesting depth are compacted.
+
+    Returns
+    -------
+    torch.Tensor
+        Compacted position tensor.
+    """
+    out = pos.detach().clone()
+    for name in sorted(members_by_name, key=lambda item: (-depths.get(item, 0), item)):
+        if target_depth is not None and depths.get(name, 0) != target_depth:
+            continue
+        members = members_by_name[name]
+        if len(members) <= 1:
+            continue
+        idx = torch.tensor(members, dtype=torch.long, device=out.device)
+        center = out[idx].mean(dim=0, keepdim=True)
+        out[idx] = center + (out[idx] - center) * float(factor)
+    return out
+
+
+def _separate_sibling_clusters(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    members_by_name: Mapping[str, tuple[int, ...]],
+    depths: Mapping[str, int],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    min_gap: float,
+) -> torch.Tensor:
+    """Repel same-parent cluster boxes along the horizontal packing axis.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Input positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    members_by_name : Mapping[str, tuple[int, ...]]
+        Valid cluster memberships.
+    depths : Mapping[str, int]
+        Declared cluster depths.
+    cluster_parents : Mapping[str, Optional[str]] or None
+        Optional declared parent lookup.
+    min_gap : float
+        Minimum rendered gap between sibling cluster AABBs.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with sibling boxes separated.
+    """
+    out = pos.detach().clone()
+    names = set(members_by_name)
+    for depth in sorted(set(depths.values()), reverse=True):
+        siblings: dict[Optional[str], list[str]] = {}
+        for name in members_by_name:
+            if depths.get(name, 0) != depth:
+                continue
+            raw_parent = cluster_parents.get(name) if cluster_parents is not None else None
+            parent = str(raw_parent) if raw_parent in names else None
+            siblings.setdefault(parent, []).append(name)
+        for sibling_names in siblings.values():
+            if len(sibling_names) <= 1:
+                continue
+            sibling_names.sort(
+                key=lambda name: (_cluster_bounds(out, node_sizes, members_by_name[name])[0], name)
+            )
+            right_edge: Optional[float] = None
+            for name in sibling_names:
+                left, right, _, _ = _cluster_bounds(out, node_sizes, members_by_name[name])
+                if right_edge is not None and left < right_edge + min_gap:
+                    shift = right_edge + min_gap - left
+                    idx = torch.tensor(members_by_name[name], dtype=torch.long, device=out.device)
+                    out[idx, 0] += float(shift)
+                    left += shift
+                    right += shift
+                right_edge = right if right_edge is None else max(right_edge, right)
+    return out
+
+
+def build_cluster_tightening_candidates(
+    incumbent_pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> tuple[ClusterTighteningCandidate, ...]:
+    """Build terminal cluster-tightening candidates under the structural gate.
+
+    Parameters
+    ----------
+    incumbent_pos : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    clusters : Mapping[str, Sequence[int]] or None
+        Declared cluster membership.
+    cluster_parents : Mapping[str, Optional[str]] or None
+        Optional declared nesting metadata.
+
+    Returns
+    -------
+    tuple[ClusterTighteningCandidate, ...]
+        Candidate positions. Empty means the structural gate did not fire.
+    """
+    enabled, reason, members_by_name, depths = _cluster_tightening_gate(
+        clusters,
+        cluster_parents,
+        int(incumbent_pos.shape[0]),
+    )
+    if not enabled:
+        return ()
+    work_pos = incumbent_pos.detach().to(device="cpu", dtype=torch.float32)
+    work_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    mean_diag = (
+        float(torch.linalg.norm(work_sizes, dim=1).mean().item()) if work_sizes.numel() else 1.0
+    )
+    min_gap = max(mean_diag * _CLUSTER_TIGHTEN_MIN_SIBLING_GAP_FACTOR, 1.0e-6)
+    max_depth = max(depths.values(), default=0)
+    candidates: list[ClusterTighteningCandidate] = []
+    variants = [
+        ("root_deepest_compact", (0, max_depth), _CLUSTER_TIGHTEN_MILD_FACTORS[0], 0.0),
+        ("root_compact", (0,), _CLUSTER_TIGHTEN_MILD_FACTORS[0], 0.0),
+        ("deepest_compact", (max_depth,), _CLUSTER_TIGHTEN_MILD_FACTORS[0], 0.0),
+        ("root_compact_stronger", (0,), _CLUSTER_TIGHTEN_MILD_FACTORS[1], 0.0),
+        ("deepest_compact_stronger", (max_depth,), _CLUSTER_TIGHTEN_MILD_FACTORS[1], 0.0),
+        ("sibling_gap", (0,), _CLUSTER_TIGHTEN_MILD_FACTORS[0], min_gap * 0.1),
+    ]
+    seen: set[tuple[str, tuple[int, ...], float, float]] = set()
+    for label, target_depths, factor, sibling_gap in variants:
+        key = (label, target_depths, factor, sibling_gap)
+        if key in seen:
+            continue
+        seen.add(key)
+        separated = work_pos.detach().clone()
+        for target_depth in target_depths:
+            separated = _compact_cluster_descendants(
+                separated,
+                members_by_name,
+                depths,
+                factor,
+                target_depth=target_depth,
+            )
+        if sibling_gap > 0.0:
+            separated = _separate_sibling_clusters(
+                separated,
+                work_sizes,
+                members_by_name,
+                depths,
+                cluster_parents,
+                sibling_gap,
+            )
+        if _overlap_count(separated, work_sizes) > _overlap_count(work_pos, work_sizes):
+            project_overlaps(
+                separated,
+                work_sizes,
+                iterations=4,
+                convergent=True,
+            )
+        if separated.numel() > 0:
+            separated -= separated.mean(dim=0, keepdim=True)
+        candidates.append(
+            ClusterTighteningCandidate(
+                name=f"cluster_tighten_{label}_f{factor:.2f}",
+                pos=separated.to(device=incumbent_pos.device, dtype=incumbent_pos.dtype),
+                gate_reason=reason,
+                cluster_count=len(members_by_name),
+                max_depth=max_depth,
+            )
+        )
+    return tuple(candidates)
 
 
 @dataclass(frozen=True)
@@ -2893,6 +3258,8 @@ __all__ = [
     "W5PhaseTiming",
     "W5ScorePair",
     "W5Seed",
+    "ClusterTighteningCandidate",
+    "build_cluster_tightening_candidates",
     "is_worker_timeout_like_exception",
     "log_w5_telemetry",
     "make_w5_skip_result",
