@@ -196,6 +196,8 @@ _LOGGER = logging.getLogger(__name__)
 # Degeneracy guard thresholds (see _candidate_is_degenerate).
 DEGENERACY_MIN_EDGE_TO_DIAGONAL_RATIO = 0.5
 DEGENERACY_MIN_BBOX_TO_NODE_AREA_RATIO = 0.5
+REGULAR_MESH_MIN_EDGE_DIAGONAL_TARGET = 1.5
+REGULAR_MESH_EXPANSION_MAX_SCALE = 1.8
 # Reject challenger layouts that fling ISOLATED (degree-0) nodes far from the
 # layout centroid. Scoped to isolated nodes only: the r80 gate sweep proved a
 # global max/median radius test also rejects legitimately-dispersed structure
@@ -1128,6 +1130,64 @@ def _candidate_is_eligible(
         if after > before:
             return False, f"overlaps increased {before}->{after}"
     return True, ""
+
+
+def _regular_mesh_clearance_expansion(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+) -> torch.Tensor:
+    """Expand tight regular-mesh drawings to a node-clearance floor.
+
+    Uniform expansion preserves edge-angle geometry, edge-length CV,
+    crossings, and neighborhood order. It only changes drawings whose
+    shortest graph edge is too close to the largest node diagonal, which is a
+    direct readability property and not a scorer/ruler predicate.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Winning positions shaped ``[N, 2]``.
+    problem : LayoutProblem
+        Prepared layout problem carrying structure, edges, and node sizes.
+
+    Returns
+    -------
+    torch.Tensor
+        Expanded positions when the regular-mesh gate and clearance trigger
+        fire; otherwise the original ``pos`` object.
+    """
+    structure = getattr(problem, "structure", None)
+    if structure is None or problem.node_sizes is None or problem.edge_index.numel() == 0:
+        return pos
+    try:
+        from dagua.layout.ops.pipelines.dagua_native import _regular_mesh_features_strong
+
+        if not _regular_mesh_features_strong(cast(Any, structure), int(problem.num_nodes)):
+            return pos
+    except Exception:  # noqa: BLE001 -- expansion is optional and must fail closed
+        return pos
+
+    edge_index = problem.edge_index.to(device=pos.device, dtype=torch.long)
+    sizes = problem.node_sizes.to(device=pos.device, dtype=pos.dtype)
+    if sizes.ndim == 1:
+        sizes = sizes.unsqueeze(1).expand(-1, 2)
+    max_diagonal = torch.linalg.vector_norm(sizes, dim=1).max().clamp_min(1.0e-9)
+    edge_lengths = torch.linalg.vector_norm(pos[edge_index[1]] - pos[edge_index[0]], dim=1)
+    positive_lengths = edge_lengths[edge_lengths > 1.0e-9]
+    min_edge = positive_lengths.min() if bool(positive_lengths.numel()) else None
+    if min_edge is None:
+        return pos
+    ratio = float((min_edge / max_diagonal).item())
+    if ratio >= REGULAR_MESH_MIN_EDGE_DIAGONAL_TARGET:
+        return pos
+    scale = min(
+        REGULAR_MESH_EXPANSION_MAX_SCALE,
+        REGULAR_MESH_MIN_EDGE_DIAGONAL_TARGET / max(ratio, 1.0e-9),
+    )
+    if scale <= 1.0:
+        return pos
+    centered = pos - pos.mean(dim=0, keepdim=True)
+    return centered * float(scale)
 
 
 def _max_isolated_spread_ratio(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
@@ -3110,12 +3170,13 @@ def layout_native_undirected_portfolio(
             time.perf_counter() - fr_started,
         )
 
-    # Candidates J/K/L (r2 wave 2, router-v2 shortlist): exact-grid
-    # certificate, geodesic-MDS stress, and community scaffold, admitted by
-    # STRUCTURAL features only (see dagua_native._undirected_route_shortlist;
-    # no graph names, no corpus constants). All three are ordinary contest
-    # candidates: the honest measured-argmax referee and the incumbent
-    # tie-break decide, exactly as for every other challenger family.
+    # Candidates J/K/L/M (r2 wave 2 + phase-2 mesh wave): exact-grid
+    # certificate, geodesic-MDS stress, local mesh regularization, and
+    # community scaffold, admitted by STRUCTURAL features only (see
+    # dagua_native._undirected_route_shortlist; no graph names, no corpus
+    # constants). All are ordinary contest candidates: the honest
+    # measured-argmax referee and the incumbent tie-break decide, exactly as
+    # for every other challenger family.
     from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
 
     shortlist = _undirected_route_shortlist(
@@ -3199,6 +3260,47 @@ def layout_native_undirected_portfolio(
         _LOGGER.info(
             "Undirected candidate runtime family=geodesic_stress seconds=%.3f",
             time.perf_counter() - geodesic_started,
+        )
+    if "mesh_regularized" in shortlist.candidates and _portfolio_has_budget(config):
+        mesh_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_lattice_grid import (
+                geodesic_dense_work_is_allowed,
+                layout_regular_mesh_pipeline,
+            )
+
+            if not geodesic_dense_work_is_allowed(n, int(problem.edge_index.shape[1])):
+                _LOGGER.info("Skipped mesh regularizer challenger: dense-work guard")
+            else:
+                mesh_pos = layout_regular_mesh_pipeline(
+                    edge_index=problem.edge_index,
+                    num_nodes=n,
+                    node_sizes=problem.node_sizes,
+                    seed=seed,
+                    edge_weights=problem.edge_weights,
+                    node_sep=challenger_node_sep,
+                )
+                _add_challenger("mesh_regularized", mesh_pos, include_raw=True)
+                if problem.edge_weights is not None:
+                    mesh_unweighted_pos = layout_regular_mesh_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        seed=seed,
+                        edge_weights=None,
+                        node_sep=challenger_node_sep,
+                    )
+                    _add_challenger(
+                        "mesh_regularized_unweighted",
+                        mesh_unweighted_pos,
+                        include_raw=True,
+                    )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("mesh regularizer undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=mesh_regularized seconds=%.3f",
+            time.perf_counter() - mesh_started,
         )
     if "community_scaffold" in shortlist.candidates and _portfolio_has_budget(config):
         community_started = time.perf_counter()
@@ -3429,7 +3531,8 @@ def layout_native_undirected_portfolio(
         ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
         best_name,
     )
-    return _never_nan_winner(positions[best_name], problem, challenger_node_sep, seed)
+    winner_pos = _regular_mesh_clearance_expansion(positions[best_name], problem)
+    return _never_nan_winner(winner_pos, problem, challenger_node_sep, seed)
 
 
 def _never_nan_winner(

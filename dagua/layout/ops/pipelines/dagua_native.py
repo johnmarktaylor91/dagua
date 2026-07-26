@@ -1357,6 +1357,12 @@ class RouterV2Config:
     # 2D meshes have diameter ~ 2*sqrt(N); small-world/SBM diameters scale
     # like log N. Requiring diameter >= factor * sqrt(N) separates them.
     mesh_diameter_sqrt_factor: float = 1.2
+    # Mesh regularization is narrower than candidate shortlisting: long
+    # ring-lattice/small-world controls can pass the lower diameter bound, but
+    # finite 2D patches stay below roughly 2*sqrt(N). The strict arm keeps
+    # those controls byte-identical while still covering grids, triangular
+    # patches, and recursive planar meshes.
+    regular_mesh_diameter_sqrt_max: float = 2.05
     # Standard "meaningful community structure" bar for modularity of a
     # label-propagation partition.
     community_modularity_min: float = 0.30
@@ -1420,6 +1426,41 @@ def _mesh_features_strong(structure: Optional[GraphStructure], num_nodes: int) -
         and float(getattr(structure, "hub_edge_fraction", 1.0))
         <= ROUTER_V2.mesh_hub_edge_fraction_max
         and float(diameter) >= ROUTER_V2.mesh_diameter_sqrt_factor * math.sqrt(float(num_nodes))
+    )
+
+
+def _regular_mesh_features_strong(structure: Optional[GraphStructure], num_nodes: int) -> bool:
+    """Return whether a graph should receive local mesh regularization.
+
+    This is a stricter structural gate than ``_mesh_features_strong``. It
+    keeps the existing broad geodesic-stress shortlist intact, but only adds
+    the local edge/angle regularizer for finite planar mesh patches whose
+    measured diameter sits in the 2D-patch band. No graph names, corpus row
+    ids, or drawing/ruler scores participate.
+
+    Parameters
+    ----------
+    structure : GraphStructure, optional
+        Classified graph topology.
+    num_nodes : int
+        Number of nodes (``<= 0`` means unknown).
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph is a regular planar mesh/lattice candidate.
+    """
+    if not _mesh_features_strong(structure, num_nodes):
+        return False
+    assert structure is not None
+    if bool(getattr(structure, "is_planar", False)) is not True:
+        return False
+    diameter = float(getattr(structure, "diameter_estimate", 0))
+    diameter_ratio = diameter / math.sqrt(float(num_nodes))
+    return (
+        diameter_ratio <= ROUTER_V2.regular_mesh_diameter_sqrt_max
+        and int(getattr(structure, "max_degree", 0)) <= 6
+        and float(getattr(structure, "edge_to_node_ratio", 0.0)) <= 2.4
     )
 
 
@@ -1516,6 +1557,8 @@ def _undirected_route_shortlist(
         if max_degree <= 4:
             candidates.append("lattice_cert")
         candidates.append("geodesic_stress")
+    if _regular_mesh_features_strong(structure, num_nodes):
+        candidates.append("mesh_regularized")
     if _community_features_strong(structure, num_nodes):
         classes.append("community")
         candidates.append("community_scaffold")
