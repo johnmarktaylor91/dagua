@@ -5745,6 +5745,7 @@ def _terminal_w5_polish(
     direction: str,
     clusters: Optional[dict[str, Any]] = None,
     cluster_parents: Optional[dict[str, Optional[str]]] = None,
+    cluster_labels: Optional[dict[str, str]] = None,
     shape_geometry: Optional[NativeShapeGeometry] = None,
     extra_seeds: Optional[Sequence[tuple[str, torch.Tensor]]] = None,
     register_anytime_best: Optional[Callable[[torch.Tensor, str], None]] = None,
@@ -5773,6 +5774,8 @@ def _terminal_w5_polish(
         Cluster membership metadata.
     cluster_parents : dict[str, str | None], optional
         Nested-cluster parent metadata.
+    cluster_labels : dict[str, str], optional
+        Cluster label text keyed by cluster name for declared-cluster facets.
     shape_geometry : NativeShapeGeometry, optional
         Optional non-box shape descriptors for W5 overlap geometry.
     extra_seeds : Sequence[tuple[str, torch.Tensor]], optional
@@ -5806,6 +5809,7 @@ def _terminal_w5_polish(
             W5ScorePair,
             W5Seed,
             _finisher_slice_s,
+            build_cluster_tightening_candidates,
             log_w5_telemetry,
             make_w5_skip_result,
             run_w5_finisher,
@@ -5877,6 +5881,9 @@ def _terminal_w5_polish(
                 direction=direction,
                 declared_hierarchical=declared_hierarchical,
                 all_pairs_dist=all_pairs_dist,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+                cluster_labels=cluster_labels,
             )
             numeric["declared_hierarchical"] = declared_hierarchical
             return (
@@ -5904,6 +5911,57 @@ def _terminal_w5_polish(
 
         referee_started = time.perf_counter()
         incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
+        cluster_tightening_telemetry: list[dict[str, Any]] = []
+        cluster_selected = False
+        cluster_seed_positions: list[tuple[str, torch.Tensor]] = []
+        for cluster_candidate in build_cluster_tightening_candidates(
+            final_pos,
+            cpu_node_sizes,
+            clusters,
+            cluster_parents,
+        ):
+            candidate_score_pair, candidate_axes = honest_score_payload(cluster_candidate.pos)
+            selected = w5_dominates(
+                candidate_score_pair,
+                incumbent_score_pair,
+                1.0e-9,
+            )
+            cluster_tightening_telemetry.append(
+                {
+                    "name": cluster_candidate.name,
+                    "gate_reason": cluster_candidate.gate_reason,
+                    "cluster_count": cluster_candidate.cluster_count,
+                    "max_depth": cluster_candidate.max_depth,
+                    "incumbent_score_pair": {
+                        "directed": incumbent_score_pair.directed,
+                        "undirected": incumbent_score_pair.undirected,
+                    },
+                    "candidate_score_pair": {
+                        "directed": candidate_score_pair.directed,
+                        "undirected": candidate_score_pair.undirected,
+                    },
+                    "selected": selected,
+                }
+            )
+            cluster_seed_positions.append((cluster_candidate.name, cluster_candidate.pos))
+            if selected:
+                final_pos = cluster_candidate.pos.to(device=final_pos.device, dtype=final_pos.dtype)
+                incumbent_score_pair = candidate_score_pair
+                incumbent_axes = candidate_axes
+                cluster_selected = True
+                if register_anytime_best is not None:
+                    register_anytime_best(final_pos, "cluster_tightening_accept")
+                break
+        if cluster_tightening_telemetry:
+            existing_cluster_telemetry = list(
+                getattr(config, "_dagua_native_cluster_tightening_telemetry", [])
+            )
+            existing_cluster_telemetry.extend(cluster_tightening_telemetry)
+            setattr(
+                config,
+                "_dagua_native_cluster_tightening_telemetry",
+                existing_cluster_telemetry,
+            )
         setattr(
             config,
             "_dagua_native_w5_referee_cost_s",
@@ -5937,6 +5995,10 @@ def _terminal_w5_polish(
             return final_pos
 
         seed_bank = [W5Seed("terminal_final", final_pos)]
+        for seed_name, seed_pos in cluster_seed_positions:
+            seed_bank.append(
+                W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+            )
         for seed_name, seed_pos in list(getattr(config, "_dagua_native_terminal_w5_seed_bank", [])):
             seed_bank.append(
                 W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
@@ -5989,6 +6051,8 @@ def _terminal_w5_polish(
             if register_anytime_best is not None:
                 register_anytime_best(w5_result.winner_pos, "terminal_w5_accept")
             return w5_result.winner_pos
+        if cluster_selected:
+            return final_pos
     except Exception as exc:  # noqa: BLE001 -- terminal W5 cannot sink the returned layout
         if is_worker_timeout_like_exception(exc):
             raise
@@ -6279,6 +6343,7 @@ def layout_dagua_native_pipeline(
                     direction=effective_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    cluster_labels=cluster_labels,
                     shape_geometry=shape_geometry,
                 )
             )
@@ -6418,6 +6483,7 @@ def layout_dagua_native_pipeline(
                                         direction=effective_config.direction,
                                         clusters=clusters,
                                         cluster_parents=cluster_parents,
+                                        cluster_labels=cluster_labels,
                                         shape_geometry=shape_geometry,
                                     )
                                 )
@@ -6499,6 +6565,7 @@ def layout_dagua_native_pipeline(
                     direction=effective_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    cluster_labels=cluster_labels,
                     shape_geometry=shape_geometry,
                     extra_seeds=w5_seed_positions,
                 )
@@ -6815,6 +6882,7 @@ def layout_dagua_native_pipeline(
                     direction=prepared_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    cluster_labels=cluster_labels,
                     shape_geometry=shape_geometry,
                     register_anytime_best=register_anytime_best,
                 )
@@ -6842,6 +6910,7 @@ def layout_dagua_native_pipeline(
                 direction=prepared_config.direction,
                 clusters=clusters,
                 cluster_parents=cluster_parents,
+                cluster_labels=cluster_labels,
                 shape_geometry=shape_geometry,
                 register_anytime_best=register_anytime_best,
             )
