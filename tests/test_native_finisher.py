@@ -12,6 +12,8 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.native_finisher import (
+    W5CostPlan,
+    W5FinisherResult,
     W5HonestAxes,
     W5ScorePair,
     W5Seed,
@@ -637,6 +639,53 @@ def test_tiny_w5_deterministic_costs_use_installed_ledger() -> None:
 
     assert _use_tiny_row_deterministic_w5_costs(config, 10) is True
     assert not hasattr(config, PROCESS_DEADLINE_ATTR)
+
+
+def test_w5_telemetry_marks_non_tiny_ledger_costs_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ledger-backed medium W5 rows report deterministic modeled-cost telemetry."""
+    from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
+
+    telemetry_path = tmp_path / "w5.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=300.0, return_reserve_dwu=5.0)
+    pos = torch.zeros((500, 2), dtype=torch.float32)
+    result = W5FinisherResult(
+        winner_pos=pos,
+        incumbent_score_pair=_pair(1.0, 1.0),
+        winner_score_pair=_pair(1.0, 1.0),
+        winner_name="incumbent",
+        deadline_returned=False,
+        accepted=(),
+        rejected=(),
+        checkpoints=(),
+        mode="barrier_2d",
+        steps=96,
+        node_count=500,
+        edge_count=0,
+        cost_plan=W5CostPlan(
+            seeds=1,
+            steps=96,
+            checkpoints=4,
+            measured_step_s=0.0437,
+            warmup_s=0.0,
+            referee_s=0.019,
+            budget_s=20.0,
+            budget_usable_s=18.0,
+            predicted_s=4.2712,
+        ),
+    )
+
+    log_w5_telemetry(result, config)
+
+    capsys.readouterr()
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+    assert records[-1]["node_count"] == 500
+    assert records[-1]["use_deterministic_costs"] is True
 
 
 def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
