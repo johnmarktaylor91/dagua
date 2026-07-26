@@ -20,6 +20,10 @@ from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
 from dagua.layout.ops.pipelines.native_directed import (
     DIRECTED_FULL_REFEREE_TOP_K,
+    DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX,
+    DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH,
+    DIRECTED_NESTED_STRESS_MAX_NODES,
+    DIRECTED_NESTED_STRESS_PARETO_KEYS,
     IGRAPH_OUTPUT_SCALE,
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
@@ -188,6 +192,50 @@ def test_nested_stress_prefilter_builds_only_runtime_nested_connected_dag() -> N
     assert not _bounded_connected_nested_dag_for_stress(disconnected)
 
 
+def test_nested_stress_prefilter_enforces_cosigned_runtime_caps() -> None:
+    """The nested-stress guard rejects oversized, dense, and over-deep DAGs."""
+    nested = _nested_dag_problem()
+    oversized = LayoutProblem(
+        edge_index=torch.stack(
+            [
+                torch.arange(DIRECTED_NESTED_STRESS_MAX_NODES, dtype=torch.long),
+                torch.arange(1, DIRECTED_NESTED_STRESS_MAX_NODES + 1, dtype=torch.long),
+            ]
+        ),
+        num_nodes=DIRECTED_NESTED_STRESS_MAX_NODES + 1,
+        node_sizes=torch.ones((DIRECTED_NESTED_STRESS_MAX_NODES + 1, 2), dtype=torch.float32),
+        clusters={"root": list(range(DIRECTED_NESTED_STRESS_MAX_NODES + 1)), "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    dense_edges = [(source, target) for source in range(8) for target in range(source + 1, 8)]
+    dense = LayoutProblem(
+        edge_index=torch.tensor(dense_edges, dtype=torch.long).t().contiguous(),
+        num_nodes=8,
+        node_sizes=torch.ones((8, 2), dtype=torch.float32),
+        clusters={"root": list(range(8)), "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    deep_parents: dict[str, Optional[str]] = {"root": None}
+    parent = "root"
+    for depth in range(DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH + 1):
+        child = f"child_{depth}"
+        deep_parents[child] = parent
+        parent = child
+    over_deep = LayoutProblem(
+        edge_index=nested.edge_index,
+        num_nodes=nested.num_nodes,
+        node_sizes=nested.node_sizes,
+        clusters={"root": list(range(nested.num_nodes)), **{name: [0] for name in deep_parents}},
+        cluster_parents=deep_parents,
+    )
+
+    assert _bounded_connected_nested_dag_for_stress(nested)
+    assert not _bounded_connected_nested_dag_for_stress(oversized)
+    assert not _bounded_connected_nested_dag_for_stress(dense)
+    assert len(dense_edges) / dense.num_nodes > DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX
+    assert not _bounded_connected_nested_dag_for_stress(over_deep)
+
+
 def test_nested_stress_strict_pareto_rejects_nondominating_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,25 +286,41 @@ def test_nested_stress_strict_pareto_rejects_nondominating_candidate(
 
 def test_nested_stress_comparator_requires_dag_floor_and_strict_pareto() -> None:
     """Nested-stress admission has no tolerance and enforces the DAG floor."""
+    assert "cluster_sibling_overlap_score" in DIRECTED_NESTED_STRESS_PARETO_KEYS
+    assert "cluster_nesting_fidelity_score" in DIRECTED_NESTED_STRESS_PARETO_KEYS
     incumbent = {
         "dag_consistency": 0.9,
         "ksm_score": 0.7,
         "neighborhood_preservation_score": 0.6,
+        "cluster_sibling_overlap_score": 0.9,
+        "cluster_nesting_fidelity_score": 0.9,
     }
     equal = dict(incumbent)
     below_floor = {
         "dag_consistency": 0.49,
         "ksm_score": 1.0,
         "neighborhood_preservation_score": 1.0,
+        "cluster_sibling_overlap_score": 1.0,
+        "cluster_nesting_fidelity_score": 1.0,
     }
     dominating = {
         "dag_consistency": 0.9,
         "ksm_score": 0.8,
         "neighborhood_preservation_score": 0.6,
+        "cluster_sibling_overlap_score": 0.9,
+        "cluster_nesting_fidelity_score": 0.9,
+    }
+    degraded_sibling = {
+        "dag_consistency": 0.9,
+        "ksm_score": 0.8,
+        "neighborhood_preservation_score": 0.6,
+        "cluster_sibling_overlap_score": 0.89,
+        "cluster_nesting_fidelity_score": 0.9,
     }
 
     assert not _nested_stress_candidate_pareto_admissible(equal, incumbent)
     assert not _nested_stress_candidate_pareto_admissible(below_floor, incumbent)
+    assert not _nested_stress_candidate_pareto_admissible(degraded_sibling, incumbent)
     assert _nested_stress_candidate_pareto_admissible(dominating, incumbent)
 
 

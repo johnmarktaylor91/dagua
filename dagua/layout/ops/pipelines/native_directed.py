@@ -68,6 +68,8 @@ DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
 DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
 DIRECTED_NESTED_STRESS_MIN_NODES = 6
 DIRECTED_NESTED_STRESS_MAX_NODES = 2000
+DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX = 3.0
+DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH = 8
 DIRECTED_NESTED_STRESS_STEPS = 100
 DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER = 4.0
 DIRECTED_NESTED_STRESS_DAG_FLOOR = 0.50
@@ -80,6 +82,8 @@ DIRECTED_NESTED_STRESS_PARETO_KEYS = (
     "node_occlusion_score",
     "neighborhood_preservation_score",
     "edge_length_deviation_score",
+    "cluster_sibling_overlap_score",
+    "cluster_nesting_fidelity_score",
     "gabriel_score",
     "crossing_angle_score",
     "angular_resolution_score",
@@ -1795,6 +1799,42 @@ def _nested_compound_structure_declared(problem: LayoutProblem) -> bool:
     return len(problem.clusters) >= 2
 
 
+def _max_declared_cluster_parent_depth(cluster_parents: Optional[Dict[str, Optional[str]]]) -> int:
+    """Return the maximum declared cluster parent-chain depth.
+
+    Parameters
+    ----------
+    cluster_parents : dict[str, str | None], optional
+        Runtime cluster hierarchy mapping from child cluster id to parent
+        cluster id, with ``None`` for root-level clusters.
+
+    Returns
+    -------
+    int
+        Largest finite parent-chain depth, where root-level clusters have
+        depth ``0``. Cycles are treated as over-depth so malformed metadata
+        cannot open the nested-stress arm.
+    """
+    if not cluster_parents:
+        return 0
+    max_depth = 0
+    for cluster_name in cluster_parents:
+        depth = 0
+        seen: set[str] = set()
+        current: Optional[str] = cluster_name
+        while current is not None:
+            if current in seen:
+                return DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH + 1
+            seen.add(current)
+            parent = cluster_parents.get(current)
+            if parent is None:
+                break
+            depth += 1
+            current = parent
+        max_depth = max(max_depth, depth)
+    return max_depth
+
+
 def _bounded_connected_nested_dag_for_stress(problem: LayoutProblem) -> bool:
     """Return whether the nested-DAG stress arm may be constructed.
 
@@ -1811,10 +1851,14 @@ def _bounded_connected_nested_dag_for_stress(problem: LayoutProblem) -> bool:
     """
     n = int(problem.num_nodes)
     edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    edge_node_ratio = edge_count / float(max(n, 1))
     if (
         n < DIRECTED_NESTED_STRESS_MIN_NODES
         or n > DIRECTED_NESTED_STRESS_MAX_NODES
         or edge_count == 0
+        or edge_node_ratio > DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX
+        or _max_declared_cluster_parent_depth(problem.cluster_parents)
+        > DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH
         or not _nested_compound_structure_declared(problem)
     ):
         return False
