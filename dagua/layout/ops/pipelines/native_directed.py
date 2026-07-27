@@ -64,6 +64,15 @@ DIRECTED_RECOMBINANT_MIN_NODES = 80
 DIRECTED_RECOMBINANT_MAX_NODES = 600
 DIRECTED_RECOMBINANT_MAX_CANDIDATES = 6
 DIRECTED_RECOMBINANT_PRIOR_S = 15.0
+DIRECTED_WIDE_DAG_MIN_NODES = 40
+DIRECTED_WIDE_DAG_MAX_NODES = 800
+DIRECTED_WIDE_DAG_MAX_CANDIDATES = 4
+DIRECTED_WIDE_DAG_PRIOR_S = 20.0
+DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE = 6
+DIRECTED_WIDE_DAG_MIN_WIDTH_DEPTH_RATIO = 4.0
+DIRECTED_WIDE_DAG_MIN_LAYER_WIDTH = 12
+DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_WIDTH = 10
+DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_LAYERS = 4
 DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
 DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
 DIRECTED_NESTED_STRESS_MIN_NODES = 6
@@ -928,6 +937,63 @@ def _directed_recombinant_layered_enabled(problem: LayoutProblem) -> bool:
     )
 
 
+def _directed_wide_dag_ordering_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the wide-DAG ordering arm may build candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem inspected using only runtime graph structure.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded semantic DAGs with wide rank fanout, either from
+        a high maximum out-degree or from a large width-to-depth ratio.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_WIDE_DAG_MIN_NODES or n > DIRECTED_WIDE_DAG_MAX_NODES or edge_count == 0:
+        return False
+    structure = problem.structure
+    if structure is None:
+        return False
+    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+    tags = set(getattr(structure, "topology_tags", ()))
+    if "planar_dag" in tags:
+        return False
+
+    ranks, max_width, _long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
+    depth = len({int(rank) for rank in ranks})
+    width_depth_ratio = float(max_width) / float(max(depth, 1))
+    weighted_layered_skew = (
+        _weighted_referee_active(problem)
+        and depth >= DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_LAYERS
+        and max_width >= DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_WIDTH
+    )
+    if "lattice_like" in tags and not weighted_layered_skew:
+        return False
+    out_degree = [0] * n
+    for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i != dst_i and 0 <= src_i < n and 0 <= dst_i < n:
+            out_degree[src_i] += 1
+    max_out_degree = max(out_degree, default=0)
+    high_fanout = max_out_degree >= max(
+        DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE,
+        int(round(0.06 * float(n))),
+    )
+    broad_layers = (
+        max_width >= DIRECTED_WIDE_DAG_MIN_LAYER_WIDTH
+        and width_depth_ratio >= DIRECTED_WIDE_DAG_MIN_WIDTH_DEPTH_RATIO
+    )
+    return high_fanout or broad_layers or weighted_layered_skew
+
+
 def _clean_fan_bundle_for_compaction(problem: LayoutProblem) -> bool:
     """Return whether the directed fan-compaction arm may be built.
 
@@ -1525,6 +1591,251 @@ def _directed_recombinant_layered_candidates(
             continue
         candidates[spec.name] = candidate
     return candidates
+
+
+def _wide_dag_layered_specs() -> tuple[_RecombinantLayeredSpec, ...]:
+    """Return bounded layered-stage crosses for wide-DAG ordering.
+
+    Returns
+    -------
+    tuple[_RecombinantLayeredSpec, ...]
+        Four ELK/Sugiyama-style in-house layer/order/x-coordinate candidates.
+    """
+    return (
+        _RecombinantLayeredSpec(
+            name="wide_ns_bary_bk",
+            layering="network_simplex_tightened",
+            ordering="barycenter_transpose",
+            xcoord="brandes_koepf",
+        ),
+        _RecombinantLayeredSpec(
+            name="wide_ns_median_lp",
+            layering="network_simplex_tightened",
+            ordering="median",
+            xcoord="dot_lp",
+        ),
+        _RecombinantLayeredSpec(
+            name="wide_lp_bary_lp",
+            layering="longest_path",
+            ordering="barycenter_transpose",
+            xcoord="dot_lp",
+        ),
+        _RecombinantLayeredSpec(
+            name="wide_native_bary_bk",
+            layering="native_current",
+            ordering="barycenter_transpose",
+            xcoord="brandes_koepf",
+        ),
+    )
+
+
+def _directed_wide_dag_ordering_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> dict[str, torch.Tensor]:
+    """Build bounded wide-DAG layered-ordering candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying deadline and telemetry fields.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate names mapped to complete layered layouts.
+    """
+    setattr(config, "_dagua_native_wide_dag_ordering_fired", False)
+    if not bool(getattr(config, "use_wide_dag_ordering_arm", True)):
+        return {}
+    if not _directed_wide_dag_ordering_enabled(problem):
+        return {}
+    setattr(config, "_dagua_native_wide_dag_ordering_fired", True)
+    candidates: dict[str, torch.Tensor] = {}
+    predicted_cost = estimate_native_work_cost(
+        problem,
+        "directed_recombinant",
+        {"volume": 1.0},
+        _native_device_class(config),
+    )
+    predicted_cost.metadata["legacy_prior_s"] = DIRECTED_WIDE_DAG_PRIOR_S
+    predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
+    for spec in _wide_dag_layered_specs():
+        if len(candidates) >= DIRECTED_WIDE_DAG_MAX_CANDIDATES:
+            break
+        if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
+            config,
+            predicted_cost,
+            f"optional_directed_wide_dag_ordering_{spec.name}",
+        ):
+            break
+        process_started = time.process_time()
+        candidate = _build_recombinant_layered_candidate(spec, problem, incumbent, config)
+        wide_cpu_s = _prediction_cpu_elapsed_s(process_started)
+        _LOGGER.info(
+            "Directed candidate runtime family=wide_dag_ordering arm=%s cpu_seconds=%.3f",
+            spec.name,
+            wide_cpu_s,
+        )
+        if candidate is None:
+            continue
+        candidates[spec.name] = candidate
+    return candidates
+
+
+def _register_wide_dag_ordering_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    positions: Dict[str, torch.Tensor],
+    scores: Dict[str, float],
+    incumbent_pair: Optional["W5ScorePair"],
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    arm_timings: Dict[str, Tuple[float, float]],
+) -> Optional["W5ScorePair"]:
+    """Register only dual-ruler-dominating wide-DAG ordering candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with candidate telemetry.
+    positions : dict[str, torch.Tensor]
+        Candidate registry updated in place.
+    scores : dict[str, float]
+        Directed score registry updated for admitted variants.
+    incumbent_pair : W5ScorePair, optional
+        Cached incumbent dual-ruler score pair.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    arm_timings : dict[str, tuple[float, float]]
+        Per-arm timing registry updated for admitted candidates.
+
+    Returns
+    -------
+    W5ScorePair or None
+        Cached incumbent score pair when computed, otherwise ``None``.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    if not _portfolio_has_budget(config, min_remaining_s=2.0):
+        return incumbent_pair
+    raw_candidates = _directed_wide_dag_ordering_candidates(problem, incumbent, config)
+    if not raw_candidates:
+        return incumbent_pair
+    if incumbent_pair is None:
+        incumbent_pair = _score_directed_candidate_pair(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+    incumbent_referee_key = _runtime_referee_telemetry(incumbent, problem)[0]
+    telemetry = list(getattr(config, "_dagua_native_wide_dag_ordering_telemetry", []))
+    for name, raw_candidate in raw_candidates.items():
+        candidate_started = time.perf_counter()
+        variants: Dict[str, torch.Tensor] = {}
+        _register_challenger_variants(
+            name,
+            raw_candidate,
+            problem,
+            config,
+            variants,
+            preserve_rank_order=True,
+        )
+        for variant_name, candidate in variants.items():
+            dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
+                candidate,
+                incumbent_pair,
+                problem,
+                cluster_ids,
+                all_pairs_dist,
+                incumbent_referee_key,
+            )
+            selected = bool(dominates)
+            telemetry.append(
+                {
+                    "name": variant_name,
+                    "incumbent_directed": incumbent_pair.directed,
+                    "incumbent_undirected": incumbent_pair.undirected,
+                    "candidate_directed": candidate_pair.directed,
+                    "candidate_undirected": candidate_pair.undirected,
+                    "selected": selected,
+                }
+            )
+            if not selected:
+                continue
+            positions[variant_name] = candidate
+            scores[variant_name] = candidate_pair.directed
+            arm_timings[variant_name] = (candidate_started, time.perf_counter())
+    setattr(config, "_dagua_native_wide_dag_ordering_telemetry", telemetry)
+    return incumbent_pair
+
+
+def maybe_accept_wide_dag_ordering_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> torch.Tensor:
+    """Return incumbent or a selected wide-DAG ordering candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current layered positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with arm telemetry.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        The incumbent or the highest directed-score wide-DAG candidate that
+        already dominates the incumbent under both frozen rulers.
+    """
+    positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
+    incumbent_score = _score_directed_candidate_cached(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    scores: Dict[str, float] = {"incumbent": incumbent_score}
+    arm_timings: Dict[str, Tuple[float, float]] = {}
+    _register_wide_dag_ordering_candidates(
+        problem=problem,
+        incumbent=incumbent,
+        config=config,
+        positions=positions,
+        scores=scores,
+        incumbent_pair=None,
+        cluster_ids=cluster_ids,
+        all_pairs_dist=all_pairs_dist,
+        arm_timings=arm_timings,
+    )
+    best_name = max(scores, key=lambda name: (scores[name], name))
+    if best_name == "incumbent":
+        return incumbent
+    setattr(config, "_dagua_native_wide_dag_ordering_selected", best_name)
+    return positions[best_name].to(device=incumbent.device, dtype=incumbent.dtype)
 
 
 def _fan_compaction_visual_box_area(pos: torch.Tensor, problem: LayoutProblem) -> float:
@@ -3803,6 +4114,22 @@ def layout_native_directed_portfolio(
         except Exception as exc:  # noqa: BLE001 -- recombinant candidates cannot sink incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed recombinant layered challenger failed", exc_info=True)
+    if _directed_wide_dag_ordering_enabled(problem):
+        try:
+            incumbent_pair = _register_wide_dag_ordering_candidates(
+                problem=problem,
+                incumbent=incumbent,
+                config=config,
+                positions=positions,
+                scores=scores,
+                incumbent_pair=incumbent_pair,
+                cluster_ids=cluster_ids,
+                all_pairs_dist=all_pairs_dist,
+                arm_timings=arm_timings,
+            )
+        except Exception as exc:  # noqa: BLE001 -- wide-DAG candidates cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed wide-DAG ordering challenger failed", exc_info=True)
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
