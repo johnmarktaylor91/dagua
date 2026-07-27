@@ -6891,6 +6891,40 @@ def layout_dagua_native_pipeline(
 
         result = _run_native_problem(problem, state, ctx, prepared_config)
         register_anytime_best(result, "post_base_contest")
+        try:
+            from dagua.layout.ops.pipelines.native_directed import (
+                _directed_wide_dag_ordering_enabled,
+                maybe_accept_wide_dag_ordering_arm,
+            )
+            from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+            if _directed_wide_dag_ordering_enabled(problem):
+                cpu_edge_index = prepared_edge_index.detach().to(device="cpu")
+                offsets, targets = _build_csr(cpu_edge_index, int(problem.num_nodes))
+                all_pairs_dist = _all_pairs_unweighted(
+                    offsets,
+                    targets,
+                    int(problem.num_nodes),
+                    max_dist=int(problem.num_nodes),
+                )
+                wide_cluster_ids = _problem_cluster_ids(problem)
+                wide_result = maybe_accept_wide_dag_ordering_arm(
+                    problem,
+                    result,
+                    prepared_config,
+                    wide_cluster_ids,
+                    all_pairs_dist,
+                )
+                if wide_result is not result:
+                    result = wide_result
+                    register_anytime_best(result, "wide_dag_ordering_accept")
+        except Exception as exc:  # noqa: BLE001 -- wide-DAG arm cannot sink base layout
+            if is_worker_timeout_like_exception(exc):
+                raise
+            _LOGGER.warning(
+                "wide-DAG ordering challenger failed; preserving base result",
+                exc_info=True,
+            )
         if dot_cluster_fidelity:
             result = _apply_dot_cluster_fidelity_layout(
                 result,

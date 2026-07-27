@@ -23,9 +23,13 @@ import torch
 import dagua
 from dagua.eval.graphs import _make_r8_lr_direction
 from dagua.layout.engine import layout as engine_layout
+from dagua.layout.graph_classify import GraphFamily, GraphStructure
 from dagua.layout.ops.pipelines import dagua_native as dn_module
 from dagua.layout.ops.pipelines.dagua_native import _apply_public_direction_frame
-from dagua.layout.ops.pipelines.native_directed import _score_directed_candidate
+from dagua.layout.ops.pipelines.native_directed import (
+    _directed_wide_dag_ordering_enabled,
+    _score_directed_candidate,
+)
 from dagua.layout.ops.state import LayoutProblem
 from dagua.metrics import quick
 
@@ -227,3 +231,87 @@ def test_directed_candidate_scoring_is_tb_lr_transpose_equivalent() -> None:
     lr_score = _score_directed_candidate(lr_pos, lr_problem, cluster_ids=None)
 
     assert lr_score == pytest.approx(tb_score)
+
+
+def test_wide_dag_ordering_gate_opens_for_high_fanout_dag() -> None:
+    """High fanout semantic DAGs should be eligible for ordering candidates."""
+    edge_index = torch.tensor([[0] * 24 + list(range(1, 39)), list(range(1, 25)) + [39] * 38])
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=24,
+        num_layers=3,
+        avg_layer_width=40.0 / 3.0,
+        is_planar_hint=False,
+        is_directed_acyclic=True,
+        is_semantically_directed=True,
+        direction_is_declared=True,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=40, structure=structure)
+
+    assert _directed_wide_dag_ordering_enabled(problem)
+
+
+def test_wide_dag_ordering_gate_rejects_ordinary_lattice_like_dag() -> None:
+    """Ordinary lattice-like DAGs should not enter the wide-DAG arm."""
+    sources = []
+    targets = []
+    width = 8
+    height = 5
+    for row in range(height - 1):
+        for col in range(width):
+            node = row * width + col
+            sources.append(node)
+            targets.append((row + 1) * width + col)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=2,
+        num_layers=height,
+        avg_layer_width=float(width),
+        is_planar_hint=True,
+        is_directed_acyclic=True,
+        topology_tags=("lattice_like",),
+        is_semantically_directed=True,
+        direction_is_declared=True,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=width * height, structure=structure)
+
+    assert not _directed_wide_dag_ordering_enabled(problem)
+
+
+def test_wide_dag_ordering_gate_opens_for_weighted_layered_skew() -> None:
+    """Weighted layered skew DAGs should be eligible even when lattice-like."""
+    sources = []
+    targets = []
+    width = 10
+    height = 4
+    for row in range(height - 1):
+        for col in range(width):
+            node = row * width + col
+            sources.append(node)
+            targets.append((row + 1) * width + col)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    edge_weights = torch.linspace(1.0, 10.0, steps=len(sources))
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=2,
+        num_layers=height,
+        avg_layer_width=float(width),
+        is_planar_hint=False,
+        is_directed_acyclic=True,
+        topology_tags=("lattice_like",),
+        is_semantically_directed=True,
+        direction_is_declared=True,
+        has_edge_weights=True,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=width * height,
+        edge_weights=edge_weights,
+        structure=structure,
+    )
+
+    assert _directed_wide_dag_ordering_enabled(problem)
