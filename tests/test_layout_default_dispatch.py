@@ -315,3 +315,30 @@ def test_wide_dag_ordering_gate_opens_for_weighted_layered_skew() -> None:
     )
 
     assert _directed_wide_dag_ordering_enabled(problem)
+
+
+def test_wide_dag_ordering_gate_rejects_dense_chain_dag() -> None:
+    """Dense narrow DAGs should not enter the wide-rank ordering arm."""
+    sources = []
+    targets = []
+    node_count = 50
+    for source in range(node_count):
+        for target in range(source + 1, min(node_count, source + 8)):
+            sources.append(source)
+            targets.append(target)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=14,
+        num_layers=node_count,
+        avg_layer_width=1.0,
+        is_planar_hint=False,
+        is_directed_acyclic=True,
+        topology_tags=("dense_dag",),
+        is_semantically_directed=True,
+        direction_is_declared=True,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=node_count, structure=structure)
+
+    assert not _directed_wide_dag_ordering_enabled(problem)
