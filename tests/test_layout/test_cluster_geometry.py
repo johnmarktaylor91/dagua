@@ -210,22 +210,34 @@ def test_cluster_tightening_candidates_follow_structural_gate() -> None:
         dtype=torch.float32,
     )
     node_sizes = torch.ones((4, 2), dtype=torch.float32)
+    connected_edges = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    disconnected_edges = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
 
-    plain = build_cluster_tightening_candidates(positions, node_sizes, None, None)
+    plain = build_cluster_tightening_candidates(positions, connected_edges, node_sizes, None, None)
     clustered = build_cluster_tightening_candidates(
         positions,
+        connected_edges,
         node_sizes,
         {"left": [0, 1], "right": [2, 3]},
         {"left": None, "right": None},
     )
     nested = build_cluster_tightening_candidates(
         positions,
+        connected_edges,
         node_sizes,
         {"outer": [0, 1, 2], "inner": [1, 2]},
         {"outer": None, "inner": "outer"},
     )
+    disconnected = build_cluster_tightening_candidates(
+        positions,
+        disconnected_edges,
+        node_sizes,
+        {"left": [0, 1], "right": [2, 3]},
+        {"left": None, "right": None},
+    )
 
     assert plain == ()
+    assert disconnected == ()
     assert clustered
     assert clustered[0].gate_reason == "multi_cluster"
     assert nested
