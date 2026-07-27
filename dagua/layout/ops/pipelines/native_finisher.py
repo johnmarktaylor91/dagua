@@ -331,7 +331,57 @@ def _cluster_depth_lookup(
     return depths
 
 
+def _weak_component_count(edge_index: torch.Tensor, num_nodes: int) -> int:
+    """Return the undirected connected-component count.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``. Edges are treated as undirected for
+        component packing eligibility.
+    num_nodes : int
+        Number of layout nodes.
+
+    Returns
+    -------
+    int
+        Number of weak connected components.
+    """
+    if num_nodes <= 0:
+        return 0
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    if cpu_edges.numel() > 0:
+        for source, target in cpu_edges.t().tolist():
+            source_index = int(source)
+            target_index = int(target)
+            if (
+                0 <= source_index < num_nodes
+                and 0 <= target_index < num_nodes
+                and source_index != target_index
+            ):
+                adjacency[source_index].append(target_index)
+                adjacency[target_index].append(source_index)
+
+    seen = [False] * num_nodes
+    component_count = 0
+    for start in range(num_nodes):
+        if seen[start]:
+            continue
+        component_count += 1
+        stack = [start]
+        seen[start] = True
+        while stack:
+            node = stack.pop()
+            for neighbor in adjacency[node]:
+                if not seen[neighbor]:
+                    seen[neighbor] = True
+                    stack.append(neighbor)
+    return component_count
+
+
 def _cluster_tightening_gate(
+    edge_index: torch.Tensor,
     clusters: Optional[Mapping[str, Sequence[int]]],
     cluster_parents: Optional[Mapping[str, Optional[str]]],
     num_nodes: int,
@@ -340,6 +390,10 @@ def _cluster_tightening_gate(
 
     Parameters
     ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``. The tightening finisher is only
+        eligible for single-component graphs because it does not repack
+        disconnected components.
     clusters : Mapping[str, Sequence[int]] or None
         Declared cluster membership keyed by cluster name.
     cluster_parents : Mapping[str, Optional[str]] or None
@@ -357,6 +411,8 @@ def _cluster_tightening_gate(
     max_depth = max(depths.values(), default=0)
     if num_nodes > _CLUSTER_TIGHTEN_MAX_NODES:
         return False, "too_large", members, depths
+    if _weak_component_count(edge_index, num_nodes) != 1:
+        return False, "disconnected_components", members, depths
     if len(members) >= 2:
         return True, "multi_cluster", members, depths
     if max_depth >= 1:
@@ -497,6 +553,7 @@ def _separate_sibling_clusters(
 
 def build_cluster_tightening_candidates(
     incumbent_pos: torch.Tensor,
+    edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
     clusters: Optional[Mapping[str, Sequence[int]]],
     cluster_parents: Optional[Mapping[str, Optional[str]]],
@@ -507,6 +564,9 @@ def build_cluster_tightening_candidates(
     ----------
     incumbent_pos : torch.Tensor
         Incumbent positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]`` used to exclude disconnected graphs
+        from component-packing-sensitive tightening.
     node_sizes : torch.Tensor
         Node-size tensor with shape ``[N, 2]``.
     clusters : Mapping[str, Sequence[int]] or None
@@ -520,6 +580,7 @@ def build_cluster_tightening_candidates(
         Candidate positions. Empty means the structural gate did not fire.
     """
     enabled, reason, members_by_name, depths = _cluster_tightening_gate(
+        edge_index,
         clusters,
         cluster_parents,
         int(incumbent_pos.shape[0]),

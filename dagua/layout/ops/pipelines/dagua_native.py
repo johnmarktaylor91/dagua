@@ -5916,6 +5916,7 @@ def _terminal_w5_polish(
         cluster_seed_positions: list[tuple[str, torch.Tensor]] = []
         for cluster_candidate in build_cluster_tightening_candidates(
             final_pos,
+            cpu_edge_index,
             cpu_node_sizes,
             clusters,
             cluster_parents,
