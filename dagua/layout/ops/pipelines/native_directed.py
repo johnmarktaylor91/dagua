@@ -963,7 +963,7 @@ def _directed_wide_dag_ordering_enabled(problem: LayoutProblem) -> bool:
     if getattr(structure, "is_semantically_directed", True) is False:
         return False
     tags = set(getattr(structure, "topology_tags", ()))
-    if "planar_dag" in tags:
+    if "planar_dag" in tags or "dense_dag" in tags:
         return False
 
     ranks, max_width, _long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
