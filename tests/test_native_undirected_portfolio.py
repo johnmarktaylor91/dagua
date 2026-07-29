@@ -158,18 +158,35 @@ def test_undirected_referee_forwards_extended_cluster_metadata(
     assert telemetry.old_score > telemetry.extended_score
 
 
-def test_undirected_cluster_dual_ruler_rejects_old_regression() -> None:
-    """Clustered challengers must improve extended score without old loss."""
-    incumbent = _ClusterScoreTelemetry(extended_score=80.0, old_score=90.0, metrics={})
-    challenger = _ClusterScoreTelemetry(extended_score=81.0, old_score=89.9, metrics={})
+def test_undirected_cluster_dual_ruler_uses_v3_with_old_band() -> None:
+    """Clustered challengers use V3 plus old-ruler non-regression band."""
+    incumbent = _ClusterScoreTelemetry(
+        extended_score=80.0,
+        old_score=90.0,
+        metrics={},
+        v3_tiered=75.0,
+    )
+    challenger = _ClusterScoreTelemetry(
+        extended_score=81.0,
+        old_score=89.96,
+        metrics={},
+        v3_tiered=75.1,
+    )
+    regressor = _ClusterScoreTelemetry(
+        extended_score=82.0,
+        old_score=89.9,
+        metrics={},
+        v3_tiered=75.2,
+    )
 
-    assert not _cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert _cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert not _cluster_candidate_is_dual_admissible(regressor, incumbent)
     assert (
         _select_undirected_winner(
             {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
             {"incumbent": incumbent, "challenger": challenger},
         )
-        == "incumbent"
+        == "challenger"
     )
 
 
@@ -953,11 +970,11 @@ def test_contest_registers_both_cleanup_variants() -> None:
 
     graph = _ring_with_chords()
     scored_positions: list[torch.Tensor] = []
-    original_score = nu._score_undirected_candidate
+    original_score = nu._score_undirected_candidate_payload
 
-    def spy(pos, problem, cluster_ids, aesthetic_profile=None):
+    def spy(pos, problem, cluster_ids, aesthetic_profile=None, all_pairs_dist=None):
         scored_positions.append(pos.detach().clone())
-        return original_score(pos, problem, cluster_ids, aesthetic_profile)
+        return original_score(pos, problem, cluster_ids, aesthetic_profile, all_pairs_dist)
 
     original_project = nu._project_candidate
     project_calls: list[bool] = []
@@ -966,14 +983,14 @@ def test_contest_registers_both_cleanup_variants() -> None:
         project_calls.append(bool(convergent))
         return original_project(pos, problem, convergent=convergent)
 
-    nu._score_undirected_candidate = spy
+    nu._score_undirected_candidate_payload = spy
     nu._project_candidate = spy_project
     try:
         from dagua.layout import layout
 
         layout(graph, LayoutConfig(seed=42, device="cpu"))
     finally:
-        nu._score_undirected_candidate = original_score
+        nu._score_undirected_candidate_payload = original_score
         nu._project_candidate = original_project
 
     # Every challenger cleanup ran both variants (False and True in pairs).
@@ -1693,6 +1710,25 @@ def test_skipped_predicted_arm_contest_returns_best_computed_arm(
         del problem, cluster_ids, aesthetic_profile, all_pairs_dist
         return 10.0 if torch.equal(pos, challenger) else 0.0
 
+    def fake_score_payload(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        aesthetic_profile: object = None,
+        all_pairs_dist: Optional[object] = None,
+    ) -> tuple[float, _ClusterScoreTelemetry]:
+        """Prefer the computed challenger at the V3 payload scorer seam."""
+        score = fake_score(pos, problem, cluster_ids, aesthetic_profile, all_pairs_dist)
+        return (
+            score,
+            _ClusterScoreTelemetry(
+                extended_score=score,
+                old_score=score,
+                metrics={},
+                v3_tiered=score,
+            ),
+        )
+
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_run_native_problem)
     monkeypatch.setattr(dagua_native, "_collinear_dodge", lambda *args, **kwargs: None)
     monkeypatch.setattr(dagua_native, "_unshear_bimodal_edges", lambda *args, **kwargs: None)
@@ -1702,6 +1738,7 @@ def test_skipped_predicted_arm_contest_returns_best_computed_arm(
     monkeypatch.setattr(nu, "_predicted_undirected_arm_budget_available", lambda *args: False)
     monkeypatch.setattr(nu, "_proxy_undirected_candidate", fake_score)
     monkeypatch.setattr(nu, "_score_undirected_candidate_cached", fake_score)
+    monkeypatch.setattr(nu, "_score_undirected_candidate_payload", fake_score_payload)
 
     result = layout_native_undirected_portfolio(
         problem,
