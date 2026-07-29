@@ -176,6 +176,47 @@ def test_w5_finisher_returns_exact_incumbent_when_candidates_are_worse() -> None
     assert all(not checkpoint.accepted for checkpoint in result.checkpoints)
 
 
+def test_w5_scale_line_search_prefers_honest_v3_scale() -> None:
+    """Global scale search uses V3 scores and keeps a deterministic eval cap."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    score_calls: list[torch.Tensor] = []
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Score candidates by closeness to a 1.5x global scale.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Score pair carrying the synthetic V3 scalar.
+        """
+        score_calls.append(candidate.detach().clone())
+        width = float((candidate[1, 0] - candidate[0, 0]).abs().item())
+        scale = width / 10.0
+        return W5ScorePair(directed=0.0, undirected=0.0, v3=-abs(scale - 1.5))
+
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+    )
+
+    assert result.evals == 6
+    assert len(score_calls) == 6
+    assert result.scale != pytest.approx(1.0)
+    assert result.score_pair.v3 is not None
+    assert result.score_pair.v3 > score_fn(pos).v3
+
+
 def test_w5_finisher_deadline_returns_exact_incumbent() -> None:
     """Expired benchmark budget returns the incumbent with deadline telemetry."""
     config = LayoutConfig()
@@ -500,8 +541,9 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
     assert plan.steps == 36
     assert plan.checkpoints == 2
     assert plan.predicted_s == pytest.approx(
-        plan.seeds * (plan.steps * 0.0437 + plan.checkpoints * 0.019)
+        plan.seeds * (plan.steps * 0.0437 + plan.checkpoints * plan.referee_s)
     )
+    assert plan.scale_search_evals == 6
     assert plan.shadow_step_s == pytest.approx(0.1)
 
 
@@ -752,14 +794,11 @@ def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
         pass_id: int = 1,
         stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
-        """Record pass order and assert only pass 2 receives the fixed sample."""
+        """Record pass order and assert both passes receive the fixed sample."""
         del edge_work, size_work, topo_depth, mode, deadline, honest_axes, max_checkpoints
         assert max_steps == 5
         events.append(f"{seed.name} pass {pass_id}")
-        if pass_id == 1 and "stress build" not in events:
-            assert stress_sample is None
-        if pass_id == 2:
-            assert stress_sample is sample
+        assert stress_sample is sample
         return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
 
     monkeypatch.setattr(native_finisher, "_measured_cost_plan", fake_plan)
@@ -786,9 +825,9 @@ def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
     assert result.cost_plan is not None
     assert events[:5] == [
         "plan",
-        "seed_a pass 1",
         "closed",
         "stress build",
+        "seed_a pass 1",
         "seed_a_p1 pass 2",
     ]
     assert "seed_b pass 1" in events
@@ -848,10 +887,10 @@ def test_w5_finisher_runs_pass_two_despite_process_spend_noise(
     def fake_w5_spent_s(config_arg: object, started_perf: Optional[float] = None) -> float:
         """Allow seed entry, then deny the pass-2 admission guard."""
         del config_arg, started_perf
-        return 0.0 if events != ["plan", "seed_a pass 1"] else 999.0
+        return 0.0 if events != ["plan", "stress build", "seed_a pass 1"] else 999.0
 
     def fake_build_stress_sample(*args: object, **kwargs: object) -> None:
-        """Record pass-2 sample construction."""
+        """Record promoted pass-1 sample construction."""
         del args, kwargs
         events.append("stress build")
         return None
@@ -873,15 +912,15 @@ def test_w5_finisher_runs_pass_two_despite_process_spend_noise(
         config=config,
     )
 
-    assert events == ["plan", "seed_a pass 1", "stress build", "seed_a_p1 pass 2"]
+    assert events == ["plan", "stress build", "seed_a pass 1", "seed_a_p1 pass 2"]
     assert result.deadline_returned is False
     assert result.steps == 2
 
 
-def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
+def test_measured_cost_plan_prices_scale_search_at_a3c_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rgg_500 boundary fixture is modeled rather than probe-sized."""
+    """The rgg_500 boundary fixture reserves the scale-search referee volume."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -928,11 +967,11 @@ def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
     )
 
     assert plan is not None
-    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 21, 1)
-    assert plan.referee_s == pytest.approx(0.019)
+    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 19, 1)
+    assert plan.referee_s == pytest.approx(6 * 0.019)
     assert plan.budget_usable_s == pytest.approx(0.950)
-    assert plan.predicted_s == pytest.approx(0.9367)
-    assert native_finisher._checkpoint_steps(21, 1) == {21}
+    assert plan.predicted_s == pytest.approx(0.9443)
+    assert native_finisher._checkpoint_steps(19, 1) == {19}
 
 
 def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
@@ -954,7 +993,7 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
         targets=torch.tensor([1], dtype=torch.long),
         graph_distances=torch.tensor([1.0], dtype=torch.float32),
     )
-    pass_two_samples: list[object] = []
+    samples_by_pass: dict[int, list[object]] = {1: [], 2: []}
 
     def fake_measure(*args: object) -> object:
         """Return a tiny-row step cost that admits the raised continuation fixture."""
@@ -989,8 +1028,7 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
         del edge_work, size_work, depth_work, mode, deadline, honest_axes
         assert max_steps == 96
         assert max_checkpoints == 4
-        if pass_id == 2:
-            pass_two_samples.append(stress_sample)
+        samples_by_pass.setdefault(pass_id, []).append(stress_sample)
         return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
 
     monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
@@ -1035,8 +1073,10 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
     assert (plan.steps, plan.checkpoints) == (96, 4)
     assert result.cost_plan is not None
     assert (result.cost_plan.steps, result.cost_plan.checkpoints) == (96, 4)
-    assert pass_two_samples
-    assert all(seen is sample for seen in pass_two_samples)
+    assert samples_by_pass[1]
+    assert samples_by_pass[2]
+    assert all(seen is sample for seen in samples_by_pass[1])
+    assert all(seen is sample for seen in samples_by_pass[2])
 
 
 def test_w5_finisher_slow_shadow_probe_does_not_force_skip(
