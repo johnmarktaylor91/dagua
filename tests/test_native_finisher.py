@@ -200,7 +200,65 @@ def test_w5_scale_line_search_prefers_honest_v3_scale() -> None:
         score_calls.append(candidate.detach().clone())
         width = float((candidate[1, 0] - candidate[0, 0]).abs().item())
         scale = width / 10.0
-        return W5ScorePair(directed=0.0, undirected=0.0, v3=-abs(scale - 1.5))
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-abs(scale - 1.5),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    keepalive: list[torch.Tensor] = []
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+        keepalive=keepalive,
+    )
+
+    assert result.evals == 6
+    assert len(score_calls) == 6
+    assert len(keepalive) == 6
+    assert result.scale != pytest.approx(1.0)
+    assert result.score_pair.v3 is not None
+    assert result.score_pair.v3 > score_fn(pos).v3
+
+
+def test_w5_scale_line_search_skips_scale_invariant_facets() -> None:
+    """Facet gate avoids extra V3 referee calls when scale cannot help."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return in-band C4/C5 facets for one candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            V3 score pair whose scale-sensitive facets are already in band.
+        """
+        nonlocal score_calls
+        del candidate
+        score_calls += 1
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=1.0,
+            c5_whitespace_ratio=1.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
 
     result = native_finisher._honest_scale_line_search(
         pos,
@@ -208,13 +266,197 @@ def test_w5_scale_line_search_prefers_honest_v3_scale() -> None:
         "undirected",
         deadline=float("inf"),
         config=None,
+        keepalive=[],
     )
 
-    assert result.evals == 6
-    assert len(score_calls) == 6
-    assert result.scale != pytest.approx(1.0)
-    assert result.score_pair.v3 is not None
-    assert result.score_pair.v3 > score_fn(pos).v3
+    assert result.evals == 1
+    assert score_calls == 1
+    assert result.scale == pytest.approx(1.0)
+
+
+def test_w5_scale_line_search_caps_large_rows_at_three_evals() -> None:
+    """Large-row scale search uses the runtime cap including raw score."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.stack((torch.arange(300, dtype=torch.float32), torch.zeros(300)), dim=1)
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Score a large out-of-band C5 candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            V3 score pair that admits the line search.
+        """
+        nonlocal score_calls
+        score_calls += 1
+        scale = float((candidate[-1, 0] - candidate[0, 0]).abs().item()) / 299.0
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-abs(scale - 1.5),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+        keepalive=[],
+    )
+
+    assert result.evals == 3
+    assert score_calls == 3
+
+
+def test_w5_scale_line_search_keeps_scaled_tensor_alive_on_score_exception() -> None:
+    """Run-level keepalive survives scorer exceptions after cache insertion."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    keepalive: list[torch.Tensor] = []
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Raise on the first scaled candidate after it has been retained.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Raw score pair that admits scale search.
+        """
+        nonlocal score_calls
+        score_calls += 1
+        if score_calls > 1:
+            raise RuntimeError("synthetic scorer failure")
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=0.0,
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    with pytest.raises(RuntimeError, match="synthetic scorer failure"):
+        native_finisher._honest_scale_line_search(
+            pos,
+            score_fn,
+            "undirected",
+            deadline=float("inf"),
+            config=None,
+            keepalive=keepalive,
+        )
+
+    assert score_calls == 2
+    assert len(keepalive) == 2
+    assert keepalive[0] is pos
+    assert keepalive[1] is not pos
+
+
+def test_w5_finisher_falls_back_when_scaled_winner_regresses_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scaled line-search winner must re-pass raw checkpoint viability."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    incumbent = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    candidate = incumbent.clone()
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    node_sizes = torch.full((2, 2), 8.0)
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+        neighborhood_sample: Optional[object] = None,
+        shape_geometry: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return one raw viable checkpoint whose best scale overlaps."""
+        del (
+            seed,
+            edge_work,
+            size_work,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+            neighborhood_sample,
+            shape_geometry,
+        )
+        return candidate, 1, 2.0, [(1, candidate, 1.0)]
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Prefer a shrinking global scale that violates overlap viability.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Dominating V3 score pair with out-of-band C5 facets.
+        """
+        width = float((pos[1, 0] - pos[0, 0]).abs().item())
+        scale = width / 10.0
+        return W5ScorePair(
+            directed=100.0,
+            undirected=100.0,
+            v3=-abs(scale - 0.6),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    result = run_w5_finisher(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=W5ScorePair(0.0, 0.0, v3=-1.0),
+        seeds=[W5Seed("incumbent", incumbent)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert result.accepted
+    assert torch.equal(result.winner_pos, candidate)
+    assert result.viability_counts["scaled_viability_fallback"] >= 1
 
 
 def test_w5_finisher_deadline_returns_exact_incumbent() -> None:
@@ -967,11 +1209,12 @@ def test_measured_cost_plan_prices_scale_search_at_a3c_boundary(
     )
 
     assert plan is not None
-    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 19, 1)
-    assert plan.referee_s == pytest.approx(6 * 0.019)
+    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 20, 1)
+    assert plan.scale_search_evals == 3
+    assert plan.referee_s == pytest.approx(3 * 0.019)
     assert plan.budget_usable_s == pytest.approx(0.950)
-    assert plan.predicted_s == pytest.approx(0.9443)
-    assert native_finisher._checkpoint_steps(19, 1) == {19}
+    assert plan.predicted_s == pytest.approx(0.931)
+    assert native_finisher._checkpoint_steps(20, 1) == {20}
 
 
 def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
