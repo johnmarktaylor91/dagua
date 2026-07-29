@@ -14,6 +14,14 @@ from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.eval.ruler_v3 import (
+    C4_CLEARANCE_BAND_NODE_DIAGONALS,
+    WHITESPACE_CROWDING_DECAY,
+    WHITESPACE_RATIO_HI,
+    WHITESPACE_RATIO_LO,
+    WHITESPACE_SPRAWL_DECAY,
+    _structure_area_floor,
+)
 from dagua.layout.ops.pipelines.native_budget import (
     DETERMINISTIC_BUDGET_ATTR,
     PROCESS_DEADLINE_ATTR,
@@ -67,6 +75,20 @@ _MEASURED_COST_DEFAULT_REFEREE_S = 1.20
 _MEASURED_COST_SURROGATE_STEPS = 4
 _W5_STRESS_MAX_SOURCES = 200
 _W5_STRESS_MAX_PAIRS = 100_000
+_W5_NEIGHBORHOOD_RADII = (2, 3)
+_W5_NEIGHBORHOOD_MAX_TRIPLETS = 16_384
+_W5_SOFT_BBOX_TAU_NODE_DIAG = 0.25
+_W5_C5_SOFT_BBOX_WEIGHT = 8.0
+_W5_C4_CLEARANCE_BAND_WEIGHT = 10.0
+_W5_PASS1_STRESS_WEIGHT = 12.0
+_W5_PASS2_STRESS_BASE_WEIGHT = 16.0
+_W5_PASS2_STRESS_HEADROOM_WEIGHT = 48.0
+_W5_PASS1_CONTRASTIVE_WEIGHT = 8.0
+_W5_PASS2_CONTRASTIVE_WEIGHT = 12.0
+_W5_CONTRASTIVE_MARGIN_NODE_DIAG = 0.45
+_W5_SCALE_SEARCH_EVALS = 6
+_W5_SCALE_SEARCH_MIN = 0.50
+_W5_SCALE_SEARCH_MAX = 2.40
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
@@ -685,7 +707,8 @@ class W5CostPlan:
     warmup_s : float
         Shadow wall-clock warmup observed by the surrogate probe.
     referee_s : float
-        Modeled wall-second cost for one honest referee score.
+        Modeled wall-second cost reserved for one checkpoint's honest scoring,
+        including the deterministic global scale search evaluations.
     budget_s : float
         Wall-clock seconds available under the shared W5 spend cap.
     budget_usable_s : float
@@ -698,6 +721,9 @@ class W5CostPlan:
     shadow_warmup_s : float, optional
         Measured surrogate first-step wall seconds, retained for calibration
         audits and never used for plan sizing.
+    scale_search_evals : int
+        Number of honest referee evaluations reserved per checkpoint for the
+        deterministic global scale line search.
     """
 
     seeds: int
@@ -711,6 +737,7 @@ class W5CostPlan:
     predicted_s: float
     shadow_step_s: Optional[float] = None
     shadow_warmup_s: Optional[float] = None
+    scale_search_evals: int = _W5_SCALE_SEARCH_EVALS
 
 
 @dataclass(frozen=True)
@@ -904,6 +931,54 @@ class W5StressSample:
     sources: torch.Tensor
     targets: torch.Tensor
     graph_distances: torch.Tensor
+
+
+@dataclass(frozen=True)
+class W5NeighborhoodSample:
+    """Fixed contrastive neighborhood sample for W5 C3 guidance.
+
+    Parameters
+    ----------
+    anchors : torch.Tensor
+        Anchor node indices with shape ``[P]``.
+    positives : torch.Tensor
+        Positive graph-neighborhood target indices with shape ``[P]``.
+    negatives : torch.Tensor
+        Negative graph-neighborhood target indices with shape ``[P]``.
+    radii : torch.Tensor
+        Graph-distance radius for each triplet with shape ``[P]``.
+    """
+
+    anchors: torch.Tensor
+    positives: torch.Tensor
+    negatives: torch.Tensor
+    radii: torch.Tensor
+
+
+@dataclass(frozen=True)
+class W5ScaleSearchResult:
+    """Best deterministic global-scale candidate from one checkpoint.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Best scaled positions with shape ``[N, 2]``.
+    score_pair : W5ScorePair
+        Honest score pair for ``pos``.
+    scale : float
+        Global scale factor applied around the checkpoint centroid.
+    evals : int
+        Number of honest score evaluations used by the search.
+    keepalive : tuple[torch.Tensor, ...]
+        Scored position tensors retained until W5 exits so id-keyed scorer
+        caches cannot collide with recycled Python object ids.
+    """
+
+    pos: torch.Tensor
+    score_pair: W5ScorePair
+    scale: float
+    evals: int
+    keepalive: tuple[torch.Tensor, ...] = ()
 
 
 def is_worker_timeout_like_exception(exc: Exception) -> bool:
@@ -1356,7 +1431,7 @@ def _charge_w5_owner_plan(
             "mode": mode,
             "steps": int(cost_plan.steps),
             "seeds": int(cost_plan.seeds),
-            "checkpoints": int(cost_plan.checkpoints),
+            "checkpoints": int(cost_plan.checkpoints) * int(cost_plan.scale_search_evals),
         },
         _native_device_class(config),
     )
@@ -1910,6 +1985,277 @@ def _build_w5_stress_sample(
     )
 
 
+def _build_w5_neighborhood_sample(
+    all_pairs_dist: Optional[Any],
+    node_count: int,
+    device: torch.device,
+) -> Optional[W5NeighborhoodSample]:
+    """Build deterministic multi-radius contrastive graph-neighborhood triplets.
+
+    Parameters
+    ----------
+    all_pairs_dist : object, optional
+        Precomputed all-pairs graph distances. No sample is built when this is
+        absent, preserving the W5 no-new-APSP invariant.
+    node_count : int
+        Number of graph nodes.
+    device : torch.device
+        Device for returned index tensors.
+
+    Returns
+    -------
+    W5NeighborhoodSample or None
+        Fixed positive/negative triplets for radii 2 and 3, capped for bounded
+        per-step cost.
+    """
+    if all_pairs_dist is None or node_count < 3:
+        return None
+    try:
+        distances = torch.as_tensor(all_pairs_dist, dtype=torch.float32, device="cpu")
+    except Exception:  # noqa: BLE001 -- contrastive C3 guidance is optional
+        return None
+    if distances.ndim != 2 or int(distances.shape[0]) != node_count:
+        return None
+    finite = torch.isfinite(distances)
+    anchors: list[int] = []
+    positives: list[int] = []
+    negatives: list[int] = []
+    radii: list[int] = []
+    per_radius_cap = max(1, _W5_NEIGHBORHOOD_MAX_TRIPLETS // len(_W5_NEIGHBORHOOD_RADII))
+    for radius in _W5_NEIGHBORHOOD_RADII:
+        radius_count = 0
+        for anchor in range(node_count):
+            row = distances[anchor]
+            positive_mask = finite[anchor] & (row > 0.0) & (row <= float(radius))
+            negative_mask = finite[anchor] & (row > float(radius))
+            positive_targets = torch.nonzero(positive_mask, as_tuple=False).flatten().tolist()
+            negative_targets = torch.nonzero(negative_mask, as_tuple=False).flatten().tolist()
+            if not positive_targets or not negative_targets:
+                continue
+            negative_count = len(negative_targets)
+            for local_index, positive in enumerate(positive_targets):
+                if radius_count >= per_radius_cap:
+                    break
+                negative = negative_targets[(anchor + local_index) % negative_count]
+                anchors.append(anchor)
+                positives.append(int(positive))
+                negatives.append(int(negative))
+                radii.append(int(radius))
+                radius_count += 1
+            if radius_count >= per_radius_cap:
+                break
+    if not anchors:
+        return None
+    return W5NeighborhoodSample(
+        anchors=torch.as_tensor(anchors, dtype=torch.long, device=device).detach(),
+        positives=torch.as_tensor(positives, dtype=torch.long, device=device).detach(),
+        negatives=torch.as_tensor(negatives, dtype=torch.long, device=device).detach(),
+        radii=torch.as_tensor(radii, dtype=torch.float32, device=device).detach(),
+    )
+
+
+def _mean_node_diag_tensor(pos: torch.Tensor, node_sizes: torch.Tensor) -> torch.Tensor:
+    """Return mean node diagonal as a differentiable-device scalar.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]`` used only for device/dtype.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar mean node diagonal clamped away from zero.
+    """
+    if node_sizes.numel() == 0:
+        return pos.new_tensor(1.0)
+    sizes = node_sizes.to(device=pos.device, dtype=pos.dtype)
+    return torch.linalg.vector_norm(sizes, dim=1).mean().clamp_min(1.0e-6)
+
+
+def _soft_bbox_area_band_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    structure_floor: Optional[float],
+) -> torch.Tensor:
+    """Penalize C5 visual-area ratios outside the V3 asymmetric log band.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    structure_floor : float, optional
+        V3 topology-aware structure area floor for the graph.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss that is zero inside the V3 C5 area band.
+    """
+    if pos.shape[0] == 0 or node_sizes.numel() == 0 or structure_floor is None:
+        return pos.new_zeros(())
+    if not math.isfinite(float(structure_floor)) or float(structure_floor) <= 0.0:
+        return pos.new_zeros(())
+    sizes = node_sizes.to(device=pos.device, dtype=pos.dtype)
+    lower = pos - sizes * 0.5
+    upper = pos + sizes * 0.5
+    tau = (_W5_SOFT_BBOX_TAU_NODE_DIAG * _mean_node_diag_tensor(pos, sizes)).clamp_min(1.0e-6)
+    soft_right = tau * torch.logsumexp(upper[:, 0] / tau, dim=0)
+    soft_top = tau * torch.logsumexp(upper[:, 1] / tau, dim=0)
+    soft_left = -tau * torch.logsumexp(-lower[:, 0] / tau, dim=0)
+    soft_bottom = -tau * torch.logsumexp(-lower[:, 1] / tau, dim=0)
+    area = (soft_right - soft_left).clamp_min(1.0e-6) * (soft_top - soft_bottom).clamp_min(1.0e-6)
+    floor_tensor = pos.new_tensor(float(structure_floor)).clamp_min(1.0e-6)
+    ratio = (area / floor_tensor).clamp_min(1.0e-12)
+    crowd_distance = torch.relu(torch.log(pos.new_tensor(WHITESPACE_RATIO_LO) / ratio))
+    sprawl_distance = torch.relu(torch.log(ratio / pos.new_tensor(WHITESPACE_RATIO_HI)))
+    return (
+        float(WHITESPACE_CROWDING_DECAY) * crowd_distance.square()
+        + float(WHITESPACE_SPRAWL_DECAY) * sprawl_distance.square()
+    )
+
+
+def _box_pair_signed_gap(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    max_nodes: int,
+) -> torch.Tensor:
+    """Return deterministic sampled AABB signed gaps for node pairs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    max_nodes : int
+        Maximum nodes included in the all-pairs sample.
+
+    Returns
+    -------
+    torch.Tensor
+        Pairwise signed gaps with shape ``[P]``; negative values indicate
+        overlap on both axes.
+    """
+    node_count = int(pos.shape[0])
+    if node_count < 2:
+        return pos.new_empty(0)
+    if node_count > max_nodes:
+        sample = torch.linspace(
+            0,
+            node_count - 1,
+            steps=max_nodes,
+            dtype=torch.float32,
+            device=pos.device,
+        ).round()
+        sample = sample.to(dtype=torch.long).clamp(0, node_count - 1)
+        work_pos = pos[sample]
+        work_sizes = node_sizes.to(device=pos.device, dtype=pos.dtype)[sample]
+    else:
+        work_pos = pos
+        work_sizes = node_sizes.to(device=pos.device, dtype=pos.dtype)
+    left, right = torch.triu_indices(
+        int(work_pos.shape[0]),
+        int(work_pos.shape[0]),
+        offset=1,
+        device=pos.device,
+    )
+    if left.numel() == 0:
+        return pos.new_empty(0)
+    gap_xy = (
+        torch.abs(work_pos[right] - work_pos[left]) - (work_sizes[left] + work_sizes[right]) * 0.5
+    )
+    positive_gap = torch.clamp(gap_xy, min=0.0)
+    separated = (gap_xy > 0.0).any(dim=1)
+    separated_gap = torch.linalg.vector_norm(positive_gap, dim=1)
+    overlap_gap = torch.max(gap_xy, dim=1).values
+    return torch.where(separated, separated_gap, overlap_gap)
+
+
+def _clearance_band_hinge_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    shape_geometry: Optional[NativeShapeGeometry],
+    max_nodes: int = 512,
+) -> torch.Tensor:
+    """Penalize sub-clearance node pairs before they become C4 overlaps.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    shape_geometry : NativeShapeGeometry, optional
+        Optional non-box shape descriptors for signed shape gaps.
+    max_nodes : int, default=512
+        Maximum nodes included in deterministic pair sampling.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar clearance-band hinge normalized by mean node diagonal.
+    """
+    if int(pos.shape[0]) < 2 or node_sizes.numel() == 0:
+        return pos.new_zeros(())
+    if shape_geometry is None:
+        signed_gap = _box_pair_signed_gap(pos, node_sizes, max_nodes)
+    else:
+        signed_gap = pairwise_shape_signed_gap(
+            pos,
+            node_sizes,
+            shape_geometry,
+            max_nodes=max_nodes,
+        )
+    if signed_gap.numel() == 0:
+        return pos.new_zeros(())
+    mean_diag = _mean_node_diag_tensor(pos, node_sizes)
+    band = max(0.5, float(C4_CLEARANCE_BAND_NODE_DIAGONALS)) * mean_diag
+    hinge = torch.relu(band - signed_gap.to(device=pos.device, dtype=pos.dtype))
+    return torch.nan_to_num(hinge.square().mean() / mean_diag.square(), nan=0.0, posinf=10.0)
+
+
+def _contrastive_neighborhood_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    neighborhood_sample: Optional[W5NeighborhoodSample],
+) -> torch.Tensor:
+    """Return multi-radius C3 contrastive neighborhood preservation loss.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    neighborhood_sample : W5NeighborhoodSample, optional
+        Precomputed graph-distance triplets for radii 2 and 3.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar hinge loss requiring graph-near positives to be geometrically
+        closer than graph-far negatives by a node-scale margin.
+    """
+    if neighborhood_sample is None or neighborhood_sample.anchors.numel() == 0:
+        return pos.new_zeros(())
+    anchors = neighborhood_sample.anchors.to(device=pos.device, dtype=torch.long)
+    positives = neighborhood_sample.positives.to(device=pos.device, dtype=torch.long)
+    negatives = neighborhood_sample.negatives.to(device=pos.device, dtype=torch.long)
+    radii = neighborhood_sample.radii.to(device=pos.device, dtype=pos.dtype)
+    positive_dist = torch.linalg.vector_norm(pos[anchors] - pos[positives], dim=1)
+    negative_dist = torch.linalg.vector_norm(pos[anchors] - pos[negatives], dim=1)
+    mean_diag = _mean_node_diag_tensor(pos, node_sizes)
+    margin = _W5_CONTRASTIVE_MARGIN_NODE_DIAG * mean_diag * (radii / 2.0).clamp_min(1.0)
+    hinge = torch.relu(positive_dist - negative_dist + margin)
+    normalizer = (negative_dist.detach().mean().clamp_min(mean_diag.detach())).square()
+    return torch.nan_to_num(hinge.square().mean() / normalizer, nan=0.0, posinf=10.0)
+
+
 def _increment_count(counts: dict[str, int], key: str) -> None:
     """Increment ``key`` in a telemetry count dictionary.
 
@@ -2062,9 +2408,11 @@ def _aligned_surrogate_loss(
     mode: str,
     floors: dict[str, float],
     stress_sample: Optional[W5StressSample],
+    neighborhood_sample: Optional[W5NeighborhoodSample],
+    pass_id: int,
     shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
-    """Evaluate the pass-2 W5 objective with honest-aligned additive terms.
+    """Evaluate the W5 objective with V3-facet-aligned additive terms.
 
     Parameters
     ----------
@@ -2081,7 +2429,12 @@ def _aligned_surrogate_loss(
     floors : dict[str, float]
         Incumbent floor values for barrier terms.
     stress_sample : W5StressSample, optional
-        Fixed sampled graph-distance pairs for stress guidance.
+        Fixed sampled graph-distance pairs for C1 stress guidance.
+    neighborhood_sample : W5NeighborhoodSample, optional
+        Fixed graph-neighborhood triplets for C3 contrastive guidance.
+    pass_id : int
+        Surrogate pass identifier. Pass 1 uses moderate C1/C3 weights; pass 2
+        increases the honest-aligned continuation terms.
     shape_geometry : NativeShapeGeometry, optional
         Optional non-box shape descriptors.
 
@@ -2101,11 +2454,27 @@ def _aligned_surrogate_loss(
     )
     honest_ksm = floors.get("honest_ksm")
     ksm_headroom = 0.0 if honest_ksm is None else max(0.0, 1.0 - float(honest_ksm))
-    stress_weight = 12.0 + 72.0 * ksm_headroom
+    if pass_id == 1:
+        stress_weight = _W5_PASS1_STRESS_WEIGHT
+        contrastive_weight = _W5_PASS1_CONTRASTIVE_WEIGHT
+    else:
+        stress_weight = (
+            _W5_PASS2_STRESS_BASE_WEIGHT + _W5_PASS2_STRESS_HEADROOM_WEIGHT * ksm_headroom
+        )
+        contrastive_weight = _W5_PASS2_CONTRASTIVE_WEIGHT
     edge_l1_weight = 6.0
     loss = (
         loss
+        + _W5_C5_SOFT_BBOX_WEIGHT
+        * _soft_bbox_area_band_loss(pos, node_sizes, floors.get("c5_structure_floor"))
+        + _W5_C4_CLEARANCE_BAND_WEIGHT * _clearance_band_hinge_loss(pos, node_sizes, shape_geometry)
         + stress_weight * _stress_gain_loss(pos, stress_sample)
+        + contrastive_weight
+        * _contrastive_neighborhood_loss(
+            pos,
+            node_sizes,
+            neighborhood_sample,
+        )
         + edge_l1_weight * _edge_length_l1_deviation_loss(pos, edge_index)
     )
     return torch.nan_to_num(loss, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
@@ -2147,6 +2516,7 @@ def _pass_loss(
     floors: dict[str, float],
     pass_id: int,
     stress_sample: Optional[W5StressSample],
+    neighborhood_sample: Optional[W5NeighborhoodSample],
     shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> torch.Tensor:
     """Evaluate the selected W5 pass loss.
@@ -2168,7 +2538,9 @@ def _pass_loss(
     pass_id : int
         Surrogate pass identifier.
     stress_sample : W5StressSample, optional
-        Fixed sampled graph-distance pairs for pass 2.
+        Fixed sampled graph-distance pairs for stress guidance.
+    neighborhood_sample : W5NeighborhoodSample, optional
+        Fixed graph-neighborhood triplets for contrastive C3 guidance.
     shape_geometry : NativeShapeGeometry, optional
         Optional non-box shape descriptors.
 
@@ -2177,16 +2549,6 @@ def _pass_loss(
     torch.Tensor
         Scalar loss for the requested pass.
     """
-    if pass_id == 1:
-        return _surrogate_loss(
-            pos,
-            edge_index,
-            node_sizes,
-            topo_depth,
-            mode,
-            floors,
-            shape_geometry,
-        )
     return _aligned_surrogate_loss(
         pos,
         edge_index,
@@ -2195,6 +2557,8 @@ def _pass_loss(
         mode,
         floors,
         stress_sample,
+        neighborhood_sample,
+        pass_id,
         shape_geometry,
     )
 
@@ -2212,6 +2576,7 @@ def _optimize_seed(
     step_timing_hook: Optional[Callable[[int, float], None]] = None,
     pass_id: int = 1,
     stress_sample: Optional[W5StressSample] = None,
+    neighborhood_sample: Optional[W5NeighborhoodSample] = None,
     shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Run one bounded W5 descent from ``seed``.
@@ -2240,10 +2605,12 @@ def _optimize_seed(
         Callback receiving each completed step index and wall-clock step
         duration. Used only by measured admission sizing.
     pass_id : int, default=1
-        Surrogate pass identifier. Pass 1 uses the unchanged objective; pass 2
-        adds honest-aligned stress and L1 edge-length terms.
+        Surrogate pass identifier. Pass 1 uses moderate V3-facet guidance;
+        pass 2 increases the C1/C3 continuation weights.
     stress_sample : W5StressSample, optional
-        Fixed sampled graph-distance pairs for pass 2.
+        Fixed sampled graph-distance pairs for C1 stress guidance.
+    neighborhood_sample : W5NeighborhoodSample, optional
+        Fixed graph-neighborhood triplets for C3 contrastive guidance.
     shape_geometry : NativeShapeGeometry, optional
         Optional non-box shape descriptors.
 
@@ -2266,6 +2633,17 @@ def _optimize_seed(
         "knn_loss": float(soft_knn_neighborhood_loss(work, edge_index).detach().item()),
         "edge_cv_loss": float(edge_length_cv_loss(work, edge_index).detach().item()),
     }
+    try:
+        floors["c5_structure_floor"] = float(
+            _structure_area_floor(
+                size_work := node_sizes.detach().to(device="cpu", dtype=torch.float32),
+                None,
+                edge_index.detach().to(device="cpu", dtype=torch.long),
+            )
+        )
+        del size_work
+    except Exception:  # noqa: BLE001 -- C5 soft-area guidance is optional
+        pass
     if honest_axes is not None:
         if honest_axes.flow is not None:
             floors["honest_flow"] = float(honest_axes.flow)
@@ -2280,6 +2658,7 @@ def _optimize_seed(
         floors,
         pass_id,
         stress_sample,
+        neighborhood_sample,
         shape_geometry,
     )
     start_loss = float(start_loss_tensor.detach().item())
@@ -2310,6 +2689,7 @@ def _optimize_seed(
             floors,
             pass_id,
             stress_sample,
+            neighborhood_sample,
             shape_geometry,
         )
         if not bool(torch.isfinite(loss).all().item()):
@@ -2339,6 +2719,7 @@ def _optimize_seed(
                 floors,
                 pass_id,
                 stress_sample,
+                neighborhood_sample,
                 shape_geometry,
             )
             checkpoint_loss = float(checkpoint_loss_tensor.detach().item())
@@ -2359,6 +2740,7 @@ def _run_optimize_seed_pass(
     max_checkpoints: int,
     pass_id: int,
     stress_sample: Optional[W5StressSample],
+    neighborhood_sample: Optional[W5NeighborhoodSample],
     shape_geometry: Optional[NativeShapeGeometry] = None,
 ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
     """Call the active optimizer with optional pass-2 arguments when supported.
@@ -2386,7 +2768,9 @@ def _run_optimize_seed_pass(
     pass_id : int
         Surrogate pass identifier.
     stress_sample : W5StressSample, optional
-        Fixed sampled graph-distance pairs for pass 2.
+        Fixed sampled graph-distance pairs for C1 stress guidance.
+    neighborhood_sample : W5NeighborhoodSample, optional
+        Fixed graph-neighborhood triplets for C3 contrastive guidance.
     shape_geometry : NativeShapeGeometry, optional
         Optional non-box shape descriptors.
 
@@ -2396,6 +2780,12 @@ def _run_optimize_seed_pass(
         Final positions, completed steps, start loss, and checkpoint
         positions/losses.
     """
+    optimize_parameters = inspect.signature(_optimize_seed).parameters
+    optional_kwargs: dict[str, object] = {}
+    if "neighborhood_sample" in optimize_parameters:
+        optional_kwargs["neighborhood_sample"] = neighborhood_sample
+    if shape_geometry is not None and "shape_geometry" in optimize_parameters:
+        optional_kwargs["shape_geometry"] = shape_geometry
     if shape_geometry is None:
         return _optimize_seed(
             seed,
@@ -2409,6 +2799,7 @@ def _run_optimize_seed_pass(
             max_checkpoints=max_checkpoints,
             pass_id=pass_id,
             stress_sample=stress_sample,
+            **optional_kwargs,
         )
     return _optimize_seed(
         seed,
@@ -2422,7 +2813,166 @@ def _run_optimize_seed_pass(
         max_checkpoints=max_checkpoints,
         pass_id=pass_id,
         stress_sample=stress_sample,
-        shape_geometry=shape_geometry,
+        **optional_kwargs,
+    )
+
+
+def _w5_score_scalar(pair: W5ScorePair, tallied_axis: str) -> Optional[float]:
+    """Return the scalar honest score used by checkpoint scale search.
+
+    Parameters
+    ----------
+    pair : W5ScorePair
+        Honest score pair, optionally carrying the runtime V3 tiered score.
+    tallied_axis : str
+        Existing W5 axis, ``"directed"`` or ``"undirected"``, used only as a
+        fallback when no V3 score is present.
+
+    Returns
+    -------
+    float or None
+        Finite scalar score when available.
+    """
+    if pair.v3 is not None and math.isfinite(float(pair.v3)):
+        return float(pair.v3)
+    value = pair.directed if tallied_axis == "directed" else pair.undirected
+    return float(value) if math.isfinite(float(value)) else None
+
+
+def _scale_positions_about_centroid(pos: torch.Tensor, scale: float) -> torch.Tensor:
+    """Apply a global layout scale around the current node centroid.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    scale : float
+        Positive scale factor.
+
+    Returns
+    -------
+    torch.Tensor
+        Scaled positions with shape ``[N, 2]``.
+    """
+    if int(pos.shape[0]) == 0:
+        return pos.detach().clone()
+    center = pos.detach().mean(dim=0, keepdim=True)
+    return center + (pos.detach() - center) * float(scale)
+
+
+def _honest_scale_line_search(
+    checkpoint_pos: torch.Tensor,
+    score_fn: Callable[[torch.Tensor], W5ScorePair],
+    tallied_axis: str,
+    *,
+    deadline: float,
+    config: Optional[LayoutConfig],
+) -> W5ScaleSearchResult:
+    """Run deterministic global-scale search scored by the honest referee.
+
+    Parameters
+    ----------
+    checkpoint_pos : torch.Tensor
+        Candidate checkpoint positions with shape ``[N, 2]``.
+    score_fn : Callable[[torch.Tensor], W5ScorePair]
+        Existing honest W5 scorer. In the native path this is backed by
+        ``score_v3_runtime_result`` and its DWU charge/cache layer.
+    tallied_axis : str
+        Existing W5 axis used as fallback for legacy callers without V3 scores.
+    deadline : float
+        Absolute ``time.monotonic()`` deadline for non-measured W5 work.
+    config : LayoutConfig, optional
+        Prepared layout configuration used for hard wall-reserve checks.
+
+    Returns
+    -------
+    W5ScaleSearchResult
+        Best scored scale candidate. Legacy non-V3 score pairs return the raw
+        checkpoint after one score evaluation.
+    """
+    raw_pair = score_fn(checkpoint_pos)
+    raw_scalar = _w5_score_scalar(raw_pair, tallied_axis)
+    keepalive = [checkpoint_pos]
+    if raw_pair.v3 is None or raw_scalar is None:
+        return W5ScaleSearchResult(
+            pos=checkpoint_pos,
+            score_pair=raw_pair,
+            scale=1.0,
+            evals=1,
+            keepalive=tuple(keepalive),
+        )
+    best_pos = checkpoint_pos
+    best_pair = raw_pair
+    best_scalar = raw_scalar
+    best_scale = 1.0
+    evals = 1
+    left = float(_W5_SCALE_SEARCH_MIN)
+    right = float(_W5_SCALE_SEARCH_MAX)
+    inv_phi = (math.sqrt(5.0) - 1.0) * 0.5
+
+    def score_scale(scale: float) -> Optional[float]:
+        """Score one scale and update the best candidate when it improves.
+
+        Parameters
+        ----------
+        scale : float
+            Global scale factor to evaluate.
+
+        Returns
+        -------
+        float or None
+            Finite scalar honest score for the scaled candidate.
+        """
+        nonlocal best_pair, best_pos, best_scalar, best_scale, evals
+        if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S) or (
+            math.isfinite(float(deadline)) and time.monotonic() >= deadline
+        ):
+            return None
+        scaled_pos = _scale_positions_about_centroid(checkpoint_pos, scale)
+        keepalive.append(scaled_pos)
+        pair = score_fn(scaled_pos)
+        evals += 1
+        scalar = _w5_score_scalar(pair, tallied_axis)
+        if scalar is not None and scalar > best_scalar:
+            best_pos = scaled_pos
+            best_pair = pair
+            best_scalar = scalar
+            best_scale = float(scale)
+        return scalar
+
+    x1 = right - inv_phi * (right - left)
+    x2 = left + inv_phi * (right - left)
+    score1: Optional[float] = None
+    score2: Optional[float] = None
+    while evals < _W5_SCALE_SEARCH_EVALS:
+        if score1 is None:
+            score1 = score_scale(x1)
+            if score1 is None:
+                break
+            continue
+        if score2 is None:
+            score2 = score_scale(x2)
+            if score2 is None:
+                break
+            continue
+        if score1 < score2:
+            left = x1
+            x1 = x2
+            score1 = score2
+            x2 = left + inv_phi * (right - left)
+            score2 = None
+        else:
+            right = x2
+            x2 = x1
+            score2 = score1
+            x1 = right - inv_phi * (right - left)
+            score1 = None
+    return W5ScaleSearchResult(
+        pos=best_pos,
+        score_pair=best_pair,
+        scale=best_scale,
+        evals=evals,
+        keepalive=tuple(keepalive),
     )
 
 
@@ -2614,6 +3164,7 @@ def _measured_cost_plan(
         W5CostPlan
             Cost plan priced solely by the frozen W5 cost model.
         """
+        reserved_checkpoints = int(checkpoints) * _W5_SCALE_SEARCH_EVALS
         cost = estimate_native_work_cost(
             {"num_nodes": node_count, "num_edges": edge_count},
             "w5",
@@ -2621,7 +3172,7 @@ def _measured_cost_plan(
                 "mode": routed_mode,
                 "steps": steps,
                 "seeds": seed_count,
-                "checkpoints": checkpoints,
+                "checkpoints": reserved_checkpoints,
             },
             _native_device_class(config),
         )
@@ -2915,7 +3466,8 @@ def run_w5_finisher(
         kept_seeds[0].pos.device,
     )
     stress_sample: Optional[W5StressSample] = None
-    stress_sample_ready = False
+    neighborhood_sample: Optional[W5NeighborhoodSample] = None
+    guidance_samples_ready = False
     max_steps: Optional[int] = None
     max_checkpoints = _MEASURED_COST_MAX_CHECKPOINTS
     if use_measured_cost:
@@ -2979,6 +3531,7 @@ def run_w5_finisher(
     phase_timings: list[W5PhaseTiming] = []
     viability_counts: dict[str, int] = {}
     viability_drop_counts: dict[str, int] = {}
+    scale_search_keepalive: list[torch.Tensor] = []
     steps_total = 0
     routed_mode = "skip"
     incumbent_overlap = _overlap_count(incumbent_pos, size_work, shape_work)
@@ -3014,21 +3567,25 @@ def run_w5_finisher(
             )
             pass_seed = mode_seed
             for pass_id in (1, 2):
-                if pass_id == 2:
-                    if deadline_returned:
-                        break
-                    if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
-                        deadline_returned = True
-                        break
-                    if not stress_sample_ready:
-                        all_pairs_dist = _closed_over_all_pairs_dist(score_fn)
-                        stress_sample = _build_w5_stress_sample(
-                            edge_work,
-                            int(kept_seeds[0].pos.shape[0]),
-                            all_pairs_dist,
-                            kept_seeds[0].pos.device,
-                        )
-                        stress_sample_ready = True
+                if deadline_returned:
+                    break
+                if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
+                    deadline_returned = True
+                    break
+                if not guidance_samples_ready:
+                    all_pairs_dist = _closed_over_all_pairs_dist(score_fn)
+                    stress_sample = _build_w5_stress_sample(
+                        edge_work,
+                        int(kept_seeds[0].pos.shape[0]),
+                        all_pairs_dist,
+                        kept_seeds[0].pos.device,
+                    )
+                    neighborhood_sample = _build_w5_neighborhood_sample(
+                        all_pairs_dist,
+                        int(kept_seeds[0].pos.shape[0]),
+                        kept_seeds[0].pos.device,
+                    )
+                    guidance_samples_ready = True
                 optimize_s = 0.0
                 viability_s = 0.0
                 score_s = 0.0
@@ -3046,6 +3603,7 @@ def run_w5_finisher(
                         max_checkpoints=max_checkpoints,
                         pass_id=pass_id,
                         stress_sample=stress_sample,
+                        neighborhood_sample=neighborhood_sample,
                         shape_geometry=shape_work,
                     )
                     optimize_s = max(0.0, time.perf_counter() - optimize_started)
@@ -3077,6 +3635,7 @@ def run_w5_finisher(
                             {},
                             pass_id,
                             stress_sample,
+                            neighborhood_sample,
                             shape_work,
                         )
                         .detach()
@@ -3136,7 +3695,20 @@ def run_w5_finisher(
                     try:
                         score_started = time.perf_counter()
                         score_pos = checkpoint_pos.to(device=edge_index.device, dtype=torch.float32)
-                        honest = score_fn(score_pos)
+                        scale_search = _honest_scale_line_search(
+                            score_pos,
+                            score_fn,
+                            tallied_axis,
+                            deadline=float("inf") if use_measured_cost else deadline,
+                            config=config,
+                        )
+                        scale_search_keepalive.extend(scale_search.keepalive)
+                        score_pos = scale_search.pos
+                        checkpoint_pos = scale_search.pos.to(
+                            device=checkpoint_pos.device,
+                            dtype=checkpoint_pos.dtype,
+                        )
+                        honest = scale_search.score_pair
                         score_s += max(0.0, time.perf_counter() - score_started)
                     except Exception as exc:
                         score_s += max(0.0, time.perf_counter() - score_started)
