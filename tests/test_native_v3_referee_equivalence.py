@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from dagua.eval.graphs import get_test_graphs
 from dagua.eval.ruler_v3 import (
     _smooth_clearance_occlusion_score,
     referee_eligibility_key,
@@ -143,6 +144,51 @@ def _all_pairs(edge_index: torch.Tensor, num_nodes: int) -> np.ndarray:
     return _all_pairs_unweighted(offsets, targets, num_nodes, max_dist=num_nodes)
 
 
+def _assert_runtime_matches_frozen(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    sizes: torch.Tensor,
+    weights: Optional[torch.Tensor],
+) -> None:
+    """Assert runtime V3 mirrors the restricted frozen oracle.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    weights : torch.Tensor, optional
+        Optional runtime-visible edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    None
+        Assertions validate bit-exact score, key, and facet equality.
+    """
+    problem = _problem(pos, edge_index, sizes, weights)
+    distances = _all_pairs(edge_index, int(pos.shape[0]))
+    runtime_key, runtime_tiered, runtime_facets = score_v3_runtime(
+        pos,
+        problem,
+        all_pairs_dist=distances,
+    )
+    runtime_result = score_v3_runtime_result(pos, problem, all_pairs_dist=distances)
+    frozen = score_core_v3(
+        pos,
+        edge_index,
+        sizes,
+        all_pairs_dist=distances,
+        graph_meta=_runtime_v3_graph_meta(problem),
+    )
+    assert runtime_result.scores == frozen.scores
+    assert runtime_key == referee_eligibility_key(frozen)
+    assert runtime_tiered == frozen.scores["tiered"]
+    assert runtime_facets == frozen.facets
+
+
 @pytest.mark.parametrize("weighted", [False, True])
 def test_score_v3_runtime_matches_frozen_restricted_oracle(weighted: bool) -> None:
     """Assert runtime V3 mirrors frozen V3 with restricted metadata.
@@ -167,22 +213,15 @@ def test_score_v3_runtime_matches_frozen_restricted_oracle(weighted: bool) -> No
     weights = (
         torch.tensor([1.0, 2.0, 4.0, 8.0, 3.0, 6.0], dtype=torch.float64) if weighted else None
     )
-    problem = _problem(pos, edge_index, sizes, weights)
-    distances = _all_pairs(edge_index, int(pos.shape[0]))
-    runtime_key, runtime_tiered, runtime_facets = score_v3_runtime(
-        pos,
-        problem,
-        all_pairs_dist=distances,
-    )
-    runtime_result = score_v3_runtime_result(pos, problem, all_pairs_dist=distances)
-    frozen = score_core_v3(
-        pos,
-        edge_index,
-        sizes,
-        all_pairs_dist=distances,
-        graph_meta=_runtime_v3_graph_meta(problem),
-    )
-    assert runtime_result.scores == frozen.scores
-    assert runtime_key == referee_eligibility_key(frozen)
-    assert runtime_tiered == frozen.scores["tiered"]
-    assert runtime_facets == frozen.facets
+    _assert_runtime_matches_frozen(pos, edge_index, sizes, weights)
+    if weighted:
+        return
+
+    graph = next(tg.graph for tg in get_test_graphs() if tg.name == "hub_spoke_10x20")
+    large_edge_index = graph.edge_index.detach().to(dtype=torch.long)
+    large_count = int(graph.num_nodes)
+    generator = torch.Generator(device="cpu").manual_seed(42)
+    large_pos = torch.randn((large_count, 2), generator=generator, dtype=torch.float64)
+    large_sizes = torch.full((large_count, 2), 1.0, dtype=torch.float64)
+    assert large_count >= 200
+    _assert_runtime_matches_frozen(large_pos, large_edge_index, large_sizes, None)

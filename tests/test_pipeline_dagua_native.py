@@ -805,9 +805,11 @@ def test_terminal_w5_preserves_compliant_final_tensor_when_candidate_breaches_re
         node_sizes: Optional[torch.Tensor],
         edge_weights: Optional[torch.Tensor],
         direction: str,
+        all_pairs_dist: Optional[object] = None,
+        result_fn: Optional[object] = None,
     ) -> object:
         """Return a scorer that marks only the terminal W5 winner as breaching."""
-        del edge_index, num_nodes, node_sizes, direction
+        del edge_index, num_nodes, node_sizes, direction, all_pairs_dist, result_fn
         assert edge_weights is not None
 
         def referee_key(pos: torch.Tensor) -> tuple[int, float]:
@@ -1550,9 +1552,11 @@ def test_best_of_polish_preserves_compliant_winner_when_w5_breaches_referee(
         node_sizes: Optional[torch.Tensor],
         edge_weights: Optional[torch.Tensor],
         direction: str,
+        all_pairs_dist: Optional[object] = None,
+        result_fn: Optional[object] = None,
     ) -> object:
         """Return a scorer that marks only the fake W5 winner as breaching."""
-        del edge_index, num_nodes, node_sizes, direction
+        del edge_index, num_nodes, node_sizes, direction, all_pairs_dist, result_fn
         assert edge_weights is not None
 
         def referee_key(pos: torch.Tensor) -> tuple[int, float]:
