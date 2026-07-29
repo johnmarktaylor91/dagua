@@ -14,7 +14,7 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
-from dagua.layout.ops.base import Pipeline
+from dagua.layout.ops.base import Pipeline, finite_checkpoint_or_restore
 from dagua.layout.ops.coordinate import (
     ComponentTilingCrossingRisk,
     ComponentTilingCrossingRiskConfig,
@@ -1984,10 +1984,15 @@ def _run_native_problem(
         )
 
     selected = _choose_native_pipeline(structure=structure, config=config)
+    last_finite_pos: Optional[torch.Tensor] = None
+    if state.pos is not None and bool(torch.isfinite(state.pos).all().item()):
+        last_finite_pos = state.pos.detach().clone()
     if selected == "legacy_monolith":
-        return dagua_native_legacy._run_native_problem(problem, state, ctx, config)
+        result = dagua_native_legacy._run_native_problem(problem, state, ctx, config)
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
     if selected == "force_directed":
-        return layout_native_force_directed_pipeline(
+        result = layout_native_force_directed_pipeline(
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
             node_sizes=problem.node_sizes,
@@ -1995,6 +2000,8 @@ def _run_native_problem(
             seed=problem.seed,
             edge_weights=problem.edge_weights,
         )
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
     if selected == "undirected_portfolio":
         # Early return like force_directed: the incumbent candidate runs the
         # full baseline path (including its own polish battery) inside the
@@ -2004,23 +2011,27 @@ def _run_native_problem(
             layout_native_undirected_portfolio,
         )
 
-        return layout_native_undirected_portfolio(
+        result = layout_native_undirected_portfolio(
             problem=problem,
             state=state,
             ctx=ctx,
             config=config,
         )
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
     if selected == "directed_portfolio":
         from dagua.layout.ops.pipelines.native_directed import (
             layout_native_directed_portfolio,
         )
 
-        return layout_native_directed_portfolio(
+        result = layout_native_directed_portfolio(
             problem=problem,
             state=state,
             ctx=ctx,
             config=config,
         )
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
 
     try:
         final_state = build_dagua_pipeline(config).apply(problem, state, ctx)
@@ -2039,6 +2050,7 @@ def _run_native_problem(
     result = final_state.pos.detach()
     if result.shape[0] > problem.num_nodes:
         result = result[: problem.num_nodes]
+    result, last_finite_pos = finite_checkpoint_or_restore(result, last_finite_pos)
     # Best-of-polish edge-equalize. The gradient pipeline
     # converges to a local minimum where edge_length_variance_loss is
     # saturated (confirmed empirically: w=0..200 produces identical
@@ -2070,6 +2082,7 @@ def _run_native_problem(
             config=config,
             edge_weights=problem.edge_weights,
         )
+        result, _ = finite_checkpoint_or_restore(result, last_finite_pos)
     return result
 
 
@@ -6677,10 +6690,13 @@ def layout_dagua_native_pipeline(
         None
             The prepared config receives the current anytime record.
         """
+        previous = getattr(prepared_config, "_dagua_native_anytime_best", None)
+        previous_pos = previous.pos if previous is not None else None
+        finite_pos, _ = finite_checkpoint_or_restore(pos.detach(), previous_pos)
         setattr(
             prepared_config,
             "_dagua_native_anytime_best",
-            _AnytimeBestRecord(pos=pos.detach().clone(), provenance=provenance),
+            _AnytimeBestRecord(pos=finite_pos.detach().clone(), provenance=provenance),
         )
 
     setattr(prepared_config, "_dagua_native_register_anytime_best", register_anytime_best)
@@ -6705,6 +6721,27 @@ def layout_dagua_native_pipeline(
         torch.Tensor
             Finished native positions with shape ``[N, 2]``.
         """
+        last_finite_pos: Optional[torch.Tensor] = None
+        if prepared_init_pos is not None and bool(torch.isfinite(prepared_init_pos).all().item()):
+            last_finite_pos = prepared_init_pos.detach().clone()
+
+        def ensure_finite_boundary(pos: torch.Tensor) -> torch.Tensor:
+            """Restore a finite native stage-boundary tensor when needed.
+
+            Parameters
+            ----------
+            pos : torch.Tensor
+                Candidate positions with shape ``[N, 2]``.
+
+            Returns
+            -------
+            torch.Tensor
+                Finite positions with shape ``[N, 2]``.
+            """
+            nonlocal last_finite_pos
+            pos, last_finite_pos = finite_checkpoint_or_restore(pos.detach(), last_finite_pos)
+            return pos
+
         state = SolveState(pos=prepared_init_pos)
         ctx = RuntimeContext(
             plan=ExecutionPlan(
@@ -6812,7 +6849,7 @@ def layout_dagua_native_pipeline(
             )
             if outer_state.pos is None:
                 raise RuntimeError("dagua_native component tiling did not produce positions.")
-            result = outer_state.pos.detach()
+            result = ensure_finite_boundary(outer_state.pos)
             register_anytime_best(result, "post_base_contest")
             # Also polish the per-component-tiled output. Closes
             # +2.96 on disconnected_label_cycle_collage (the (50, 0.05)
@@ -6832,21 +6869,23 @@ def layout_dagua_native_pipeline(
                 is_semantically_directed, declared_hierarchical = _honest_ruler_flags(
                     contest_structure
                 )
-                result = _best_of_polish(
-                    result,
-                    prepared_edge_index,
-                    normalized_node_sizes,
-                    is_semantically_directed=is_semantically_directed,
-                    declared_hierarchical=declared_hierarchical,
-                    direction_is_declared=bool(
-                        getattr(contest_structure, "direction_is_declared", False)
-                    ),
-                    direction=prepared_config.direction,
-                    polish_battery=str(
-                        getattr(prepared_config, "_dagua_native_polish_battery", "full")
-                    ),
-                    config=prepared_config,
-                    edge_weights=prepared_edge_weights,
+                result = ensure_finite_boundary(
+                    _best_of_polish(
+                        result,
+                        prepared_edge_index,
+                        normalized_node_sizes,
+                        is_semantically_directed=is_semantically_directed,
+                        declared_hierarchical=declared_hierarchical,
+                        direction_is_declared=bool(
+                            getattr(contest_structure, "direction_is_declared", False)
+                        ),
+                        direction=prepared_config.direction,
+                        polish_battery=str(
+                            getattr(prepared_config, "_dagua_native_polish_battery", "full")
+                        ),
+                        config=prepared_config,
+                        edge_weights=prepared_edge_weights,
+                    )
                 )
                 register_anytime_best(result, "post_polish_accept")
             risk_state = ComponentTilingCrossingRisk(
@@ -6862,34 +6901,38 @@ def layout_dagua_native_pipeline(
                 ctx,
             )
             if risk_state.pos is not None:
-                result = risk_state.pos.detach()
+                result = ensure_finite_boundary(risk_state.pos)
             if dot_cluster_fidelity:
-                result = _apply_dot_cluster_fidelity_layout(
-                    result,
-                    prepared_edge_index,
-                    normalized_node_sizes,
-                    clusters,
-                    cluster_parents,
-                    shape_geometry,
+                result = ensure_finite_boundary(
+                    _apply_dot_cluster_fidelity_layout(
+                        result,
+                        prepared_edge_index,
+                        normalized_node_sizes,
+                        clusters,
+                        cluster_parents,
+                        shape_geometry,
+                    )
                 )
             if owns_terminal_w5:
-                result = _terminal_w5_polish(
-                    result,
-                    edge_index=prepared_edge_index,
-                    node_sizes=normalized_node_sizes,
-                    edge_weights=prepared_edge_weights,
-                    config=prepared_config,
-                    structure=problem.structure,
-                    direction=prepared_config.direction,
-                    clusters=clusters,
-                    cluster_parents=cluster_parents,
-                    cluster_labels=cluster_labels,
-                    shape_geometry=shape_geometry,
-                    register_anytime_best=register_anytime_best,
+                result = ensure_finite_boundary(
+                    _terminal_w5_polish(
+                        result,
+                        edge_index=prepared_edge_index,
+                        node_sizes=normalized_node_sizes,
+                        edge_weights=prepared_edge_weights,
+                        config=prepared_config,
+                        structure=problem.structure,
+                        direction=prepared_config.direction,
+                        clusters=clusters,
+                        cluster_parents=cluster_parents,
+                        cluster_labels=cluster_labels,
+                        shape_geometry=shape_geometry,
+                        register_anytime_best=register_anytime_best,
+                    )
                 )
             return result
 
-        result = _run_native_problem(problem, state, ctx, prepared_config)
+        result = ensure_finite_boundary(_run_native_problem(problem, state, ctx, prepared_config))
         register_anytime_best(result, "post_base_contest")
         try:
             from dagua.layout.ops.pipelines.native_directed import (
@@ -6916,7 +6959,7 @@ def layout_dagua_native_pipeline(
                     all_pairs_dist,
                 )
                 if wide_result is not result:
-                    result = wide_result
+                    result = ensure_finite_boundary(wide_result)
                     register_anytime_best(result, "wide_dag_ordering_accept")
         except Exception as exc:  # noqa: BLE001 -- wide-DAG arm cannot sink base layout
             if is_worker_timeout_like_exception(exc):
@@ -6926,28 +6969,32 @@ def layout_dagua_native_pipeline(
                 exc_info=True,
             )
         if dot_cluster_fidelity:
-            result = _apply_dot_cluster_fidelity_layout(
-                result,
-                prepared_edge_index,
-                normalized_node_sizes,
-                clusters,
-                cluster_parents,
-                shape_geometry,
+            result = ensure_finite_boundary(
+                _apply_dot_cluster_fidelity_layout(
+                    result,
+                    prepared_edge_index,
+                    normalized_node_sizes,
+                    clusters,
+                    cluster_parents,
+                    shape_geometry,
+                )
             )
         if owns_terminal_w5:
-            result = _terminal_w5_polish(
-                result,
-                edge_index=prepared_edge_index,
-                node_sizes=normalized_node_sizes,
-                edge_weights=prepared_edge_weights,
-                config=prepared_config,
-                structure=problem.structure,
-                direction=prepared_config.direction,
-                clusters=clusters,
-                cluster_parents=cluster_parents,
-                cluster_labels=cluster_labels,
-                shape_geometry=shape_geometry,
-                register_anytime_best=register_anytime_best,
+            result = ensure_finite_boundary(
+                _terminal_w5_polish(
+                    result,
+                    edge_index=prepared_edge_index,
+                    node_sizes=normalized_node_sizes,
+                    edge_weights=prepared_edge_weights,
+                    config=prepared_config,
+                    structure=problem.structure,
+                    direction=prepared_config.direction,
+                    clusters=clusters,
+                    cluster_parents=cluster_parents,
+                    cluster_labels=cluster_labels,
+                    shape_geometry=shape_geometry,
+                    register_anytime_best=register_anytime_best,
+                )
             )
         return result
 

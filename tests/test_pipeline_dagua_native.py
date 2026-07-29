@@ -61,6 +61,55 @@ def _deadline_gate_config() -> LayoutConfig:
     return config
 
 
+def test_dagua_native_restores_finite_checkpoint_after_nan_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native stage returning NaN degrades to a finite checkpoint."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+
+    finite_checkpoint = torch.tensor(
+        [[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 2.0, dtype=torch.float32)
+    config = LayoutConfig(
+        algorithm="dagua_native",
+        seed=42,
+        device="cpu",
+        decompose_components=False,
+        route_flat_to_stress=False,
+        edge_equalize_polish=False,
+    )
+    config._dagua_native_terminal_w5_owner = True
+
+    def fake_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        prepared_config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Return a non-finite stage result after a finite warm start."""
+        del problem, state, ctx, prepared_config
+        return torch.full_like(finite_checkpoint, float("nan"))
+
+    monkeypatch.setattr(native, "_run_native_problem", fake_run_native_problem)
+
+    actual = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=3,
+        node_sizes=node_sizes,
+        config=config,
+        init_pos=finite_checkpoint,
+        seed=42,
+    )
+
+    assert bool(torch.isfinite(actual).all().item())
+    assert torch.equal(actual, finite_checkpoint)
+
+
 def _install_proxy_honest_w5_fixture(
     monkeypatch: pytest.MonkeyPatch,
     base_pos: torch.Tensor,
