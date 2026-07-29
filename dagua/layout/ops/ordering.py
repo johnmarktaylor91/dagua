@@ -21,6 +21,7 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 LOWER_CROSSING_ORDER_STATS_KEY = "native_lower_crossing_order_stats"
+DOT_VIRTUAL_EDGE_WEIGHT = 1.0
 
 
 def _target_device(problem: LayoutProblem, state: SolveState) -> torch.device:
@@ -131,6 +132,69 @@ def _validate_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tens
     if int(edge_index_cpu.min().item()) < 0 or int(edge_index_cpu.max().item()) >= num_nodes:
         raise ValueError("problem.edge_index references a node outside the valid range")
     return edge_index_cpu
+
+
+def _expanded_layered_graph(
+    rank_values: Sequence[int],
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+) -> Tuple[List[int], torch.Tensor, set[int], List[int]]:
+    """Expand long layered edges into adjacent-rank virtual chains.
+
+    Parameters
+    ----------
+    rank_values : sequence of int
+        Per-real-node rank values with length ``N``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]`` over real nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. Present for API symmetry
+        with dot-position expansion; mincross penalties start at unit weight.
+
+    Returns
+    -------
+    tuple[list[int], torch.Tensor, set[int], list[int]]
+        Expanded rank values, expanded chain edges with shape ``[2, E2]``,
+        virtual node ids, and unit edge penalties aligned to the expanded edge
+        tensor.
+    """
+    del edge_weights
+    expanded_ranks = [int(value) for value in rank_values]
+    expanded_edges: List[Tuple[int, int]] = []
+    edge_penalties: List[int] = []
+    virtual_ids: set[int] = set()
+    if edge_index.ndim != 2 or int(edge_index.shape[0]) != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    original_count = len(expanded_ranks)
+    for edge_id in range(int(edges.shape[1])):
+        tail = int(edges[0, edge_id].item())
+        head = int(edges[1, edge_id].item())
+        if tail == head:
+            continue
+        if not (0 <= tail < original_count and 0 <= head < original_count):
+            raise ValueError("edge_index references a node outside rank_values.")
+        tail_rank = int(expanded_ranks[tail])
+        head_rank = int(expanded_ranks[head])
+        if head_rank <= tail_rank + 1:
+            expanded_edges.append((tail, head))
+            edge_penalties.append(1)
+            continue
+        previous = tail
+        for rank in range(tail_rank + 1, head_rank):
+            virtual_node = len(expanded_ranks)
+            expanded_ranks.append(rank)
+            virtual_ids.add(virtual_node)
+            expanded_edges.append((previous, virtual_node))
+            edge_penalties.append(int(DOT_VIRTUAL_EDGE_WEIGHT))
+            previous = virtual_node
+        expanded_edges.append((previous, head))
+        edge_penalties.append(int(DOT_VIRTUAL_EDGE_WEIGHT))
+    if expanded_edges:
+        expanded_edge_index = torch.tensor(expanded_edges, dtype=torch.long).t().contiguous()
+    else:
+        expanded_edge_index = torch.zeros((2, 0), dtype=torch.long)
+    return expanded_ranks, expanded_edge_index, virtual_ids, edge_penalties
 
 
 def _expanded_layers_to_tensor(layers: Any, num_nodes: int) -> torch.Tensor:

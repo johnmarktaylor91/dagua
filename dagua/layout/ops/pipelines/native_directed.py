@@ -8,6 +8,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from itertools import permutations
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional, Sequence, Tuple
 
 import numpy as np
@@ -77,6 +78,12 @@ DIRECTED_WIDE_DAG_MIN_WIDTH_DEPTH_RATIO = 4.0
 DIRECTED_WIDE_DAG_MIN_LAYER_WIDTH = 12
 DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_WIDTH = 10
 DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_LAYERS = 4
+DIRECTED_DOT_ORDER_MIN_NODES = 4
+DIRECTED_DOT_ORDER_MAX_NODES = 800
+DIRECTED_DOT_ORDER_MAX_CANDIDATES = 3
+DIRECTED_DOT_ORDER_PRIOR_S = 20.0
+DIRECTED_DOT_ORDER_MAX_EXPANDED_NODES = 6000
+DIRECTED_DOT_ORDER_MAX_EXPANSION_RATIO = 8.0
 DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
 DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
 DIRECTED_NESTED_STRESS_MIN_NODES = 6
@@ -122,6 +129,16 @@ class _RecombinantLayeredSpec:
     layering: str
     ordering: str
     xcoord: str
+
+
+@dataclass(frozen=True)
+class _DotOrderSpec:
+    """One bounded expanded-graph dot-mincross candidate arm."""
+
+    name: str
+    layering: str
+    xcoord: str
+    warm_start: bool
 
 
 @dataclass(frozen=True)
@@ -1019,6 +1036,51 @@ def _directed_wide_dag_ordering_enabled(problem: LayoutProblem) -> bool:
     return high_fanout or broad_layers or weighted_layered_skew
 
 
+def _directed_dot_order_enabled(problem: LayoutProblem) -> bool:
+    """Return whether expanded-graph dot-order candidates may be built.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem inspected using only runtime graph structure.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded semantic DAGs where long edges or wide fanout make
+        expanded-graph mincross materially different from raw-graph ordering.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_DOT_ORDER_MIN_NODES or n > DIRECTED_DOT_ORDER_MAX_NODES or edge_count == 0:
+        return False
+    structure = problem.structure
+    if structure is None:
+        return False
+    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+    tags = set(getattr(structure, "topology_tags", ()))
+    if "dense_dag" in tags:
+        return False
+
+    ranks, _max_width, long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
+    out_degree = [0] * n
+    for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i != dst_i and 0 <= src_i < n and 0 <= dst_i < n:
+            out_degree[src_i] += 1
+    max_out_degree = max(out_degree, default=0)
+    del ranks
+    return (
+        long_edge_ratio >= 0.05
+        or max_out_degree >= DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE
+        or _directed_wide_dag_ordering_enabled(problem)
+    )
+
+
 def _clean_fan_bundle_for_compaction(problem: LayoutProblem) -> bool:
     """Return whether the directed fan-compaction arm may be built.
 
@@ -1368,11 +1430,38 @@ def _apply_recombinant_ordering(
     tuple[list[list[int]], torch.Tensor]
         Ordered layers and positions after ordering.
     """
-    layers = torch.tensor(rank_values, dtype=torch.long)
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    expanded_ranks, expanded_edges, virtual_ids, _edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    n_expanded = len(expanded_ranks)
+    rank_sep = float(getattr(config, "_dagua_native_rank_sep", config.rank_sep))
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    expanded_initial = _initial_recombinant_positions(
+        expanded_ranks,
+        None,
+        rank_sep,
+        node_sep,
+    )
+    if initial_pos.shape[0] == int(problem.num_nodes):
+        expanded_initial[: int(problem.num_nodes)] = initial_pos.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
+    layers = torch.tensor(expanded_ranks, dtype=torch.long)
     state = SolveState(
-        pos=initial_pos.detach().clone(),
+        pos=expanded_initial.detach().clone(),
         layers=layers,
-        adjacency=_recombinant_adjacency_lists(problem.edge_index, int(problem.num_nodes)),
+        adjacency=_recombinant_adjacency_lists(expanded_edges, n_expanded),
+    )
+    state.extras["expanded_graph"] = SimpleNamespace(
+        edge_index=expanded_edges,
+        layers=layers,
+        num_nodes=n_expanded,
+        virtual_ids=virtual_ids,
     )
     ctx = RuntimeContext()
     if spec.ordering == "barycenter_transpose":
@@ -1395,25 +1484,23 @@ def _apply_recombinant_ordering(
         state = MedianSweep(MedianSweepConfig(passes=12)).apply(problem, state, ctx)
     elif spec.ordering == "discrete":
         ordered_pos = _rank_local_zero_crossing_swap_candidate(
-            initial_pos,
-            problem.edge_index,
-            max_passes=_ordering_portfolio_max_passes(int(problem.num_nodes)),
+            expanded_initial,
+            expanded_edges,
+            max_passes=_ordering_portfolio_max_passes(n_expanded),
             config=config,
         )
         state.pos = ordered_pos
         state.ordering = None
     if spec.ordering == "discrete":
-        rank_to_nodes = _rank_to_nodes_from_incumbent_y(
-            state.pos,
-            problem.edge_index,
-            problem.num_nodes,
-        )
+        expanded_rank_to_nodes: dict[int, list[int]] = {}
+        for node, rank in enumerate(expanded_ranks):
+            expanded_rank_to_nodes.setdefault(int(rank), []).append(node)
         ordered_layers = [
             sorted(nodes, key=lambda node: float(state.pos[node, 0].item()))
-            for _rank, nodes in sorted(rank_to_nodes.items())
+            for _rank, nodes in sorted(expanded_rank_to_nodes.items())
         ]
     else:
-        ordered_layers = _ordered_layers_from_ordering(rank_values, state.ordering)
+        ordered_layers = _ordered_layers_from_ordering(expanded_ranks, state.ordering)
     return ordered_layers, state.pos.detach().to(device="cpu", dtype=torch.float32)
 
 
@@ -1442,11 +1529,48 @@ def _assign_recombinant_x_coordinates(
         X coordinates with shape ``[N]``, or ``None`` if the existing x solver
         cannot run.
     """
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
     n = int(problem.num_nodes)
+    rank_values = [0] * max(n, 0)
+    for rank, layer in enumerate(ordered_layers):
+        for node in layer:
+            node_i = int(node)
+            if 0 <= node_i < n:
+                rank_values[node_i] = int(rank)
+    expanded_ranks, expanded_edges, virtual_ids, _edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    n_expanded = len(expanded_ranks)
+    ordered_node_ids = {int(node) for layer in ordered_layers for node in layer}
+    expanded_layers = [list(layer) for layer in ordered_layers]
+    if any(node >= n for node in ordered_node_ids):
+        expanded_layers = [list(layer) for layer in ordered_layers]
+    else:
+        for virtual_node in sorted(virtual_ids):
+            rank = int(expanded_ranks[virtual_node])
+            while len(expanded_layers) <= rank:
+                expanded_layers.append([])
+            expanded_layers[rank].append(virtual_node)
+        expanded_layers = [
+            sorted(
+                [int(node) for node in layer],
+                key=lambda node: (node not in virtual_ids, node),
+            )
+            for layer in expanded_layers
+        ]
     sizes = (
         problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
         if problem.node_sizes is not None
         else torch.full((n, 2), float(node_sep), dtype=torch.float32)
+    )
+    extra_count = max(0, n_expanded - n)
+    expanded_widths = (
+        torch.cat((sizes[:, 0], torch.zeros(extra_count, dtype=torch.float32)))
+        if extra_count > 0
+        else sizes[:, 0]
     )
     if spec.xcoord == "dot_lp":
         try:
@@ -1454,18 +1578,20 @@ def _assign_recombinant_x_coordinates(
                 _graphviz_dot_x_position_network_simplex,
             )
 
-            return _graphviz_dot_x_position_network_simplex(
-                rank_ordering=ordered_layers,
-                node_widths=sizes[:, 0],
-                edge_index=problem.edge_index.detach().to(device="cpu"),
+            x_all = _graphviz_dot_x_position_network_simplex(
+                rank_ordering=expanded_layers,
+                node_widths=expanded_widths,
+                edge_index=expanded_edges,
                 node_sep=node_sep,
                 edge_weights=(
-                    None
-                    if problem.edge_weights is None
-                    else problem.edge_weights.detach().to(device="cpu")
+                    torch.ones(int(expanded_edges.shape[1]), dtype=torch.float32)
+                    if expanded_edges.numel()
+                    else torch.zeros(0, dtype=torch.float32)
                 ),
                 center=True,
             ).to(dtype=torch.float32)
+            x_values = x_all[:n].to(dtype=torch.float32)
+            return x_values - x_values.mean()
         except Exception:
             return None
     if spec.xcoord == "brandes_koepf":
@@ -1473,33 +1599,28 @@ def _assign_recombinant_x_coordinates(
             from dagua.layout.ops.brandes_koepf import brandes_koepf_x_assignment
 
             order_index = {
-                int(node): order for layer in ordered_layers for order, node in enumerate(layer)
+                int(node): order for layer in expanded_layers for order, node in enumerate(layer)
             }
-            rank_index = {
-                int(node): rank for rank, layer in enumerate(ordered_layers) for node in layer
-            }
-            predecessors: dict[int, list[int]] = {node: [] for node in range(n)}
-            successors: dict[int, list[int]] = {node: [] for node in range(n)}
-            candidate_edges = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+            predecessors: dict[int, list[int]] = {node: [] for node in range(n_expanded)}
+            successors: dict[int, list[int]] = {node: [] for node in range(n_expanded)}
+            candidate_edges = expanded_edges.detach().to(device="cpu", dtype=torch.long)
             for src, dst in candidate_edges.t().tolist():
                 src_i = int(src)
                 dst_i = int(dst)
-                if src_i == dst_i or not (0 <= src_i < n and 0 <= dst_i < n):
-                    continue
-                if abs(rank_index.get(dst_i, 0) - rank_index.get(src_i, 0)) != 1:
+                if src_i == dst_i or not (0 <= src_i < n_expanded and 0 <= dst_i < n_expanded):
                     continue
                 successors[src_i].append(dst_i)
                 predecessors[dst_i].append(src_i)
-            for node in range(n):
+            for node in range(n_expanded):
                 predecessors[node].sort(key=lambda item: (order_index.get(item, 0), item))
                 successors[node].sort(key=lambda item: (order_index.get(item, 0), item))
-            widths = {node: float(sizes[node, 0].item()) for node in range(n)}
+            widths = {node: float(expanded_widths[node].item()) for node in range(n_expanded)}
             x_map = brandes_koepf_x_assignment(
-                layering=ordered_layers,
+                layering=expanded_layers,
                 predecessors=predecessors,
                 successors=successors,
                 widths=widths,
-                dummy_nodes=set(),
+                dummy_nodes=virtual_ids,
                 node_sep=node_sep,
             )
             x_values = torch.tensor([float(x_map.get(node, 0.0)) for node in range(n)])
@@ -1711,6 +1832,471 @@ def _directed_wide_dag_ordering_candidates(
             continue
         candidates[spec.name] = candidate
     return candidates
+
+
+def _dot_order_specs() -> tuple[_DotOrderSpec, ...]:
+    """Return the bounded expanded-graph dot-mincross candidate specs.
+
+    Returns
+    -------
+    tuple[_DotOrderSpec, ...]
+        Three deterministic candidates using dot ordering over virtual-chain
+        expanded layered graphs.
+    """
+    return (
+        _DotOrderSpec(
+            name="dot_ns_dotx",
+            layering="network_simplex_tightened",
+            xcoord="dot_lp",
+            warm_start=False,
+        ),
+        _DotOrderSpec(
+            name="dot_native_dotx",
+            layering="native_current",
+            xcoord="dot_lp",
+            warm_start=True,
+        ),
+        _DotOrderSpec(
+            name="dot_native_bk",
+            layering="native_current",
+            xcoord="brandes_koepf",
+            warm_start=True,
+        ),
+    )
+
+
+def _dot_order_iterations(expanded_nodes: int) -> int:
+    """Return the deterministic mincross iteration count for expanded size.
+
+    Parameters
+    ----------
+    expanded_nodes : int
+        Number of real plus virtual nodes.
+
+    Returns
+    -------
+    int
+        Graphviz-mincross iteration budget from the structural ladder.
+    """
+    if expanded_nodes <= 2000:
+        return 24
+    if expanded_nodes <= 4000:
+        return 12
+    return 8
+
+
+def _rank_ordering_from_values(
+    rank_values: Sequence[int],
+    incumbent: Optional[torch.Tensor] = None,
+) -> list[list[int]]:
+    """Build rank groups, optionally seeded by incumbent x order.
+
+    Parameters
+    ----------
+    rank_values : sequence of int
+        Per-node rank values.
+    incumbent : torch.Tensor, optional
+        Incumbent positions with shape ``[N, 2]`` used as a deterministic
+        warm-start order for real nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Nodes grouped by rank in left-to-right seed order.
+    """
+    rank_to_nodes: dict[int, list[int]] = {}
+    for node, rank in enumerate(rank_values):
+        rank_to_nodes.setdefault(int(rank), []).append(node)
+    if incumbent is None:
+        return [rank_to_nodes[rank] for rank in sorted(rank_to_nodes)]
+    x_values = incumbent.detach().to(device="cpu", dtype=torch.float32)[:, 0]
+    real_count = int(x_values.numel())
+    layers: list[list[int]] = []
+    for rank in sorted(rank_to_nodes):
+        nodes = rank_to_nodes[rank]
+        nodes.sort(
+            key=lambda node: (
+                float(x_values[node].item()) if node < real_count else 0.0,
+                node >= real_count,
+                node,
+            )
+        )
+        layers.append(nodes)
+    return layers
+
+
+def _expanded_size_within_dot_order_ladder(expanded_nodes: int, real_nodes: int) -> bool:
+    """Return whether expanded graph size is within the dot-order ladder.
+
+    Parameters
+    ----------
+    expanded_nodes : int
+        Number of real plus virtual nodes.
+    real_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when both absolute and relative expansion caps hold.
+    """
+    if expanded_nodes > DIRECTED_DOT_ORDER_MAX_EXPANDED_NODES:
+        return False
+    return float(expanded_nodes) <= DIRECTED_DOT_ORDER_MAX_EXPANSION_RATIO * float(
+        max(real_nodes, 1)
+    )
+
+
+def _dot_order_rank_values(
+    spec: _DotOrderSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+) -> Optional[list[int]]:
+    """Return real-node ranks for one dot-order spec.
+
+    Parameters
+    ----------
+    spec : _DotOrderSpec
+        Dot-order candidate specification.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    list[int] or None
+        Dense rank values, or ``None`` when the requested ranker cannot solve.
+    """
+    if spec.layering == "network_simplex_tightened":
+        from dagua.layout.ops.ordering import _expanded_layered_graph
+
+        longest_path_ranks, _max_width, _long_edge_ratio = _directed_rank_profile(
+            problem.edge_index,
+            int(problem.num_nodes),
+        )
+        expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+            rank_values=longest_path_ranks,
+            edge_index=problem.edge_index,
+            edge_weights=problem.edge_weights,
+        )
+        if not _expanded_size_within_dot_order_ladder(
+            len(expanded_ranks),
+            int(problem.num_nodes),
+        ):
+            return None
+    rank_spec = _RecombinantLayeredSpec(
+        name=spec.name,
+        layering=spec.layering,
+        ordering="graphviz_mincross",
+        xcoord=spec.xcoord,
+    )
+    return _recombinant_rank_values(rank_spec, problem, incumbent)
+
+
+def _build_dot_order_candidate(
+    spec: _DotOrderSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    rank_values: Optional[Sequence[int]] = None,
+) -> tuple[Optional[torch.Tensor], int]:
+    """Build one expanded-graph dot-order candidate.
+
+    Parameters
+    ----------
+    spec : _DotOrderSpec
+        Dot-order candidate specification.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+    rank_values : sequence of int, optional
+        Precomputed real-node rank values for the spec.
+
+    Returns
+    -------
+    tuple[torch.Tensor or None, int]
+        Candidate positions with shape ``[N, 2]`` and expanded node count.
+    """
+    from dagua.layout.ops._dot_mincross import graphviz_mincross
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    n = int(problem.num_nodes)
+    rank_values = (
+        _dot_order_rank_values(spec, problem, incumbent)
+        if rank_values is None
+        else list(rank_values)
+    )
+    if rank_values is None or len(rank_values) != n:
+        return None, n
+    expanded_ranks, expanded_edges, _virtual_ids, edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    expanded_n = len(expanded_ranks)
+    if not _expanded_size_within_dot_order_ladder(expanded_n, n):
+        return None, expanded_n
+    seed_pos = incumbent if spec.warm_start else None
+    seed_layers = _rank_ordering_from_values(expanded_ranks, seed_pos)
+    node_order = [int(node) for layer in seed_layers for node in layer]
+    ordered_layers = graphviz_mincross(
+        ranks=seed_layers,
+        edges=expanded_edges,
+        iterations=_dot_order_iterations(expanded_n),
+        edge_penalties=edge_penalties,
+        node_order=node_order,
+    )
+    x_spec = _RecombinantLayeredSpec(
+        name=spec.name,
+        layering=spec.layering,
+        ordering="graphviz_mincross",
+        xcoord=spec.xcoord,
+    )
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    x_values = _assign_recombinant_x_coordinates(x_spec, ordered_layers, problem, node_sep)
+    if x_values is None or int(x_values.numel()) != n:
+        return None, expanded_n
+    rank_sep = float(getattr(config, "_dagua_native_rank_sep", config.rank_sep))
+    y_values = torch.tensor(rank_values, dtype=torch.float32) * rank_sep
+    out = torch.stack([x_values.to(dtype=torch.float32), y_values], dim=1)
+    out[:, 1] = out[:, 1] - out[:, 1].mean()
+    if not torch.isfinite(out).all():
+        return None, expanded_n
+    return out, expanded_n
+
+
+def _directed_dot_order_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> dict[str, torch.Tensor]:
+    """Build bounded expanded-graph dot-order candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying deadline and telemetry fields.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate names mapped to complete layered layouts.
+    """
+    setattr(config, "_dagua_native_dot_order_fired", False)
+    if not bool(getattr(config, "use_dot_order_arm", True)):
+        return {}
+    if not _directed_dot_order_enabled(problem):
+        return {}
+    setattr(config, "_dagua_native_dot_order_fired", True)
+    candidates: dict[str, torch.Tensor] = {}
+    n = int(problem.num_nodes)
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    for spec in _dot_order_specs():
+        if len(candidates) >= DIRECTED_DOT_ORDER_MAX_CANDIDATES:
+            break
+        rank_values = _dot_order_rank_values(spec, problem, incumbent)
+        if rank_values is None or len(rank_values) != n:
+            continue
+        expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+            rank_values=rank_values,
+            edge_index=problem.edge_index,
+            edge_weights=problem.edge_weights,
+        )
+        expanded_n = len(expanded_ranks)
+        if not _expanded_size_within_dot_order_ladder(expanded_n, n):
+            break
+        predicted_cost = estimate_native_work_cost(
+            problem,
+            "directed_recombinant",
+            {"volume": float(expanded_n) / float(max(n, 1))},
+            _native_device_class(config),
+        )
+        predicted_cost.metadata["legacy_prior_s"] = DIRECTED_DOT_ORDER_PRIOR_S
+        predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
+        if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
+            config,
+            predicted_cost,
+            f"optional_directed_dot_order_{spec.name}",
+        ):
+            break
+        process_started = time.process_time()
+        candidate, _confirmed_expanded_n = _build_dot_order_candidate(
+            spec,
+            problem,
+            incumbent,
+            config,
+            rank_values=rank_values,
+        )
+        dot_order_cpu_s = _prediction_cpu_elapsed_s(process_started)
+        _LOGGER.info(
+            "Directed candidate runtime family=dot_order arm=%s cpu_seconds=%.3f expanded_n=%d",
+            spec.name,
+            dot_order_cpu_s,
+            expanded_n,
+        )
+        if candidate is None:
+            continue
+        candidates[spec.name] = candidate
+    return candidates
+
+
+def _register_dot_order_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    positions: Dict[str, torch.Tensor],
+    scores: Dict[str, float],
+    incumbent_pair: Optional["W5ScorePair"],
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    arm_timings: Dict[str, Tuple[float, float]],
+) -> Optional["W5ScorePair"]:
+    """Register only dual-ruler-dominating dot-order candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with candidate telemetry.
+    positions : dict[str, torch.Tensor]
+        Candidate registry updated in place.
+    scores : dict[str, float]
+        Directed score registry updated for admitted variants.
+    incumbent_pair : W5ScorePair, optional
+        Cached incumbent dual-ruler score pair.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    arm_timings : dict[str, tuple[float, float]]
+        Per-arm timing registry updated for admitted candidates.
+
+    Returns
+    -------
+    W5ScorePair or None
+        Cached incumbent score pair when computed, otherwise ``None``.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    if not _portfolio_has_budget(config, min_remaining_s=2.0):
+        return incumbent_pair
+    raw_candidates = _directed_dot_order_candidates(problem, incumbent, config)
+    if not raw_candidates:
+        return incumbent_pair
+    if incumbent_pair is None:
+        incumbent_pair = _score_directed_candidate_pair(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+    incumbent_referee_key = _runtime_referee_telemetry(incumbent, problem)[0]
+    telemetry = list(getattr(config, "_dagua_native_dot_order_telemetry", []))
+    for name, raw_candidate in raw_candidates.items():
+        candidate_started = time.perf_counter()
+        variants: Dict[str, torch.Tensor] = {}
+        _register_challenger_variants(
+            name,
+            raw_candidate,
+            problem,
+            config,
+            variants,
+            preserve_rank_order=True,
+        )
+        for variant_name, candidate in variants.items():
+            dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
+                candidate,
+                incumbent_pair,
+                problem,
+                cluster_ids,
+                all_pairs_dist,
+                incumbent_referee_key,
+            )
+            selected = bool(dominates)
+            telemetry.append(
+                {
+                    "name": variant_name,
+                    "incumbent_directed": incumbent_pair.directed,
+                    "incumbent_undirected": incumbent_pair.undirected,
+                    "candidate_directed": candidate_pair.directed,
+                    "candidate_undirected": candidate_pair.undirected,
+                    "selected": selected,
+                }
+            )
+            if not selected:
+                continue
+            positions[variant_name] = candidate
+            scores[variant_name] = candidate_pair.directed
+            arm_timings[variant_name] = (candidate_started, time.perf_counter())
+    setattr(config, "_dagua_native_dot_order_telemetry", telemetry)
+    return incumbent_pair
+
+
+def maybe_accept_dot_order_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> torch.Tensor:
+    """Return incumbent or a selected expanded-graph dot-order candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current layered positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with arm telemetry.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        The incumbent or the highest directed-score dot-order candidate that
+        already dominates the incumbent under both frozen rulers.
+    """
+    positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
+    incumbent_score = _score_directed_candidate_cached(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    scores: Dict[str, float] = {"incumbent": incumbent_score}
+    arm_timings: Dict[str, Tuple[float, float]] = {}
+    _register_dot_order_candidates(
+        problem=problem,
+        incumbent=incumbent,
+        config=config,
+        positions=positions,
+        scores=scores,
+        incumbent_pair=None,
+        cluster_ids=cluster_ids,
+        all_pairs_dist=all_pairs_dist,
+        arm_timings=arm_timings,
+    )
+    best_name = max(scores, key=lambda name: (scores[name], name))
+    if best_name == "incumbent":
+        return incumbent
+    setattr(config, "_dagua_native_dot_order_selected", best_name)
+    return positions[best_name].to(device=incumbent.device, dtype=incumbent.dtype)
 
 
 def _register_wide_dag_ordering_candidates(
@@ -4147,6 +4733,22 @@ def layout_native_directed_portfolio(
         except Exception as exc:  # noqa: BLE001 -- wide-DAG candidates cannot sink incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed wide-DAG ordering challenger failed", exc_info=True)
+    if _directed_dot_order_enabled(problem):
+        try:
+            incumbent_pair = _register_dot_order_candidates(
+                problem=problem,
+                incumbent=incumbent,
+                config=config,
+                positions=positions,
+                scores=scores,
+                incumbent_pair=incumbent_pair,
+                cluster_ids=cluster_ids,
+                all_pairs_dist=all_pairs_dist,
+                arm_timings=arm_timings,
+            )
+        except Exception as exc:  # noqa: BLE001 -- dot-order candidates cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed dot-order challenger failed", exc_info=True)
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
