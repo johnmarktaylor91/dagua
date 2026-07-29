@@ -8,7 +8,12 @@ import pytest
 import torch
 
 from dagua.layout.classic.fmmm import layout_fmmm
-from dagua.layout.ops.pipelines.fmmm import build_fmmm_pipeline, layout_fmmm_pipeline
+from dagua.layout.ops.pipelines.fmmm import (
+    _graphviz_fdp_prism_delaunay_edges,
+    _graphviz_fdp_prism_overlap,
+    build_fmmm_pipeline,
+    layout_fmmm_pipeline,
+)
 from dagua.layout.ops.state import (
     ExecutionPlan,
     LayoutProblem,
@@ -83,6 +88,41 @@ def _complete_edge_index(num_nodes: int) -> torch.Tensor:
         for target in range(num_nodes)
         if source != target
     )
+
+
+def test_graphviz_fdp_prism_delaunay_sanitizes_nonfinite_degenerate_points() -> None:
+    """PRISM Delaunay input sanitation prevents NaN/degenerate SciPy crashes."""
+    x_positions = [0.0, float("nan"), float("inf"), 0.0, 0.0]
+    y_positions = [0.0, 0.0, float("-inf"), 0.0, 0.0]
+
+    edges = _graphviz_fdp_prism_delaunay_edges(x_positions, y_positions)
+
+    assert edges
+    assert all(0 <= source < target < len(x_positions) for source, target in edges)
+
+
+def test_graphviz_fdp_prism_overlap_returns_finite_after_nonfinite_input() -> None:
+    """PRISM overlap removal returns finite coordinates after bad warm starts."""
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [float("nan"), 0.0],
+            [float("inf"), float("-inf")],
+            [0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    edge_index = _edge_index_from_edges([(0, 1), (1, 2), (2, 3)])
+    node_sizes = torch.full((4, 2), 12.0, dtype=torch.float32)
+
+    actual = _graphviz_fdp_prism_overlap(
+        positions,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        ntry=1,
+    )
+
+    assert bool(torch.isfinite(actual).all().item())
 
 
 def _assert_exact_match(classic: torch.Tensor, pipeline: torch.Tensor) -> None:
