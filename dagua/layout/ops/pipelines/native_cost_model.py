@@ -8,6 +8,7 @@ one DWU is one modeled wall-second on the frozen calibration reference box.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
@@ -33,6 +34,27 @@ PROVENANCE_REF = (
 # over-priced small/medium rows 90-7000x and starved the winning fCoSE arms
 # (the M2 4-row regression class).
 FCOSE_EXACT_REPULSION_NODE_CAP = 512
+
+V3_REFEREE_CPU_ANCHORS: tuple[tuple[int, int, float], ...] = (
+    (50, 70, 0.033),
+    (120, 237, 0.325),
+    (500, 1470, 1.16),
+    (1000, 2038, 5.36),
+)
+_V3_REFEREE_LOG_N = tuple(math.log(float(anchor[0])) for anchor in V3_REFEREE_CPU_ANCHORS)
+_V3_REFEREE_LOG_DWU = tuple(math.log(anchor[2]) for anchor in V3_REFEREE_CPU_ANCHORS)
+_V3_REFEREE_LOG_SECANTS = tuple(
+    (_V3_REFEREE_LOG_DWU[index + 1] - _V3_REFEREE_LOG_DWU[index])
+    / (_V3_REFEREE_LOG_N[index + 1] - _V3_REFEREE_LOG_N[index])
+    for index in range(len(V3_REFEREE_CPU_ANCHORS) - 1)
+)
+_V3_REFEREE_LOG_SLOPES = (
+    _V3_REFEREE_LOG_SECANTS[0],
+    1.3837190372140398,
+    1.3356963554361434,
+    2.0,
+)
+_V3_REFEREE_MIN_DWU = 0.02
 
 # Frozen modeled wall-second constants. Tiny-row W5 priors are retained as
 # protective measured/model anchors; directed flat arms use P90 idle telemetry
@@ -513,6 +535,59 @@ def estimate_native_work_cost(
     )
 
 
+def _v3_referee_cpu_anchor_cost(num_nodes: int) -> float:
+    """Return the measured CPU DWU price for one V3 referee score.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes used as the deterministic complexity axis.
+
+    Returns
+    -------
+    float
+        Modeled CPU DWU for one full restricted V3 scorer evaluation.
+
+    Notes
+    -----
+    The curve is a monotone cubic Hermite interpolation in log-node/log-cost
+    space through the PF3 B3 measured full-scorer anchors. Above the largest
+    anchor it continues with the requested ``~5.4 * (N / 1000)^2`` floor,
+    avoiding the old under-priced scale boundary while keeping the function
+    continuous at ``N=1000``.
+    """
+    n = max(1, _safe_nonnegative_int(num_nodes))
+    if n >= V3_REFEREE_CPU_ANCHORS[-1][0]:
+        return V3_REFEREE_CPU_ANCHORS[-1][2] * (float(n) / 1000.0) ** 2
+    if n <= V3_REFEREE_CPU_ANCHORS[0][0]:
+        scaled = (
+            V3_REFEREE_CPU_ANCHORS[0][2]
+            * (float(n) / float(V3_REFEREE_CPU_ANCHORS[0][0])) ** _V3_REFEREE_LOG_SLOPES[0]
+        )
+        return max(_V3_REFEREE_MIN_DWU, float(scaled))
+
+    log_n = math.log(float(n))
+    for index in range(len(V3_REFEREE_CPU_ANCHORS) - 1):
+        lower = _V3_REFEREE_LOG_N[index]
+        upper = _V3_REFEREE_LOG_N[index + 1]
+        if log_n <= upper:
+            span = upper - lower
+            t = (log_n - lower) / span
+            h00 = 2.0 * t**3 - 3.0 * t**2 + 1.0
+            h10 = t**3 - 2.0 * t**2 + t
+            h01 = -2.0 * t**3 + 3.0 * t**2
+            h11 = t**3 - t**2
+            log_cost = (
+                h00 * _V3_REFEREE_LOG_DWU[index]
+                + h10 * span * _V3_REFEREE_LOG_SLOPES[index]
+                + h01 * _V3_REFEREE_LOG_DWU[index + 1]
+                + h11 * span * _V3_REFEREE_LOG_SLOPES[index + 1]
+            )
+            return float(math.exp(log_cost))
+
+    return V3_REFEREE_CPU_ANCHORS[-1][2]
+
+
 def estimate_v3_referee_cost(
     num_nodes: int,
     num_edges: int,
@@ -545,25 +620,11 @@ def estimate_v3_referee_cost(
     normalized_device = str(device_class).lower()
     density_volume = float(n * max(n - 1, 0) // 2)
     edge_pair_volume = float(e * max(e - 1, 0) // 2)
-    base = 0.02 + 1.8e-6 * density_volume + 2.0e-7 * min(edge_pair_volume, 20_000.0)
-    if has_clusters:
-        base += 0.08 + 2.0e-4 * float(n)
-    if has_weights:
-        base += 0.05 + 1.5e-4 * float(max(e, 1))
-    if n >= 1000:
-        base = max(base, 2.2 * (float(n) / 1000.0) ** 2)
-    elif n >= 500:
-        base = max(base, 0.9 * (float(n) / 500.0) ** 2)
-    elif n >= 200:
-        base = max(base, 0.4 * (float(n) / 200.0) ** 2)
-    elif n >= 120:
-        base = max(base, 0.3 * (float(n) / 120.0) ** 2)
-    if normalized_device == "cuda":
-        base *= 0.85
+    base = _v3_referee_cpu_anchor_cost(n)
     metadata = {
         "provenance": (
-            "V3 referee C4-fast anchors from Fable design: ~0.3/0.4/0.9/2.2s "
-            "@N=120/200/500/1000 clustered-weighted."
+            "PF3 B3 DWU-honesty refit to measured full restricted V3 scorer CPU "
+            "costs: 0.033/0.325/1.16/5.36 DWU @ N=50/120/500/1000."
         ),
         "num_nodes": n,
         "num_edges": e,
@@ -571,6 +632,7 @@ def estimate_v3_referee_cost(
         "has_clusters": bool(has_clusters),
         "has_weights": bool(has_weights),
         "terms": {
+            "anchor_curve": float(base),
             "dense_pairs": density_volume,
             "edge_pairs_capped": min(edge_pair_volume, 20_000.0),
         },
