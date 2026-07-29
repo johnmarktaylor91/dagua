@@ -17,6 +17,7 @@ from dagua.eval.graphs import _make_r8_lr_direction
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.layout.graph_classify import classify_graph
+from dagua.layout.ops.ordering import _expanded_layered_graph
 from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
 from dagua.layout.ops.pipelines.native_directed import (
     DIRECTED_FULL_REFEREE_TOP_K,
@@ -28,12 +29,15 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
+    _assign_recombinant_x_coordinates,
     _bounded_connected_nested_dag_for_stress,
+    _build_dot_order_candidate,
     _build_fan_compaction_candidate,
     _build_nested_stress_candidate,
     _clean_fan_bundle_for_compaction,
     _crossing_edge_pairs,
     _directed_cluster_candidate_is_dual_admissible,
+    _directed_dot_order_candidates,
     _directed_mrtree_enabled,
     _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
@@ -41,6 +45,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     _directed_recombinant_layered_enabled,
     _directed_stress_blend_candidates,
     _DirectedClusterScoreTelemetry,
+    _DotOrderSpec,
     _exact_crossing_count,
     _exact_crossing_count_loop,
     _fan_compaction_candidate_is_accepted,
@@ -820,6 +825,201 @@ def test_recombinant_layered_budget_gate_skips_when_tight() -> None:
     incumbent = torch.zeros((100, 2), dtype=torch.float32)
 
     assert _directed_recombinant_layered_candidates(problem, incumbent, config) == {}
+
+
+def _dot_order_structure(**overrides: object) -> SimpleNamespace:
+    """Return classifier metadata representative of dot-order target DAGs.
+
+    Parameters
+    ----------
+    overrides : object
+        Structural fields that should override the default target metadata.
+
+    Returns
+    -------
+    SimpleNamespace
+        Structural object consumed by the dot-order gate.
+    """
+    values = {
+        "is_directed_acyclic": True,
+        "is_acyclic": True,
+        "is_semantically_directed": True,
+        "topology_tags": (),
+        "num_layers_effective": 3,
+        "num_layers": 3,
+        "edge_to_node_ratio": 1.0,
+        "hub_edge_fraction": 0.2,
+        "diameter_estimate": 3,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _skip_edge_dot_order_problem() -> LayoutProblem:
+    """Return a small DAG where expanded mincross can improve chord crossings.
+
+    Returns
+    -------
+    LayoutProblem
+        Directed acyclic graph with rank-span-two crossing skip edges.
+    """
+    edge_index = torch.tensor(
+        [
+            [0, 1, 0, 1, 2, 3],
+            [5, 4, 2, 3, 5, 4],
+        ],
+        dtype=torch.long,
+    )
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=6,
+        node_sizes=torch.full((6, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+
+def test_dot_order_gate_structural_and_off_class_noop() -> None:
+    """Off-class dot-order calls only mark the fired telemetry false."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+    config = LayoutConfig()
+    incumbent = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+
+    candidates = _directed_dot_order_candidates(problem, incumbent, config)
+
+    assert candidates == {}
+    assert getattr(config, "_dagua_native_dot_order_fired") is False
+    assert torch.equal(incumbent, torch.arange(6, dtype=torch.float32).reshape(3, 2))
+    assert not hasattr(config, "_dagua_native_dot_order_telemetry")
+
+
+def test_dot_order_candidates_are_byte_deterministic() -> None:
+    """Two dot-order builds return byte-identical candidate tensors."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.tensor(
+        [
+            [-20.0, 0.0],
+            [20.0, 0.0],
+            [-20.0, 40.0],
+            [20.0, 40.0],
+            [-20.0, 80.0],
+            [20.0, 80.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    first = _directed_dot_order_candidates(problem, incumbent, LayoutConfig())
+    second = _directed_dot_order_candidates(problem, incumbent, LayoutConfig())
+
+    assert first.keys() == second.keys()
+    assert first
+    for name, first_candidate in first.items():
+        assert torch.equal(first_candidate, second[name])
+
+
+def test_dot_order_candidate_places_all_real_nodes_with_rank_consistent_y() -> None:
+    """The expanded dot-order candidate maps every real node back to finite coordinates."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.zeros((6, 2), dtype=torch.float32)
+    candidate, _expanded_n = _build_dot_order_candidate(
+        _DotOrderSpec(
+            name="dot_ns_dotx",
+            layering="network_simplex_tightened",
+            xcoord="dot_lp",
+            warm_start=False,
+        ),
+        problem,
+        incumbent,
+        LayoutConfig(),
+    )
+
+    assert candidate is not None
+    assert candidate.shape == (6, 2)
+    assert torch.isfinite(candidate).all()
+    for src, dst in problem.edge_index.t().tolist():
+        assert float(candidate[int(dst), 1].item()) > float(candidate[int(src), 1].item())
+
+
+def test_dot_ns_dotx_constructive_win_on_skip_edge_dag() -> None:
+    """The dot mincross arm reduces exact chord crossings on a skip-edge DAG."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.tensor(
+        [
+            [-20.0, 0.0],
+            [20.0, 0.0],
+            [-20.0, 40.0],
+            [20.0, 40.0],
+            [-20.0, 80.0],
+            [20.0, 80.0],
+        ],
+        dtype=torch.float32,
+    )
+    candidate, expanded_n = _build_dot_order_candidate(
+        _DotOrderSpec(
+            name="dot_ns_dotx",
+            layering="network_simplex_tightened",
+            xcoord="dot_lp",
+            warm_start=False,
+        ),
+        problem,
+        incumbent,
+        LayoutConfig(),
+    )
+
+    assert candidate is not None
+    assert expanded_n <= 8 * int(problem.num_nodes)
+    assert _exact_crossing_count(candidate, problem.edge_index) < _exact_crossing_count(
+        incumbent,
+        problem.edge_index,
+    )
+
+
+def test_expanded_virtual_chain_crossings_match_original_chords() -> None:
+    """Expanded adjacent-rank chains preserve the chord crossing count."""
+    rank_values = [0, 0, 2, 2]
+    edge_index = torch.tensor([[0, 1], [3, 2]], dtype=torch.long)
+    expanded_ranks, expanded_edges, _virtual_ids, _penalties = _expanded_layered_graph(
+        rank_values,
+        edge_index,
+        None,
+    )
+    chord_pos = torch.tensor(
+        [[-10.0, 0.0], [10.0, 0.0], [-10.0, 20.0], [10.0, 20.0]],
+        dtype=torch.float32,
+    )
+    expanded_pos = torch.zeros((len(expanded_ranks), 2), dtype=torch.float32)
+    expanded_pos[:4] = chord_pos
+    expanded_pos[4] = torch.tensor([-10.0, 10.0])
+    expanded_pos[5] = torch.tensor([10.0, 10.0])
+
+    assert _exact_crossing_count(expanded_pos, expanded_edges) == _exact_crossing_count(
+        chord_pos,
+        edge_index,
+    )
+
+
+def test_recombinant_bk_uses_span_two_virtual_chain_edges() -> None:
+    """A rank-span-two edge influences BK after virtual-chain expansion."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [2]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0),
+    )
+    ordered_layers = [[0], [1], [2]]
+    spec = type(
+        "Spec",
+        (),
+        {"xcoord": "brandes_koepf"},
+    )()
+
+    x_values = _assign_recombinant_x_coordinates(spec, ordered_layers, problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert abs(float(x_values[0].item()) - float(x_values[2].item())) < 1.0e-5
 
 
 def test_challenger_registration_includes_guarded_raw_variant() -> None:

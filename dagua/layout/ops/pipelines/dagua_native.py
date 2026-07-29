@@ -7088,12 +7088,17 @@ def layout_dagua_native_pipeline(
         register_anytime_best(result, "post_base_contest")
         try:
             from dagua.layout.ops.pipelines.native_directed import (
+                _directed_dot_order_enabled,
                 _directed_wide_dag_ordering_enabled,
+                maybe_accept_dot_order_arm,
                 maybe_accept_wide_dag_ordering_arm,
             )
             from dagua.metrics import _all_pairs_unweighted, _build_csr
 
-            if _directed_wide_dag_ordering_enabled(problem):
+            dot_order_anytime_enabled = not bool(problem.clusters) and _directed_dot_order_enabled(
+                problem,
+            )
+            if _directed_wide_dag_ordering_enabled(problem) or dot_order_anytime_enabled:
                 cpu_edge_index = prepared_edge_index.detach().to(device="cpu")
                 offsets, targets = _build_csr(cpu_edge_index, int(problem.num_nodes))
                 all_pairs_dist = _all_pairs_unweighted(
@@ -7103,6 +7108,17 @@ def layout_dagua_native_pipeline(
                     max_dist=int(problem.num_nodes),
                 )
                 wide_cluster_ids = _problem_cluster_ids(problem)
+                if dot_order_anytime_enabled:
+                    dot_result = maybe_accept_dot_order_arm(
+                        problem,
+                        result,
+                        prepared_config,
+                        wide_cluster_ids,
+                        all_pairs_dist,
+                    )
+                    if dot_result is not result:
+                        result = ensure_finite_boundary(dot_result)
+                        register_anytime_best(result, "dot_order_accept")
                 wide_result = maybe_accept_wide_dag_ordering_arm(
                     problem,
                     result,
@@ -7117,7 +7133,7 @@ def layout_dagua_native_pipeline(
             if is_worker_timeout_like_exception(exc):
                 raise
             _LOGGER.warning(
-                "wide-DAG ordering challenger failed; preserving base result",
+                "directed ordering challenger failed; preserving base result",
                 exc_info=True,
             )
         if dot_cluster_fidelity:
