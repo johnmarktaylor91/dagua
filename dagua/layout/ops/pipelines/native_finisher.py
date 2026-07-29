@@ -87,6 +87,8 @@ _W5_PASS1_CONTRASTIVE_WEIGHT = 8.0
 _W5_PASS2_CONTRASTIVE_WEIGHT = 12.0
 _W5_CONTRASTIVE_MARGIN_NODE_DIAG = 0.45
 _W5_SCALE_SEARCH_EVALS = 6
+_W5_SCALE_SEARCH_LARGE_EVALS = 3
+_W5_SCALE_SEARCH_LARGE_N = 300
 _W5_SCALE_SEARCH_MIN = 0.50
 _W5_SCALE_SEARCH_MAX = 2.40
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
@@ -202,11 +204,51 @@ class W5ScorePair:
         Score from the frozen common undirected composite.
     v3 : float, optional
         Runtime-restricted V3 tiered headline score when available.
+    c5_whitespace_ratio : float, optional
+        Runtime-restricted V3 C5 whitespace ratio when available.
+    c4_clearance_penalty : float, optional
+        Runtime-restricted V3 C4 clearance penalty when available.
+    c4_clearance_contact_pairs : int, optional
+        Runtime-restricted V3 C4 clearance contact count when available.
     """
 
     directed: float
     undirected: float
     v3: Optional[float] = None
+    c5_whitespace_ratio: Optional[float] = None
+    c4_clearance_penalty: Optional[float] = None
+    c4_clearance_contact_pairs: Optional[int] = None
+
+
+def w5_score_pair_from_v3_result(directed: float, undirected: float, v3_result: Any) -> W5ScorePair:
+    """Build a W5 score pair with runtime V3 facet telemetry.
+
+    Parameters
+    ----------
+    directed : float
+        Directed frozen-ruler composite score.
+    undirected : float
+        Undirected frozen-ruler composite score.
+    v3_result : object
+        Runtime-restricted V3 result exposing ``scores`` and ``facets``.
+
+    Returns
+    -------
+    W5ScorePair
+        Score pair carrying the tiered headline score plus C4/C5 facet fields
+        used to gate global-scale line search.
+    """
+    c4_meta = getattr(v3_result.facets.get("C4"), "metadata", {})
+    c5_meta = getattr(v3_result.facets.get("C5"), "metadata", {})
+    clearance_pairs = c4_meta.get("clearance_contact_pairs")
+    return W5ScorePair(
+        directed=directed,
+        undirected=undirected,
+        v3=float(v3_result.scores["tiered"]),
+        c5_whitespace_ratio=float(c5_meta["whitespace_ratio"]),
+        c4_clearance_penalty=float(c4_meta["clearance_penalty"]),
+        c4_clearance_contact_pairs=None if clearance_pairs is None else int(clearance_pairs),
+    )
 
 
 @dataclass(frozen=True)
@@ -965,6 +1007,8 @@ class W5ScaleSearchResult:
         Best scaled positions with shape ``[N, 2]``.
     score_pair : W5ScorePair
         Honest score pair for ``pos``.
+    raw_score_pair : W5ScorePair
+        Honest score pair for the unscaled checkpoint.
     scale : float
         Global scale factor applied around the checkpoint centroid.
     evals : int
@@ -976,6 +1020,7 @@ class W5ScaleSearchResult:
 
     pos: torch.Tensor
     score_pair: W5ScorePair
+    raw_score_pair: W5ScorePair
     scale: float
     evals: int
     keepalive: tuple[torch.Tensor, ...] = ()
@@ -2839,6 +2884,49 @@ def _w5_score_scalar(pair: W5ScorePair, tallied_axis: str) -> Optional[float]:
     return float(value) if math.isfinite(float(value)) else None
 
 
+def _w5_scale_search_eval_cap(node_count: int) -> int:
+    """Return the honest-referee eval cap for one line search.
+
+    Parameters
+    ----------
+    node_count : int
+        Number of candidate nodes.
+
+    Returns
+    -------
+    int
+        Maximum score evaluations, including the raw checkpoint score.
+    """
+    if int(node_count) >= _W5_SCALE_SEARCH_LARGE_N:
+        return _W5_SCALE_SEARCH_LARGE_EVALS
+    return _W5_SCALE_SEARCH_EVALS
+
+
+def _w5_scale_search_facet_gate(pair: W5ScorePair) -> bool:
+    """Return whether V3 C4/C5 facets justify global scale search.
+
+    Parameters
+    ----------
+    pair : W5ScorePair
+        Raw checkpoint score pair carrying optional V3 facet telemetry.
+
+    Returns
+    -------
+    bool
+        ``True`` when C5 is outside its frozen area band or C4 reports a
+        clearance deficit.
+    """
+    ratio = pair.c5_whitespace_ratio
+    if ratio is not None and math.isfinite(float(ratio)):
+        if float(ratio) < float(WHITESPACE_RATIO_LO) or float(ratio) > float(WHITESPACE_RATIO_HI):
+            return True
+    clearance_penalty = pair.c4_clearance_penalty
+    if clearance_penalty is not None and math.isfinite(float(clearance_penalty)):
+        return float(clearance_penalty) > 0.0
+    contact_pairs = pair.c4_clearance_contact_pairs
+    return contact_pairs is not None and int(contact_pairs) > 0
+
+
 def _scale_positions_about_centroid(pos: torch.Tensor, scale: float) -> torch.Tensor:
     """Apply a global layout scale around the current node centroid.
 
@@ -2867,6 +2955,7 @@ def _honest_scale_line_search(
     *,
     deadline: float,
     config: Optional[LayoutConfig],
+    keepalive: list[torch.Tensor],
 ) -> W5ScaleSearchResult:
     """Run deterministic global-scale search scored by the honest referee.
 
@@ -2883,6 +2972,8 @@ def _honest_scale_line_search(
         Absolute ``time.monotonic()`` deadline for non-measured W5 work.
     config : LayoutConfig, optional
         Prepared layout configuration used for hard wall-reserve checks.
+    keepalive : list[torch.Tensor]
+        Run-level tensor retention list used by id-keyed scorer caches.
 
     Returns
     -------
@@ -2890,16 +2981,24 @@ def _honest_scale_line_search(
         Best scored scale candidate. Legacy non-V3 score pairs return the raw
         checkpoint after one score evaluation.
     """
+    scored_keepalive = [checkpoint_pos]
+    keepalive.append(checkpoint_pos)
     raw_pair = score_fn(checkpoint_pos)
     raw_scalar = _w5_score_scalar(raw_pair, tallied_axis)
-    keepalive = [checkpoint_pos]
-    if raw_pair.v3 is None or raw_scalar is None:
+    max_evals = _w5_scale_search_eval_cap(int(checkpoint_pos.shape[0]))
+    if (
+        raw_pair.v3 is None
+        or raw_scalar is None
+        or max_evals <= 1
+        or not _w5_scale_search_facet_gate(raw_pair)
+    ):
         return W5ScaleSearchResult(
             pos=checkpoint_pos,
             score_pair=raw_pair,
+            raw_score_pair=raw_pair,
             scale=1.0,
             evals=1,
-            keepalive=tuple(keepalive),
+            keepalive=tuple(scored_keepalive),
         )
     best_pos = checkpoint_pos
     best_pair = raw_pair
@@ -2929,6 +3028,7 @@ def _honest_scale_line_search(
         ):
             return None
         scaled_pos = _scale_positions_about_centroid(checkpoint_pos, scale)
+        scored_keepalive.append(scaled_pos)
         keepalive.append(scaled_pos)
         pair = score_fn(scaled_pos)
         evals += 1
@@ -2944,7 +3044,7 @@ def _honest_scale_line_search(
     x2 = left + inv_phi * (right - left)
     score1: Optional[float] = None
     score2: Optional[float] = None
-    while evals < _W5_SCALE_SEARCH_EVALS:
+    while evals < max_evals:
         if score1 is None:
             score1 = score_scale(x1)
             if score1 is None:
@@ -2970,9 +3070,10 @@ def _honest_scale_line_search(
     return W5ScaleSearchResult(
         pos=best_pos,
         score_pair=best_pair,
+        raw_score_pair=raw_pair,
         scale=best_scale,
         evals=evals,
-        keepalive=tuple(keepalive),
+        keepalive=tuple(scored_keepalive),
     )
 
 
@@ -3164,7 +3265,8 @@ def _measured_cost_plan(
         W5CostPlan
             Cost plan priced solely by the frozen W5 cost model.
         """
-        reserved_checkpoints = int(checkpoints) * _W5_SCALE_SEARCH_EVALS
+        scale_search_evals = _w5_scale_search_eval_cap(node_count)
+        reserved_checkpoints = int(checkpoints) * scale_search_evals
         cost = estimate_native_work_cost(
             {"num_nodes": node_count, "num_edges": edge_count},
             "w5",
@@ -3193,6 +3295,7 @@ def _measured_cost_plan(
             predicted_s=predicted_s,
             shadow_step_s=step_measurement.step_s,
             shadow_warmup_s=step_measurement.warmup_s,
+            scale_search_evals=scale_search_evals,
         )
 
     minimum_plan = build_plan(1, 1, 1)
@@ -3695,20 +3798,38 @@ def run_w5_finisher(
                     try:
                         score_started = time.perf_counter()
                         score_pos = checkpoint_pos.to(device=edge_index.device, dtype=torch.float32)
+                        raw_score_pos = score_pos
                         scale_search = _honest_scale_line_search(
                             score_pos,
                             score_fn,
                             tallied_axis,
                             deadline=float("inf") if use_measured_cost else deadline,
                             config=config,
+                            keepalive=scale_search_keepalive,
                         )
-                        scale_search_keepalive.extend(scale_search.keepalive)
                         score_pos = scale_search.pos
-                        checkpoint_pos = scale_search.pos.to(
+                        scaled_checkpoint_pos = scale_search.pos.to(
                             device=checkpoint_pos.device,
                             dtype=checkpoint_pos.dtype,
                         )
                         honest = scale_search.score_pair
+                        if abs(float(scale_search.scale) - 1.0) > 1.0e-12:
+                            scaled_overlap = _overlap_count(
+                                scaled_checkpoint_pos,
+                                size_work,
+                                shape_work,
+                            )
+                            if scaled_overlap > incumbent_overlap or _is_degenerate(
+                                scaled_checkpoint_pos,
+                                size_work,
+                            ):
+                                _increment_count(viability_counts, "scaled_viability_fallback")
+                                score_pos = raw_score_pos
+                                honest = scale_search.raw_score_pair
+                            else:
+                                checkpoint_pos = scaled_checkpoint_pos
+                        else:
+                            checkpoint_pos = scaled_checkpoint_pos
                         score_s += max(0.0, time.perf_counter() - score_started)
                     except Exception as exc:
                         score_s += max(0.0, time.perf_counter() - score_started)
@@ -3980,4 +4101,5 @@ __all__ = [
     "run_w5_finisher",
     "w5_honest_axes_from_metrics",
     "w5_dominates",
+    "w5_score_pair_from_v3_result",
 ]

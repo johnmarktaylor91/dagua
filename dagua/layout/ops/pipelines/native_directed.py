@@ -518,7 +518,10 @@ def _score_directed_candidate_payload(
         Directed/undirected composites and honest W5 routing axes from the
         same metric pass.
     """
-    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair, w5_honest_axes_from_metrics
+    from dagua.layout.ops.pipelines.native_finisher import (
+        w5_honest_axes_from_metrics,
+        w5_score_pair_from_v3_result,
+    )
     from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
     from dagua.metrics import composite, composite_undirected, full
 
@@ -542,10 +545,10 @@ def _score_directed_candidate_payload(
     numeric["declared_hierarchical"] = True
     v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
     return (
-        W5ScorePair(
+        w5_score_pair_from_v3_result(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
-            v3=float(v3_result.scores["tiered"]),
+            v3_result=v3_result,
         ),
         w5_honest_axes_from_metrics(numeric),
     )

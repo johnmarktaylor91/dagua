@@ -5139,6 +5139,7 @@ def _best_of_polish(
         is_worker_timeout_like_exception,
         w5_dominates,
         w5_honest_axes_from_metrics,
+        w5_score_pair_from_v3_result,
     )
     from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
     from dagua.metrics import (
@@ -5238,10 +5239,10 @@ def _best_of_polish(
             all_pairs_dist=all_pairs_dist,
         )
         numeric["declared_hierarchical"] = declared_hierarchical
-        score_pair = W5ScorePair(
+        score_pair = w5_score_pair_from_v3_result(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
-            v3=float(v3_result_for(pos).scores["tiered"]),
+            v3_result=v3_result_for(pos),
         )
         payload = (score_pair, w5_honest_axes_from_metrics(numeric))
         honest_score_cache[cache_key] = payload
@@ -5930,6 +5931,7 @@ def _terminal_w5_polish(
             w5_dominates,
             w5_honest_axes_from_metrics,
             w5_predicted_skip_reason,
+            w5_score_pair_from_v3_result,
         )
         from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
         from dagua.metrics import (
@@ -6039,10 +6041,10 @@ def _terminal_w5_polish(
             )
             numeric["declared_hierarchical"] = declared_hierarchical
             return (
-                W5ScorePair(
+                w5_score_pair_from_v3_result(
                     directed=float(composite(numeric)),
                     undirected=float(composite_undirected(numeric)),
-                    v3=float(v3_result_for(pos).scores["tiered"]),
+                    v3_result=v3_result_for(pos),
                 ),
                 w5_honest_axes_from_metrics(numeric),
             )
