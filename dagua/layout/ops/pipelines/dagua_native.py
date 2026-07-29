@@ -4950,7 +4950,7 @@ def _w5_referee_key_fn(
     edge_weights: Optional[torch.Tensor],
     direction: str,
 ) -> Optional[Callable[[torch.Tensor], tuple[int, float]]]:
-    """Build a severe-G6 referee-key scorer for weighted W5 gates.
+    """Build a severe-G6 referee-key scorer for W5 gates.
 
     Parameters
     ----------
@@ -4968,13 +4968,9 @@ def _w5_referee_key_fn(
     Returns
     -------
     Callable[[torch.Tensor], tuple[int, float]] or None
-        Referee-key scorer when declared weights are non-degenerate, otherwise
-        ``None`` so W5 keeps the neutral score-only path.
+        Referee-key scorer for runtime-restricted V3 selection.
     """
-    from dagua.layout.ops.pipelines.native_directed import (
-        _runtime_referee_telemetry,
-        _weighted_referee_active,
-    )
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -4982,9 +4978,8 @@ def _w5_referee_key_fn(
         node_sizes=node_sizes,
         edge_weights=edge_weights,
         direction=direction,
+        structure=classify_graph(edge_index, int(num_nodes)),
     )
-    if not _weighted_referee_active(problem):
-        return None
 
     def referee_key(pos: torch.Tensor) -> tuple[int, float]:
         """Return the severe-G6 referee prefix for one W5 candidate.
@@ -4999,7 +4994,7 @@ def _w5_referee_key_fn(
         tuple[int, float]
             Eligibility key from the frozen severe-G6 referee.
         """
-        return _runtime_referee_telemetry(pos, problem)[0]
+        return score_v3_runtime(pos, problem)[0]
 
     return referee_key
 
@@ -5083,6 +5078,7 @@ def _best_of_polish(
         w5_dominates,
         w5_honest_axes_from_metrics,
     )
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
     from dagua.metrics import (
         _all_pairs_unweighted,
         _build_csr,
@@ -5100,6 +5096,14 @@ def _best_of_polish(
     cpu_edge_index = edge_index.detach().to(device="cpu")
     cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
     cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
+    v3_problem = LayoutProblem(
+        edge_index=cpu_edge_index,
+        num_nodes=int(base_pos.shape[0]),
+        node_sizes=cpu_node_sizes,
+        direction=direction,
+        structure=classify_graph(cpu_edge_index, int(base_pos.shape[0])),
+        edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
+    )
     offsets, targets = _build_csr(cpu_edge_index, int(base_pos.shape[0]))
     all_pairs_dist = _all_pairs_unweighted(
         offsets, targets, int(base_pos.shape[0]), max_dist=int(base_pos.shape[0])
@@ -5148,6 +5152,13 @@ def _best_of_polish(
         score_pair = W5ScorePair(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
+            v3=float(
+                score_v3_runtime_result(
+                    pos,
+                    v3_problem,
+                    all_pairs_dist=all_pairs_dist,
+                ).scores["tiered"]
+            ),
         )
         payload = (score_pair, w5_honest_axes_from_metrics(numeric))
         honest_score_cache[cache_key] = payload
@@ -5604,6 +5615,11 @@ def _best_of_polish(
                     incumbent_referee_key=(
                         referee_key_fn(honest_best_pos) if referee_key_fn is not None else (1, -0.0)
                     ),
+                    tallied_axis=(
+                        "directed"
+                        if is_semantically_directed and declared_hierarchical
+                        else "undirected"
+                    ),
                 ):
                     register_anytime_best = getattr(
                         config,
@@ -5830,6 +5846,7 @@ def _terminal_w5_polish(
             w5_honest_axes_from_metrics,
             w5_predicted_skip_reason,
         )
+        from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
         from dagua.metrics import (
             _all_pairs_unweighted,
             _build_csr,
@@ -5863,6 +5880,16 @@ def _terminal_w5_polish(
                 )
             )
         cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
+        v3_problem = LayoutProblem(
+            edge_index=cpu_edge_index,
+            num_nodes=int(final_pos.shape[0]),
+            node_sizes=cpu_node_sizes,
+            direction=direction,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            structure=terminal_structure,
+            edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
+        )
         offsets, targets = _build_csr(cpu_edge_index, int(final_pos.shape[0]))
         all_pairs_dist = _all_pairs_unweighted(
             offsets,
@@ -5903,6 +5930,13 @@ def _terminal_w5_polish(
                 W5ScorePair(
                     directed=float(composite(numeric)),
                     undirected=float(composite_undirected(numeric)),
+                    v3=float(
+                        score_v3_runtime_result(
+                            pos,
+                            v3_problem,
+                            all_pairs_dist=all_pairs_dist,
+                        ).scores["tiered"]
+                    ),
                 ),
                 w5_honest_axes_from_metrics(numeric),
             )
@@ -5939,6 +5973,11 @@ def _terminal_w5_polish(
                 candidate_score_pair,
                 incumbent_score_pair,
                 1.0e-9,
+                tallied_axis=(
+                    "directed"
+                    if is_semantically_directed and declared_hierarchical
+                    else "undirected"
+                ),
             )
             cluster_tightening_telemetry.append(
                 {
@@ -6060,6 +6099,9 @@ def _terminal_w5_polish(
             ),
             incumbent_referee_key=(
                 referee_key_fn(final_pos) if referee_key_fn is not None else (1, -0.0)
+            ),
+            tallied_axis=(
+                "directed" if is_semantically_directed and declared_hierarchical else "undirected"
             ),
         ):
             if register_anytime_best is not None:

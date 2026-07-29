@@ -513,6 +513,77 @@ def estimate_native_work_cost(
     )
 
 
+def estimate_v3_referee_cost(
+    num_nodes: int,
+    num_edges: int,
+    has_clusters: bool,
+    has_weights: bool,
+    device_class: str,
+) -> NativeWorkCost:
+    """Estimate deterministic work units for one restricted V3 referee score.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    num_edges : int
+        Number of graph edges.
+    has_clusters : bool
+        Whether runtime-visible cluster metadata enables V3 group scoring.
+    has_weights : bool
+        Whether runtime-visible edge weights enable V3 weighted group scoring.
+    device_class : str
+        Frozen device class axis, usually ``"cpu"`` or ``"cuda"``.
+
+    Returns
+    -------
+    NativeWorkCost
+        Zero-generation score-reservation package for one V3 referee pass.
+    """
+    n = _safe_nonnegative_int(num_nodes)
+    e = _safe_nonnegative_int(num_edges)
+    normalized_device = str(device_class).lower()
+    density_volume = float(n * max(n - 1, 0) // 2)
+    edge_pair_volume = float(e * max(e - 1, 0) // 2)
+    base = 0.02 + 1.8e-6 * density_volume + 2.0e-7 * min(edge_pair_volume, 20_000.0)
+    if has_clusters:
+        base += 0.08 + 2.0e-4 * float(n)
+    if has_weights:
+        base += 0.05 + 1.5e-4 * float(max(e, 1))
+    if n >= 1000:
+        base = max(base, 2.2 * (float(n) / 1000.0) ** 2)
+    elif n >= 500:
+        base = max(base, 0.9 * (float(n) / 500.0) ** 2)
+    elif n >= 200:
+        base = max(base, 0.4 * (float(n) / 200.0) ** 2)
+    elif n >= 120:
+        base = max(base, 0.3 * (float(n) / 120.0) ** 2)
+    if normalized_device == "cuda":
+        base *= 0.85
+    metadata = {
+        "provenance": (
+            "V3 referee C4-fast anchors from Fable design: ~0.3/0.4/0.9/2.2s "
+            "@N=120/200/500/1000 clustered-weighted."
+        ),
+        "num_nodes": n,
+        "num_edges": e,
+        "device_class": normalized_device,
+        "has_clusters": bool(has_clusters),
+        "has_weights": bool(has_weights),
+        "terms": {
+            "dense_pairs": density_volume,
+            "edge_pairs_capped": min(edge_pair_volume, 20_000.0),
+        },
+    }
+    return NativeWorkCost(
+        family="v3_referee",
+        generation_dwu=0.0,
+        reserved_score_dwu=max(0.01, float(base)),
+        metadata=metadata,
+        device_class=normalized_device,
+    )
+
+
 __all__ = [
     "FCOSE_EXACT_REPULSION_NODE_CAP",
     "FROZEN_COST_TABLE",
@@ -520,6 +591,7 @@ __all__ = [
     "PROVENANCE_REF",
     "apsp_volume",
     "estimate_native_work_cost",
+    "estimate_v3_referee_cost",
     "fcose_force_volume",
     "ruler_sample_volume",
     "stress_pair_volume",

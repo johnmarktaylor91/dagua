@@ -593,9 +593,10 @@ def test_terminal_w5_incumbent_is_final_return_tensor_and_runs_once(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture terminal W5 inputs and return a no-op result."""
-        del node_sizes, score_fn, accept_margin
+        del node_sizes, score_fn, accept_margin, shape_geometry, referee_key_fn
         captured["calls"] = int(captured["calls"]) + 1
         captured["incumbent_pos"] = incumbent_pos.detach().cpu()
         captured["incumbent_score_pair"] = incumbent_score_pair
@@ -656,7 +657,11 @@ def test_terminal_w5_incumbent_is_final_return_tensor_and_runs_once(
     assert int(captured["calls"]) == 1
     assert torch.equal(actual, terminal)
     assert torch.equal(captured["incumbent_pos"], terminal)
-    assert captured["incumbent_score_pair"] == W5ScorePair(directed=90.0, undirected=94.0)
+    captured_pair = captured["incumbent_score_pair"]
+    assert isinstance(captured_pair, W5ScorePair)
+    assert captured_pair.directed == 90.0
+    assert captured_pair.undirected == 94.0
+    assert captured_pair.v3 is not None
     assert captured["incumbent_axes"] == W5HonestAxes(
         flow=0.753,
         depth=0.875,
@@ -718,6 +723,7 @@ def test_terminal_w5_preserves_final_tensor_when_candidate_does_not_dominate(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a one-sided W5 candidate that must be rejected."""
         del (
@@ -733,6 +739,7 @@ def test_terminal_w5_preserves_final_tensor_when_candidate_does_not_dominate(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
         return W5FinisherResult(
@@ -1017,6 +1024,7 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a one-sided W5 winner for terminal monotonicity checks."""
         del (
@@ -1032,6 +1040,7 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         calls["run_w5"] += 1
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "x_only")
@@ -1290,9 +1299,10 @@ def test_best_of_polish_w5_receives_final_honest_winner(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture W5 inputs and return a no-op result."""
-        del node_sizes, score_fn, accept_margin
+        del node_sizes, score_fn, accept_margin, shape_geometry, referee_key_fn
         captured["calls"] = int(captured["calls"]) + 1
         captured["incumbent_pos"] = incumbent_pos.detach().cpu()
         captured["incumbent_score_pair"] = incumbent_score_pair
@@ -1324,7 +1334,11 @@ def test_best_of_polish_w5_receives_final_honest_winner(
     assert int(captured["calls"]) == 1
     assert torch.equal(polished, base_pos)
     assert torch.equal(captured["incumbent_pos"], base_pos)
-    assert captured["incumbent_score_pair"] == W5ScorePair(directed=20.0, undirected=20.0)
+    captured_pair = captured["incumbent_score_pair"]
+    assert isinstance(captured_pair, W5ScorePair)
+    assert captured_pair.directed == 20.0
+    assert captured_pair.undirected == 20.0
+    assert captured_pair.v3 is not None
     assert captured["incumbent_axes"] == W5HonestAxes(
         flow=0.753,
         depth=0.875,
@@ -1370,6 +1384,7 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a W5 winner that dominates the final honest incumbent."""
         del (
@@ -1385,6 +1400,7 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         captured["incumbent"] = incumbent_score_pair
         accepted = W5Candidate("w5_unit", w5_pos, winner_pair, "barrier_2d")
@@ -1413,7 +1429,11 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
         config=LayoutConfig(),
     )
 
-    assert captured["incumbent"] == W5ScorePair(directed=20.0, undirected=20.0)
+    captured_pair = captured["incumbent"]
+    assert isinstance(captured_pair, W5ScorePair)
+    assert captured_pair.directed == 20.0
+    assert captured_pair.undirected == 20.0
+    assert captured_pair.v3 is not None
     assert winner_pair.directed > captured["incumbent"].directed + 0.05
     assert winner_pair.undirected > captured["incumbent"].undirected + 0.05
     assert torch.equal(polished, w5_pos)
@@ -1454,6 +1474,7 @@ def test_best_of_polish_preserves_final_winner_when_w5_does_not_dominate(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a W5 winner that fails the unchanged dual-ruler gate."""
         del (
@@ -1469,6 +1490,7 @@ def test_best_of_polish_preserves_final_winner_when_w5_does_not_dominate(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
         return W5FinisherResult(
