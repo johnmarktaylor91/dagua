@@ -38,7 +38,7 @@ FCOSE_EXACT_REPULSION_NODE_CAP = 512
 V3_REFEREE_CPU_ANCHORS: tuple[tuple[int, int, float], ...] = (
     (50, 70, 0.033),
     (120, 237, 0.325),
-    (500, 1470, 1.16),
+    (500, 1470, 3.2183127469552315),
     (1000, 2038, 5.36),
 )
 _V3_REFEREE_LOG_N = tuple(math.log(float(anchor[0])) for anchor in V3_REFEREE_CPU_ANCHORS)
@@ -50,8 +50,8 @@ _V3_REFEREE_LOG_SECANTS = tuple(
 )
 _V3_REFEREE_LOG_SLOPES = (
     _V3_REFEREE_LOG_SECANTS[0],
-    1.3837190372140398,
-    1.3356963554361434,
+    2.0283048140222286,
+    0.9679432589542972,
     2.0,
 )
 _V3_REFEREE_MIN_DWU = 0.02
@@ -507,12 +507,14 @@ def estimate_native_work_cost(
         step_volume = float(max(steps, 0) * max(seeds, 0))
         referee_volume = float(max(checkpoints, 0) * max(seeds, 0))
         generation = _term_cost(terms, "step", step_volume)
-        reserved = _term_cost(terms, "referee", referee_volume)
+        referee_cost = _v3_referee_cpu_anchor_cost(size.num_nodes)
+        reserved = referee_cost * referee_volume
         metadata["terms"] = {
             "step": step_volume,
             "referee": referee_volume,
             "combined": w5_step_volume(mode, steps, seeds, checkpoints),
         }
+        metadata["referee_dwu_per_eval"] = referee_cost
         metadata["mode"] = mode
     elif normalized_family.startswith("directed_"):
         volume = _safe_nonnegative_float(knobs.get("volume", 1.0), 1.0)
@@ -585,8 +587,6 @@ def _v3_referee_cpu_anchor_cost(num_nodes: int) -> float:
             )
             return float(math.exp(log_cost))
 
-    return V3_REFEREE_CPU_ANCHORS[-1][2]
-
 
 def estimate_v3_referee_cost(
     num_nodes: int,
@@ -624,7 +624,7 @@ def estimate_v3_referee_cost(
     metadata = {
         "provenance": (
             "PF3 B3 DWU-honesty refit to measured full restricted V3 scorer CPU "
-            "costs: 0.033/0.325/1.16/5.36 DWU @ N=50/120/500/1000."
+            "costs: 0.033/0.325/3.2183127469552315/5.36 DWU @ N=50/120/500/1000."
         ),
         "num_nodes": n,
         "num_edges": e,
@@ -634,13 +634,13 @@ def estimate_v3_referee_cost(
         "terms": {
             "anchor_curve": float(base),
             "dense_pairs": density_volume,
-            "edge_pairs_capped": min(edge_pair_volume, 20_000.0),
+            "edge_pairs_observed": edge_pair_volume,
         },
     }
     return NativeWorkCost(
         family="v3_referee",
         generation_dwu=0.0,
-        reserved_score_dwu=max(0.01, float(base)),
+        reserved_score_dwu=max(_V3_REFEREE_MIN_DWU, float(base)),
         metadata=metadata,
         device_class=normalized_device,
     )
