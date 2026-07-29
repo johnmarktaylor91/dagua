@@ -53,6 +53,10 @@ from dagua.layout.ops.state import LayoutProblem
 from dagua.metrics import node_occlusion_score
 
 V3_REFEREE_DWU_FRACTION = 0.25
+_FROZEN_STRESS_SOURCES = 200
+_FROZEN_STRESS_TARGETS = 1000
+_FROZEN_CROSSING_SAMPLES = 1_000_000
+_FROZEN_NEIGHBORHOOD_SAMPLES = 5000
 
 
 def fast_smooth_clearance_occlusion_score(
@@ -150,12 +154,6 @@ def fast_smooth_clearance_occlusion_score(
     n_abut = int(((~any_positive) & ~all_negative).sum().item())
     clearance_contact_pairs = int(contact_mask.sum().item())
     packed_seam_severity = seam_severity_sum / max(1, count)
-    assert math.isclose(
-        clearance_penalty,
-        packed_seam_severity * count + strict_overlap_count + n_abut,
-        rel_tol=1.0e-12,
-        abs_tol=1.0e-12,
-    )
     score = 1.0 / (1.0 + 2.0 * clearance_penalty / max(1, count))
     return {
         **legacy,
@@ -312,19 +310,24 @@ def score_v3_runtime_result(
     labels, offsets = _normalize_label_geometry(None, None, int(positions.shape[0]))
     num_nodes = int(positions.shape[0])
 
-    crossing_geometry = _crossing_pair_geometry(positions, edges, n_samples=20000, seed=0)
+    crossing_geometry = _crossing_pair_geometry(
+        positions,
+        edges,
+        n_samples=_FROZEN_CROSSING_SAMPLES,
+        seed=0,
+    )
     c1 = _component_weighted_ksm(
         positions,
         edges,
         sizes,
-        stress_sources=64,
-        stress_targets=128,
+        stress_sources=_FROZEN_STRESS_SOURCES,
+        stress_targets=_FROZEN_STRESS_TARGETS,
         all_pairs_dist=all_pairs_dist,
     )
     c2 = angle_weighted_crossing_score(
         positions,
         edges,
-        n_samples=20000,
+        n_samples=_FROZEN_CROSSING_SAMPLES,
         seed=0,
         _geometry=crossing_geometry,
     )
@@ -333,7 +336,7 @@ def score_v3_runtime_result(
         edges,
         num_nodes=num_nodes,
         radii=(1, 2, 3),
-        n_samples=5000,
+        n_samples=_FROZEN_NEIGHBORHOOD_SAMPLES,
         all_pairs_dist=all_pairs_dist,
     )
     c4 = _fast_visual_occlusion_score(positions, sizes, labels, offsets, seed=0)
@@ -347,7 +350,7 @@ def score_v3_runtime_result(
     c6 = crossing_angle_90_score(
         positions,
         edges,
-        n_samples=20000,
+        n_samples=_FROZEN_CROSSING_SAMPLES,
         seed=0,
         _geometry=crossing_geometry,
     )

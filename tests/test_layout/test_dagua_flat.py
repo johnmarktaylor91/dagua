@@ -50,8 +50,12 @@ def test_auto_route_respects_is_semantically_directed_true() -> None:
     graph.compute_node_sizes()
     pos_routed = layout(graph, LayoutConfig(seed=42, route_flat_to_stress=True))
     pos_layered = layout(graph, LayoutConfig(seed=42, force_pipeline="tree"))
-    # Directed chains use the native tree path rather than the flat pipeline.
-    assert torch.allclose(pos_routed, pos_layered)
+    # Directed chains may receive terminal W5 polish, but they must preserve
+    # the tree route's rank semantics rather than falling through to flat.
+    assert torch.equal(torch.argsort(pos_routed[:, 1]), torch.argsort(pos_layered[:, 1]))
+    routed_edge_delta = pos_routed[1:, 1] - pos_routed[:-1, 1]
+    layered_edge_delta = pos_layered[1:, 1] - pos_layered[:-1, 1]
+    assert torch.all(torch.sign(routed_edge_delta) == torch.sign(layered_edge_delta))
 
 
 def test_auto_route_redirects_undirected_to_flat() -> None:
