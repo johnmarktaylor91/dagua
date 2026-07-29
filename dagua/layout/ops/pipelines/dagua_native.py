@@ -4949,6 +4949,8 @@ def _w5_referee_key_fn(
     node_sizes: Optional[torch.Tensor],
     edge_weights: Optional[torch.Tensor],
     direction: str,
+    all_pairs_dist: Optional[np.ndarray] = None,
+    result_fn: Optional[Callable[[torch.Tensor], Any]] = None,
 ) -> Optional[Callable[[torch.Tensor], tuple[int, float]]]:
     """Build a severe-G6 referee-key scorer for W5 gates.
 
@@ -4964,12 +4966,18 @@ def _w5_referee_key_fn(
         Declared edge weights with shape ``[E]``.
     direction : str
         Layout direction stored on the synthetic runtime problem.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached unweighted shortest-path distances with shape ``[N, N]``.
+    result_fn : Callable[[torch.Tensor], object], optional
+        Shared V3 result provider. When supplied, the key is derived from the
+        already-cached full V3 result used for ``W5ScorePair.v3``.
 
     Returns
     -------
     Callable[[torch.Tensor], tuple[int, float]] or None
         Referee-key scorer for runtime-restricted V3 selection.
     """
+    from dagua.eval.ruler_v3 import referee_eligibility_key
     from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime
 
     problem = LayoutProblem(
@@ -4994,9 +5002,63 @@ def _w5_referee_key_fn(
         tuple[int, float]
             Eligibility key from the frozen severe-G6 referee.
         """
-        return score_v3_runtime(pos, problem)[0]
+        if result_fn is not None:
+            return referee_eligibility_key(result_fn(pos))
+        return score_v3_runtime(pos, problem, all_pairs_dist=all_pairs_dist)[0]
 
     return referee_key
+
+
+def _native_v3_referee_device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the device class used to price a runtime V3 referee score.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA configs, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
+
+
+def _charge_runtime_v3_referee_score(
+    problem: LayoutProblem,
+    config: Optional[LayoutConfig],
+    reason: str,
+) -> None:
+    """Charge one actual runtime V3 referee result to the DWU ledger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Runtime problem whose V3 scorer is being invoked.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying the optional DWU ledger.
+    reason : str
+        Stable budget-ledger reason for this mandatory score.
+
+    Returns
+    -------
+    None
+        The optional ledger is debited when installed.
+    """
+    from dagua.layout.ops.pipelines.native_budget import charge
+    from dagua.layout.ops.pipelines.native_cost_model import estimate_v3_referee_cost
+
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    cost = estimate_v3_referee_cost(
+        int(problem.num_nodes),
+        edge_count,
+        bool(problem.clusters),
+        problem.edge_weights is not None,
+        _native_v3_referee_device_class(config),
+    )
+    charge(config, cost.reserved_score_dwu, reason)
 
 
 def _best_of_polish(
@@ -5119,6 +5181,33 @@ def _best_of_polish(
     )
 
     honest_score_cache: dict[int, tuple[W5ScorePair, W5HonestAxes]] = {}
+    v3_result_cache: dict[int, Any] = {}
+
+    def v3_result_for(pos: torch.Tensor) -> Any:
+        """Return the cached restricted V3 result for one W5 candidate.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        object
+            Runtime-restricted V3 result for ``pos``.
+        """
+        cache_key = id(pos)
+        cached = v3_result_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = score_v3_runtime_result(
+            pos,
+            v3_problem,
+            all_pairs_dist=all_pairs_dist,
+        )
+        _charge_runtime_v3_referee_score(v3_problem, config, "w5_v3_referee")
+        v3_result_cache[cache_key] = result
+        return result
 
     def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
         """Score one finalist and expose its honest W5 routing axes.
@@ -5152,13 +5241,7 @@ def _best_of_polish(
         score_pair = W5ScorePair(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
-            v3=float(
-                score_v3_runtime_result(
-                    pos,
-                    v3_problem,
-                    all_pairs_dist=all_pairs_dist,
-                ).scores["tiered"]
-            ),
+            v3=float(v3_result_for(pos).scores["tiered"]),
         )
         payload = (score_pair, w5_honest_axes_from_metrics(numeric))
         honest_score_cache[cache_key] = payload
@@ -5579,9 +5662,11 @@ def _best_of_polish(
                 referee_key_fn = _w5_referee_key_fn(
                     edge_index=edge_index,
                     num_nodes=int(honest_best_pos.shape[0]),
-                    node_sizes=node_sizes,
+                    node_sizes=cpu_node_sizes,
                     edge_weights=edge_weights,
                     direction=direction,
+                    all_pairs_dist=all_pairs_dist,
+                    result_fn=v3_result_for,
                 )
                 w5_kwargs: dict[str, Any] = {
                     "incumbent_pos": honest_best_pos,
@@ -5897,6 +5982,33 @@ def _terminal_w5_polish(
             int(final_pos.shape[0]),
             max_dist=int(final_pos.shape[0]),
         )
+        v3_result_cache: dict[int, Any] = {}
+
+        def v3_result_for(pos: torch.Tensor) -> Any:
+            """Return the cached restricted V3 result for one terminal W5 candidate.
+
+            Parameters
+            ----------
+            pos : torch.Tensor
+                Candidate positions with shape ``[N, 2]``.
+
+            Returns
+            -------
+            object
+                Runtime-restricted V3 result for ``pos``.
+            """
+            cache_key = id(pos)
+            cached = v3_result_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            result = score_v3_runtime_result(
+                pos,
+                v3_problem,
+                all_pairs_dist=all_pairs_dist,
+            )
+            _charge_runtime_v3_referee_score(v3_problem, config, "terminal_w5_v3_referee")
+            v3_result_cache[cache_key] = result
+            return result
 
         def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
             """Score one terminal W5 candidate with the frozen metrics ruler.
@@ -5930,13 +6042,7 @@ def _terminal_w5_polish(
                 W5ScorePair(
                     directed=float(composite(numeric)),
                     undirected=float(composite_undirected(numeric)),
-                    v3=float(
-                        score_v3_runtime_result(
-                            pos,
-                            v3_problem,
-                            all_pairs_dist=all_pairs_dist,
-                        ).scores["tiered"]
-                    ),
+                    v3=float(v3_result_for(pos).scores["tiered"]),
                 ),
                 w5_honest_axes_from_metrics(numeric),
             )
@@ -6068,6 +6174,8 @@ def _terminal_w5_polish(
             node_sizes=cpu_node_sizes,
             edge_weights=edge_weights,
             direction=direction,
+            all_pairs_dist=all_pairs_dist,
+            result_fn=v3_result_for,
         )
         w5_kwargs: dict[str, Any] = {
             "incumbent_pos": final_pos,

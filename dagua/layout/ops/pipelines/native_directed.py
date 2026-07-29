@@ -15,7 +15,7 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.base import Op, Pipeline
-from dagua.layout.ops.pipelines.native_budget import admit_native_work
+from dagua.layout.ops.pipelines.native_budget import admit_native_work, charge
 from dagua.layout.ops.pipelines.native_cost_model import (
     NativeWorkCost,
     estimate_native_work_cost,
@@ -293,8 +293,10 @@ def _admit_v3_referee_score(
         problem.edge_weights is not None,
         _native_device_class(config),
     )
-    admitted = admit_native_work(config, cost, "v3_referee")
-    return True if mandatory_floor else admitted
+    if mandatory_floor:
+        charge(config, cost.reserved_score_dwu, "mandatory_v3_referee_floor")
+        return True
+    return admit_native_work(config, cost, "v3_referee")
 
 
 def _directed_cluster_candidate_is_dual_admissible(
@@ -3907,6 +3909,7 @@ def layout_native_directed_portfolio(
     offsets, targets = _build_csr(cpu_edges, n)
     all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
     cluster_ids = _build_cluster_ids(problem)
+    _admit_v3_referee_score(problem, config, mandatory_floor=True)
     incumbent_score, incumbent_score_telemetry = _score_directed_candidate_referee_payload(
         incumbent,
         problem,

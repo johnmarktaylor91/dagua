@@ -385,8 +385,10 @@ def _admit_v3_referee_score(
         problem.edge_weights is not None,
         _native_device_class(config),
     )
-    admitted = admit_native_work(config, cost, "v3_referee")
-    return True if mandatory_floor else admitted
+    if mandatory_floor:
+        charge(config, cost.reserved_score_dwu, "mandatory_v3_referee_floor")
+        return True
+    return admit_native_work(config, cost, "v3_referee")
 
 
 def _cluster_candidate_is_dual_admissible(
