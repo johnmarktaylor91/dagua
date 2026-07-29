@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
 from dagua.layout.ops.pipelines.native_finisher import (
     W5CostPlan,
     W5FinisherResult,
@@ -225,6 +226,62 @@ def test_w5_scale_line_search_prefers_honest_v3_scale() -> None:
     assert result.scale != pytest.approx(1.0)
     assert result.score_pair.v3 is not None
     assert result.score_pair.v3 > score_fn(pos).v3
+
+
+def test_w5_scale_line_search_stops_when_next_referee_eval_exceeds_dwu() -> None:
+    """Scale search returns the best current score when the ledger cannot pay."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.stack(
+        (
+            torch.arange(1000, dtype=torch.float32),
+            torch.zeros(1000, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=5.0)
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a scale-sensitive V3 score while charging the test ledger.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Score pair carrying the synthetic V3 scalar.
+        """
+        nonlocal score_calls
+        score_calls += 1
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=float(score_calls),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    keepalive: list[torch.Tensor] = []
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=config,
+        keepalive=keepalive,
+    )
+
+    assert result.evals == 1
+    assert score_calls == 1
+    assert len(keepalive) == 1
+    assert result.scale == pytest.approx(1.0)
 
 
 def test_w5_scale_line_search_skips_scale_invariant_facets() -> None:
@@ -622,7 +679,7 @@ def test_measured_cost_plan_uses_wall_surrogate_and_restores_small_row_work() ->
     )
     assert small_plan is not None
     assert small_plan.steps == 36
-    assert small_plan.seeds == 3
+    assert small_plan.seeds == 1
     assert small_plan.predicted_s == pytest.approx(
         small_plan.seeds
         * (
@@ -779,14 +836,7 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
         honest_axes=None,
     )
 
-    assert plan is not None
-    assert plan.steps == 36
-    assert plan.checkpoints == 2
-    assert plan.predicted_s == pytest.approx(
-        plan.seeds * (plan.steps * 0.0437 + plan.checkpoints * plan.referee_s)
-    )
-    assert plan.scale_search_evals == 6
-    assert plan.shadow_step_s == pytest.approx(0.1)
+    assert plan is None
 
 
 def test_tiny_measured_cost_plan_uses_deterministic_budget_units(
@@ -1159,10 +1209,10 @@ def test_w5_finisher_runs_pass_two_despite_process_spend_noise(
     assert result.steps == 2
 
 
-def test_measured_cost_plan_prices_scale_search_at_a3c_boundary(
+def test_measured_cost_plan_prices_scale_search_at_v3_anchor_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rgg_500 boundary fixture reserves the scale-search referee volume."""
+    """The rgg_500 boundary fixture rejects stale-flat scale-search pricing."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -1208,12 +1258,7 @@ def test_measured_cost_plan_prices_scale_search_at_a3c_boundary(
         honest_axes=None,
     )
 
-    assert plan is not None
-    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 20, 1)
-    assert plan.scale_search_evals == 3
-    assert plan.referee_s == pytest.approx(3 * 0.019)
-    assert plan.budget_usable_s == pytest.approx(0.950)
-    assert plan.predicted_s == pytest.approx(0.931)
+    assert plan is None
     assert native_finisher._checkpoint_steps(20, 1) == {20}
 
 

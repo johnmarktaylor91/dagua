@@ -31,7 +31,10 @@ from dagua.layout.ops.pipelines.native_budget import (
     remaining_wall_s,
     wall_reserve_exhausted,
 )
-from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
+from dagua.layout.ops.pipelines.native_cost_model import (
+    estimate_native_work_cost,
+    estimate_v3_referee_cost,
+)
 from dagua.layout.ops.pipelines.native_shape_geometry import (
     NativeShapeGeometry,
     pairwise_shape_signed_gap,
@@ -1463,8 +1466,9 @@ def _charge_w5_owner_plan(
     Returns
     -------
     None
-        The function charges the ledger when installed and marks the plan so
-        repeated local checks do not double-debit it.
+        The function charges W5 generation when installed and marks the plan so
+        repeated local checks do not double-debit it. Referee evaluations are
+        charged by the runtime V3 scorer as they happen.
     """
     if config is None or bool(getattr(config, "_dagua_native_w5_owner_charged", False)):
         return
@@ -1480,7 +1484,7 @@ def _charge_w5_owner_plan(
         },
         _native_device_class(config),
     )
-    charge(config, cost.generation_dwu + cost.reserved_score_dwu, "mandatory_w5_owner")
+    charge(config, cost.generation_dwu, "mandatory_w5_owner")
     setattr(config, "_dagua_native_w5_owner_charged", True)
 
 
@@ -2981,6 +2985,29 @@ def _honest_scale_line_search(
         Best scored scale candidate. Legacy non-V3 score pairs return the raw
         checkpoint after one score evaluation.
     """
+
+    def can_afford_next_referee_eval() -> bool:
+        """Return whether the ledger can afford one more V3 referee score.
+
+        Returns
+        -------
+        bool
+            ``True`` when no ledger is active, or when the current remaining
+            deterministic budget covers the same N-keyed charge used by the
+            runtime V3 scorer.
+        """
+        ledger_remaining = remaining_dwu(config)
+        if ledger_remaining is None:
+            return True
+        eval_cost = estimate_v3_referee_cost(
+            int(checkpoint_pos.shape[0]),
+            0,
+            has_clusters=False,
+            has_weights=False,
+            device_class=_native_device_class(config),
+        ).reserved_score_dwu
+        return float(ledger_remaining) >= float(eval_cost)
+
     scored_keepalive = [checkpoint_pos]
     keepalive.append(checkpoint_pos)
     raw_pair = score_fn(checkpoint_pos)
@@ -3026,6 +3053,8 @@ def _honest_scale_line_search(
         if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S) or (
             math.isfinite(float(deadline)) and time.monotonic() >= deadline
         ):
+            return None
+        if not can_afford_next_referee_eval():
             return None
         scaled_pos = _scale_positions_about_centroid(checkpoint_pos, scale)
         scored_keepalive.append(scaled_pos)
