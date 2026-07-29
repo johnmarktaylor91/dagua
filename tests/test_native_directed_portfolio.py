@@ -590,18 +590,35 @@ def test_directed_referee_forwards_extended_cluster_metadata(
     assert telemetry.old_score > telemetry.extended_score
 
 
-def test_directed_cluster_dual_ruler_rejects_old_regression() -> None:
-    """Clustered directed challengers must not regress old-ruler score."""
-    incumbent = _DirectedClusterScoreTelemetry(extended_score=80.0, old_score=90.0, metrics={})
-    challenger = _DirectedClusterScoreTelemetry(extended_score=81.0, old_score=89.9, metrics={})
+def test_directed_cluster_dual_ruler_uses_v3_with_old_band() -> None:
+    """Clustered directed challengers use V3 plus old-ruler non-regression band."""
+    incumbent = _DirectedClusterScoreTelemetry(
+        extended_score=80.0,
+        old_score=90.0,
+        metrics={},
+        v3_tiered=75.0,
+    )
+    challenger = _DirectedClusterScoreTelemetry(
+        extended_score=81.0,
+        old_score=89.96,
+        metrics={},
+        v3_tiered=75.1,
+    )
+    regressor = _DirectedClusterScoreTelemetry(
+        extended_score=82.0,
+        old_score=89.9,
+        metrics={},
+        v3_tiered=75.2,
+    )
 
-    assert not _directed_cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert _directed_cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert not _directed_cluster_candidate_is_dual_admissible(regressor, incumbent)
     assert (
         _select_directed_winner(
             {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
             {"incumbent": incumbent, "challenger": challenger},
         )
-        == "incumbent"
+        == "challenger"
     )
 
 
@@ -1221,10 +1238,23 @@ def test_directed_ordering_reachable_for_medium_small_band_once(monkeypatch: obj
         assert int(incumbent_pos.shape[0]) == num_nodes
         return incumbent_pos.clone()
 
-    def fake_score(*args: object, **kwargs: object) -> float:
-        """Keep all candidates tied so the incumbent remains selected."""
+    def fake_score_payload(
+        pos: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[float, _DirectedClusterScoreTelemetry]:
+        """Keep the incumbent ahead at the V3 payload scorer seam."""
         del args, kwargs
-        return 1.0
+        score = 2.0 if torch.equal(pos, incumbent) else 1.0
+        return (
+            score,
+            _DirectedClusterScoreTelemetry(
+                extended_score=score,
+                old_score=score,
+                metrics={},
+                v3_tiered=score,
+            ),
+        )
 
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
@@ -1238,7 +1268,11 @@ def test_directed_ordering_reachable_for_medium_small_band_once(monkeypatch: obj
         "_rank_local_zero_crossing_swap_candidate",
         fake_rank_ordering,
     )
-    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        fake_score_payload,
+    )
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -1460,9 +1494,10 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture the W5 incumbent payload and return a no-op result."""
-        del seeds, node_sizes, score_fn, accept_margin
+        del seeds, node_sizes, score_fn, accept_margin, referee_key_fn
         captured["pair"] = incumbent_score_pair
         captured["axes"] = incumbent_axes
         return make_w5_skip_result(
@@ -2182,17 +2217,25 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         proxy_scored.append(score)
         return score
 
-    def fake_score(
+    def fake_score_payload(
         pos: torch.Tensor,
         problem: LayoutProblem,
         cluster_ids: Optional[torch.Tensor],
         all_pairs_dist: object = None,
-    ) -> float:
+    ) -> tuple[float, _DirectedClusterScoreTelemetry]:
         """Use x coordinate as the full score."""
         del problem, cluster_ids, all_pairs_dist
         score = float(pos[0, 0].item())
         full_scored.append(score)
-        return score
+        return (
+            score,
+            _DirectedClusterScoreTelemetry(
+                extended_score=score,
+                old_score=score,
+                metrics={},
+                v3_tiered=score,
+            ),
+        )
 
     def fake_grid_enabled(problem: LayoutProblem, config: LayoutConfig) -> bool:
         """Force the large-graph test to build enough candidates."""
@@ -2206,7 +2249,11 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
     monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
     monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
     monkeypatch.setattr(native_directed, "_proxy_directed_candidate", fake_proxy)
-    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        fake_score_payload,
+    )
     monkeypatch.setattr(native_directed, "_full_sugiyama_grid_enabled", fake_grid_enabled)
     edge_index = torch.stack(
         [

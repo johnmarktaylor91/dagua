@@ -16,7 +16,11 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.pipelines.native_budget import admit_native_work
-from dagua.layout.ops.pipelines.native_cost_model import NativeWorkCost, estimate_native_work_cost
+from dagua.layout.ops.pipelines.native_cost_model import (
+    NativeWorkCost,
+    estimate_native_work_cost,
+    estimate_v3_referee_cost,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -135,6 +139,8 @@ class _DirectedClusterScoreTelemetry:
     v3_referee_eligibility_key : tuple[int, float]
         Severe-G6 referee prefix. It is neutral ``(1, -0.0)`` when the input
         graph is outside the declared-weight gate.
+    v3_tiered : float
+        Runtime-restricted V3 tiered headline score.
     v3_severe_g6_breach : bool
         Whether the frozen V3 severe-G6 oracle found an absolute breach.
     v3_referee_ineligibility_reason : str
@@ -145,6 +151,7 @@ class _DirectedClusterScoreTelemetry:
     old_score: float
     metrics: Dict[str, float]
     v3_referee_eligibility_key: Tuple[int, float] = (1, -0.0)
+    v3_tiered: float = float("-inf")
     v3_severe_g6_breach: bool = False
     v3_referee_ineligibility_reason: str = "not_weighted_input"
 
@@ -189,13 +196,9 @@ def _runtime_referee_graph_meta(problem: LayoutProblem) -> Dict[str, Any]:
     dict[str, Any]
         Metadata sufficient for the frozen V3 G6 group oracle.
     """
-    meta: Dict[str, Any] = {}
-    if problem.edge_weights is not None:
-        meta["edge_weights"] = (
-            problem.edge_weights.detach().to(device="cpu", dtype=torch.float64).flatten().tolist()
-        )
-        meta["weight_mode"] = "distance"
-    return meta
+    from dagua.layout.ops.pipelines.native_v3_referee import _runtime_v3_graph_meta
+
+    return _runtime_v3_graph_meta(problem)
 
 
 def _runtime_referee_telemetry(
@@ -216,57 +219,32 @@ def _runtime_referee_telemetry(
     tuple[tuple[int, float], bool, str]
         Eligibility prefix, breach flag, and telemetry reason.
     """
-    if not _weighted_referee_active(problem):
-        return (1, -0.0), False, "not_weighted_input"
-    from dagua.eval.ruler_v3 import (
-        SEVERE_G6_FACETS,
-        RulerV3Facet,
-        RulerV3Result,
-        referee_eligibility_key,
-        severe_g6_breach,
-    )
-    from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
+    from dagua.eval.ruler_v3 import severe_g6_breach
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
 
-    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
-    node_sizes = (
-        torch.ones((int(problem.num_nodes), 2), dtype=torch.float32)
-        if problem.node_sizes is None
-        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
-    )
-    group_results = evaluate_conditional_groups(
-        cpu_pos,
-        problem.edge_index.detach().to(device="cpu"),
-        node_sizes,
-        _runtime_referee_graph_meta(problem),
-    )
-    facets: Dict[str, RulerV3Facet] = {}
-    for group in group_results.values():
-        for code, group_facet in group.facets.items():
-            if code not in SEVERE_G6_FACETS:
-                continue
-            facets[code] = RulerV3Facet(
-                code=group_facet.code,
-                name=group_facet.name,
-                tier=group_facet.tier,
-                score=group_facet.score,
-                base_weight=group_facet.base_weight,
-                effective_weight=group_facet.effective_weight,
-                applicable=group_facet.applicable,
-                applicability_reason=group_facet.applicability_reason,
-                metadata=group_facet.metadata,
-            )
-    result = RulerV3Result(
-        facets=facets,
-        scores={"tiered": 0.0, "equal": 0.0, "tier1_only": 0.0},
-        flags=tuple(),
-        applicability={code: facet.applicable for code, facet in facets.items()},
-        coverage={},
-        metadata={"runtime_referee": "severe_g6_only"},
-    )
-    key = referee_eligibility_key(result)
+    result = score_v3_runtime_result(pos, problem)
+    key = _runtime_referee_key_from_result(result)
     breached = severe_g6_breach(result)
     reason = "severe_g6_breach" if breached else "compliant"
     return key, breached, reason
+
+
+def _runtime_referee_key_from_result(result: object) -> Tuple[int, float]:
+    """Return the severe-G6 eligibility key for a runtime V3 result.
+
+    Parameters
+    ----------
+    result : object
+        Frozen V3 result.
+
+    Returns
+    -------
+    tuple[int, float]
+        Native selection eligibility prefix.
+    """
+    from dagua.eval.ruler_v3 import referee_eligibility_key
+
+    return referee_eligibility_key(result)
 
 
 def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
@@ -283,6 +261,40 @@ def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
         Copy of ``metrics`` with the extended cluster-quality keys omitted.
     """
     return {key: value for key, value in metrics.items() if key not in CLUSTER_EXTENDED_SCORE_KEYS}
+
+
+def _admit_v3_referee_score(
+    problem: LayoutProblem,
+    config: Optional[LayoutConfig],
+    *,
+    mandatory_floor: bool,
+) -> bool:
+    """Return whether one V3 finalist score is admitted by the DWU ledger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Candidate contest problem.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying the optional budget ledger.
+    mandatory_floor : bool
+        Whether this score is part of the incumbent/top-1 scoring floor.
+
+    Returns
+    -------
+    bool
+        ``True`` when scoring may proceed.
+    """
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    cost = estimate_v3_referee_cost(
+        int(problem.num_nodes),
+        edge_count,
+        bool(problem.clusters),
+        problem.edge_weights is not None,
+        _native_device_class(config),
+    )
+    admitted = admit_native_work(config, cost, "v3_referee")
+    return True if mandatory_floor else admitted
 
 
 def _directed_cluster_candidate_is_dual_admissible(
@@ -305,8 +317,8 @@ def _directed_cluster_candidate_is_dual_admissible(
         score does not decrease.
     """
     return (
-        candidate.extended_score > incumbent.extended_score + CLUSTER_DUAL_ACCEPTANCE_MARGIN
-        and candidate.old_score >= incumbent.old_score
+        candidate.v3_tiered > incumbent.v3_tiered + CLUSTER_DUAL_ACCEPTANCE_MARGIN
+        and candidate.old_score >= incumbent.old_score - CLUSTER_DUAL_ACCEPTANCE_MARGIN
     )
 
 
@@ -395,26 +407,22 @@ def _score_directed_candidate_referee_payload(
     old_score = float(
         composite_auto(_old_cluster_ruler_metrics(numeric_float), is_semantically_directed=True)
     )
-    telemetry = None
-    v3_key, v3_breach, v3_reason = _runtime_referee_telemetry(pos, problem)
-    if problem.clusters:
-        telemetry = _DirectedClusterScoreTelemetry(
-            extended_score=score,
-            old_score=old_score,
-            metrics=numeric_float,
-            v3_referee_eligibility_key=v3_key,
-            v3_severe_g6_breach=v3_breach,
-            v3_referee_ineligibility_reason=v3_reason,
-        )
-    elif _weighted_referee_active(problem):
-        telemetry = _DirectedClusterScoreTelemetry(
-            extended_score=score,
-            old_score=old_score,
-            metrics=numeric_float,
-            v3_referee_eligibility_key=v3_key,
-            v3_severe_g6_breach=v3_breach,
-            v3_referee_ineligibility_reason=v3_reason,
-        )
+    from dagua.eval.ruler_v3 import severe_g6_breach
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+
+    v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
+    v3_key = _runtime_referee_key_from_result(v3_result)
+    v3_breach = severe_g6_breach(v3_result)
+    v3_reason = "severe_g6_breach" if v3_breach else "compliant"
+    telemetry = _DirectedClusterScoreTelemetry(
+        extended_score=score,
+        old_score=old_score,
+        metrics=numeric_float,
+        v3_referee_eligibility_key=v3_key,
+        v3_tiered=float(v3_result.scores["tiered"]),
+        v3_severe_g6_breach=v3_breach,
+        v3_referee_ineligibility_reason=v3_reason,
+    )
     return score, telemetry
 
 
@@ -509,6 +517,7 @@ def _score_directed_candidate_payload(
         same metric pass.
     """
     from dagua.layout.ops.pipelines.native_finisher import W5ScorePair, w5_honest_axes_from_metrics
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
     from dagua.metrics import composite, composite_undirected, full
 
     numeric = full(
@@ -529,10 +538,12 @@ def _score_directed_candidate_payload(
         cluster_labels=problem.cluster_labels,
     )
     numeric["declared_hierarchical"] = True
+    v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
     return (
         W5ScorePair(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
+            v3=float(v3_result.scores["tiered"]),
         ),
         w5_honest_axes_from_metrics(numeric),
     )
@@ -584,6 +595,7 @@ def _directed_ordering_candidate_dual_dominates(
             incumbent_pair,
             candidate_referee_key=candidate_referee_key,
             incumbent_referee_key=incumbent_referee_key,
+            tallied_axis="directed",
         ),
         candidate_pair,
     )
@@ -623,9 +635,16 @@ def _select_directed_winner(
                 continue
             candidate_key = (
                 candidate_telemetry.v3_referee_eligibility_key,
-                candidate_telemetry.old_score,
+                candidate_telemetry.v3_tiered,
+                candidate_telemetry.extended_score,
+                name,
             )
-            best_key = (best_telemetry.v3_referee_eligibility_key, best_telemetry.old_score)
+            best_key = (
+                best_telemetry.v3_referee_eligibility_key,
+                best_telemetry.v3_tiered,
+                best_telemetry.extended_score,
+                best_name,
+            )
             if candidate_key > best_key:
                 best_name = name
         elif score > scores[best_name]:
@@ -657,7 +676,8 @@ def _proxy_directed_candidate(
     float
         Higher-is-better proxy composite score.
     """
-    from dagua.metrics import cluster_silhouette_score, composite_auto, quick
+    from dagua.layout.ops.pipelines.native_v3_referee import v3_proxy_fold
+    from dagua.metrics import cluster_silhouette_score, quick
 
     cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
     cpu_edges = problem.edge_index.detach().to(device="cpu")
@@ -675,7 +695,7 @@ def _proxy_directed_candidate(
     if cluster_ids is not None:
         numeric.update(cluster_silhouette_score(cpu_pos, cluster_ids))
     numeric["declared_hierarchical"] = True
-    return float(composite_auto(numeric, is_semantically_directed=True))
+    return v3_proxy_fold(numeric, int(problem.num_nodes))
 
 
 def _directed_candidate_family(candidate_name: str) -> str:
@@ -3887,21 +3907,12 @@ def layout_native_directed_portfolio(
     offsets, targets = _build_csr(cpu_edges, n)
     all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
     cluster_ids = _build_cluster_ids(problem)
-    if problem.clusters or _weighted_referee_active(problem):
-        incumbent_score, incumbent_score_telemetry = _score_directed_candidate_referee_payload(
-            incumbent,
-            problem,
-            cluster_ids,
-            all_pairs_dist,
-        )
-    else:
-        incumbent_score = _score_directed_candidate_cached(
-            incumbent,
-            problem,
-            cluster_ids,
-            all_pairs_dist,
-        )
-        incumbent_score_telemetry = None
+    incumbent_score, incumbent_score_telemetry = _score_directed_candidate_referee_payload(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
     scores: Dict[str, float] = {"incumbent": incumbent_score}
     cluster_score_telemetry: Dict[str, _DirectedClusterScoreTelemetry] = {}
     if incumbent_score_telemetry is not None:
@@ -4458,15 +4469,11 @@ def layout_native_directed_portfolio(
     for name in finalist_names:
         if name == "incumbent":
             continue
-        if not problem.clusters and not _weighted_referee_active(problem):
-            if name in scores:
-                continue
-            scores[name] = _score_directed_candidate_cached(
-                positions[name],
-                problem,
-                cluster_ids,
-                all_pairs_dist,
-            )
+        if not _admit_v3_referee_score(
+            problem,
+            config,
+            mandatory_floor=name == finalist_names[1] if len(finalist_names) > 1 else False,
+        ):
             continue
         if name in scores and name in cluster_score_telemetry:
             continue
@@ -4665,25 +4672,16 @@ def layout_native_directed_portfolio(
                 "config": config,
                 "incumbent_axes": best_axes,
             }
-            if _weighted_referee_active(problem):
-                w5_kwargs["referee_key_fn"] = referee_key_w5_candidate
+            w5_kwargs["referee_key_fn"] = referee_key_w5_candidate
             w5_result = run_w5_finisher(**w5_kwargs)
             log_w5_telemetry(w5_result, config)
-            w5_referee_key_fn = (
-                referee_key_w5_candidate if _weighted_referee_active(problem) else None
-            )
             if w5_result.accepted and w5_dominates(
                 w5_result.winner_score_pair,
                 best_pair,
                 0.05,
-                candidate_referee_key=(
-                    w5_referee_key_fn(w5_result.winner_pos)
-                    if w5_referee_key_fn is not None
-                    else (1, -0.0)
-                ),
-                incumbent_referee_key=(
-                    w5_referee_key_fn(best_position) if w5_referee_key_fn is not None else (1, -0.0)
-                ),
+                candidate_referee_key=referee_key_w5_candidate(w5_result.winner_pos),
+                incumbent_referee_key=referee_key_w5_candidate(best_position),
+                tallied_axis="directed",
             ):
                 best_name = w5_result.winner_name
                 best_position = w5_result.winner_pos

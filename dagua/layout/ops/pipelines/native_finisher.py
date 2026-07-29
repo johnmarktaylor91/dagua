@@ -170,7 +170,7 @@ class W5PhaseTiming:
 
 @dataclass(frozen=True)
 class W5ScorePair:
-    """Directed and undirected honest composites from one metrics evaluation.
+    """Directed, undirected, and optional V3 composites from one evaluation.
 
     Parameters
     ----------
@@ -178,10 +178,13 @@ class W5ScorePair:
         Score from the hierarchy-gated directed composite.
     undirected : float
         Score from the frozen common undirected composite.
+    v3 : float, optional
+        Runtime-restricted V3 tiered headline score when available.
     """
 
     directed: float
     undirected: float
+    v3: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -928,8 +931,9 @@ def w5_dominates(
     *,
     candidate_referee_key: Tuple[int, float] = (1, -0.0),
     incumbent_referee_key: Tuple[int, float] = (1, -0.0),
+    tallied_axis: Optional[str] = None,
 ) -> bool:
-    """Return whether ``candidate`` beats ``incumbent`` under both rulers.
+    """Return whether ``candidate`` beats ``incumbent`` under the accept gate.
 
     Parameters
     ----------
@@ -944,6 +948,9 @@ def w5_dominates(
         preserves the historical score-only W5 gate.
     incumbent_referee_key : tuple[int, float], default=(1, -0.0)
         Severe-G6 eligibility prefix for the incumbent/current winner.
+    tallied_axis : str, optional
+        Legacy composite axis used as the non-regression guardrail when V3 is
+        available. Accepted values are ``"directed"`` and ``"undirected"``.
 
     Returns
     -------
@@ -952,12 +959,81 @@ def w5_dominates(
     """
     if candidate_referee_key != incumbent_referee_key:
         return candidate_referee_key > incumbent_referee_key
+    candidate_v3 = candidate.v3
+    incumbent_v3 = incumbent.v3
+    if (
+        candidate_v3 is not None
+        and incumbent_v3 is not None
+        and math.isfinite(float(candidate_v3))
+        and math.isfinite(float(incumbent_v3))
+    ):
+        axis = "directed" if tallied_axis == "directed" else "undirected"
+        candidate_tallied = candidate.directed if axis == "directed" else candidate.undirected
+        incumbent_tallied = incumbent.directed if axis == "directed" else incumbent.undirected
+        return (
+            float(candidate_v3) > float(incumbent_v3) + margin
+            and math.isfinite(candidate_tallied)
+            and math.isfinite(incumbent_tallied)
+            and candidate_tallied >= incumbent_tallied - margin
+        )
     return (
         math.isfinite(candidate.directed)
         and math.isfinite(candidate.undirected)
         and candidate.directed > incumbent.directed + margin
         and candidate.undirected > incumbent.undirected + margin
     )
+
+
+def _w5_dominates_with_axis(
+    candidate: W5ScorePair,
+    incumbent: W5ScorePair,
+    margin: float,
+    *,
+    candidate_referee_key: Tuple[int, float],
+    incumbent_referee_key: Tuple[int, float],
+    tallied_axis: str,
+) -> bool:
+    """Call the W5 dominance gate with legacy monkeypatch compatibility.
+
+    Parameters
+    ----------
+    candidate : W5ScorePair
+        Candidate score pair.
+    incumbent : W5ScorePair
+        Incumbent score pair.
+    margin : float
+        Acceptance margin.
+    candidate_referee_key : tuple[int, float]
+        Severe-G6 prefix for the candidate.
+    incumbent_referee_key : tuple[int, float]
+        Severe-G6 prefix for the incumbent.
+    tallied_axis : str
+        Legacy composite axis for the V3 non-regression guardrail.
+
+    Returns
+    -------
+    bool
+        Dominance decision.
+    """
+    try:
+        return w5_dominates(
+            candidate,
+            incumbent,
+            margin,
+            candidate_referee_key=candidate_referee_key,
+            incumbent_referee_key=incumbent_referee_key,
+            tallied_axis=tallied_axis,
+        )
+    except TypeError as exc:
+        if "tallied_axis" not in str(exc):
+            raise
+        return w5_dominates(
+            candidate,
+            incumbent,
+            margin,
+            candidate_referee_key=candidate_referee_key,
+            incumbent_referee_key=incumbent_referee_key,
+        )
 
 
 def _remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
@@ -2667,6 +2743,9 @@ def run_w5_finisher(
     slice_s = _finisher_slice_s(config)
     node_count = int(incumbent_pos.shape[0])
     edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+    tallied_axis = (
+        "directed" if is_semantically_directed and declared_hierarchical else "undirected"
+    )
     predicted_skip_reason = w5_predicted_skip_reason(node_count, edge_count, config)
     cost_plan: Optional[W5CostPlan] = None
     incumbent_referee_key = (
@@ -2732,12 +2811,13 @@ def run_w5_finisher(
         winner_referee_key = (
             referee_key_fn(winner_pos) if referee_key_fn is not None else incumbent_referee_key
         )
-        if winner_pos is not incumbent_pos and not w5_dominates(
+        if winner_pos is not incumbent_pos and not _w5_dominates_with_axis(
             winner_score_pair,
             incumbent_score_pair,
             float(accept_margin),
             candidate_referee_key=winner_referee_key,
             incumbent_referee_key=incumbent_referee_key,
+            tallied_axis=tallied_axis,
         ):
             winner_pos = incumbent_pos
             winner_score_pair = incumbent_score_pair
@@ -3079,12 +3159,13 @@ def run_w5_finisher(
                         if referee_key_fn is not None
                         else winner_referee_key
                     )
-                    is_accepted = w5_dominates(
+                    is_accepted = _w5_dominates_with_axis(
                         honest,
                         winner_score_pair,
                         float(accept_margin),
                         candidate_referee_key=checkpoint_referee_key,
                         incumbent_referee_key=winner_referee_key,
+                        tallied_axis=tallied_axis,
                     )
                     reason = "dominates" if is_accepted else "does_not_dominate_both"
                     checkpoint = W5Checkpoint(
