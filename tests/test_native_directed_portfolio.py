@@ -2973,11 +2973,11 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
 
     layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), config)
 
-    pure_stress_candidates = 2
+    non_sugiyama_candidates = 1
     expected_sugiyama_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(
         SUGIYAMA_RANK_SEP_GRID
     ) * len(SUGIYAMA_NODE_SEP_GRID)
-    expected_candidates = expected_sugiyama_candidates + pure_stress_candidates
+    expected_candidates = expected_sugiyama_candidates + non_sugiyama_candidates
     assert len(proxy_scored) == expected_candidates
     assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
     decision_log = getattr(config, DECISION_LOG_ATTR)
