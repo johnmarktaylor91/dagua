@@ -162,6 +162,9 @@ class _DirectedClusterScoreTelemetry:
         Whether the frozen V3 severe-G6 oracle found an absolute breach.
     v3_referee_ineligibility_reason : str
         Human-readable telemetry reason for the selected prefix.
+    champion_ineligibility_flags : frozenset[str], optional
+        Frozen V3 row flags that disqualify a candidate from champion
+        selection. ``None`` preserves callers without V3 flag payloads.
     """
 
     extended_score: float
@@ -171,6 +174,7 @@ class _DirectedClusterScoreTelemetry:
     v3_tiered: float = float("-inf")
     v3_severe_g6_breach: bool = False
     v3_referee_ineligibility_reason: str = "not_weighted_input"
+    champion_ineligibility_flags: Optional[frozenset[str]] = None
 
 
 def _weighted_referee_active(problem: LayoutProblem) -> bool:
@@ -332,13 +336,19 @@ def _directed_cluster_candidate_is_dual_admissible(
     Returns
     -------
     bool
-        ``True`` iff extended improves by the honest margin and old-ruler
-        score does not decrease.
+        ``True`` iff V3 improves by the honest margin and the candidate does
+        not introduce a frozen champion-ineligible degeneracy flag.
     """
-    return (
-        candidate.v3_tiered > incumbent.v3_tiered + CLUSTER_DUAL_ACCEPTANCE_MARGIN
-        and candidate.old_score >= incumbent.old_score - CLUSTER_DUAL_ACCEPTANCE_MARGIN
+    from dagua.layout.ops.pipelines.native_finisher import (
+        candidate_introduces_champion_ineligible_flag,
     )
+
+    if candidate_introduces_champion_ineligible_flag(
+        candidate.champion_ineligibility_flags,
+        incumbent.champion_ineligibility_flags,
+    ):
+        return False
+    return candidate.v3_tiered > incumbent.v3_tiered + CLUSTER_DUAL_ACCEPTANCE_MARGIN
 
 
 def _score_directed_candidate(
@@ -427,6 +437,7 @@ def _score_directed_candidate_referee_payload(
         composite_auto(_old_cluster_ruler_metrics(numeric_float), is_semantically_directed=True)
     )
     from dagua.eval.ruler_v3 import severe_g6_breach
+    from dagua.layout.ops.pipelines.native_finisher import DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
     from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
 
     v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
@@ -441,6 +452,8 @@ def _score_directed_candidate_referee_payload(
         v3_tiered=float(v3_result.scores["tiered"]),
         v3_severe_g6_breach=v3_breach,
         v3_referee_ineligibility_reason=v3_reason,
+        champion_ineligibility_flags=frozenset(str(flag) for flag in v3_result.flags)
+        & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
     )
     return score, telemetry
 
@@ -2287,6 +2300,15 @@ def _register_dot_order_candidates(
                 all_pairs_dist,
                 incumbent_referee_key,
             )
+            from dagua.layout.ops.pipelines.native_finisher import w5_legacy_tallied_sole_failure
+
+            legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
+                candidate_pair,
+                incumbent_pair,
+                candidate_referee_key=_runtime_referee_telemetry(candidate, problem)[0],
+                incumbent_referee_key=incumbent_referee_key,
+                tallied_axis="directed",
+            )
             selected = bool(dominates)
             telemetry.append(
                 {
@@ -2295,6 +2317,7 @@ def _register_dot_order_candidates(
                     "incumbent_undirected": incumbent_pair.undirected,
                     "candidate_directed": candidate_pair.directed,
                     "candidate_undirected": candidate_pair.undirected,
+                    "legacy_tallied_sole_failure": legacy_tallied_sole_failure,
                     "selected": selected,
                 }
             )
@@ -2437,6 +2460,15 @@ def _register_wide_dag_ordering_candidates(
                 all_pairs_dist,
                 incumbent_referee_key,
             )
+            from dagua.layout.ops.pipelines.native_finisher import w5_legacy_tallied_sole_failure
+
+            legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
+                candidate_pair,
+                incumbent_pair,
+                candidate_referee_key=_runtime_referee_telemetry(candidate, problem)[0],
+                incumbent_referee_key=incumbent_referee_key,
+                tallied_axis="directed",
+            )
             selected = bool(dominates)
             telemetry.append(
                 {
@@ -2445,6 +2477,7 @@ def _register_wide_dag_ordering_candidates(
                     "incumbent_undirected": incumbent_pair.undirected,
                     "candidate_directed": candidate_pair.directed,
                     "candidate_undirected": candidate_pair.undirected,
+                    "legacy_tallied_sole_failure": legacy_tallied_sole_failure,
                     "selected": selected,
                 }
             )
