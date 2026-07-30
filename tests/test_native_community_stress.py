@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 import numpy as np
+import pytest
 import torch
 
 from dagua.eval.graphs import _make_r79_weighted_community_graph, _make_weighted_clusters
@@ -167,6 +168,33 @@ def test_community_stress_is_byte_identical_across_runs() -> None:
     )
 
     assert _hash_positions(pos_a) == _hash_positions(pos_b)
+
+
+def test_community_stress_dense_work_guard_fires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Community stress must abstain before entering dense geodesic work."""
+    from dagua.layout.ops.pipelines import native_lattice_grid
+
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    labels = torch.tensor([0, 0, 1], dtype=torch.long)
+
+    def fail_core(*args: object, **kwargs: object) -> torch.Tensor:
+        """Fail if the dense geodesic core is reached."""
+        del args, kwargs
+        raise AssertionError("dense geodesic core should not run")
+
+    monkeypatch.setattr(native_lattice_grid, "geodesic_dense_work_is_allowed", lambda *args: False)
+    monkeypatch.setattr(native_lattice_grid, "_layout_geodesic_stress_core", fail_core)
+
+    with pytest.raises(ValueError, match="community stress dense-work cap exceeded"):
+        layout_community_stress_pipeline(
+            edge_index=edge_index,
+            num_nodes=3,
+            community_labels=labels,
+            inter_scale=1.5,
+            seed=42,
+        )
 
 
 def test_geodesic_refactor_no_hook_matches_public_caller_hash() -> None:
