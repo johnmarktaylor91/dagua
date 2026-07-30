@@ -907,7 +907,7 @@ def test_dot_order_gate_structural_and_off_class_noop() -> None:
 
 
 def test_dot_order_default_gate_is_disabled_for_target_shape() -> None:
-    """Target-shaped dot-order graphs still cannot build default candidates."""
+    """Low-fanout skip-edge DAGs still cannot build default candidates."""
     problem = _skip_edge_dot_order_problem()
     incumbent = torch.tensor(
         [
@@ -927,6 +927,67 @@ def test_dot_order_default_gate_is_disabled_for_target_shape() -> None:
     assert not _directed_dot_order_enabled(problem)
     assert candidates == {}
     assert getattr(config, "_dagua_native_dot_order_fired") is False
+
+
+def test_dot_order_gate_opens_for_clusterless_high_fanout_dag() -> None:
+    """Clusterless semantic DAGs with one wide hub pass the dot-order gate."""
+    edge_index = torch.tensor(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [1, 2, 3, 4, 5, 6],
+        ],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+    assert _directed_dot_order_enabled(problem)
+
+
+def test_dot_order_gate_rejects_clusters_and_non_hub_dags() -> None:
+    """Dot-order stays off for declared clusters and ordinary low-fanout DAGs."""
+    hub_edge_index = torch.tensor(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [1, 2, 3, 4, 5, 6],
+        ],
+        dtype=torch.long,
+    )
+    clustered = LayoutProblem(
+        edge_index=hub_edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 10.0),
+        clusters={"c0": [0, 1, 2]},
+        structure=_dot_order_structure(),
+    )
+    ordinary = LayoutProblem(
+        edge_index=torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long),
+        num_nodes=5,
+        node_sizes=torch.full((5, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+    assert not _directed_dot_order_enabled(clustered)
+    assert not _directed_dot_order_enabled(ordinary)
+
+
+def test_dot_order_gate_rejects_powerlaw_scale_moderate_fanout() -> None:
+    """Moderate fanout at 500-node scale stays below the narrow hub threshold."""
+    sources = [0 for _ in range(15)] + [node for node in range(1, 499)]
+    targets = [node for node in range(1, 16)] + [node + 1 for node in range(1, 499)]
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=500,
+        node_sizes=torch.full((500, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+    assert not _directed_dot_order_enabled(problem)
 
 
 def test_dot_order_direct_builder_remains_byte_deterministic() -> None:
