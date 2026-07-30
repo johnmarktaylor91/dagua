@@ -1463,6 +1463,33 @@ def _apply_recombinant_ordering(
         num_nodes=n_expanded,
         virtual_ids=virtual_ids,
     )
+    expanded_sizes = (
+        torch.cat(
+            (
+                problem.node_sizes.detach().to(device="cpu", dtype=torch.float32),
+                torch.zeros(
+                    (max(0, n_expanded - int(problem.num_nodes)), 2),
+                    dtype=torch.float32,
+                ),
+            ),
+            dim=0,
+        )
+        if problem.node_sizes is not None and n_expanded > int(problem.num_nodes)
+        else (
+            problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+            if problem.node_sizes is not None
+            else None
+        )
+    )
+    expanded_problem = LayoutProblem(
+        edge_index=expanded_edges,
+        num_nodes=n_expanded,
+        node_sizes=expanded_sizes,
+        direction=problem.direction,
+        structure=problem.structure,
+        edge_weights=torch.tensor(_edge_penalties, dtype=torch.float32),
+        seed=problem.seed,
+    )
     ctx = RuntimeContext()
     if spec.ordering == "barycenter_transpose":
         from dagua.layout.ops.ordering import (
@@ -1473,15 +1500,19 @@ def _apply_recombinant_ordering(
         )
 
         state = BarycenterSweep(BarycenterSweepConfig(passes=12, direction="both")).apply(
-            problem,
+            expanded_problem,
             state,
             ctx,
         )
-        state = TransposeHeuristic(TransposeHeuristicConfig(passes=4)).apply(problem, state, ctx)
+        state = TransposeHeuristic(TransposeHeuristicConfig(passes=4)).apply(
+            expanded_problem,
+            state,
+            ctx,
+        )
     elif spec.ordering == "median":
         from dagua.layout.ops.ordering import MedianSweep, MedianSweepConfig
 
-        state = MedianSweep(MedianSweepConfig(passes=12)).apply(problem, state, ctx)
+        state = MedianSweep(MedianSweepConfig(passes=12)).apply(expanded_problem, state, ctx)
     elif spec.ordering == "discrete":
         ordered_pos = _rank_local_zero_crossing_swap_candidate(
             expanded_initial,
@@ -1538,7 +1569,7 @@ def _assign_recombinant_x_coordinates(
             node_i = int(node)
             if 0 <= node_i < n:
                 rank_values[node_i] = int(rank)
-    expanded_ranks, expanded_edges, virtual_ids, _edge_penalties = _expanded_layered_graph(
+    expanded_ranks, expanded_edges, virtual_ids, edge_penalties = _expanded_layered_graph(
         rank_values=rank_values,
         edge_index=problem.edge_index,
         edge_weights=problem.edge_weights,
@@ -1554,13 +1585,7 @@ def _assign_recombinant_x_coordinates(
             while len(expanded_layers) <= rank:
                 expanded_layers.append([])
             expanded_layers[rank].append(virtual_node)
-        expanded_layers = [
-            sorted(
-                [int(node) for node in layer],
-                key=lambda node: (node not in virtual_ids, node),
-            )
-            for layer in expanded_layers
-        ]
+        expanded_layers = [[int(node) for node in layer] for layer in expanded_layers]
     sizes = (
         problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
         if problem.node_sizes is not None
@@ -1583,11 +1608,7 @@ def _assign_recombinant_x_coordinates(
                 node_widths=expanded_widths,
                 edge_index=expanded_edges,
                 node_sep=node_sep,
-                edge_weights=(
-                    torch.ones(int(expanded_edges.shape[1]), dtype=torch.float32)
-                    if expanded_edges.numel()
-                    else torch.zeros(0, dtype=torch.float32)
-                ),
+                edge_weights=torch.tensor(edge_penalties, dtype=torch.float32),
                 center=True,
             ).to(dtype=torch.float32)
             x_values = x_all[:n].to(dtype=torch.float32)
@@ -1628,6 +1649,42 @@ def _assign_recombinant_x_coordinates(
         except Exception:
             return None
     return None
+
+
+def _recombinant_expansion_volume(
+    spec: _RecombinantLayeredSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+) -> Optional[float]:
+    """Return the expanded-node pricing volume for a recombinant spec.
+
+    Parameters
+    ----------
+    spec : _RecombinantLayeredSpec
+        Candidate specification whose layering determines long-edge expansion.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float or None
+        Expanded-node-to-real-node ratio, or ``None`` when ranks cannot be
+        derived for the candidate.
+    """
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    n = int(problem.num_nodes)
+    rank_values = _recombinant_rank_values(spec, problem, incumbent)
+    if rank_values is None or len(rank_values) != n:
+        return None
+    expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    return float(len(expanded_ranks)) / float(max(n, 1))
 
 
 def _build_recombinant_layered_candidate(
@@ -1708,17 +1765,20 @@ def _directed_recombinant_layered_candidates(
     if not _directed_recombinant_layered_enabled(problem):
         return {}
     candidates: dict[str, torch.Tensor] = {}
-    predicted_cost = estimate_native_work_cost(
-        problem,
-        "directed_recombinant",
-        {"volume": 1.0},
-        _native_device_class(config),
-    )
-    predicted_cost.metadata["legacy_prior_s"] = DIRECTED_RECOMBINANT_PRIOR_S
-    predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
     for spec in _recombinant_layered_specs():
         if len(candidates) >= DIRECTED_RECOMBINANT_MAX_CANDIDATES:
             break
+        expansion_volume = _recombinant_expansion_volume(spec, problem, incumbent)
+        if expansion_volume is None:
+            continue
+        predicted_cost = estimate_native_work_cost(
+            problem,
+            "directed_recombinant",
+            {"volume": expansion_volume},
+            _native_device_class(config),
+        )
+        predicted_cost.metadata["legacy_prior_s"] = DIRECTED_RECOMBINANT_PRIOR_S
+        predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
         if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
             config,
             predicted_cost,
@@ -1803,17 +1863,20 @@ def _directed_wide_dag_ordering_candidates(
         return {}
     setattr(config, "_dagua_native_wide_dag_ordering_fired", True)
     candidates: dict[str, torch.Tensor] = {}
-    predicted_cost = estimate_native_work_cost(
-        problem,
-        "directed_recombinant",
-        {"volume": 1.0},
-        _native_device_class(config),
-    )
-    predicted_cost.metadata["legacy_prior_s"] = DIRECTED_WIDE_DAG_PRIOR_S
-    predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
     for spec in _wide_dag_layered_specs():
         if len(candidates) >= DIRECTED_WIDE_DAG_MAX_CANDIDATES:
             break
+        expansion_volume = _recombinant_expansion_volume(spec, problem, incumbent)
+        if expansion_volume is None:
+            continue
+        predicted_cost = estimate_native_work_cost(
+            problem,
+            "directed_recombinant",
+            {"volume": expansion_volume},
+            _native_device_class(config),
+        )
+        predicted_cost.metadata["legacy_prior_s"] = DIRECTED_WIDE_DAG_PRIOR_S
+        predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
         if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
             config,
             predicted_cost,
@@ -4733,7 +4796,7 @@ def layout_native_directed_portfolio(
         except Exception as exc:  # noqa: BLE001 -- wide-DAG candidates cannot sink incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed wide-DAG ordering challenger failed", exc_info=True)
-    if _directed_dot_order_enabled(problem):
+    if not bool(problem.clusters) and _directed_dot_order_enabled(problem):
         try:
             incumbent_pair = _register_dot_order_candidates(
                 problem=problem,

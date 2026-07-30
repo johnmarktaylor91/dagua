@@ -138,7 +138,7 @@ def _expanded_layered_graph(
     rank_values: Sequence[int],
     edge_index: torch.Tensor,
     edge_weights: Optional[torch.Tensor],
-) -> Tuple[List[int], torch.Tensor, set[int], List[int]]:
+) -> Tuple[List[int], torch.Tensor, set[int], List[float]]:
     """Expand long layered edges into adjacent-rank virtual chains.
 
     Parameters
@@ -148,28 +148,34 @@ def _expanded_layered_graph(
     edge_index : torch.Tensor
         Directed edge tensor with shape ``[2, E]`` over real nodes.
     edge_weights : torch.Tensor, optional
-        Optional edge weights with shape ``[E]``. Present for API symmetry
-        with dot-position expansion; mincross penalties start at unit weight.
+        Optional edge weights with shape ``[E]``. When present, each expanded
+        chain edge inherits the original edge weight so downstream weighted
+        x-coordinate stages retain baseline fidelity.
 
     Returns
     -------
-    tuple[list[int], torch.Tensor, set[int], list[int]]
+    tuple[list[int], torch.Tensor, set[int], list[float]]
         Expanded rank values, expanded chain edges with shape ``[2, E2]``,
-        virtual node ids, and unit edge penalties aligned to the expanded edge
+        virtual node ids, and edge penalties aligned to the expanded edge
         tensor.
     """
-    del edge_weights
     expanded_ranks = [int(value) for value in rank_values]
     expanded_edges: List[Tuple[int, int]] = []
-    edge_penalties: List[int] = []
+    edge_penalties: List[float] = []
     virtual_ids: set[int] = set()
     if edge_index.ndim != 2 or int(edge_index.shape[0]) != 2:
         raise ValueError("edge_index must have shape [2, E].")
     edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    weights = (
+        edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        if edge_weights is not None
+        else torch.ones(int(edges.shape[1]), dtype=torch.float32)
+    )
     original_count = len(expanded_ranks)
     for edge_id in range(int(edges.shape[1])):
         tail = int(edges[0, edge_id].item())
         head = int(edges[1, edge_id].item())
+        edge_weight = float(weights[edge_id].item())
         if tail == head:
             continue
         if not (0 <= tail < original_count and 0 <= head < original_count):
@@ -178,7 +184,7 @@ def _expanded_layered_graph(
         head_rank = int(expanded_ranks[head])
         if head_rank <= tail_rank + 1:
             expanded_edges.append((tail, head))
-            edge_penalties.append(1)
+            edge_penalties.append(edge_weight)
             continue
         previous = tail
         for rank in range(tail_rank + 1, head_rank):
@@ -186,10 +192,10 @@ def _expanded_layered_graph(
             expanded_ranks.append(rank)
             virtual_ids.add(virtual_node)
             expanded_edges.append((previous, virtual_node))
-            edge_penalties.append(int(DOT_VIRTUAL_EDGE_WEIGHT))
+            edge_penalties.append(edge_weight)
             previous = virtual_node
         expanded_edges.append((previous, head))
-        edge_penalties.append(int(DOT_VIRTUAL_EDGE_WEIGHT))
+        edge_penalties.append(edge_weight)
     if expanded_edges:
         expanded_edge_index = torch.tensor(expanded_edges, dtype=torch.long).t().contiguous()
     else:
