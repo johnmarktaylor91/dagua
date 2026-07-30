@@ -2350,7 +2350,7 @@ def _router_v2_large_mini_contest(
     torch.Tensor
         Winning positions with shape ``[N, 2]``.
     """
-    from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
+    from dagua.layout.ops.pipelines.dagua_native import ROUTER_V2, _undirected_route_shortlist
 
     started_at = time.perf_counter()
     started_process_at = time.process_time()
@@ -2432,7 +2432,62 @@ def _router_v2_large_mini_contest(
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("large mini-contest geodesic challenger failed", exc_info=True)
-    if "community_scaffold" in shortlist.candidates and _portfolio_has_budget(config):
+    community_admission = (
+        bool(problem.clusters)
+        or "community_scaffold" in shortlist.candidates
+        or (problem.edge_weights is not None and n <= ROUTER_V2.geodesic_gate_nodes)
+    )
+    community_labels = None
+    if community_admission and _portfolio_has_budget(config):
+        try:
+            from dagua.layout.ops.pipelines.native_community_stress import (
+                COMMUNITY_STRESS_INTER_SCALES,
+                layout_community_stress_pipeline,
+                resolve_community_labels,
+            )
+
+            community_started = time.perf_counter()
+            community_labels = resolve_community_labels(problem)
+            if community_labels is not None:
+                for inter_scale in COMMUNITY_STRESS_INTER_SCALES:
+                    _admit(
+                        f"community_stress_s{inter_scale:g}",
+                        layout_community_stress_pipeline(
+                            edge_index=problem.edge_index,
+                            num_nodes=n,
+                            node_sizes=problem.node_sizes,
+                            config=config,
+                            seed=seed,
+                            edge_weights=problem.edge_weights,
+                            community_labels=community_labels,
+                            inter_scale=inter_scale,
+                            node_sep=node_sep,
+                        ),
+                    )
+                if problem.edge_weights is not None:
+                    for inter_scale in COMMUNITY_STRESS_INTER_SCALES:
+                        _admit(
+                            f"community_stress_s{inter_scale:g}_unweighted",
+                            layout_community_stress_pipeline(
+                                edge_index=problem.edge_index,
+                                num_nodes=n,
+                                node_sizes=problem.node_sizes,
+                                config=config,
+                                seed=seed,
+                                edge_weights=None,
+                                community_labels=community_labels,
+                                inter_scale=inter_scale,
+                                node_sep=node_sep,
+                            ),
+                        )
+            _LOGGER.info(
+                "Undirected candidate runtime family=community_stress seconds=%.3f",
+                time.perf_counter() - community_started,
+            )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest community stress challenger failed", exc_info=True)
+    if community_labels is not None and _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.native_community import (
                 layout_native_community_pipeline,
@@ -2447,6 +2502,7 @@ def _router_v2_large_mini_contest(
                     config=config,
                     seed=seed,
                     edge_weights=problem.edge_weights,
+                    community_labels=community_labels,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
@@ -3198,7 +3254,7 @@ def layout_native_undirected_portfolio(
     # constants). All are ordinary contest candidates: the honest
     # measured-argmax referee and the incumbent tie-break decide, exactly as
     # for every other challenger family.
-    from dagua.layout.ops.pipelines.dagua_native import _undirected_route_shortlist
+    from dagua.layout.ops.pipelines.dagua_native import ROUTER_V2, _undirected_route_shortlist
 
     shortlist = _undirected_route_shortlist(
         cast(Any, problem.structure),
@@ -3323,7 +3379,69 @@ def layout_native_undirected_portfolio(
             "Undirected candidate runtime family=mesh_regularized seconds=%.3f",
             time.perf_counter() - mesh_started,
         )
-    if "community_scaffold" in shortlist.candidates and _portfolio_has_budget(config):
+    community_admission = (
+        bool(problem.clusters)
+        or "community_scaffold" in shortlist.candidates
+        or (problem.edge_weights is not None and n <= ROUTER_V2.geodesic_gate_nodes)
+    )
+    community_labels = None
+    community_stress_fired = False
+    if community_admission and _portfolio_has_budget(config):
+        community_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_community_stress import (
+                COMMUNITY_STRESS_INTER_SCALES,
+                layout_community_stress_pipeline,
+                resolve_community_labels,
+            )
+
+            community_labels = resolve_community_labels(problem)
+            if community_labels is not None:
+                for inter_scale in COMMUNITY_STRESS_INTER_SCALES:
+                    community_pos = layout_community_stress_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        config=config,
+                        seed=seed,
+                        edge_weights=problem.edge_weights,
+                        community_labels=community_labels,
+                        inter_scale=inter_scale,
+                        node_sep=challenger_node_sep,
+                    )
+                    _add_challenger(
+                        f"community_stress_s{inter_scale:g}",
+                        community_pos,
+                        include_raw=True,
+                    )
+                    community_stress_fired = True
+                if problem.edge_weights is not None:
+                    for inter_scale in COMMUNITY_STRESS_INTER_SCALES:
+                        community_pos = layout_community_stress_pipeline(
+                            edge_index=problem.edge_index,
+                            num_nodes=n,
+                            node_sizes=problem.node_sizes,
+                            config=config,
+                            seed=seed,
+                            edge_weights=None,
+                            community_labels=community_labels,
+                            inter_scale=inter_scale,
+                            node_sep=challenger_node_sep,
+                        )
+                        _add_challenger(
+                            f"community_stress_s{inter_scale:g}_unweighted",
+                            community_pos,
+                            include_raw=True,
+                        )
+                        community_stress_fired = True
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("community stress undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=community_stress seconds=%.3f",
+            time.perf_counter() - community_started,
+        )
+    if community_labels is not None and _portfolio_has_budget(config):
         community_started = time.perf_counter()
         try:
             from dagua.layout.ops.pipelines.native_community import (
@@ -3337,6 +3455,7 @@ def layout_native_undirected_portfolio(
                 config=config,
                 seed=seed,
                 edge_weights=problem.edge_weights,
+                community_labels=community_labels,
             )
             _add_challenger("community_scaffold", community_pos, include_raw=True)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
@@ -3387,6 +3506,18 @@ def layout_native_undirected_portfolio(
         )
         if reserved_cluster_name is not None:
             proxy_finalists.append(reserved_cluster_name)
+    if community_stress_fired and challenger_names:
+        reserved_community_name = next(
+            (
+                name
+                for name in challenger_names
+                if name not in proxy_finalists
+                and _marketplace_family(name).startswith("community_stress")
+            ),
+            None,
+        )
+        if reserved_community_name is not None:
+            proxy_finalists.append(reserved_community_name)
     finalist_names = [
         "incumbent",
         *proxy_finalists,
