@@ -1058,12 +1058,39 @@ def _directed_dot_order_enabled(problem: LayoutProblem) -> bool:
     Returns
     -------
     bool
-        Always ``False`` in the default runtime path. The implementation is
-        retained for future gated experiments, but the Fable-verified corpus
-        contribution was zero, so candidate construction is disabled.
+        ``True`` only for bounded semantic DAGs with clean high-fanout hub
+        structure where expanded-graph mincross has proven useful.
     """
-    del problem
-    return False
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_DOT_ORDER_MIN_NODES or n > DIRECTED_DOT_ORDER_MAX_NODES or edge_count == 0:
+        return False
+    if problem.clusters:
+        return False
+    structure = problem.structure
+    if structure is None:
+        return False
+    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+
+    ranks, _max_width, _long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
+    expanded_n = n
+    out_degree = [0] * n
+    for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i != dst_i and 0 <= src_i < n and 0 <= dst_i < n:
+            out_degree[src_i] += 1
+            expanded_n += max(0, int(ranks[dst_i]) - int(ranks[src_i]) - 1)
+    if not _expanded_size_within_dot_order_ladder(expanded_n, n):
+        return False
+    high_fanout_threshold = max(
+        DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE,
+        int(round(0.06 * float(n))),
+    )
+    return max(out_degree, default=0) >= high_fanout_threshold
 
 
 def _clean_fan_bundle_for_compaction(problem: LayoutProblem) -> bool:
