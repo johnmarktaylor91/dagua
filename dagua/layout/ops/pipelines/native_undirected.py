@@ -2546,32 +2546,35 @@ def _router_v2_large_mini_contest(
         for name, pos in positions.items()
     }
     cluster_score_telemetry: Dict[str, _ClusterScoreTelemetry] = {}
-    if problem.clusters:
-        scores: Dict[str, float] = {}
-        for name, pos in positions.items():
-            score, score_telemetry = _score_undirected_candidate_payload(
-                pos,
-                problem,
-                cluster_ids,
-                aesthetic_profile,
-                all_pairs_dist,
-            )
-            scores[name] = score
-            if score_telemetry is not None:
-                cluster_score_telemetry[name] = score_telemetry
-    else:
-        scores = {
-            name: _score_undirected_candidate_cached(
-                pos,
-                problem,
-                cluster_ids,
-                aesthetic_profile,
-                all_pairs_dist,
-            )
-            for name, pos in positions.items()
-        }
+    scores: Dict[str, float] = {}
     best_name = "incumbent" if "incumbent" in positions else "sfdp_prism"
+    for index, (name, pos) in enumerate(positions.items()):
+        if not _admit_v3_referee_score(
+            problem,
+            config,
+            mandatory_floor=name == best_name or index <= 1,
+        ):
+            continue
+        score, score_telemetry = _score_undirected_candidate_payload(
+            pos,
+            problem,
+            cluster_ids,
+            aesthetic_profile,
+            all_pairs_dist,
+        )
+        scores[name] = score
+        if score_telemetry is not None:
+            cluster_score_telemetry[name] = score_telemetry
     best_name = _select_undirected_winner(scores, cluster_score_telemetry, best_name)
+    try:
+        projected_winner = _project_candidate_prism(positions[best_name], problem)
+    except Exception as exc:  # noqa: BLE001 -- the terminal W5 seed is optional
+        _reraise_worker_timeout(exc)
+        projected_winner = None
+    if projected_winner is not None and bool(torch.isfinite(projected_winner).all().item()):
+        terminal_seeds = list(getattr(config, "_dagua_native_terminal_w5_seed_bank", []))
+        terminal_seeds.append((f"{best_name}_prism_seed", projected_winner.detach()))
+        setattr(config, "_dagua_native_terminal_w5_seed_bank", terminal_seeds)
     _log_marketplace_telemetry(
         route="undirected_large_mini",
         structural_gate="large_prism_shortlist",
