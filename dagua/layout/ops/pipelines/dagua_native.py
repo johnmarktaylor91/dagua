@@ -6155,12 +6155,14 @@ def _terminal_w5_polish(
             )
             return final_pos
 
-        seed_bank = [W5Seed("terminal_final", final_pos)]
-        for seed_name, seed_pos in cluster_seed_positions:
-            seed_bank.append(
-                W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+        seed_bank = [
+            W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+            for seed_name, seed_pos in list(
+                getattr(config, "_dagua_native_terminal_w5_seed_bank", [])
             )
-        for seed_name, seed_pos in list(getattr(config, "_dagua_native_terminal_w5_seed_bank", [])):
+        ]
+        seed_bank.append(W5Seed("terminal_final", final_pos))
+        for seed_name, seed_pos in cluster_seed_positions:
             seed_bank.append(
                 W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
             )

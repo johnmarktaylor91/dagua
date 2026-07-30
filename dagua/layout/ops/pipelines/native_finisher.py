@@ -3056,6 +3056,100 @@ def _scale_positions_about_centroid(pos: torch.Tensor, scale: float) -> torch.Te
     return center + (pos.detach() - center) * float(scale)
 
 
+def _w5_c5_band_scale_candidate(pair: W5ScorePair) -> Optional[float]:
+    """Return a closed-form global scale toward the frozen C5 band center.
+
+    Parameters
+    ----------
+    pair : W5ScorePair
+        Raw checkpoint score pair carrying the V3 C5 whitespace ratio.
+
+    Returns
+    -------
+    float or None
+        Clamped scale factor to evaluate, or ``None`` when the raw C5 ratio is
+        unavailable, in-band, or requires only the already-scored identity.
+    """
+    ratio = pair.c5_whitespace_ratio
+    if ratio is None or not math.isfinite(float(ratio)):
+        return None
+    ratio_now = float(ratio)
+    if float(WHITESPACE_RATIO_LO) <= ratio_now <= float(WHITESPACE_RATIO_HI):
+        return None
+    if ratio_now <= 0.0:
+        return None
+    ratio_target = (
+        float(WHITESPACE_RATIO_HI)
+        if ratio_now > float(WHITESPACE_RATIO_HI)
+        else float(WHITESPACE_RATIO_LO)
+    )
+    raw_scale = math.sqrt(ratio_target / ratio_now)
+    if not math.isfinite(raw_scale):
+        return None
+    scale = min(float(_W5_SCALE_SEARCH_MAX), max(float(_W5_SCALE_SEARCH_MIN), raw_scale))
+    if abs(scale - 1.0) <= 1.0e-12:
+        return None
+    return scale
+
+
+def _w5_scaled_candidate_should_fallback(
+    scaled_pos: torch.Tensor,
+    size_work: torch.Tensor,
+    shape_work: Optional[NativeShapeGeometry],
+    incumbent_overlap: int,
+    candidate_score: W5ScorePair,
+    incumbent_score: W5ScorePair,
+    *,
+    candidate_referee_key: Tuple[int, float],
+    incumbent_referee_key: Tuple[int, float],
+    tallied_axis: str,
+    accept_margin: float,
+) -> bool:
+    """Return whether a scored scale candidate should fall back to raw.
+
+    Parameters
+    ----------
+    scaled_pos : torch.Tensor
+        Scaled checkpoint positions with shape ``[N, 2]``.
+    size_work : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    shape_work : NativeShapeGeometry, optional
+        Optional non-box shape descriptors.
+    incumbent_overlap : int
+        Current accepted winner overlap count.
+    candidate_score : W5ScorePair
+        Honest score pair for ``scaled_pos``.
+    incumbent_score : W5ScorePair
+        Honest score pair for the current W5 winner.
+    candidate_referee_key : tuple[int, float]
+        V3 referee key for ``scaled_pos``.
+    incumbent_referee_key : tuple[int, float]
+        V3 referee key for the current W5 winner.
+    tallied_axis : str
+        Legacy score axis used when no V3 score is available.
+    accept_margin : float
+        Required honest score margin.
+
+    Returns
+    -------
+    bool
+        ``True`` when the caller should discard the scaled candidate and score
+        the raw checkpoint instead.
+    """
+    if _is_degenerate(scaled_pos, size_work):
+        return True
+    if _overlap_count(scaled_pos, size_work, shape_work) <= incumbent_overlap:
+        return False
+    return not w5_dominates(
+        candidate_score,
+        incumbent_score,
+        float(accept_margin),
+        candidate_referee_key=candidate_referee_key,
+        incumbent_referee_key=incumbent_referee_key,
+        tallied_axis=tallied_axis,
+    )
+
+
 def _honest_scale_line_search(
     checkpoint_pos: torch.Tensor,
     score_fn: Callable[[torch.Tensor], W5ScorePair],
@@ -3172,6 +3266,10 @@ def _honest_scale_line_search(
             best_scalar = scalar
             best_scale = float(scale)
         return scalar
+
+    analytic_scale = _w5_c5_band_scale_candidate(raw_pair)
+    if analytic_scale is not None:
+        score_scale(analytic_scale)
 
     x1 = right - inv_phi * (right - left)
     x2 = left + inv_phi * (right - left)
@@ -3920,13 +4018,9 @@ def run_w5_finisher(
                             break
                         continue
                     if _overlap_count(checkpoint_pos, size_work, shape_work) > incumbent_overlap:
-                        _increment_count(viability_counts, "drop_overlap_regressed")
-                        _increment_count(viability_drop_counts, "overlap_regressed")
-                        viability_s += max(0.0, time.perf_counter() - viability_started)
-                        if epilogue_scoring:
-                            break
-                        continue
-                    _increment_count(viability_counts, "scored_viable")
+                        _increment_count(viability_counts, "scored_overlap_regressed")
+                    else:
+                        _increment_count(viability_counts, "scored_viable")
                     viability_s += max(0.0, time.perf_counter() - viability_started)
                     try:
                         score_started = time.perf_counter()
@@ -3947,14 +4041,22 @@ def run_w5_finisher(
                         )
                         honest = scale_search.score_pair
                         if abs(float(scale_search.scale) - 1.0) > 1.0e-12:
-                            scaled_overlap = _overlap_count(
+                            scaled_referee_key = (
+                                referee_key_fn(score_pos)
+                                if referee_key_fn is not None
+                                else winner_referee_key
+                            )
+                            if _w5_scaled_candidate_should_fallback(
                                 scaled_checkpoint_pos,
                                 size_work,
                                 shape_work,
-                            )
-                            if scaled_overlap > incumbent_overlap or _is_degenerate(
-                                scaled_checkpoint_pos,
-                                size_work,
+                                incumbent_overlap,
+                                honest,
+                                winner_score_pair,
+                                candidate_referee_key=scaled_referee_key,
+                                incumbent_referee_key=winner_referee_key,
+                                tallied_axis=tallied_axis,
+                                accept_margin=float(accept_margin),
                             ):
                                 _increment_count(viability_counts, "scaled_viability_fallback")
                                 score_pos = raw_score_pos

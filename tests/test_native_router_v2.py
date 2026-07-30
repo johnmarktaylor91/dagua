@@ -10,6 +10,9 @@ the corpus 6x7, and node relabeling must never change a routing decision
 
 from __future__ import annotations
 
+import importlib
+
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -42,8 +45,10 @@ from dagua.layout.ops.pipelines.native_lattice_grid import (
     layout_regular_mesh_pipeline,
 )
 from dagua.layout.ops.pipelines.native_undirected import (
+    _ClusterScoreTelemetry,
     _never_nan_winner,
     _regular_mesh_clearance_expansion,
+    _router_v2_large_mini_contest,
 )
 from dagua.layout.ops.state import LayoutProblem
 
@@ -202,9 +207,102 @@ class _DeclaredUndirected:
     edge_weights = None
 
 
+class _MiniShortlist:
+    """Minimal router shortlist stand-in for mini-contest tests."""
+
+    candidates = ("rgg_geometric_seed",)
+
+
 # ---------------------------------------------------------------------------
 # Certificate correctness
 # ---------------------------------------------------------------------------
+
+
+def test_large_mini_contest_cluster_free_selection_uses_v3_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster-free mini-contest winners are selected by the V3 referee key."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+
+    baseline_pos = torch.tensor([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], dtype=torch.float32)
+    challenger_pos = torch.tensor([[1.0, 0.0], [11.0, 0.0], [21.0, 0.0]], dtype=torch.float32)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 1.0),
+        seed=42,
+    )
+    config = LayoutConfig()
+    score_calls: list[float] = []
+
+    def score_payload(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: torch.Tensor | None,
+        aesthetic_profile: object | None = None,
+        all_pairs_dist: object | None = None,
+    ) -> tuple[float, _ClusterScoreTelemetry]:
+        """Return legacy and V3 scores that disagree on the winner.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+        problem : LayoutProblem
+            Unused layout problem.
+        cluster_ids : torch.Tensor, optional
+            Unused cluster ids.
+        aesthetic_profile : object, optional
+            Unused aesthetic profile.
+        all_pairs_dist : object, optional
+            Unused shortest-path cache.
+
+        Returns
+        -------
+        tuple[float, _ClusterScoreTelemetry]
+            Legacy score and V3 telemetry.
+        """
+        del problem, cluster_ids, aesthetic_profile, all_pairs_dist
+        marker = float(pos[0, 0].item())
+        score_calls.append(marker)
+        v3_score = 1.0 if marker == 1.0 else 0.0
+        legacy_score = 0.0 if marker == 1.0 else 100.0
+        return legacy_score, _ClusterScoreTelemetry(
+            extended_score=legacy_score,
+            old_score=legacy_score,
+            metrics={},
+            v3_referee_eligibility_key=(1, -0.0),
+            v3_tiered=v3_score,
+        )
+
+    monkeypatch.setattr(
+        dagua_native,
+        "_undirected_route_shortlist",
+        lambda *args, **kwargs: _MiniShortlist(),
+    )
+    monkeypatch.setattr(native_undirected, "_portfolio_has_budget", lambda *args, **kwargs: True)
+    monkeypatch.setattr(native_undirected, "_rgg_geometric_seed_enabled", lambda _problem: True)
+    monkeypatch.setattr(
+        native_undirected,
+        "_rgg_geometric_seed_candidate",
+        lambda _problem, _seed, _node_sep: challenger_pos,
+    )
+    monkeypatch.setattr(native_undirected, "_repair_flung_isolates", lambda pos, *_args: pos)
+    monkeypatch.setattr(native_undirected, "_candidate_is_degenerate", lambda *_args: (False, "ok"))
+    monkeypatch.setattr(native_undirected, "_project_candidate_prism", lambda *_args: None)
+    monkeypatch.setattr(native_undirected, "_log_marketplace_telemetry", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        native_undirected,
+        "_admit_v3_referee_score",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(native_undirected, "_score_undirected_candidate_payload", score_payload)
+
+    winner = _router_v2_large_mini_contest(baseline_pos, problem, config)
+
+    assert torch.equal(winner, challenger_pos)
+    assert score_calls == [0.0, 1.0]
 
 
 def test_certificate_fires_on_out_of_corpus_grid() -> None:

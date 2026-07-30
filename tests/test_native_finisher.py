@@ -21,6 +21,8 @@ from dagua.layout.ops.pipelines.native_finisher import (
     W5HonestAxes,
     W5ScorePair,
     W5Seed,
+    _honest_scale_line_search,
+    _w5_scaled_candidate_should_fallback,
     log_w5_telemetry,
     run_w5_finisher,
     w5_dominates,
@@ -66,6 +68,76 @@ def _tiny_layout() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
     node_sizes = torch.full((4, 2), 2.0)
     return pos, edge_index, node_sizes
+
+
+def test_w5_scale_search_evaluates_c5_scale_down_candidate() -> None:
+    """Analytic C5 search can spend the large-row cap on a scale below 1.0."""
+    checkpoint_pos = torch.stack(
+        (
+            torch.arange(300, dtype=torch.float32),
+            torch.zeros(300, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    raw_span = float((checkpoint_pos[:, 0].max() - checkpoint_pos[:, 0].min()).item())
+    scored_scales: list[float] = []
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Return a V3 score that is maximized by the analytic shrink.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying an out-of-band C5 ratio.
+        """
+        span = float((pos[:, 0].max() - pos[:, 0].min()).item())
+        scale = span / raw_span
+        scored_scales.append(scale)
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-abs(scale - 0.8),
+            c5_whitespace_ratio=25.0,
+        )
+
+    result = _honest_scale_line_search(
+        checkpoint_pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+        keepalive=[],
+    )
+
+    assert result.evals == 3
+    assert result.scale == 0.8
+    assert any(scale < 1.0 for scale in scored_scales)
+
+
+def test_scaled_overlap_regression_survives_when_v3_dominates() -> None:
+    """Overlap-regressed analytic scale candidates are kept when V3 dominates."""
+    scaled_pos = torch.tensor([[0.0, 0.0], [100.0, 0.0], [101.0, 0.0]], dtype=torch.float32)
+    size_work = torch.full((3, 2), 4.0, dtype=torch.float32)
+    incumbent = W5ScorePair(directed=10.0, undirected=10.0, v3=10.0)
+    candidate = W5ScorePair(directed=0.0, undirected=0.0, v3=10.2)
+
+    assert not _w5_scaled_candidate_should_fallback(
+        scaled_pos,
+        size_work,
+        None,
+        incumbent_overlap=0,
+        candidate_score=candidate,
+        incumbent_score=incumbent,
+        candidate_referee_key=(1, -0.0),
+        incumbent_referee_key=(1, -0.0),
+        tallied_axis="undirected",
+        accept_margin=0.05,
+    )
 
 
 def test_w5_dominates_uses_referee_prefix_before_scores() -> None:
@@ -530,10 +602,10 @@ def test_w5_scale_line_search_keeps_scaled_tensor_alive_on_score_exception() -> 
     assert keepalive[1] is not pos
 
 
-def test_w5_finisher_falls_back_when_scaled_winner_regresses_overlap(
+def test_w5_finisher_admits_v3_dominant_scaled_overlap_regression(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scaled line-search winner must re-pass raw checkpoint viability."""
+    """A scaled line-search winner can survive overlap regression by V3."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -614,7 +686,7 @@ def test_w5_finisher_falls_back_when_scaled_winner_regresses_overlap(
     )
 
     assert result.accepted
-    assert torch.equal(result.winner_pos, candidate)
+    assert not torch.equal(result.winner_pos, candidate)
     assert result.viability_counts["scaled_viability_fallback"] >= 1
 
 
@@ -1849,10 +1921,10 @@ def test_w5_projects_overlapping_checkpoint_before_viability(
     assert result.viability_drop_counts == {}
 
 
-def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
+def test_w5_scores_checkpoint_when_projection_still_overlap_regresses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A checkpoint that remains overlap-regressed after projection is not scored."""
+    """A checkpoint that remains overlap-regressed after projection is referee-scored."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -1897,10 +1969,21 @@ def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
         del size_work
         return checkpoint_pos
 
-    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
-        """Fail if an overlap-regressed checkpoint reaches honest scoring."""
+    def non_dominating_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a score that cannot beat the incumbent.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Non-dominating score pair.
+        """
         del candidate
-        raise AssertionError("overlap-regressed checkpoint should be dropped")
+        return _pair(-1.0, -1.0)
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
     monkeypatch.setattr(native_finisher, "_project_checkpoint_for_viability", no_op_project)
@@ -1911,15 +1994,16 @@ def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
         seeds=[W5Seed("overlap", pos)],
         edge_index=edge_index,
         node_sizes=node_sizes,
-        score_fn=forbidden_score_fn,
+        score_fn=non_dominating_score_fn,
         is_semantically_directed=False,
         declared_hierarchical=False,
     )
 
-    assert result.checkpoints == ()
-    assert result.skipped_reason == "no_checkpoint"
-    assert result.viability_counts["drop_overlap_regressed"] == 2
-    assert result.viability_drop_counts == {"overlap_regressed": 2}
+    assert result.accepted == ()
+    assert len(result.checkpoints) == 2
+    assert result.skipped_reason == "no_checkpoint_improved"
+    assert result.viability_counts["scored_overlap_regressed"] == 2
+    assert result.viability_drop_counts == {}
 
 
 def test_w5_late_entry_prediction_uses_process_time_parity(
