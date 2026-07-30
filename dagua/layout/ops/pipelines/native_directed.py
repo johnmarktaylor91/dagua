@@ -95,6 +95,10 @@ DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER = 4.0
 DIRECTED_NESTED_STRESS_DAG_FLOOR = 0.50
 DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
 DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
+DIRECTED_PURE_STRESS_MIN_NODES = 6
+DIRECTED_PURE_STRESS_MAX_NODES = 512
+DIRECTED_PURE_STRESS_SMACOF_MAX_NODES = 128
+DIRECTED_PURE_STRESS_ELK_MAX_NODES = 64
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
 DIRECTED_NESTED_STRESS_PARETO_KEYS = (
     "ksm_score",
@@ -670,13 +674,11 @@ def _select_directed_winner(
                 candidate_telemetry.v3_referee_eligibility_key,
                 candidate_telemetry.v3_tiered,
                 candidate_telemetry.extended_score,
-                name,
             )
             best_key = (
                 best_telemetry.v3_referee_eligibility_key,
                 best_telemetry.v3_tiered,
                 best_telemetry.extended_score,
-                best_name,
             )
             if candidate_key > best_key:
                 best_name = name
@@ -3836,6 +3838,114 @@ def _directed_stress_blend_candidates(
     }
 
 
+def _directed_pure_stress_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    seed: int,
+) -> dict[str, torch.Tensor]:
+    """Build cold-start pure native-stress challengers.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Full-scored incumbent positions with shape ``[N, 2]``. Accepted for
+        API symmetry with the stress-blend builder; pure stress is cold-started.
+    config : LayoutConfig
+        Prepared native configuration.
+    seed : int
+        Deterministic stress solver seed.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Pure-stress family names mapped to calibrated positions.
+    """
+    del incumbent
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_PURE_STRESS_MIN_NODES or n > DIRECTED_PURE_STRESS_MAX_NODES or edge_count == 0:
+        return {}
+
+    from dagua.layout.ops.pipelines.elk_stress import layout_elk_stress_pipeline
+    from dagua.layout.ops.pipelines.native_undirected import _reraise_worker_timeout
+    from dagua.layout.ops.pipelines.smacof_nonmetric import layout_smacof_nonmetric_pipeline
+    from dagua.layout.ops.pipelines.stress_majorization import (
+        layout_stress_majorization_pipeline,
+    )
+
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    cpu_sizes = (
+        None
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    cpu_weights = (
+        None
+        if problem.edge_weights is None
+        else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    candidates: dict[str, torch.Tensor] = {}
+
+    try:
+        stress_majorization = layout_stress_majorization_pipeline(
+            edge_index=cpu_edges,
+            num_nodes=n,
+            node_sizes=cpu_sizes,
+            seed=seed,
+            edge_weights=cpu_weights,
+        )
+        if isinstance(stress_majorization, tuple):
+            stress_majorization = stress_majorization[0]
+        calibrated = _scale_to_median_edge_length(stress_majorization, problem.edge_index, target)
+        candidates["pure_stress_majorization"] = _d4_oriented_by_declared_flow(calibrated, problem)
+        candidates["pure_stress_majorization_unoriented"] = calibrated
+    except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed pure stress-majorization challenger failed", exc_info=True)
+
+    if n <= DIRECTED_PURE_STRESS_SMACOF_MAX_NODES:
+        try:
+            smacof = layout_smacof_nonmetric_pipeline(
+                edge_index=cpu_edges,
+                num_nodes=n,
+                node_sizes=cpu_sizes,
+                seed=seed,
+                edge_weights=cpu_weights,
+                fidelity_dtype=torch.float32,
+            )
+            calibrated = _scale_to_median_edge_length(smacof, problem.edge_index, target)
+            candidates["pure_smacof_nonmetric"] = _d4_oriented_by_declared_flow(calibrated, problem)
+            candidates["pure_smacof_nonmetric_unoriented"] = calibrated
+        except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed pure SMACOF challenger failed", exc_info=True)
+
+    if n <= DIRECTED_PURE_STRESS_ELK_MAX_NODES:
+        try:
+            elk_stress = layout_elk_stress_pipeline(
+                edge_index=cpu_edges,
+                num_nodes=n,
+                node_sizes=cpu_sizes,
+                seed=seed,
+                edge_weights=cpu_weights,
+                fidelity_dtype=torch.float32,
+            )
+            calibrated = _scale_to_median_edge_length(elk_stress, problem.edge_index, target)
+            candidates["pure_elk_stress"] = _d4_oriented_by_declared_flow(calibrated, problem)
+        except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed pure ELK stress challenger failed", exc_info=True)
+
+    return candidates
+
+
 def _segments_cross(
     first_start: torch.Tensor,
     first_end: torch.Tensor,
@@ -4811,6 +4921,44 @@ def layout_native_directed_portfolio(
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed stress-blend challenger failed", exc_info=True)
+    if _portfolio_has_budget(config, min_remaining_s=2.0):
+        try:
+            pure_stress_cost = _directed_flat_arm_cost(
+                problem,
+                config,
+                "directed_pure_stress",
+            )
+            pure_stress_cost_s = (
+                pure_stress_cost.generation_dwu + pure_stress_cost.reserved_score_dwu
+            )
+            if not _predicted_arm_budget_available(
+                config, pure_stress_cost_s
+            ) or not admit_native_work(
+                config,
+                pure_stress_cost,
+                "optional_directed_pure_stress_package",
+            ):
+                _LOGGER.info("Skipped directed pure-stress: insufficient predicted budget")
+            else:
+                candidate_started = time.perf_counter()
+                for name, candidate in _directed_pure_stress_candidates(
+                    problem,
+                    incumbent,
+                    config,
+                    seed,
+                ).items():
+                    _register_challenger_variants(
+                        name,
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed pure-stress challenger package failed", exc_info=True)
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
         ordering_rank_to_nodes = _rank_to_nodes_from_incumbent_y(
