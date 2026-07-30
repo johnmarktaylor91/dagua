@@ -209,7 +209,14 @@ def layout_native_community_pipeline(
 
     # Metagraph: aggregate inter-community coupling into edge distance costs
     # (heavier coupling -> shorter target distance -> adjacent slots).
-    meta_positions = _metagraph_positions(cpu_edges, labels, num_communities, spacing, seed)
+    meta_positions = _metagraph_positions(
+        cpu_edges,
+        cpu_weights,
+        labels,
+        num_communities,
+        spacing,
+        seed,
+    )
 
     # Uniform slot-frame scale until every community pair is separated.
     meta_positions = _separate_communities(meta_positions, content_radius, spacing)
@@ -223,6 +230,7 @@ def layout_native_community_pipeline(
 
 def _metagraph_positions(
     edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
     labels: torch.Tensor,
     num_communities: int,
     spacing: float,
@@ -234,6 +242,8 @@ def _metagraph_positions(
     ----------
     edge_index : torch.Tensor
         Parent edge tensor shaped ``[2, E]`` (CPU).
+    edge_weights : torch.Tensor, optional
+        Parent edge weights shaped ``[E]`` (CPU).
     labels : torch.Tensor
         Community ids shaped ``[N]``.
     num_communities : int
@@ -264,7 +274,14 @@ def _metagraph_positions(
     lo = torch.minimum(meta_src[cross], meta_dst[cross])
     hi = torch.maximum(meta_src[cross], meta_dst[cross])
     keys = lo * num_communities + hi
-    unique_keys, counts = torch.unique(keys, return_counts=True)
+    unique_keys, inverse = torch.unique(keys, sorted=True, return_inverse=True)
+    source_weights = (
+        edge_weights[cross].to(dtype=torch.float32)
+        if edge_weights is not None
+        else torch.ones_like(keys, dtype=torch.float32)
+    )
+    coupling = torch.zeros(int(unique_keys.numel()), dtype=torch.float32)
+    coupling.scatter_add_(0, inverse, source_weights)
     meta_edges = torch.stack(
         [
             torch.div(unique_keys, num_communities, rounding_mode="floor"),
@@ -273,7 +290,7 @@ def _metagraph_positions(
     )
     # Heavier coupling means "closer": distance cost 1/sqrt(count) keeps the
     # quotient metric finite and monotone in coupling strength.
-    meta_weights = counts.to(dtype=torch.float32).clamp_min(1.0).rsqrt()
+    meta_weights = coupling.clamp_min(1.0e-9).rsqrt()
     if not geodesic_dense_work_is_allowed(num_communities, int(meta_edges.shape[1])):
         return _deterministic_fallback_positions(num_communities, spacing, seed)
     return layout_geodesic_stress_pipeline(
