@@ -591,7 +591,7 @@ def _directed_ordering_candidate_dual_dominates(
     cluster_ids: Optional[torch.Tensor],
     all_pairs_dist: Optional[np.ndarray],
     incumbent_referee_key: Tuple[int, float] = (1, -0.0),
-) -> tuple[bool, "W5ScorePair"]:
+) -> tuple[bool, "W5ScorePair", Tuple[int, float]]:
     """Return whether an ordering candidate may enter the winner contest.
 
     Parameters
@@ -611,9 +611,9 @@ def _directed_ordering_candidate_dual_dominates(
 
     Returns
     -------
-    tuple[bool, W5ScorePair]
+    tuple[bool, W5ScorePair, tuple[int, float]]
         Whether the candidate dominates under both rulers and the candidate
-        score pair.
+        score pair plus the already-computed severe-G6 referee key.
     """
     from dagua.layout.ops.pipelines.native_finisher import w5_dominates
 
@@ -624,16 +624,14 @@ def _directed_ordering_candidate_dual_dominates(
         all_pairs_dist,
     )
     candidate_referee_key = _runtime_referee_telemetry(candidate, problem)[0]
-    return (
-        w5_dominates(
-            candidate_pair,
-            incumbent_pair,
-            candidate_referee_key=candidate_referee_key,
-            incumbent_referee_key=incumbent_referee_key,
-            tallied_axis="directed",
-        ),
+    dominates = w5_dominates(
         candidate_pair,
+        incumbent_pair,
+        candidate_referee_key=candidate_referee_key,
+        incumbent_referee_key=incumbent_referee_key,
+        tallied_axis="directed",
     )
+    return dominates, candidate_pair, candidate_referee_key
 
 
 def _select_directed_winner(
@@ -2292,20 +2290,22 @@ def _register_dot_order_candidates(
             preserve_rank_order=True,
         )
         for variant_name, candidate in variants.items():
-            dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                candidate,
-                incumbent_pair,
-                problem,
-                cluster_ids,
-                all_pairs_dist,
-                incumbent_referee_key,
+            dominates, candidate_pair, candidate_referee_key = (
+                _directed_ordering_candidate_dual_dominates(
+                    candidate,
+                    incumbent_pair,
+                    problem,
+                    cluster_ids,
+                    all_pairs_dist,
+                    incumbent_referee_key,
+                )
             )
             from dagua.layout.ops.pipelines.native_finisher import w5_legacy_tallied_sole_failure
 
             legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
                 candidate_pair,
                 incumbent_pair,
-                candidate_referee_key=_runtime_referee_telemetry(candidate, problem)[0],
+                candidate_referee_key=candidate_referee_key,
                 incumbent_referee_key=incumbent_referee_key,
                 tallied_axis="directed",
             )
@@ -2452,20 +2452,22 @@ def _register_wide_dag_ordering_candidates(
             preserve_rank_order=True,
         )
         for variant_name, candidate in variants.items():
-            dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                candidate,
-                incumbent_pair,
-                problem,
-                cluster_ids,
-                all_pairs_dist,
-                incumbent_referee_key,
+            dominates, candidate_pair, candidate_referee_key = (
+                _directed_ordering_candidate_dual_dominates(
+                    candidate,
+                    incumbent_pair,
+                    problem,
+                    cluster_ids,
+                    all_pairs_dist,
+                    incumbent_referee_key,
+                )
             )
             from dagua.layout.ops.pipelines.native_finisher import w5_legacy_tallied_sole_failure
 
             legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
                 candidate_pair,
                 incumbent_pair,
-                candidate_referee_key=_runtime_referee_telemetry(candidate, problem)[0],
+                candidate_referee_key=candidate_referee_key,
                 incumbent_referee_key=incumbent_referee_key,
                 tallied_axis="directed",
             )
@@ -3288,12 +3290,14 @@ def _register_recombinant_layered_candidates(
             # admitted only when the same frozen directed and undirected
             # composites both beat the incumbent. Off-class rows never reach
             # candidate construction at all.
-            dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                candidate,
-                incumbent_pair,
-                problem,
-                cluster_ids,
-                all_pairs_dist,
+            dominates, candidate_pair, _candidate_referee_key = (
+                _directed_ordering_candidate_dual_dominates(
+                    candidate,
+                    incumbent_pair,
+                    problem,
+                    cluster_ids,
+                    all_pairs_dist,
+                )
             )
             if not dominates:
                 continue
@@ -4780,12 +4784,14 @@ def layout_native_directed_portfolio(
                                 cluster_ids,
                                 all_pairs_dist,
                             )
-                        dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                            candidate,
-                            incumbent_pair,
-                            problem,
-                            cluster_ids,
-                            all_pairs_dist,
+                        dominates, candidate_pair, _candidate_referee_key = (
+                            _directed_ordering_candidate_dual_dominates(
+                                candidate,
+                                incumbent_pair,
+                                problem,
+                                cluster_ids,
+                                all_pairs_dist,
+                            )
                         )
                         if dominates:
                             if n <= DIRECTED_ORDERING_W5_NODE_CAP:
@@ -5256,13 +5262,15 @@ def layout_native_directed_portfolio(
                             best_position,
                             problem,
                         )[0]
-                        dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                            candidate,
-                            best_pair_for_ordering,
-                            problem,
-                            cluster_ids,
-                            all_pairs_dist,
-                            best_referee_key_for_ordering,
+                        dominates, candidate_pair, _candidate_referee_key = (
+                            _directed_ordering_candidate_dual_dominates(
+                                candidate,
+                                best_pair_for_ordering,
+                                problem,
+                                cluster_ids,
+                                all_pairs_dist,
+                                best_referee_key_for_ordering,
+                            )
                         )
                         if dominates:
                             name = f"{best_name}_rank_local_zero_crossing_swap"
