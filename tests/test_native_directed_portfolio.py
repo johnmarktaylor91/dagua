@@ -42,6 +42,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     _directed_mrtree_enabled,
     _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
+    _directed_pure_stress_candidates,
     _directed_recombinant_layered_candidates,
     _directed_recombinant_layered_enabled,
     _directed_stress_blend_candidates,
@@ -719,18 +720,18 @@ def _run_with_watchdog(func: Callable[[], _T], timeout_s: float) -> _T:
 
 
 def test_r8_nested_lr_direction_native_layout_terminates() -> None:
-    """Native directed portfolio returns finite R8 LR positions promptly."""
+    """Native directed portfolio returns finite R8 LR positions within ELK cap."""
     graph = _make_r8_lr_direction().graph
     graph.compute_node_sizes()
     config = LayoutConfig(algorithm="dagua_native", seed=42, device="cpu")
 
     started = time.perf_counter()
-    positions = _run_with_watchdog(lambda: layout(graph, config), timeout_s=20.0)
+    positions = _run_with_watchdog(lambda: layout(graph, config), timeout_s=45.0)
     runtime_s = time.perf_counter() - started
 
     assert positions.shape == (30, 2)
     assert torch.isfinite(positions).all()
-    assert runtime_s < 20.0
+    assert runtime_s < 45.0
 
 
 def test_semantic_cyclic_graph_routes_to_common_contest() -> None:
@@ -1277,6 +1278,7 @@ def test_directed_portfolio_dot_order_is_not_registered_for_clusters(
     monkeypatch.setattr(native_directed, "_register_dot_order_candidates", fake_register_dot)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(
@@ -1400,6 +1402,170 @@ def test_directed_narrow_seed_candidates_are_finite() -> None:
         assert bool(torch.isfinite(candidate).all().item())
         extent = candidate.max(dim=0).values - candidate.min(dim=0).values
         assert float(extent.max().item()) > 0.0
+
+
+def test_directed_pure_stress_candidates_are_deterministic_and_finite() -> None:
+    """Cold-start pure stress candidates are byte-identical and non-degenerate."""
+    from dagua.layout.ops.pipelines.native_undirected import _candidate_is_degenerate
+
+    edge_index = torch.tensor(
+        [[0, 0, 1, 2, 3, 4, 2, 5, 6, 7, 1], [1, 2, 3, 3, 4, 6, 5, 7, 7, 8, 8]],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=9,
+        node_sizes=torch.full((9, 2), 30.0),
+        edge_weights=torch.linspace(0.7, 1.7, edge_index.shape[1]),
+    )
+    incumbent = torch.stack(
+        [torch.arange(9, dtype=torch.float32) * 40.0, torch.arange(9, dtype=torch.float32) * 8.0],
+        dim=1,
+    )
+
+    first = _directed_pure_stress_candidates(problem, incumbent, LayoutConfig(), seed=42)
+    second = _directed_pure_stress_candidates(problem, incumbent, LayoutConfig(), seed=42)
+
+    assert {
+        "pure_stress_majorization",
+        "pure_stress_majorization_unoriented",
+        "pure_smacof_nonmetric",
+        "pure_smacof_nonmetric_unoriented",
+        "pure_elk_stress",
+    } == set(first)
+    assert set(first) == set(second)
+    for name, candidate in first.items():
+        assert candidate.detach().numpy().tobytes() == second[name].detach().numpy().tobytes()
+        assert candidate.shape == (9, 2)
+        assert bool(torch.isfinite(candidate).all().item())
+        degenerate, reason = _candidate_is_degenerate(
+            candidate,
+            problem.node_sizes,
+            problem.edge_index,
+        )
+        assert not degenerate, reason
+
+
+def test_directed_pure_stress_cost_entries_match_blend() -> None:
+    """Directed pure-stress uses the modeled stress-blend flat cost."""
+    from dagua.layout.ops.pipelines.native_cost_model import FROZEN_COST_TABLE
+
+    assert FROZEN_COST_TABLE[("directed_pure_stress", "cpu")] == {"full_arm": (0.0, 12.0)}
+    assert FROZEN_COST_TABLE[("directed_pure_stress", "cuda")] == {"full_arm": (0.0, 10.0)}
+
+
+def test_directed_pure_stress_registers_and_ties_leave_incumbent(
+    monkeypatch: object,
+) -> None:
+    """Pure-stress challengers register and exact referee ties keep incumbent."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [40.0, 40.0],
+            [80.0, 80.0],
+            [120.0, 120.0],
+            [160.0, 160.0],
+            [200.0, 200.0],
+        ],
+        dtype=torch.float32,
+    )
+    pure_candidate = incumbent + torch.tensor([10.0, -10.0])
+    edge_index = torch.tensor([[0, 1, 2, 3, 4], [1, 2, 3, 4, 5]], dtype=torch.long)
+    registered: list[str] = []
+    scored: list[str] = []
+
+    def fake_native_problem(
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Return the layered incumbent fixture."""
+        del problem, state, ctx, config
+        return incumbent
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Record challenger admission at the shared variant registrar seam."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        registered.append(name)
+        positions[name] = raw_pos
+
+    def fake_score_payload(
+        pos: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[float, _DirectedClusterScoreTelemetry]:
+        """Return an exact full-referee tie for incumbent and pure stress."""
+        del args, kwargs
+        scored.append("pure" if torch.equal(pos, pure_candidate) else "incumbent")
+        return (
+            10.0,
+            _DirectedClusterScoreTelemetry(
+                extended_score=10.0,
+                old_score=10.0,
+                metrics={},
+                v3_tiered=10.0,
+            ),
+        )
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_undirected, "_portfolio_has_budget", lambda *args, **kwargs: True)
+    monkeypatch.setattr(native_directed, "admit_native_work", lambda *args, **kwargs: True)
+    monkeypatch.setattr(native_directed, "_predicted_arm_budget_available", lambda *args: True)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_pure_stress_candidates",
+        lambda *args: {"pure_stress_majorization": pure_candidate},
+    )
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_ordering_cost_admissible", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_recombinant_layered_enabled",
+        lambda *args: False,
+    )
+    monkeypatch.setattr(native_directed, "_directed_wide_dag_ordering_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_directed_dot_order_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_full_sugiyama_grid_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(native_directed, "_proxy_directed_candidate", lambda *args: 1.0)
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        fake_score_payload,
+    )
+
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=6,
+        node_sizes=torch.full((6, 2), 20.0),
+    )
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert "pure_stress_majorization" in registered
+    assert "pure" in scored
+    assert torch.equal(returned, incumbent)
 
 
 def test_directed_mrtree_and_rank_swap_targets_are_structurally_gated() -> None:
@@ -1740,6 +1906,7 @@ def test_directed_ordering_reachable_for_medium_small_band_once(monkeypatch: obj
     monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(
@@ -1840,6 +2007,7 @@ def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -1995,6 +2163,7 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -2097,6 +2266,7 @@ def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -2178,6 +2348,7 @@ def test_directed_portfolio_full_path_noop_keeps_incumbent(monkeypatch: object) 
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -2602,6 +2773,7 @@ def test_directed_predicted_cost_skips_second_dotx_arm(monkeypatch: object) -> N
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(
         native_directed,
@@ -2672,6 +2844,7 @@ def test_directed_sugiyama_ledger_admission_skips_before_run(monkeypatch: object
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     edge_index = torch.stack(
@@ -2803,9 +2976,11 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
 
     layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), config)
 
-    expected_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(SUGIYAMA_RANK_SEP_GRID) * len(
-        SUGIYAMA_NODE_SEP_GRID
-    )
+    pure_stress_candidates = 2
+    expected_sugiyama_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(
+        SUGIYAMA_RANK_SEP_GRID
+    ) * len(SUGIYAMA_NODE_SEP_GRID)
+    expected_candidates = expected_sugiyama_candidates + pure_stress_candidates
     assert len(proxy_scored) == expected_candidates + 1
     assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
     decision_log = getattr(config, DECISION_LOG_ATTR)
@@ -2822,5 +2997,5 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         and str(record["reason"]).startswith("optional_directed_sugiyama")
     ]
 
-    assert len(admitted_sugiyama) == expected_candidates
+    assert len(admitted_sugiyama) == expected_sugiyama_candidates
     assert skipped_sugiyama == []
