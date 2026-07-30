@@ -98,7 +98,6 @@ DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
 DIRECTED_PURE_STRESS_MIN_NODES = 6
 DIRECTED_PURE_STRESS_MAX_NODES = 512
 DIRECTED_PURE_STRESS_SMACOF_MAX_NODES = 128
-DIRECTED_PURE_STRESS_ELK_MAX_NODES = 64
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
 DIRECTED_NESTED_STRESS_PARETO_KEYS = (
     "ksm_score",
@@ -3869,7 +3868,6 @@ def _directed_pure_stress_candidates(
     if n < DIRECTED_PURE_STRESS_MIN_NODES or n > DIRECTED_PURE_STRESS_MAX_NODES or edge_count == 0:
         return {}
 
-    from dagua.layout.ops.pipelines.elk_stress import layout_elk_stress_pipeline
     from dagua.layout.ops.pipelines.native_undirected import _reraise_worker_timeout
     from dagua.layout.ops.pipelines.smacof_nonmetric import layout_smacof_nonmetric_pipeline
     from dagua.layout.ops.pipelines.stress_majorization import (
@@ -3905,7 +3903,6 @@ def _directed_pure_stress_candidates(
             stress_majorization = stress_majorization[0]
         calibrated = _scale_to_median_edge_length(stress_majorization, problem.edge_index, target)
         candidates["pure_stress_majorization"] = _d4_oriented_by_declared_flow(calibrated, problem)
-        candidates["pure_stress_majorization_unoriented"] = calibrated
     except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
         _reraise_worker_timeout(exc)
         _LOGGER.warning("directed pure stress-majorization challenger failed", exc_info=True)
@@ -3922,26 +3919,9 @@ def _directed_pure_stress_candidates(
             )
             calibrated = _scale_to_median_edge_length(smacof, problem.edge_index, target)
             candidates["pure_smacof_nonmetric"] = _d4_oriented_by_declared_flow(calibrated, problem)
-            candidates["pure_smacof_nonmetric_unoriented"] = calibrated
         except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed pure SMACOF challenger failed", exc_info=True)
-
-    if n <= DIRECTED_PURE_STRESS_ELK_MAX_NODES:
-        try:
-            elk_stress = layout_elk_stress_pipeline(
-                edge_index=cpu_edges,
-                num_nodes=n,
-                node_sizes=cpu_sizes,
-                seed=seed,
-                edge_weights=cpu_weights,
-                fidelity_dtype=torch.float32,
-            )
-            calibrated = _scale_to_median_edge_length(elk_stress, problem.edge_index, target)
-            candidates["pure_elk_stress"] = _d4_oriented_by_declared_flow(calibrated, problem)
-        except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
-            _reraise_worker_timeout(exc)
-            _LOGGER.warning("directed pure ELK stress challenger failed", exc_info=True)
 
     return candidates
 

@@ -720,18 +720,18 @@ def _run_with_watchdog(func: Callable[[], _T], timeout_s: float) -> _T:
 
 
 def test_r8_nested_lr_direction_native_layout_terminates() -> None:
-    """Native directed portfolio returns finite R8 LR positions within ELK cap."""
+    """Native directed portfolio returns finite R8 LR positions within budget."""
     graph = _make_r8_lr_direction().graph
     graph.compute_node_sizes()
     config = LayoutConfig(algorithm="dagua_native", seed=42, device="cpu")
 
     started = time.perf_counter()
-    positions = _run_with_watchdog(lambda: layout(graph, config), timeout_s=45.0)
+    positions = _run_with_watchdog(lambda: layout(graph, config), timeout_s=20.0)
     runtime_s = time.perf_counter() - started
 
     assert positions.shape == (30, 2)
     assert torch.isfinite(positions).all()
-    assert runtime_s < 45.0
+    assert runtime_s < 20.0
 
 
 def test_semantic_cyclic_graph_routes_to_common_contest() -> None:
@@ -1428,10 +1428,7 @@ def test_directed_pure_stress_candidates_are_deterministic_and_finite() -> None:
 
     assert {
         "pure_stress_majorization",
-        "pure_stress_majorization_unoriented",
         "pure_smacof_nonmetric",
-        "pure_smacof_nonmetric_unoriented",
-        "pure_elk_stress",
     } == set(first)
     assert set(first) == set(second)
     for name, candidate in first.items():
@@ -2981,7 +2978,7 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         SUGIYAMA_RANK_SEP_GRID
     ) * len(SUGIYAMA_NODE_SEP_GRID)
     expected_candidates = expected_sugiyama_candidates + pure_stress_candidates
-    assert len(proxy_scored) == expected_candidates + 1
+    assert len(proxy_scored) == expected_candidates
     assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
     decision_log = getattr(config, DECISION_LOG_ATTR)
     admitted_sugiyama = [
