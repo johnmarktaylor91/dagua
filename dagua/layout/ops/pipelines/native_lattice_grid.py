@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -483,6 +483,58 @@ def layout_geodesic_stress_pipeline(
         Finite positions shaped ``[N, 2]`` in point units.
     """
     del kwargs
+    return _layout_geodesic_stress_core(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        config=config,
+        seed=seed,
+        edge_weights=edge_weights,
+        steps=steps,
+        node_sep=node_sep,
+        distance_transform=None,
+    )
+
+
+def _layout_geodesic_stress_core(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    config: Optional[Any] = None,
+    seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
+    steps: Optional[int] = None,
+    node_sep: Optional[float] = None,
+    distance_transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+) -> torch.Tensor:
+    """Run the geodesic-stress body with an optional distance hook.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]`` (direction ignored).
+    num_nodes : int
+        Number of nodes.
+    node_sizes : torch.Tensor, optional
+        Node bounding boxes shaped ``[N, 2]``.
+    config : Any, optional
+        Optional layout configuration carrying ``node_sep``.
+    seed : int, default=42
+        Deterministic seed used only by fallbacks.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge distance costs shaped ``[E]``.
+    steps : int, optional
+        Explicit descent budget.
+    node_sep : float, optional
+        Node separation override in points.
+    distance_transform : Callable[[torch.Tensor], torch.Tensor], optional
+        Hook applied to the finite APSP matrix before MDS and SMACOF.
+
+    Returns
+    -------
+    torch.Tensor
+        Finite positions shaped ``[N, 2]`` in point units.
+    """
     resolved_sep = float(
         node_sep if node_sep is not None else getattr(config, "node_sep", 36.0) or 36.0
     )
@@ -507,6 +559,10 @@ def layout_geodesic_stress_pipeline(
     distances_np = shortest_path_distances(edge_index, num_nodes, edge_weights)
     distances = torch.tensor(distances_np, dtype=torch.float64)
     distances = torch.nan_to_num(distances, nan=1.0, posinf=1.0, neginf=1.0).clamp_min(0.0)
+    if distance_transform is not None:
+        distances = distance_transform(distances).to(dtype=torch.float64)
+        distances = torch.nan_to_num(distances, nan=1.0, posinf=1.0, neginf=1.0).clamp_min(0.0)
+        distances.fill_diagonal_(0.0)
 
     positions = _classical_mds_2d(distances)
     if positions is None:
