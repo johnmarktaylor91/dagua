@@ -13,6 +13,7 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
 from dagua.layout.ops.pipelines.native_finisher import (
+    W5Checkpoint,
     W5CostPlan,
     W5FinisherResult,
     W5HonestAxes,
@@ -21,6 +22,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     log_w5_telemetry,
     run_w5_finisher,
     w5_dominates,
+    w5_legacy_tallied_sole_failure,
     w5_predicted_skip_reason,
 )
 
@@ -90,6 +92,79 @@ def test_w5_dominates_uses_referee_prefix_before_scores() -> None:
         incumbent_referee_key=(0, -0.50),
     )
     assert w5_dominates(_pair(10.2, 10.2), _pair(10.0, 10.0))
+
+
+def test_w5_dominates_admits_v3_gain_despite_removed_tallied_veto() -> None:
+    """V3-branch admission no longer vetoes on the old tallied composite."""
+    incumbent = W5ScorePair(directed=90.0, undirected=90.0, v3=70.0)
+    candidate = W5ScorePair(directed=10.0, undirected=10.0, v3=70.2)
+
+    assert w5_dominates(candidate, incumbent, tallied_axis="directed")
+    assert w5_legacy_tallied_sole_failure(candidate, incumbent, tallied_axis="directed")
+
+
+def test_w5_dominates_rejects_fresh_champion_ineligible_flag() -> None:
+    """Fresh frozen degeneracy flags replace the old tallied-composite veto."""
+    incumbent = W5ScorePair(
+        directed=90.0,
+        undirected=90.0,
+        v3=70.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    candidate = W5ScorePair(
+        directed=91.0,
+        undirected=91.0,
+        v3=70.2,
+        champion_ineligibility_flags=frozenset({"SPRAWL_COLLAPSE"}),
+    )
+
+    assert not w5_dominates(candidate, incumbent, tallied_axis="directed")
+
+
+def test_w5_telemetry_counts_legacy_tallied_sole_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W5 telemetry reports checkpoints admitted by removing the legacy veto."""
+    telemetry_path = tmp_path / "w5.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    pos, _, _ = _tiny_layout()
+    incumbent = W5ScorePair(directed=90.0, undirected=90.0, v3=70.0)
+    candidate = W5ScorePair(directed=10.0, undirected=10.0, v3=70.2)
+    checkpoint = W5Checkpoint(
+        seed="sample",
+        mode="surrogate",
+        pass_id=1,
+        step=1,
+        surrogate_delta=0.0,
+        honest_delta=-80.0,
+        undirected_honest_delta=-80.0,
+        honest_score_pair=candidate,
+        accepted=True,
+        reason="dominates",
+        pass_spend_s=0.0,
+        legacy_tallied_sole_failure=True,
+    )
+
+    log_w5_telemetry(
+        W5FinisherResult(
+            winner_pos=pos,
+            incumbent_score_pair=incumbent,
+            winner_score_pair=candidate,
+            winner_name="sample",
+            deadline_returned=False,
+            accepted=(),
+            rejected=(),
+            checkpoints=(checkpoint,),
+            mode="surrogate",
+            steps=1,
+        ),
+        None,
+    )
+
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+    assert records[0]["legacy_tallied_sole_failure_checkpoint_count"] == 1
+    assert records[0]["checkpoints"][0]["legacy_tallied_sole_failure"]
 
 
 def test_w5_finisher_demotes_referee_breaching_high_score_checkpoint(

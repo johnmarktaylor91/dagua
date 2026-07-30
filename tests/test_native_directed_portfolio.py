@@ -595,25 +595,28 @@ def test_directed_referee_forwards_extended_cluster_metadata(
     assert telemetry.old_score > telemetry.extended_score
 
 
-def test_directed_cluster_dual_ruler_uses_v3_with_old_band() -> None:
-    """Clustered directed challengers use V3 plus old-ruler non-regression band."""
+def test_directed_cluster_dual_ruler_uses_v3_with_flag_guard() -> None:
+    """Clustered directed challengers use V3 plus frozen degeneracy flags."""
     incumbent = _DirectedClusterScoreTelemetry(
         extended_score=80.0,
         old_score=90.0,
         metrics={},
         v3_tiered=75.0,
+        champion_ineligibility_flags=frozenset(),
     )
     challenger = _DirectedClusterScoreTelemetry(
         extended_score=81.0,
-        old_score=89.96,
+        old_score=10.0,
         metrics={},
         v3_tiered=75.1,
+        champion_ineligibility_flags=frozenset(),
     )
     regressor = _DirectedClusterScoreTelemetry(
         extended_score=82.0,
-        old_score=89.9,
+        old_score=91.0,
         metrics={},
         v3_tiered=75.2,
+        champion_ineligibility_flags=frozenset({"DEGENERATE_SCALE"}),
     )
 
     assert _directed_cluster_candidate_is_dual_admissible(challenger, incumbent)
