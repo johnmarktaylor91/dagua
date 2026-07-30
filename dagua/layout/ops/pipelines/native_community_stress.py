@@ -49,36 +49,55 @@ def greedy_modularity_communities(
     for (source, target), weight in edge_weight_by_pair.items():
         degrees[source] += weight
         degrees[target] += weight
+    source_nodes = torch.tensor(
+        [source for source, _target in edge_weight_by_pair],
+        dtype=torch.long,
+    )
+    target_nodes = torch.tensor(
+        [target for _source, target in edge_weight_by_pair],
+        dtype=torch.long,
+    )
+    edge_weight_tensor = torch.tensor(list(edge_weight_by_pair.values()), dtype=torch.float64)
+    degrees_tensor = torch.tensor(degrees, dtype=torch.float64)
 
     while True:
         communities = sorted(set(int(label) for label in labels.tolist()))
-        degree_by_community = {
-            community: sum(
-                degrees[node] for node in range(num_nodes) if int(labels[node]) == community
-            )
-            for community in communities
-        }
-        coupling: dict[tuple[int, int], float] = {}
-        for (source, target), weight in edge_weight_by_pair.items():
-            source_community = int(labels[source])
-            target_community = int(labels[target])
-            if source_community == target_community:
-                continue
-            lo = min(source_community, target_community)
-            hi = max(source_community, target_community)
-            coupling[(lo, hi)] = coupling.get((lo, hi), 0.0) + weight
+        degree_by_community = torch.zeros(
+            max(communities) + 1,
+            dtype=torch.float64,
+        ).scatter_add_(0, labels, degrees_tensor)
+        source_communities = labels[source_nodes]
+        target_communities = labels[target_nodes]
+        cross_edges = source_communities != target_communities
+        if not bool(cross_edges.any().item()):
+            break
+        lo_communities = torch.minimum(
+            source_communities[cross_edges],
+            target_communities[cross_edges],
+        )
+        hi_communities = torch.maximum(
+            source_communities[cross_edges],
+            target_communities[cross_edges],
+        )
+        # Encoding by the stable node cap keeps unique keys sorted in the same
+        # order as the former sorted((lo, hi)) coupling dictionary.
+        coupling_keys = lo_communities * num_nodes + hi_communities
+        unique_keys, inverse = torch.unique(coupling_keys, sorted=True, return_inverse=True)
+        coupling_values = torch.zeros(int(unique_keys.numel()), dtype=torch.float64)
+        coupling_values.scatter_add_(0, inverse, edge_weight_tensor[cross_edges])
 
         best_pair: Optional[tuple[int, int]] = None
-        best_gain = 0.0
         total_weight_sq = total_weight * total_weight
-        for pair in sorted(coupling):
-            lo, hi = pair
-            gain = coupling[pair] / total_weight - (
-                degree_by_community[lo] * degree_by_community[hi]
-            ) / (2.0 * total_weight_sq)
-            if gain > best_gain + 0.0:
-                best_gain = gain
-                best_pair = pair
+        los = torch.div(unique_keys, num_nodes, rounding_mode="floor")
+        his = unique_keys % num_nodes
+        gain_values = coupling_values / total_weight - (
+            degree_by_community[los] * degree_by_community[his]
+        ) / (2.0 * total_weight_sq)
+        best_gain_tensor, best_index_tensor = torch.max(gain_values, dim=0)
+        best_gain = float(best_gain_tensor.item())
+        if best_gain > 0.0:
+            best_index = int(best_index_tensor.item())
+            best_pair = (int(los[best_index].item()), int(his[best_index].item()))
 
         if best_pair is None or best_gain <= CNM_GAIN_EPSILON:
             break
@@ -176,13 +195,23 @@ def layout_community_stress_pipeline(
         Finite positions shaped ``[N, 2]`` in point units.
     """
     del kwargs
-    from dagua.layout.ops.pipelines.native_lattice_grid import _layout_geodesic_stress_core
+    from dagua.layout.ops.pipelines.native_lattice_grid import (
+        _geodesic_descent_steps,
+        _layout_geodesic_stress_core,
+        geodesic_dense_work_is_allowed,
+    )
 
     if inter_scale > max(COMMUNITY_STRESS_INTER_SCALES):
         raise ValueError("community stress inter_scale must not exceed 2.2.")
     labels = community_labels.detach().to(device="cpu", dtype=torch.long)
     if int(labels.numel()) != num_nodes:
         raise ValueError("community_labels must have shape [N].")
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() else 0
+    if not geodesic_dense_work_is_allowed(num_nodes, edge_count, steps):
+        raise ValueError(
+            "community stress dense-work cap exceeded "
+            f"(n={num_nodes}, e={edge_count}, steps={steps or _geodesic_descent_steps(num_nodes)})"
+        )
 
     def _inflate_intercommunity_distances(distances: torch.Tensor) -> torch.Tensor:
         """Return distances with cross-community pairs inflated.
