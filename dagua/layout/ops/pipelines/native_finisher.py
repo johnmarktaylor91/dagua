@@ -54,6 +54,9 @@ from dagua.layout.ops.pipelines.native_surrogates import (
 )
 from dagua.layout.projection import project_overlaps
 
+DEGENERACY_CHAMPION_INELIGIBLE_FLAGS = frozenset(
+    {"DEGENERATE_SCALE", "SPRAWL_COLLAPSE", "COINCIDENT_COLLAPSE"}
+)
 _LOGGER = logging.getLogger(__name__)
 _ABSOLUTE_DEADLINE_RESERVE_S = 5.0
 _MIN_BENCHMARK_REMAINING_S = 30.0
@@ -213,6 +216,9 @@ class W5ScorePair:
         Runtime-restricted V3 C4 clearance penalty when available.
     c4_clearance_contact_pairs : int, optional
         Runtime-restricted V3 C4 clearance contact count when available.
+    champion_ineligibility_flags : frozenset[str], optional
+        Frozen V3 row flags that disqualify a candidate from champion
+        selection. ``None`` preserves callers without V3 flag payloads.
     """
 
     directed: float
@@ -221,6 +227,7 @@ class W5ScorePair:
     c5_whitespace_ratio: Optional[float] = None
     c4_clearance_penalty: Optional[float] = None
     c4_clearance_contact_pairs: Optional[int] = None
+    champion_ineligibility_flags: Optional[frozenset[str]] = None
 
 
 def w5_score_pair_from_v3_result(directed: float, undirected: float, v3_result: Any) -> W5ScorePair:
@@ -251,6 +258,8 @@ def w5_score_pair_from_v3_result(directed: float, undirected: float, v3_result: 
         c5_whitespace_ratio=float(c5_meta["whitespace_ratio"]),
         c4_clearance_penalty=float(c4_meta["clearance_penalty"]),
         c4_clearance_contact_pairs=None if clearance_pairs is None else int(clearance_pairs),
+        champion_ineligibility_flags=frozenset(str(flag) for flag in v3_result.flags)
+        & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
     )
 
 
@@ -831,6 +840,9 @@ class W5Checkpoint:
     pass_spend_s : float
         Wall-clock seconds spent in this seed/mode/pass through the checkpoint
         scoring event.
+    legacy_tallied_sole_failure : bool
+        Whether the old V3-branch tallied-axis conjunct was the only legacy
+        reason this checkpoint would have been rejected.
     """
 
     seed: str
@@ -844,6 +856,7 @@ class W5Checkpoint:
     accepted: bool
     reason: str
     pass_spend_s: float
+    legacy_tallied_sole_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -1047,6 +1060,89 @@ def is_worker_timeout_like_exception(exc: Exception) -> bool:
     )
 
 
+def candidate_introduces_champion_ineligible_flag(
+    candidate_flags: Optional[frozenset[str]],
+    incumbent_flags: Optional[frozenset[str]],
+) -> bool:
+    """Return whether a candidate newly carries a champion-ineligible flag.
+
+    Parameters
+    ----------
+    candidate_flags : frozenset[str], optional
+        Frozen V3 champion-ineligibility flags carried by the candidate.
+        ``None`` disables this guard for legacy callers.
+    incumbent_flags : frozenset[str], optional
+        Frozen V3 champion-ineligibility flags carried by the incumbent.
+
+    Returns
+    -------
+    bool
+        ``True`` when both flag payloads are populated and the candidate has a
+        frozen champion-ineligibility flag absent from the incumbent.
+    """
+    if candidate_flags is None or incumbent_flags is None:
+        return False
+    return bool((candidate_flags - incumbent_flags) & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS)
+
+
+def w5_legacy_tallied_sole_failure(
+    candidate: W5ScorePair,
+    incumbent: W5ScorePair,
+    margin: float = _W5_ACCEPT_MARGIN,
+    *,
+    candidate_referee_key: Tuple[int, float] = (1, -0.0),
+    incumbent_referee_key: Tuple[int, float] = (1, -0.0),
+    tallied_axis: Optional[str] = None,
+) -> bool:
+    """Return whether only the removed legacy tallied-axis veto would reject.
+
+    Parameters
+    ----------
+    candidate : W5ScorePair
+        Candidate directed, undirected, V3, and optional flag scores.
+    incumbent : W5ScorePair
+        Incumbent directed, undirected, V3, and optional flag scores.
+    margin : float, default=0.05
+        Acceptance margin.
+    candidate_referee_key : tuple[int, float], default=(1, -0.0)
+        Severe-G6 eligibility prefix for the candidate.
+    incumbent_referee_key : tuple[int, float], default=(1, -0.0)
+        Severe-G6 eligibility prefix for the incumbent.
+    tallied_axis : str, optional
+        Legacy composite axis previously used as the V3 non-regression veto.
+
+    Returns
+    -------
+    bool
+        ``True`` when the V3 margin and new flag guard pass, but the removed
+        tallied-axis conjunct would have rejected the candidate.
+    """
+    if candidate_referee_key != incumbent_referee_key:
+        return False
+    candidate_v3 = candidate.v3
+    incumbent_v3 = incumbent.v3
+    if (
+        candidate_v3 is None
+        or incumbent_v3 is None
+        or not math.isfinite(float(candidate_v3))
+        or not math.isfinite(float(incumbent_v3))
+        or float(candidate_v3) <= float(incumbent_v3) + margin
+        or candidate_introduces_champion_ineligible_flag(
+            candidate.champion_ineligibility_flags,
+            incumbent.champion_ineligibility_flags,
+        )
+    ):
+        return False
+    axis = "directed" if tallied_axis == "directed" else "undirected"
+    candidate_tallied = candidate.directed if axis == "directed" else candidate.undirected
+    incumbent_tallied = incumbent.directed if axis == "directed" else incumbent.undirected
+    return (
+        not math.isfinite(candidate_tallied)
+        or not math.isfinite(incumbent_tallied)
+        or candidate_tallied < incumbent_tallied - margin
+    )
+
+
 def w5_dominates(
     candidate: W5ScorePair,
     incumbent: W5ScorePair,
@@ -1072,8 +1168,7 @@ def w5_dominates(
     incumbent_referee_key : tuple[int, float], default=(1, -0.0)
         Severe-G6 eligibility prefix for the incumbent/current winner.
     tallied_axis : str, optional
-        Legacy composite axis used as the non-regression guardrail when V3 is
-        available. Accepted values are ``"directed"`` and ``"undirected"``.
+        Legacy composite axis retained for telemetry compatibility.
 
     Returns
     -------
@@ -1090,15 +1185,12 @@ def w5_dominates(
         and math.isfinite(float(candidate_v3))
         and math.isfinite(float(incumbent_v3))
     ):
-        axis = "directed" if tallied_axis == "directed" else "undirected"
-        candidate_tallied = candidate.directed if axis == "directed" else candidate.undirected
-        incumbent_tallied = incumbent.directed if axis == "directed" else incumbent.undirected
-        return (
-            float(candidate_v3) > float(incumbent_v3) + margin
-            and math.isfinite(candidate_tallied)
-            and math.isfinite(incumbent_tallied)
-            and candidate_tallied >= incumbent_tallied - margin
-        )
+        if candidate_introduces_champion_ineligible_flag(
+            candidate.champion_ineligibility_flags,
+            incumbent.champion_ineligibility_flags,
+        ):
+            return False
+        return float(candidate_v3) > float(incumbent_v3) + margin
     return (
         math.isfinite(candidate.directed)
         and math.isfinite(candidate.undirected)
@@ -3889,6 +3981,14 @@ def run_w5_finisher(
                         incumbent_referee_key=winner_referee_key,
                         tallied_axis=tallied_axis,
                     )
+                    legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
+                        honest,
+                        winner_score_pair,
+                        float(accept_margin),
+                        candidate_referee_key=checkpoint_referee_key,
+                        incumbent_referee_key=winner_referee_key,
+                        tallied_axis=tallied_axis,
+                    )
                     reason = "dominates" if is_accepted else "does_not_dominate_both"
                     checkpoint = W5Checkpoint(
                         seed=seed.name,
@@ -3902,6 +4002,7 @@ def run_w5_finisher(
                         accepted=is_accepted,
                         reason=reason,
                         pass_spend_s=float(optimize_s + viability_s + score_s),
+                        legacy_tallied_sole_failure=legacy_tallied_sole_failure,
                     )
                     checkpoints.append(checkpoint)
                     if is_accepted:
@@ -4067,6 +4168,9 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
         "incumbent_axes": axes_payload(result.incumbent_axes),
         "winner_score_pair": pair_payload(result.winner_score_pair),
         "accepted": [candidate.name for candidate in result.accepted],
+        "legacy_tallied_sole_failure_checkpoint_count": sum(
+            1 for checkpoint in result.checkpoints if checkpoint.legacy_tallied_sole_failure
+        ),
         "rejected": [
             {
                 "seed": checkpoint.seed,
@@ -4074,6 +4178,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
                 "pass_id": checkpoint.pass_id,
                 "step": checkpoint.step,
                 "reason": checkpoint.reason,
+                "legacy_tallied_sole_failure": checkpoint.legacy_tallied_sole_failure,
             }
             for checkpoint in result.rejected
         ],
@@ -4089,6 +4194,7 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
                 "honest_score_pair": pair_payload(checkpoint.honest_score_pair),
                 "accepted": checkpoint.accepted,
                 "reason": checkpoint.reason,
+                "legacy_tallied_sole_failure": checkpoint.legacy_tallied_sole_failure,
                 "pass_spend_s": checkpoint.pass_spend_s,
             }
             for checkpoint in result.checkpoints
@@ -4124,11 +4230,14 @@ __all__ = [
     "W5Seed",
     "ClusterTighteningCandidate",
     "build_cluster_tightening_candidates",
+    "candidate_introduces_champion_ineligible_flag",
+    "DEGENERACY_CHAMPION_INELIGIBLE_FLAGS",
     "is_worker_timeout_like_exception",
     "log_w5_telemetry",
     "make_w5_skip_result",
     "run_w5_finisher",
     "w5_honest_axes_from_metrics",
     "w5_dominates",
+    "w5_legacy_tallied_sole_failure",
     "w5_score_pair_from_v3_result",
 ]

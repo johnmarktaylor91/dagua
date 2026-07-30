@@ -255,6 +255,9 @@ class _ClusterScoreTelemetry:
         Whether the frozen V3 severe-G6 oracle found an absolute breach.
     v3_referee_ineligibility_reason : str
         Human-readable telemetry reason for the selected prefix.
+    champion_ineligibility_flags : frozenset[str], optional
+        Frozen V3 row flags that disqualify a candidate from champion
+        selection. ``None`` preserves callers without V3 flag payloads.
     """
 
     extended_score: float
@@ -264,6 +267,7 @@ class _ClusterScoreTelemetry:
     v3_tiered: float = float("-inf")
     v3_severe_g6_breach: bool = False
     v3_referee_ineligibility_reason: str = "not_weighted_input"
+    champion_ineligibility_flags: Optional[frozenset[str]] = None
 
 
 def _weighted_referee_active(problem: LayoutProblem) -> bool:
@@ -407,13 +411,19 @@ def _cluster_candidate_is_dual_admissible(
     Returns
     -------
     bool
-        ``True`` iff extended improves by the honest margin and old-ruler
-        score does not decrease.
+        ``True`` iff V3 improves by the honest margin and the candidate does
+        not introduce a frozen champion-ineligible degeneracy flag.
     """
-    return (
-        candidate.v3_tiered > incumbent.v3_tiered + CLUSTER_DUAL_ACCEPTANCE_MARGIN
-        and candidate.old_score >= incumbent.old_score - CLUSTER_DUAL_ACCEPTANCE_MARGIN
+    from dagua.layout.ops.pipelines.native_finisher import (
+        candidate_introduces_champion_ineligible_flag,
     )
+
+    if candidate_introduces_champion_ineligible_flag(
+        candidate.champion_ineligibility_flags,
+        incumbent.champion_ineligibility_flags,
+    ):
+        return False
+    return candidate.v3_tiered > incumbent.v3_tiered + CLUSTER_DUAL_ACCEPTANCE_MARGIN
 
 
 def _portfolio_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
@@ -1485,6 +1495,7 @@ def _score_undirected_candidate_payload(
             profile=aesthetic_profile,
         )
     from dagua.eval.ruler_v3 import referee_eligibility_key, severe_g6_breach
+    from dagua.layout.ops.pipelines.native_finisher import DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
     from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
 
     v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
@@ -1499,6 +1510,8 @@ def _score_undirected_candidate_payload(
         v3_tiered=float(v3_result.scores["tiered"]),
         v3_severe_g6_breach=v3_breach,
         v3_referee_ineligibility_reason=v3_reason,
+        champion_ineligibility_flags=frozenset(str(flag) for flag in v3_result.flags)
+        & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
     )
     return score, telemetry
 
