@@ -1022,6 +1022,111 @@ def test_recombinant_bk_uses_span_two_virtual_chain_edges() -> None:
     assert abs(float(x_values[0].item()) - float(x_values[2].item())) < 1.0e-5
 
 
+@pytest.mark.parametrize("xcoord", ["dot_lp", "brandes_koepf"])
+def test_recombinant_x_assignment_preserves_given_real_layer_order(
+    xcoord: str,
+) -> None:
+    """Span-one layers keep the ordering stage order during x assignment."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[2, 0, 1], [5, 3, 4]], dtype=torch.long),
+        num_nodes=6,
+        node_sizes=torch.full((6, 2), 10.0),
+    )
+    ordered_layers = [[2, 0, 1], [5, 3, 4]]
+    spec = type("Spec", (), {"xcoord": xcoord})()
+
+    x_values = _assign_recombinant_x_coordinates(spec, ordered_layers, problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert float(x_values[2].item()) < float(x_values[0].item()) < float(x_values[1].item())
+    assert float(x_values[5].item()) < float(x_values[3].item()) < float(x_values[4].item())
+
+
+def test_recombinant_dot_lp_expansion_preserves_real_edge_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expanded recombinant dot-x edges inherit original edge weights."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_dot_x(
+        rank_ordering: list[list[int]],
+        node_widths: torch.Tensor,
+        edge_index: torch.Tensor,
+        node_sep: float = 18.0,
+        edge_weights: Optional[torch.Tensor] = None,
+        center: bool = True,
+    ) -> torch.Tensor:
+        """Capture expanded weights and return monotone coordinates."""
+        del rank_ordering, edge_index, node_sep, center
+        assert edge_weights is not None
+        captured["edge_weights"] = edge_weights.detach().clone()
+        return torch.arange(int(node_widths.numel()), dtype=torch.float32)
+
+    monkeypatch.setattr(dagua_native, "_graphviz_dot_x_position_network_simplex", fake_dot_x)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [2]], dtype=torch.long),
+        edge_weights=torch.tensor([7.0], dtype=torch.float32),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0),
+    )
+    spec = type("Spec", (), {"xcoord": "dot_lp"})()
+
+    x_values = _assign_recombinant_x_coordinates(spec, [[0], [1], [2]], problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert torch.equal(captured["edge_weights"], torch.tensor([7.0, 7.0], dtype=torch.float32))
+
+
+def test_directed_portfolio_dot_order_is_not_registered_for_clusters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clustered directed portfolios must not admit dot-order candidates."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    incumbent = torch.zeros((4, 2), dtype=torch.float32)
+    calls: list[str] = []
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite incumbent quickly."""
+        del args, kwargs
+        return incumbent.clone()
+
+    def fake_register_dot(*args: object, **kwargs: object) -> object:
+        """Record any forbidden dot registration."""
+        del args, kwargs
+        calls.append("dot")
+        return None
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_directed_dot_order_enabled", lambda *args: True)
+    monkeypatch.setattr(native_directed, "_register_dot_order_candidates", fake_register_dot)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_recombinant_layered_enabled",
+        lambda *args: False,
+    )
+    monkeypatch.setattr(native_directed, "_directed_wide_dag_ordering_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_ordering_cost_admissible", lambda *args, **kwargs: False)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [2, 3]], dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0),
+        clusters={"root": [0, 1, 2, 3], "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    config = LayoutConfig()
+
+    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), config)
+
+    assert calls == []
+    assert not hasattr(config, "_dagua_native_dot_order_fired")
+
+
 def test_challenger_registration_includes_guarded_raw_variant() -> None:
     """Parity candidates expose raw positions alongside cleanup variants."""
     edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
