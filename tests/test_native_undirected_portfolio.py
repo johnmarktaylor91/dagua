@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -59,6 +60,7 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _restore_proxy_finalist_slots,
     _rgg_geometric_seed_candidate,
     _rgg_geometric_seed_enabled,
+    _router_v2_large_mini_contest,
     _score_undirected_candidate,
     _score_undirected_candidate_payload,
     _select_undirected_winner,
@@ -1244,6 +1246,70 @@ def test_arm_s_rejection_restores_displaced_proxy_challenger() -> None:
     assert "arm_s_stress_k10" not in restored
     assert restored == ["incumbent", "cluster_sfdp", "community_scaffold"]
     assert finalist_names[1] == "arm_s_stress_k10"
+
+
+def test_large_mini_contest_scaffold_falls_back_when_labels_are_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed community-stress resolver must not suppress scaffold admission."""
+    import importlib
+
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    community_stress = importlib.import_module("dagua.layout.ops.pipelines.native_community_stress")
+    community = importlib.import_module("dagua.layout.ops.pipelines.native_community")
+
+    baseline = torch.zeros((4, 2), dtype=torch.float32)
+    scaffold = torch.tensor(
+        [[0.0, 0.0], [80.0, 0.0], [80.0, 80.0], [0.0, 80.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=4, seed=42)
+    config = LayoutConfig(seed=42, device="cpu")
+    calls: list[dict[str, object]] = []
+
+    def fake_scaffold_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
+        """Capture scaffold kwargs and return a finite challenger."""
+        del args
+        calls.append(dict(kwargs))
+        return scaffold
+
+    def fake_score(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        aesthetic_profile: object = None,
+        all_pairs_dist: Optional[object] = None,
+    ) -> float:
+        """Prefer the scaffold challenger over the baseline."""
+        del problem, cluster_ids, aesthetic_profile, all_pairs_dist
+        return 10.0 if torch.equal(pos, scaffold) else 0.0
+
+    monkeypatch.setattr(
+        dagua_native,
+        "_undirected_route_shortlist",
+        lambda *args, **kwargs: SimpleNamespace(
+            classes=["community"],
+            candidates=["community_scaffold"],
+        ),
+    )
+    monkeypatch.setattr(community_stress, "resolve_community_labels", lambda problem: None)
+    monkeypatch.setattr(community, "layout_native_community_pipeline", fake_scaffold_pipeline)
+    monkeypatch.setattr(nu, "_repair_flung_isolates", lambda pos, *args, **kwargs: pos)
+    monkeypatch.setattr(nu, "_project_candidate_prism", lambda pos, *args, **kwargs: pos)
+    monkeypatch.setattr(nu, "_candidate_is_degenerate", lambda *args, **kwargs: (False, ""))
+    monkeypatch.setattr(nu, "_small_world_knn_seed_enabled", lambda problem: False)
+    monkeypatch.setattr(nu, "_rgg_geometric_seed_enabled", lambda problem: False)
+    monkeypatch.setattr(nu, "_proxy_undirected_candidate", fake_score)
+    monkeypatch.setattr(nu, "_score_undirected_candidate_cached", fake_score)
+
+    result = _router_v2_large_mini_contest(baseline, problem, config)
+
+    assert calls
+    assert "community_labels" not in calls[0]
+    torch.testing.assert_close(result, scaffold)
 
 
 def test_arm_s_named_floor_admission_drops_compactness_floor() -> None:
