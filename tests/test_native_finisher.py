@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -13,6 +14,7 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
 from dagua.layout.ops.pipelines.native_finisher import (
+    DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
     W5Checkpoint,
     W5CostPlan,
     W5FinisherResult,
@@ -119,6 +121,31 @@ def test_w5_dominates_rejects_fresh_champion_ineligible_flag() -> None:
     )
 
     assert not w5_dominates(candidate, incumbent, tallied_axis="directed")
+
+
+def test_w5_dominates_logs_v3_missing_champion_flags(caplog: pytest.LogCaptureFixture) -> None:
+    """V3-branch hand-built pairs with missing flag payloads leave debug telemetry."""
+    incumbent = W5ScorePair(directed=90.0, undirected=90.0, v3=70.0)
+    candidate = W5ScorePair(directed=91.0, undirected=91.0, v3=70.2)
+
+    with caplog.at_level(logging.DEBUG, logger="dagua.layout.ops.pipelines.native_finisher"):
+        assert w5_dominates(candidate, incumbent, tallied_axis="directed")
+
+    assert "missing champion ineligibility flags" in caplog.text
+
+
+def test_degeneracy_champion_ineligible_flag_copies_match() -> None:
+    """Runtime, sprint scoring, and re-baseline flag copies must not drift."""
+    from scripts import freeze_v3_rebaseline, native_sprint_score
+
+    assert (
+        DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+        == native_sprint_score.DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+    )
+    assert (
+        DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+        == freeze_v3_rebaseline.DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+    )
 
 
 def test_w5_telemetry_counts_legacy_tallied_sole_failure(

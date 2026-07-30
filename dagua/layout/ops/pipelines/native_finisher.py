@@ -1185,6 +1185,18 @@ def w5_dominates(
         and math.isfinite(float(candidate_v3))
         and math.isfinite(float(incumbent_v3))
     ):
+        if (
+            candidate.champion_ineligibility_flags is None
+            or incumbent.champion_ineligibility_flags is None
+        ):
+            _LOGGER.debug(
+                "w5_dominates V3 branch received missing champion ineligibility flags",
+                extra={
+                    "candidate_flags_missing": candidate.champion_ineligibility_flags is None,
+                    "incumbent_flags_missing": incumbent.champion_ineligibility_flags is None,
+                    "tallied_axis": tallied_axis,
+                },
+            )
         if candidate_introduces_champion_ineligible_flag(
             candidate.champion_ineligibility_flags,
             incumbent.champion_ineligibility_flags,
