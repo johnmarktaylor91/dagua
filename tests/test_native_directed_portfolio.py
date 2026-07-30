@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.eval.graphs import _make_r8_lr_direction
+from dagua.eval.graphs import _make_r8_lr_direction, get_test_graphs
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.layout.graph_classify import classify_graph
@@ -59,11 +59,14 @@ from dagua.layout.ops.pipelines.native_directed import (
     _rank_to_nodes_from_incumbent_y,
     _register_challenger_variants,
     _restore_projected_rank_order,
+    _runtime_referee_telemetry,
     _score_directed_candidate,
+    _score_directed_candidate_pair,
     _score_directed_candidate_referee_payload,
     _select_directed_winner,
     layout_native_directed_portfolio,
 )
+from dagua.layout.ops.pipelines.native_finisher import W5ScorePair, w5_dominates
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 _T = TypeVar("_T")
@@ -1641,11 +1644,11 @@ def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
         problem: LayoutProblem,
         cluster_ids: Optional[torch.Tensor],
         all_pairs_dist: Optional[object],
-    ) -> tuple[bool, W5ScorePair]:
+    ) -> tuple[bool, W5ScorePair, tuple[int, float]]:
         """Reject the crossing-improving candidate under the frozen dual gate."""
         del incumbent_pair, problem, cluster_ids, all_pairs_dist
         captured["candidate"] = candidate
-        return False, W5ScorePair(directed=11.0, undirected=9.0)
+        return False, W5ScorePair(directed=11.0, undirected=9.0), (1, -0.0)
 
     def fake_sugiyama(**kwargs: object) -> torch.Tensor:
         """Return a tied non-ordering challenger without external solver cost."""
@@ -1754,10 +1757,12 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
         del args, kwargs
         return payload_pair, payload_axes
 
-    def fake_dual_gate(*args: object, **kwargs: object) -> tuple[bool, W5ScorePair]:
+    def fake_dual_gate(
+        *args: object, **kwargs: object
+    ) -> tuple[bool, W5ScorePair, tuple[int, float]]:
         """Admit the ordering seed while keeping scalar best_name incumbent."""
         del args, kwargs
-        return True, W5ScorePair(directed=11.0, undirected=11.0)
+        return True, W5ScorePair(directed=11.0, undirected=11.0), (1, -0.0)
 
     def fake_rank_swap(*args: object, **kwargs: object) -> torch.Tensor:
         """Return a distinct zero-crossing ordering seed."""
@@ -1896,11 +1901,11 @@ def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
         problem: LayoutProblem,
         cluster_ids: Optional[torch.Tensor],
         all_pairs_dist: Optional[object],
-    ) -> tuple[bool, W5ScorePair]:
+    ) -> tuple[bool, W5ScorePair, tuple[int, float]]:
         """Reject the recombinant candidate under the dual frozen rulers."""
         del incumbent_pair, problem, cluster_ids, all_pairs_dist
         captured["candidate"] = candidate
-        return False, W5ScorePair(directed=11.0, undirected=9.0)
+        return False, W5ScorePair(directed=11.0, undirected=9.0), (1, -0.0)
 
     def fake_sugiyama(**kwargs: object) -> torch.Tensor:
         """Return tied non-recombinant challengers cheaply."""
@@ -2057,7 +2062,7 @@ def test_directed_ordering_dual_gate_rejects_single_ruler_win(
 
     monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_pair)
 
-    dominates, pair = _directed_ordering_candidate_dual_dominates(
+    dominates, pair, _candidate_referee_key = _directed_ordering_candidate_dual_dominates(
         candidate,
         incumbent_pair,
         problem,
@@ -2112,7 +2117,7 @@ def test_directed_ordering_dual_gate_demotes_referee_breacher(
     monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_pair)
     monkeypatch.setattr(native_directed, "_runtime_referee_telemetry", fake_referee)
 
-    dominates, pair = _directed_ordering_candidate_dual_dominates(
+    dominates, pair, candidate_referee_key = _directed_ordering_candidate_dual_dominates(
         candidate,
         incumbent_pair,
         problem,
@@ -2123,6 +2128,56 @@ def test_directed_ordering_dual_gate_demotes_referee_breacher(
 
     assert not dominates
     assert pair == W5ScorePair(directed=100.0, undirected=100.0)
+    assert candidate_referee_key == (0, -0.50)
+
+
+def test_r79_weighted_skew_dag_severe_g6_candidate_rejected_by_referee_key() -> None:
+    """A real r79 weighted-DAG candidate is rejected by the severe-G6 prefix."""
+    test_graph = next(
+        graph for graph in get_test_graphs() if graph.name == "r79_weighted_skew_dag_6x10"
+    )
+    graph = test_graph.graph
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.compute_node_sizes(),
+        edge_weights=graph.edge_weights,
+        direction="directed",
+    )
+    candidate = torch.stack(
+        (torch.arange(graph.num_nodes, dtype=torch.float32), torch.zeros(graph.num_nodes)),
+        dim=1,
+    )
+    candidate_pair = _score_directed_candidate_pair(candidate, problem, None, None)
+    incumbent_pair = W5ScorePair(
+        directed=candidate_pair.directed - 1.0,
+        undirected=candidate_pair.undirected - 1.0,
+    )
+
+    dominates, admitted_pair, candidate_referee_key = _directed_ordering_candidate_dual_dominates(
+        candidate,
+        incumbent_pair,
+        problem,
+        None,
+        None,
+        (1, -0.0),
+    )
+    telemetry_key, breached, reason = _runtime_referee_telemetry(candidate, problem)
+
+    assert not dominates
+    assert admitted_pair == candidate_pair
+    assert candidate_referee_key == telemetry_key
+    assert candidate_referee_key[0] == 0
+    assert breached
+    assert reason == "severe_g6_breach"
+    assert candidate_pair.champion_ineligibility_flags == frozenset()
+    assert w5_dominates(
+        candidate_pair,
+        incumbent_pair,
+        candidate_referee_key=(1, -0.0),
+        incumbent_referee_key=(1, -0.0),
+        tallied_axis="directed",
+    )
 
 
 def test_directed_incumbent_config_is_not_deadline_weakened(monkeypatch: object) -> None:
