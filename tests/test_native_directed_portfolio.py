@@ -38,6 +38,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     _crossing_edge_pairs,
     _directed_cluster_candidate_is_dual_admissible,
     _directed_dot_order_candidates,
+    _directed_dot_order_enabled,
     _directed_mrtree_enabled,
     _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
@@ -51,12 +52,14 @@ from dagua.layout.ops.pipelines.native_directed import (
     _fan_compaction_candidate_is_accepted,
     _force_challengers_enabled,
     _full_sugiyama_grid_enabled,
+    _lever2_expanded_x_assignment_enabled,
     _maybe_accept_fan_compaction_arm,
     _maybe_accept_nested_stress_arm,
     _nested_stress_candidate_pareto_admissible,
     _ordering_cost_admissible,
     _rank_local_zero_crossing_swap_candidate,
     _rank_to_nodes_from_incumbent_y,
+    _recombinant_rank_values,
     _register_challenger_variants,
     _restore_projected_rank_order,
     _runtime_referee_telemetry,
@@ -885,7 +888,7 @@ def _skip_edge_dot_order_problem() -> LayoutProblem:
 
 
 def test_dot_order_gate_structural_and_off_class_noop() -> None:
-    """Off-class dot-order calls only mark the fired telemetry false."""
+    """Default dot-order calls only mark the fired telemetry false."""
     problem = LayoutProblem(
         edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
         num_nodes=3,
@@ -903,8 +906,8 @@ def test_dot_order_gate_structural_and_off_class_noop() -> None:
     assert not hasattr(config, "_dagua_native_dot_order_telemetry")
 
 
-def test_dot_order_candidates_are_byte_deterministic() -> None:
-    """Two dot-order builds return byte-identical candidate tensors."""
+def test_dot_order_default_gate_is_disabled_for_target_shape() -> None:
+    """Target-shaped dot-order graphs still cannot build default candidates."""
     problem = _skip_edge_dot_order_problem()
     incumbent = torch.tensor(
         [
@@ -917,14 +920,43 @@ def test_dot_order_candidates_are_byte_deterministic() -> None:
         ],
         dtype=torch.float32,
     )
+    config = LayoutConfig()
 
-    first = _directed_dot_order_candidates(problem, incumbent, LayoutConfig())
-    second = _directed_dot_order_candidates(problem, incumbent, LayoutConfig())
+    candidates = _directed_dot_order_candidates(problem, incumbent, config)
 
-    assert first.keys() == second.keys()
-    assert first
-    for name, first_candidate in first.items():
-        assert torch.equal(first_candidate, second[name])
+    assert not _directed_dot_order_enabled(problem)
+    assert candidates == {}
+    assert getattr(config, "_dagua_native_dot_order_fired") is False
+
+
+def test_dot_order_direct_builder_remains_byte_deterministic() -> None:
+    """Two direct dot-order builds return byte-identical candidate tensors."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.tensor(
+        [
+            [-20.0, 0.0],
+            [20.0, 0.0],
+            [-20.0, 40.0],
+            [20.0, 40.0],
+            [-20.0, 80.0],
+            [20.0, 80.0],
+        ],
+        dtype=torch.float32,
+    )
+    spec = _DotOrderSpec(
+        name="dot_ns_dotx",
+        layering="network_simplex_tightened",
+        xcoord="dot_lp",
+        warm_start=False,
+    )
+
+    first, first_expanded_n = _build_dot_order_candidate(spec, problem, incumbent, LayoutConfig())
+    second, second_expanded_n = _build_dot_order_candidate(spec, problem, incumbent, LayoutConfig())
+
+    assert first is not None
+    assert second is not None
+    assert first_expanded_n == second_expanded_n
+    assert torch.equal(first, second)
 
 
 def test_dot_order_candidate_places_all_real_nodes_with_rank_consistent_y() -> None:
@@ -1082,6 +1114,81 @@ def test_recombinant_dot_lp_expansion_preserves_real_edge_weights(
 
     assert x_values is not None
     assert torch.equal(captured["edge_weights"], torch.tensor([7.0, 7.0], dtype=torch.float32))
+
+
+def test_recombinant_ns_ranker_falls_back_before_oversized_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized Lever-2 rows avoid the network-simplex ranker entirely."""
+    elk = importlib.import_module("dagua.layout.ops.elk")
+
+    def fail_network_simplex(*args: object, **kwargs: object) -> list[int]:
+        """Fail if the oversized row still enters the network-simplex ranker."""
+        del args, kwargs
+        raise AssertionError("network simplex should be capped before ranking")
+
+    monkeypatch.setattr(elk, "_network_simplex_layers", fail_network_simplex)
+    chain_edges = [(node, node + 1) for node in range(19)]
+    skip_edges = [(node, 19) for node in range(11)]
+    edge_index = torch.tensor(chain_edges + skip_edges, dtype=torch.long).t().contiguous()
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=20,
+        node_sizes=torch.full((20, 2), 10.0),
+    )
+    spec = type("Spec", (), {"layering": "network_simplex_tightened"})()
+
+    ranks = _recombinant_rank_values(spec, problem, torch.zeros((20, 2), dtype=torch.float32))
+
+    assert ranks == list(range(20))
+
+
+def test_recombinant_dot_lp_uses_raw_x_assignment_above_expansion_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized Lever-2 expansions fall back to raw-graph dot-x assignment."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    captured: dict[str, object] = {}
+
+    def fake_dot_x(
+        rank_ordering: list[list[int]],
+        node_widths: torch.Tensor,
+        edge_index: torch.Tensor,
+        node_sep: float = 18.0,
+        edge_weights: Optional[torch.Tensor] = None,
+        center: bool = True,
+    ) -> torch.Tensor:
+        """Capture raw fallback payload and return monotone coordinates."""
+        del node_sep, center
+        captured["rank_ordering"] = [list(layer) for layer in rank_ordering]
+        captured["node_width_count"] = int(node_widths.numel())
+        captured["edge_index"] = edge_index.detach().clone()
+        captured["edge_weights"] = None if edge_weights is None else edge_weights.detach().clone()
+        return torch.arange(int(node_widths.numel()), dtype=torch.float32)
+
+    monkeypatch.setattr(dagua_native, "_graphviz_dot_x_position_network_simplex", fake_dot_x)
+    sources = list(range(5))
+    targets = list(range(5, 10))
+    edges = [(src, dst) for src in sources for dst in targets]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    edge_weights = torch.arange(1, len(edges) + 1, dtype=torch.float32)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        edge_weights=edge_weights,
+        num_nodes=10,
+        node_sizes=torch.full((10, 2), 10.0),
+    )
+    ordered_layers = [sources] + [[] for _ in range(8)] + [targets]
+    spec = type("Spec", (), {"xcoord": "dot_lp"})()
+
+    x_values = _assign_recombinant_x_coordinates(spec, ordered_layers, problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert not _lever2_expanded_x_assignment_enabled(210, 10)
+    assert captured["rank_ordering"] == [sources, targets]
+    assert captured["node_width_count"] == 10
+    assert torch.equal(captured["edge_index"], edge_index)
+    assert torch.equal(captured["edge_weights"], edge_weights)
 
 
 def test_directed_portfolio_dot_order_is_not_registered_for_clusters(
