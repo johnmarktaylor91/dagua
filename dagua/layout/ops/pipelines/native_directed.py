@@ -1058,38 +1058,12 @@ def _directed_dot_order_enabled(problem: LayoutProblem) -> bool:
     Returns
     -------
     bool
-        ``True`` for bounded semantic DAGs where long edges or wide fanout make
-        expanded-graph mincross materially different from raw-graph ordering.
+        Always ``False`` in the default runtime path. The implementation is
+        retained for future gated experiments, but the Fable-verified corpus
+        contribution was zero, so candidate construction is disabled.
     """
-    n = int(problem.num_nodes)
-    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
-    if n < DIRECTED_DOT_ORDER_MIN_NODES or n > DIRECTED_DOT_ORDER_MAX_NODES or edge_count == 0:
-        return False
-    structure = problem.structure
-    if structure is None:
-        return False
-    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
-        return False
-    if getattr(structure, "is_semantically_directed", True) is False:
-        return False
-    tags = set(getattr(structure, "topology_tags", ()))
-    if "dense_dag" in tags:
-        return False
-
-    ranks, _max_width, long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
-    out_degree = [0] * n
-    for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
-        src_i = int(src)
-        dst_i = int(dst)
-        if src_i != dst_i and 0 <= src_i < n and 0 <= dst_i < n:
-            out_degree[src_i] += 1
-    max_out_degree = max(out_degree, default=0)
-    del ranks
-    return (
-        long_edge_ratio >= 0.05
-        or max_out_degree >= DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE
-        or _directed_wide_dag_ordering_enabled(problem)
-    )
+    del problem
+    return False
 
 
 def _clean_fan_bundle_for_compaction(problem: LayoutProblem) -> bool:
@@ -1297,6 +1271,24 @@ def _recombinant_rank_values(
         )
         return _dense_rank_values(ranks)
     if spec.layering == "network_simplex_tightened":
+        from dagua.layout.ops.ordering import _expanded_layered_graph
+
+        longest_path_ranks, _max_width, _long_edge_ratio = _directed_rank_profile(
+            problem.edge_index,
+            int(problem.num_nodes),
+        )
+        expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+            rank_values=longest_path_ranks,
+            edge_index=problem.edge_index,
+            edge_weights=problem.edge_weights,
+        )
+        if not _lever2_expanded_x_assignment_enabled(
+            len(expanded_ranks),
+            int(problem.num_nodes),
+        ):
+            # Network-simplex ranking can dominate runtime on rows whose
+            # virtual-chain expansion would be outside the Lever-2 ladder.
+            return _dense_rank_values(longest_path_ranks)
         try:
             from dagua.layout.ops.elk import _network_simplex_layers
 
@@ -1597,6 +1589,11 @@ def _assign_recombinant_x_coordinates(
                 expanded_layers.append([])
             expanded_layers[rank].append(virtual_node)
         expanded_layers = [[int(node) for node in layer] for layer in expanded_layers]
+    use_expanded_x = _lever2_expanded_x_assignment_enabled(n_expanded, n)
+    x_layers = (
+        expanded_layers if use_expanded_x else _raw_layers_from_expanded_order(ordered_layers, n)
+    )
+    x_edge_index = expanded_edges if use_expanded_x else problem.edge_index
     sizes = (
         problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
         if problem.node_sizes is not None
@@ -1608,6 +1605,16 @@ def _assign_recombinant_x_coordinates(
         if extra_count > 0
         else sizes[:, 0]
     )
+    x_widths = expanded_widths if use_expanded_x else sizes[:, 0]
+    x_edge_weights = (
+        torch.tensor(edge_penalties, dtype=torch.float32)
+        if use_expanded_x
+        else (
+            problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+            if problem.edge_weights is not None
+            else None
+        )
+    )
     if spec.xcoord == "dot_lp":
         try:
             from dagua.layout.ops.pipelines.dagua_native import (
@@ -1615,11 +1622,11 @@ def _assign_recombinant_x_coordinates(
             )
 
             x_all = _graphviz_dot_x_position_network_simplex(
-                rank_ordering=expanded_layers,
-                node_widths=expanded_widths,
-                edge_index=expanded_edges,
+                rank_ordering=x_layers,
+                node_widths=x_widths,
+                edge_index=x_edge_index,
                 node_sep=node_sep,
-                edge_weights=torch.tensor(edge_penalties, dtype=torch.float32),
+                edge_weights=x_edge_weights,
                 center=True,
             ).to(dtype=torch.float32)
             x_values = x_all[:n].to(dtype=torch.float32)
@@ -1630,29 +1637,31 @@ def _assign_recombinant_x_coordinates(
         try:
             from dagua.layout.ops.brandes_koepf import brandes_koepf_x_assignment
 
+            x_node_count = int(x_widths.numel())
+            x_dummy_nodes = virtual_ids if use_expanded_x else set()
             order_index = {
-                int(node): order for layer in expanded_layers for order, node in enumerate(layer)
+                int(node): order for layer in x_layers for order, node in enumerate(layer)
             }
-            predecessors: dict[int, list[int]] = {node: [] for node in range(n_expanded)}
-            successors: dict[int, list[int]] = {node: [] for node in range(n_expanded)}
-            candidate_edges = expanded_edges.detach().to(device="cpu", dtype=torch.long)
+            predecessors: dict[int, list[int]] = {node: [] for node in range(x_node_count)}
+            successors: dict[int, list[int]] = {node: [] for node in range(x_node_count)}
+            candidate_edges = x_edge_index.detach().to(device="cpu", dtype=torch.long)
             for src, dst in candidate_edges.t().tolist():
                 src_i = int(src)
                 dst_i = int(dst)
-                if src_i == dst_i or not (0 <= src_i < n_expanded and 0 <= dst_i < n_expanded):
+                if src_i == dst_i or not (0 <= src_i < x_node_count and 0 <= dst_i < x_node_count):
                     continue
                 successors[src_i].append(dst_i)
                 predecessors[dst_i].append(src_i)
-            for node in range(n_expanded):
+            for node in range(x_node_count):
                 predecessors[node].sort(key=lambda item: (order_index.get(item, 0), item))
                 successors[node].sort(key=lambda item: (order_index.get(item, 0), item))
-            widths = {node: float(expanded_widths[node].item()) for node in range(n_expanded)}
+            widths = {node: float(x_widths[node].item()) for node in range(x_node_count)}
             x_map = brandes_koepf_x_assignment(
-                layering=expanded_layers,
+                layering=x_layers,
                 predecessors=predecessors,
                 successors=successors,
                 widths=widths,
-                dummy_nodes=virtual_ids,
+                dummy_nodes=x_dummy_nodes,
                 node_sep=node_sep,
             )
             x_values = torch.tensor([float(x_map.get(node, 0.0)) for node in range(n)])
@@ -2019,6 +2028,51 @@ def _expanded_size_within_dot_order_ladder(expanded_nodes: int, real_nodes: int)
     return float(expanded_nodes) <= DIRECTED_DOT_ORDER_MAX_EXPANSION_RATIO * float(
         max(real_nodes, 1)
     )
+
+
+def _lever2_expanded_x_assignment_enabled(expanded_nodes: int, real_nodes: int) -> bool:
+    """Return whether recombinant/wide x assignment may use expanded nodes.
+
+    Parameters
+    ----------
+    expanded_nodes : int
+        Number of real plus virtual nodes in the Lever-2 expanded layered graph.
+    real_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when the expanded graph is within the same absolute and
+        relative size ladder used by the retired dot-order arm.
+    """
+    return _expanded_size_within_dot_order_ladder(expanded_nodes, real_nodes)
+
+
+def _raw_layers_from_expanded_order(
+    ordered_layers: Sequence[Sequence[int]],
+    real_nodes: int,
+) -> list[list[int]]:
+    """Drop virtual nodes from expanded ordered layers for raw x assignment.
+
+    Parameters
+    ----------
+    ordered_layers : sequence[sequence[int]]
+        Ordered layers, potentially from a virtual-chain expanded graph.
+    real_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Non-empty raw layers preserving the real-node order chosen upstream.
+    """
+    raw_layers: list[list[int]] = []
+    for layer in ordered_layers:
+        raw_layer = [int(node) for node in layer if 0 <= int(node) < real_nodes]
+        if raw_layer:
+            raw_layers.append(raw_layer)
+    return raw_layers
 
 
 def _dot_order_rank_values(
