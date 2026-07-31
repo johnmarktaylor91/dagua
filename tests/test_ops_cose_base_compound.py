@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import math
+
+import pytest
 import torch
 
 from dagua.layout.ops.cose_base_compound import (
     CoSECompoundOptions,
+    _calc_estimated_size_graph,
     _calc_gravitational_force,
+    _calc_ideal_edge_lengths,
+    _calc_inclusion_depths,
+    _calc_lowest_common_ancestors,
     _calc_repulsion_force,
+    _calc_repulsion_forces,
     _child_maps,
     _Graph,
     _Node,
     _Rect,
+    _scatter_node,
     _tile_nodes,
+    _update_graph_bounds,
     build_cose_compound_state,
     layout_cose_base_compound,
 )
@@ -122,6 +132,100 @@ def test_cose_base_repulsion_is_sibling_scoped() -> None:
 
     assert node_a.repulsion_force_x == 0.0
     assert node_b.repulsion_force_x == 0.0
+
+
+def test_cose_base_repulsion_uses_grid_surrounding_range() -> None:
+    """FR-grid repulsion should only include Cytoscape surrounding siblings.
+
+    Returns
+    -------
+    None
+        The first tick should refresh grid neighborhoods and ignore siblings
+        outside the CoSE repulsion range.
+    """
+    state = build_cose_compound_state(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 30.0),
+        clusters=None,
+        cluster_parents=None,
+        options=CoSECompoundOptions(),
+    )
+    near_left = state.nodes_by_leaf[0]
+    near_right = state.nodes_by_leaf[1]
+    far = state.nodes_by_leaf[2]
+    near_left.rect.x = 0.0
+    near_left.rect.y = 0.0
+    near_right.rect.x = 40.0
+    near_right.rect.y = 0.0
+    far.rect.x = 500.0
+    far.rect.y = 0.0
+    state.total_iterations = 1
+    state.repulsion_range = 100.0
+    _update_graph_bounds(state.root, True)
+
+    _calc_repulsion_forces(state, grid_update_allowed=True, force_surrounding_update=False)
+
+    assert near_left.surrounding == [near_right]
+    assert far not in near_left.surrounding
+    assert near_left.repulsion_force_x != 0.0
+    assert far.repulsion_force_x == 0.0
+
+
+def test_cose_base_inter_graph_ideal_length_uses_layout_base_depths() -> None:
+    """Inter-graph ideal lengths should use layout-base node depths.
+
+    Returns
+    -------
+    None
+        Leaves under one compound should have depth two, producing the
+        Cytoscape 1.0.3 ideal length for this micro compound edge.
+    """
+    edge_index = torch.tensor([[2], [3]], dtype=torch.long)
+    state = build_cose_compound_state(
+        edge_index=edge_index,
+        num_nodes=6,
+        node_sizes=torch.full((6, 2), 30.0),
+        clusters={"a": [0, 1, 2], "b": [3, 4, 5]},
+        cluster_parents=None,
+        options=CoSECompoundOptions(),
+    )
+
+    _calc_lowest_common_ancestors(state)
+    _calc_inclusion_depths(state)
+    _calc_estimated_size_graph(state.root)
+    _calc_ideal_edge_lengths(state)
+
+    edge = state.edges[0]
+    assert state.nodes_by_leaf[2].inclusion_tree_depth == 2
+    assert state.nodes_by_leaf[3].inclusion_tree_depth == 2
+    assert edge.ideal_length == pytest.approx(83.92304845413264)
+
+
+def test_cose_base_random_scatter_matches_layout_base_world_frame() -> None:
+    """Random scatter should use layout-base's world-centered top-left frame.
+
+    Returns
+    -------
+    None
+        The first sine-RNG draw pair should match Cytoscape layout-base.
+    """
+    state = build_cose_compound_state(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=1,
+        node_sizes=torch.full((1, 2), 30.0),
+        clusters=None,
+        cluster_parents=None,
+        options=CoSECompoundOptions(),
+    )
+    node = state.nodes_by_leaf[0]
+    expected_x = 1200.0 + ((math.sin(1) * 10000.0) % 1.0) * 2000.0 - 1000.0
+    expected_y = 900.0 + ((math.sin(2) * 10000.0) % 1.0) * 2000.0 - 1000.0
+
+    _scatter_node(state, node)
+
+    assert node.rect.x == pytest.approx(expected_x)
+    assert node.rect.y == pytest.approx(expected_y)
 
 
 def test_cose_base_compound_layout_is_deterministic() -> None:

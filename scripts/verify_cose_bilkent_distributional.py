@@ -32,6 +32,8 @@ POINT_MASS_THRESHOLD = 1.0e-6
 TOST_ALPHA = 0.05
 VARIANCE_RATIO_MIN = 0.5
 VARIANCE_RATIO_MAX = 2.0
+CYTOSCAPE_DEFAULT_NODE_WIDTH = 30.0
+CYTOSCAPE_DEFAULT_NODE_HEIGHT = 30.0
 
 
 @dataclass(frozen=True)
@@ -257,6 +259,27 @@ def _node_sizes(graph: DaguaGraph) -> torch.Tensor:
     return graph.node_sizes.detach().cpu().to(dtype=torch.float64)
 
 
+def _matched_cytoscape_node_sizes(graph: DaguaGraph) -> torch.Tensor:
+    """Return Cytoscape's unstyled headless node dimensions for native runs.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Fixture graph whose node count determines the output shape.
+
+    Returns
+    -------
+    torch.Tensor
+        Width/height tensor with shape ``[N, 2]`` using Cytoscape's default
+        30-by-30 leaf dimensions.
+    """
+    size = torch.tensor(
+        [CYTOSCAPE_DEFAULT_NODE_WIDTH, CYTOSCAPE_DEFAULT_NODE_HEIGHT],
+        dtype=torch.float64,
+    )
+    return size.repeat(graph.num_nodes, 1)
+
+
 def _ordering_inversion_rate(
     positions: np.ndarray,
     clusters: Mapping[str, Any],
@@ -441,7 +464,7 @@ def _core_positions(
     return layout_cose_base_compound(
         edge_index=_edge_index(graph),
         num_nodes=graph.num_nodes,
-        node_sizes=_node_sizes(graph),
+        node_sizes=_matched_cytoscape_node_sizes(graph),
         clusters=graph.clusters,
         cluster_parents=graph.cluster_parents,
         options=CoSECompoundOptions(steps=steps, seed=seed, quality=quality, version="1.0.3"),
@@ -475,7 +498,7 @@ def _pipeline_positions(
     return layout_cose_bilkent_pipeline(
         edge_index=_edge_index(graph),
         num_nodes=graph.num_nodes,
-        node_sizes=_node_sizes(graph),
+        node_sizes=_matched_cytoscape_node_sizes(graph),
         steps=steps,
         seed=seed,
         quality=quality,
