@@ -120,6 +120,32 @@ def test_cise_steps_zero_preserves_static_circle_placement() -> None:
     assert not torch.equal(static, relaxed)
 
 
+def test_cise_default_enables_reference_force_budget() -> None:
+    """Default CiSE should run the calibrated reference force budget.
+
+    Returns
+    -------
+    None
+        Omitting ``steps`` should be equivalent to Cytoscape's default
+        per-stage iteration budget, while explicit ``steps=0`` remains the
+        static compatibility path.
+    """
+    edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 3, 4]], dtype=torch.long)
+    clusters = {"left": [0, 1, 2], "right": [3, 4, 5]}
+
+    default = layout_cise_pipeline(edge_index=edge_index, num_nodes=6, clusters=clusters)
+    reference_budget = layout_cise_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        clusters=clusters,
+        steps=2500,
+    )
+    static = layout_cise_pipeline(edge_index=edge_index, num_nodes=6, clusters=clusters, steps=0)
+
+    assert torch.equal(default, reference_budget)
+    assert not torch.equal(default, static)
+
+
 def test_cise_relaxation_keeps_members_on_rigid_circles() -> None:
     """Relaxed CiSE clusters should remain rigid circular bodies.
 

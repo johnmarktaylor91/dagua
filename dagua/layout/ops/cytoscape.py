@@ -39,6 +39,7 @@ _CISE_SWAP_HISTORY_CLEARANCE_PERIOD = 6 * _CISE_SWAP_PERIOD
 _CISE_MIN_DISPLACEMENT_FOR_SWAP = 6.0
 _CISE_CLUSTER_ENLARGEMENT_CHECK_PERIOD = 50
 _CISE_DEFAULT_INNER_EDGE_LENGTH = _CISE_DEFAULT_EDGE_LENGTH / 3.0
+_CISE_CIRCLE_PARENT_MARGIN = _CISE_CLUSTER_MARGIN + 15.0
 _COSE_DEFAULT_NODE_WIDTH = 1.0
 _COSE_DEFAULT_NODE_HEIGHT = 1.0
 _COSE_DEFAULT_RENDERED_NODE_CENTER = 15.0
@@ -642,6 +643,140 @@ def _cise_alignment_score(first: list[str], second: list[str]) -> float:
     return matrix[-1][-1]
 
 
+def _cise_sign(value: float) -> float:
+    """Return Cytoscape layout-base's numeric sign.
+
+    Parameters
+    ----------
+    value : float
+        Input scalar.
+
+    Returns
+    -------
+    float
+        ``1.0`` for positive values, ``-1.0`` for negative values, and ``0.0``
+        for exactly zero.
+    """
+    if value > 0.0:
+        return 1.0
+    if value < 0.0:
+        return -1.0
+    return 0.0
+
+
+def _cise_rectangles_overlap(
+    left_center: tuple[float, float],
+    left_size: tuple[float, float],
+    right_center: tuple[float, float],
+    right_size: tuple[float, float],
+) -> bool:
+    """Return whether two axis-aligned Cytoscape node rectangles overlap.
+
+    Parameters
+    ----------
+    left_center : tuple[float, float]
+        First rectangle center.
+    left_size : tuple[float, float]
+        First rectangle ``(width, height)``.
+    right_center : tuple[float, float]
+        Second rectangle center.
+    right_size : tuple[float, float]
+        Second rectangle ``(width, height)``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the rectangles intersect.
+    """
+    return (
+        abs(right_center[0] - left_center[0]) < (left_size[0] + right_size[0]) / 2.0
+        and abs(right_center[1] - left_center[1]) < (left_size[1] + right_size[1]) / 2.0
+    )
+
+
+def _cise_clipped_rect_delta(
+    left_center: tuple[float, float],
+    left_size: tuple[float, float],
+    right_center: tuple[float, float],
+    right_size: tuple[float, float],
+) -> Optional[tuple[float, float, float]]:
+    """Return Cytoscape ``LEdge.updateLength``-style clipped delta.
+
+    Parameters
+    ----------
+    left_center : tuple[float, float]
+        Source rectangle center.
+    left_size : tuple[float, float]
+        Source rectangle ``(width, height)``.
+    right_center : tuple[float, float]
+        Target rectangle center.
+    right_size : tuple[float, float]
+        Target rectangle ``(width, height)``.
+
+    Returns
+    -------
+    tuple[float, float, float] | None
+        ``(dx, dy, length)`` from source clip point to target clip point, or
+        ``None`` when the rectangles overlap.
+    """
+    if _cise_rectangles_overlap(left_center, left_size, right_center, right_size):
+        return None
+    delta_x = right_center[0] - left_center[0]
+    delta_y = right_center[1] - left_center[1]
+    if delta_x == 0.0 and delta_y == 0.0:
+        return None
+
+    def _clip_scale(size: tuple[float, float]) -> float:
+        """Return center-line scale from rectangle center to boundary.
+
+        Parameters
+        ----------
+        size : tuple[float, float]
+            Rectangle ``(width, height)``.
+
+        Returns
+        -------
+        float
+            Fraction of the center-to-center vector used to reach the
+            rectangle boundary.
+        """
+        scales: list[float] = []
+        if delta_x != 0.0:
+            scales.append((size[0] / 2.0) / abs(delta_x))
+        if delta_y != 0.0:
+            scales.append((size[1] / 2.0) / abs(delta_y))
+        return min(scales, default=0.0)
+
+    left_scale = _clip_scale(left_size)
+    right_scale = _clip_scale(right_size)
+    clipped_x = delta_x * (1.0 - left_scale - right_scale)
+    clipped_y = delta_y * (1.0 - left_scale - right_scale)
+    if abs(clipped_x) < 1.0:
+        clipped_x = _cise_sign(clipped_x)
+    if abs(clipped_y) < 1.0:
+        clipped_y = _cise_sign(clipped_y)
+    length = math.hypot(clipped_x, clipped_y)
+    if length == 0.0:
+        return None
+    return clipped_x, clipped_y, length
+
+
+def _cise_parent_dimension(circle: _CiSECircleState) -> float:
+    """Return the square parent-node dimension for one CiSE circle.
+
+    Parameters
+    ----------
+    circle : _CiSECircleState
+        Circle whose parent dimension is needed.
+
+    Returns
+    -------
+    float
+        Cytoscape ``CiSECircle.calculateParentNodeDimension`` dimension.
+    """
+    return 2.0 * (circle.radius + _CISE_CIRCLE_PARENT_MARGIN) + _CISE_DEFAULT_NODE_DIMENSION
+
+
 def _cise_decompose_force(
     circle: _CiSECircleState,
     node: int,
@@ -735,11 +870,15 @@ def _cise_calc_forces(
         target_group = group_by_node.get(target)
         if source_group is None or target_group is None or source_group == target_group:
             continue
-        delta_x = float(pos[target, 0] - pos[source, 0])
-        delta_y = float(pos[target, 1] - pos[source, 1])
-        length = math.hypot(delta_x, delta_y)
-        if length == 0.0:
+        clipped = _cise_clipped_rect_delta(
+            (float(pos[source, 0]), float(pos[source, 1])),
+            (_CISE_DEFAULT_NODE_DIMENSION, _CISE_DEFAULT_NODE_DIMENSION),
+            (float(pos[target, 0]), float(pos[target, 1])),
+            (_CISE_DEFAULT_NODE_DIMENSION, _CISE_DEFAULT_NODE_DIMENSION),
+        )
+        if clipped is None:
             continue
+        delta_x, delta_y, length = clipped
         spring_force = _CISE_DEFAULT_SPRING_STRENGTH * (length - ideal_length)
         force_x = spring_force * delta_x / length
         force_y = spring_force * delta_y / length
@@ -750,12 +889,21 @@ def _cise_calc_forces(
     for left_index, left in enumerate(circles):
         for right_index in range(left_index + 1, len(circles)):
             right = circles[right_index]
-            delta_x = right.center[0] - left.center[0]
-            delta_y = right.center[1] - left.center[1]
+            left_dimension = _cise_parent_dimension(left)
+            right_dimension = _cise_parent_dimension(right)
+            clipped = _cise_clipped_rect_delta(
+                (left.center[0], left.center[1]),
+                (left_dimension, left_dimension),
+                (right.center[0], right.center[1]),
+                (right_dimension, right_dimension),
+            )
+            if clipped is None:
+                continue
+            delta_x, delta_y, distance = clipped
             if abs(delta_x) < _CISE_MIN_REPULSION_DISTANCE:
-                delta_x = math.copysign(_CISE_MIN_REPULSION_DISTANCE, delta_x)
+                delta_x = _cise_sign(delta_x) * _CISE_MIN_REPULSION_DISTANCE
             if abs(delta_y) < _CISE_MIN_REPULSION_DISTANCE:
-                delta_y = math.copysign(_CISE_MIN_REPULSION_DISTANCE, delta_y)
+                delta_y = _cise_sign(delta_y) * _CISE_MIN_REPULSION_DISTANCE
             distance_sq = delta_x * delta_x + delta_y * delta_y
             distance = math.sqrt(distance_sq)
             force = (
@@ -1801,6 +1949,7 @@ class CytoscapeCiSERelax(Op):
     steps: int = 2500
     gravity: float = 0.25
     gravity_range: float = 3.8
+    randomize: bool = False
 
     def apply(
         self,
@@ -1845,21 +1994,24 @@ class CytoscapeCiSERelax(Op):
         edges = _cise_edges(problem.edge_index, problem.num_nodes)
         group_by_node, _order_by_node = _cise_member_group_maps(circles)
         _cise_update_swapping_conditions(circles, edges, group_by_node)
-        step_budget = max(1, int(self.steps))
-        phase_lengths = (
-            max(1, step_budget // 3),
-            max(1, step_budget // 3),
-            max(1, step_budget - 2 * (step_budget // 3)),
-        )
         swapped_history: list[_CiSESwapPair] = []
-        for phase_index, phase_steps in enumerate(phase_lengths):
-            initial_cooling = 0.5 if phase_index == 2 else 0.4
+        stage_specs = [
+            ("polish_relax", False, 0.5),
+            ("reverse_relax", False, 0.4),
+            ("polish_relax", False, 0.5),
+            ("swap_relax", False, 0.4),
+            ("polish_relax", True, 0.5),
+        ]
+        if not self.randomize:
+            stage_specs.pop(1)
+        for stage_name, polish, initial_cooling in stage_specs:
+            phase_steps = max(1, int(self.steps))
             for iteration in range(1, phase_steps + 1):
                 if iteration % _CISE_CONVERGENCE_CHECK_PERIOD == 0:
                     cooling_factor = initial_cooling * ((phase_steps - iteration) / phase_steps)
                 else:
                     cooling_factor = initial_cooling
-                if phase_index == 0 and iteration % _CISE_REVERSE_PERIOD == 0:
+                if stage_name == "reverse_relax" and iteration % _CISE_REVERSE_PERIOD == 0:
                     for circle_index in range(len(circles)):
                         if _cise_reverse_if_better(
                             circle_index,
@@ -1872,13 +2024,13 @@ class CytoscapeCiSERelax(Op):
                     group_by_node, _order_by_node = _cise_member_group_maps(circles)
                 perform_swap = False
                 prepare_swap = False
-                if phase_index == 1:
+                if stage_name == "swap_relax":
                     if iteration % _CISE_SWAP_HISTORY_CLEARANCE_PERIOD == 0:
                         swapped_history = []
                     iteration_in_period = iteration % _CISE_SWAP_PERIOD
                     prepare_swap = iteration_in_period >= _CISE_SWAP_IDLE_DURATION
                     perform_swap = iteration_in_period == 0
-                elif phase_index == 2 and iteration % _CISE_CLUSTER_ENLARGEMENT_CHECK_PERIOD == 0:
+                elif polish and iteration % _CISE_CLUSTER_ENLARGEMENT_CHECK_PERIOD == 0:
                     _cise_enlargement_check(circles, pos)
                 parent_forces, parent_rotations, node_swap_rotation = _cise_calc_forces(
                     circles=circles,
@@ -1888,7 +2040,7 @@ class CytoscapeCiSERelax(Op):
                     cooling_factor=cooling_factor,
                     gravity=float(self.gravity),
                     gravity_range=float(self.gravity_range),
-                    polish=phase_index == 2,
+                    polish=polish,
                 )
                 if prepare_swap:
                     for circle in circles:
