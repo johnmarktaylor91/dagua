@@ -17,9 +17,10 @@ from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext,
 
 def build_cise_pipeline(
     node_separation: float = 12.5,
-    steps: int = 0,
+    steps: int = 2500,
     gravity: float = 0.25,
     gravity_range: float = 3.8,
+    randomize: bool = False,
 ) -> Pipeline:
     """Build the Cytoscape CiSE-style circular-cluster pipeline.
 
@@ -27,13 +28,15 @@ def build_cise_pipeline(
     ----------
     node_separation : float, default=12.5
         Separation used for member circles and cluster spacing.
-    steps : int, default=0
-        Maximum CiSE relaxation iteration budget. The default preserves the
-        previous static CiSE output; positive values enable Steps 3-5.
+    steps : int, default=2500
+        Maximum CiSE relaxation iteration budget per reference sub-stage. Use
+        ``0`` to preserve the Step 1/2 static placement.
     gravity : float, default=0.25
         Root graph gravity strength used by the relaxation phase.
     gravity_range : float, default=3.8
         Root graph gravity range multiplier.
+    randomize : bool, default=False
+        Whether to include Cytoscape CiSE's randomized Step 3 reversal stage.
 
     Returns
     -------
@@ -47,6 +50,7 @@ def build_cise_pipeline(
                 steps=steps,
                 gravity=gravity,
                 gravity_range=gravity_range,
+                randomize=randomize,
             ),
             CytoscapeFinalize(),
         ],
@@ -58,7 +62,7 @@ def layout_cise_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 0,
+    steps: int = 2500,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     clusters: Optional[dict[str, Any]] = None,
@@ -79,9 +83,9 @@ def layout_cise_pipeline(
         Number of graph nodes.
     node_sizes : torch.Tensor | None, optional
         Node-size tensor with shape ``[N, 2]``.
-    steps : int, default=0
-        Maximum CiSE relaxation iteration budget. The default preserves the
-        previous static CiSE output; positive values enable Steps 3-5.
+    steps : int, default=2500
+        Maximum CiSE relaxation iteration budget per reference sub-stage. Use
+        ``0`` to preserve the Step 1/2 static placement.
     seed : int, default=42
         Accepted for API consistency.
     edge_weights : torch.Tensor | None, optional
@@ -93,7 +97,7 @@ def layout_cise_pipeline(
     nodeSeparation : float, default=12.5
         Separation used for circular clusters.
     randomize : bool, default=False
-        Accepted for API consistency.
+        Whether to include Cytoscape CiSE's randomized Step 3 reversal stage.
     gravity : float, default=0.25
         Accepted for API consistency.
     gravityRange : float, default=3.8
@@ -106,7 +110,7 @@ def layout_cise_pipeline(
     torch.Tensor
         Position tensor with shape ``[N, 2]``.
     """
-    del seed, edge_weights, cluster_parents, randomize
+    del seed, edge_weights, cluster_parents
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -118,6 +122,7 @@ def layout_cise_pipeline(
         steps=steps,
         gravity=gravity,
         gravity_range=gravityRange,
+        randomize=randomize,
     ).apply(
         problem,
         SolveState(),

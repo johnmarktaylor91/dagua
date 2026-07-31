@@ -1539,7 +1539,9 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         kwargs["fidelity_dtype"] = config.fidelity_dtype
         # Forward steps if the pipeline accepts it
         sig = inspect.signature(pipeline_fn)
-        if "steps" in sig.parameters:
+        if "steps" in sig.parameters and not (
+            str(config.algorithm).lower() == "cise" and config.steps <= 0
+        ):
             kwargs["steps"] = config.steps
 
         # Classify once here, where the real DaguaGraph is in scope, so an
