@@ -3372,13 +3372,13 @@ def _compound_order_graph(graph: _DagreGraph) -> List[List[NodeId]]:
     ]
     best_crossings = float("inf")
     best = [list(layer) for layer in layers]
-    constraints: List[Tuple[NodeId, NodeId]] = []
-    constraint_set: Set[Tuple[NodeId, NodeId]] = set()
     iteration = 0
     iterations_since_best = 0
     while iterations_since_best < 4:
         layer_graphs = down_layer_graphs if iteration % 2 else up_layer_graphs
         bias_right = iteration % 4 >= 2
+        constraints: List[Tuple[NodeId, NodeId]] = []
+        constraint_set: Set[Tuple[NodeId, NodeId]] = set()
         for layer_graph in layer_graphs:
             for node, label in layer_graph.nodes.items():
                 if node in graph.nodes:
