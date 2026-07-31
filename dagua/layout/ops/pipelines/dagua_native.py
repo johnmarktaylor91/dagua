@@ -6069,6 +6069,19 @@ def _terminal_w5_polish(
         cluster_tightening_telemetry: list[dict[str, Any]] = []
         cluster_selected = False
         cluster_seed_positions: list[tuple[str, torch.Tensor]] = []
+        tallied_axis = (
+            "directed" if is_semantically_directed and declared_hierarchical else "undirected"
+        )
+        selected_cluster_candidate: (
+            tuple[
+                str,
+                torch.Tensor,
+                W5ScorePair,
+                W5HonestAxes,
+            ]
+            | None
+        ) = None
+        selected_cluster_v3 = float("-inf")
         for cluster_candidate in build_cluster_tightening_candidates(
             final_pos,
             cpu_edge_index,
@@ -6081,12 +6094,22 @@ def _terminal_w5_polish(
                 candidate_score_pair,
                 incumbent_score_pair,
                 1.0e-9,
-                tallied_axis=(
-                    "directed"
-                    if is_semantically_directed and declared_hierarchical
-                    else "undirected"
-                ),
+                tallied_axis=tallied_axis,
             )
+            candidate_v3 = candidate_score_pair.v3
+            candidate_v3_float = (
+                float(candidate_v3)
+                if candidate_v3 is not None and math.isfinite(float(candidate_v3))
+                else float("-inf")
+            )
+            if selected and candidate_v3_float > selected_cluster_v3:
+                selected_cluster_candidate = (
+                    cluster_candidate.name,
+                    cluster_candidate.pos,
+                    candidate_score_pair,
+                    candidate_axes,
+                )
+                selected_cluster_v3 = candidate_v3_float
             cluster_tightening_telemetry.append(
                 {
                     "name": cluster_candidate.name,
@@ -6101,18 +6124,25 @@ def _terminal_w5_polish(
                         "directed": candidate_score_pair.directed,
                         "undirected": candidate_score_pair.undirected,
                     },
-                    "selected": selected,
+                    "selected": False,
                 }
             )
             cluster_seed_positions.append((cluster_candidate.name, cluster_candidate.pos))
-            if selected:
-                final_pos = cluster_candidate.pos.to(device=final_pos.device, dtype=final_pos.dtype)
-                incumbent_score_pair = candidate_score_pair
-                incumbent_axes = candidate_axes
-                cluster_selected = True
-                if register_anytime_best is not None:
-                    register_anytime_best(final_pos, "cluster_tightening_accept")
-                break
+        if selected_cluster_candidate is not None:
+            (
+                selected_cluster_name,
+                selected_cluster_pos,
+                incumbent_score_pair,
+                incumbent_axes,
+            ) = selected_cluster_candidate
+            final_pos = selected_cluster_pos.to(device=final_pos.device, dtype=final_pos.dtype)
+            cluster_selected = True
+            for record in cluster_tightening_telemetry:
+                if record["name"] == selected_cluster_name:
+                    record["selected"] = True
+                    break
+            if register_anytime_best is not None:
+                register_anytime_best(final_pos, "cluster_tightening_accept")
         if cluster_tightening_telemetry:
             existing_cluster_telemetry = list(
                 getattr(config, "_dagua_native_cluster_tightening_telemetry", [])
