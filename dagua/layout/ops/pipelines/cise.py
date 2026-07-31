@@ -7,17 +7,33 @@ from typing import Any, Optional
 import torch
 
 from dagua.layout.ops.base import Pipeline
-from dagua.layout.ops.cytoscape import CytoscapeCircleClusters, CytoscapeFinalize
+from dagua.layout.ops.cytoscape import (
+    CytoscapeCircleClusters,
+    CytoscapeCiSERelax,
+    CytoscapeFinalize,
+)
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
-def build_cise_pipeline(node_separation: float = 12.5) -> Pipeline:
+def build_cise_pipeline(
+    node_separation: float = 12.5,
+    steps: int = 0,
+    gravity: float = 0.25,
+    gravity_range: float = 3.8,
+) -> Pipeline:
     """Build the Cytoscape CiSE-style circular-cluster pipeline.
 
     Parameters
     ----------
-    node_separation : float, default=60.0
+    node_separation : float, default=12.5
         Separation used for member circles and cluster spacing.
+    steps : int, default=0
+        Maximum CiSE relaxation iteration budget. The default preserves the
+        previous static CiSE output; positive values enable Steps 3-5.
+    gravity : float, default=0.25
+        Root graph gravity strength used by the relaxation phase.
+    gravity_range : float, default=3.8
+        Root graph gravity range multiplier.
 
     Returns
     -------
@@ -25,7 +41,15 @@ def build_cise_pipeline(node_separation: float = 12.5) -> Pipeline:
         Composable CiSE pipeline.
     """
     return Pipeline(
-        [CytoscapeCircleClusters(node_separation=node_separation), CytoscapeFinalize()],
+        [
+            CytoscapeCircleClusters(node_separation=node_separation),
+            CytoscapeCiSERelax(
+                steps=steps,
+                gravity=gravity,
+                gravity_range=gravity_range,
+            ),
+            CytoscapeFinalize(),
+        ],
         name="cise_pipeline",
     )
 
@@ -34,7 +58,7 @@ def layout_cise_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 2500,
+    steps: int = 0,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     clusters: Optional[dict[str, Any]] = None,
@@ -55,8 +79,9 @@ def layout_cise_pipeline(
         Number of graph nodes.
     node_sizes : torch.Tensor | None, optional
         Node-size tensor with shape ``[N, 2]``.
-    steps : int, default=2500
-        Accepted for API consistency with Cytoscape CiSE.
+    steps : int, default=0
+        Maximum CiSE relaxation iteration budget. The default preserves the
+        previous static CiSE output; positive values enable Steps 3-5.
     seed : int, default=42
         Accepted for API consistency.
     edge_weights : torch.Tensor | None, optional
@@ -65,7 +90,7 @@ def layout_cise_pipeline(
         Cluster membership mapping.
     cluster_parents : dict[str, str | None] | None, optional
         Cluster parent mapping.
-    nodeSeparation : float, default=60.0
+    nodeSeparation : float, default=12.5
         Separation used for circular clusters.
     randomize : bool, default=False
         Accepted for API consistency.
@@ -81,14 +106,19 @@ def layout_cise_pipeline(
     torch.Tensor
         Position tensor with shape ``[N, 2]``.
     """
-    del steps, seed, edge_weights, cluster_parents, randomize, gravity, gravityRange
+    del seed, edge_weights, cluster_parents, randomize
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
         node_sizes=node_sizes,
         clusters=clusters,
     )
-    state = build_cise_pipeline(node_separation=nodeSeparation).apply(
+    state = build_cise_pipeline(
+        node_separation=nodeSeparation,
+        steps=steps,
+        gravity=gravity,
+        gravity_range=gravityRange,
+    ).apply(
         problem,
         SolveState(),
         RuntimeContext(plan=ExecutionPlan(device="cpu")),
