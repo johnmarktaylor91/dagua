@@ -1,6 +1,5 @@
 """Regression tests for Sugiyama igraph-fidelity edge cases."""
 
-import hashlib
 import importlib
 from typing import Any
 
@@ -663,8 +662,8 @@ def test_corrected_dot_x_skips_cluster_skeleton_without_parent_map(
     assert calls["tie_break"] == 1
 
 
-def test_certified_cluster_skeleton_positions_are_byte_exact() -> None:
-    """Pin faithful cluster-skeleton output bytes against the pre-fix baseline."""
+def test_computed_cluster_skeleton_positions_are_deterministic() -> None:
+    """Keep cluster-skeleton output deterministic without a stored trace hash."""
     graph = _moe_router_sparse_cluster_graph()
     extra_kwargs: dict[str, object] = {}
     _apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=extra_kwargs)
@@ -689,23 +688,10 @@ def test_certified_cluster_skeleton_positions_are_byte_exact() -> None:
         fidelity_mode="graphviz",
         **extra_kwargs,
     )
-    position_bytes = positions.detach().cpu().contiguous().numpy().tobytes()
-    expected_sha256 = "".join(
-        (
-            "3d26c4af",
-            "c860e2d8",
-            "b2691ec2",
-            "6c39530a",
-            "529b0955",
-            "632b6d4c",
-            "03efbd28",
-            "74b2df61",
-        )
-    )
-
     assert extra_kwargs["graphviz_enable_cluster_skeleton"] is True
+    assert "graphviz_expected_x_inventory" not in extra_kwargs
+    assert torch.isfinite(positions).all()
     assert torch.equal(positions, repeated)
-    assert hashlib.sha256(position_bytes).hexdigest() == expected_sha256
 
 
 def test_graphviz_x_assignment_can_preserve_point_units() -> None:
@@ -816,8 +802,8 @@ def test_sugiyama_graphviz_class2_scans_backedge_at_original_tail() -> None:
     assert edge_order == [1, 0]
 
 
-def test_sugiyama_graphviz_class2_installs_virtual_leaders_before_cluster() -> None:
-    """Match dot's recursive class-2 order on the certified MoE row."""
+def test_sugiyama_graphviz_class2_cluster_order_is_computed_not_fixture_pinned() -> None:
+    """Run class-2 cluster ordering without fixture-specific virtual leader rewrites."""
     ranks = [[0], [1], [2, 9, 10], [3, 4, 5, 6], [7], [8]]
     edges = [
         (0, 1),
@@ -846,8 +832,8 @@ def test_sugiyama_graphviz_class2_installs_virtual_leaders_before_cluster() -> N
         iterations=24,
     )
 
-    assert ordered[2] == [9, 10, 2]
-    assert ordered[3] == [5, 6, 4, 3]
+    assert ordered[2] == [2, 9, 10]
+    assert ordered[3] == [3, 4, 5, 6]
 
 
 def test_sugiyama_graphviz_recursive_cluster_rank_uses_class1_slack() -> None:
@@ -1032,23 +1018,24 @@ def test_sugiyama_graphviz_typed_clusters_use_dot_nodesep(
     assert seen["node_sep"] == 18.0
 
 
-def test_sugiyama_graphviz_typed_inventory_rejects_oracle_mismatch() -> None:
-    """Refuse a typed cluster solve whose final inventory is not exact."""
-    with pytest.raises(ValueError, match="failed structural parity"):
-        _graphviz_x_coordinate_assignment(
-            layers=[[0, 1]],
-            edge_index=torch.empty((2, 0), dtype=torch.long),
-            edge_weights=None,
-            node_sizes=torch.full((2, 2), 44.0, dtype=torch.float32),
-            num_nodes=2,
-            num_original_nodes=2,
-            rank_sep=1.0,
-            node_sep=1.0,
-            output_device=torch.device("cpu"),
-            graphviz_cluster_members={"group": (0, 1)},
-            graphviz_cluster_parents={"group": None},
-            expected_typed_inventory=(0, ()),
-        )
+def test_sugiyama_graphviz_typed_inventory_solves_without_oracle() -> None:
+    """Compute typed cluster x coordinates without requiring a stored oracle."""
+    positions = _graphviz_x_coordinate_assignment(
+        layers=[[0, 1]],
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_weights=None,
+        node_sizes=torch.full((2, 2), 44.0, dtype=torch.float32),
+        num_nodes=2,
+        num_original_nodes=2,
+        rank_sep=1.0,
+        node_sep=1.0,
+        output_device=torch.device("cpu"),
+        graphviz_cluster_members={"group": (0, 1)},
+        graphviz_cluster_parents={"group": None},
+    )
+
+    assert positions.shape == (2, 2)
+    assert torch.isfinite(positions).all()
 
 
 def test_sugiyama_graphviz_typed_inventory_rejects_endpoint_digest_mismatch() -> None:
@@ -1361,15 +1348,13 @@ def _graphviz_fidelity_positions(graph: DaguaGraph) -> torch.Tensor:
     )
 
 
-def test_sugiyama_hierarchical_residual_stage_dot_input_x_bit_parity() -> None:
-    """Pin the certified DOT-input-frame x solve for the nested 5-cluster row."""
+def test_sugiyama_hierarchical_residual_stage_computed_dot_x_is_deterministic() -> None:
+    """Run the nested 5-cluster row through the computed Graphviz-dot path."""
     graph = _hierarchical_residual_stage_graph()
     graph.compute_node_sizes()
     extra_kwargs: dict[str, object] = {}
     _apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=extra_kwargs)
-    oracle = extra_kwargs["graphviz_expected_x_inventory"]
-    assert isinstance(oracle, tuple) and len(oracle) == 4
-    assert oracle[3] == 72.0
+    assert "graphviz_expected_x_inventory" not in extra_kwargs
 
     positions = layout_sugiyama_pipeline(
         edge_index=graph.edge_index,
@@ -1381,44 +1366,29 @@ def test_sugiyama_hierarchical_residual_stage_dot_input_x_bit_parity() -> None:
         fidelity_mode="graphviz",
         **extra_kwargs,
     )
-
-    expected_x = torch.tensor(
-        [
-            -0.1120331958,
-            -0.1120331958,
-            -0.4854771793,
-            -0.4854771793,
-            -0.3858921230,
-            -0.5186722279,
-            -0.5186722279,
-            -0.4522821605,
-            -0.4522821605,
-            -0.4522821605,
-        ],
-        dtype=torch.float32,
+    repeat = layout_sugiyama_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        barycenter_passes=24,
+        rank_sep=1.0,
+        node_sep=1.0,
+        fidelity_mode="graphviz",
+        **extra_kwargs,
     )
-    assert torch.allclose(positions[:, 0], expected_x, atol=1e-6, rtol=0.0)
+
+    assert torch.isfinite(positions).all()
+    assert torch.equal(positions, repeat)
 
 
-def test_sugiyama_cluster_member_style_stress_dot_input_x_parity() -> None:
-    """Pin the certified DOT-input-frame x solve for the prep/core skip row."""
+def test_sugiyama_cluster_member_style_stress_computed_dot_x_is_deterministic() -> None:
+    """Run the prep/core skip row through the computed Graphviz-dot path."""
     graph = _cluster_member_style_stress_graph()
     positions = _graphviz_fidelity_positions(graph)
+    repeat = _graphviz_fidelity_positions(graph)
 
-    expected_x = torch.tensor(
-        [
-            -0.4166666567,
-            -0.4166666567,
-            -0.4166666567,
-            -0.5000000000,
-            -0.5000000000,
-            -0.5000000000,
-            0.0000000000,
-            0.0000000000,
-        ],
-        dtype=torch.float32,
-    )
-    assert torch.allclose(positions[:, 0], expected_x, atol=1e-6, rtol=0.0)
+    assert torch.isfinite(positions).all()
+    assert torch.equal(positions, repeat)
 
 
 def test_sugiyama_disconnected_collage_dot_packing_node_sep() -> None:
@@ -1441,15 +1411,15 @@ def test_sugiyama_disconnected_collage_dot_packing_node_sep() -> None:
     assert torch.allclose(positions[:, 0], expected_x, atol=1e-6, rtol=0.0)
 
 
-def test_sugiyama_dot_input_oracle_rejects_nearby_cluster_topology() -> None:
-    """Keep the DOT-input-frame oracle fail-closed after one edge changes."""
-    from dagua.eval.competitors.classic_competitor import (
-        _graphviz_typed_cluster_inventory_oracle,
-    )
-
+def test_sugiyama_cluster_metadata_does_not_inject_dot_input_oracle() -> None:
+    """Clustered Graphviz metadata should remain computed for nearby topologies."""
     graph = _cluster_member_style_stress_graph()
-    assert _graphviz_typed_cluster_inventory_oracle(graph=graph) is not None
-
     changed = _cluster_member_style_stress_graph()
     changed.add_edge("ingest", "serve")
-    assert _graphviz_typed_cluster_inventory_oracle(graph=changed) is None
+
+    for candidate in (graph, changed):
+        candidate.compute_node_sizes()
+        extra_kwargs: dict[str, object] = {}
+        _apply_sugiyama_graphviz_metadata(graph=candidate, extra_kwargs=extra_kwargs)
+        assert extra_kwargs["graphviz_enable_cluster_skeleton"] is True
+        assert "graphviz_expected_x_inventory" not in extra_kwargs
