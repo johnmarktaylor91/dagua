@@ -13,6 +13,7 @@ _CYTOSCAPE_LCG_INCREMENT = 1013904223
 _CYTOSCAPE_LCG_MODULUS = 4294967296.0
 _DEFAULT_EDGE_LENGTH = 50.0
 _DEFAULT_GRAPH_MARGIN = 15.0
+_DEFAULT_COMPOUND_PADDING = 10.0
 _EMPTY_COMPOUND_NODE_SIZE = 40.0
 _INITIAL_WORLD_BOUNDARY = 1000.0
 _WORLD_CENTER_X = 1200.0
@@ -551,7 +552,14 @@ def _make_compound_node(name: str) -> _Node:
     _Node
         New compound node.
     """
-    return _Node(id=name, rect=_Rect(0.0, 0.0, 1.0, 1.0))
+    return _Node(
+        id=name,
+        rect=_Rect(0.0, 0.0, 1.0, 1.0),
+        padding_left=_DEFAULT_COMPOUND_PADDING,
+        padding_top=_DEFAULT_COMPOUND_PADDING,
+        padding_right=_DEFAULT_COMPOUND_PADDING,
+        padding_bottom=_DEFAULT_COMPOUND_PADDING,
+    )
 
 
 def _populate_graph(
@@ -955,9 +963,9 @@ def _calc_inclusion_depths(state: CoSECompoundState) -> None:
     for graph in state.graphs:
         graph_depth = graph_depths.get(id(graph), 1)
         for node in graph.nodes:
-            node.inclusion_tree_depth = graph_depth + 1
+            node.inclusion_tree_depth = graph_depth
             if node.child is not None:
-                graph_depths[id(node.child)] = node.inclusion_tree_depth
+                graph_depths[id(node.child)] = graph_depth + 1
 
 
 def _calc_no_of_children(node: _Node) -> int:
@@ -1223,8 +1231,12 @@ def _scatter_node(state: CoSECompoundState, node: _Node) -> None:
     """
     state.sine_seed, random_x = _next_sine_random(state.sine_seed)
     state.sine_seed, random_y = _next_sine_random(state.sine_seed)
-    node.rect.x = random_x * _INITIAL_WORLD_BOUNDARY
-    node.rect.y = random_y * _INITIAL_WORLD_BOUNDARY
+    node.rect.x = (
+        _WORLD_CENTER_X + random_x * (2.0 * _INITIAL_WORLD_BOUNDARY) - (_INITIAL_WORLD_BOUNDARY)
+    )
+    node.rect.y = (
+        _WORLD_CENTER_Y + random_y * (2.0 * _INITIAL_WORLD_BOUNDARY) - (_INITIAL_WORLD_BOUNDARY)
+    )
 
 
 def _position_nodes_randomly(state: CoSECompoundState, graph: _Graph) -> None:
@@ -2832,24 +2844,94 @@ def _calc_spring_forces(state: CoSECompoundState) -> None:
         _calc_spring_force(state, edge)
 
 
-def _calc_repulsion_forces(state: CoSECompoundState) -> None:
-    """Apply sibling-scoped repulsion forces.
+def _refresh_repulsion_surrounding(
+    state: CoSECompoundState,
+    node_a: _Node,
+    processed_nodes: set[_Node],
+) -> None:
+    """Refresh one node's Cytoscape FR-grid repulsion neighborhood.
+
+    Parameters
+    ----------
+    state : CoSECompoundState
+        Mutable state carrying grid cells and repulsion range.
+    node_a : _Node
+        Node whose surrounding list should be rebuilt.
+    processed_nodes : set[_Node]
+        Nodes whose pairwise repulsion has already been accounted for in this
+        tick.
+
+    Returns
+    -------
+    None
+        Mutates ``node_a.surrounding``.
+    """
+    surrounding: List[_Node] = []
+    surrounding_seen: set[_Node] = set()
+    if not state.grid:
+        node_a.surrounding = surrounding
+        return
+    for grid_x in range(node_a.start_x - 1, node_a.finish_x + 2):
+        for grid_y in range(node_a.start_y - 1, node_a.finish_y + 2):
+            if (
+                grid_x < 0
+                or grid_y < 0
+                or grid_x >= len(state.grid)
+                or grid_y >= len(state.grid[0])
+            ):
+                continue
+            for node_b in state.grid[grid_x][grid_y]:
+                if (
+                    node_a.owner is not node_b.owner
+                    or node_a is node_b
+                    or node_b in processed_nodes
+                    or node_b in surrounding_seen
+                ):
+                    continue
+                distance_x = abs(_center_x(node_a) - _center_x(node_b)) - (
+                    node_a.rect.width / 2.0 + node_b.rect.width / 2.0
+                )
+                distance_y = abs(_center_y(node_a) - _center_y(node_b)) - (
+                    node_a.rect.height / 2.0 + node_b.rect.height / 2.0
+                )
+                if distance_x <= state.repulsion_range and distance_y <= state.repulsion_range:
+                    surrounding.append(node_b)
+                    surrounding_seen.add(node_b)
+    node_a.surrounding = surrounding
+
+
+def _calc_repulsion_forces(
+    state: CoSECompoundState,
+    grid_update_allowed: bool,
+    force_surrounding_update: bool,
+) -> None:
+    """Apply Cytoscape's FR-grid sibling-scoped repulsion forces.
 
     Parameters
     ----------
     state : CoSECompoundState
         Mutable state.
+    grid_update_allowed : bool
+        Whether normal ten-tick grid refreshes are enabled.
+    force_surrounding_update : bool
+        Whether tree regrowth should force a surrounding-list refresh.
 
     Returns
     -------
     None
         Mutates node forces.
     """
-    for graph in state.graphs:
-        nodes = graph.nodes
-        for i, node_a in enumerate(nodes):
-            for node_b in nodes[i + 1 :]:
-                _calc_repulsion_force(state, node_a, node_b)
+    if state.total_iterations % _GRID_CALCULATION_CHECK_PERIOD == 1 and grid_update_allowed:
+        _update_grid(state)
+    processed_nodes: set[_Node] = set()
+    for node_a in _all_nodes(state):
+        if (
+            state.total_iterations % _GRID_CALCULATION_CHECK_PERIOD == 1 and grid_update_allowed
+        ) or force_surrounding_update:
+            _refresh_repulsion_surrounding(state, node_a, processed_nodes)
+        for node_b in node_a.surrounding:
+            _calc_repulsion_force(state, node_a, node_b)
+        processed_nodes.add(node_a)
 
 
 def _calc_gravitational_forces(state: CoSECompoundState) -> None:
@@ -3006,11 +3088,15 @@ def _tick(state: CoSECompoundState) -> bool:
             (100.0 - state.after_growth_iterations) / 100.0
         )
         state.after_growth_iterations += 1
+    grid_update_allowed = not state.is_tree_growing and not state.is_growth_finished
+    force_surrounding_update = (state.grow_tree_iterations % 10 == 1 and state.is_tree_growing) or (
+        state.after_growth_iterations % 10 == 1 and state.is_growth_finished
+    )
     state.total_displacement = 0.0
     _update_graph_bounds(state.root, True)
     _calc_estimated_size_graph(state.root)
     _calc_spring_forces(state)
-    _calc_repulsion_forces(state)
+    _calc_repulsion_forces(state, grid_update_allowed, force_surrounding_update)
     _calc_gravitational_forces(state)
     _move_nodes(state)
     return False
