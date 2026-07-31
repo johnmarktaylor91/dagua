@@ -530,6 +530,8 @@ def _cluster_box_escape_gate(
     """
     members = _valid_cluster_members(clusters, num_nodes)
     depths = _cluster_depth_lookup(tuple(sorted(members)), cluster_parents)
+    if num_nodes > _CLUSTER_TIGHTEN_MAX_NODES:
+        return False, "too_large_escape", members, depths
     if len(members) >= 2:
         return True, "multi_cluster_escape", members, depths
     return False, "no_declared_multi_cluster", members, depths
@@ -1010,6 +1012,8 @@ def build_cluster_tightening_candidates(
                 max(mean_diag * gutter_factor, 1.0e-6),
             )
             escaped_by_gutter[gutter_factor] = escaped
+            if torch.equal(escaped, work_pos):
+                continue
             append_candidate(
                 f"cluster_box_escape_g{gutter_factor:.2f}",
                 escaped,
@@ -1020,7 +1024,6 @@ def build_cluster_tightening_candidates(
 
     if (
         escape_enabled
-        and compact_enabled
         and int(work_pos.shape[0]) <= _CLUSTER_SEPARATE_MAX_NODES
         and len(_root_cluster_names(escape_members, cluster_parents))
         <= _CLUSTER_SEPARATE_MAX_ROOT_CLUSTERS
