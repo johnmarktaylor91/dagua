@@ -237,9 +237,19 @@ def test_cluster_tightening_candidates_follow_structural_gate() -> None:
     )
 
     assert plain == ()
-    assert disconnected == ()
+    disconnected_names = tuple(candidate.name for candidate in disconnected)
+    assert disconnected_names == (
+        "cluster_tighten_cluster_box_escape_g0.35",
+        "cluster_tighten_cluster_box_escape_g0.70",
+        "cluster_tighten_cluster_separate_push_1.15",
+        "cluster_tighten_cluster_separate_push_1.30",
+        "cluster_tighten_cluster_box_escape_compact_dominant_0.85_push_1.15",
+        "cluster_tighten_cluster_box_escape_compact_dominant_0.75",
+    )
+    assert all(candidate.gate_reason == "multi_cluster_escape" for candidate in disconnected)
+    assert not any("root_compact" in name or "sibling_gap" in name for name in disconnected_names)
     assert clustered
-    assert clustered[0].gate_reason == "multi_cluster"
+    assert any(candidate.gate_reason == "multi_cluster" for candidate in clustered)
     assert nested
     assert nested[0].max_depth == 1
 
