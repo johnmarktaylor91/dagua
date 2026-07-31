@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import torch
 
@@ -110,6 +110,9 @@ def layout_elk_pipeline(
     variant: Optional[str] = None,
     fidelity_dtype: Optional[torch.dtype] = None,
     config: Optional["LayoutConfig"] = None,
+    clusters: Optional[Mapping[str, Any]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
 ) -> torch.Tensor:
     """Run the native ELK Layered-style pipeline.
 
@@ -158,6 +161,14 @@ def layout_elk_pipeline(
         ``float64`` coordinates.
     config : LayoutConfig | None, optional
         Optional config for direction fallback.
+    clusters : mapping[str, Any] | None, optional
+        Cluster membership mapping. When populated, ELK's default
+        ``SEPARATE_CHILDREN`` recursion wrapper is used.
+    cluster_parents : mapping[str, str | None] | None, optional
+        Cluster hierarchy mapping.
+    cluster_labels : mapping[str, str] | None, optional
+        Accepted for API parity with the elkjs adapter. Labels are not passed
+        to the current native node-size pipeline.
 
     Returns
     -------
@@ -169,7 +180,7 @@ def layout_elk_pipeline(
     RuntimeError
         If the composed pipeline does not produce positions.
     """
-    del edge_weights, fidelity_dtype
+    del edge_weights, fidelity_dtype, cluster_labels
     resolved_direction = direction or str(getattr(config, "direction", "DOWN"))
     resolved_node_spacing = node_node_spacing
     if nodeNode is not None:
@@ -195,6 +206,38 @@ def layout_elk_pipeline(
             node_placement_strategy = "simple"
         else:
             raise ValueError("variant must be elk_layered_ns, elk_layered_bk, elk_lp, or None.")
+
+    if clusters:
+        from dagua.layout.ops.elk_compound import ElkRecursiveCompound, _CompoundOptions
+
+        compound_problem = LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            clusters=dict(clusters),
+            cluster_parents=None if cluster_parents is None else dict(cluster_parents),
+            seed=resolved_seed,
+        )
+        compound_state = ElkRecursiveCompound(
+            root_options=_CompoundOptions(
+                direction=resolved_direction,
+                node_node_spacing=resolved_node_spacing,
+                between_layers_spacing=resolved_between_layers,
+                cycle_breaking_strategy=cycle_breaking_strategy,
+                layering_strategy=layering_strategy,
+                crossing_minimization_strategy=crossing_minimization_strategy,
+                node_placement_strategy=node_placement_strategy,
+                random_seed=resolved_seed,
+                thoroughness=thoroughness,
+            ),
+        ).apply(
+            compound_problem,
+            SolveState(),
+            RuntimeContext(plan=ExecutionPlan(device="cpu")),
+        )
+        if compound_state.pos is None:
+            raise RuntimeError("ELK compound pipeline did not produce final positions.")
+        return compound_state.pos
 
     problem = LayoutProblem(
         edge_index=edge_index,
