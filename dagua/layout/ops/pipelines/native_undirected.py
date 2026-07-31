@@ -113,6 +113,17 @@ MID_SIZE_PRISM_MAX_DEGREE_THRESHOLD = 20
 MID_SIZE_PRISM_DEGREE_UNIFORMITY_MAX = 1.0
 WEIGHTED_STRESS_MAJOR_SMALL_NODE_CAP = 64
 WEIGHTED_STRESS_MAJOR_TARGET_DIAG_MULTIPLIER = 4.0
+SMALL_WORLD_RT_MIN_NODES = 80
+SMALL_WORLD_RT_MAX_NODES = 200
+SMALL_WORLD_RT_EDGE_NODE_RATIO_MIN = 1.5
+SMALL_WORLD_RT_EDGE_NODE_RATIO_MAX = 3.0
+SMALL_WORLD_RT_DEGREE_UNIFORMITY_MAX = 0.20
+SMALL_WORLD_RT_MAX_DEGREE = 8
+SMALL_WORLD_RT_MIN_DIAMETER = 10
+WEIGHTED_CLUSTER_SMACOF_MAX_NODES = 64
+WEIGHTED_CLUSTER_SMACOF_MIN_COMMUNITY_SCORE = 0.40
+WEIGHTED_CLUSTER_SMACOF_MIN_COMMUNITIES = 2
+WEIGHTED_CLUSTER_SMACOF_MAX_COMMUNITIES = 8
 
 # Candidate C (neato) participates when the public quality knob resolves to
 # at least this value ("high" alias = 0.75)...
@@ -2285,6 +2296,164 @@ def _weighted_stress_majorization_candidate(
     return _scale_to_median_edge_length(raw, problem.edge_index, target)
 
 
+def _small_world_reingold_tilford_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the narrow small-world tree arm may enter the contest.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem with classified structure.
+
+    Returns
+    -------
+    bool
+        ``True`` for small unweighted, declared-undirected, near-regular
+        cyclic graphs in the measured small-world size band.
+    """
+    n = int(problem.num_nodes)
+    structure = problem.structure
+    if (
+        structure is None
+        or problem.edge_weights is not None
+        or n < SMALL_WORLD_RT_MIN_NODES
+        or n > SMALL_WORLD_RT_MAX_NODES
+        or problem.edge_index.numel() == 0
+    ):
+        return False
+    if bool(getattr(structure, "is_semantically_directed", True)):
+        return False
+    edge_ratio = float(getattr(structure, "edge_to_node_ratio", 0.0))
+    return (
+        not bool(getattr(structure, "is_acyclic", True))
+        and SMALL_WORLD_RT_EDGE_NODE_RATIO_MIN <= edge_ratio <= SMALL_WORLD_RT_EDGE_NODE_RATIO_MAX
+        and int(getattr(structure, "max_degree", 0)) <= SMALL_WORLD_RT_MAX_DEGREE
+        and float(getattr(structure, "degree_uniformity", 1.0))
+        <= SMALL_WORLD_RT_DEGREE_UNIFORMITY_MAX
+        and int(getattr(structure, "diameter_estimate", 0)) >= SMALL_WORLD_RT_MIN_DIAMETER
+    )
+
+
+def _small_world_reingold_tilford_candidate(
+    problem: LayoutProblem,
+    seed: int,
+    node_sep: float,
+) -> Optional[torch.Tensor]:
+    """Build the narrow Reingold-Tilford small-world challenger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    seed : int
+        Deterministic seed accepted for pipeline API parity.
+    node_sep : float
+        Node separation in points for target scale calibration.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Rescaled Reingold-Tilford positions with shape ``[N, 2]``, or
+        ``None`` outside the structural small-world gate.
+    """
+    if not _small_world_reingold_tilford_enabled(problem):
+        return None
+    from dagua.layout.ops.pipelines.reingold_tilford import layout_reingold_tilford_pipeline
+
+    raw = layout_reingold_tilford_pipeline(
+        edge_index=problem.edge_index.detach().to(device="cpu"),
+        num_nodes=int(problem.num_nodes),
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        seed=seed,
+    )
+    target = WEIGHTED_STRESS_MAJOR_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    return _scale_to_median_edge_length(raw, problem.edge_index, target)
+
+
+def _weighted_cluster_smacof_nonmetric_enabled(problem: LayoutProblem) -> bool:
+    """Return whether weighted clustered graphs may run nonmetric SMACOF.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem with classified structure.
+
+    Returns
+    -------
+    bool
+        ``True`` for small declared-weighted undirected graphs with structural
+        community evidence.
+    """
+    n = int(problem.num_nodes)
+    structure = problem.structure
+    if (
+        structure is None
+        or problem.edge_weights is None
+        or n <= 1
+        or n > WEIGHTED_CLUSTER_SMACOF_MAX_NODES
+        or problem.edge_index.numel() == 0
+    ):
+        return False
+    if bool(getattr(structure, "is_semantically_directed", True)):
+        return False
+    communities = int(getattr(structure, "num_communities", 0))
+    return (
+        WEIGHTED_CLUSTER_SMACOF_MIN_COMMUNITIES
+        <= communities
+        <= WEIGHTED_CLUSTER_SMACOF_MAX_COMMUNITIES
+        and float(getattr(structure, "community_score", 0.0))
+        >= WEIGHTED_CLUSTER_SMACOF_MIN_COMMUNITY_SCORE
+    )
+
+
+def _weighted_cluster_smacof_nonmetric_candidate(
+    problem: LayoutProblem,
+    seed: int,
+    node_sep: float,
+) -> Optional[torch.Tensor]:
+    """Build the nonmetric SMACOF challenger for small weighted clusters.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    seed : int
+        Deterministic SMACOF seed.
+    node_sep : float
+        Node separation in points for target scale calibration.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Rescaled nonmetric SMACOF positions with shape ``[N, 2]``, or
+        ``None`` outside the weighted-cluster structural gate.
+    """
+    if not _weighted_cluster_smacof_nonmetric_enabled(problem):
+        return None
+    from dagua.layout.ops.pipelines.smacof_nonmetric import layout_smacof_nonmetric_pipeline
+
+    raw = layout_smacof_nonmetric_pipeline(
+        edge_index=problem.edge_index.detach().to(device="cpu"),
+        num_nodes=int(problem.num_nodes),
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        seed=seed,
+        edge_weights=problem.edge_weights.detach().to(device="cpu", dtype=torch.float32),
+    )
+    target = WEIGHTED_STRESS_MAJOR_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    return _scale_to_median_edge_length(raw, problem.edge_index, target)
+
+
 def _cluster_aware_sfdp_candidate(
     problem: LayoutProblem,
     config: LayoutConfig,
@@ -3193,6 +3362,41 @@ def layout_native_undirected_portfolio(
             _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
     if stress_points_pos is not None:
         _add_challenger("stress_points", stress_points_pos)
+
+    # Coverage-gap arms: structurally gated in-house specialists, registered
+    # through the common challenger path so they can only win by the frozen
+    # referee and exact-score tie semantics remain incumbent-first.
+    if _portfolio_has_budget(config):
+        try:
+            small_world_rt_pos = _small_world_reingold_tilford_candidate(
+                problem,
+                seed,
+                challenger_node_sep,
+            )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("small-world Reingold-Tilford challenger failed", exc_info=True)
+            small_world_rt_pos = None
+        if small_world_rt_pos is not None:
+            _add_challenger("small_world_reingold_tilford", small_world_rt_pos, include_raw=True)
+
+    if _portfolio_has_budget(config):
+        try:
+            weighted_cluster_smacof_pos = _weighted_cluster_smacof_nonmetric_candidate(
+                problem,
+                seed,
+                challenger_node_sep,
+            )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("weighted-cluster nonmetric SMACOF challenger failed", exc_info=True)
+            weighted_cluster_smacof_pos = None
+        if weighted_cluster_smacof_pos is not None:
+            _add_challenger(
+                "weighted_cluster_smacof_nonmetric",
+                weighted_cluster_smacof_pos,
+                include_raw=True,
+            )
 
     # W4 narrow geometry seeds: structurally gated and referee-protected.
     # They only add seed layouts to the existing challenger marketplace; the
