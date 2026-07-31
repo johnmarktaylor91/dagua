@@ -98,6 +98,7 @@ DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
 DIRECTED_PURE_STRESS_MIN_NODES = 6
 DIRECTED_PURE_STRESS_MAX_NODES = 128
 DIRECTED_PURE_STRESS_SMACOF_MAX_NODES = 128
+DIRECTED_DAVIDSON_HAREL_SMALL_NODE_CAP = 16
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
 DIRECTED_NESTED_STRESS_PARETO_KEYS = (
     "ksm_score",
@@ -3926,6 +3927,68 @@ def _directed_pure_stress_candidates(
     return candidates
 
 
+def _directed_davidson_harel_small_candidates(
+    problem: LayoutProblem,
+    config: LayoutConfig,
+    seed: int,
+) -> dict[str, torch.Tensor]:
+    """Build the small-N Davidson-Harel uncrossing challenger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    config : LayoutConfig
+        Prepared native configuration.
+    seed : int
+        Deterministic Davidson-Harel seed.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate family names mapped to calibrated positions.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n <= 1 or n > DIRECTED_DAVIDSON_HAREL_SMALL_NODE_CAP or edge_count == 0:
+        return {}
+
+    from dagua.layout.ops.pipelines.davidson_harel import layout_davidson_harel_pipeline
+    from dagua.layout.ops.pipelines.native_undirected import _reraise_worker_timeout
+
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    cpu_sizes = (
+        None
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    cpu_weights = (
+        None
+        if problem.edge_weights is None
+        else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    candidates: dict[str, torch.Tensor] = {}
+    try:
+        raw = layout_davidson_harel_pipeline(
+            edge_index=cpu_edges,
+            num_nodes=n,
+            node_sizes=cpu_sizes,
+            seed=seed,
+            edge_weights=cpu_weights,
+            fidelity_dtype=torch.float32,
+        )
+        calibrated = _scale_to_median_edge_length(raw, problem.edge_index, target)
+        candidates["davidson_harel_small"] = _d4_oriented_by_declared_flow(calibrated, problem)
+    except Exception as exc:  # noqa: BLE001 -- DH challengers cannot sink incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed Davidson-Harel small-N challenger failed", exc_info=True)
+    return candidates
+
+
 def _segments_cross(
     first_start: torch.Tensor,
     first_end: torch.Tensor,
@@ -4798,6 +4861,7 @@ def layout_native_directed_portfolio(
         )
         return incumbent
     incumbent_pair: Optional["W5ScorePair"] = None
+    directed_dh_w5_seeds: list[tuple[str, torch.Tensor]] = []
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         try:
             pivot_cost = _directed_flat_arm_cost(problem, config, "directed_pivot_mds")
@@ -4939,6 +5003,36 @@ def layout_native_directed_portfolio(
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed pure-stress challenger package failed", exc_info=True)
+    if _portfolio_has_budget(config, min_remaining_s=2.0):
+        try:
+            dh_cost = _directed_flat_arm_cost(problem, config, "directed_davidson_harel_small")
+            dh_cost_s = dh_cost.generation_dwu + dh_cost.reserved_score_dwu
+            if not _predicted_arm_budget_available(config, dh_cost_s) or not admit_native_work(
+                config,
+                dh_cost,
+                "optional_directed_davidson_harel_small",
+            ):
+                _LOGGER.info("Skipped directed Davidson-Harel small-N: insufficient budget")
+            else:
+                candidate_started = time.perf_counter()
+                for name, candidate in _directed_davidson_harel_small_candidates(
+                    problem,
+                    config,
+                    seed,
+                ).items():
+                    _register_challenger_variants(
+                        name,
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+                    directed_dh_w5_seeds.append((name, candidate))
+        except Exception as exc:  # noqa: BLE001 -- DH challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed Davidson-Harel challenger package failed", exc_info=True)
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
         ordering_rank_to_nodes = _rank_to_nodes_from_incumbent_y(
@@ -5632,6 +5726,8 @@ def layout_native_directed_portfolio(
     _append_terminal_w5_seed(config, "directed_candidate_a", incumbent)
     if ordering_w5_seed is not None:
         _append_terminal_w5_seed(config, "directed_ordering", ordering_w5_seed)
+    for seed_name, seed_pos in directed_dh_w5_seeds:
+        _append_terminal_w5_seed(config, f"directed_{seed_name}", seed_pos)
     for seed_rank, seed_name in enumerate(
         sorted(scores, key=lambda name: (-scores[name], name))[:3],
         start=1,

@@ -111,6 +111,8 @@ LARGE_CONTEST_NODE_THRESHOLD = 250
 MID_SIZE_PRISM_NODE_THRESHOLD = 120
 MID_SIZE_PRISM_MAX_DEGREE_THRESHOLD = 20
 MID_SIZE_PRISM_DEGREE_UNIFORMITY_MAX = 1.0
+WEIGHTED_STRESS_MAJOR_SMALL_NODE_CAP = 64
+WEIGHTED_STRESS_MAJOR_TARGET_DIAG_MULTIPLIER = 4.0
 
 # Candidate C (neato) participates when the public quality knob resolves to
 # at least this value ("high" alias = 0.75)...
@@ -2172,6 +2174,117 @@ def _rgg_geometric_seed_candidate(
 WEIGHTED_SIMILARITY_TRANSFORM = "inverse"
 
 
+def _median_node_box_diagonal(node_sizes: Optional[torch.Tensor], fallback: float) -> float:
+    """Return a finite median node-box diagonal.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor, optional
+        Node boxes with shape ``[N, 2]``.
+    fallback : float
+        Fallback width and height when explicit node sizes are unavailable.
+
+    Returns
+    -------
+    float
+        Positive median diagonal in drawing units.
+    """
+    if node_sizes is None or node_sizes.numel() == 0:
+        return math.sqrt(2.0) * max(float(fallback), 1.0)
+    sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    diagonals = torch.linalg.vector_norm(sizes, dim=1)
+    finite = diagonals[torch.isfinite(diagonals) & (diagonals > 0.0)]
+    if finite.numel() == 0:
+        return math.sqrt(2.0) * max(float(fallback), 1.0)
+    return float(finite.median().item())
+
+
+def _scale_to_median_edge_length(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    target_length: float,
+) -> torch.Tensor:
+    """Scale positions so the median drawn edge length reaches the target.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    target_length : float
+        Desired median edge length in drawing units.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered and uniformly scaled positions with shape ``[N, 2]``.
+    """
+    out = positions.detach().to(device="cpu", dtype=torch.float32).clone()
+    if out.numel() == 0 or edge_index.numel() == 0:
+        return out
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    lengths = torch.linalg.vector_norm(out[edges[0]] - out[edges[1]], dim=1)
+    finite = lengths[torch.isfinite(lengths) & (lengths > 1.0e-6)]
+    if finite.numel() == 0:
+        return out - out.mean(dim=0, keepdim=True)
+    current = float(finite.median().item())
+    if not math.isfinite(current) or current <= 1.0e-6:
+        return out - out.mean(dim=0, keepdim=True)
+    centered = out - out.mean(dim=0, keepdim=True)
+    return centered * (max(float(target_length), 1.0e-6) / current)
+
+
+def _weighted_stress_majorization_candidate(
+    problem: LayoutProblem,
+    seed: int,
+    node_sep: float,
+) -> Optional[torch.Tensor]:
+    """Build the small weighted stress-majorization challenger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    seed : int
+        Deterministic stress-majorization seed.
+    node_sep : float
+        Node separation in points for target scale calibration.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Rescaled stress-majorization candidate with shape ``[N, 2]``, or
+        ``None`` outside the weighted small-graph structural gate.
+    """
+    n = int(problem.num_nodes)
+    if problem.edge_weights is None or n <= 1 or n > WEIGHTED_STRESS_MAJOR_SMALL_NODE_CAP:
+        return None
+    if problem.edge_index.numel() == 0:
+        return None
+    from dagua.layout.ops.pipelines.stress_majorization import (
+        layout_stress_majorization_pipeline,
+    )
+
+    raw = layout_stress_majorization_pipeline(
+        edge_index=problem.edge_index.detach().to(device="cpu"),
+        num_nodes=n,
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        seed=seed,
+        edge_weights=problem.edge_weights.detach().to(device="cpu", dtype=torch.float32),
+    )
+    if isinstance(raw, tuple):
+        raw = raw[0]
+    target = WEIGHTED_STRESS_MAJOR_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    return _scale_to_median_edge_length(raw, problem.edge_index, target)
+
+
 def _cluster_aware_sfdp_candidate(
     problem: LayoutProblem,
     config: LayoutConfig,
@@ -3037,6 +3150,19 @@ def layout_native_undirected_portfolio(
         and n <= LARGE_CONTEST_NODE_THRESHOLD
         and _portfolio_has_budget(config)
     ):
+        try:
+            weighted_sm_pos = _weighted_stress_majorization_candidate(
+                problem,
+                seed,
+                challenger_node_sep,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("weighted stress-majorization challenger failed", exc_info=True)
+            weighted_sm_pos = None
+        if weighted_sm_pos is not None:
+            _add_challenger("weighted_stress_majorization", weighted_sm_pos, include_raw=True)
+
         try:
             weighted_pos = _weighted_similarity_candidate(problem, seed)
         except Exception as exc:  # noqa: BLE001
