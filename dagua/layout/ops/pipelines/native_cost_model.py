@@ -110,6 +110,8 @@ FROZEN_COST_TABLE: CostTable = {
     ("directed_recombinant", "cuda"): {"full_arm": (0.0, 2.5)},
     ("directed_pure_stress", "cpu"): {"full_arm": (0.0, 12.0)},
     ("directed_pure_stress", "cuda"): {"full_arm": (0.0, 10.0)},
+    ("directed_davidson_harel_small", "cpu"): {"full_arm": (0.0, 4.0)},
+    ("directed_davidson_harel_small", "cuda"): {"full_arm": (0.0, 4.0)},
     ("directed_stress_blend", "cpu"): {"full_arm": (0.0, 12.0)},
     ("directed_stress_blend", "cuda"): {"full_arm": (0.0, 10.0)},
     ("directed_sugiyama", "cpu"): {"full_arm": (0.0, 2.2)},

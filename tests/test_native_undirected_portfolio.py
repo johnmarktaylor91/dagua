@@ -67,6 +67,7 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _small_world_knn_seed_candidate,
     _small_world_knn_seed_enabled,
     _use_large_prism_shortlist,
+    _weighted_stress_majorization_candidate,
 )
 from dagua.layout.ops.state import LayoutProblem
 
@@ -1508,6 +1509,43 @@ def test_weighted_undirected_contest_reaches_weighted_similarity_candidate() -> 
     assert bool(torch.isfinite(pos).all())
     assert calls, "weighted-undirected contest never invoked candidate E"
     assert all(calls)
+
+
+def test_weighted_stress_majorization_candidate_rescales_to_node_box_target() -> None:
+    """The small weighted SM candidate is packaged at the native edge scale."""
+    graph = _clustered_ring_graph(weighted=True)
+    node_sep = 12.0
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        edge_weights=graph.edge_weights,
+        seed=42,
+    )
+
+    candidate = _weighted_stress_majorization_candidate(problem, seed=42, node_sep=node_sep)
+
+    assert candidate is not None
+    lengths = torch.linalg.vector_norm(
+        candidate[graph.edge_index[0]] - candidate[graph.edge_index[1]],
+        dim=1,
+    )
+    median_length = float(lengths.median().item())
+    target_length = 4.0 * float(torch.linalg.vector_norm(graph.node_sizes, dim=1).median().item())
+    assert median_length == pytest.approx(target_length, rel=1.0e-5, abs=1.0e-5)
+
+
+def test_weighted_stress_majorization_candidate_requires_weights() -> None:
+    """The weighted SM arm is closed outside weighted-undirected rows."""
+    graph = _clustered_ring_graph(weighted=False)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+    )
+
+    assert _weighted_stress_majorization_candidate(problem, seed=42, node_sep=12.0) is None
 
 
 def test_stress_points_candidate_uses_point_targets() -> None:

@@ -37,6 +37,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     _clean_fan_bundle_for_compaction,
     _crossing_edge_pairs,
     _directed_cluster_candidate_is_dual_admissible,
+    _directed_davidson_harel_small_candidates,
     _directed_dot_order_candidates,
     _directed_dot_order_enabled,
     _directed_mrtree_enabled,
@@ -1279,6 +1280,11 @@ def test_directed_portfolio_dot_order_is_not_registered_for_clusters(
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(
@@ -1449,6 +1455,49 @@ def test_directed_pure_stress_cost_entries_match_blend() -> None:
 
     assert FROZEN_COST_TABLE[("directed_pure_stress", "cpu")] == {"full_arm": (0.0, 12.0)}
     assert FROZEN_COST_TABLE[("directed_pure_stress", "cuda")] == {"full_arm": (0.0, 10.0)}
+    assert FROZEN_COST_TABLE[("directed_davidson_harel_small", "cpu")] == {"full_arm": (0.0, 4.0)}
+    assert FROZEN_COST_TABLE[("directed_davidson_harel_small", "cuda")] == {"full_arm": (0.0, 4.0)}
+
+
+def test_directed_davidson_harel_small_candidate_is_scaled_and_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DH uncrossing arm is structural small-N only and median-edge scaled."""
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    davidson_harel = importlib.import_module("dagua.layout.ops.pipelines.davidson_harel")
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+    raw = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]],
+        dtype=torch.float32,
+    )
+
+    def fake_dh(**kwargs: object) -> torch.Tensor:
+        """Return a deterministic raw DH candidate for scale validation."""
+        assert kwargs["seed"] == 42
+        return raw
+
+    monkeypatch.setattr(davidson_harel, "layout_davidson_harel_pipeline", fake_dh)
+    monkeypatch.setattr(
+        native_directed,
+        "_d4_oriented_by_declared_flow",
+        lambda candidate, problem: candidate,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=5,
+        node_sizes=torch.full((5, 2), 10.0),
+        seed=42,
+    )
+
+    candidates = _directed_davidson_harel_small_candidates(problem, LayoutConfig(), seed=42)
+
+    candidate = candidates["davidson_harel_small"]
+    lengths = torch.linalg.vector_norm(candidate[edge_index[0]] - candidate[edge_index[1]], dim=1)
+    target_length = 4.0 * float(torch.linalg.vector_norm(problem.node_sizes, dim=1).median().item())
+    assert float(lengths.median().item()) == pytest.approx(target_length, rel=1.0e-6)
+
+    too_large = LayoutProblem(edge_index=edge_index, num_nodes=17, node_sizes=torch.ones((17, 2)))
+    assert _directed_davidson_harel_small_candidates(too_large, LayoutConfig(), seed=42) == {}
 
 
 def test_directed_pure_stress_registers_and_ties_leave_incumbent(
@@ -1904,6 +1953,11 @@ def test_directed_ordering_reachable_for_medium_small_band_once(monkeypatch: obj
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(
@@ -2005,6 +2059,11 @@ def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -2161,6 +2220,11 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -2264,6 +2328,11 @@ def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -2346,6 +2415,11 @@ def test_directed_portfolio_full_path_noop_keeps_incumbent(monkeypatch: object) 
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -2771,6 +2845,11 @@ def test_directed_predicted_cost_skips_second_dotx_arm(monkeypatch: object) -> N
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(
         native_directed,
@@ -2842,6 +2921,11 @@ def test_directed_sugiyama_ledger_admission_skips_before_run(monkeypatch: object
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     edge_index = torch.stack(
