@@ -245,6 +245,7 @@ _EXPECTED_OP_MODULES = (
     "coarsen",
     "context",
     "converge",
+    "cose_base_compound",
     "coordinate",
     "crossing_swap",
     "cytoscape",

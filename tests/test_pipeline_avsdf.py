@@ -74,6 +74,7 @@ def test_cytoscape_family_production_pipelines_have_no_runtime_delegation() -> N
     root = Path(__file__).parents[1]
     for path in [
         root / "dagua" / "layout" / "ops" / "cytoscape.py",
+        root / "dagua" / "layout" / "ops" / "cose_base_compound.py",
         root / "dagua" / "layout" / "ops" / "pipelines" / "avsdf.py",
         root / "dagua" / "layout" / "ops" / "pipelines" / "cose.py",
         root / "dagua" / "layout" / "ops" / "pipelines" / "cose_bilkent.py",
