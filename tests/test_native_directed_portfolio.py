@@ -20,6 +20,7 @@ from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.ordering import _expanded_layered_graph
 from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
 from dagua.layout.ops.pipelines.native_directed import (
+    DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS,
     DIRECTED_FULL_REFEREE_TOP_K,
     DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX,
     DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH,
@@ -31,12 +32,15 @@ from dagua.layout.ops.pipelines.native_directed import (
     SUGIYAMA_RANK_SEP_GRID,
     _assign_recombinant_x_coordinates,
     _bounded_connected_nested_dag_for_stress,
+    _build_dagre_compound_candidate,
     _build_dot_order_candidate,
     _build_fan_compaction_candidate,
     _build_nested_stress_candidate,
     _clean_fan_bundle_for_compaction,
     _crossing_edge_pairs,
+    _DagreCompoundCandidate,
     _directed_cluster_candidate_is_dual_admissible,
+    _directed_dagre_compound_enabled,
     _directed_davidson_harel_small_candidates,
     _directed_dot_order_candidates,
     _directed_dot_order_enabled,
@@ -63,6 +67,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     _rank_to_nodes_from_incumbent_y,
     _recombinant_rank_values,
     _register_challenger_variants,
+    _register_dagre_compound_candidates,
     _restore_projected_rank_order,
     _runtime_referee_telemetry,
     _score_directed_candidate,
@@ -203,6 +208,101 @@ def test_nested_stress_prefilter_builds_only_runtime_nested_connected_dag() -> N
     assert not _bounded_connected_nested_dag_for_stress(plain)
     assert not _bounded_connected_nested_dag_for_stress(cyclic)
     assert not _bounded_connected_nested_dag_for_stress(disconnected)
+
+
+def test_dagre_compound_arm_gate_and_builder_are_deterministic() -> None:
+    """Compound dagre builds only for clustered DAGs and stays deterministic."""
+    problem = _nested_dag_problem()
+    incumbent = torch.stack(
+        [
+            torch.linspace(0.0, 120.0, problem.num_nodes),
+            torch.linspace(0.0, 240.0, problem.num_nodes),
+        ],
+        dim=1,
+    )
+    config = LayoutConfig(seed=42, device="cpu")
+    y_compaction = DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS[0]
+
+    first = _build_dagre_compound_candidate(problem, incumbent, config, y_compaction)
+    second = _build_dagre_compound_candidate(problem, incumbent, config, y_compaction)
+    plain = LayoutProblem(
+        edge_index=problem.edge_index,
+        num_nodes=problem.num_nodes,
+        node_sizes=problem.node_sizes,
+        direction=problem.direction,
+    )
+
+    assert _directed_dagre_compound_enabled(problem)
+    assert not _directed_dagre_compound_enabled(plain)
+    assert first is not None
+    assert second is not None
+    assert first.y_compaction == y_compaction
+    assert first.pos.shape == incumbent.shape
+    assert torch.isfinite(first.pos).all()
+    torch.testing.assert_close(first.pos, second.pos, rtol=0.0, atol=0.0)
+
+
+def test_dagre_compound_arm_registers_only_dual_admissible_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compound-dagre arm enters the winner set only through V3 admission."""
+    problem = _nested_dag_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+    challenger = torch.ones((problem.num_nodes, 2), dtype=torch.float32)
+    incumbent_telemetry = _DirectedClusterScoreTelemetry(
+        extended_score=10.0,
+        old_score=9.0,
+        metrics={},
+        v3_tiered=100.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    challenger_telemetry = _DirectedClusterScoreTelemetry(
+        extended_score=12.0,
+        old_score=9.5,
+        metrics={},
+        v3_tiered=100.2,
+        champion_ineligibility_flags=frozenset(),
+    )
+    candidate = _DagreCompoundCandidate(
+        pos=challenger,
+        y_compaction=DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS[0],
+        target_edge_length=24.0,
+    )
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_dagre_compound_candidates",
+        lambda *args: {"dagre_compound_y0.6": candidate},
+    )
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        lambda *args: (12.0, challenger_telemetry),
+    )
+
+    config = LayoutConfig(seed=42, device="cpu")
+    positions = {"incumbent": incumbent}
+    scores = {"incumbent": incumbent_telemetry.extended_score}
+    cluster_score_telemetry = {"incumbent": incumbent_telemetry}
+    _register_dagre_compound_candidates(
+        problem=problem,
+        incumbent=incumbent,
+        config=config,
+        positions=positions,
+        scores=scores,
+        cluster_score_telemetry=cluster_score_telemetry,
+        cluster_ids=None,
+        all_pairs_dist=None,
+        arm_timings={},
+    )
+    telemetry = getattr(config, "_dagua_native_dagre_compound_telemetry")
+
+    assert getattr(config, "_dagua_native_dagre_compound_mechanism_fired") is True
+    assert getattr(config, "_dagua_native_dagre_compound_dual_admissible") is True
+    assert positions["dagre_compound_y0.6"] is challenger
+    assert scores["dagre_compound_y0.6"] == challenger_telemetry.extended_score
+    assert telemetry[-1]["mechanism_fired"] is True
+    assert telemetry[-1]["dual_admissible"] is True
 
 
 def test_nested_stress_prefilter_enforces_cosigned_runtime_caps() -> None:
