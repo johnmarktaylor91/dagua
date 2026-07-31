@@ -66,7 +66,11 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _select_undirected_winner,
     _small_world_knn_seed_candidate,
     _small_world_knn_seed_enabled,
+    _small_world_reingold_tilford_candidate,
+    _small_world_reingold_tilford_enabled,
     _use_large_prism_shortlist,
+    _weighted_cluster_smacof_nonmetric_candidate,
+    _weighted_cluster_smacof_nonmetric_enabled,
     _weighted_stress_majorization_candidate,
 )
 from dagua.layout.ops.state import LayoutProblem
@@ -1546,6 +1550,78 @@ def test_weighted_stress_majorization_candidate_requires_weights() -> None:
     )
 
     assert _weighted_stress_majorization_candidate(problem, seed=42, node_sep=12.0) is None
+
+
+def test_small_world_reingold_tilford_candidate_is_structurally_gated() -> None:
+    """The small-world RT arm opens only for the measured structural class."""
+    num_nodes = 100
+    sources = torch.arange(num_nodes, dtype=torch.long).repeat_interleave(2)
+    targets = torch.cat(
+        (
+            (torch.arange(num_nodes, dtype=torch.long) + 1).remainder(num_nodes),
+            (torch.arange(num_nodes, dtype=torch.long) + 2).remainder(num_nodes),
+        )
+    )
+    edge_index = torch.stack((sources, targets), dim=0)
+    node_sizes = torch.full((num_nodes, 2), 8.0, dtype=torch.float32)
+    structure = SimpleNamespace(
+        is_semantically_directed=False,
+        is_acyclic=False,
+        edge_to_node_ratio=2.0,
+        max_degree=4,
+        degree_uniformity=0.0,
+        diameter_estimate=25,
+    )
+    eligible = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        structure=structure,
+    )
+    weighted = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        edge_weights=torch.ones(edge_index.shape[1], dtype=torch.float32),
+        structure=structure,
+    )
+
+    assert _small_world_reingold_tilford_enabled(eligible)
+    assert _small_world_reingold_tilford_candidate(eligible, seed=42, node_sep=8.0) is not None
+    assert not _small_world_reingold_tilford_enabled(weighted)
+
+
+def test_weighted_cluster_smacof_nonmetric_candidate_is_structurally_gated() -> None:
+    """The weighted-cluster SMACOF arm requires weights and community evidence."""
+    graph = _clustered_ring_graph(weighted=True)
+    structure = SimpleNamespace(
+        is_semantically_directed=False,
+        num_communities=3,
+        community_score=0.55,
+    )
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        edge_weights=graph.edge_weights,
+        seed=42,
+        structure=structure,
+    )
+    unweighted = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+        structure=structure,
+    )
+
+    candidate = _weighted_cluster_smacof_nonmetric_candidate(problem, seed=42, node_sep=12.0)
+
+    assert _weighted_cluster_smacof_nonmetric_enabled(problem)
+    assert candidate is not None
+    assert candidate.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(candidate).all())
+    assert not _weighted_cluster_smacof_nonmetric_enabled(unweighted)
 
 
 def test_stress_points_candidate_uses_point_targets() -> None:
