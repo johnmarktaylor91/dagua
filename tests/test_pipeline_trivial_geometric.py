@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,9 @@ import torch
 
 import dagua
 from dagua.config import LayoutConfig
+from dagua.eval.competitors.graphviz_competitor import GraphvizOsage
+from dagua.eval.equivalence_metrics import procrustes_rmsd
+from dagua.layout.ops.networkx_simple import graphviz_array_rects
 from dagua.layout.ops.pipelines import PIPELINE_REGISTRY, get_pipeline_function
 from dagua.layout.ops.pipelines.arc import build_arc_pipeline, layout_arc_pipeline
 from dagua.layout.ops.pipelines.circlepack import (
@@ -141,6 +145,68 @@ def test_arc_places_bfs_order_on_x_axis() -> None:
 
     np.testing.assert_allclose(actual[:, 1], np.zeros(4), rtol=0.0, atol=0.0)
     np.testing.assert_allclose(actual[:, 0], np.linspace(-1.0, 1.0, 4), rtol=0.0, atol=0.0)
+
+
+def test_graphviz_array_rects_uses_sum_sort_and_integer_offsets() -> None:
+    """Match Graphviz 7.0.5 array packing sort and truncation details.
+
+    Returns
+    -------
+    None
+        The wider-but-shorter rectangle must not sort ahead of the larger
+        width-plus-height rectangle, and centers must reflect integer
+        lower-left offsets.
+    """
+    rects = [
+        (0.0, 0.0, 90.0, 4.0),
+        (0.0, 0.0, 50.5, 50.5),
+        (0.0, 0.0, 10.0, 10.0),
+    ]
+    centers = graphviz_array_rects(rects=rects, margin=4.0)
+
+    np.testing.assert_allclose(centers[1], np.array([27.25, 41.25]), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(centers[0], np.array([101.0, 41.0]), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(centers[2], np.array([27.0, 7.0]), rtol=0.0, atol=0.0)
+
+
+def test_osage_nested_clusters_match_graphviz_reference() -> None:
+    """Match ``dot -K osage`` on a nested, label-free compound fixture.
+
+    Returns
+    -------
+    None
+        The source port must pack child clusters as units and then reposition
+        nodes top-down like Graphviz osage.
+    """
+    if shutil.which("dot") is None:
+        pytest.skip("Graphviz dot is not available")
+
+    graph = dagua.DaguaGraph()
+    for node in range(6):
+        graph.add_node(node, label=f"n{node}")
+    graph.add_cluster("outer", [2, 3], label="")
+    graph.add_cluster("inner", [0, 1], parent="outer", label="")
+    graph.add_cluster("side", [4, 5], label="")
+    graph.compute_node_sizes()
+
+    reference = GraphvizOsage().layout_with_variant(
+        graph,
+        timeout=30.0,
+        seed=None,
+        variant_params={"packmode": "array"},
+    )
+    assert reference.pos is not None, reference.error
+    actual = layout_osage_pipeline(
+        graph.edge_index,
+        graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        cluster_labels=graph.cluster_labels,
+    )
+
+    np.testing.assert_allclose(actual.numpy(), reference.pos.numpy(), rtol=0.0, atol=0.0)
+    assert procrustes_rmsd(actual.numpy(), reference.pos.numpy()) < 1.0e-12
 
 
 @pytest.mark.parametrize(

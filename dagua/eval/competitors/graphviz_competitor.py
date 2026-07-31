@@ -667,13 +667,14 @@ def _layout_with_graphviz_engine(
     node_sizes = None
     if graph.node_sizes is not None and size_aware_externals():
         node_sizes = graph.node_sizes
+    dot_source = _graph_to_dot(graph) if engine == "osage" else to_dot(graph, node_sizes=node_sizes)
     with tempfile.NamedTemporaryFile(
         mode="w",
         suffix=".dot",
         delete=False,
         encoding="utf-8",
     ) as handle:
-        handle.write(to_dot(graph, node_sizes=node_sizes))
+        handle.write(dot_source)
         dot_path = Path(handle.name)
 
     try:

@@ -133,6 +133,44 @@ def _verification_graphs() -> List[Tuple[str, DaguaGraph]]:
     ]
 
 
+def _osage_clustered_graphs() -> List[Tuple[str, DaguaGraph]]:
+    """Build clustered Graphviz osage verification fixtures.
+
+    Returns
+    -------
+    list[tuple[str, DaguaGraph]]
+        Clustered fixtures covering sibling clusters, nested clusters, mixed
+        direct children, disconnected clusters, and small labels.
+    """
+    sibling = _graph_from_edges("osage_sibling", 4, [])
+    sibling.add_cluster("c1", [0, 1], label="")
+    sibling.add_cluster("c2", [2, 3], label="")
+
+    nested = _graph_from_edges("osage_nested", 6, [])
+    nested.add_cluster("outer", [2, 3], label="")
+    nested.add_cluster("inner", [0, 1], parent="outer", label="")
+    nested.add_cluster("side", [4, 5], label="")
+
+    labeled = _graph_from_edges("osage_labeled", 6, [(0, 1), (2, 3), (4, 5)])
+    labeled.add_cluster("a", [0, 1], label="A")
+    labeled.add_cluster("b", [2, 3], label="B")
+    labeled.add_cluster("c", [4, 5], label="C")
+
+    mixed = _graph_from_edges("osage_mixed", 7, [(0, 2), (3, 4)])
+    mixed.add_cluster("root_group", [4, 5], label="R")
+    mixed.add_cluster("child_group", [0, 1, 2], parent="root_group", label="C")
+    mixed.add_cluster("loose_group", [3, 6], label="")
+
+    for graph in (sibling, nested, labeled, mixed):
+        graph.compute_node_sizes()
+    return [
+        ("cluster_siblings", sibling),
+        ("cluster_nested", nested),
+        ("cluster_labeled", labeled),
+        ("cluster_mixed", mixed),
+    ]
+
+
 def _reference_positions(
     layout_name: str,
     graph: DaguaGraph,
@@ -194,10 +232,20 @@ def _candidate_positions(layout_name: str, graph: DaguaGraph) -> np.ndarray:
         "arc": layout_arc_pipeline,
         "osage": layout_osage_pipeline,
     }
+    kwargs: Dict[str, Any] = {}
+    if layout_name == "osage" and graph.clusters:
+        kwargs.update(
+            {
+                "clusters": graph.clusters,
+                "cluster_parents": graph.cluster_parents,
+                "cluster_labels": graph.cluster_labels,
+            }
+        )
     positions = pipeline_by_name[layout_name](
         edge_index=graph.edge_index,
         num_nodes=graph.num_nodes,
         node_sizes=graph.node_sizes,
+        **kwargs,
     )
     return positions.detach().cpu().numpy()
 
@@ -232,7 +280,10 @@ def _compare_layouts() -> List[Dict[str, Any]]:
     """
     rows: List[Dict[str, Any]] = []
     for layout_name in ("star", "concentric", "circlepack", "osage", "arc"):
-        for graph_name, graph in _verification_graphs():
+        graphs = _verification_graphs()
+        if layout_name == "osage":
+            graphs = [*graphs, *_osage_clustered_graphs()]
+        for graph_name, graph in graphs:
             reference, reason = _reference_positions(layout_name, graph)
             if reference is None:
                 rows.append(
