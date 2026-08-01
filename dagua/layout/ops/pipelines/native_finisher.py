@@ -98,6 +98,8 @@ _W5_SCALE_SEARCH_LARGE_EVALS = 3
 _W5_SCALE_SEARCH_LARGE_N = 300
 _W5_SCALE_SEARCH_MIN = 0.50
 _W5_SCALE_SEARCH_MAX = 2.40
+_W5_TERMINAL_GLOBAL_SCALE_MULTIPLIERS = (0.85, 0.9, 0.95, 1.05, 1.1, 1.2, 1.35)
+_W5_TERMINAL_SCALE_TIE_EPS = 1.0e-6
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
@@ -1456,6 +1458,61 @@ class W5ScaleSearchResult:
     raw_score_pair: W5ScorePair
     scale: float
     evals: int
+    keepalive: tuple[torch.Tensor, ...] = ()
+
+
+@dataclass(frozen=True)
+class W5GlobalScaleSweepCandidate:
+    """One scored terminal global-scale sweep candidate.
+
+    Parameters
+    ----------
+    scale : float
+        Uniform multiplier applied around the incumbent centroid.
+    score_pair : W5ScorePair, optional
+        Restricted-V3-backed score pair when scoring completed.
+    referee_key : tuple[int, float]
+        Severe-G6 referee key for the scaled candidate.
+    selected : bool
+        Whether this candidate became the terminal scale-sweep winner.
+    reason : str
+        Stable accept or reject reason for telemetry and tests.
+    """
+
+    scale: float
+    score_pair: Optional[W5ScorePair]
+    referee_key: Tuple[int, float]
+    selected: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class W5GlobalScaleSweepResult:
+    """Result of the terminal post-W5 uniform scale sweep.
+
+    Parameters
+    ----------
+    winner_pos : torch.Tensor
+        Incumbent positions or the best accepted scaled positions with shape
+        ``[N, 2]``.
+    winner_score_pair : W5ScorePair
+        Score pair for ``winner_pos``.
+    winner_scale : float
+        Accepted global scale multiplier. ``1.0`` means the incumbent won.
+    selected : bool
+        Whether any scaled candidate strictly improved restricted V3.
+    candidates : tuple[W5GlobalScaleSweepCandidate, ...]
+        Candidate telemetry in evaluation order.
+    keepalive : tuple[torch.Tensor, ...]
+        Scored tensors retained so id-keyed scorer caches cannot collide with
+        recycled Python object ids during the sweep.
+    """
+
+    winner_pos: torch.Tensor
+    winner_score_pair: W5ScorePair
+    winner_scale: float
+    selected: bool
+    candidates: tuple[W5GlobalScaleSweepCandidate, ...]
     keepalive: tuple[torch.Tensor, ...] = ()
 
 
@@ -3567,6 +3624,220 @@ def _w5_scaled_candidate_should_fallback(
     )
 
 
+def _finite_v3_score(pair: W5ScorePair) -> Optional[float]:
+    """Return a finite restricted-V3 score from a W5 score pair.
+
+    Parameters
+    ----------
+    pair : W5ScorePair
+        Candidate score pair that may carry a restricted V3 score.
+
+    Returns
+    -------
+    float or None
+        Finite V3 tiered score when present.
+    """
+    value = pair.v3
+    if value is None or not math.isfinite(float(value)):
+        return None
+    return float(value)
+
+
+def _attach_terminal_global_scale_sweep_telemetry(
+    result: W5GlobalScaleSweepResult,
+    config: Optional[LayoutConfig],
+) -> None:
+    """Attach terminal scale-sweep telemetry to the layout config.
+
+    Parameters
+    ----------
+    result : W5GlobalScaleSweepResult
+        Completed scale-sweep result.
+    config : LayoutConfig, optional
+        Prepared layout configuration that carries native telemetry.
+
+    Returns
+    -------
+    None
+        The telemetry list is appended in-place when ``config`` is present.
+    """
+    if config is None:
+        return
+    winner_v3 = _finite_v3_score(result.winner_score_pair)
+    payload = {
+        "event": "native_w5_terminal_global_scale_sweep",
+        "graph": _graph_name(config),
+        "selected": bool(result.selected),
+        "winner_scale": float(result.winner_scale),
+        "winner_v3": winner_v3,
+        "candidates": [
+            {
+                "scale": float(candidate.scale),
+                "v3": (
+                    None if candidate.score_pair is None else _finite_v3_score(candidate.score_pair)
+                ),
+                "referee_key": [
+                    int(candidate.referee_key[0]),
+                    float(candidate.referee_key[1]),
+                ],
+                "selected": bool(candidate.selected),
+                "reason": candidate.reason,
+            }
+            for candidate in result.candidates
+        ],
+    }
+    records = list(getattr(config, "_dagua_native_terminal_scale_sweep_telemetry", []))
+    records.append(payload)
+    setattr(config, "_dagua_native_terminal_scale_sweep_telemetry", records)
+    telemetry_path = os.environ.get("DAGUA_W5_TELEMETRY_PATH")
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def run_w5_terminal_global_scale_sweep(
+    *,
+    incumbent_pos: torch.Tensor,
+    incumbent_score_pair: W5ScorePair,
+    score_fn: Callable[[torch.Tensor], W5ScorePair],
+    referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+    config: Optional[LayoutConfig] = None,
+    multipliers: Sequence[float] = _W5_TERMINAL_GLOBAL_SCALE_MULTIPLIERS,
+) -> W5GlobalScaleSweepResult:
+    """Score a fixed terminal uniform-scale sweep and keep the V3 argmax.
+
+    Parameters
+    ----------
+    incumbent_pos : torch.Tensor
+        Fixed terminal W5 winner positions with shape ``[N, 2]``.
+    incumbent_score_pair : W5ScorePair
+        Restricted-V3-backed score pair for ``incumbent_pos``.
+    score_fn : Callable[[torch.Tensor], W5ScorePair]
+        Existing frozen-ruler scorer used by W5. In the native terminal path it
+        is backed by the runtime restricted-V3 referee and its flag payload.
+    referee_key_fn : Callable[[torch.Tensor], tuple[int, float]], optional
+        Severe-G6 referee-key scorer. Candidates whose key regresses against
+        the incumbent cannot be selected.
+    config : LayoutConfig, optional
+        Prepared layout configuration used only for telemetry attachment.
+    multipliers : Sequence[float], default=_W5_TERMINAL_GLOBAL_SCALE_MULTIPLIERS
+        Deterministic global scale factors to evaluate around the centroid.
+
+    Returns
+    -------
+    W5GlobalScaleSweepResult
+        Incumbent or strictly better restricted-V3 scaled winner. Ties remain
+        on the incumbent.
+    """
+    incumbent_v3 = _finite_v3_score(incumbent_score_pair)
+    incumbent_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    if incumbent_v3 is None or int(incumbent_pos.shape[0]) < 2:
+        result = W5GlobalScaleSweepResult(
+            winner_pos=incumbent_pos,
+            winner_score_pair=incumbent_score_pair,
+            winner_scale=1.0,
+            selected=False,
+            candidates=(),
+        )
+        _attach_terminal_global_scale_sweep_telemetry(result, config)
+        return result
+
+    best_pos = incumbent_pos
+    best_pair = incumbent_score_pair
+    best_v3 = float(incumbent_v3)
+    best_scale = 1.0
+    best_index: Optional[int] = None
+    keepalive: list[torch.Tensor] = [incumbent_pos]
+    candidates: list[W5GlobalScaleSweepCandidate] = []
+
+    for raw_scale in multipliers:
+        scale = float(raw_scale)
+        if not math.isfinite(scale) or scale <= 0.0 or abs(scale - 1.0) <= 1.0e-12:
+            continue
+        scaled_pos = _scale_positions_about_centroid(incumbent_pos, scale)
+        keepalive.append(scaled_pos)
+        try:
+            score_pair = score_fn(scaled_pos)
+            referee_key = (
+                referee_key_fn(scaled_pos) if referee_key_fn is not None else incumbent_key
+            )
+        except Exception as exc:  # noqa: BLE001 -- terminal scale sweep is an optional candidate
+            if is_worker_timeout_like_exception(exc):
+                raise
+            candidates.append(
+                W5GlobalScaleSweepCandidate(
+                    scale=scale,
+                    score_pair=None,
+                    referee_key=(0, float("-inf")),
+                    selected=False,
+                    reason="score_exception",
+                )
+            )
+            continue
+        candidate_v3 = _finite_v3_score(score_pair)
+        reason = "missing_v3"
+        selected = False
+        if referee_key < incumbent_key:
+            reason = "referee_key_regressed"
+        elif candidate_introduces_champion_ineligible_flag(
+            score_pair.champion_ineligibility_flags,
+            incumbent_score_pair.champion_ineligibility_flags,
+        ):
+            reason = "introduced_champion_ineligible_flag"
+        elif candidate_v3 is None:
+            reason = "missing_v3"
+        elif candidate_v3 > best_v3 + _W5_TERMINAL_SCALE_TIE_EPS:
+            best_pos = scaled_pos
+            best_pair = score_pair
+            best_v3 = float(candidate_v3)
+            best_scale = scale
+            best_index = len(candidates)
+            selected = True
+            reason = "v3_argmax"
+        else:
+            reason = "does_not_improve_v3"
+        candidates.append(
+            W5GlobalScaleSweepCandidate(
+                scale=scale,
+                score_pair=score_pair,
+                referee_key=referee_key,
+                selected=selected,
+                reason=reason,
+            )
+        )
+
+    if best_index is not None:
+        candidates = [
+            W5GlobalScaleSweepCandidate(
+                scale=candidate.scale,
+                score_pair=candidate.score_pair,
+                referee_key=candidate.referee_key,
+                selected=index == best_index,
+                reason=(
+                    "v3_argmax"
+                    if index == best_index
+                    else (
+                        "superseded_v3_argmax"
+                        if candidate.reason == "v3_argmax"
+                        else candidate.reason
+                    )
+                ),
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+
+    result = W5GlobalScaleSweepResult(
+        winner_pos=best_pos,
+        winner_score_pair=best_pair,
+        winner_scale=best_scale,
+        selected=best_index is not None,
+        candidates=tuple(candidates),
+        keepalive=tuple(keepalive),
+    )
+    _attach_terminal_global_scale_sweep_telemetry(result, config)
+    return result
+
+
 def _honest_scale_line_search(
     checkpoint_pos: torch.Tensor,
     score_fn: Callable[[torch.Tensor], W5ScorePair],
@@ -4758,6 +5029,8 @@ __all__ = [
     "W5Candidate",
     "W5Checkpoint",
     "W5FinisherResult",
+    "W5GlobalScaleSweepCandidate",
+    "W5GlobalScaleSweepResult",
     "W5HonestAxes",
     "W5PhaseTiming",
     "W5ScorePair",
@@ -4770,6 +5043,7 @@ __all__ = [
     "log_w5_telemetry",
     "make_w5_skip_result",
     "run_w5_finisher",
+    "run_w5_terminal_global_scale_sweep",
     "w5_honest_axes_from_metrics",
     "w5_dominates",
     "w5_legacy_tallied_sole_failure",

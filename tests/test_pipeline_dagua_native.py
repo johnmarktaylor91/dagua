@@ -1171,10 +1171,26 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
         del args
         return None
 
+    def no_terminal_scale_sweep(**kwargs: object) -> object:
+        """Keep this W5 monotonicity fixture isolated from terminal scaling."""
+        del kwargs
+
+        class NoScaleResult:
+            """Minimal scale-sweep no-op result for the local fixture."""
+
+            selected = False
+
+        return NoScaleResult()
+
     monkeypatch.setattr(metrics, "full", fake_full)
     monkeypatch.setattr(metrics, "composite", fake_composite)
     monkeypatch.setattr(metrics, "composite_undirected", fake_composite_undirected)
     monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+    monkeypatch.setattr(
+        native_finisher,
+        "run_w5_terminal_global_scale_sweep",
+        no_terminal_scale_sweep,
+    )
     monkeypatch.setattr(native_finisher, "log_w5_telemetry", ignore_w5_telemetry)
 
     first = _terminal_w5_polish(
