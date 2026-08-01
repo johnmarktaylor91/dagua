@@ -5268,6 +5268,7 @@ def _best_of_polish(
 
     honest_score_cache: dict[int, tuple[W5ScorePair, W5HonestAxes]] = {}
     v3_result_cache: dict[int, Any] = {}
+    v3_result_keepalive: list[torch.Tensor] = []
 
     def v3_result_for(pos: torch.Tensor) -> Any:
         """Return the cached restricted V3 result for one W5 candidate.
@@ -5286,6 +5287,10 @@ def _best_of_polish(
         cached = v3_result_cache.get(cache_key)
         if cached is not None:
             return cached
+        # The scorer cache is keyed by Python object id for speed. Retain every
+        # scored tensor so a later short-lived W5 candidate cannot inherit a
+        # recycled id and receive stale V3 geometry.
+        v3_result_keepalive.append(pos)
         result = score_v3_runtime_result(
             pos,
             v3_problem,

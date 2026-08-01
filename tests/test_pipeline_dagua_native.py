@@ -1616,6 +1616,119 @@ def test_best_of_polish_w5_receives_final_honest_winner(
     assert captured["seed_names"][:2] == ["incumbent", "proxy_polish_winner"]
 
 
+def test_best_of_polish_retains_id_keyed_v3_candidate_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-of-polish keeps scored W5 tensors alive beside the id-keyed cache."""
+    import gc
+    import importlib
+    import weakref
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+        make_w5_skip_result,
+    )
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    base_pos, proxy_pos, edge_index, node_sizes, cluster_ids = _proxy_honest_fixture_tensors()
+    _install_proxy_honest_w5_fixture(monkeypatch, base_pos, proxy_pos)
+    retained: dict[str, bool] = {}
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
+    ) -> W5FinisherResult:
+        """Score a short-lived W5 candidate and verify cache-side retention.
+
+        Parameters
+        ----------
+        incumbent_pos : torch.Tensor
+            Current best-of-polish winner with shape ``[N, 2]``.
+        incumbent_score_pair : W5ScorePair
+            Honest score pair for ``incumbent_pos``.
+        seeds : Sequence[W5Seed]
+            W5 seed bank; unused in this retention fixture.
+        edge_index : torch.Tensor
+            Edge-index tensor with shape ``[2, E]``.
+        node_sizes : torch.Tensor
+            Node-size tensor with shape ``[N, 2]``.
+        score_fn : object
+            W5 score callback to exercise.
+        is_semantically_directed : bool
+            Whether the fixture graph is semantically directed.
+        declared_hierarchical : bool
+            Whether the fixture graph declares hierarchy.
+        direction_is_declared : bool, default=False
+            Whether direction was explicit.
+        config : LayoutConfig, optional
+            Layout configuration passed through to the skip result.
+        accept_margin : float, default=0.05
+            W5 accept margin; unused.
+        incumbent_axes : W5HonestAxes, optional
+            Honest routing axes; unused.
+        shape_geometry : object, optional
+            Shape geometry; unused.
+        referee_key_fn : object, optional
+            Severe-G6 key scorer; unused.
+
+        Returns
+        -------
+        W5FinisherResult
+            No-op W5 result after proving the candidate remains live.
+        """
+        del seeds, node_sizes, accept_margin, incumbent_axes, shape_geometry, referee_key_fn
+        scorer = score_fn
+        assert callable(scorer)
+        candidate = incumbent_pos.detach().clone() + torch.tensor([0.0, 7.0])
+        candidate_ref = weakref.ref(candidate)
+        scored_pair = scorer(candidate)
+        assert isinstance(scored_pair, W5ScorePair)
+        del candidate
+        gc.collect()
+        retained["candidate_alive"] = candidate_ref() is not None
+        return make_w5_skip_result(
+            incumbent_pos=incumbent_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            reason="unit_noop",
+            edge_index=edge_index,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    polished = _best_of_polish(
+        base_pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        cluster_ids=cluster_ids,
+        config=LayoutConfig(),
+    )
+
+    assert torch.equal(polished, base_pos)
+    assert retained == {"candidate_alive": True}
+
+
 def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
