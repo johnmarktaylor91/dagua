@@ -69,6 +69,7 @@ _MIN_FINISHER_ENTRY_S = 1.0
 _MAX_W5_SPEND_S = 20.0
 _TOTAL_BUDGET_FRACTION = 0.10
 _W5_ACCEPT_MARGIN = 0.05
+_W5_LAYERED_READING_EPS = 0.01
 _PREDICTED_COST_LATE_ENTRY_REMAINING_S = 90.0
 _PREDICTED_COST_RETURN_RESERVE_S = 2.0
 _MEASURED_COST_MAX_SEEDS = 2
@@ -240,6 +241,12 @@ class W5ScorePair:
         Runtime-restricted V3 C4 clearance penalty when available.
     c4_clearance_contact_pairs : int, optional
         Runtime-restricted V3 C4 clearance contact count when available.
+    g1_directed_flow : float, optional
+        Frozen V3 ``G1_directed_flow`` score used by declared-layered
+        finisher preservation guards.
+    g1_depth_order : float, optional
+        Frozen V3 ``G1_depth_order`` diagnostic score used by declared-layered
+        finisher preservation guards.
     champion_ineligibility_flags : frozenset[str], optional
         Frozen V3 row flags that disqualify a candidate from champion
         selection. ``None`` preserves callers without V3 flag payloads.
@@ -251,7 +258,35 @@ class W5ScorePair:
     c5_whitespace_ratio: Optional[float] = None
     c4_clearance_penalty: Optional[float] = None
     c4_clearance_contact_pairs: Optional[int] = None
+    g1_directed_flow: Optional[float] = None
+    g1_depth_order: Optional[float] = None
     champion_ineligibility_flags: Optional[frozenset[str]] = None
+
+
+def _finite_v3_facet_score(v3_result: Any, code: str) -> Optional[float]:
+    """Return a finite frozen V3 facet score when it is available.
+
+    Parameters
+    ----------
+    v3_result : object
+        Runtime-restricted V3 result exposing a ``facets`` mapping.
+    code : str
+        V3 facet code to read.
+
+    Returns
+    -------
+    float or None
+        Finite facet score when present; otherwise ``None``.
+    """
+    facet = getattr(v3_result, "facets", {}).get(code)
+    value = getattr(facet, "score", None)
+    if value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
 
 
 def w5_score_pair_from_v3_result(directed: float, undirected: float, v3_result: Any) -> W5ScorePair:
@@ -282,6 +317,8 @@ def w5_score_pair_from_v3_result(directed: float, undirected: float, v3_result: 
         c5_whitespace_ratio=float(c5_meta["whitespace_ratio"]),
         c4_clearance_penalty=float(c4_meta["clearance_penalty"]),
         c4_clearance_contact_pairs=None if clearance_pairs is None else int(clearance_pairs),
+        g1_directed_flow=_finite_v3_facet_score(v3_result, "G1_directed_flow"),
+        g1_depth_order=_finite_v3_facet_score(v3_result, "G1_depth_order"),
         champion_ineligibility_flags=frozenset(str(flag) for flag in v3_result.flags)
         & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
     )
@@ -1700,6 +1737,65 @@ def candidate_introduces_champion_ineligible_flag(
     return bool((candidate_flags - incumbent_flags) & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS)
 
 
+def _layered_preservation_required(
+    *,
+    is_semantically_directed: bool,
+    declared_hierarchical: bool,
+    direction_is_declared: bool,
+) -> bool:
+    """Return whether a finisher candidate must preserve layered reading.
+
+    Parameters
+    ----------
+    is_semantically_directed : bool
+        Whether the graph's edge direction has semantic meaning.
+    declared_hierarchical : bool
+        Whether the row declares hierarchy metadata used by the frozen ruler.
+    direction_is_declared : bool
+        Whether semantic direction came from explicit user/config metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` for declared-layered rows; ``False`` for inferred,
+        undirected, clustered-undirected, geometric, and cyclic-feedback rows.
+    """
+    return bool(is_semantically_directed and direction_is_declared and declared_hierarchical)
+
+
+def _layered_reading_preserved(
+    candidate: W5ScorePair,
+    incumbent: W5ScorePair,
+    eps: float = _W5_LAYERED_READING_EPS,
+) -> bool:
+    """Return whether frozen V3 layered-reading facets did not regress.
+
+    Parameters
+    ----------
+    candidate : W5ScorePair
+        Candidate score pair carrying frozen V3 G1 facet telemetry.
+    incumbent : W5ScorePair
+        Incumbent score pair carrying frozen V3 G1 facet telemetry.
+    eps : float, default=_W5_LAYERED_READING_EPS
+        Allowed numerical slack before a facet regression rejects a candidate.
+
+    Returns
+    -------
+    bool
+        ``True`` when the candidate preserves both available layered-reading
+        facets. Missing facet payloads keep legacy/direct unit callers active.
+    """
+    for candidate_value, incumbent_value in (
+        (candidate.g1_directed_flow, incumbent.g1_directed_flow),
+        (candidate.g1_depth_order, incumbent.g1_depth_order),
+    ):
+        if candidate_value is None or incumbent_value is None:
+            continue
+        if float(candidate_value) < float(incumbent_value) - float(eps):
+            return False
+    return True
+
+
 def w5_legacy_tallied_sole_failure(
     candidate: W5ScorePair,
     incumbent: W5ScorePair,
@@ -1766,6 +1862,8 @@ def w5_dominates(
     candidate_referee_key: Tuple[int, float] = (1, -0.0),
     incumbent_referee_key: Tuple[int, float] = (1, -0.0),
     tallied_axis: Optional[str] = None,
+    preserve_layered_reading: bool = False,
+    layered_reading_eps: float = _W5_LAYERED_READING_EPS,
 ) -> bool:
     """Return whether ``candidate`` beats ``incumbent`` under the accept gate.
 
@@ -1784,12 +1882,23 @@ def w5_dominates(
         Severe-G6 eligibility prefix for the incumbent/current winner.
     tallied_axis : str, optional
         Legacy composite axis retained for telemetry compatibility.
+    preserve_layered_reading : bool, default=False
+        Whether to reject V3 improvements that degrade frozen G1 layered
+        reading facets beyond ``layered_reading_eps``.
+    layered_reading_eps : float, default=_W5_LAYERED_READING_EPS
+        Allowed numerical slack for layered-reading facet comparisons.
 
     Returns
     -------
     bool
         ``True`` only when both finite components clear ``margin``.
     """
+    if preserve_layered_reading and not _layered_reading_preserved(
+        candidate,
+        incumbent,
+        layered_reading_eps,
+    ):
+        return False
     if candidate_referee_key != incumbent_referee_key:
         return candidate_referee_key > incumbent_referee_key
     candidate_v3 = candidate.v3
@@ -1834,6 +1943,8 @@ def _w5_dominates_with_axis(
     candidate_referee_key: Tuple[int, float],
     incumbent_referee_key: Tuple[int, float],
     tallied_axis: str,
+    preserve_layered_reading: bool = False,
+    layered_reading_eps: float = _W5_LAYERED_READING_EPS,
 ) -> bool:
     """Call the W5 dominance gate with legacy monkeypatch compatibility.
 
@@ -1851,6 +1962,10 @@ def _w5_dominates_with_axis(
         Severe-G6 prefix for the incumbent.
     tallied_axis : str
         Legacy composite axis for the V3 non-regression guardrail.
+    preserve_layered_reading : bool, default=False
+        Whether declared-layered rows must preserve frozen G1 reading facets.
+    layered_reading_eps : float, default=_W5_LAYERED_READING_EPS
+        Allowed numerical slack for layered-reading facet comparisons.
 
     Returns
     -------
@@ -1865,9 +1980,15 @@ def _w5_dominates_with_axis(
             candidate_referee_key=candidate_referee_key,
             incumbent_referee_key=incumbent_referee_key,
             tallied_axis=tallied_axis,
+            preserve_layered_reading=preserve_layered_reading,
+            layered_reading_eps=layered_reading_eps,
         )
     except TypeError as exc:
-        if "tallied_axis" not in str(exc):
+        if (
+            "tallied_axis" not in str(exc)
+            and "preserve_layered_reading" not in str(exc)
+            and "layered_reading_eps" not in str(exc)
+        ):
             raise
         return w5_dominates(
             candidate,
@@ -3843,6 +3964,9 @@ def run_w5_terminal_global_scale_sweep(
     score_fn: Callable[[torch.Tensor], W5ScorePair],
     referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
     config: Optional[LayoutConfig] = None,
+    is_semantically_directed: bool = False,
+    declared_hierarchical: bool = False,
+    direction_is_declared: bool = False,
     multipliers: Sequence[float] = _W5_TERMINAL_GLOBAL_SCALE_MULTIPLIERS,
 ) -> W5GlobalScaleSweepResult:
     """Score a fixed terminal uniform-scale sweep and keep the V3 argmax.
@@ -3861,6 +3985,12 @@ def run_w5_terminal_global_scale_sweep(
         the incumbent cannot be selected.
     config : LayoutConfig, optional
         Prepared layout configuration used only for telemetry attachment.
+    is_semantically_directed : bool, default=False
+        Whether edge direction has semantic meaning.
+    declared_hierarchical : bool, default=False
+        Whether the row declares hierarchy metadata used by the frozen ruler.
+    direction_is_declared : bool, default=False
+        Whether semantic direction came from explicit user/config metadata.
     multipliers : Sequence[float], default=_W5_TERMINAL_GLOBAL_SCALE_MULTIPLIERS
         Deterministic global scale factors to evaluate around the centroid.
 
@@ -3872,6 +4002,11 @@ def run_w5_terminal_global_scale_sweep(
     """
     incumbent_v3 = _finite_v3_score(incumbent_score_pair)
     incumbent_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    preserve_layered_reading = _layered_preservation_required(
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        direction_is_declared=direction_is_declared,
+    )
     if incumbent_v3 is None or int(incumbent_pos.shape[0]) < 2:
         result = W5GlobalScaleSweepResult(
             winner_pos=incumbent_pos,
@@ -3927,6 +4062,11 @@ def run_w5_terminal_global_scale_sweep(
             reason = "introduced_champion_ineligible_flag"
         elif candidate_v3 is None:
             reason = "missing_v3"
+        elif preserve_layered_reading and not _layered_reading_preserved(
+            score_pair,
+            incumbent_score_pair,
+        ):
+            reason = "layered_reading_regressed"
         elif candidate_v3 > best_v3 + _W5_TERMINAL_SCALE_TIE_EPS:
             best_pos = scaled_pos
             best_pair = score_pair
@@ -4267,6 +4407,9 @@ def run_w5_terminal_smacof_stress_polish(
     score_fn: Callable[[torch.Tensor], W5ScorePair],
     referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
     config: Optional[LayoutConfig] = None,
+    is_semantically_directed: bool = False,
+    declared_hierarchical: bool = False,
+    direction_is_declared: bool = False,
     iterations: Sequence[int] = _W5_SMACOF_STRESS_ITERATIONS,
     output_scales: Sequence[float] = _W5_SMACOF_STRESS_OUTPUT_SCALES,
     max_nodes: int = _W5_SMACOF_STRESS_MAX_NODES,
@@ -4293,6 +4436,12 @@ def run_w5_terminal_smacof_stress_polish(
         the current winner cannot be selected.
     config : LayoutConfig, optional
         Prepared layout configuration used for budget checks and telemetry.
+    is_semantically_directed : bool, default=False
+        Whether edge direction has semantic meaning.
+    declared_hierarchical : bool, default=False
+        Whether the row declares hierarchy metadata used by the frozen ruler.
+    direction_is_declared : bool, default=False
+        Whether semantic direction came from explicit user/config metadata.
     iterations : Sequence[int], default=_W5_SMACOF_STRESS_ITERATIONS
         Deterministic SMACOF update counts to checkpoint and score.
     output_scales : Sequence[float], default=_W5_SMACOF_STRESS_OUTPUT_SCALES
@@ -4365,6 +4514,11 @@ def run_w5_terminal_smacof_stress_polish(
     best_pair = incumbent_score_pair
     best_v3 = float(incumbent_v3)
     best_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    preserve_layered_reading = _layered_preservation_required(
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        direction_is_declared=direction_is_declared,
+    )
     best_index: Optional[int] = None
     keepalive: list[torch.Tensor] = [incumbent_pos]
     candidates: list[W5SMACOFStressCandidate] = []
@@ -4455,6 +4609,11 @@ def run_w5_terminal_smacof_stress_polish(
                 reason = "introduced_champion_ineligible_flag"
             elif candidate_v3 is None:
                 reason = "missing_v3"
+            elif preserve_layered_reading and not _layered_reading_preserved(
+                score_pair,
+                incumbent_score_pair,
+            ):
+                reason = "layered_reading_regressed"
             elif float(candidate_v3) > best_v3 + _W5_SMACOF_STRESS_TIE_EPS:
                 best_pos = candidate_pos
                 best_pair = score_pair
@@ -4621,6 +4780,9 @@ def run_w5_terminal_small_n_anneal(
     max_nodes: int = _W5_SMALL_N_ANNEAL_MAX_NODES,
     has_clusters: bool = False,
     has_weights: bool = False,
+    is_semantically_directed: bool = False,
+    declared_hierarchical: bool = False,
+    direction_is_declared: bool = False,
 ) -> W5SmallNAnnealResult:
     """Run seeded terminal small-N Gaussian annealing scored by restricted V3.
 
@@ -4653,6 +4815,12 @@ def run_w5_terminal_small_n_anneal(
     has_weights : bool, default=False
         Whether runtime-visible edge weights should be included in the
         score-cost guard.
+    is_semantically_directed : bool, default=False
+        Whether edge direction has semantic meaning.
+    declared_hierarchical : bool, default=False
+        Whether the row declares hierarchy metadata used by the frozen ruler.
+    direction_is_declared : bool, default=False
+        Whether semantic direction came from explicit user/config metadata.
 
     Returns
     -------
@@ -4717,6 +4885,11 @@ def run_w5_terminal_small_n_anneal(
     best_pair = incumbent_score_pair
     best_v3 = float(incumbent_v3)
     best_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    preserve_layered_reading = _layered_preservation_required(
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        direction_is_declared=direction_is_declared,
+    )
     best_index: Optional[int] = None
     accepted_count = 0
     keepalive: list[torch.Tensor] = [incumbent_pos]
@@ -4797,6 +4970,11 @@ def run_w5_terminal_small_n_anneal(
             reason = "introduced_champion_ineligible_flag"
         elif candidate_v3 is None:
             reason = "missing_v3"
+        elif preserve_layered_reading and not _layered_reading_preserved(
+            score_pair,
+            incumbent_score_pair,
+        ):
+            reason = "layered_reading_regressed"
         elif float(candidate_v3) > best_v3 + _W5_SMALL_N_ANNEAL_TIE_EPS:
             best_pos = candidate_pos
             best_pair = score_pair
@@ -5337,6 +5515,11 @@ def run_w5_finisher(
     tallied_axis = (
         "directed" if is_semantically_directed and declared_hierarchical else "undirected"
     )
+    preserve_layered_reading = _layered_preservation_required(
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        direction_is_declared=direction_is_declared,
+    )
     predicted_skip_reason = w5_predicted_skip_reason(node_count, edge_count, config)
     cost_plan: Optional[W5CostPlan] = None
     incumbent_referee_key = (
@@ -5409,6 +5592,7 @@ def run_w5_finisher(
             candidate_referee_key=winner_referee_key,
             incumbent_referee_key=incumbent_referee_key,
             tallied_axis=tallied_axis,
+            preserve_layered_reading=preserve_layered_reading,
         ):
             winner_pos = incumbent_pos
             winner_score_pair = incumbent_score_pair
@@ -5800,6 +5984,7 @@ def run_w5_finisher(
                         candidate_referee_key=checkpoint_referee_key,
                         incumbent_referee_key=winner_referee_key,
                         tallied_axis=tallied_axis,
+                        preserve_layered_reading=preserve_layered_reading,
                     )
                     legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
                         honest,
