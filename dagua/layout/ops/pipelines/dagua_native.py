@@ -6071,6 +6071,7 @@ def _terminal_w5_polish(
             max_dist=int(final_pos.shape[0]),
         )
         v3_result_cache: dict[int, Any] = {}
+        v3_result_keepalive: list[torch.Tensor] = []
 
         def v3_result_for(pos: torch.Tensor) -> Any:
             """Return the cached restricted V3 result for one terminal W5 candidate.
@@ -6089,6 +6090,10 @@ def _terminal_w5_polish(
             cached = v3_result_cache.get(cache_key)
             if cached is not None:
                 return cached
+            # The finisher scores many short-lived tensors before the terminal
+            # scale sweep. Retain id-keyed tensors so Python cannot recycle an
+            # object id and return a stale V3 result for a later scale candidate.
+            v3_result_keepalive.append(pos)
             result = score_v3_runtime_result(
                 pos,
                 v3_problem,
