@@ -23,6 +23,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     W5Seed,
     _honest_scale_line_search,
     _scale_positions_about_centroid,
+    _scale_positions_about_centroid_xy,
     _w5_scaled_candidate_should_fallback,
     log_w5_telemetry,
     run_w5_finisher,
@@ -407,6 +408,69 @@ def test_terminal_global_scale_sweep_preserves_declared_layered_reading() -> Non
     assert result.selected is False
     assert result.winner_pos is pos
     assert {candidate.reason for candidate in result.candidates} == {"layered_reading_regressed"}
+
+
+def test_terminal_global_scale_sweep_accepts_anisotropic_layered_improvement() -> None:
+    """Aspect-gated anisotropic candidates can win when G1 facets improve."""
+    pos = torch.tensor(
+        [[0.0, 0.0], [100.0, 0.0], [0.0, 10.0], [100.0, 10.0]],
+        dtype=torch.float32,
+    )
+    raw_span = torch.max(pos, dim=0).values - torch.min(pos, dim=0).values
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 win only for the measured strong-anisotropic pair.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        span = torch.max(candidate, dim=0).values - torch.min(candidate, dim=0).values
+        scale_x = round(float((span[0] / raw_span[0]).item()), 2)
+        scale_y = round(float((span[1] / raw_span[1]).item()), 2)
+        is_aniso_win = scale_x == 0.7 and scale_y == 8.0
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0 if is_aniso_win else 10.0,
+            g1_directed_flow=1.0 if is_aniso_win else 0.8,
+            g1_depth_order=1.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        g1_directed_flow=0.7,
+        g1_depth_order=1.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        score_fn=score_fn,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is True
+    assert result.winner_scale_x == pytest.approx(0.7)
+    assert result.winner_scale_y == pytest.approx(8.0)
+    torch.testing.assert_close(
+        result.winner_pos,
+        _scale_positions_about_centroid_xy(pos, 0.7, 8.0),
+    )
+    winner = next(candidate for candidate in result.candidates if candidate.selected)
+    assert winner.scale_x == pytest.approx(0.7)
+    assert winner.scale_y == pytest.approx(8.0)
 
 
 def test_terminal_global_scale_sweep_leaves_nonlayered_rows_unchanged() -> None:
