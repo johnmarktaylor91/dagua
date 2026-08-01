@@ -27,6 +27,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     log_w5_telemetry,
     run_w5_finisher,
     run_w5_terminal_global_scale_sweep,
+    run_w5_terminal_smacof_stress_polish,
     run_w5_terminal_small_n_anneal,
     w5_dominates,
     w5_legacy_tallied_sole_failure,
@@ -359,6 +360,169 @@ def test_terminal_global_scale_sweep_rejects_new_degeneracy_flag() -> None:
     )
 
 
+def test_terminal_global_scale_sweep_preserves_declared_layered_reading() -> None:
+    """Declared-layered scale sweep rejects V3 gains that regress G1 facets."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high-V3 score with degraded frozen G1 facets.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.88,
+            g1_depth_order=0.97,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        g1_directed_flow=0.95,
+        g1_depth_order=0.98,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        score_fn=score_fn,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.winner_pos is pos
+    assert {candidate.reason for candidate in result.candidates} == {"layered_reading_regressed"}
+
+
+def test_terminal_global_scale_sweep_leaves_nonlayered_rows_unchanged() -> None:
+    """Non-layered scale sweep can still accept a V3 gain with lower G1 facets."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high-V3 score with irrelevant G1 facet movement.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.0,
+            g1_depth_order=0.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            g1_directed_flow=1.0,
+            g1_depth_order=1.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        direction_is_declared=False,
+    )
+
+    assert result.selected is True
+    assert result.winner_score_pair.v3 == pytest.approx(12.0)
+
+
+def test_terminal_smacof_stress_polish_preserves_declared_layered_reading() -> None:
+    """Declared-layered SMACOF rejects V3 gains that regress G1 facets."""
+    incumbent = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 0.1, dtype=torch.float32)
+    all_pairs = [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Return incumbent facets for incumbent and regressed facets otherwise.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        if torch.allclose(pos.detach().cpu(), incumbent):
+            return W5ScorePair(
+                directed=0.0,
+                undirected=0.0,
+                v3=10.0,
+                g1_directed_flow=0.95,
+                g1_depth_order=0.98,
+                champion_ineligibility_flags=frozenset(),
+            )
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.88,
+            g1_depth_order=0.97,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=score_fn(incumbent),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=all_pairs,
+        score_fn=score_fn,
+        referee_key_fn=lambda pos: (1, -0.0),
+        config=_deterministic_budget_config(),
+        iterations=(20,),
+        output_scales=(1.0,),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.winner_pos is incumbent
+    assert result.candidates[0].reason == "layered_reading_regressed"
+
+
 def test_terminal_small_n_anneal_selects_strict_v3_argmax() -> None:
     """Small-N anneal accepts only strict restricted-V3 improvements."""
     pos, edge_index, node_sizes = _tiny_layout()
@@ -509,6 +673,60 @@ def test_terminal_small_n_anneal_rejects_new_degeneracy_flag() -> None:
     }
 
 
+def test_terminal_small_n_anneal_preserves_declared_layered_reading() -> None:
+    """Declared-layered anneal rejects V3 gains that regress G1 facets."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a strict V3 gain with lower layered-reading facets.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.88,
+            g1_depth_order=0.97,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        g1_directed_flow=0.95,
+        g1_depth_order=0.98,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=3,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.accepted_count == 0
+    assert result.winner_pos is pos
+    assert {candidate.reason for candidate in result.candidates} == {"layered_reading_regressed"}
+
+
 def test_terminal_small_n_anneal_respects_structural_n_gate() -> None:
     """Small-N anneal skips rows above the structural node-count cap."""
     pos = torch.stack((torch.arange(51, dtype=torch.float32), torch.zeros(51)), dim=1)
@@ -653,6 +871,36 @@ def test_w5_dominates_rejects_fresh_champion_ineligible_flag() -> None:
     )
 
     assert not w5_dominates(candidate, incumbent, tallied_axis="directed")
+
+
+def test_w5_dominates_rejects_declared_layered_reading_regression() -> None:
+    """Declared-layered W5 dominance requires G1 facet preservation."""
+    incumbent = W5ScorePair(
+        directed=90.0,
+        undirected=90.0,
+        v3=70.0,
+        g1_directed_flow=0.95,
+        g1_depth_order=0.98,
+        champion_ineligibility_flags=frozenset(),
+    )
+    candidate = W5ScorePair(
+        directed=91.0,
+        undirected=91.0,
+        v3=70.2,
+        g1_directed_flow=0.88,
+        g1_depth_order=0.97,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    assert not w5_dominates(candidate, incumbent, preserve_layered_reading=True)
+    assert not w5_dominates(
+        candidate,
+        incumbent,
+        candidate_referee_key=(1, -0.0),
+        incumbent_referee_key=(0, -1.0),
+        preserve_layered_reading=True,
+    )
+    assert w5_dominates(candidate, incumbent, preserve_layered_reading=False)
 
 
 def test_w5_dominates_logs_v3_missing_champion_flags(caplog: pytest.LogCaptureFixture) -> None:
