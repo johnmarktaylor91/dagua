@@ -17,6 +17,8 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 _DEFAULT_RANKSEP_POINTS = 72.0
 _DEFAULT_NODESEP_POINTS = 18.0
 _TWO_PI = 2.0 * math.pi
+_CIRCO_CROSSING_REDUCTION_MAX_WORK = 2_000_000
+_CIRCO_CROSSING_REDUCTION_MAX_BLOCK_NODES = 128
 
 
 def _graphviz_round_points(value: float) -> int:
@@ -1501,6 +1503,16 @@ def _circo_reduce_edge_crossings(
     list[int]
         Best circular node order found by the Graphviz blockpath sweep.
     """
+    work_estimate = len(directed.nodes) * max(1, len(directed.edge_endpoints)) ** 2
+    if (
+        len(directed.nodes) > _CIRCO_CROSSING_REDUCTION_MAX_BLOCK_NODES
+        or work_estimate > _CIRCO_CROSSING_REDUCTION_MAX_WORK
+    ):
+        # The Graphviz reduce pass is cubic-ish in dense blocks because each
+        # insertion trial recomputes the full circular crossing sweep. Large
+        # blocks keep the deterministic blockpath order rather than burning the
+        # native portfolio budget on a cosmetic local search.
+        return ordered
     crossings = _circo_count_all_crossings(ordered, directed)
     if crossings == 0:
         return ordered

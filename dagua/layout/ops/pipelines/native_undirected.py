@@ -206,6 +206,10 @@ SMALL_WORLD_EDGE_NODE_RATIO_MAX = 4.0
 RGG_GEOMETRIC_SEED_NODE_MIN = 100
 RGG_GEOMETRIC_SEED_NODE_MAX = 1000
 RGG_GEOMETRIC_EDGE_NODE_RATIO_MIN = 4.0
+CIRCO_CONTEST_MIN_NODES = 250
+CIRCO_CONTEST_MAX_NODES = 700
+CIRCO_CONTEST_EDGE_NODE_RATIO_MAX = 4.0
+CIRCO_CONTEST_SCALE = 0.9
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2051,6 +2055,75 @@ def _rgg_geometric_seed_enabled(problem: LayoutProblem) -> bool:
     )
 
 
+def _circo_contest_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the calibrated circo arm may enter the contest.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded, unweighted, disconnected-friendly undirected
+        topologies where circular block layout is a plausible competitor.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if (
+        n < CIRCO_CONTEST_MIN_NODES
+        or n > CIRCO_CONTEST_MAX_NODES
+        or edge_count == 0
+        or problem.edge_weights is not None
+        or problem.clusters
+    ):
+        return False
+    structure = problem.structure
+    if structure is not None:
+        if getattr(structure, "family", None) == GraphFamily.GRID:
+            return False
+        if int(getattr(structure, "max_degree", 0)) > 20:
+            return False
+    edge_ratio = edge_count / float(max(n, 1))
+    return edge_ratio <= CIRCO_CONTEST_EDGE_NODE_RATIO_MAX
+
+
+def _scaled_circo_candidate(problem: LayoutProblem) -> Optional[torch.Tensor]:
+    """Build the uniformly scale-calibrated in-house circo challenger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Centered, uniformly scaled circo positions with shape ``[N, 2]`` when
+        the structural gate admits the arm.
+    """
+    if not _circo_contest_enabled(problem):
+        return None
+    from dagua.layout.ops.pipelines.circo import layout_circo_pipeline
+
+    raw = layout_circo_pipeline(
+        edge_index=problem.edge_index.detach().to(device="cpu"),
+        num_nodes=int(problem.num_nodes),
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        fidelity_dtype=torch.float32,
+    )
+    if not bool(torch.isfinite(raw).all().item()):
+        return None
+    centered = raw.detach().to(device="cpu", dtype=torch.float32)
+    centered = centered - centered.mean(dim=0, keepdim=True)
+    return centered * CIRCO_CONTEST_SCALE
+
+
 def _unique_undirected_pairs(edge_index: torch.Tensor) -> torch.Tensor:
     """Return sorted unique undirected edge pairs.
 
@@ -2817,6 +2890,12 @@ def _router_v2_large_mini_contest(
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("large mini-contest RGG geometric seed failed", exc_info=True)
+    if _circo_contest_enabled(problem) and _portfolio_has_budget(config):
+        try:
+            _admit("circo_scaled", _scaled_circo_candidate(problem))
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest circo challenger failed", exc_info=True)
 
     cluster_ids = _build_cluster_ids(problem)
     from dagua.metrics import _all_pairs_unweighted, _build_csr
@@ -3419,6 +3498,14 @@ def layout_native_undirected_portfolio(
         except Exception as exc:  # noqa: BLE001 -- a failed seed never sinks the incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("RGG geometric seed challenger failed", exc_info=True)
+    if _circo_contest_enabled(problem) and _portfolio_has_budget(config):
+        try:
+            circo_pos = _scaled_circo_candidate(problem)
+            if circo_pos is not None:
+                _add_challenger("circo_scaled", circo_pos, include_raw=True)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("circo undirected challenger failed", exc_info=True)
 
     # Candidate G (r83-P3.3): local fCoSE at the fidelity campaign's
     # reference defaults. Three adjacent deterministic seeds retain bounded
