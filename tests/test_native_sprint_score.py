@@ -583,8 +583,8 @@ def test_score_position_v3_publishes_severe_g6_flag_and_eligibility(
     assert row["v3_severe_g6_breach"] is True
 
 
-def test_best_rows_by_graph_applies_native_severe_g6_eligibility_only() -> None:
-    """Native best-row selection uses eligibility; field rows remain annotated only."""
+def test_best_rows_by_graph_applies_symmetric_severe_g6_field_eligibility() -> None:
+    """Native and field V3 selections both exclude severe-G6 breaching winners."""
     rows = [
         {
             "graph": "g",
@@ -624,7 +624,63 @@ def test_best_rows_by_graph_applies_native_severe_g6_eligibility_only() -> None:
     field = scorer.best_rows_by_graph(rows, "v3_tiered", engine=None)
 
     assert native["g"]["position_path"] == "native_ok.pt"
+    assert field["g"]["position_path"] == "field_ok.pt"
+
+
+def test_best_rows_by_graph_can_disable_symmetric_g6_field_policy() -> None:
+    """The A/B flag preserves the pre-policy field-best behavior."""
+    rows = [
+        {
+            "graph": "g",
+            "engine": "elk_layered",
+            "v3_tiered": 2.0,
+            "v3_referee_eligibility_key": [1, -0.0],
+            "position_path": "field_ok.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "dagre",
+            "v3_tiered": 99.0,
+            "v3_referee_eligibility_key": [0, -0.40],
+            "v3_row_flags": ["severe_g6_breach"],
+            "position_path": "field_flagged.pt",
+        },
+    ]
+
+    field = scorer.best_rows_by_graph(
+        rows,
+        "v3_tiered",
+        engine=None,
+        apply_symmetric_severe_g6_field_eligibility=False,
+    )
+
     assert field["g"]["position_path"] == "field_flagged.pt"
+
+
+def test_best_rows_by_graph_returns_no_field_when_all_competitors_breach_g6() -> None:
+    """Field-best is missing when every V3 competitor breaches severe-G6."""
+    rows = [
+        {
+            "graph": "g",
+            "engine": "dagre",
+            "v3_tiered": 99.0,
+            "v3_referee_eligibility_key": [0, -0.40],
+            "v3_row_flags": ["severe_g6_breach"],
+            "position_path": "field_deep.pt",
+        },
+        {
+            "graph": "g",
+            "engine": "elk_layered",
+            "v3_tiered": 1.0,
+            "v3_referee_eligibility_key": [0, -0.01],
+            "v3_row_flags": ["severe_g6_breach"],
+            "position_path": "field_shallow.pt",
+        },
+    ]
+
+    field = scorer.best_rows_by_graph(rows, "v3_tiered", engine=None)
+
+    assert field == {}
 
 
 def test_best_rows_by_graph_uses_least_breach_fallback_for_native() -> None:
