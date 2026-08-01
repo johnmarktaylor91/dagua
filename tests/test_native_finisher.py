@@ -22,9 +22,11 @@ from dagua.layout.ops.pipelines.native_finisher import (
     W5ScorePair,
     W5Seed,
     _honest_scale_line_search,
+    _scale_positions_about_centroid,
     _w5_scaled_candidate_should_fallback,
     log_w5_telemetry,
     run_w5_finisher,
+    run_w5_terminal_global_scale_sweep,
     w5_dominates,
     w5_legacy_tallied_sole_failure,
     w5_predicted_skip_reason,
@@ -137,6 +139,209 @@ def test_scaled_overlap_regression_survives_when_v3_dominates() -> None:
         incumbent_referee_key=(1, -0.0),
         tallied_axis="undirected",
         accept_margin=0.05,
+    )
+
+
+def test_terminal_global_scale_sweep_selects_strict_v3_argmax() -> None:
+    """Terminal scale sweep chooses the best strict restricted-V3 multiplier."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+    raw_span = float((pos[:, 0].max() - pos[:, 0].min()).item())
+    score_by_scale = {
+        0.85: 10.1,
+        0.9: 10.2,
+        0.95: 10.3,
+        1.05: 10.4,
+        1.1: 10.5,
+        1.2: 11.0,
+        1.35: 10.9,
+    }
+    calls: list[float] = []
+
+    def scale_key(candidate: torch.Tensor) -> float:
+        """Return the candidate scale inferred from its x-span.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        float
+            Rounded uniform scale factor.
+        """
+        span = float((candidate[:, 0].max() - candidate[:, 0].min()).item())
+        return round(span / raw_span, 2)
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 score keyed by the inferred scale.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        scale = scale_key(candidate)
+        calls.append(scale)
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=score_by_scale[scale],
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert calls == [0.85, 0.9, 0.95, 1.05, 1.1, 1.2, 1.35]
+    assert result.selected is True
+    assert result.winner_scale == pytest.approx(1.2)
+    assert result.winner_score_pair.v3 == pytest.approx(11.0)
+    assert torch.equal(result.winner_pos, _scale_positions_about_centroid(pos, 1.2))
+
+
+def test_terminal_global_scale_sweep_keeps_incumbent_on_ties() -> None:
+    """Terminal scale sweep is a no-op when every multiplier ties V3."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 tie for every scaled candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a tied restricted V3 score.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent_pair = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent_pair,
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.winner_scale == 1.0
+    assert result.winner_score_pair is incumbent_pair
+    assert result.winner_pos is pos
+
+
+def test_terminal_global_scale_sweep_treats_tiny_float_delta_as_tie() -> None:
+    """Terminal scale sweep no-ops on scorer-noise-sized V3 deltas."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return only sub-epsilon V3 movement for every scale.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a near-tied restricted V3 score.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0 + 5.0e-8,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.winner_scale == 1.0
+    assert result.winner_pos is pos
+
+
+def test_terminal_global_scale_sweep_rejects_new_degeneracy_flag() -> None:
+    """Terminal scale sweep rejects the best V3 score when it adds a frozen flag."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+    raw_span = float((pos[:, 0].max() - pos[:, 0].min()).item())
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high but newly degenerate score at x1.2.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair with optional champion-ineligible flags.
+        """
+        span = float((candidate[:, 0].max() - candidate[:, 0].min()).item())
+        scale = round(span / raw_span, 2)
+        flags = frozenset({"DEGENERATE_SCALE"}) if scale == 1.2 else frozenset()
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0 if scale == 1.2 else 10.0,
+            champion_ineligibility_flags=flags,
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.winner_scale == 1.0
+    assert any(
+        candidate.scale == pytest.approx(1.2)
+        and candidate.reason == "introduced_champion_ineligible_flag"
+        for candidate in result.candidates
     )
 
 

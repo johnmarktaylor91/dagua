@@ -6013,6 +6013,7 @@ def _terminal_w5_polish(
             log_w5_telemetry,
             make_w5_skip_result,
             run_w5_finisher,
+            run_w5_terminal_global_scale_sweep,
             w5_dominates,
             w5_honest_axes_from_metrics,
             w5_predicted_skip_reason,
@@ -6349,6 +6350,9 @@ def _terminal_w5_polish(
         # W5 runs once, sentinel-owned, on the true final tensor, monotone,
         # fidelity no-op. Weighted inputs add the severe-G6 prefix before the
         # unchanged dual-ruler comparison.
+        terminal_winner_pos = final_pos
+        terminal_winner_pair = incumbent_score_pair
+        terminal_winner_reason: Optional[str] = None
         if w5_result.accepted and w5_dominates(
             w5_result.winner_score_pair,
             incumbent_score_pair,
@@ -6363,9 +6367,27 @@ def _terminal_w5_polish(
                 "directed" if is_semantically_directed and declared_hierarchical else "undirected"
             ),
         ):
+            terminal_winner_pos = w5_result.winner_pos
+            terminal_winner_pair = w5_result.winner_score_pair
+            terminal_winner_reason = "terminal_w5_accept"
+        scale_sweep = run_w5_terminal_global_scale_sweep(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            score_fn=honest_score,
+            referee_key_fn=referee_key_fn,
+            config=config,
+        )
+        if scale_sweep.selected:
             if register_anytime_best is not None:
-                register_anytime_best(w5_result.winner_pos, "terminal_w5_accept")
-            return w5_result.winner_pos
+                register_anytime_best(
+                    scale_sweep.winner_pos,
+                    f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}",
+                )
+            return scale_sweep.winner_pos.to(device=final_pos.device, dtype=final_pos.dtype)
+        if terminal_winner_reason is not None:
+            if register_anytime_best is not None:
+                register_anytime_best(terminal_winner_pos, terminal_winner_reason)
+            return terminal_winner_pos
         if cluster_selected:
             return final_pos
     except Exception as exc:  # noqa: BLE001 -- terminal W5 cannot sink the returned layout
