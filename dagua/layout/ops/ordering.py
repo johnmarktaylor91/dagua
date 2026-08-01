@@ -683,6 +683,7 @@ def _dagre_graph_from_native_layers(
         node_order=list(range(num_nodes)),
         edges=[],
         num_original_nodes=num_nodes,
+        original_node_ids=list(range(num_nodes)),
         rank_sep=1.0,
         node_sep=1.0,
         edge_sep=1.0,

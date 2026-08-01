@@ -6,10 +6,13 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.eval.competitors.dagre_competitor import DagreCompetitor
 from dagua.eval.equivalence_metrics import anisotropic_procrustes, procrustes_rmsd
+from dagua.eval.graphs import make_clustered_medium
 from dagua.graph import DaguaGraph
 from dagua.layout.engine import layout
 from dagua.layout.ops.pipelines import PIPELINE_REGISTRY, get_pipeline_function
@@ -190,6 +193,40 @@ def test_dagre_cached_reference_layouts_are_similarity_exact() -> None:
         anisotropic = anisotropic_procrustes(positions.numpy(), reference.numpy())
         assert residual < 1.0e-9, graph["name"]
         assert float(anisotropic["anisotropic_rmsd"]) < 1.0e-9, graph["name"]
+
+
+def test_dagre_compound_clustered_medium_matches_reference() -> None:
+    """Pin dense flat-cluster compound ordering against dagre.js.
+
+    Returns
+    -------
+    None
+        ``clustered_medium_5x20`` must remain similarity-exact when the local
+        dagre.js 0.8.5 reference package is available.
+    """
+    competitor = DagreCompetitor()
+    if not competitor.available():
+        pytest.skip("dagre.js reference is unavailable")
+    graph = make_clustered_medium(5, 20, inter_density=0.05, seed=42)
+    reference = competitor.layout(graph, timeout=300.0)
+    assert reference.pos is not None, reference.error
+
+    positions = layout_dagre_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes.to(dtype=torch.float64),
+        nodesep=40.0,
+        ranksep=60.0,
+        edgesep=20.0,
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+    ).to(dtype=torch.float32)
+    residual = procrustes_rmsd(positions.numpy(), reference.pos.numpy())
+    anisotropic = anisotropic_procrustes(positions.numpy(), reference.pos.numpy())
+
+    assert residual < 1.0e-9
+    assert float(anisotropic["anisotropic_rmsd"]) < 1.0e-9
+    torch.testing.assert_close(positions, reference.pos, rtol=0.0, atol=0.0)
 
 
 def test_layout_config_algorithm_dagre_and_hard_pin_work() -> None:
