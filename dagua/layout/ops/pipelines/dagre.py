@@ -14,10 +14,14 @@ from dagua.layout.ops.brandes_koepf import (
 from dagua.layout.ops.dagre import (
     DagreAssignRanks,
     DagreAssignY,
+    DagreBorderSegments,
+    DagreCleanupNestingGraph,
     DagreFinalizeCoordinates,
     DagreMakeAcyclic,
+    DagreNestingGraph,
     DagreNormalizeEdges,
     DagreOrderNodes,
+    DagreParentDummyChains,
     DagrePrepareGraph,
 )
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
@@ -39,6 +43,7 @@ def build_dagre_pipeline(
     edge_sep: float = _DAGRE_DEFAULT_EDGE_SEP,
     acyclicer: str = "dfs",
     config: Optional["LayoutConfig"] = None,
+    compound: bool = False,
 ) -> Pipeline:
     """Build the dagre.js 0.8.5 node-placement pipeline.
 
@@ -68,6 +73,8 @@ def build_dagre_pipeline(
         Feedback-arc heuristic: ``dfs`` or ``greedy``.
     config : LayoutConfig | None, optional
         Optional config used only for resolved hard pins at finalization.
+    compound : bool, default=False
+        Whether to insert dagre.js compound-cluster stages.
 
     Returns
     -------
@@ -75,28 +82,36 @@ def build_dagre_pipeline(
         Seven composable stages: prepare, acyclic, rank, normalize, order,
         Brandes-Koepf x assignment, y assignment, and final transform.
     """
-    return Pipeline(
+    ops = [
+        DagrePrepareGraph(
+            rank_sep=rank_sep,
+            node_sep=node_sep,
+            edge_sep=edge_sep,
+            rankdir=rankdir,
+            ranker=ranker,
+            acyclicer=acyclicer,
+        ),
+        DagreMakeAcyclic(),
+    ]
+    if compound:
+        ops.append(DagreNestingGraph())
+    ops.append(DagreAssignRanks())
+    if compound:
+        ops.append(DagreCleanupNestingGraph())
+    ops.append(DagreNormalizeEdges())
+    if compound:
+        ops.extend([DagreParentDummyChains(), DagreBorderSegments()])
+    ops.extend(
         [
-            DagrePrepareGraph(
-                rank_sep=rank_sep,
-                node_sep=node_sep,
-                edge_sep=edge_sep,
-                rankdir=rankdir,
-                ranker=ranker,
-                acyclicer=acyclicer,
-            ),
-            DagreMakeAcyclic(),
-            DagreAssignRanks(),
-            DagreNormalizeEdges(),
             DagreOrderNodes(),
             BrandesKoepfXAssignment(
                 BrandesKoepfConfig(node_sep=node_sep, edge_sep=edge_sep, align=align)
             ),
             DagreAssignY(),
             DagreFinalizeCoordinates(config=config),
-        ],
-        name="dagre_pipeline",
+        ]
     )
+    return Pipeline(ops, name="dagre_pipeline")
 
 
 def layout_dagre_pipeline(
@@ -117,6 +132,8 @@ def layout_dagre_pipeline(
     acyclicer: str = "dfs",
     fidelity_dtype: Optional[torch.dtype] = None,
     config: Optional["LayoutConfig"] = None,
+    clusters: Optional[dict[str, object]] = None,
+    cluster_parents: Optional[dict[str, Optional[str]]] = None,
 ) -> torch.Tensor:
     """Run the deterministic Dagre layered-layout pipeline.
 
@@ -160,6 +177,10 @@ def layout_dagre_pipeline(
         the public engine converts output to ``float32``.
     config : LayoutConfig | None, optional
         Full layout config used for direction fallback and hard pins.
+    clusters : dict[str, object] | None, optional
+        Declared cluster membership mapping.
+    cluster_parents : dict[str, str | None] | None, optional
+        Declared cluster hierarchy mapping.
 
     Returns
     -------
@@ -184,6 +205,8 @@ def layout_dagre_pipeline(
         num_nodes=num_nodes,
         node_sizes=node_sizes,
         edge_weights=edge_weights,
+        clusters=clusters,
+        cluster_parents=cluster_parents,
     )
     state = SolveState()
     context = RuntimeContext(plan=ExecutionPlan(device="cpu"))
@@ -196,6 +219,7 @@ def layout_dagre_pipeline(
         edge_sep=resolved_edge_sep,
         acyclicer=acyclicer,
         config=config,
+        compound=bool(clusters),
     )
     final_state = pipeline.apply(problem, state, context)
     if final_state.pos is None:
