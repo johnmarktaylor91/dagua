@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 
 from dagua.config import LayoutConfig
@@ -108,6 +109,12 @@ _W5_SMALL_N_ANNEAL_SIGMA_HI_FRACTION = 0.35
 _W5_SMALL_N_ANNEAL_SIGMA_LO_FRACTION = 0.015
 _W5_SMALL_N_ANNEAL_SINGLE_NODE_PROBABILITY = 0.70
 _W5_SMALL_N_ANNEAL_TIE_EPS = 1.0e-6
+_W5_SMACOF_STRESS_MAX_NODES = 256
+_W5_SMACOF_STRESS_MAX_EDGES = 1_024
+_W5_SMACOF_STRESS_ITERATIONS = (20, 40, 60)
+_W5_SMACOF_STRESS_OUTPUT_SCALES = (1.0, 0.9, 1.1)
+_W5_SMACOF_STRESS_TIE_EPS = 1.0e-6
+_W5_SMACOF_STRESS_MIN_DISTANCE = 1.0e-9
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
@@ -1588,6 +1595,65 @@ class W5SmallNAnnealResult:
     accepted_count: int
     skipped_reason: Optional[str]
     candidates: tuple[W5SmallNAnnealCandidate, ...]
+    keepalive: tuple[torch.Tensor, ...] = ()
+
+
+@dataclass(frozen=True)
+class W5SMACOFStressCandidate:
+    """One scored terminal SMACOF stress-polish candidate.
+
+    Parameters
+    ----------
+    iterations : int
+        Number of Guttman-transform SMACOF updates used for the candidate.
+    output_scale : float
+        Uniform multiplier applied around the SMACOF output centroid before
+        scoring. ``1.0`` is the unscaled stress-polish result.
+    score_pair : W5ScorePair, optional
+        Restricted-V3-backed score pair when scoring completed.
+    referee_key : tuple[int, float]
+        Severe-G6 referee key for the candidate.
+    selected : bool
+        Whether this candidate became the SMACOF stress-polish winner.
+    reason : str
+        Stable accept or reject reason for telemetry and tests.
+    """
+
+    iterations: int
+    output_scale: float
+    score_pair: Optional[W5ScorePair]
+    referee_key: Tuple[int, float]
+    selected: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class W5SMACOFStressResult:
+    """Result of the terminal full-pair SMACOF stress-polish arm.
+
+    Parameters
+    ----------
+    winner_pos : torch.Tensor
+        Incumbent positions or the best accepted SMACOF candidate with shape
+        ``[N, 2]``.
+    winner_score_pair : W5ScorePair
+        Score pair for ``winner_pos``.
+    selected : bool
+        Whether any SMACOF candidate strictly improved restricted V3.
+    skipped_reason : str, optional
+        Structural or budget reason the arm skipped before scoring candidates.
+    candidates : tuple[W5SMACOFStressCandidate, ...]
+        Candidate telemetry in evaluation order.
+    keepalive : tuple[torch.Tensor, ...]
+        Scored tensors retained so id-keyed scorer caches cannot collide with
+        recycled Python object ids during the arm.
+    """
+
+    winner_pos: torch.Tensor
+    winner_score_pair: W5ScorePair
+    selected: bool
+    skipped_reason: Optional[str]
+    candidates: tuple[W5SMACOFStressCandidate, ...]
     keepalive: tuple[torch.Tensor, ...] = ()
 
 
@@ -3957,6 +4023,492 @@ def _median_edge_length(
     return max(1.0e-6, fallback if math.isfinite(fallback) else 1.0)
 
 
+def _smacof_target_distances(
+    all_pairs_dist: Any,
+    median_edge_length: float,
+    node_count: int,
+) -> Optional[np.ndarray]:
+    """Return finite SMACOF target distances in layout units.
+
+    Parameters
+    ----------
+    all_pairs_dist : object
+        Precomputed all-pairs hop-distance matrix with shape ``[N, N]``.
+    median_edge_length : float
+        Current median rendered edge length used to convert hops to points.
+    node_count : int
+        Expected number of graph nodes.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Dense target distances with shape ``[N, N]``. ``None`` means the
+        runtime APSP payload cannot safely drive full-pair stress.
+    """
+    if not math.isfinite(float(median_edge_length)) or float(median_edge_length) <= 0.0:
+        return None
+    try:
+        distances = np.asarray(all_pairs_dist, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if distances.shape != (int(node_count), int(node_count)):
+        return None
+    if not np.isfinite(distances).all():
+        return None
+    targets = np.maximum(distances, 0.0) * float(median_edge_length)
+    np.fill_diagonal(targets, 0.0)
+    off_diag = ~np.eye(int(node_count), dtype=bool)
+    if not np.all(targets[off_diag] > 0.0):
+        return None
+    return targets
+
+
+def _smacof_stress_value_np(
+    positions: np.ndarray,
+    target_distances: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """Compute the full-pair weighted SMACOF stress objective.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Current positions with shape ``[N, 2]``.
+    target_distances : numpy.ndarray
+        Desired pair distances with shape ``[N, N]``.
+    weights : numpy.ndarray
+        SMACOF weights with shape ``[N, N]``.
+
+    Returns
+    -------
+    float
+        Weighted stress value. Lower is better.
+    """
+    deltas = positions[:, None, :] - positions[None, :, :]
+    current = np.sqrt(np.sum(deltas * deltas, axis=2))
+    residual = current - target_distances
+    return 0.5 * float(np.sum(weights * residual * residual))
+
+
+def _smacof_guttman_update_np(
+    positions: np.ndarray,
+    target_distances: np.ndarray,
+    weights: np.ndarray,
+    laplacian_pinv: np.ndarray,
+) -> np.ndarray:
+    """Apply one pseudoinverse Guttman-transform SMACOF update.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Current positions with shape ``[N, 2]``.
+    target_distances : numpy.ndarray
+        Desired pair distances with shape ``[N, N]``.
+    weights : numpy.ndarray
+        SMACOF weights with shape ``[N, N]``.
+    laplacian_pinv : numpy.ndarray
+        Pseudoinverse of the weighted Laplacian ``V`` with shape ``[N, N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Centered updated positions with shape ``[N, 2]``.
+    """
+    deltas = positions[:, None, :] - positions[None, :, :]
+    current = np.maximum(
+        np.sqrt(np.sum(deltas * deltas, axis=2)),
+        _W5_SMACOF_STRESS_MIN_DISTANCE,
+    )
+    ratio = np.zeros_like(target_distances)
+    active = weights > 0.0
+    ratio[active] = target_distances[active] / current[active]
+    b_matrix = -weights * ratio
+    np.fill_diagonal(b_matrix, 0.0)
+    np.fill_diagonal(b_matrix, -b_matrix.sum(axis=1))
+    updated = laplacian_pinv @ (b_matrix @ positions)
+    return updated - updated.mean(axis=0, keepdims=True)
+
+
+def _smacof_stress_polish_np(
+    warm_start: np.ndarray,
+    target_distances: np.ndarray,
+    iterations: int,
+) -> Optional[np.ndarray]:
+    """Run warm-start full-pair SMACOF with a precomputed ``pinv(V)``.
+
+    Parameters
+    ----------
+    warm_start : numpy.ndarray
+        Initial positions with shape ``[N, 2]``.
+    target_distances : numpy.ndarray
+        Desired pair distances with shape ``[N, N]``.
+    iterations : int
+        Number of Guttman-transform updates to run.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Polished centered positions with shape ``[N, 2]``. ``None`` means the
+        dense solve became non-finite or singular enough to be unusable.
+    """
+    if int(iterations) <= 0:
+        return None
+    with np.errstate(divide="ignore", invalid="ignore"):
+        weights = np.where(
+            target_distances > 0.0,
+            1.0 / np.square(target_distances),
+            0.0,
+        )
+    np.fill_diagonal(weights, 0.0)
+    if not np.isfinite(weights).all() or float(np.sum(weights)) <= 0.0:
+        return None
+    laplacian = -weights
+    np.fill_diagonal(laplacian, weights.sum(axis=1))
+    try:
+        laplacian_pinv = np.linalg.pinv(laplacian)
+    except np.linalg.LinAlgError:
+        return None
+    current = warm_start.astype(np.float64, copy=True)
+    current -= current.mean(axis=0, keepdims=True)
+    current_stress = _smacof_stress_value_np(current, target_distances, weights)
+    if not math.isfinite(current_stress):
+        return None
+    for _iteration in range(int(iterations)):
+        candidate = _smacof_guttman_update_np(
+            current,
+            target_distances,
+            weights,
+            laplacian_pinv,
+        )
+        if not np.isfinite(candidate).all():
+            return None
+        candidate_stress = _smacof_stress_value_np(candidate, target_distances, weights)
+        if not math.isfinite(candidate_stress):
+            return None
+        if candidate_stress > current_stress + 1.0e-8:
+            blended = candidate
+            for _blend in range(8):
+                blended = 0.5 * (blended + current)
+                candidate_stress = _smacof_stress_value_np(
+                    blended,
+                    target_distances,
+                    weights,
+                )
+                if candidate_stress <= current_stress + 1.0e-8:
+                    candidate = blended
+                    break
+            else:
+                candidate = current
+                candidate_stress = current_stress
+        current = candidate
+        current_stress = candidate_stress
+    return current - current.mean(axis=0, keepdims=True)
+
+
+def _attach_smacof_stress_telemetry(
+    result: W5SMACOFStressResult,
+    config: Optional[LayoutConfig],
+) -> None:
+    """Attach terminal SMACOF stress-polish telemetry to the layout config.
+
+    Parameters
+    ----------
+    result : W5SMACOFStressResult
+        Completed SMACOF stress-polish result.
+    config : LayoutConfig, optional
+        Prepared layout configuration that carries native telemetry.
+
+    Returns
+    -------
+    None
+        The telemetry list is appended in-place when ``config`` is present.
+    """
+    if config is None:
+        return
+    payload = {
+        "event": "native_w5_terminal_smacof_stress_polish",
+        "graph": _graph_name(config),
+        "selected": bool(result.selected),
+        "winner_v3": _finite_v3_score(result.winner_score_pair),
+        "skipped_reason": result.skipped_reason,
+        "candidates": [
+            {
+                "iterations": int(candidate.iterations),
+                "output_scale": float(candidate.output_scale),
+                "v3": (
+                    None if candidate.score_pair is None else _finite_v3_score(candidate.score_pair)
+                ),
+                "referee_key": [
+                    int(candidate.referee_key[0]),
+                    float(candidate.referee_key[1]),
+                ],
+                "selected": bool(candidate.selected),
+                "reason": candidate.reason,
+            }
+            for candidate in result.candidates
+        ],
+    }
+    records = list(getattr(config, "_dagua_native_terminal_smacof_stress_telemetry", []))
+    records.append(payload)
+    setattr(config, "_dagua_native_terminal_smacof_stress_telemetry", records)
+    telemetry_path = os.environ.get("DAGUA_W5_TELEMETRY_PATH")
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def run_w5_terminal_smacof_stress_polish(
+    *,
+    incumbent_pos: torch.Tensor,
+    incumbent_score_pair: W5ScorePair,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    all_pairs_dist: Any,
+    score_fn: Callable[[torch.Tensor], W5ScorePair],
+    referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+    config: Optional[LayoutConfig] = None,
+    iterations: Sequence[int] = _W5_SMACOF_STRESS_ITERATIONS,
+    output_scales: Sequence[float] = _W5_SMACOF_STRESS_OUTPUT_SCALES,
+    max_nodes: int = _W5_SMACOF_STRESS_MAX_NODES,
+    max_edges: int = _W5_SMACOF_STRESS_MAX_EDGES,
+) -> W5SMACOFStressResult:
+    """Run referee-gated terminal full-pair SMACOF stress polish.
+
+    Parameters
+    ----------
+    incumbent_pos : torch.Tensor
+        Current terminal winner positions with shape ``[N, 2]``.
+    incumbent_score_pair : W5ScorePair
+        Restricted-V3-backed score pair for ``incumbent_pos``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    all_pairs_dist : object
+        Precomputed all-pairs hop distances with shape ``[N, N]``.
+    score_fn : Callable[[torch.Tensor], W5ScorePair]
+        Existing W5 scorer backed by the frozen restricted-V3 runtime referee.
+    referee_key_fn : Callable[[torch.Tensor], tuple[int, float]], optional
+        Severe-G6 referee-key scorer. Candidates whose key regresses against
+        the current winner cannot be selected.
+    config : LayoutConfig, optional
+        Prepared layout configuration used for budget checks and telemetry.
+    iterations : Sequence[int], default=_W5_SMACOF_STRESS_ITERATIONS
+        Deterministic SMACOF update counts to checkpoint and score.
+    output_scales : Sequence[float], default=_W5_SMACOF_STRESS_OUTPUT_SCALES
+        Uniform scale variants scored around each SMACOF checkpoint centroid.
+    max_nodes : int, default=_W5_SMACOF_STRESS_MAX_NODES
+        Structural full-pair node cap.
+    max_edges : int, default=_W5_SMACOF_STRESS_MAX_EDGES
+        Structural edge cap for bounded terminal work.
+
+    Returns
+    -------
+    W5SMACOFStressResult
+        Incumbent or strictly better restricted-V3 SMACOF winner. Ties remain
+        on the incumbent.
+    """
+    node_count = int(incumbent_pos.shape[0])
+    edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+
+    def skipped(reason: str) -> W5SMACOFStressResult:
+        """Build and attach a no-op SMACOF result.
+
+        Parameters
+        ----------
+        reason : str
+            Stable skip reason.
+
+        Returns
+        -------
+        W5SMACOFStressResult
+            No-op SMACOF stress-polish result.
+        """
+        result = W5SMACOFStressResult(
+            winner_pos=incumbent_pos,
+            winner_score_pair=incumbent_score_pair,
+            selected=False,
+            skipped_reason=reason,
+            candidates=(),
+            keepalive=(incumbent_pos,),
+        )
+        _attach_smacof_stress_telemetry(result, config)
+        return result
+
+    incumbent_v3 = _finite_v3_score(incumbent_score_pair)
+    if _w5_disabled_by_env():
+        return skipped("disabled_by_env")
+    if node_count < 3:
+        return skipped("too_few_nodes")
+    if node_count > int(max_nodes):
+        return skipped("too_many_nodes")
+    if edge_count <= 0:
+        return skipped("no_edges")
+    if edge_count > int(max_edges):
+        return skipped("too_many_edges")
+    if _weak_component_count(edge_index, node_count) != 1:
+        return skipped("disconnected_components")
+    if incumbent_v3 is None:
+        return skipped("missing_incumbent_v3")
+    if remaining_dwu(config) is None:
+        return skipped("no_deterministic_budget")
+    if _finisher_slice_s(config) is None:
+        return skipped("no_budget")
+
+    median_edge = _median_edge_length(incumbent_pos, edge_index, node_sizes)
+    target_distances = _smacof_target_distances(all_pairs_dist, median_edge, node_count)
+    if target_distances is None:
+        return skipped("invalid_distances")
+
+    warm_start = incumbent_pos.detach().to(device="cpu", dtype=torch.float64).numpy()
+    best_pos = incumbent_pos
+    best_pair = incumbent_score_pair
+    best_v3 = float(incumbent_v3)
+    best_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    best_index: Optional[int] = None
+    keepalive: list[torch.Tensor] = [incumbent_pos]
+    candidates: list[W5SMACOFStressCandidate] = []
+
+    for raw_iterations in iterations:
+        iteration_count = int(raw_iterations)
+        if iteration_count <= 0:
+            continue
+        smacof_np = _smacof_stress_polish_np(warm_start, target_distances, iteration_count)
+        if smacof_np is None:
+            candidates.append(
+                W5SMACOFStressCandidate(
+                    iterations=iteration_count,
+                    output_scale=1.0,
+                    score_pair=None,
+                    referee_key=(0, float("-inf")),
+                    selected=False,
+                    reason="smacof_failed",
+                )
+            )
+            continue
+        smacof_pos = torch.from_numpy(smacof_np).to(
+            device=incumbent_pos.device,
+            dtype=incumbent_pos.dtype,
+        )
+        if _is_degenerate(smacof_pos, node_sizes.to(device=smacof_pos.device)):
+            candidates.append(
+                W5SMACOFStressCandidate(
+                    iterations=iteration_count,
+                    output_scale=1.0,
+                    score_pair=None,
+                    referee_key=(0, float("-inf")),
+                    selected=False,
+                    reason="pre_score_degenerate",
+                )
+            )
+            continue
+        for raw_scale in output_scales:
+            output_scale = float(raw_scale)
+            if not math.isfinite(output_scale) or output_scale <= 0.0:
+                continue
+            candidate_pos = (
+                smacof_pos
+                if abs(output_scale - 1.0) <= 1.0e-12
+                else _scale_positions_about_centroid(smacof_pos, output_scale)
+            )
+            keepalive.append(candidate_pos)
+            if _is_degenerate(candidate_pos, node_sizes.to(device=candidate_pos.device)):
+                candidates.append(
+                    W5SMACOFStressCandidate(
+                        iterations=iteration_count,
+                        output_scale=output_scale,
+                        score_pair=None,
+                        referee_key=(0, float("-inf")),
+                        selected=False,
+                        reason="pre_score_degenerate",
+                    )
+                )
+                continue
+            try:
+                score_pair = score_fn(candidate_pos)
+                referee_key = (
+                    referee_key_fn(candidate_pos) if referee_key_fn is not None else best_key
+                )
+            except Exception as exc:  # noqa: BLE001 -- terminal SMACOF is optional candidate work
+                if is_worker_timeout_like_exception(exc):
+                    raise
+                candidates.append(
+                    W5SMACOFStressCandidate(
+                        iterations=iteration_count,
+                        output_scale=output_scale,
+                        score_pair=None,
+                        referee_key=(0, float("-inf")),
+                        selected=False,
+                        reason="score_exception",
+                    )
+                )
+                continue
+            candidate_v3 = _finite_v3_score(score_pair)
+            reason = "missing_v3"
+            selected = False
+            if referee_key < best_key:
+                reason = "referee_key_regressed"
+            elif candidate_introduces_champion_ineligible_flag(
+                score_pair.champion_ineligibility_flags,
+                best_pair.champion_ineligibility_flags,
+            ):
+                reason = "introduced_champion_ineligible_flag"
+            elif candidate_v3 is None:
+                reason = "missing_v3"
+            elif float(candidate_v3) > best_v3 + _W5_SMACOF_STRESS_TIE_EPS:
+                best_pos = candidate_pos
+                best_pair = score_pair
+                best_v3 = float(candidate_v3)
+                best_key = referee_key
+                best_index = len(candidates)
+                selected = True
+                reason = "v3_argmax"
+            else:
+                reason = "does_not_improve_v3"
+            candidates.append(
+                W5SMACOFStressCandidate(
+                    iterations=iteration_count,
+                    output_scale=output_scale,
+                    score_pair=score_pair,
+                    referee_key=referee_key,
+                    selected=selected,
+                    reason=reason,
+                )
+            )
+
+    if best_index is not None:
+        candidates = [
+            W5SMACOFStressCandidate(
+                iterations=candidate.iterations,
+                output_scale=candidate.output_scale,
+                score_pair=candidate.score_pair,
+                referee_key=candidate.referee_key,
+                selected=index == best_index,
+                reason=(
+                    "v3_argmax"
+                    if index == best_index
+                    else (
+                        "superseded_v3_argmax"
+                        if candidate.reason == "v3_argmax"
+                        else candidate.reason
+                    )
+                ),
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+
+    result = W5SMACOFStressResult(
+        winner_pos=best_pos,
+        winner_score_pair=best_pair,
+        selected=best_index is not None,
+        skipped_reason=None if candidates else "no_candidates",
+        candidates=tuple(candidates),
+        keepalive=tuple(keepalive),
+    )
+    _attach_smacof_stress_telemetry(result, config)
+    return result
+
+
 def _can_afford_small_n_anneal_score(
     *,
     config: Optional[LayoutConfig],
@@ -5501,6 +6053,8 @@ __all__ = [
     "W5PhaseTiming",
     "W5ScorePair",
     "W5Seed",
+    "W5SMACOFStressCandidate",
+    "W5SMACOFStressResult",
     "W5SmallNAnnealCandidate",
     "W5SmallNAnnealResult",
     "ClusterTighteningCandidate",
@@ -5512,6 +6066,7 @@ __all__ = [
     "make_w5_skip_result",
     "run_w5_finisher",
     "run_w5_terminal_global_scale_sweep",
+    "run_w5_terminal_smacof_stress_polish",
     "run_w5_terminal_small_n_anneal",
     "w5_honest_axes_from_metrics",
     "w5_dominates",

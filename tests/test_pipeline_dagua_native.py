@@ -424,6 +424,149 @@ def test_gate_row_deadline_runs_real_pipeline_not_prelayout_fallback(
     assert not torch.equal(actual, fallback)
 
 
+def test_terminal_smacof_stress_polish_accepts_v3_improvement() -> None:
+    """Terminal SMACOF keeps a strict restricted-V3 improvement."""
+    from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5ScorePair,
+        run_w5_terminal_smacof_stress_polish,
+    )
+
+    config = LayoutConfig()
+    install_budget_ledger(config, 120.0, return_reserve_dwu=0.0)
+    incumbent = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 0.1, dtype=torch.float32)
+    all_pairs = [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Score every non-incumbent tensor as an honest V3 improvement."""
+        score = 10.0 if torch.allclose(pos.detach().cpu(), incumbent) else 11.0
+        return W5ScorePair(
+            directed=score,
+            undirected=score,
+            v3=score,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=score_fn(incumbent),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=all_pairs,
+        score_fn=score_fn,
+        referee_key_fn=lambda pos: (1, -0.0),
+        config=config,
+        iterations=(20,),
+        output_scales=(1.0,),
+    )
+
+    assert result.selected
+    assert result.skipped_reason is None
+    assert result.candidates[0].reason == "v3_argmax"
+    assert not torch.equal(result.winner_pos, incumbent)
+
+
+def test_terminal_smacof_stress_polish_rejects_collapsed_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal SMACOF rejects a collapsed candidate before scoring."""
+    from dagua.layout.ops.pipelines import native_finisher
+    from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+
+    config = LayoutConfig()
+    install_budget_ledger(config, 120.0, return_reserve_dwu=0.0)
+    incumbent = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0, dtype=torch.float32)
+    all_pairs = [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+
+    def collapsed_smacof(*args: object, **kwargs: object) -> object:
+        """Return a collapsed layout to exercise the pre-score guard."""
+        del args, kwargs
+        return torch.zeros((4, 2), dtype=torch.float64).numpy()
+
+    def fail_score(pos: torch.Tensor) -> W5ScorePair:
+        """Fail if the collapsed candidate reaches the scorer."""
+        if not torch.allclose(pos.detach().cpu(), incumbent):
+            raise AssertionError("collapsed SMACOF candidate should not be scored")
+        return W5ScorePair(
+            directed=10.0,
+            undirected=10.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    monkeypatch.setattr(native_finisher, "_smacof_stress_polish_np", collapsed_smacof)
+
+    result = native_finisher.run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=fail_score(incumbent),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=all_pairs,
+        score_fn=fail_score,
+        referee_key_fn=lambda pos: (1, -0.0),
+        config=config,
+        iterations=(20,),
+        output_scales=(1.0,),
+    )
+
+    assert not result.selected
+    assert result.candidates[0].reason == "pre_score_degenerate"
+    assert torch.equal(result.winner_pos, incumbent)
+
+
+def test_terminal_smacof_stress_polish_skips_disconnected_graph() -> None:
+    """Terminal SMACOF only runs on connected full-pair stress problems."""
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5ScorePair,
+        run_w5_terminal_smacof_stress_polish,
+    )
+
+    incumbent = torch.tensor([[0.0, 0.0], [2.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 0.1, dtype=torch.float32)
+    incumbent_pair = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    result = run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=incumbent_pair,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=[[0.0, 1.0, 3.0], [1.0, 0.0, 3.0], [3.0, 3.0, 0.0]],
+        score_fn=lambda pos: incumbent_pair,
+        referee_key_fn=lambda pos: (1, -0.0),
+    )
+
+    assert not result.selected
+    assert result.skipped_reason == "disconnected_components"
+    assert result.candidates == ()
+
+
 def test_worker_timeout_returns_registered_prelayout_fallback(
     monkeypatch: Any,
 ) -> None:
