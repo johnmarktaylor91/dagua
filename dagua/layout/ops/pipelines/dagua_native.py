@@ -6383,6 +6383,9 @@ def _terminal_w5_polish(
             score_fn=honest_score,
             referee_key_fn=referee_key_fn,
             config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
         )
         if scale_sweep.selected:
             terminal_winner_pos = scale_sweep.winner_pos.to(
@@ -6400,6 +6403,9 @@ def _terminal_w5_polish(
             score_fn=honest_score,
             referee_key_fn=referee_key_fn,
             config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
         )
         if smacof_stress.selected:
             terminal_winner_pos = smacof_stress.winner_pos.to(
@@ -6418,6 +6424,9 @@ def _terminal_w5_polish(
             config=config,
             has_clusters=bool(clusters),
             has_weights=edge_weights is not None,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
         )
         if small_n_anneal.selected:
             if register_anytime_best is not None:

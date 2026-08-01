@@ -1346,9 +1346,12 @@ def _save_tensor_atomic(path: Path, tensor: torch.Tensor) -> None:
         prefix=f"{path.stem}.",
         suffix=".tmp",
     )
-    os.close(file_descriptor)
     try:
-        torch.save(tensor, temp_path)
+        with os.fdopen(file_descriptor, "wb") as file_obj:
+            # Passing an open file keeps PyTorch's zip archive root stable
+            # across random atomic temp names, so deterministic tensor values
+            # produce byte-identical saved position files.
+            torch.save(tensor, file_obj)
         Path(temp_path).replace(path)
     except BaseException:
         Path(temp_path).unlink(missing_ok=True)
