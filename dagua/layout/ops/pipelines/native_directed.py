@@ -84,6 +84,12 @@ DIRECTED_DOT_ORDER_MAX_CANDIDATES = 3
 DIRECTED_DOT_ORDER_PRIOR_S = 20.0
 DIRECTED_DOT_ORDER_MAX_EXPANDED_NODES = 6000
 DIRECTED_DOT_ORDER_MAX_EXPANSION_RATIO = 8.0
+DIRECTED_DAGRE_COMPOUND_MAX_NODES = 1500
+DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS = (0.6,)
+DIRECTED_DAGRE_COMPOUND_NODE_SEP = 40.0
+DIRECTED_DAGRE_COMPOUND_RANK_SEP = 60.0
+DIRECTED_DAGRE_COMPOUND_EDGE_SEP = 20.0
+DIRECTED_DAGRE_COMPOUND_PRIOR_S = 20.0
 DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
 DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
 DIRECTED_NESTED_STRESS_MIN_NODES = 6
@@ -143,6 +149,15 @@ class _DotOrderSpec:
     layering: str
     xcoord: str
     warm_start: bool
+
+
+@dataclass(frozen=True)
+class _DagreCompoundCandidate:
+    """One packaged compound-dagre directed candidate."""
+
+    pos: torch.Tensor
+    y_compaction: float
+    target_edge_length: float
 
 
 @dataclass(frozen=True)
@@ -3039,6 +3054,322 @@ def _scale_to_median_edge_length(
     return centered * (max(float(target_length), 1.0e-6) / current)
 
 
+def _median_drawn_edge_length(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    fallback: float,
+) -> float:
+    """Return a finite median edge length for candidate packaging.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Candidate or incumbent positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    fallback : float
+        Positive fallback length when no valid edge span is available.
+
+    Returns
+    -------
+    float
+        Positive median drawn edge length in layout units.
+    """
+    out = positions.detach().to(device="cpu", dtype=torch.float32)
+    if out.numel() == 0 or edge_index.numel() == 0:
+        return max(float(fallback), 1.0e-6)
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    valid = (
+        (edges[0] >= 0)
+        & (edges[0] < out.shape[0])
+        & (edges[1] >= 0)
+        & (edges[1] < out.shape[0])
+        & (edges[0] != edges[1])
+    )
+    if not bool(valid.any()):
+        return max(float(fallback), 1.0e-6)
+    valid_edges = edges[:, valid]
+    lengths = torch.linalg.vector_norm(out[valid_edges[0]] - out[valid_edges[1]], dim=1)
+    finite = lengths[torch.isfinite(lengths) & (lengths > 1.0e-6)]
+    if finite.numel() == 0:
+        return max(float(fallback), 1.0e-6)
+    return max(float(finite.median().item()), 1.0e-6)
+
+
+def _directed_dagre_compound_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the compound-dagre arm should construct candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed portfolio problem with optional declared cluster metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` only for bounded, declared-cluster, acyclic directed rows.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if (
+        n <= 0
+        or n > DIRECTED_DAGRE_COMPOUND_MAX_NODES
+        or edge_count == 0
+        or not bool(problem.clusters)
+    ):
+        return False
+    structure = problem.structure
+    if structure is not None:
+        if not bool(
+            getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+        ):
+            return False
+    return _directed_edges_are_acyclic(problem.edge_index, n)
+
+
+def _build_dagre_compound_candidate(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    y_compaction: float,
+) -> Optional[_DagreCompoundCandidate]:
+    """Build one y-compacted compound-dagre candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Declared-cluster directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration used for direction fallback.
+    y_compaction : float
+        Multiplicative factor applied to dagre's vertical coordinates around
+        the candidate center.
+
+    Returns
+    -------
+    _DagreCompoundCandidate or None
+        Packaged candidate when dagre returns finite positions, otherwise
+        ``None``.
+    """
+    if not _directed_dagre_compound_enabled(problem):
+        return None
+    from dagua.layout.ops.pipelines.dagre import layout_dagre_pipeline
+
+    edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+    node_sizes = (
+        None
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    edge_weights = (
+        None
+        if problem.edge_weights is None
+        else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    rankdir = str(problem.direction or getattr(config, "direction", "TB"))
+    raw = layout_dagre_pipeline(
+        edge_index=edge_index,
+        num_nodes=int(problem.num_nodes),
+        node_sizes=node_sizes,
+        seed=int(problem.seed),
+        edge_weights=edge_weights,
+        rankdir=rankdir,
+        nodesep=DIRECTED_DAGRE_COMPOUND_NODE_SEP,
+        ranksep=DIRECTED_DAGRE_COMPOUND_RANK_SEP,
+        edgesep=DIRECTED_DAGRE_COMPOUND_EDGE_SEP,
+        config=config,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+    )
+    candidate = raw.detach().to(device="cpu", dtype=torch.float32).clone()
+    if candidate.shape != (int(problem.num_nodes), 2) or not bool(torch.isfinite(candidate).all()):
+        return None
+
+    center = candidate.mean(dim=0, keepdim=True)
+    candidate[:, 1] = center[0, 1] + (candidate[:, 1] - center[0, 1]) * float(y_compaction)
+    fallback = _median_node_box_diagonal(problem.node_sizes, fallback=10.0) * 4.0
+    target_length = _median_drawn_edge_length(
+        incumbent.detach().to(device="cpu", dtype=torch.float32),
+        edge_index,
+        fallback,
+    )
+    packaged = _scale_to_median_edge_length(candidate, edge_index, target_length)
+    packaged = packaged + incumbent.detach().to(device="cpu", dtype=torch.float32).mean(
+        dim=0,
+        keepdim=True,
+    )
+    if not bool(torch.isfinite(packaged).all()):
+        return None
+    return _DagreCompoundCandidate(
+        pos=packaged,
+        y_compaction=float(y_compaction),
+        target_edge_length=target_length,
+    )
+
+
+def _directed_dagre_compound_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> Dict[str, _DagreCompoundCandidate]:
+    """Return all bounded y-compacted compound-dagre candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Declared-cluster directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration used for direction fallback.
+
+    Returns
+    -------
+    dict[str, _DagreCompoundCandidate]
+        Candidate payloads keyed by portfolio arm name.
+    """
+    candidates: Dict[str, _DagreCompoundCandidate] = {}
+    for y_compaction in DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS:
+        candidate = _build_dagre_compound_candidate(problem, incumbent, config, y_compaction)
+        if candidate is None:
+            continue
+        name = f"dagre_compound_y{float(y_compaction):g}"
+        candidates[name] = candidate
+    return candidates
+
+
+def _register_dagre_compound_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    positions: Dict[str, torch.Tensor],
+    scores: Dict[str, float],
+    cluster_score_telemetry: Dict[str, _DirectedClusterScoreTelemetry],
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    arm_timings: Dict[str, Tuple[float, float]],
+) -> None:
+    """Register only referee-admissible compound-dagre candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Declared-cluster directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with arm telemetry.
+    positions : dict[str, torch.Tensor]
+        Candidate registry updated in place for admitted winners only.
+    scores : dict[str, float]
+        Full-ruler score registry updated for admitted candidates only.
+    cluster_score_telemetry : dict[str, _DirectedClusterScoreTelemetry]
+        Clustered referee telemetry updated for admitted candidates.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    arm_timings : dict[str, tuple[float, float]]
+        Per-arm timing registry updated for admitted candidates.
+
+    Returns
+    -------
+    None
+        Candidate state and telemetry are updated in place.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    telemetry = list(getattr(config, "_dagua_native_dagre_compound_telemetry", []))
+    setattr(config, "_dagua_native_dagre_compound_mechanism_fired", False)
+    setattr(config, "_dagua_native_dagre_compound_dual_admissible", False)
+    if not _portfolio_has_budget(config, min_remaining_s=2.0):
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    predicted_cost = _directed_opaque_arm_cost(
+        problem,
+        config,
+        DIRECTED_DAGRE_COMPOUND_PRIOR_S,
+    )
+    predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
+    if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
+        config,
+        predicted_cost,
+        "optional_directed_dagre_compound",
+    ):
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    candidate_started = time.perf_counter()
+    raw_candidates = _directed_dagre_compound_candidates(problem, incumbent, config)
+    mechanism_fired = bool(raw_candidates)
+    setattr(config, "_dagua_native_dagre_compound_mechanism_fired", mechanism_fired)
+    if not raw_candidates:
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    incumbent_telemetry = cluster_score_telemetry.get("incumbent")
+    if incumbent_telemetry is None:
+        incumbent_score, incumbent_telemetry = _score_directed_candidate_referee_payload(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+        scores["incumbent"] = incumbent_score
+        if incumbent_telemetry is not None:
+            cluster_score_telemetry["incumbent"] = incumbent_telemetry
+    if incumbent_telemetry is None:
+        telemetry.append({"mechanism_fired": mechanism_fired, "dual_admissible": False})
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    any_dual_admissible = False
+    for name, candidate in raw_candidates.items():
+        if not _admit_v3_referee_score(problem, config, mandatory_floor=False):
+            continue
+        score, score_telemetry = _score_directed_candidate_referee_payload(
+            candidate.pos,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+        dual_admissible = (
+            score_telemetry is not None
+            and _directed_cluster_candidate_is_dual_admissible(
+                score_telemetry,
+                incumbent_telemetry,
+            )
+        )
+        any_dual_admissible = any_dual_admissible or dual_admissible
+        telemetry.append(
+            {
+                "name": name,
+                "mechanism_fired": mechanism_fired,
+                "dual_admissible": dual_admissible,
+                "selected": dual_admissible,
+                "y_compaction": candidate.y_compaction,
+                "target_edge_length": candidate.target_edge_length,
+                "incumbent_extended": incumbent_telemetry.extended_score,
+                "incumbent_v3_tiered": incumbent_telemetry.v3_tiered,
+                "candidate_extended": score,
+                "candidate_v3_tiered": (
+                    float("-inf") if score_telemetry is None else score_telemetry.v3_tiered
+                ),
+            }
+        )
+        if not dual_admissible or score_telemetry is None:
+            continue
+        positions[name] = candidate.pos
+        scores[name] = score
+        cluster_score_telemetry[name] = score_telemetry
+        arm_timings[name] = (candidate_started, time.perf_counter())
+    setattr(config, "_dagua_native_dagre_compound_dual_admissible", any_dual_admissible)
+    setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+
+
 def _d4_oriented_by_declared_flow(candidate: torch.Tensor, problem: LayoutProblem) -> torch.Tensor:
     """Return the D4 transform with the strongest declared-flow properties.
 
@@ -5436,6 +5767,22 @@ def layout_native_directed_portfolio(
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed YifanHu challenger failed", exc_info=True)
+
+    try:
+        _register_dagre_compound_candidates(
+            problem=problem,
+            incumbent=incumbent,
+            config=config,
+            positions=positions,
+            scores=scores,
+            cluster_score_telemetry=cluster_score_telemetry,
+            cluster_ids=cluster_ids,
+            all_pairs_dist=all_pairs_dist,
+            arm_timings=arm_timings,
+        )
+    except Exception as exc:  # noqa: BLE001 -- referee-gated arm cannot sink incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed dagre-compound challenger failed", exc_info=True)
 
     proxy_scores = {
         name: _proxy_directed_candidate(candidate, problem, cluster_ids, all_pairs_dist)
