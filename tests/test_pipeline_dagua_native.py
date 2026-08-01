@@ -668,7 +668,7 @@ def test_terminal_w5_incumbent_is_final_return_tensor_and_runs_once(
         ksm=0.922,
         edge_length=0.876,
     )
-    assert captured["seed_names"][0] == "terminal_final"
+    assert "terminal_final" in captured["seed_names"]
     assert "candidate_a" in captured["seed_names"]
 
 
@@ -866,6 +866,11 @@ def test_terminal_w5_preserves_compliant_final_tensor_when_candidate_breaches_re
         )
 
     monkeypatch.setattr(native, "_w5_referee_key_fn", fake_referee_key_fn)
+    monkeypatch.setattr(
+        native,
+        "_terminal_weighted_stress_majorization_candidate",
+        lambda **kwargs: None,
+    )
     monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
 
     actual = _terminal_w5_polish(
@@ -880,6 +885,108 @@ def test_terminal_w5_preserves_compliant_final_tensor_when_candidate_breaches_re
 
     assert winner_pair.directed > W5ScorePair(directed=90.0, undirected=94.0).directed
     assert torch.equal(actual, terminal)
+
+
+def test_terminal_weighted_stress_candidate_can_replace_breaching_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal weighted-stress coverage can close a severe-G6 incumbent breach."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+        make_w5_skip_result,
+    )
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    _candidate_a, terminal, _w5_pos = _terminal_w5_fixture_tensors()
+    weighted_stress = terminal + torch.tensor([0.0, 50.0])
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_weights = torch.tensor([7.0, 1.0, 0.25], dtype=torch.float32)
+    node_sizes = torch.full((4, 2), 1.0)
+    config = _terminal_w5_config()
+    config._dagua_native_terminal_w5_owner = True
+    captured: dict[str, torch.Tensor] = {}
+
+    _install_terminal_w5_metric_fixture(monkeypatch, terminal, weighted_stress, weighted_stress)
+    monkeypatch.setattr(native_finisher, "w5_predicted_skip_reason", lambda *args: None)
+    monkeypatch.setattr(native_finisher, "_finisher_slice_s", lambda config: 1.0)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", lambda *args: None)
+    monkeypatch.setattr(
+        native,
+        "_terminal_weighted_stress_majorization_candidate",
+        lambda **kwargs: weighted_stress,
+    )
+
+    def fake_referee_key_fn(
+        *,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: Optional[torch.Tensor],
+        edge_weights: Optional[torch.Tensor],
+        direction: str,
+        all_pairs_dist: Optional[object] = None,
+        result_fn: Optional[object] = None,
+    ) -> object:
+        """Return severe-G6 keys for the terminal weighted-stress fixture."""
+        del edge_index, num_nodes, node_sizes, edge_weights, direction, all_pairs_dist, result_fn
+
+        def referee_key(pos: torch.Tensor) -> tuple[int, float]:
+            """Return compliant only for the weighted-stress candidate."""
+            return (1, -0.0) if torch.equal(pos.detach().cpu(), weighted_stress) else (0, -0.25)
+
+        return referee_key
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
+    ) -> W5FinisherResult:
+        """Capture the weighted-stress incumbent and return a no-op result."""
+        del node_sizes, score_fn, accept_margin, incumbent_axes, shape_geometry, referee_key_fn
+        captured["incumbent"] = incumbent_pos.detach().cpu()
+        return make_w5_skip_result(
+            incumbent_pos=incumbent_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            reason="unit_noop",
+            edge_index=edge_index,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+
+    monkeypatch.setattr(native, "_w5_referee_key_fn", fake_referee_key_fn)
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    actual = _terminal_w5_polish(
+        terminal,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        edge_weights=edge_weights,
+        config=config,
+        structure=None,
+        direction="TB",
+    )
+
+    assert torch.equal(captured["incumbent"], weighted_stress)
+    assert torch.equal(actual, weighted_stress)
 
 
 def test_terminal_w5_noops_on_fidelity_no_budget_and_trivial_graph(
