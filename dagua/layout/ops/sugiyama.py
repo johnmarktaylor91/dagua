@@ -23,7 +23,6 @@ from typing import (
     Set,
     Tuple,
     Union,
-    cast,
 )
 
 import torch
@@ -77,55 +76,6 @@ _SUGIYAMA_GRAPHVIZ_TYPED_NODE_SIZES_KEY = "sugiyama_graphviz_typed_node_sizes"
 _SUGIYAMA_GRAPHVIZ_EDGE_LABEL_SIZES_KEY = "sugiyama_graphviz_edge_label_sizes"
 _SUGIYAMA_GRAPHVIZ_CLUSTER_RANKS_KEY = "sugiyama_graphviz_cluster_ranks"
 _SUGIYAMA_GRAPHVIZ_CLUSTER_LABEL_WIDTHS_KEY = "sugiyama_graphviz_cluster_label_widths"
-_SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY = "sugiyama_graphviz_expected_x_inventory"
-# Admission requires a post-simplex C trace, not only endpoint parity. The
-# transformer endpoint digest remains on the Round 6 solver because its exact
-# tree path changes the strict crossing result from four to five.
-_GRAPHVIZ_705_SIMPLEX_CERTIFIED_DIGESTS = frozenset(
-    {
-        (
-            "dddec78af0191d8bf6f657e0087cfe1e"  # pragma: allowlist secret
-            "ba549d0c120b58464b6b7d61107a57af"  # pragma: allowlist secret
-        ),
-        (
-            "626e87e891e6c656be60d855ad71c6cd"  # pragma: allowlist secret
-            "4aa14bf914828bf6c53cd231998b2b34"  # pragma: allowlist secret
-        ),
-        (
-            "3f2c998d0ee341ae054d6074381d0540"  # pragma: allowlist secret
-            "b3fb8f2452311adf6eda364f90ba9416"  # pragma: allowlist secret
-        ),
-        (
-            "a93d14d120cc13196f06c0bc06df7ca3"  # pragma: allowlist secret
-            "3b3d88e316b82ab39c5ea53d02714092"  # pragma: allowlist secret
-        ),
-        (
-            "b912830a888ce9d4e92a346bef4e16d9"  # pragma: allowlist secret
-            "bac9fe2290c33557ee474850ba316b9d"  # pragma: allowlist secret
-        ),
-        (
-            "72ebc06e8da69f498a0e6fc72be17bd0"  # pragma: allowlist secret
-            "2f090c29e0baa910f77b66bff047c5a5"  # pragma: allowlist secret
-        ),
-        (
-            "d773c924f01dee2a1179506943bd5aafa"  # pragma: allowlist secret
-            "b405a9ba07f36a8c40c0294a5eb08bc"  # pragma: allowlist secret
-        ),
-        # F2 fix round: hierarchical_residual_stage, endpoint parity proven
-        # against the instrumented dot 7.0.5 DOT-input-frame x trace.
-        (
-            "c9ee9c0eaa690fd59c3ca593c3ade961"  # pragma: allowlist secret
-            "245f8c2ae910e0f8d36012f36b4842ce"  # pragma: allowlist secret
-        ),
-        # F2 fix round: cluster_member_style_stress, endpoint parity proven
-        # against the instrumented dot 7.0.5 DOT-input-frame x trace.
-        (
-            "38b3fe73fc660ea1ec32d61af50ee8c1"  # pragma: allowlist secret
-            "68f063043f1e87de5fbf800c7e45aced"  # pragma: allowlist secret
-        ),
-    }
-)
-
 _GRAPHVIZ_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_DEFAULT_NODE_SEP_POINTS = 18.0
 # ``splines.c selfRightSpace()`` reserves a fixed SELF_EDGE_SIZE=18 points of
@@ -2119,126 +2069,6 @@ def _expand_long_edges_with_dummy_nodes(
         if use_graphviz_edge_order and not has_label:
             representative_chains[edge_pair] = (list(path), segment_indices)
 
-    normalized_clusters = _normalize_graphviz_clusters(
-        clusters=clusters,
-        num_nodes=num_original_nodes,
-    )
-    if (
-        num_original_nodes == 19
-        and len(normalized_clusters) == 7
-        and edge_count == 24
-        and len(expanded_sources) == 32
-    ):
-        # Recursive ``clone_vn`` expansion for the fail-closed hybrid
-        # inventory. The C trace replaces the two partial intercluster chains
-        # with three complete parallel chains into ``merge``.
-        target_edges = [
-            (0, 1),
-            (4, 13),
-            (13, 14),
-            (12, 14),
-            (12, 15),
-            (10, 36),
-            (35, 36),
-            (34, 35),
-            (33, 34),
-            (32, 33),
-            (8, 31),
-            (30, 31),
-            (29, 30),
-            (28, 29),
-            (27, 28),
-            (11, 12),
-            (11, 32),
-            (11, 27),
-            (11, 26),
-            (25, 26),
-            (24, 25),
-            (23, 24),
-            (22, 23),
-            (6, 22),
-            (4, 7),
-            (4, 5),
-            (4, 9),
-            (4, 21),
-            (20, 21),
-            (19, 20),
-            (1, 2),
-            (2, 3),
-            (3, 12),
-            (3, 19),
-            (5, 6),
-            (7, 8),
-            (9, 10),
-            (15, 17),
-            (15, 16),
-            (16, 18),
-            (17, 18),
-        ]
-        virtual_lineage = {
-            **{node: (3, 4) for node in range(19, 22)},
-            **{node: (6, 11) for node in range(22, 27)},
-            **{node: (8, 11) for node in range(27, 32)},
-            **{node: (10, 11) for node in range(32, 37)},
-        }
-        input_pairs = list(zip(sources, targets))
-
-        def target_origin(tail: int, head: int) -> int:
-            """Return the oriented input edge represented by a traced edge.
-
-            Parameters
-            ----------
-            tail : int
-                Traced expanded tail id.
-            head : int
-                Traced expanded head id.
-
-            Returns
-            -------
-            int
-                Input edge index used as ``ED_to_orig`` lineage.
-            """
-            lineage = virtual_lineage.get(tail, virtual_lineage.get(head, (tail, head)))
-            if lineage in input_pairs:
-                return input_pairs.index(lineage)
-            return input_pairs.index((lineage[1], lineage[0]))
-
-        expanded_sources = [tail for tail, _ in target_edges]
-        expanded_targets = [head for _, head in target_edges]
-        expanded_edge_origins = [target_origin(tail, head) for tail, head in target_edges]
-        expanded_weight_values = [
-            2.0 if (tail, head) == (4, 7) else 1.0 for tail, head in target_edges
-        ]
-        mincross_edge_penalties = [
-            2 if (tail, head) == (4, 7) else 1 for tail, head in target_edges
-        ]
-        next_dummy_index = 37
-        dummy_sizes = [[20.0, 0.0] for _ in range(18)]
-        graphviz_left_widths = graphviz_left_widths[:num_original_nodes] + [10.0] * 18
-        graphviz_right_widths = graphviz_right_widths[:num_original_nodes] + [10.0] * 18
-
-    if (
-        num_original_nodes == 100
-        and len(normalized_clusters) == 1
-        and next(iter(normalized_clusters.values()), ()) == tuple(range(5))
-        and len(expanded_sources) == 752
-    ):
-        # The independently traced dependency inventory expands its core
-        # cluster before restoring external chains. The two short core-to-pkg1
-        # representatives remain on the discarded skeleton and never enter
-        # the root fast graph.
-        discarded_pairs = {(2, 6), (3, 6)}
-        retained = [
-            index
-            for index, pair in enumerate(zip(expanded_sources, expanded_targets))
-            if pair not in discarded_pairs
-        ]
-        expanded_sources = [expanded_sources[index] for index in retained]
-        expanded_targets = [expanded_targets[index] for index in retained]
-        expanded_edge_origins = [expanded_edge_origins[index] for index in retained]
-        expanded_weight_values = [expanded_weight_values[index] for index in retained]
-        mincross_edge_penalties = [mincross_edge_penalties[index] for index in retained]
-
     if dummy_sizes:
         expanded_node_sizes = torch.cat(
             [
@@ -3095,26 +2925,6 @@ def _graphviz_skeleton_cluster_ordering(
     }
     if not cluster_members:
         return [list(rank) for rank in ranks]
-    use_class2_leader_order = (
-        num_original_nodes == 9
-        and len(cluster_members) == 1
-        and next(iter(cluster_members.values())) == frozenset({3, 4, 5, 6})
-        and len(edges) == 13
-    )
-    use_class2_leaf_tie_order = use_class2_leader_order or (
-        (num_original_nodes, len(cluster_members), len(edges)) in {(10, 3, 14), (26, 4, 49)}
-    )
-    if use_class2_leader_order:
-        # ``fast_node`` prepends class-2 virtual nodes to dot's recursive
-        # ranks on the certified MoE inventory.
-        ranks = [
-            sorted(
-                (int(node) for node in rank),
-                key=lambda node: node < num_original_nodes,
-            )
-            for rank in ranks
-        ]
-
     parents = _normalize_graphviz_cluster_parents(
         cluster_names=tuple(cluster_members.keys()),
         cluster_parents=graphviz_cluster_parents,
@@ -3169,6 +2979,7 @@ def _graphviz_skeleton_cluster_ordering(
         leader_ids=leader_ids,
         local_orders=local_orders,
     )
+    installed = _graphviz_unique_rank_order(ordered_ranks=installed, source_ranks=ranks)
     remincrossed = graphviz_mincross(
         ranks=installed,
         edges=edges,
@@ -3183,18 +2994,6 @@ def _graphviz_skeleton_cluster_ordering(
         edges=edges,
         cluster_members=cluster_members,
     )
-    if use_class2_leaf_tie_order:
-        # This reverse tie has endpoint-level trace parity on the admitted
-        # inventories. Other cluster shapes stay on their regression-pinned
-        # order until their complete x network is certified.
-        final_order = _graphviz_class2_leaf_order(
-            ranks=final_order,
-            edges=edges,
-            cluster_members=cluster_members,
-            children=children,
-            num_original_nodes=num_original_nodes,
-            prepend_virtual_nodes=use_class2_leader_order,
-        )
     final_order = _graphviz_contain_cluster_ordering(
         ranks=final_order,
         graphviz_cluster_members=cluster_members,
@@ -3209,1347 +3008,54 @@ def _graphviz_skeleton_cluster_ordering(
                 cluster_parents=parents,
                 edges=edges,
             )
-    if (num_original_nodes, len(cluster_members), len(edges)) == (15, 3, 53):
-        # Graphviz 7.0.5 ``merge_ranks``/``remincross`` trace for the
-        # fail-closed multiscale inventory. Node ids are deterministic class-2
-        # creation ids; the adapter admits this path only for the exact labeled
-        # topology and cluster fingerprint.
-        final_order = [
-            [0],
-            [1],
-            [2],
-            [3, 15, 20],
-            [4, 26, 16, 29, 21],
-            [35, 5, 34, 27, 17, 30, 22],
-            [36, 39, 6, 28, 18, 31, 23],
-            [37, 40, 42, 7, 19, 32, 24],
-            [38, 41, 43, 44, 8, 33, 25],
-            [11, 12, 10, 9],
-            [13],
-            [14],
-        ]
-    elif (num_original_nodes, len(cluster_members), len(edges)) == (12, 5, 19):
-        # Nested path siblings are expanded before the decoder and the final
-        # root remincross. This trace-certified order also avoids the cyclic
-        # boundary candidate produced by the former recursive approximation.
-        final_order = [
-            [0],
-            [2, 1],
-            [5, 3, 8, 9],
-            [6, 4, 10, 12, 13],
-            [11, 7],
-        ]
-    elif (num_original_nodes, len(cluster_members), len(edges)) == (19, 7, 41):
-        # Complete recursive hybrid clone chains from the Graphviz 7.0.5
-        # ``merge_ranks`` trace.
-        final_order = [
-            [0],
-            [1],
-            [2],
-            [11, 3],
-            [32, 26, 27, 12, 19],
-            [33, 25, 28, 15, 14, 20],
-            [34, 24, 29, 16, 17, 13, 21],
-            [35, 23, 30, 18, 4],
-            [36, 22, 31, 9, 5, 7],
-            [10, 6, 8],
-        ]
-    elif (num_original_nodes, len(cluster_members), len(edges)) == (100, 5, 974):
-        # Five leaf clusters share hundreds of long-edge virtual nodes. This
-        # is the exact 7.0.5 recursive ``merge_ranks`` order; the signature is
-        # admitted only by the labeled medium-cluster inventory oracle.
-        final_order = [
-            [0],
-            [1, 100],
-            [2, 121, 122, 146, 101],
-            [172, 3, 123, 147, 102],
-            [4, 173, 124, 148, 103],
-            [5, 125, 149, 104],
-            [6, 126, 150, 105],
-            [7, 127, 151, 106],
-            [174, 8, 128, 152, 107],
-            [9, 129, 153, 175, 108],
-            [197, 10, 130, 154, 176, 109],
-            [11, 198, 199, 200, 131, 155, 177, 110],
-            [12, 20, 201, 208, 132, 156, 178, 111],
-            [222, 13, 223, 21, 202, 267, 209, 133, 157, 179, 279, 299, 112],
-            [14, 234, 235, 322, 22, 203, 224, 268, 210, 134, 158, 323, 180, 280, 300, 339, 113],
-            [15, 23, 204, 225, 269, 211, 135, 159, 236, 324, 181, 281, 365, 301, 340, 114],
-            [16, 24, 205, 226, 270, 212, 136, 160, 237, 325, 182, 282, 366, 302, 341, 115],
-            [
-                17,
-                251,
-                25,
-                206,
-                227,
-                271,
-                213,
-                137,
-                161,
-                252,
-                238,
-                326,
-                183,
-                283,
-                367,
-                303,
-                342,
-                385,
-                116,
-            ],
-            [
-                18,
-                26,
-                409,
-                207,
-                228,
-                272,
-                214,
-                138,
-                162,
-                253,
-                239,
-                410,
-                327,
-                184,
-                284,
-                368,
-                304,
-                343,
-                386,
-                117,
-            ],
-            [
-                19,
-                27,
-                229,
-                273,
-                215,
-                139,
-                163,
-                254,
-                240,
-                411,
-                328,
-                185,
-                285,
-                369,
-                305,
-                344,
-                387,
-                118,
-            ],
-            [
-                28,
-                264,
-                230,
-                274,
-                216,
-                140,
-                164,
-                255,
-                422,
-                241,
-                412,
-                329,
-                186,
-                286,
-                370,
-                306,
-                345,
-                388,
-                119,
-            ],
-            [
-                431,
-                29,
-                265,
-                231,
-                275,
-                217,
-                141,
-                165,
-                256,
-                423,
-                242,
-                413,
-                330,
-                187,
-                287,
-                371,
-                307,
-                346,
-                389,
-                120,
-            ],
-            [
-                30,
-                432,
-                40,
-                266,
-                232,
-                276,
-                218,
-                142,
-                166,
-                257,
-                424,
-                243,
-                414,
-                331,
-                188,
-                288,
-                433,
-                372,
-                308,
-                347,
-                390,
-            ],
-            [
-                31,
-                41,
-                233,
-                277,
-                219,
-                143,
-                167,
-                258,
-                425,
-                244,
-                415,
-                332,
-                189,
-                289,
-                434,
-                373,
-                309,
-                348,
-                489,
-                391,
-            ],
-            [
-                32,
-                447,
-                451,
-                42,
-                278,
-                220,
-                144,
-                168,
-                259,
-                476,
-                426,
-                245,
-                416,
-                333,
-                190,
-                290,
-                435,
-                374,
-                310,
-                349,
-                490,
-                392,
-            ],
-            [
-                33,
-                43,
-                221,
-                145,
-                448,
-                169,
-                260,
-                477,
-                427,
-                246,
-                417,
-                334,
-                191,
-                291,
-                436,
-                375,
-                452,
-                311,
-                350,
-                491,
-                393,
-            ],
-            [
-                34,
-                44,
-                449,
-                170,
-                261,
-                478,
-                428,
-                247,
-                418,
-                335,
-                192,
-                292,
-                437,
-                376,
-                517,
-                453,
-                312,
-                351,
-                530,
-                492,
-                394,
-            ],
-            [
-                35,
-                45,
-                450,
-                171,
-                262,
-                479,
-                429,
-                248,
-                419,
-                336,
-                193,
-                293,
-                438,
-                377,
-                518,
-                454,
-                313,
-                352,
-                531,
-                493,
-                395,
-            ],
-            [
-                36,
-                553,
-                46,
-                263,
-                480,
-                430,
-                249,
-                420,
-                337,
-                194,
-                294,
-                439,
-                378,
-                554,
-                519,
-                455,
-                314,
-                353,
-                532,
-                494,
-                396,
-            ],
-            [
-                37,
-                564,
-                47,
-                481,
-                250,
-                421,
-                338,
-                195,
-                295,
-                440,
-                379,
-                565,
-                467,
-                555,
-                520,
-                456,
-                315,
-                354,
-                572,
-                533,
-                495,
-                397,
-            ],
-            [
-                38,
-                592,
-                48,
-                196,
-                296,
-                441,
-                380,
-                593,
-                566,
-                599,
-                468,
-                556,
-                521,
-                457,
-                316,
-                355,
-                573,
-                534,
-                496,
-                606,
-                398,
-            ],
-            [
-                39,
-                49,
-                628,
-                297,
-                482,
-                442,
-                381,
-                594,
-                567,
-                600,
-                469,
-                557,
-                522,
-                458,
-                317,
-                356,
-                574,
-                535,
-                497,
-                607,
-                399,
-            ],
-            [
-                629,
-                50,
-                487,
-                298,
-                483,
-                443,
-                382,
-                595,
-                568,
-                601,
-                470,
-                558,
-                523,
-                459,
-                318,
-                357,
-                575,
-                536,
-                498,
-                608,
-                400,
-            ],
-            [
-                51,
-                630,
-                488,
-                60,
-                484,
-                444,
-                383,
-                596,
-                569,
-                602,
-                471,
-                559,
-                524,
-                460,
-                319,
-                358,
-                576,
-                537,
-                499,
-                609,
-                401,
-            ],
-            [
-                631,
-                52,
-                632,
-                61,
-                485,
-                445,
-                384,
-                597,
-                570,
-                603,
-                472,
-                560,
-                525,
-                461,
-                320,
-                359,
-                577,
-                538,
-                500,
-                610,
-                402,
-            ],
-            [
-                53,
-                646,
-                647,
-                62,
-                486,
-                446,
-                598,
-                571,
-                604,
-                473,
-                561,
-                526,
-                462,
-                321,
-                360,
-                633,
-                578,
-                539,
-                501,
-                611,
-                704,
-                403,
-            ],
-            [
-                54,
-                654,
-                666,
-                723,
-                63,
-                605,
-                474,
-                562,
-                527,
-                463,
-                361,
-                648,
-                634,
-                579,
-                540,
-                502,
-                612,
-                705,
-                404,
-            ],
-            [
-                55,
-                64,
-                475,
-                563,
-                528,
-                464,
-                362,
-                649,
-                681,
-                691,
-                655,
-                635,
-                580,
-                541,
-                667,
-                503,
-                613,
-                706,
-                405,
-            ],
-            [
-                702,
-                56,
-                724,
-                65,
-                529,
-                465,
-                363,
-                650,
-                725,
-                682,
-                692,
-                656,
-                636,
-                581,
-                542,
-                668,
-                504,
-                732,
-                614,
-                707,
-                406,
-            ],
-            [
-                57,
-                703,
-                66,
-                466,
-                364,
-                651,
-                745,
-                726,
-                683,
-                693,
-                657,
-                637,
-                582,
-                543,
-                669,
-                505,
-                733,
-                615,
-                749,
-                708,
-                763,
-                407,
-            ],
-            [
-                58,
-                67,
-                652,
-                746,
-                727,
-                684,
-                694,
-                658,
-                638,
-                583,
-                544,
-                670,
-                506,
-                734,
-                616,
-                750,
-                709,
-                764,
-                784,
-                408,
-            ],
-            [
-                59,
-                68,
-                653,
-                747,
-                728,
-                685,
-                695,
-                659,
-                639,
-                584,
-                805,
-                545,
-                671,
-                507,
-                735,
-                617,
-                751,
-                710,
-                765,
-                785,
-            ],
-            [
-                69,
-                80,
-                813,
-                748,
-                729,
-                686,
-                696,
-                660,
-                640,
-                585,
-                806,
-                546,
-                672,
-                508,
-                736,
-                618,
-                752,
-                711,
-                766,
-                786,
-            ],
-            [
-                70,
-                815,
-                81,
-                814,
-                730,
-                687,
-                697,
-                661,
-                641,
-                586,
-                807,
-                547,
-                673,
-                509,
-                737,
-                619,
-                753,
-                712,
-                767,
-                787,
-            ],
-            [
-                71,
-                833,
-                816,
-                82,
-                731,
-                688,
-                698,
-                662,
-                642,
-                587,
-                808,
-                548,
-                674,
-                510,
-                738,
-                620,
-                754,
-                713,
-                768,
-                788,
-            ],
-            [
-                72,
-                834,
-                817,
-                83,
-                689,
-                699,
-                663,
-                643,
-                588,
-                809,
-                549,
-                675,
-                511,
-                739,
-                621,
-                755,
-                714,
-                769,
-                789,
-            ],
-            [
-                846,
-                73,
-                84,
-                690,
-                700,
-                664,
-                644,
-                589,
-                810,
-                550,
-                676,
-                512,
-                740,
-                622,
-                756,
-                835,
-                715,
-                818,
-                770,
-                790,
-            ],
-            [
-                74,
-                847,
-                848,
-                85,
-                701,
-                665,
-                645,
-                590,
-                811,
-                551,
-                677,
-                513,
-                741,
-                623,
-                757,
-                836,
-                716,
-                819,
-                771,
-                791,
-            ],
-            [75, 86, 591, 812, 552, 678, 514, 742, 624, 758, 837, 717, 820, 772, 792],
-            [849, 76, 875, 87, 679, 515, 743, 625, 759, 838, 850, 718, 861, 821, 773, 793],
-            [77, 873, 874, 88, 876, 680, 516, 744, 626, 760, 839, 851, 719, 862, 822, 774, 794],
-            [78, 89, 627, 761, 840, 852, 720, 863, 823, 775, 795],
-            [79, 90, 877, 762, 841, 853, 721, 864, 824, 776, 796],
-            [91, 842, 854, 722, 865, 825, 777, 797],
-            [92, 843, 855, 866, 826, 778, 798],
-            [93, 844, 856, 867, 827, 779, 799],
-            [94, 878, 845, 857, 868, 828, 780, 800],
-            [95, 858, 869, 829, 781, 801],
-            [96, 859, 870, 830, 782, 802],
-            [97, 879, 860, 871, 831, 783, 803],
-            [880, 98, 872, 832, 804],
-            [99],
-        ]
-    elif (num_original_nodes, len(cluster_members), len(edges)) == (100, 1, 750):
-        # The dependency hub's core cluster is locally minimized before its
-        # external chains are restored. Preserve the independently traced
-        # root order for the exact labeled topology only.
-        final_order = [
-            [5],
-            [
-                251,
-                274,
-                228,
-                6,
-                234,
-                4,
-                2,
-                1,
-                0,
-                3,
-                236,
-                232,
-                226,
-                229,
-                258,
-                262,
-                239,
-                279,
-                267,
-                244,
-            ],
-            [
-                252,
-                275,
-                13,
-                303,
-                288,
-                297,
-                293,
-                287,
-                235,
-                19,
-                301,
-                198,
-                148,
-                137,
-                159,
-                106,
-                129,
-                100,
-                190,
-                292,
-                196,
-                130,
-                179,
-                174,
-                202,
-                205,
-                285,
-                11,
-                209,
-                199,
-                8,
-                133,
-                110,
-                123,
-                103,
-                171,
-                169,
-                101,
-                142,
-                188,
-                165,
-                191,
-                167,
-                134,
-                127,
-                150,
-                195,
-                184,
-                237,
-                233,
-                144,
-                227,
-                9,
-                153,
-                111,
-                193,
-                213,
-                230,
-                117,
-                259,
-                263,
-                240,
-                280,
-                218,
-                268,
-                245,
-            ],
-            [
-                253,
-                407,
-                276,
-                304,
-                289,
-                298,
-                336,
-                331,
-                450,
-                294,
-                23,
-                448,
-                446,
-                302,
-                149,
-                138,
-                160,
-                107,
-                14,
-                197,
-                131,
-                180,
-                175,
-                203,
-                206,
-                386,
-                210,
-                384,
-                200,
-                341,
-                320,
-                318,
-                325,
-                37,
-                286,
-                321,
-                323,
-                124,
-                104,
-                172,
-                170,
-                102,
-                329,
-                143,
-                317,
-                238,
-                189,
-                166,
-                192,
-                168,
-                328,
-                135,
-                128,
-                151,
-                20,
-                10,
-                185,
-                145,
-                364,
-                355,
-                346,
-                360,
-                350,
-                154,
-                112,
-                194,
-                231,
-                214,
-                260,
-                264,
-                241,
-                281,
-                118,
-                269,
-                219,
-                246,
-            ],
-            [
-                408,
-                474,
-                254,
-                305,
-                277,
-                337,
-                332,
-                290,
-                464,
-                299,
-                451,
-                481,
-                471,
-                486,
-                295,
-                469,
-                449,
-                447,
-                72,
-                139,
-                161,
-                422,
-                108,
-                414,
-                419,
-                342,
-                41,
-                22,
-                132,
-                181,
-                176,
-                204,
-                207,
-                387,
-                412,
-                211,
-                201,
-                385,
-                521,
-                125,
-                105,
-                30,
-                319,
-                173,
-                326,
-                17,
-                413,
-                528,
-                516,
-                456,
-                519,
-                53,
-                7,
-                455,
-                136,
-                15,
-                322,
-                324,
-                373,
-                330,
-                12,
-                152,
-                73,
-                369,
-                381,
-                371,
-                186,
-                379,
-                146,
-                365,
-                356,
-                374,
-                347,
-                361,
-                351,
-                155,
-                113,
-                16,
-                261,
-                265,
-                242,
-                215,
-                282,
-                270,
-                119,
-                220,
-                247,
-            ],
-            [
-                409,
-                475,
-                255,
-                306,
-                338,
-                278,
-                465,
-                333,
-                291,
-                482,
-                472,
-                487,
-                452,
-                300,
-                554,
-                140,
-                296,
-                423,
-                162,
-                415,
-                109,
-                470,
-                343,
-                420,
-                463,
-                514,
-                458,
-                44,
-                457,
-                31,
-                182,
-                177,
-                208,
-                388,
-                212,
-                522,
-                429,
-                513,
-                24,
-                126,
-                18,
-                27,
-                511,
-                26,
-                327,
-                433,
-                529,
-                517,
-                520,
-                545,
-                314,
-                25,
-                309,
-                311,
-                21,
-                428,
-                39,
-                430,
-                426,
-                45,
-                46,
-                54,
-                77,
-                398,
-                370,
-                392,
-                59,
-                399,
-                395,
-                561,
-                382,
-                372,
-                557,
-                402,
-                187,
-                380,
-                147,
-                366,
-                266,
-                357,
-                243,
-                375,
-                348,
-                362,
-                156,
-                283,
-                216,
-                271,
-                114,
-                352,
-                248,
-                120,
-                221,
-            ],
-            [
-                476,
-                410,
-                466,
-                256,
-                339,
-                334,
-                307,
-                483,
-                555,
-                473,
-                141,
-                488,
-                424,
-                163,
-                453,
-                416,
-                85,
-                28,
-                344,
-                421,
-                58,
-                459,
-                539,
-                515,
-                543,
-                40,
-                183,
-                178,
-                56,
-                389,
-                492,
-                523,
-                63,
-                494,
-                491,
-                490,
-                82,
-                442,
-                443,
-                497,
-                437,
-                503,
-                499,
-                436,
-                502,
-                505,
-                29,
-                512,
-                50,
-                60,
-                434,
-                530,
-                518,
-                546,
-                315,
-                51,
-                310,
-                312,
-                535,
-                532,
-                431,
-                427,
-                61,
-                383,
-                33,
-                547,
-                393,
-                96,
-                550,
-                400,
-                562,
-                396,
-                558,
-                403,
-                65,
-                284,
-                367,
-                358,
-                376,
-                349,
-                363,
-                217,
-                272,
-                157,
-                115,
-                353,
-                249,
-                121,
-                222,
-            ],
-            [
-                477,
-                467,
-                411,
-                340,
-                556,
-                335,
-                484,
-                52,
-                489,
-                425,
-                164,
-                257,
-                417,
-                308,
-                460,
-                564,
-                540,
-                509,
-                454,
-                345,
-                71,
-                544,
-                90,
-                69,
-                493,
-                390,
-                524,
-                553,
-                495,
-                87,
-                444,
-                498,
-                438,
-                500,
-                504,
-                32,
-                506,
-                510,
-                435,
-                86,
-                316,
-                70,
-                38,
-                432,
-                313,
-                81,
-                533,
-                36,
-                394,
-                368,
-                548,
-                401,
-                359,
-                43,
-                551,
-                397,
-                559,
-                404,
-                377,
-                76,
-                273,
-                158,
-                116,
-                250,
-                354,
-                122,
-                223,
-            ],
-            [
-                478,
-                468,
-                84,
-                485,
-                64,
-                78,
-                461,
-                541,
-                418,
-                565,
-                88,
-                89,
-                391,
-                525,
-                93,
-                496,
-                445,
-                439,
-                501,
-                47,
-                35,
-                507,
-                92,
-                97,
-                74,
-                34,
-                531,
-                75,
-                79,
-                534,
-                549,
-                67,
-                537,
-                552,
-                49,
-                560,
-                405,
-                57,
-                378,
-                224,
-            ],
-            [479, 462, 542, 42, 566, 91, 526, 440, 99, 80, 508, 94, 563, 538, 68, 406, 62, 225],
-            [480, 48, 536, 98, 527, 441, 83, 95],
-            [66, 55],
-        ]
     return final_order
+
+
+def _graphviz_unique_rank_order(
+    ordered_ranks: Sequence[Sequence[int]],
+    source_ranks: Sequence[Sequence[int]],
+) -> List[List[int]]:
+    """Return ranks containing every source node exactly once.
+
+    Parameters
+    ----------
+    ordered_ranks : sequence of sequence[int]
+        Candidate rank order after recursive cluster installation.
+    source_ranks : sequence of sequence[int]
+        Original expanded ranks before cluster skeleton installation. These
+        ranks define the valid node inventory and the fallback rank for any
+        node dropped by the recursive merge.
+
+    Returns
+    -------
+    list[list[int]]
+        Rank order with duplicate later occurrences removed and missing source
+        nodes appended to their original ranks.
+    """
+    source_rank_by_node: Dict[int, int] = {
+        int(node): rank_index
+        for rank_index, rank_nodes in enumerate(source_ranks)
+        for node in rank_nodes
+    }
+    normalized: List[List[int]] = [[] for _ in range(len(source_ranks))]
+    seen: Set[int] = set()
+    for rank_index, rank_nodes in enumerate(ordered_ranks):
+        if rank_index >= len(normalized):
+            normalized.append([])
+        for raw_node in rank_nodes:
+            node = int(raw_node)
+            if node not in source_rank_by_node or node in seen:
+                continue
+            normalized[rank_index].append(node)
+            seen.add(node)
+
+    for rank_index, source_nodes in enumerate(source_ranks):
+        for raw_node in source_nodes:
+            node = int(raw_node)
+            if node not in seen:
+                normalized[rank_index].append(node)
+                seen.add(node)
+    return normalized
 
 
 def _graphviz_class2_leaf_order(
@@ -5845,13 +4351,6 @@ def _graphviz_x_coordinate_assignment(
     graphviz_node_order: Optional[Sequence[int]] = None,
     expanded_edge_origins: Optional[Sequence[int]] = None,
     graphviz_weight_classes: Optional[Sequence[int]] = None,
-    expected_typed_inventory: Optional[
-        Union[
-            Tuple[int, Tuple[Tuple[int, int, int], ...]],
-            Tuple[int, Tuple[Tuple[int, int, int], ...], str],
-            Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
-        ]
-    ] = None,
     use_typed_inventory: bool = True,
     use_dot_packing_node_sep: bool = False,
     preserve_point_units: bool = False,
@@ -5898,10 +4397,6 @@ def _graphviz_x_coordinate_assignment(
         allocates one slack node per saved fast edge.
     expanded_edge_origins : sequence of int, optional
         ``ED_to_orig`` ids aligned to expanded fast edges.
-    expected_typed_inventory : tuple, optional
-        Instrumented Graphviz node count and sorted
-        ``(minlen, weight, count)`` multiset. Clustered typed inventories must
-        match this oracle before network simplex is allowed to consume them.
     use_typed_inventory : bool, default=True
         Whether the typed normal/virtual/slack inventory is structurally
         supported for this graph. Dense long-edge graphs retain the legacy
@@ -5933,11 +4428,7 @@ def _graphviz_x_coordinate_assignment(
     if num_nodes == 0:
         return positions.to(output_device)
 
-    if use_typed_inventory and _graphviz_expected_dot_input_inventory(expected_typed_inventory):
-        # 4-tuple oracles are certified against an instrumented dot run at
-        # the DOT-input nodesep; the inventory must be built in that frame.
-        graphviz_node_sep = float(cast(Tuple[Any, ...], expected_typed_inventory)[3])
-    elif use_typed_inventory and use_dot_packing_node_sep and graphviz_cluster_members is None:
+    if use_typed_inventory and use_dot_packing_node_sep and graphviz_cluster_members is None:
         graphviz_node_sep = float(node_sep) * _GRAPHVIZ_POINTS_PER_INCH
     else:
         graphviz_node_sep = (
@@ -5963,21 +4454,9 @@ def _graphviz_x_coordinate_assignment(
             graphviz_cluster_label_widths=graphviz_cluster_label_widths,
             graphviz_node_order=graphviz_node_order,
             graphviz_weight_classes=graphviz_weight_classes,
-            use_raw_initial_ranks=(
-                (expected_typed_inventory is not None and len(expected_typed_inventory) >= 3)
-                or (graphviz_cluster_members is None and num_original_nodes == 40)
-            ),
+            use_raw_initial_ranks=graphviz_cluster_members is not None,
         )
-        if expected_typed_inventory is not None:
-            _validate_graphviz_x_inventory_parity(
-                inventory=inventory,
-                expected=expected_typed_inventory,
-            )
-        use_graphviz_705_simplex = (
-            expected_typed_inventory is not None
-            and len(expected_typed_inventory) >= 3
-            and expected_typed_inventory[2] in _GRAPHVIZ_705_SIMPLEX_CERTIFIED_DIGESTS
-        )
+        use_graphviz_705_simplex = graphviz_cluster_members is not None
         aux_edges = [(edge.tail, edge.head, edge.minlen, edge.weight) for edge in inventory.edges]
         initial_ranks = inventory.initial_ranks
         aux_node_count = max(
@@ -6001,9 +4480,7 @@ def _graphviz_x_coordinate_assignment(
                 clusters=graphviz_cluster_members,
                 cluster_parents=graphviz_cluster_parents,
             )
-        elif use_graphviz_705_simplex or (
-            graphviz_cluster_members is None and num_original_nodes == 40
-        ):
+        elif use_graphviz_705_simplex:
             simplex_node_order = list(reversed(range(num_nodes, aux_node_count))) + expanded_order
         else:
             simplex_node_order = None
@@ -6026,15 +4503,42 @@ def _graphviz_x_coordinate_assignment(
         edge_index=edge_index,
         num_nodes=num_original_nodes,
     )
-    x_ranks = graphviz_network_simplex_assignment(
-        edges=aux_edges,
-        num_nodes=aux_node_count,
-        initial_ranks=initial_ranks,
-        balance_mode="lr",
-        node_order=simplex_node_order,
-        legacy_tree_order=not (use_graphviz_705_simplex or preserve_plain_exact_tree_x),
-        graphviz_705_heap_order=use_graphviz_705_simplex,
-    )
+    try:
+        x_ranks = graphviz_network_simplex_assignment(
+            edges=aux_edges,
+            num_nodes=aux_node_count,
+            initial_ranks=initial_ranks,
+            balance_mode="lr",
+            node_order=simplex_node_order,
+            legacy_tree_order=not (use_graphviz_705_simplex or preserve_plain_exact_tree_x),
+            graphviz_705_heap_order=use_graphviz_705_simplex,
+        )
+    except ValueError:
+        if graphviz_cluster_members is None:
+            raise
+        return _graphviz_x_coordinate_assignment(
+            layers=layers,
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            node_sizes=node_sizes,
+            num_nodes=num_nodes,
+            num_original_nodes=num_original_nodes,
+            rank_sep=rank_sep,
+            node_sep=node_sep,
+            output_device=output_device,
+            center_coordinates=center_coordinates,
+            graphviz_left_widths=graphviz_left_widths,
+            graphviz_right_widths=graphviz_right_widths,
+            graphviz_cluster_members=None,
+            graphviz_cluster_parents=None,
+            graphviz_cluster_label_widths=None,
+            graphviz_node_order=graphviz_node_order,
+            expanded_edge_origins=expanded_edge_origins,
+            graphviz_weight_classes=graphviz_weight_classes,
+            use_typed_inventory=use_typed_inventory,
+            use_dot_packing_node_sep=use_dot_packing_node_sep,
+            preserve_point_units=preserve_point_units,
+        )
     x_positions = [
         float(x_ranks.get(node, 0)) / float(_GRAPHVIZ_X_AUX_RESOLUTION) for node in range(num_nodes)
     ]
@@ -6055,96 +4559,6 @@ def _graphviz_x_coordinate_assignment(
     if center_coordinates:
         x_positions = _center_coordinates(values=x_positions)
     positions[:, 0] = torch.tensor(x_positions, dtype=torch.float32)
-    if (
-        use_graphviz_705_simplex
-        and num_original_nodes == 12
-        and graphviz_cluster_members is not None
-        and len(graphviz_cluster_members) == 5
-        and int(edge_index.shape[1]) == 19
-    ):
-        # Recursive ``clust_ht`` label/margin accounting makes the first two
-        # interleaved gaps taller than the standard ranksep.
-        rank_y = (0.0, 142.4 / 72.0, 219.2 / 72.0, 291.2 / 72.0, 363.2 / 72.0)
-        for rank_index, rank_nodes in enumerate(layers):
-            positions[list(rank_nodes), 1] = rank_y[rank_index] * rank_sep
-    elif (
-        use_graphviz_705_simplex
-        and num_original_nodes == 19
-        and graphviz_cluster_members is not None
-        and len(graphviz_cluster_members) == 7
-        and int(edge_index.shape[1]) == 41
-    ):
-        # Nested expert labels increase only the final two rank gaps in dot's
-        # recursive ``clust_ht`` pass; the other gaps retain their typed-box height.
-        rank_y = (
-            0.0,
-            73.0 / 72.0,
-            143.0 / 72.0,
-            213.0 / 72.0,
-            283.0 / 72.0,
-            356.0 / 72.0,
-            426.0 / 72.0,
-            496.0 / 72.0,
-            600.0 / 72.0,
-            673.0 / 72.0,
-        )
-        for rank_index, rank_nodes in enumerate(layers):
-            positions[list(rank_nodes), 1] = rank_y[rank_index] * rank_sep
-    elif (
-        use_graphviz_705_simplex
-        and num_original_nodes == 100
-        and graphviz_cluster_members is not None
-        and len(graphviz_cluster_members) == 1
-        and int(edge_index.shape[1]) == 750
-    ):
-        # The frozen reference emits x at this typed-inventory scale while y
-        # remains in points. Preserve dot's 73-point first gap and 70-point
-        # subsequent gaps in the solver's coordinate units.
-        rank_y_points = (
-            0.0,
-            73.0,
-            143.0,
-            213.0,
-            283.0,
-            353.0,
-            423.0,
-            493.0,
-            563.0,
-            633.0,
-            703.0,
-            773.0,
-        )
-        for rank_index, rank_nodes in enumerate(layers):
-            positions[list(rank_nodes), 1] = (
-                rank_y_points[rank_index] / _GRAPHVIZ_DEPENDENCY_X_POINTS_PER_UNIT * rank_sep
-            )
-    elif (
-        use_graphviz_705_simplex
-        and num_original_nodes == 15
-        and graphviz_cluster_members is not None
-        and len(graphviz_cluster_members) == 3
-        and int(edge_index.shape[1]) == 53
-    ):
-        # Cluster boundaries add eleven points at the top-down transition and
-        # detection heads in the frozen dot reference.
-        rank_y_points = (
-            0.0,
-            73.0,
-            143.0,
-            213.0,
-            283.0,
-            353.0,
-            434.0,
-            504.0,
-            574.0,
-            655.0,
-            725.0,
-            795.0,
-        )
-        for rank_index, rank_nodes in enumerate(layers):
-            positions[list(rank_nodes), 1] = (
-                rank_y_points[rank_index] / _GRAPHVIZ_MULTISCALE_X_POINTS_PER_UNIT * rank_sep
-            )
     return positions.to(output_device)
 
 
@@ -6487,15 +4901,6 @@ def _build_graphviz_x_aux_edges(
             edge_index=edge_index,
             expanded_edge_origins=expanded_edge_origins,
         )
-        if (
-            num_original_nodes == 100
-            and num_nodes == 567
-            and int(edge_index.shape[1]) == 750
-            and len(graphviz_cluster_members) == 1
-        ):
-            # ``interclexp`` discards two core-to-package fast edges but keeps
-            # their class-2 separation constraints between the restored core nodes.
-            aux_edges.extend(((6, 2, 82, 1), (6, 3, 82, 1)))
     return aux_edges, initial_ranks
 
 
@@ -9556,9 +7961,7 @@ class _ExpandDummyNodes(Op):
         use_graphviz_edge_order = bool(state.extras.get(_SUGIYAMA_GRAPHVIZ_EDGE_ORDER_KEY, False))
         use_igraph_source_order = bool(state.extras.get(_SUGIYAMA_IGRAPH_SOURCE_ORDER_KEY, False))
         use_igraph_edge_order = self.use_igraph_edge_order and use_igraph_source_order
-        dot_input_cluster_x = use_graphviz_edge_order and _graphviz_expected_dot_input_inventory(
-            state.extras.get(_SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY)
-        )
+        use_cluster_skeleton = self.use_graphviz_cluster_skeleton
         plain_component_packing = (
             use_graphviz_edge_order
             and not self.use_graphviz_cluster_skeleton
@@ -9573,7 +7976,7 @@ class _ExpandDummyNodes(Op):
         if use_graphviz_edge_order:
             node_size_key = (
                 _SUGIYAMA_GRAPHVIZ_TYPED_NODE_SIZES_KEY
-                if self.use_graphviz_cluster_skeleton or dot_input_cluster_x
+                if use_cluster_skeleton
                 else _SUGIYAMA_GRAPHVIZ_NODE_SIZES_KEY
             )
             node_sizes = state.extras.get(node_size_key, node_sizes)
@@ -9598,8 +8001,7 @@ class _ExpandDummyNodes(Op):
         graphviz_edge_order_targets: Optional[torch.Tensor] = None
         if use_graphviz_edge_order and (
             (not problem.clusters and problem.num_nodes <= _GRAPHVIZ_TYPED_X_MAX_ORIGINAL_NODES)
-            or self.use_graphviz_cluster_skeleton
-            or dot_input_cluster_x
+            or use_cluster_skeleton
         ):
             oriented_edges = state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY]
             reversed_mask = state.extras[_SUGIYAMA_REVERSED_MASK_KEY].to(
@@ -9643,9 +8045,7 @@ class _ExpandDummyNodes(Op):
             use_graphviz_edge_order=use_graphviz_edge_order,
             graphviz_edge_order_sources=graphviz_edge_order_sources,
             graphviz_edge_order_targets=graphviz_edge_order_targets,
-            graphviz_sort_outgoing=(
-                not problem.clusters or self.use_graphviz_cluster_skeleton or dot_input_cluster_x
-            ),
+            graphviz_sort_outgoing=(not problem.clusters or use_cluster_skeleton),
             use_igraph_edge_order=use_igraph_edge_order,
             igraph_edge_order_sources=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_SOURCES_KEY),
             igraph_edge_order_targets=state.extras.get(_SUGIYAMA_IGRAPH_SCAN_TARGETS_KEY),
@@ -9654,26 +8054,17 @@ class _ExpandDummyNodes(Op):
             clusters=(
                 problem.clusters
                 if use_graphviz_edge_order
-                and (
-                    self.use_graphviz_cluster_skeleton
-                    or dot_input_cluster_x
-                    or self.include_graphviz_cluster_members
-                )
+                and (use_cluster_skeleton or self.include_graphviz_cluster_members)
                 else None
             ),
             cluster_parents=problem.cluster_parents
             if use_graphviz_edge_order
-            and (
-                self.use_graphviz_cluster_skeleton
-                or dot_input_cluster_x
-                or self.include_graphviz_cluster_members
-            )
+            and (use_cluster_skeleton or self.include_graphviz_cluster_members)
             else None,
             graphviz_cluster_label_widths=state.extras.get(
                 _SUGIYAMA_GRAPHVIZ_CLUSTER_LABEL_WIDTHS_KEY
             )
-            if use_graphviz_edge_order
-            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
+            if use_graphviz_edge_order and (use_cluster_skeleton)
             else None,
             graphviz_self_loop_nodes={
                 int(node)
@@ -9682,8 +8073,7 @@ class _ExpandDummyNodes(Op):
                 .to(device="cpu", dtype=torch.long)
                 .tolist()
             }
-            if use_graphviz_edge_order
-            and (self.use_graphviz_cluster_skeleton or dot_input_cluster_x)
+            if use_graphviz_edge_order and (use_cluster_skeleton)
             else None,
         )
         state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY] = expanded_graph
@@ -9919,25 +8309,6 @@ class _BarycenterOrdering(Op):
         return state
 
 
-def _graphviz_expected_dot_input_inventory(expected: Any) -> bool:
-    """Return whether an expected x inventory targets the DOT-input frame.
-
-    Parameters
-    ----------
-    expected : Any
-        Candidate ``graphviz_expected_x_inventory`` payload.
-
-    Returns
-    -------
-    bool
-        ``True`` for 4-tuple oracles ``(count, multiset, digest, nodesep)``
-        certified against an instrumented dot run at the benchmark DOT-input
-        ``nodesep`` (points). Such rows keep legacy rank/mincross and route
-        only the x auxiliary graph through the typed cluster inventory.
-    """
-    return isinstance(expected, tuple) and len(expected) >= 4
-
-
 def _graphviz_has_multiple_weak_components(edge_index: torch.Tensor, num_nodes: int) -> bool:
     """Return whether the original graph has more than one weak component.
 
@@ -10093,13 +8464,8 @@ class _CoordinateAssignment(Op):
         node_sep = state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)
 
         if self.use_graphviz_xcoord:
-            dot_input_cluster_x = _graphviz_expected_dot_input_inventory(
-                state.extras.get(_SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY)
-            )
-            certified_cluster_inventory = (
-                self.use_graphviz_cluster_skeleton or dot_input_cluster_x
-            ) and _SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY in state.extras
-            use_typed_inventory = certified_cluster_inventory or (
+            use_cluster_inventory = bool(problem.clusters and self.use_graphviz_cluster_skeleton)
+            use_typed_inventory = use_cluster_inventory or (
                 (not problem.clusters or self.preserve_graphviz_point_units)
                 and not _graphviz_preserves_plain_exact_tree_x(
                     edge_index=problem.edge_index,
@@ -10146,24 +8512,19 @@ class _CoordinateAssignment(Op):
                 graphviz_left_widths=graphviz_left_widths,
                 graphviz_right_widths=graphviz_right_widths,
                 graphviz_cluster_members=(
-                    expanded_graph.graphviz_cluster_members if certified_cluster_inventory else None
+                    expanded_graph.graphviz_cluster_members if use_cluster_inventory else None
                 ),
                 graphviz_cluster_parents=(
-                    expanded_graph.graphviz_cluster_parents if certified_cluster_inventory else None
+                    expanded_graph.graphviz_cluster_parents if use_cluster_inventory else None
                 ),
                 graphviz_cluster_label_widths=(
-                    expanded_graph.graphviz_cluster_label_widths
-                    if certified_cluster_inventory
-                    else None
+                    expanded_graph.graphviz_cluster_label_widths if use_cluster_inventory else None
                 ),
                 graphviz_node_order=(
                     expanded_graph.graphviz_node_order if use_typed_inventory else None
                 ),
                 expanded_edge_origins=expanded_graph.expanded_edge_origins,
                 graphviz_weight_classes=expanded_graph.graphviz_weight_classes,
-                expected_typed_inventory=state.extras.get(
-                    _SUGIYAMA_GRAPHVIZ_EXPECTED_X_INVENTORY_KEY
-                ),
                 use_typed_inventory=use_typed_inventory,
                 use_dot_packing_node_sep=use_dot_packing_node_sep,
                 preserve_point_units=self.preserve_graphviz_point_units,
@@ -10187,12 +8548,7 @@ class _CoordinateAssignment(Op):
         # slicing back to the original node set.
         state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY] = expanded_positions
         state.pos = expanded_positions[: problem.num_nodes]
-        if (
-            self.use_graphviz_xcoord
-            and problem.clusters
-            and not self.use_graphviz_cluster_skeleton
-            and not certified_cluster_inventory
-        ):
+        if self.use_graphviz_xcoord and problem.clusters and not self.use_graphviz_cluster_skeleton:
             state.pos = _apply_graphviz_cluster_x_constraints(
                 positions=state.pos,
                 clusters=problem.clusters,

@@ -183,13 +183,6 @@ def layout_sugiyama_pipeline(
     graphviz_enable_cluster_skeleton: bool = False,
     graphviz_corrected_dot_x: bool = False,
     graphviz_preserve_point_units: bool = False,
-    graphviz_expected_x_inventory: Optional[
-        Union[
-            Tuple[int, Tuple[Tuple[int, int, int], ...]],
-            Tuple[int, Tuple[Tuple[int, int, int], ...], str],
-            Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
-        ]
-    ] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -270,9 +263,6 @@ def layout_sugiyama_pipeline(
     graphviz_preserve_point_units : bool, default=False
         Keep typed x-simplex output in point units instead of normalizing it
         to ``rank_sep``.
-    graphviz_expected_x_inventory : tuple, optional
-        Instrumented Graphviz node count and exact ``(minlen, weight)``
-        multiset required before the typed cluster solve can run.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -373,8 +363,6 @@ def layout_sugiyama_pipeline(
         state.extras["sugiyama_graphviz_cluster_label_widths"] = {
             str(name): float(width) for name, width in graphviz_cluster_label_widths.items()
         }
-    if graphviz_expected_x_inventory is not None and fidelity_mode == "graphviz":
-        state.extras["sugiyama_graphviz_expected_x_inventory"] = graphviz_expected_x_inventory
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
 
     pipeline = build_sugiyama_pipeline(
