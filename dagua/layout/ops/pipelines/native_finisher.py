@@ -102,6 +102,13 @@ _W5_SCALE_SEARCH_LARGE_N = 300
 _W5_SCALE_SEARCH_MIN = 0.50
 _W5_SCALE_SEARCH_MAX = 2.40
 _W5_TERMINAL_GLOBAL_SCALE_MULTIPLIERS = (0.85, 0.9, 0.95, 1.05, 1.1, 1.2, 1.35)
+_W5_TERMINAL_ANISO_ASPECT_MIN = 6.0
+_W5_TERMINAL_ANISO_STRONG_MULTIPLIERS = (
+    (0.9, 2.0),
+    (0.8, 4.0),
+    (0.75, 6.0),
+    (0.7, 8.0),
+)
 _W5_TERMINAL_SCALE_TIE_EPS = 1.0e-6
 _W5_SMALL_N_ANNEAL_MAX_NODES = 50
 _W5_SMALL_N_ANNEAL_TRIALS = 800
@@ -1529,6 +1536,10 @@ class W5GlobalScaleSweepCandidate:
         Whether this candidate became the terminal scale-sweep winner.
     reason : str
         Stable accept or reject reason for telemetry and tests.
+    scale_x : float, default=1.0
+        X-axis multiplier applied around the incumbent centroid.
+    scale_y : float, default=1.0
+        Y-axis multiplier applied around the incumbent centroid.
     """
 
     scale: float
@@ -1536,11 +1547,13 @@ class W5GlobalScaleSweepCandidate:
     referee_key: Tuple[int, float]
     selected: bool
     reason: str
+    scale_x: float = 1.0
+    scale_y: float = 1.0
 
 
 @dataclass(frozen=True)
 class W5GlobalScaleSweepResult:
-    """Result of the terminal post-W5 uniform scale sweep.
+    """Result of the terminal post-W5 scale sweep.
 
     Parameters
     ----------
@@ -1551,6 +1564,13 @@ class W5GlobalScaleSweepResult:
         Score pair for ``winner_pos``.
     winner_scale : float
         Accepted global scale multiplier. ``1.0`` means the incumbent won.
+        For anisotropic winners this is the geometric mean of the axis
+        multipliers and exists for compatibility with the prior uniform-only
+        telemetry.
+    winner_scale_x : float, default=1.0
+        Accepted X-axis multiplier.
+    winner_scale_y : float, default=1.0
+        Accepted Y-axis multiplier.
     selected : bool
         Whether any scaled candidate strictly improved restricted V3.
     candidates : tuple[W5GlobalScaleSweepCandidate, ...]
@@ -1566,6 +1586,8 @@ class W5GlobalScaleSweepResult:
     selected: bool
     candidates: tuple[W5GlobalScaleSweepCandidate, ...]
     keepalive: tuple[torch.Tensor, ...] = ()
+    winner_scale_x: float = 1.0
+    winner_scale_y: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -3792,6 +3814,89 @@ def _scale_positions_about_centroid(pos: torch.Tensor, scale: float) -> torch.Te
     return center + (pos.detach() - center) * float(scale)
 
 
+def _scale_positions_about_centroid_xy(
+    pos: torch.Tensor,
+    scale_x: float,
+    scale_y: float,
+) -> torch.Tensor:
+    """Apply axis-specific layout scale around the current node centroid.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    scale_x : float
+        Positive multiplier for the x-axis.
+    scale_y : float
+        Positive multiplier for the y-axis.
+
+    Returns
+    -------
+    torch.Tensor
+        Axis-scaled positions with shape ``[N, 2]``.
+    """
+    if int(pos.shape[0]) == 0:
+        return pos.detach().clone()
+    center = pos.detach().mean(dim=0, keepdim=True)
+    scale = torch.tensor(
+        [[float(scale_x), float(scale_y)]],
+        dtype=pos.dtype,
+        device=pos.device,
+    )
+    return center + (pos.detach() - center) * scale
+
+
+def _wide_axis_aspect_ratio(pos: torch.Tensor) -> float:
+    """Return the x-over-y layout span ratio.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Finite x/y span ratio, or ``0.0`` when the y span is collapsed.
+    """
+    if int(pos.shape[0]) < 2:
+        return 0.0
+    work = pos.detach()
+    spans = torch.max(work, dim=0).values - torch.min(work, dim=0).values
+    width = float(spans[0].item())
+    height = float(spans[1].item())
+    if not math.isfinite(width) or not math.isfinite(height) or height <= 1.0e-12:
+        return 0.0
+    return width / height
+
+
+def _terminal_anisotropic_scale_pairs(
+    pos: torch.Tensor,
+    incumbent_score_pair: W5ScorePair,
+) -> tuple[tuple[float, float], ...]:
+    """Return aspect-normalizing terminal scale pairs for lopsided layouts.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Incumbent terminal positions with shape ``[N, 2]``.
+    incumbent_score_pair : W5ScorePair
+        Current V3-backed score pair. Accepted for call-site symmetry with the
+        uniform sweep; the extreme-aspect gate is geometric.
+
+    Returns
+    -------
+    tuple[tuple[float, float], ...]
+        Deterministic ``(scale_x, scale_y)`` pairs. Empty means the structural
+        aspect/C4 gate is closed.
+    """
+    del incumbent_score_pair
+    aspect = _wide_axis_aspect_ratio(pos)
+    if aspect < _W5_TERMINAL_ANISO_ASPECT_MIN:
+        return ()
+    return _W5_TERMINAL_ANISO_STRONG_MULTIPLIERS
+
+
 def _w5_c5_band_scale_candidate(pair: W5ScorePair) -> Optional[float]:
     """Return a closed-form global scale toward the frozen C5 band center.
 
@@ -3935,6 +4040,8 @@ def _attach_terminal_global_scale_sweep_telemetry(
         "candidates": [
             {
                 "scale": float(candidate.scale),
+                "scale_x": float(candidate.scale_x),
+                "scale_y": float(candidate.scale_y),
                 "v3": (
                     None if candidate.score_pair is None else _finite_v3_score(candidate.score_pair)
                 ),
@@ -4022,15 +4129,36 @@ def run_w5_terminal_global_scale_sweep(
     best_pair = incumbent_score_pair
     best_v3 = float(incumbent_v3)
     best_scale = 1.0
+    best_scale_x = 1.0
+    best_scale_y = 1.0
     best_index: Optional[int] = None
     keepalive: list[torch.Tensor] = [incumbent_pos]
     candidates: list[W5GlobalScaleSweepCandidate] = []
 
+    scale_pairs: list[tuple[float, float]] = []
     for raw_scale in multipliers:
         scale = float(raw_scale)
         if not math.isfinite(scale) or scale <= 0.0 or abs(scale - 1.0) <= 1.0e-12:
             continue
-        scaled_pos = _scale_positions_about_centroid(incumbent_pos, scale)
+        scale_pairs.append((scale, scale))
+    scale_pairs.extend(_terminal_anisotropic_scale_pairs(incumbent_pos, incumbent_score_pair))
+
+    for scale_x, scale_y in scale_pairs:
+        if (
+            not math.isfinite(float(scale_x))
+            or not math.isfinite(float(scale_y))
+            or float(scale_x) <= 0.0
+            or float(scale_y) <= 0.0
+        ):
+            continue
+        if abs(float(scale_x) - 1.0) <= 1.0e-12 and abs(float(scale_y) - 1.0) <= 1.0e-12:
+            continue
+        if abs(float(scale_x) - float(scale_y)) <= 1.0e-12:
+            scale = float(scale_x)
+            scaled_pos = _scale_positions_about_centroid(incumbent_pos, scale)
+        else:
+            scale = math.sqrt(float(scale_x) * float(scale_y))
+            scaled_pos = _scale_positions_about_centroid_xy(incumbent_pos, scale_x, scale_y)
         keepalive.append(scaled_pos)
         try:
             score_pair = score_fn(scaled_pos)
@@ -4047,6 +4175,8 @@ def run_w5_terminal_global_scale_sweep(
                     referee_key=(0, float("-inf")),
                     selected=False,
                     reason="score_exception",
+                    scale_x=float(scale_x),
+                    scale_y=float(scale_y),
                 )
             )
             continue
@@ -4072,6 +4202,8 @@ def run_w5_terminal_global_scale_sweep(
             best_pair = score_pair
             best_v3 = float(candidate_v3)
             best_scale = scale
+            best_scale_x = float(scale_x)
+            best_scale_y = float(scale_y)
             best_index = len(candidates)
             selected = True
             reason = "v3_argmax"
@@ -4084,6 +4216,8 @@ def run_w5_terminal_global_scale_sweep(
                 referee_key=referee_key,
                 selected=selected,
                 reason=reason,
+                scale_x=float(scale_x),
+                scale_y=float(scale_y),
             )
         )
 
@@ -4103,6 +4237,8 @@ def run_w5_terminal_global_scale_sweep(
                         else candidate.reason
                     )
                 ),
+                scale_x=candidate.scale_x,
+                scale_y=candidate.scale_y,
             )
             for index, candidate in enumerate(candidates)
         ]
@@ -4114,6 +4250,8 @@ def run_w5_terminal_global_scale_sweep(
         selected=best_index is not None,
         candidates=tuple(candidates),
         keepalive=tuple(keepalive),
+        winner_scale_x=best_scale_x,
+        winner_scale_y=best_scale_y,
     )
     _attach_terminal_global_scale_sweep_telemetry(result, config)
     return result
