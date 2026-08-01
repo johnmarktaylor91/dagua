@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
@@ -100,6 +101,13 @@ _W5_SCALE_SEARCH_MIN = 0.50
 _W5_SCALE_SEARCH_MAX = 2.40
 _W5_TERMINAL_GLOBAL_SCALE_MULTIPLIERS = (0.85, 0.9, 0.95, 1.05, 1.1, 1.2, 1.35)
 _W5_TERMINAL_SCALE_TIE_EPS = 1.0e-6
+_W5_SMALL_N_ANNEAL_MAX_NODES = 50
+_W5_SMALL_N_ANNEAL_TRIALS = 800
+_W5_SMALL_N_ANNEAL_SEED = 42
+_W5_SMALL_N_ANNEAL_SIGMA_HI_FRACTION = 0.35
+_W5_SMALL_N_ANNEAL_SIGMA_LO_FRACTION = 0.015
+_W5_SMALL_N_ANNEAL_SINGLE_NODE_PROBABILITY = 0.70
+_W5_SMALL_N_ANNEAL_TIE_EPS = 1.0e-6
 _DISABLE_W5_ENV = "DAGUA_NATIVE_DISABLE_W5"
 _GRAPH_NAME_ATTR = "_dagua_native_graph_name"
 _W5_PROJECTION_ITERATIONS = 20
@@ -1513,6 +1521,73 @@ class W5GlobalScaleSweepResult:
     winner_scale: float
     selected: bool
     candidates: tuple[W5GlobalScaleSweepCandidate, ...]
+    keepalive: tuple[torch.Tensor, ...] = ()
+
+
+@dataclass(frozen=True)
+class W5SmallNAnnealCandidate:
+    """One scored terminal small-N anneal perturbation.
+
+    Parameters
+    ----------
+    trial : int
+        Zero-based trial index in the deterministic anneal schedule.
+    sigma : float
+        Gaussian perturbation standard deviation in layout units.
+    changed_nodes : int
+        Number of node positions perturbed in this trial.
+    score_pair : W5ScorePair, optional
+        Restricted-V3-backed score pair when scoring completed.
+    referee_key : tuple[int, float]
+        Severe-G6 referee key for the candidate.
+    selected : bool
+        Whether this candidate became the anneal winner.
+    reason : str
+        Stable accept or reject reason for telemetry and tests.
+    """
+
+    trial: int
+    sigma: float
+    changed_nodes: int
+    score_pair: Optional[W5ScorePair]
+    referee_key: Tuple[int, float]
+    selected: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class W5SmallNAnnealResult:
+    """Result of the terminal small-N V3-surrogate anneal.
+
+    Parameters
+    ----------
+    winner_pos : torch.Tensor
+        Incumbent positions or the best accepted annealed positions with shape
+        ``[N, 2]``.
+    winner_score_pair : W5ScorePair
+        Score pair for ``winner_pos``.
+    selected : bool
+        Whether any perturbation strictly improved restricted V3.
+    trials_completed : int
+        Number of perturbation trials scored or attempted.
+    accepted_count : int
+        Number of strict V3-improving perturbations accepted during anneal.
+    skipped_reason : str, optional
+        Structural or budget reason the annealer skipped before trial work.
+    candidates : tuple[W5SmallNAnnealCandidate, ...]
+        Candidate telemetry in evaluation order.
+    keepalive : tuple[torch.Tensor, ...]
+        Scored tensors retained so id-keyed scorer caches cannot collide with
+        recycled Python object ids during anneal.
+    """
+
+    winner_pos: torch.Tensor
+    winner_score_pair: W5ScorePair
+    selected: bool
+    trials_completed: int
+    accepted_count: int
+    skipped_reason: Optional[str]
+    candidates: tuple[W5SmallNAnnealCandidate, ...]
     keepalive: tuple[torch.Tensor, ...] = ()
 
 
@@ -3838,6 +3913,397 @@ def run_w5_terminal_global_scale_sweep(
     return result
 
 
+def _median_edge_length(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+) -> float:
+    """Return a robust edge-length scale for terminal annealing.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]`` used as a fallback scale for
+        edgeless or collapsed rows.
+
+    Returns
+    -------
+    float
+        Positive layout-unit scale for the anneal sigma schedule.
+    """
+    work_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    work_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    if work_edges.ndim == 2 and work_edges.shape[0] == 2 and work_edges.numel() > 0:
+        valid = (
+            (work_edges[0] >= 0)
+            & (work_edges[0] < int(work_pos.shape[0]))
+            & (work_edges[1] >= 0)
+            & (work_edges[1] < int(work_pos.shape[0]))
+            & (work_edges[0] != work_edges[1])
+        )
+        if bool(valid.any().item()):
+            edges = work_edges[:, valid]
+            lengths = torch.linalg.norm(work_pos[edges[0]] - work_pos[edges[1]], dim=1)
+            finite_lengths = lengths[torch.isfinite(lengths) & (lengths > 1.0e-9)]
+            if int(finite_lengths.numel()) > 0:
+                median = float(torch.median(finite_lengths).item())
+                if math.isfinite(median) and median > 0.0:
+                    return median
+    fallback = float(node_sizes.detach().to(device="cpu", dtype=torch.float32).mean().item())
+    return max(1.0e-6, fallback if math.isfinite(fallback) else 1.0)
+
+
+def _can_afford_small_n_anneal_score(
+    *,
+    config: Optional[LayoutConfig],
+    node_count: int,
+    edge_count: int,
+    has_clusters: bool,
+    has_weights: bool,
+) -> bool:
+    """Return whether the deterministic ledger can afford one more V3 score.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying optional modeled-work budget.
+    node_count : int
+        Number of graph nodes.
+    edge_count : int
+        Number of graph edges.
+    has_clusters : bool
+        Whether runtime-visible clusters affect the restricted V3 scorer cost.
+    has_weights : bool
+        Whether runtime-visible edge weights affect the restricted V3 scorer
+        cost.
+
+    Returns
+    -------
+    bool
+        ``True`` when no ledger is active or the next score fits the remaining
+        modeled-work budget.
+    """
+    ledger_remaining = remaining_dwu(config)
+    if ledger_remaining is None:
+        return True
+    cost = estimate_v3_referee_cost(
+        int(node_count),
+        int(edge_count),
+        has_clusters=bool(has_clusters),
+        has_weights=bool(has_weights),
+        device_class=_native_device_class(config),
+    )
+    return float(ledger_remaining) >= float(cost.reserved_score_dwu)
+
+
+def _attach_small_n_anneal_telemetry(
+    result: W5SmallNAnnealResult,
+    config: Optional[LayoutConfig],
+) -> None:
+    """Attach terminal small-N anneal telemetry to the layout config.
+
+    Parameters
+    ----------
+    result : W5SmallNAnnealResult
+        Completed anneal result.
+    config : LayoutConfig, optional
+        Prepared layout configuration that carries native telemetry.
+
+    Returns
+    -------
+    None
+        The telemetry list is appended in-place when ``config`` is present.
+    """
+    if config is None:
+        return
+    payload = {
+        "event": "native_w5_terminal_small_n_anneal",
+        "graph": _graph_name(config),
+        "selected": bool(result.selected),
+        "winner_v3": _finite_v3_score(result.winner_score_pair),
+        "trials_completed": int(result.trials_completed),
+        "accepted_count": int(result.accepted_count),
+        "skipped_reason": result.skipped_reason,
+        "candidates": [
+            {
+                "trial": int(candidate.trial),
+                "sigma": float(candidate.sigma),
+                "changed_nodes": int(candidate.changed_nodes),
+                "v3": (
+                    None if candidate.score_pair is None else _finite_v3_score(candidate.score_pair)
+                ),
+                "referee_key": [
+                    int(candidate.referee_key[0]),
+                    float(candidate.referee_key[1]),
+                ],
+                "selected": bool(candidate.selected),
+                "reason": candidate.reason,
+            }
+            for candidate in result.candidates
+        ],
+    }
+    records = list(getattr(config, "_dagua_native_terminal_small_n_anneal_telemetry", []))
+    records.append(payload)
+    setattr(config, "_dagua_native_terminal_small_n_anneal_telemetry", records)
+    telemetry_path = os.environ.get("DAGUA_W5_TELEMETRY_PATH")
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def run_w5_terminal_small_n_anneal(
+    *,
+    incumbent_pos: torch.Tensor,
+    incumbent_score_pair: W5ScorePair,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    score_fn: Callable[[torch.Tensor], W5ScorePair],
+    referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+    config: Optional[LayoutConfig] = None,
+    trials: int = _W5_SMALL_N_ANNEAL_TRIALS,
+    seed: int = _W5_SMALL_N_ANNEAL_SEED,
+    max_nodes: int = _W5_SMALL_N_ANNEAL_MAX_NODES,
+    has_clusters: bool = False,
+    has_weights: bool = False,
+) -> W5SmallNAnnealResult:
+    """Run seeded terminal small-N Gaussian annealing scored by restricted V3.
+
+    Parameters
+    ----------
+    incumbent_pos : torch.Tensor
+        Current terminal winner positions with shape ``[N, 2]``.
+    incumbent_score_pair : W5ScorePair
+        Restricted-V3-backed score pair for ``incumbent_pos``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    score_fn : Callable[[torch.Tensor], W5ScorePair]
+        Existing W5 scorer backed by the frozen restricted-V3 runtime referee.
+    referee_key_fn : Callable[[torch.Tensor], tuple[int, float]], optional
+        Severe-G6 referee-key scorer. Candidates whose key regresses against
+        the current winner cannot be selected.
+    config : LayoutConfig, optional
+        Prepared layout configuration used for budget checks and telemetry.
+    trials : int, default=_W5_SMALL_N_ANNEAL_TRIALS
+        Maximum number of deterministic perturbation trials.
+    seed : int, default=_W5_SMALL_N_ANNEAL_SEED
+        Fixed anneal random seed.
+    max_nodes : int, default=_W5_SMALL_N_ANNEAL_MAX_NODES
+        Structural small-N gate.
+    has_clusters : bool, default=False
+        Whether runtime-visible clusters should be included in the score-cost
+        guard.
+    has_weights : bool, default=False
+        Whether runtime-visible edge weights should be included in the
+        score-cost guard.
+
+    Returns
+    -------
+    W5SmallNAnnealResult
+        Incumbent or strictly better restricted-V3 perturbation winner. Ties
+        remain on the incumbent.
+    """
+    node_count = int(incumbent_pos.shape[0])
+    edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+
+    def skipped(reason: str) -> W5SmallNAnnealResult:
+        """Build and attach a no-op anneal result.
+
+        Parameters
+        ----------
+        reason : str
+            Stable skip reason.
+
+        Returns
+        -------
+        W5SmallNAnnealResult
+            No-op anneal result.
+        """
+        result = W5SmallNAnnealResult(
+            winner_pos=incumbent_pos,
+            winner_score_pair=incumbent_score_pair,
+            selected=False,
+            trials_completed=0,
+            accepted_count=0,
+            skipped_reason=reason,
+            candidates=(),
+            keepalive=(incumbent_pos,),
+        )
+        _attach_small_n_anneal_telemetry(result, config)
+        return result
+
+    incumbent_v3 = _finite_v3_score(incumbent_score_pair)
+    if _w5_disabled_by_env():
+        return skipped("disabled_by_env")
+    if node_count < 2:
+        return skipped("too_few_nodes")
+    if node_count > int(max_nodes):
+        return skipped("too_many_nodes")
+    if incumbent_v3 is None:
+        return skipped("missing_incumbent_v3")
+    if remaining_dwu(config) is None:
+        return skipped("no_deterministic_budget")
+    slice_s = _finisher_slice_s(config)
+    if slice_s is None:
+        return skipped("no_budget")
+
+    deadline = float("inf")
+    median_edge = _median_edge_length(incumbent_pos, edge_index, node_sizes)
+    sigma_hi = _W5_SMALL_N_ANNEAL_SIGMA_HI_FRACTION * median_edge
+    sigma_lo = _W5_SMALL_N_ANNEAL_SIGMA_LO_FRACTION * median_edge
+    if not math.isfinite(sigma_hi) or not math.isfinite(sigma_lo) or sigma_hi <= 0.0:
+        return skipped("invalid_sigma")
+
+    py_rng = random.Random(int(seed))
+    torch_rng = torch.Generator(device="cpu").manual_seed(int(seed))
+    best_pos = incumbent_pos
+    best_pair = incumbent_score_pair
+    best_v3 = float(incumbent_v3)
+    best_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    best_index: Optional[int] = None
+    accepted_count = 0
+    keepalive: list[torch.Tensor] = [incumbent_pos]
+    candidates: list[W5SmallNAnnealCandidate] = []
+
+    for trial in range(max(0, int(trials))):
+        if (
+            wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S)
+            or time.monotonic() >= deadline
+        ):
+            break
+        if not _can_afford_small_n_anneal_score(
+            config=config,
+            node_count=node_count,
+            edge_count=edge_count,
+            has_clusters=has_clusters,
+            has_weights=has_weights,
+        ):
+            break
+        frac = float(trial) / float(max(int(trials) - 1, 1))
+        sigma = sigma_hi * (sigma_lo / sigma_hi) ** frac
+        changed_nodes = (
+            1
+            if py_rng.random() < _W5_SMALL_N_ANNEAL_SINGLE_NODE_PROBABILITY
+            else max(1, node_count // 3)
+        )
+        sampled = py_rng.sample(range(node_count), int(changed_nodes))
+        index = torch.tensor(sampled, dtype=torch.long, device=incumbent_pos.device)
+        candidate_pos = best_pos.detach().clone()
+        noise = torch.randn((int(changed_nodes), 2), generator=torch_rng, dtype=torch.float32)
+        candidate_pos[index] += noise.to(
+            device=candidate_pos.device,
+            dtype=candidate_pos.dtype,
+        ) * float(sigma)
+        keepalive.append(candidate_pos)
+
+        if _is_degenerate(candidate_pos, node_sizes.to(device=candidate_pos.device)):
+            candidates.append(
+                W5SmallNAnnealCandidate(
+                    trial=trial,
+                    sigma=float(sigma),
+                    changed_nodes=int(changed_nodes),
+                    score_pair=None,
+                    referee_key=(0, float("-inf")),
+                    selected=False,
+                    reason="pre_score_degenerate",
+                )
+            )
+            continue
+        try:
+            score_pair = score_fn(candidate_pos)
+            referee_key = referee_key_fn(candidate_pos) if referee_key_fn is not None else best_key
+        except Exception as exc:  # noqa: BLE001 -- terminal anneal is optional candidate work
+            if is_worker_timeout_like_exception(exc):
+                raise
+            candidates.append(
+                W5SmallNAnnealCandidate(
+                    trial=trial,
+                    sigma=float(sigma),
+                    changed_nodes=int(changed_nodes),
+                    score_pair=None,
+                    referee_key=(0, float("-inf")),
+                    selected=False,
+                    reason="score_exception",
+                )
+            )
+            continue
+
+        candidate_v3 = _finite_v3_score(score_pair)
+        reason = "missing_v3"
+        selected = False
+        if referee_key < best_key:
+            reason = "referee_key_regressed"
+        elif candidate_introduces_champion_ineligible_flag(
+            score_pair.champion_ineligibility_flags,
+            best_pair.champion_ineligibility_flags,
+        ):
+            reason = "introduced_champion_ineligible_flag"
+        elif candidate_v3 is None:
+            reason = "missing_v3"
+        elif float(candidate_v3) > best_v3 + _W5_SMALL_N_ANNEAL_TIE_EPS:
+            best_pos = candidate_pos
+            best_pair = score_pair
+            best_v3 = float(candidate_v3)
+            best_key = referee_key
+            best_index = len(candidates)
+            accepted_count += 1
+            selected = True
+            reason = "v3_argmax"
+        else:
+            reason = "does_not_improve_v3"
+        candidates.append(
+            W5SmallNAnnealCandidate(
+                trial=trial,
+                sigma=float(sigma),
+                changed_nodes=int(changed_nodes),
+                score_pair=score_pair,
+                referee_key=referee_key,
+                selected=selected,
+                reason=reason,
+            )
+        )
+
+    if best_index is not None:
+        candidates = [
+            W5SmallNAnnealCandidate(
+                trial=candidate.trial,
+                sigma=candidate.sigma,
+                changed_nodes=candidate.changed_nodes,
+                score_pair=candidate.score_pair,
+                referee_key=candidate.referee_key,
+                selected=index == best_index,
+                reason=(
+                    "v3_argmax"
+                    if index == best_index
+                    else (
+                        "superseded_v3_argmax"
+                        if candidate.reason == "v3_argmax"
+                        else candidate.reason
+                    )
+                ),
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+
+    result = W5SmallNAnnealResult(
+        winner_pos=best_pos,
+        winner_score_pair=best_pair,
+        selected=best_index is not None,
+        trials_completed=len(candidates),
+        accepted_count=accepted_count,
+        skipped_reason=None if candidates else "no_trials",
+        candidates=tuple(candidates),
+        keepalive=tuple(keepalive),
+    )
+    _attach_small_n_anneal_telemetry(result, config)
+    return result
+
+
 def _honest_scale_line_search(
     checkpoint_pos: torch.Tensor,
     score_fn: Callable[[torch.Tensor], W5ScorePair],
@@ -5035,6 +5501,8 @@ __all__ = [
     "W5PhaseTiming",
     "W5ScorePair",
     "W5Seed",
+    "W5SmallNAnnealCandidate",
+    "W5SmallNAnnealResult",
     "ClusterTighteningCandidate",
     "build_cluster_tightening_candidates",
     "candidate_introduces_champion_ineligible_flag",
@@ -5044,6 +5512,7 @@ __all__ = [
     "make_w5_skip_result",
     "run_w5_finisher",
     "run_w5_terminal_global_scale_sweep",
+    "run_w5_terminal_small_n_anneal",
     "w5_honest_axes_from_metrics",
     "w5_dominates",
     "w5_legacy_tallied_sole_failure",

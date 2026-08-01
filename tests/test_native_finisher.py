@@ -27,6 +27,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     log_w5_telemetry,
     run_w5_finisher,
     run_w5_terminal_global_scale_sweep,
+    run_w5_terminal_small_n_anneal,
     w5_dominates,
     w5_legacy_tallied_sole_failure,
     w5_predicted_skip_reason,
@@ -70,6 +71,19 @@ def _tiny_layout() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
     node_sizes = torch.full((4, 2), 2.0)
     return pos, edge_index, node_sizes
+
+
+def _deterministic_budget_config() -> LayoutConfig:
+    """Return a config carrying the deterministic-native budget ledger.
+
+    Returns
+    -------
+    LayoutConfig
+        Test config admitted for budgeted terminal anneal work.
+    """
+    config = LayoutConfig(seed=42)
+    install_budget_ledger(config, 900.0)
+    return config
 
 
 def test_w5_scale_search_evaluates_c5_scale_down_candidate() -> None:
@@ -343,6 +357,247 @@ def test_terminal_global_scale_sweep_rejects_new_degeneracy_flag() -> None:
         and candidate.reason == "introduced_champion_ineligible_flag"
         for candidate in result.candidates
     )
+
+
+def test_terminal_small_n_anneal_selects_strict_v3_argmax() -> None:
+    """Small-N anneal accepts only strict restricted-V3 improvements."""
+    pos, edge_index, node_sizes = _tiny_layout()
+    calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a monotonically improving test V3 score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        nonlocal calls
+        del candidate
+        calls += 1
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0 + float(calls),
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=4,
+    )
+
+    assert result.selected is True
+    assert result.accepted_count == 4
+    assert result.trials_completed == 4
+    assert result.winner_score_pair.v3 == pytest.approx(14.0)
+    assert [candidate.selected for candidate in result.candidates] == [False, False, False, True]
+    assert [candidate.reason for candidate in result.candidates[:-1]] == [
+        "superseded_v3_argmax",
+        "superseded_v3_argmax",
+        "superseded_v3_argmax",
+    ]
+
+
+def test_terminal_small_n_anneal_keeps_incumbent_on_ties() -> None:
+    """Small-N anneal no-ops when every perturbation ties restricted V3."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a tied V3 score for every perturbation.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=5,
+    )
+
+    assert result.selected is False
+    assert result.accepted_count == 0
+    assert result.winner_pos is pos
+    assert result.winner_score_pair is incumbent
+    assert {candidate.reason for candidate in result.candidates} == {"does_not_improve_v3"}
+
+
+def test_terminal_small_n_anneal_rejects_new_degeneracy_flag() -> None:
+    """Small-N anneal rejects high V3 perturbations with fresh frozen flags."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high but newly degenerate score for every perturbation.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair with optional champion-ineligible flags.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            champion_ineligibility_flags=frozenset({"SPRAWL_COLLAPSE"}),
+        )
+
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=3,
+    )
+
+    assert result.selected is False
+    assert result.accepted_count == 0
+    assert {candidate.reason for candidate in result.candidates} == {
+        "introduced_champion_ineligible_flag"
+    }
+
+
+def test_terminal_small_n_anneal_respects_structural_n_gate() -> None:
+    """Small-N anneal skips rows above the structural node-count cap."""
+    pos = torch.stack((torch.arange(51, dtype=torch.float32), torch.zeros(51)), dim=1)
+    edge_index = torch.stack((torch.arange(50, dtype=torch.long), torch.arange(1, 51)))
+    node_sizes = torch.full((51, 2), 2.0)
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if the structural gate lets a candidate score through.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Unused score pair.
+        """
+        del candidate
+        raise AssertionError("small-N anneal scored a graph above the N gate")
+
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.skipped_reason == "too_many_nodes"
+    assert result.trials_completed == 0
+
+
+def test_terminal_small_n_anneal_is_byte_deterministic() -> None:
+    """Fixed-seed anneal returns byte-identical tensors across invocations."""
+    pos, edge_index, node_sizes = _tiny_layout()
+    target = pos + torch.tensor([[0.2, -0.1], [0.0, 0.3], [-0.2, 0.1], [0.1, 0.0]])
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a deterministic geometry-derived V3 score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        score = -float(torch.sum((candidate.detach().cpu() - target) ** 2).item())
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=score,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    kwargs = {
+        "incumbent_pos": pos,
+        "incumbent_score_pair": W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-1.0e9,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        "edge_index": edge_index,
+        "node_sizes": node_sizes,
+        "score_fn": score_fn,
+        "config": _deterministic_budget_config(),
+        "trials": 16,
+    }
+    first = run_w5_terminal_small_n_anneal(**kwargs)
+    kwargs["config"] = _deterministic_budget_config()
+    second = run_w5_terminal_small_n_anneal(**kwargs)
+
+    assert torch.equal(first.winner_pos, second.winner_pos)
+    assert first.winner_score_pair.v3 == second.winner_score_pair.v3
+    assert [candidate.changed_nodes for candidate in first.candidates] == [
+        candidate.changed_nodes for candidate in second.candidates
+    ]
 
 
 def test_w5_dominates_uses_referee_prefix_before_scores() -> None:

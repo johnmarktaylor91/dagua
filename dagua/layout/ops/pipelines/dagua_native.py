@@ -6014,6 +6014,7 @@ def _terminal_w5_polish(
             make_w5_skip_result,
             run_w5_finisher,
             run_w5_terminal_global_scale_sweep,
+            run_w5_terminal_small_n_anneal,
             w5_dominates,
             w5_honest_axes_from_metrics,
             w5_predicted_skip_reason,
@@ -6383,12 +6384,27 @@ def _terminal_w5_polish(
             config=config,
         )
         if scale_sweep.selected:
+            terminal_winner_pos = scale_sweep.winner_pos.to(
+                device=final_pos.device,
+                dtype=final_pos.dtype,
+            )
+            terminal_winner_pair = scale_sweep.winner_score_pair
+            terminal_winner_reason = f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}"
+        small_n_anneal = run_w5_terminal_small_n_anneal(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            edge_index=edge_index,
+            node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            score_fn=honest_score,
+            referee_key_fn=referee_key_fn,
+            config=config,
+            has_clusters=bool(clusters),
+            has_weights=edge_weights is not None,
+        )
+        if small_n_anneal.selected:
             if register_anytime_best is not None:
-                register_anytime_best(
-                    scale_sweep.winner_pos,
-                    f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}",
-                )
-            return scale_sweep.winner_pos.to(device=final_pos.device, dtype=final_pos.dtype)
+                register_anytime_best(small_n_anneal.winner_pos, "terminal_small_n_anneal")
+            return small_n_anneal.winner_pos.to(device=final_pos.device, dtype=final_pos.dtype)
         if terminal_winner_reason is not None:
             if register_anytime_best is not None:
                 register_anytime_best(terminal_winner_pos, terminal_winner_reason)
