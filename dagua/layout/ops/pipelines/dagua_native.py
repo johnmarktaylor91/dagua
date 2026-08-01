@@ -80,6 +80,9 @@ _ANYTIME_LARGE_ROW_MIN_NODES = 250
 _ANYTIME_LARGE_ROW_MIN_EDGES = 700
 _ANYTIME_FALLBACK_NODE_SEP_FACTOR = 1.4
 _TERMINAL_W5_SEED_BANK_MAX = 6
+_TERMINAL_WEIGHTED_STRESS_MAX_NODES = 128
+_TERMINAL_WEIGHTED_STRESS_MAX_EDGES = 512
+_TERMINAL_WEIGHTED_STRESS_MIN_WEIGHT_RATIO = 1.0001
 
 
 @dataclass(frozen=True)
@@ -5009,6 +5012,88 @@ def _w5_referee_key_fn(
     return referee_key
 
 
+def _terminal_weighted_stress_majorization_candidate(
+    *,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
+    node_sep: float,
+    seed: int,
+) -> Optional[torch.Tensor]:
+    """Build a terminal weighted-stress candidate for declared weighted rows.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes represented by the candidate.
+    node_sizes : torch.Tensor, optional
+        Node-size tensor with shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Declared edge weights with shape ``[E]``.
+    node_sep : float
+        Fallback node separation used for scale calibration.
+    seed : int
+        Deterministic stress-majorization seed.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Scaled weighted stress-majorization positions with shape ``[N, 2]``,
+        or ``None`` when the structural weighted gate does not apply.
+    """
+    n = int(num_nodes)
+    edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+    if (
+        edge_weights is None
+        or n <= 1
+        or n > _TERMINAL_WEIGHTED_STRESS_MAX_NODES
+        or edge_count == 0
+        or edge_count > _TERMINAL_WEIGHTED_STRESS_MAX_EDGES
+    ):
+        return None
+    cpu_weights = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    if cpu_weights.numel() != edge_count:
+        return None
+    finite_positive = cpu_weights[torch.isfinite(cpu_weights) & (cpu_weights > 0.0)]
+    if finite_positive.numel() != cpu_weights.numel():
+        return None
+    weight_min = float(finite_positive.min().item())
+    weight_max = float(finite_positive.max().item())
+    if weight_max / max(weight_min, 1.0e-12) < _TERMINAL_WEIGHTED_STRESS_MIN_WEIGHT_RATIO:
+        return None
+
+    from dagua.layout.ops.pipelines.native_directed import (
+        DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER,
+        _median_node_box_diagonal,
+        _scale_to_median_edge_length,
+    )
+    from dagua.layout.ops.pipelines.stress_majorization import (
+        layout_stress_majorization_pipeline,
+    )
+
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    cpu_sizes = (
+        None if node_sizes is None else node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    raw = layout_stress_majorization_pipeline(
+        edge_index=cpu_edges,
+        num_nodes=n,
+        node_sizes=cpu_sizes,
+        seed=seed,
+        edge_weights=cpu_weights,
+    )
+    if isinstance(raw, tuple):
+        raw = raw[0]
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        cpu_sizes,
+        node_sep,
+    )
+    return _scale_to_median_edge_length(raw, cpu_edges, target)
+
+
 def _native_v3_referee_device_class(config: Optional[LayoutConfig]) -> str:
     """Return the device class used to price a runtime V3 referee score.
 
@@ -6072,6 +6157,47 @@ def _terminal_w5_polish(
         tallied_axis = (
             "directed" if is_semantically_directed and declared_hierarchical else "undirected"
         )
+        referee_key_fn = _w5_referee_key_fn(
+            edge_index=cpu_edge_index,
+            num_nodes=int(final_pos.shape[0]),
+            node_sizes=cpu_node_sizes,
+            edge_weights=edge_weights,
+            direction=direction,
+            all_pairs_dist=all_pairs_dist,
+            result_fn=v3_result_for,
+        )
+        weighted_stress_candidate = _terminal_weighted_stress_majorization_candidate(
+            edge_index=cpu_edge_index,
+            num_nodes=int(final_pos.shape[0]),
+            node_sizes=cpu_node_sizes,
+            edge_weights=edge_weights,
+            node_sep=float(getattr(config, "_dagua_native_node_sep", config.node_sep)),
+            seed=int(getattr(config, "seed", 42) or 42),
+        )
+        if weighted_stress_candidate is not None:
+            candidate_score_pair, candidate_axes = honest_score_payload(weighted_stress_candidate)
+            candidate_key = (
+                referee_key_fn(weighted_stress_candidate)
+                if referee_key_fn is not None
+                else (1, -0.0)
+            )
+            incumbent_key = referee_key_fn(final_pos) if referee_key_fn is not None else (1, -0.0)
+            if w5_dominates(
+                candidate_score_pair,
+                incumbent_score_pair,
+                0.05,
+                candidate_referee_key=candidate_key,
+                incumbent_referee_key=incumbent_key,
+                tallied_axis=tallied_axis,
+            ):
+                final_pos = weighted_stress_candidate.to(
+                    device=final_pos.device,
+                    dtype=final_pos.dtype,
+                )
+                incumbent_score_pair = candidate_score_pair
+                incumbent_axes = candidate_axes
+                if register_anytime_best is not None:
+                    register_anytime_best(final_pos, "terminal_weighted_stress_accept")
         selected_cluster_candidate: (
             tuple[
                 str,
@@ -6202,15 +6328,6 @@ def _terminal_w5_polish(
                 for seed_name, seed_pos in extra_seeds
             )
 
-        referee_key_fn = _w5_referee_key_fn(
-            edge_index=cpu_edge_index,
-            num_nodes=int(final_pos.shape[0]),
-            node_sizes=cpu_node_sizes,
-            edge_weights=edge_weights,
-            direction=direction,
-            all_pairs_dist=all_pairs_dist,
-            result_fn=v3_result_for,
-        )
         w5_kwargs: dict[str, Any] = {
             "incumbent_pos": final_pos,
             "incumbent_score_pair": incumbent_score_pair,
