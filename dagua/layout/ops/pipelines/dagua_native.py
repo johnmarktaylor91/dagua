@@ -6393,7 +6393,13 @@ def _terminal_w5_polish(
                 dtype=final_pos.dtype,
             )
             terminal_winner_pair = scale_sweep.winner_score_pair
-            terminal_winner_reason = f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}"
+            if abs(scale_sweep.winner_scale_x - scale_sweep.winner_scale_y) <= 1.0e-12:
+                terminal_winner_reason = f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}"
+            else:
+                terminal_winner_reason = (
+                    "terminal_scale_sweep_"
+                    f"sx{scale_sweep.winner_scale_x:g}_sy{scale_sweep.winner_scale_y:g}"
+                )
         smacof_stress = run_w5_terminal_smacof_stress_polish(
             incumbent_pos=terminal_winner_pos,
             incumbent_score_pair=terminal_winner_pair,
