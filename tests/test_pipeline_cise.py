@@ -68,3 +68,101 @@ def test_cise_uses_cytoscape_default_circle_geometry() -> None:
     radii = torch.linalg.vector_norm(pos - center, dim=1)
     expected = (3.0 * (30.0**2 + 30.0**2) ** 0.5 + 3.0 * 12.5) / (2.0 * torch.pi)
     assert torch.allclose(radii, torch.full_like(radii, float(expected)), atol=1.0e-4)
+
+
+def test_cise_relaxation_is_deterministic() -> None:
+    """CiSE Steps 3-5 should be byte-identical for identical inputs.
+
+    Returns
+    -------
+    None
+        Repeated runs with the same seed/options must match exactly.
+    """
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 4, 5, 0, 1, 2], [1, 2, 0, 4, 5, 3, 3, 4, 5]],
+        dtype=torch.long,
+    )
+    clusters = {"left": [0, 1, 2], "right": [3, 4, 5]}
+
+    first = layout_cise_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        clusters=clusters,
+        steps=75,
+        seed=11,
+    )
+    repeated = layout_cise_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        clusters=clusters,
+        steps=75,
+        seed=11,
+    )
+
+    assert torch.equal(first, repeated)
+
+
+def test_cise_steps_zero_preserves_static_circle_placement() -> None:
+    """Zero-step CiSE should preserve the Step 1/2 static placement.
+
+    Returns
+    -------
+    None
+        The compatibility path should still expose the pre-relaxation layout.
+    """
+    edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 3, 4]], dtype=torch.long)
+    clusters = {"left": [0, 1, 2], "right": [3, 4, 5]}
+
+    static = layout_cise_pipeline(edge_index=edge_index, num_nodes=6, clusters=clusters, steps=0)
+    relaxed = layout_cise_pipeline(edge_index=edge_index, num_nodes=6, clusters=clusters, steps=60)
+
+    assert static.shape == relaxed.shape == (6, 2)
+    assert not torch.equal(static, relaxed)
+
+
+def test_cise_default_enables_reference_force_budget() -> None:
+    """Default CiSE should run the calibrated reference force budget.
+
+    Returns
+    -------
+    None
+        Omitting ``steps`` should be equivalent to Cytoscape's default
+        per-stage iteration budget, while explicit ``steps=0`` remains the
+        static compatibility path.
+    """
+    edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 3, 4]], dtype=torch.long)
+    clusters = {"left": [0, 1, 2], "right": [3, 4, 5]}
+
+    default = layout_cise_pipeline(edge_index=edge_index, num_nodes=6, clusters=clusters)
+    reference_budget = layout_cise_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        clusters=clusters,
+        steps=2500,
+    )
+    static = layout_cise_pipeline(edge_index=edge_index, num_nodes=6, clusters=clusters, steps=0)
+
+    assert torch.equal(default, reference_budget)
+    assert not torch.equal(default, static)
+
+
+def test_cise_relaxation_keeps_members_on_rigid_circles() -> None:
+    """Relaxed CiSE clusters should remain rigid circular bodies.
+
+    Returns
+    -------
+    None
+        Within each cluster, all members keep the reference ring radius.
+    """
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 4, 5, 0, 1, 2, 6], [1, 2, 0, 4, 5, 3, 3, 4, 5, 0]],
+        dtype=torch.long,
+    )
+    clusters = {"left": [0, 1, 2], "right": [3, 4, 5], "single": [6]}
+    pos = layout_cise_pipeline(edge_index=edge_index, num_nodes=7, clusters=clusters, steps=90)
+
+    for members in (clusters["left"], clusters["right"]):
+        member_pos = pos[torch.tensor(members)]
+        center = member_pos.mean(dim=0, keepdim=True)
+        radii = torch.linalg.vector_norm(member_pos - center, dim=1)
+        assert torch.allclose(radii, radii.mean().expand_as(radii), atol=1.0e-4)
