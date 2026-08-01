@@ -6014,6 +6014,7 @@ def _terminal_w5_polish(
             make_w5_skip_result,
             run_w5_finisher,
             run_w5_terminal_global_scale_sweep,
+            run_w5_terminal_smacof_stress_polish,
             run_w5_terminal_small_n_anneal,
             w5_dominates,
             w5_honest_axes_from_metrics,
@@ -6390,6 +6391,23 @@ def _terminal_w5_polish(
             )
             terminal_winner_pair = scale_sweep.winner_score_pair
             terminal_winner_reason = f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}"
+        smacof_stress = run_w5_terminal_smacof_stress_polish(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            edge_index=edge_index,
+            node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            all_pairs_dist=all_pairs_dist,
+            score_fn=honest_score,
+            referee_key_fn=referee_key_fn,
+            config=config,
+        )
+        if smacof_stress.selected:
+            terminal_winner_pos = smacof_stress.winner_pos.to(
+                device=final_pos.device,
+                dtype=final_pos.dtype,
+            )
+            terminal_winner_pair = smacof_stress.winner_score_pair
+            terminal_winner_reason = "terminal_smacof_stress_polish"
         small_n_anneal = run_w5_terminal_small_n_anneal(
             incumbent_pos=terminal_winner_pos,
             incumbent_score_pair=terminal_winner_pair,
