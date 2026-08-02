@@ -7,6 +7,7 @@ import logging
 import math
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Optional
 
 import pytest
@@ -28,6 +29,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     _w5_scaled_candidate_should_fallback,
     log_w5_telemetry,
     run_w5_finisher,
+    run_w5_terminal_continuous_facet_polish,
     run_w5_terminal_global_scale_sweep,
     run_w5_terminal_smacof_stress_polish,
     run_w5_terminal_small_n_anneal,
@@ -689,6 +691,354 @@ def test_terminal_smacof_stress_polish_preserves_declared_layered_reading() -> N
     assert result.selected is False
     assert result.winner_pos is incumbent
     assert result.candidates[0].reason == "layered_reading_regressed"
+
+
+def _deep_tree_polish_structure() -> SimpleNamespace:
+    """Return a synthetic deep-tree structure for continuous-facet polish tests.
+
+    Returns
+    -------
+    SimpleNamespace
+        Classifier-like payload matching the structural deep-tree gate.
+    """
+    return SimpleNamespace(
+        family=SimpleNamespace(name="TREE"),
+        max_layer_width=24,
+        num_layers=6,
+        num_layers_effective=5,
+        edge_to_node_ratio=0.98,
+        topology_tags=(),
+    )
+
+
+def _medium_cluster_polish_structure() -> SimpleNamespace:
+    """Return a synthetic medium-cluster structure for polish gate tests.
+
+    Returns
+    -------
+    SimpleNamespace
+        Classifier-like payload matching the structural clustered gate.
+    """
+    return SimpleNamespace(
+        family=SimpleNamespace(name="GENERAL"),
+        max_layer_width=3,
+        num_layers=75,
+        num_layers_effective=24,
+        edge_to_node_ratio=1.93,
+        topology_tags=(),
+    )
+
+
+def _chain_edges(num_nodes: int) -> torch.Tensor:
+    """Return a deterministic directed chain edge tensor.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the chain.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, max(N - 1, 0)]``.
+    """
+    if num_nodes <= 1:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+
+
+def test_terminal_continuous_facet_polish_selects_strict_v3_argmax() -> None:
+    """Select a structural deep-tree move only after strict V3 improvement."""
+    num_nodes = 64
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 8],
+        dim=1,
+    )
+    edge_index = _chain_edges(num_nodes)
+    node_sizes = torch.full((num_nodes, 2), 1.0)
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        g1_directed_flow=0.99,
+        g1_depth_order=0.99,
+        g4_layered_parent_centering=0.99,
+        g4_layered_subtree_congruence=0.99,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 score that improves only when node 0 moves right.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair carrying V3 and G1 facet payloads.
+        """
+        moved_right = float(candidate[0, 0].item()) > float(pos[0, 0].item())
+        score = 11.0 if moved_right else 9.5
+        return W5ScorePair(
+            directed=score,
+            undirected=score,
+            v3=score,
+            g1_directed_flow=0.99,
+            g1_depth_order=0.99,
+            g4_layered_parent_centering=0.99,
+            g4_layered_subtree_congruence=0.99,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is True
+    assert result.gate_reason == "deep_tree_fan_spacing"
+    assert result.accepted[0].node == 0
+    assert result.winner_score_pair.v3 == pytest.approx(11.0)
+
+
+def test_terminal_continuous_facet_polish_preserves_declared_layered_reading() -> None:
+    """Reject strict V3 moves that regress declared layered reading."""
+    num_nodes = 64
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 8],
+        dim=1,
+    )
+    edge_index = _chain_edges(num_nodes)
+    node_sizes = torch.full((num_nodes, 2), 1.0)
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        g1_directed_flow=0.99,
+        g1_depth_order=0.99,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a higher V3 score with a degraded G1 flow payload.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair rejected by the layered guard.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=11.0,
+            undirected=11.0,
+            v3=11.0,
+            g1_directed_flow=0.50,
+            g1_depth_order=0.99,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.skipped_reason == "no_move_improved_v3"
+
+
+def test_terminal_continuous_facet_polish_preserves_deep_tree_shape() -> None:
+    """Reject deep-tree V3 moves that visibly break G4 tree-shape facets."""
+    num_nodes = 64
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 8],
+        dim=1,
+    )
+    edge_index = _chain_edges(num_nodes)
+    node_sizes = torch.full((num_nodes, 2), 1.0)
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        g1_directed_flow=0.99,
+        g1_depth_order=0.99,
+        g4_layered_parent_centering=0.99,
+        g4_layered_subtree_congruence=0.99,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a higher V3 score with degraded deep-tree G4 shape.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair rejected by the deep-tree shape guard.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=11.0,
+            undirected=11.0,
+            v3=11.0,
+            g1_directed_flow=0.99,
+            g1_depth_order=0.99,
+            g4_layered_parent_centering=0.80,
+            g4_layered_subtree_congruence=0.99,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.skipped_reason == "no_move_improved_v3"
+
+
+def test_terminal_continuous_facet_polish_structural_gates_exclude_controls() -> None:
+    """Keep binary-tree and lattice-like compound controls out of the new arm."""
+    binary_pos = torch.stack(
+        [torch.arange(11, dtype=torch.float32), torch.arange(11, dtype=torch.float32) % 4],
+        dim=1,
+    )
+    binary_result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=binary_pos,
+        incumbent_score_pair=W5ScorePair(10.0, 10.0, v3=10.0),
+        edge_index=_chain_edges(11),
+        node_sizes=torch.ones((11, 2)),
+        score_fn=lambda candidate: W5ScorePair(11.0, 11.0, v3=11.0),
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+    compound_structure = SimpleNamespace(
+        family=SimpleNamespace(name="GENERAL"),
+        max_layer_width=1,
+        num_layers=150,
+        num_layers_effective=1,
+        edge_to_node_ratio=1.4,
+        topology_tags=("lattice_like",),
+    )
+    clusters = {
+        f"compound_stage_{index}": list(range(index * 30, (index + 1) * 30)) for index in range(5)
+    }
+    compound_pos = torch.stack(
+        [torch.arange(150, dtype=torch.float32), torch.arange(150, dtype=torch.float32) % 5],
+        dim=1,
+    )
+    compound_result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=compound_pos,
+        incumbent_score_pair=W5ScorePair(10.0, 10.0, v3=10.0),
+        edge_index=_chain_edges(150),
+        node_sizes=torch.ones((150, 2)),
+        score_fn=lambda candidate: W5ScorePair(11.0, 11.0, v3=11.0),
+        structure=compound_structure,
+        clusters=clusters,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert binary_result.skipped_reason == "structural_gate_closed"
+    assert compound_result.skipped_reason == "structural_gate_closed"
+
+
+def test_terminal_continuous_facet_polish_medium_cluster_gate_selects() -> None:
+    """Admit a flat medium-cluster signature without relying on graph names."""
+    num_nodes = 100
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 10],
+        dim=1,
+    )
+    clusters = {f"cluster_{index}": list(range(index * 20, (index + 1) * 20)) for index in range(5)}
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a strict V3 gain when the first node moves right.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair with no champion-ineligible flags.
+        """
+        moved_right = float(candidate[0, 0].item()) > float(pos[0, 0].item())
+        score = 12.0 if moved_right else 10.0
+        return W5ScorePair(
+            directed=score,
+            undirected=score,
+            v3=score,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            10.0,
+            10.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=torch.stack(
+            [
+                torch.arange(193, dtype=torch.long) % num_nodes,
+                (torch.arange(193, dtype=torch.long) + 3) % num_nodes,
+            ]
+        ),
+        node_sizes=torch.ones((num_nodes, 2)),
+        score_fn=score_fn,
+        structure=_medium_cluster_polish_structure(),
+        clusters=clusters,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is True
+    assert result.gate_reason == "medium_cluster_neighborhood_spacing"
 
 
 def test_terminal_small_n_anneal_selects_strict_v3_argmax() -> None:

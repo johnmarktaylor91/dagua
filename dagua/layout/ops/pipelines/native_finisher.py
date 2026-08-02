@@ -24,6 +24,7 @@ from dagua.eval.ruler_v3 import (
     WHITESPACE_SPRAWL_DECAY,
     _structure_area_floor,
 )
+from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
 from dagua.layout.ops.cluster_geometry import build_cluster_geometry_profile
 from dagua.layout.ops.pipelines.native_budget import (
     DETERMINISTIC_BUDGET_ATTR,
@@ -70,6 +71,8 @@ _MAX_W5_SPEND_S = 20.0
 _TOTAL_BUDGET_FRACTION = 0.10
 _W5_ACCEPT_MARGIN = 0.05
 _W5_LAYERED_READING_EPS = 0.01
+_W5_LAYERED_SHAPE_EPS = 0.08
+_W5_LAYERED_SHAPE_MIN_SCORE = 0.90
 _PREDICTED_COST_LATE_ENTRY_REMAINING_S = 90.0
 _PREDICTED_COST_RETURN_RESERVE_S = 2.0
 _MEASURED_COST_MAX_SEEDS = 2
@@ -142,6 +145,18 @@ _W5_SMALL_N_ANNEAL_SIGMA_HI_FRACTION = 0.35
 _W5_SMALL_N_ANNEAL_SIGMA_LO_FRACTION = 0.015
 _W5_SMALL_N_ANNEAL_SINGLE_NODE_PROBABILITY = 0.70
 _W5_SMALL_N_ANNEAL_TIE_EPS = 1.0e-6
+_CONTINUOUS_FACET_POLISH_TIE_EPS = 1.0e-6
+_CONTINUOUS_FACET_POLISH_STEP_FRACTIONS = (0.04, 0.02, 0.008, 0.003)
+_CONTINUOUS_FACET_POLISH_DIRECTIONS = (
+    (1.0, 0.0),
+    (-1.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (-1.0, -1.0),
+)
 _W5_SMACOF_STRESS_MAX_NODES = 256
 _W5_SMACOF_STRESS_MAX_EDGES = 1_024
 _W5_SMACOF_STRESS_ITERATIONS = (20, 40, 60)
@@ -279,6 +294,12 @@ class W5ScorePair:
     g1_depth_order : float, optional
         Frozen V3 ``G1_depth_order`` diagnostic score used by declared-layered
         finisher preservation guards.
+    g4_layered_parent_centering : float, optional
+        Frozen V3 ``G4_layered_parent_centering`` score used by deep-tree
+        visual-shape preservation guards.
+    g4_layered_subtree_congruence : float, optional
+        Frozen V3 ``G4_layered_subtree_congruence`` score used by deep-tree
+        visual-shape preservation guards.
     champion_ineligibility_flags : frozenset[str], optional
         Frozen V3 row flags that disqualify a candidate from champion
         selection. ``None`` preserves callers without V3 flag payloads.
@@ -292,6 +313,8 @@ class W5ScorePair:
     c4_clearance_contact_pairs: Optional[int] = None
     g1_directed_flow: Optional[float] = None
     g1_depth_order: Optional[float] = None
+    g4_layered_parent_centering: Optional[float] = None
+    g4_layered_subtree_congruence: Optional[float] = None
     champion_ineligibility_flags: Optional[frozenset[str]] = None
 
 
@@ -351,6 +374,14 @@ def w5_score_pair_from_v3_result(directed: float, undirected: float, v3_result: 
         c4_clearance_contact_pairs=None if clearance_pairs is None else int(clearance_pairs),
         g1_directed_flow=_finite_v3_facet_score(v3_result, "G1_directed_flow"),
         g1_depth_order=_finite_v3_facet_score(v3_result, "G1_depth_order"),
+        g4_layered_parent_centering=_finite_v3_facet_score(
+            v3_result,
+            "G4_layered_parent_centering",
+        ),
+        g4_layered_subtree_congruence=_finite_v3_facet_score(
+            v3_result,
+            "G4_layered_subtree_congruence",
+        ),
         champion_ineligibility_flags=frozenset(str(flag) for flag in v3_result.flags)
         & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
     )
@@ -1741,6 +1772,88 @@ class W5SMACOFStressResult:
     keepalive: tuple[torch.Tensor, ...] = ()
 
 
+@dataclass(frozen=True)
+class W5ContinuousFacetPolishCandidate:
+    """One accepted continuous-facet local-search move.
+
+    Parameters
+    ----------
+    pass_id : int
+        One-based coordinate-descent pass that accepted the move.
+    node : int
+        Node index moved by the accepted candidate.
+    step : float
+        Layout-unit displacement magnitude.
+    direction : tuple[float, float]
+        Unit-grid direction applied to the moved node.
+    score_pair : W5ScorePair
+        Referee-backed score pair for the accepted candidate.
+    surrogate_loss : float
+        Continuous C9/C7/C3 surrogate objective value after the move.
+    referee_key : tuple[int, float]
+        Severe-G6 referee key for the accepted candidate.
+    g4_layered_parent_centering : float, optional
+        Deep-tree layered parent-centering score for the accepted candidate.
+    g4_layered_subtree_congruence : float, optional
+        Deep-tree layered subtree-congruence score for the accepted candidate.
+    """
+
+    pass_id: int
+    node: int
+    step: float
+    direction: tuple[float, float]
+    score_pair: W5ScorePair
+    surrogate_loss: float
+    referee_key: Tuple[int, float]
+    g4_layered_parent_centering: Optional[float] = None
+    g4_layered_subtree_congruence: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class W5ContinuousFacetPolishResult:
+    """Result of the terminal C9/C7/C3 continuous-facet polish.
+
+    Parameters
+    ----------
+    winner_pos : torch.Tensor
+        Incumbent positions or the best accepted polished positions with shape
+        ``[N, 2]``.
+    winner_score_pair : W5ScorePair
+        Referee-backed score pair for ``winner_pos``.
+    selected : bool
+        Whether at least one strict V3-improving move was accepted.
+    skipped_reason : str, optional
+        Structural, budget, or scoring reason when no work ran.
+    gate_reason : str
+        Structural gate label for telemetry.
+    passes_completed : int
+        Number of coordinate passes attempted.
+    evaluations : int
+        Number of candidate positions honestly scored.
+    accepted : tuple[W5ContinuousFacetPolishCandidate, ...]
+        Accepted strict V3-improving moves in chronological order.
+    keepalive : tuple[torch.Tensor, ...]
+        Scored tensors retained so id-keyed scorer caches cannot collide with
+        recycled Python object ids during local search.
+    start_surrogate_loss : float, optional
+        Continuous surrogate loss on entry.
+    winner_surrogate_loss : float, optional
+        Continuous surrogate loss for ``winner_pos``.
+    """
+
+    winner_pos: torch.Tensor
+    winner_score_pair: W5ScorePair
+    selected: bool
+    skipped_reason: Optional[str]
+    gate_reason: str
+    passes_completed: int
+    evaluations: int
+    accepted: tuple[W5ContinuousFacetPolishCandidate, ...]
+    keepalive: tuple[torch.Tensor, ...] = ()
+    start_surrogate_loss: Optional[float] = None
+    winner_surrogate_loss: Optional[float] = None
+
+
 def is_worker_timeout_like_exception(exc: Exception) -> bool:
     """Return whether ``exc`` is the benchmark worker timeout signal.
 
@@ -1839,6 +1952,79 @@ def _layered_reading_preserved(
         if candidate_value is None or incumbent_value is None:
             continue
         if float(candidate_value) < float(incumbent_value) - float(eps):
+            return False
+    return True
+
+
+def _layered_shape_preserved(
+    candidate: W5ScorePair,
+    incumbent: W5ScorePair,
+    eps: float = _W5_LAYERED_SHAPE_EPS,
+    min_score: float = _W5_LAYERED_SHAPE_MIN_SCORE,
+) -> bool:
+    """Return whether layered tree-shape facets remain visually plausible.
+
+    Parameters
+    ----------
+    candidate : W5ScorePair
+        Candidate score pair carrying frozen V3 G4 facet telemetry.
+    incumbent : W5ScorePair
+        Incumbent score pair carrying frozen V3 G4 facet telemetry.
+    eps : float, default=_W5_LAYERED_SHAPE_EPS
+        Allowed score drop relative to the current incumbent.
+    min_score : float, default=_W5_LAYERED_SHAPE_MIN_SCORE
+        Absolute lower bound for G4 tree-shape facets when both payloads are
+        available.
+
+    Returns
+    -------
+    bool
+        ``True`` when parent centering and repeated-subtree congruence stay
+        within the small visual-trade window expected for deep tree fan polish.
+        Missing payloads keep non-V3 and legacy unit callers active.
+    """
+    for candidate_value, incumbent_value in (
+        (candidate.g4_layered_parent_centering, incumbent.g4_layered_parent_centering),
+        (candidate.g4_layered_subtree_congruence, incumbent.g4_layered_subtree_congruence),
+    ):
+        if candidate_value is None or incumbent_value is None:
+            continue
+        floor = max(float(min_score), float(incumbent_value) - float(eps))
+        if float(candidate_value) < floor:
+            return False
+    return True
+
+
+def _layered_shape_values_preserved(
+    candidate: tuple[Optional[float], Optional[float]],
+    incumbent: tuple[Optional[float], Optional[float]],
+    eps: float = _W5_LAYERED_SHAPE_EPS,
+    min_score: float = _W5_LAYERED_SHAPE_MIN_SCORE,
+) -> bool:
+    """Return whether raw layered-shape facet values pass the visual guard.
+
+    Parameters
+    ----------
+    candidate : tuple[float or None, float or None]
+        Candidate parent-centering and subtree-congruence scores.
+    incumbent : tuple[float or None, float or None]
+        Incumbent parent-centering and subtree-congruence scores.
+    eps : float, default=_W5_LAYERED_SHAPE_EPS
+        Allowed score drop relative to the current incumbent.
+    min_score : float, default=_W5_LAYERED_SHAPE_MIN_SCORE
+        Absolute lower bound for available tree-shape facets.
+
+    Returns
+    -------
+    bool
+        ``True`` when every available facet stays within the allowed visual
+        trade window. Missing values preserve legacy and non-tree callers.
+    """
+    for candidate_value, incumbent_value in zip(candidate, incumbent):
+        if candidate_value is None or incumbent_value is None:
+            continue
+        floor = max(float(min_score), float(incumbent_value) - float(eps))
+        if float(candidate_value) < floor:
             return False
     return True
 
@@ -4999,6 +5185,611 @@ def _attach_small_n_anneal_telemetry(
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def _continuous_facet_polish_gate(
+    *,
+    structure: Optional[Any],
+    edge_index: torch.Tensor,
+    clusters: Optional[Mapping[str, Sequence[int]]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    node_count: int,
+    is_semantically_directed: bool,
+    declared_hierarchical: bool,
+    direction_is_declared: bool,
+) -> tuple[bool, str, int]:
+    """Return the structural gate for C9/C7/C3 terminal local polish.
+
+    Parameters
+    ----------
+    structure : object, optional
+        Graph classifier payload for the current native row.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    clusters : Mapping[str, Sequence[int]] or None
+        Runtime-visible declared cluster memberships.
+    cluster_parents : Mapping[str, Optional[str]] or None
+        Optional declared nesting metadata.
+    node_count : int
+        Number of graph nodes.
+    is_semantically_directed : bool
+        Whether edge direction has semantic meaning.
+    declared_hierarchical : bool
+        Whether the frozen ruler uses declared hierarchy terms.
+    direction_is_declared : bool
+        Whether semantic direction came from explicit graph metadata.
+
+    Returns
+    -------
+    tuple[bool, str, int]
+        ``(enabled, reason, passes)``. The gate is structural only: it uses
+        topology, size, direction, and cluster metadata, never graph names.
+    """
+    edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+    family = getattr(structure, "family", None)
+    family_name = str(getattr(family, "name", family))
+    topology_tags = set(str(tag) for tag in getattr(structure, "topology_tags", ()) or ())
+    max_layer_width = int(getattr(structure, "max_layer_width", 0) or 0)
+    num_layers = int(getattr(structure, "num_layers", 0) or 0)
+    num_layers_effective = int(getattr(structure, "num_layers_effective", 0) or 0)
+    edge_to_node_ratio = float(getattr(structure, "edge_to_node_ratio", 0.0) or 0.0)
+    members = _valid_cluster_members(clusters, node_count)
+    depths = _cluster_depth_lookup(tuple(sorted(members)), cluster_parents)
+    max_depth = max(depths.values(), default=0)
+
+    if (
+        family_name == "TREE"
+        and not members
+        and bool(is_semantically_directed)
+        and bool(declared_hierarchical)
+        and bool(direction_is_declared)
+        and 64 <= int(node_count) <= 160
+        and edge_count == int(node_count) - 1
+        and 5 <= num_layers <= 12
+        and max_layer_width >= 20
+    ):
+        return True, "deep_tree_fan_spacing", 3
+
+    cluster_sizes = tuple(sorted(len(indices) for indices in members.values()))
+    if (
+        4 <= len(members) <= 8
+        and max_depth == 0
+        and 60 <= int(node_count) <= 160
+        and all(10 <= size <= 30 for size in cluster_sizes)
+        and "lattice_like" not in topology_tags
+        and num_layers_effective >= 8
+        and 1.6 <= edge_to_node_ratio <= 2.5
+    ):
+        return True, "medium_cluster_neighborhood_spacing", 2
+
+    return False, "gate_closed", 0
+
+
+def _continuous_facet_surrogate_loss(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    topo_depth: torch.Tensor,
+    *,
+    is_semantically_directed: bool,
+    declared_hierarchical: bool,
+) -> torch.Tensor:
+    """Return the C9/C7/C3 continuous surrogate value used for polish telemetry.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    topo_depth : torch.Tensor
+        Longest-path depth tensor with shape ``[N]``.
+    is_semantically_directed : bool
+        Whether edge direction has semantic meaning.
+    declared_hierarchical : bool
+        Whether hierarchy terms are active for this row.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar surrogate loss combining angular resolution, Gabriel intrusion,
+        and graph-neighborhood spacing, with light flow/depth barriers for
+        declared layered rows.
+    """
+    edge_work = edge_index.to(device=pos.device, dtype=torch.long)
+    loss = (
+        4.0 * angular_resolution_loss(pos, edge_work)
+        + 5.0 * gabriel_intrusion_loss(pos, edge_work)
+        + 12.0 * soft_knn_neighborhood_loss(pos, edge_work)
+    )
+    if is_semantically_directed and declared_hierarchical:
+        loss = loss + 2.0 * (1.0 - signed_flow_score_surrogate(pos, edge_work))
+        loss = loss + 2.0 * (1.0 - depth_order_score_surrogate(pos, topo_depth))
+    return torch.nan_to_num(loss, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
+
+
+def _continuous_facet_deep_tree_shape_scores(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+) -> tuple[Optional[float], Optional[float]]:
+    """Return layered G4 tree-shape scores for a deep-tree polish candidate.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed parent-child edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[float or None, float or None]
+        ``(G4_layered_parent_centering, G4_layered_subtree_congruence)`` when
+        the directed tree validates; ``None`` entries otherwise.
+    """
+    meta = {"declared_tree": True, "tree_convention": "layered"}
+    try:
+        groups = evaluate_conditional_groups(
+            pos.detach().to(device="cpu", dtype=torch.float64),
+            edge_index.detach().to(device="cpu", dtype=torch.long),
+            node_sizes.detach().to(device="cpu", dtype=torch.float64),
+            meta,
+        )
+    except Exception:  # noqa: BLE001 -- optional guard must not fail layout
+        return None, None
+    facets = getattr(groups.get("G4"), "facets", {})
+
+    def finite_facet(code: str) -> Optional[float]:
+        """Return one finite G4 facet score.
+
+        Parameters
+        ----------
+        code : str
+            G4 facet code to read.
+
+        Returns
+        -------
+        float or None
+            Finite facet score when the evaluator produced it.
+        """
+        value = getattr(facets.get(code), "score", None)
+        if value is None:
+            return None
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+        return score if math.isfinite(score) else None
+
+    return (
+        finite_facet("G4_layered_parent_centering"),
+        finite_facet("G4_layered_subtree_congruence"),
+    )
+
+
+def _continuous_facet_score_affordable(
+    *,
+    config: Optional[LayoutConfig],
+    node_count: int,
+    edge_count: int,
+    has_clusters: bool,
+    has_weights: bool,
+) -> bool:
+    """Return whether the modeled ledger can afford one facet-polish score.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying the optional deterministic
+        budget ledger.
+    node_count : int
+        Number of graph nodes.
+    edge_count : int
+        Number of graph edges.
+    has_clusters : bool
+        Whether runtime-visible clusters affect restricted V3 score cost.
+    has_weights : bool
+        Whether runtime-visible weights affect restricted V3 score cost.
+
+    Returns
+    -------
+    bool
+        ``True`` when no ledger is active or one more referee score fits.
+    """
+    ledger_remaining = remaining_dwu(config)
+    if ledger_remaining is None:
+        return True
+    cost = estimate_v3_referee_cost(
+        int(node_count),
+        int(edge_count),
+        has_clusters=bool(has_clusters),
+        has_weights=bool(has_weights),
+        device_class=_native_device_class(config),
+    )
+    return float(ledger_remaining) >= float(cost.reserved_score_dwu)
+
+
+def _attach_continuous_facet_polish_telemetry(
+    result: W5ContinuousFacetPolishResult,
+    config: Optional[LayoutConfig],
+) -> None:
+    """Attach C9/C7/C3 terminal polish telemetry to ``config`` and JSONL.
+
+    Parameters
+    ----------
+    result : W5ContinuousFacetPolishResult
+        Completed continuous-facet polish result.
+    config : LayoutConfig, optional
+        Prepared native configuration that may carry telemetry state.
+
+    Returns
+    -------
+    None
+        Telemetry is appended in-place when ``config`` is present.
+    """
+    payload = {
+        "event": "native_w5_terminal_continuous_facet_polish",
+        "graph": _graph_name(config),
+        "selected": bool(result.selected),
+        "winner_v3": _finite_v3_score(result.winner_score_pair),
+        "winner_g4_layered_parent_centering": (
+            result.accepted[-1].g4_layered_parent_centering
+            if result.accepted
+            else result.winner_score_pair.g4_layered_parent_centering
+        ),
+        "winner_g4_layered_subtree_congruence": (
+            result.accepted[-1].g4_layered_subtree_congruence
+            if result.accepted
+            else result.winner_score_pair.g4_layered_subtree_congruence
+        ),
+        "skipped_reason": result.skipped_reason,
+        "gate_reason": result.gate_reason,
+        "passes_completed": int(result.passes_completed),
+        "evaluations": int(result.evaluations),
+        "start_surrogate_loss": result.start_surrogate_loss,
+        "winner_surrogate_loss": result.winner_surrogate_loss,
+        "accepted": [
+            {
+                "pass_id": int(candidate.pass_id),
+                "node": int(candidate.node),
+                "step": float(candidate.step),
+                "direction": [float(candidate.direction[0]), float(candidate.direction[1])],
+                "v3": _finite_v3_score(candidate.score_pair),
+                "g4_layered_parent_centering": candidate.g4_layered_parent_centering,
+                "g4_layered_subtree_congruence": candidate.g4_layered_subtree_congruence,
+                "surrogate_loss": float(candidate.surrogate_loss),
+                "referee_key": [
+                    int(candidate.referee_key[0]),
+                    float(candidate.referee_key[1]),
+                ],
+            }
+            for candidate in result.accepted
+        ],
+    }
+    if config is not None:
+        records = list(getattr(config, "_dagua_native_continuous_facet_polish_telemetry", []))
+        records.append(payload)
+        setattr(config, "_dagua_native_continuous_facet_polish_telemetry", records)
+    telemetry_path = os.environ.get("DAGUA_W5_TELEMETRY_PATH")
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def run_w5_terminal_continuous_facet_polish(
+    *,
+    incumbent_pos: torch.Tensor,
+    incumbent_score_pair: W5ScorePair,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    score_fn: Callable[[torch.Tensor], W5ScorePair],
+    structure: Optional[Any] = None,
+    clusters: Optional[Mapping[str, Sequence[int]]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+    config: Optional[LayoutConfig] = None,
+    has_weights: bool = False,
+    is_semantically_directed: bool = False,
+    declared_hierarchical: bool = False,
+    direction_is_declared: bool = False,
+) -> W5ContinuousFacetPolishResult:
+    """Run a referee-gated C9/C7/C3 medium-row continuous-facet polish.
+
+    Parameters
+    ----------
+    incumbent_pos : torch.Tensor
+        Current terminal winner positions with shape ``[N, 2]``.
+    incumbent_score_pair : W5ScorePair
+        Restricted-V3-backed score pair for ``incumbent_pos``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    score_fn : Callable[[torch.Tensor], W5ScorePair]
+        Existing W5 scorer backed by the runtime restricted-V3 referee.
+    structure : object, optional
+        Graph classifier payload used for structural gating.
+    clusters : Mapping[str, Sequence[int]] or None, optional
+        Runtime-visible cluster memberships.
+    cluster_parents : Mapping[str, Optional[str]] or None, optional
+        Optional cluster nesting metadata.
+    referee_key_fn : Callable[[torch.Tensor], tuple[int, float]], optional
+        Severe-G6 referee-key scorer. Candidates whose key regresses cannot
+        be selected.
+    config : LayoutConfig, optional
+        Prepared layout configuration used for budget checks and telemetry.
+    has_weights : bool, default=False
+        Whether runtime-visible edge weights affect score-cost admission.
+    is_semantically_directed : bool, default=False
+        Whether edge direction has semantic meaning.
+    declared_hierarchical : bool, default=False
+        Whether hierarchy terms are active in the frozen ruler.
+    direction_is_declared : bool, default=False
+        Whether semantic direction came from explicit graph metadata.
+
+    Returns
+    -------
+    W5ContinuousFacetPolishResult
+        Incumbent or strict V3-improving local-search winner. Every accepted
+        move is a continuous coordinate displacement and passes the existing
+        V3 referee, degeneracy flag guard, and layered-reading guard.
+    """
+    node_count = int(incumbent_pos.shape[0])
+    edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+    enabled, gate_reason, max_passes = _continuous_facet_polish_gate(
+        structure=structure,
+        edge_index=edge_index,
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        node_count=node_count,
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        direction_is_declared=direction_is_declared,
+    )
+
+    def skipped(reason: str) -> W5ContinuousFacetPolishResult:
+        """Build a no-op result for one skip reason.
+
+        Parameters
+        ----------
+        reason : str
+            Stable skip reason.
+
+        Returns
+        -------
+        W5ContinuousFacetPolishResult
+            No-op result preserving the incumbent.
+        """
+        return W5ContinuousFacetPolishResult(
+            winner_pos=incumbent_pos,
+            winner_score_pair=incumbent_score_pair,
+            selected=False,
+            skipped_reason=reason,
+            gate_reason=gate_reason,
+            passes_completed=0,
+            evaluations=0,
+            accepted=(),
+            keepalive=(incumbent_pos,),
+        )
+
+    if not enabled:
+        return skipped("structural_gate_closed")
+    if _w5_disabled_by_env():
+        result = skipped("disabled_by_env")
+        _attach_continuous_facet_polish_telemetry(result, config)
+        return result
+    incumbent_v3 = _finite_v3_score(incumbent_score_pair)
+    if incumbent_v3 is None:
+        result = skipped("missing_incumbent_v3")
+        _attach_continuous_facet_polish_telemetry(result, config)
+        return result
+    if node_count < 2:
+        result = skipped("too_few_nodes")
+        _attach_continuous_facet_polish_telemetry(result, config)
+        return result
+
+    work_edge = edge_index.detach().to(device=incumbent_pos.device, dtype=torch.long)
+    work_sizes = node_sizes.detach().to(device=incumbent_pos.device, dtype=torch.float32)
+    topo_depth = _longest_path_depth(work_edge, node_count, incumbent_pos.device)
+    start_surrogate = float(
+        _continuous_facet_surrogate_loss(
+            incumbent_pos.detach().to(dtype=torch.float32),
+            work_edge,
+            topo_depth,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+        )
+        .detach()
+        .item()
+    )
+    extent = incumbent_pos.detach().amax(dim=0) - incumbent_pos.detach().amin(dim=0)
+    diagonal = float(torch.linalg.vector_norm(extent).item())
+    if not math.isfinite(diagonal) or diagonal <= 0.0:
+        result = skipped("invalid_extent")
+        _attach_continuous_facet_polish_telemetry(result, config)
+        return result
+
+    best_pos = incumbent_pos
+    best_pair = incumbent_score_pair
+    best_v3 = float(incumbent_v3)
+    best_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+    preserve_layered_reading = _layered_preservation_required(
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        direction_is_declared=direction_is_declared,
+    )
+    preserve_layered_shape = preserve_layered_reading and gate_reason == "deep_tree_fan_spacing"
+    incumbent_layered_shape = (
+        incumbent_score_pair.g4_layered_parent_centering,
+        incumbent_score_pair.g4_layered_subtree_congruence,
+    )
+    if preserve_layered_shape and (
+        incumbent_layered_shape[0] is None or incumbent_layered_shape[1] is None
+    ):
+        incumbent_layered_shape = _continuous_facet_deep_tree_shape_scores(
+            incumbent_pos,
+            work_edge,
+            work_sizes,
+        )
+    accepted: list[W5ContinuousFacetPolishCandidate] = []
+    keepalive: list[torch.Tensor] = [incumbent_pos]
+    evaluations = 0
+    passes_completed = 0
+    has_clusters = bool(_valid_cluster_members(clusters, node_count))
+
+    for pass_id in range(1, int(max_passes) + 1):
+        improved_this_pass = False
+        passes_completed = pass_id
+        for node in range(node_count):
+            if wall_reserve_exhausted(config, _ABSOLUTE_DEADLINE_RESERVE_S):
+                break
+            for step_fraction in _CONTINUOUS_FACET_POLISH_STEP_FRACTIONS:
+                step = float(step_fraction) * diagonal
+                local_winner: (
+                    tuple[
+                        torch.Tensor,
+                        W5ScorePair,
+                        float,
+                        Tuple[int, float],
+                        tuple[float, float],
+                        float,
+                        tuple[Optional[float], Optional[float]],
+                    ]
+                    | None
+                ) = None
+                for direction in _CONTINUOUS_FACET_POLISH_DIRECTIONS:
+                    if not _continuous_facet_score_affordable(
+                        config=config,
+                        node_count=node_count,
+                        edge_count=edge_count,
+                        has_clusters=has_clusters,
+                        has_weights=has_weights,
+                    ):
+                        break
+                    candidate_pos = best_pos.detach().clone()
+                    candidate_pos[node, 0] += float(direction[0]) * step
+                    candidate_pos[node, 1] += float(direction[1]) * step
+                    if _is_degenerate(candidate_pos, work_sizes):
+                        continue
+                    keepalive.append(candidate_pos)
+                    try:
+                        candidate_pair = score_fn(candidate_pos)
+                        candidate_key = (
+                            referee_key_fn(candidate_pos)
+                            if referee_key_fn is not None
+                            else best_key
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- optional polish candidate
+                        if is_worker_timeout_like_exception(exc):
+                            raise
+                        continue
+                    evaluations += 1
+                    candidate_v3 = _finite_v3_score(candidate_pair)
+                    if candidate_key < best_key:
+                        continue
+                    if candidate_introduces_champion_ineligible_flag(
+                        candidate_pair.champion_ineligibility_flags,
+                        incumbent_score_pair.champion_ineligibility_flags,
+                    ):
+                        continue
+                    if candidate_v3 is None or float(candidate_v3) <= best_v3:
+                        continue
+                    if preserve_layered_reading and not _layered_reading_preserved(
+                        candidate_pair,
+                        incumbent_score_pair,
+                    ):
+                        continue
+                    candidate_layered_shape = (
+                        candidate_pair.g4_layered_parent_centering,
+                        candidate_pair.g4_layered_subtree_congruence,
+                    )
+                    if preserve_layered_shape and (
+                        candidate_layered_shape[0] is None or candidate_layered_shape[1] is None
+                    ):
+                        candidate_layered_shape = _continuous_facet_deep_tree_shape_scores(
+                            candidate_pos,
+                            work_edge,
+                            work_sizes,
+                        )
+                    if preserve_layered_shape and not _layered_shape_preserved(
+                        candidate_pair,
+                        incumbent_score_pair,
+                    ):
+                        continue
+                    if preserve_layered_shape and not _layered_shape_values_preserved(
+                        candidate_layered_shape,
+                        incumbent_layered_shape,
+                    ):
+                        continue
+                    if local_winner is not None and float(candidate_v3) <= local_winner[2]:
+                        continue
+                    candidate_surrogate = float(
+                        _continuous_facet_surrogate_loss(
+                            candidate_pos.detach().to(dtype=torch.float32),
+                            work_edge,
+                            topo_depth,
+                            is_semantically_directed=is_semantically_directed,
+                            declared_hierarchical=declared_hierarchical,
+                        )
+                        .detach()
+                        .item()
+                    )
+                    local_winner = (
+                        candidate_pos,
+                        candidate_pair,
+                        float(candidate_v3),
+                        candidate_key,
+                        (float(direction[0]), float(direction[1])),
+                        candidate_surrogate,
+                        candidate_layered_shape,
+                    )
+                if local_winner is None:
+                    continue
+                (
+                    best_pos,
+                    best_pair,
+                    best_v3,
+                    best_key,
+                    best_direction,
+                    best_surrogate,
+                    best_layered_shape,
+                ) = local_winner
+                accepted.append(
+                    W5ContinuousFacetPolishCandidate(
+                        pass_id=pass_id,
+                        node=node,
+                        step=step,
+                        direction=best_direction,
+                        score_pair=best_pair,
+                        surrogate_loss=best_surrogate,
+                        referee_key=best_key,
+                        g4_layered_parent_centering=best_layered_shape[0],
+                        g4_layered_subtree_congruence=best_layered_shape[1],
+                    )
+                )
+                improved_this_pass = True
+                break
+        if not improved_this_pass:
+            break
+
+    selected = bool(accepted) and best_v3 > float(incumbent_v3) + _CONTINUOUS_FACET_POLISH_TIE_EPS
+    result = W5ContinuousFacetPolishResult(
+        winner_pos=best_pos if selected else incumbent_pos,
+        winner_score_pair=best_pair if selected else incumbent_score_pair,
+        selected=selected,
+        skipped_reason=None if selected else "no_move_improved_v3",
+        gate_reason=gate_reason,
+        passes_completed=passes_completed,
+        evaluations=evaluations,
+        accepted=tuple(accepted if selected else ()),
+        keepalive=tuple(keepalive),
+        start_surrogate_loss=start_surrogate,
+        winner_surrogate_loss=accepted[-1].surrogate_loss if accepted else start_surrogate,
+    )
+    _attach_continuous_facet_polish_telemetry(result, config)
+    return result
+
+
 def run_w5_terminal_small_n_anneal(
     *,
     incumbent_pos: torch.Tensor,
@@ -6464,6 +7255,8 @@ def log_w5_telemetry(result: W5FinisherResult, config: Optional[LayoutConfig]) -
 __all__ = [
     "W5Candidate",
     "W5Checkpoint",
+    "W5ContinuousFacetPolishCandidate",
+    "W5ContinuousFacetPolishResult",
     "W5FinisherResult",
     "W5GlobalScaleSweepCandidate",
     "W5GlobalScaleSweepResult",
@@ -6483,6 +7276,7 @@ __all__ = [
     "log_w5_telemetry",
     "make_w5_skip_result",
     "run_w5_finisher",
+    "run_w5_terminal_continuous_facet_polish",
     "run_w5_terminal_global_scale_sweep",
     "run_w5_terminal_smacof_stress_polish",
     "run_w5_terminal_small_n_anneal",

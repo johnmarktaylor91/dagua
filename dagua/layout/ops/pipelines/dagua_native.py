@@ -6091,6 +6091,7 @@ def _terminal_w5_polish(
             log_w5_telemetry,
             make_w5_skip_result,
             run_w5_finisher,
+            run_w5_terminal_continuous_facet_polish,
             run_w5_terminal_global_scale_sweep,
             run_w5_terminal_smacof_stress_polish,
             run_w5_terminal_small_n_anneal,
@@ -6498,6 +6499,29 @@ def _terminal_w5_polish(
             )
             terminal_winner_pair = smacof_stress.winner_score_pair
             terminal_winner_reason = "terminal_smacof_stress_polish"
+        continuous_facet_polish = run_w5_terminal_continuous_facet_polish(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            edge_index=edge_index,
+            node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            score_fn=honest_score,
+            structure=terminal_structure,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            referee_key_fn=referee_key_fn,
+            config=config,
+            has_weights=edge_weights is not None,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+        if continuous_facet_polish.selected:
+            terminal_winner_pos = continuous_facet_polish.winner_pos.to(
+                device=final_pos.device,
+                dtype=final_pos.dtype,
+            )
+            terminal_winner_pair = continuous_facet_polish.winner_score_pair
+            terminal_winner_reason = "terminal_continuous_facet_polish"
         small_n_anneal = run_w5_terminal_small_n_anneal(
             incumbent_pos=terminal_winner_pos,
             incumbent_score_pair=terminal_winner_pair,
