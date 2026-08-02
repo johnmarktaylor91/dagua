@@ -157,6 +157,10 @@ _CONTINUOUS_FACET_POLISH_DIRECTIONS = (
     (-1.0, 1.0),
     (-1.0, -1.0),
 )
+_DEEP_TREE_RANK_WARP_STRENGTHS = (1.25, 2.0, 2.75, 3.5)
+_DEEP_TREE_RANK_WARP_POWER = 1.8
+_DEEP_TREE_MAX_RANK_BAND_STD = 1.0e-4
+_DEEP_TREE_MAX_CHILD_CENTROID_OFFSET_RATIO = 0.10
 _W5_SMACOF_STRESS_MAX_NODES = 256
 _W5_SMACOF_STRESS_MAX_EDGES = 1_024
 _W5_SMACOF_STRESS_ITERATIONS = (20, 40, 60)
@@ -5367,6 +5371,157 @@ def _continuous_facet_deep_tree_shape_scores(
     )
 
 
+def _deep_tree_rank_band_max_std(pos: torch.Tensor, topo_depth: torch.Tensor) -> float:
+    """Return the largest within-rank y standard deviation.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Longest-path depth tensor with shape ``[N]``.
+
+    Returns
+    -------
+    float
+        Maximum population standard deviation of y coordinates within any
+        depth band. Non-finite or malformed inputs return infinity so the
+        visual guard rejects them.
+    """
+    if pos.ndim != 2 or pos.shape[1] != 2 or topo_depth.ndim != 1:
+        return float("inf")
+    if int(pos.shape[0]) != int(topo_depth.shape[0]):
+        return float("inf")
+    if int(pos.shape[0]) == 0:
+        return 0.0
+    work_pos = pos.detach().to(device="cpu", dtype=torch.float64)
+    work_depth = topo_depth.detach().to(device="cpu", dtype=torch.long)
+    if not bool(torch.isfinite(work_pos).all().item()):
+        return float("inf")
+    max_std = 0.0
+    for rank in torch.unique(work_depth, sorted=True):
+        members = torch.nonzero(work_depth == rank, as_tuple=False).squeeze(1)
+        if int(members.numel()) <= 1:
+            continue
+        y_values = work_pos[members, 1]
+        max_std = max(max_std, float(y_values.std(unbiased=False).item()))
+    return max_std
+
+
+def _deep_tree_max_child_centroid_offset_ratio(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> float:
+    """Return the largest parent-to-child-centroid offset in sibling gaps.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed parent-child edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Maximum absolute parent x offset from its child centroid divided by
+        that parent's median adjacent sibling x gap. Parents with fewer than
+        two children do not constrain centering. Non-finite inputs return
+        infinity so the visual guard rejects them.
+    """
+    if pos.ndim != 2 or pos.shape[1] != 2 or edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        return float("inf")
+    work_pos = pos.detach().to(device="cpu", dtype=torch.float64)
+    work_edge = edge_index.detach().to(device="cpu", dtype=torch.long)
+    if not bool(torch.isfinite(work_pos).all().item()):
+        return float("inf")
+    node_count = int(work_pos.shape[0])
+    children_by_parent: dict[int, list[int]] = {}
+    for source, target in work_edge.t().tolist():
+        parent = int(source)
+        child = int(target)
+        if 0 <= parent < node_count and 0 <= child < node_count:
+            children_by_parent.setdefault(parent, []).append(child)
+
+    max_ratio = 0.0
+    for parent, children in children_by_parent.items():
+        if len(children) < 2:
+            continue
+        child_x = torch.sort(work_pos[torch.as_tensor(children, dtype=torch.long), 0]).values
+        gaps = child_x[1:] - child_x[:-1]
+        positive_gaps = gaps[gaps > 1.0e-9]
+        if int(positive_gaps.numel()) == 0:
+            return float("inf")
+        sibling_gap = float(positive_gaps.median().item())
+        child_centroid = float(child_x.mean().item())
+        parent_x = float(work_pos[parent, 0].item())
+        max_ratio = max(max_ratio, abs(parent_x - child_centroid) / sibling_gap)
+    return max_ratio
+
+
+def _deep_tree_rank_warp_candidate(
+    pos: torch.Tensor,
+    topo_depth: torch.Tensor,
+    strength: float,
+) -> torch.Tensor:
+    """Return a rank-separation warp that preserves x and strict y bands.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    topo_depth : torch.Tensor
+        Longest-path depth tensor with shape ``[N]``.
+    strength : float
+        Top-rank gap amplification. Larger values deepen upper ranks while
+        leaving lower leaf gaps close to the incumbent spacing.
+
+    Returns
+    -------
+    torch.Tensor
+        Candidate positions with shape ``[N, 2]``. X coordinates are unchanged;
+        y coordinates are projected to one value per depth rank.
+    """
+    candidate = pos.detach().clone()
+    depth_work = topo_depth.detach().to(device=pos.device, dtype=torch.long)
+    unique_ranks = torch.unique(depth_work, sorted=True)
+    if int(unique_ranks.numel()) <= 1:
+        return candidate
+
+    rank_means: list[float] = []
+    rank_values: list[int] = []
+    for rank in unique_ranks:
+        members = torch.nonzero(depth_work == rank, as_tuple=False).squeeze(1)
+        rank_means.append(float(pos[members, 1].mean().item()))
+        rank_values.append(int(rank.item()))
+
+    direction = 1.0 if rank_means[-1] >= rank_means[0] else -1.0
+    raw_gaps = [
+        abs(rank_means[index + 1] - rank_means[index]) for index in range(len(rank_means) - 1)
+    ]
+    positive_gaps = [gap for gap in raw_gaps if math.isfinite(gap) and gap > 1.0e-6]
+    if positive_gaps:
+        base_gap = float(np.median(np.asarray(positive_gaps, dtype=np.float64)))
+    else:
+        extent = float((pos[:, 1].max() - pos[:, 1].min()).abs().item())
+        base_gap = max(extent / max(len(rank_means) - 1, 1), 1.0)
+
+    new_means = [0.0]
+    max_gap_index = max(len(rank_means) - 2, 1)
+    for gap_index in range(len(rank_means) - 1):
+        top_weight = ((max_gap_index - gap_index) / max_gap_index) ** _DEEP_TREE_RANK_WARP_POWER
+        gap = base_gap * (1.0 + float(strength) * top_weight)
+        new_means.append(new_means[-1] + direction * gap)
+
+    old_center = float(torch.as_tensor(rank_means, dtype=torch.float64).mean().item())
+    new_center = float(np.mean(np.asarray(new_means, dtype=np.float64)))
+    offset = old_center - new_center
+    for rank_value, y_value in zip(rank_values, new_means):
+        members = torch.nonzero(depth_work == rank_value, as_tuple=False).squeeze(1)
+        candidate[members, 1] = float(y_value + offset)
+    return candidate
+
+
 def _continuous_facet_score_affordable(
     *,
     config: Optional[LayoutConfig],
@@ -5636,6 +5791,130 @@ def run_w5_terminal_continuous_facet_polish(
     evaluations = 0
     passes_completed = 0
     has_clusters = bool(_valid_cluster_members(clusters, node_count))
+
+    if preserve_layered_shape:
+        incumbent_centroid_offset = _deep_tree_max_child_centroid_offset_ratio(
+            incumbent_pos,
+            work_edge,
+        )
+        for strength in _DEEP_TREE_RANK_WARP_STRENGTHS:
+            if not _continuous_facet_score_affordable(
+                config=config,
+                node_count=node_count,
+                edge_count=edge_count,
+                has_clusters=has_clusters,
+                has_weights=has_weights,
+            ):
+                break
+            candidate_pos = _deep_tree_rank_warp_candidate(best_pos, topo_depth, strength)
+            if _is_degenerate(candidate_pos, work_sizes):
+                continue
+            candidate_rank_std = _deep_tree_rank_band_max_std(candidate_pos, topo_depth)
+            if candidate_rank_std > _DEEP_TREE_MAX_RANK_BAND_STD:
+                continue
+            candidate_centroid_offset = _deep_tree_max_child_centroid_offset_ratio(
+                candidate_pos,
+                work_edge,
+            )
+            if candidate_centroid_offset > _DEEP_TREE_MAX_CHILD_CENTROID_OFFSET_RATIO:
+                continue
+            if candidate_centroid_offset > max(
+                _DEEP_TREE_MAX_CHILD_CENTROID_OFFSET_RATIO,
+                incumbent_centroid_offset + 1.0e-6,
+            ):
+                continue
+            keepalive.append(candidate_pos)
+            try:
+                candidate_pair = score_fn(candidate_pos)
+                candidate_key = (
+                    referee_key_fn(candidate_pos) if referee_key_fn is not None else best_key
+                )
+            except Exception as exc:  # noqa: BLE001 -- optional polish candidate
+                if is_worker_timeout_like_exception(exc):
+                    raise
+                continue
+            evaluations += 1
+            candidate_v3 = _finite_v3_score(candidate_pair)
+            if candidate_key < best_key:
+                continue
+            if candidate_introduces_champion_ineligible_flag(
+                candidate_pair.champion_ineligibility_flags,
+                incumbent_score_pair.champion_ineligibility_flags,
+            ):
+                continue
+            if candidate_v3 is None or float(candidate_v3) <= best_v3:
+                continue
+            if preserve_layered_reading and not _layered_reading_preserved(
+                candidate_pair,
+                incumbent_score_pair,
+            ):
+                continue
+            candidate_layered_shape = (
+                candidate_pair.g4_layered_parent_centering,
+                candidate_pair.g4_layered_subtree_congruence,
+            )
+            if candidate_layered_shape[0] is None or candidate_layered_shape[1] is None:
+                candidate_layered_shape = _continuous_facet_deep_tree_shape_scores(
+                    candidate_pos,
+                    work_edge,
+                    work_sizes,
+                )
+            if not _layered_shape_preserved(candidate_pair, incumbent_score_pair):
+                continue
+            if not _layered_shape_values_preserved(
+                candidate_layered_shape,
+                incumbent_layered_shape,
+            ):
+                continue
+            candidate_surrogate = float(
+                _continuous_facet_surrogate_loss(
+                    candidate_pos.detach().to(dtype=torch.float32),
+                    work_edge,
+                    topo_depth,
+                    is_semantically_directed=is_semantically_directed,
+                    declared_hierarchical=declared_hierarchical,
+                )
+                .detach()
+                .item()
+            )
+            if float(candidate_v3) <= best_v3:
+                continue
+            best_pos = candidate_pos
+            best_pair = candidate_pair
+            best_v3 = float(candidate_v3)
+            best_key = candidate_key
+            accepted = [
+                W5ContinuousFacetPolishCandidate(
+                    pass_id=1,
+                    node=-1,
+                    step=float(strength),
+                    direction=(0.0, 0.0),
+                    score_pair=best_pair,
+                    surrogate_loss=candidate_surrogate,
+                    referee_key=best_key,
+                    g4_layered_parent_centering=candidate_layered_shape[0],
+                    g4_layered_subtree_congruence=candidate_layered_shape[1],
+                )
+            ]
+
+        selected = (
+            bool(accepted) and best_v3 > float(incumbent_v3) + _CONTINUOUS_FACET_POLISH_TIE_EPS
+        )
+        result = W5ContinuousFacetPolishResult(
+            winner_pos=best_pos if selected else incumbent_pos,
+            winner_score_pair=best_pair if selected else incumbent_score_pair,
+            selected=selected,
+            skipped_reason=None if selected else "no_rank_warp_improved_v3",
+            gate_reason=gate_reason,
+            passes_completed=1,
+            evaluations=evaluations,
+            accepted=tuple(accepted if selected else ()),
+            keepalive=tuple(keepalive),
+            start_surrogate_loss=start_surrogate,
+            winner_surrogate_loss=accepted[-1].surrogate_loss if accepted else start_surrogate,
+        )
+        _attach_continuous_facet_polish_telemetry(result, config)
+        return result
 
     for pass_id in range(1, int(max_passes) + 1):
         improved_this_pass = False
