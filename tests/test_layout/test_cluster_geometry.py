@@ -15,6 +15,7 @@ from dagua.layout.ops.cluster_geometry import (
     cluster_subtree,
     compute_cluster_placement_bbox,
 )
+from dagua.layout.ops.pipelines.native_finisher import build_cluster_tightening_candidates
 from dagua.layout.ops.state import LayoutProblem
 
 
@@ -195,6 +196,62 @@ def test_layout_problem_lazily_memoizes_cluster_tree() -> None:
     assert tree is not None
     assert tree is problem.get_cluster_tree()
     assert cluster_leaves_only_at_level(tree, "outer") == frozenset({0})
+
+
+def test_cluster_tightening_candidates_follow_structural_gate() -> None:
+    """Terminal cluster tightening should fire only for declared clustered structure."""
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [8.0, 0.0],
+            [10.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    node_sizes = torch.ones((4, 2), dtype=torch.float32)
+    connected_edges = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    disconnected_edges = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+
+    plain = build_cluster_tightening_candidates(positions, connected_edges, node_sizes, None, None)
+    clustered = build_cluster_tightening_candidates(
+        positions,
+        connected_edges,
+        node_sizes,
+        {"left": [0, 1], "right": [2, 3]},
+        {"left": None, "right": None},
+    )
+    nested = build_cluster_tightening_candidates(
+        positions,
+        connected_edges,
+        node_sizes,
+        {"outer": [0, 1, 2], "inner": [1, 2]},
+        {"outer": None, "inner": "outer"},
+    )
+    disconnected = build_cluster_tightening_candidates(
+        positions,
+        disconnected_edges,
+        node_sizes,
+        {"left": [0, 1], "right": [2, 3]},
+        {"left": None, "right": None},
+    )
+
+    assert plain == ()
+    disconnected_names = tuple(candidate.name for candidate in disconnected)
+    assert disconnected_names == (
+        "cluster_tighten_cluster_box_escape_g0.35",
+        "cluster_tighten_cluster_box_escape_g0.70",
+        "cluster_tighten_cluster_separate_push_1.15",
+        "cluster_tighten_cluster_separate_push_1.30",
+        "cluster_tighten_cluster_box_escape_compact_dominant_0.85_push_1.15",
+        "cluster_tighten_cluster_box_escape_compact_dominant_0.75",
+    )
+    assert all(candidate.gate_reason == "multi_cluster_escape" for candidate in disconnected)
+    assert not any("root_compact" in name or "sibling_gap" in name for name in disconnected_names)
+    assert clustered
+    assert any(candidate.gate_reason == "multi_cluster" for candidate in clustered)
+    assert nested
+    assert nested[0].max_depth == 1
 
 
 def test_sibling_clusters_do_not_overlap_badly(clustered_graph: DaguaGraph) -> None:

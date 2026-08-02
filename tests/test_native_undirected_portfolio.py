@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -59,12 +60,18 @@ from dagua.layout.ops.pipelines.native_undirected import (
     _restore_proxy_finalist_slots,
     _rgg_geometric_seed_candidate,
     _rgg_geometric_seed_enabled,
+    _router_v2_large_mini_contest,
     _score_undirected_candidate,
     _score_undirected_candidate_payload,
     _select_undirected_winner,
     _small_world_knn_seed_candidate,
     _small_world_knn_seed_enabled,
+    _small_world_reingold_tilford_candidate,
+    _small_world_reingold_tilford_enabled,
     _use_large_prism_shortlist,
+    _weighted_cluster_smacof_nonmetric_candidate,
+    _weighted_cluster_smacof_nonmetric_enabled,
+    _weighted_stress_majorization_candidate,
 )
 from dagua.layout.ops.state import LayoutProblem
 
@@ -158,18 +165,38 @@ def test_undirected_referee_forwards_extended_cluster_metadata(
     assert telemetry.old_score > telemetry.extended_score
 
 
-def test_undirected_cluster_dual_ruler_rejects_old_regression() -> None:
-    """Clustered challengers must improve extended score without old loss."""
-    incumbent = _ClusterScoreTelemetry(extended_score=80.0, old_score=90.0, metrics={})
-    challenger = _ClusterScoreTelemetry(extended_score=81.0, old_score=89.9, metrics={})
+def test_undirected_cluster_dual_ruler_uses_v3_with_flag_guard() -> None:
+    """Clustered challengers use V3 plus frozen degeneracy flags."""
+    incumbent = _ClusterScoreTelemetry(
+        extended_score=80.0,
+        old_score=90.0,
+        metrics={},
+        v3_tiered=75.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    challenger = _ClusterScoreTelemetry(
+        extended_score=81.0,
+        old_score=10.0,
+        metrics={},
+        v3_tiered=75.1,
+        champion_ineligibility_flags=frozenset(),
+    )
+    regressor = _ClusterScoreTelemetry(
+        extended_score=82.0,
+        old_score=91.0,
+        metrics={},
+        v3_tiered=75.2,
+        champion_ineligibility_flags=frozenset({"COINCIDENT_COLLAPSE"}),
+    )
 
-    assert not _cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert _cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert not _cluster_candidate_is_dual_admissible(regressor, incumbent)
     assert (
         _select_undirected_winner(
             {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
             {"incumbent": incumbent, "challenger": challenger},
         )
-        == "incumbent"
+        == "challenger"
     )
 
 
@@ -953,11 +980,11 @@ def test_contest_registers_both_cleanup_variants() -> None:
 
     graph = _ring_with_chords()
     scored_positions: list[torch.Tensor] = []
-    original_score = nu._score_undirected_candidate
+    original_score = nu._score_undirected_candidate_payload
 
-    def spy(pos, problem, cluster_ids, aesthetic_profile=None):
+    def spy(pos, problem, cluster_ids, aesthetic_profile=None, all_pairs_dist=None):
         scored_positions.append(pos.detach().clone())
-        return original_score(pos, problem, cluster_ids, aesthetic_profile)
+        return original_score(pos, problem, cluster_ids, aesthetic_profile, all_pairs_dist)
 
     original_project = nu._project_candidate
     project_calls: list[bool] = []
@@ -966,14 +993,14 @@ def test_contest_registers_both_cleanup_variants() -> None:
         project_calls.append(bool(convergent))
         return original_project(pos, problem, convergent=convergent)
 
-    nu._score_undirected_candidate = spy
+    nu._score_undirected_candidate_payload = spy
     nu._project_candidate = spy_project
     try:
         from dagua.layout import layout
 
         layout(graph, LayoutConfig(seed=42, device="cpu"))
     finally:
-        nu._score_undirected_candidate = original_score
+        nu._score_undirected_candidate_payload = original_score
         nu._project_candidate = original_project
 
     # Every challenger cleanup ran both variants (False and True in pairs).
@@ -1226,6 +1253,70 @@ def test_arm_s_rejection_restores_displaced_proxy_challenger() -> None:
     assert finalist_names[1] == "arm_s_stress_k10"
 
 
+def test_large_mini_contest_scaffold_falls_back_when_labels_are_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed community-stress resolver must not suppress scaffold admission."""
+    import importlib
+
+    from dagua.layout.ops.pipelines import native_undirected as nu
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    community_stress = importlib.import_module("dagua.layout.ops.pipelines.native_community_stress")
+    community = importlib.import_module("dagua.layout.ops.pipelines.native_community")
+
+    baseline = torch.zeros((4, 2), dtype=torch.float32)
+    scaffold = torch.tensor(
+        [[0.0, 0.0], [80.0, 0.0], [80.0, 80.0], [0.0, 80.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=4, seed=42)
+    config = LayoutConfig(seed=42, device="cpu")
+    calls: list[dict[str, object]] = []
+
+    def fake_scaffold_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
+        """Capture scaffold kwargs and return a finite challenger."""
+        del args
+        calls.append(dict(kwargs))
+        return scaffold
+
+    def fake_score(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        aesthetic_profile: object = None,
+        all_pairs_dist: Optional[object] = None,
+    ) -> float:
+        """Prefer the scaffold challenger over the baseline."""
+        del problem, cluster_ids, aesthetic_profile, all_pairs_dist
+        return 10.0 if torch.equal(pos, scaffold) else 0.0
+
+    monkeypatch.setattr(
+        dagua_native,
+        "_undirected_route_shortlist",
+        lambda *args, **kwargs: SimpleNamespace(
+            classes=["community"],
+            candidates=["community_scaffold"],
+        ),
+    )
+    monkeypatch.setattr(community_stress, "resolve_community_labels", lambda problem: None)
+    monkeypatch.setattr(community, "layout_native_community_pipeline", fake_scaffold_pipeline)
+    monkeypatch.setattr(nu, "_repair_flung_isolates", lambda pos, *args, **kwargs: pos)
+    monkeypatch.setattr(nu, "_project_candidate_prism", lambda pos, *args, **kwargs: pos)
+    monkeypatch.setattr(nu, "_candidate_is_degenerate", lambda *args, **kwargs: (False, ""))
+    monkeypatch.setattr(nu, "_small_world_knn_seed_enabled", lambda problem: False)
+    monkeypatch.setattr(nu, "_rgg_geometric_seed_enabled", lambda problem: False)
+    monkeypatch.setattr(nu, "_proxy_undirected_candidate", fake_score)
+    monkeypatch.setattr(nu, "_score_undirected_candidate_cached", fake_score)
+
+    result = _router_v2_large_mini_contest(baseline, problem, config)
+
+    assert calls
+    assert "community_labels" not in calls[0]
+    torch.testing.assert_close(result, scaffold)
+
+
 def test_arm_s_named_floor_admission_drops_compactness_floor() -> None:
     """Arm S admission enforces named floors without a compactness mean floor."""
     payload = ArmSCandidate(
@@ -1422,6 +1513,115 @@ def test_weighted_undirected_contest_reaches_weighted_similarity_candidate() -> 
     assert bool(torch.isfinite(pos).all())
     assert calls, "weighted-undirected contest never invoked candidate E"
     assert all(calls)
+
+
+def test_weighted_stress_majorization_candidate_rescales_to_node_box_target() -> None:
+    """The small weighted SM candidate is packaged at the native edge scale."""
+    graph = _clustered_ring_graph(weighted=True)
+    node_sep = 12.0
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        edge_weights=graph.edge_weights,
+        seed=42,
+    )
+
+    candidate = _weighted_stress_majorization_candidate(problem, seed=42, node_sep=node_sep)
+
+    assert candidate is not None
+    lengths = torch.linalg.vector_norm(
+        candidate[graph.edge_index[0]] - candidate[graph.edge_index[1]],
+        dim=1,
+    )
+    median_length = float(lengths.median().item())
+    target_length = 4.0 * float(torch.linalg.vector_norm(graph.node_sizes, dim=1).median().item())
+    assert median_length == pytest.approx(target_length, rel=1.0e-5, abs=1.0e-5)
+
+
+def test_weighted_stress_majorization_candidate_requires_weights() -> None:
+    """The weighted SM arm is closed outside weighted-undirected rows."""
+    graph = _clustered_ring_graph(weighted=False)
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+    )
+
+    assert _weighted_stress_majorization_candidate(problem, seed=42, node_sep=12.0) is None
+
+
+def test_small_world_reingold_tilford_candidate_is_structurally_gated() -> None:
+    """The small-world RT arm opens only for the measured structural class."""
+    num_nodes = 100
+    sources = torch.arange(num_nodes, dtype=torch.long).repeat_interleave(2)
+    targets = torch.cat(
+        (
+            (torch.arange(num_nodes, dtype=torch.long) + 1).remainder(num_nodes),
+            (torch.arange(num_nodes, dtype=torch.long) + 2).remainder(num_nodes),
+        )
+    )
+    edge_index = torch.stack((sources, targets), dim=0)
+    node_sizes = torch.full((num_nodes, 2), 8.0, dtype=torch.float32)
+    structure = SimpleNamespace(
+        is_semantically_directed=False,
+        is_acyclic=False,
+        edge_to_node_ratio=2.0,
+        max_degree=4,
+        degree_uniformity=0.0,
+        diameter_estimate=25,
+    )
+    eligible = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        structure=structure,
+    )
+    weighted = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        edge_weights=torch.ones(edge_index.shape[1], dtype=torch.float32),
+        structure=structure,
+    )
+
+    assert _small_world_reingold_tilford_enabled(eligible)
+    assert _small_world_reingold_tilford_candidate(eligible, seed=42, node_sep=8.0) is not None
+    assert not _small_world_reingold_tilford_enabled(weighted)
+
+
+def test_weighted_cluster_smacof_nonmetric_candidate_is_structurally_gated() -> None:
+    """The weighted-cluster SMACOF arm requires weights and community evidence."""
+    graph = _clustered_ring_graph(weighted=True)
+    structure = SimpleNamespace(
+        is_semantically_directed=False,
+        num_communities=3,
+        community_score=0.55,
+    )
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        edge_weights=graph.edge_weights,
+        seed=42,
+        structure=structure,
+    )
+    unweighted = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        seed=42,
+        structure=structure,
+    )
+
+    candidate = _weighted_cluster_smacof_nonmetric_candidate(problem, seed=42, node_sep=12.0)
+
+    assert _weighted_cluster_smacof_nonmetric_enabled(problem)
+    assert candidate is not None
+    assert candidate.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(candidate).all())
+    assert not _weighted_cluster_smacof_nonmetric_enabled(unweighted)
 
 
 def test_stress_points_candidate_uses_point_targets() -> None:
@@ -1693,6 +1893,25 @@ def test_skipped_predicted_arm_contest_returns_best_computed_arm(
         del problem, cluster_ids, aesthetic_profile, all_pairs_dist
         return 10.0 if torch.equal(pos, challenger) else 0.0
 
+    def fake_score_payload(
+        pos: torch.Tensor,
+        problem: LayoutProblem,
+        cluster_ids: Optional[torch.Tensor],
+        aesthetic_profile: object = None,
+        all_pairs_dist: Optional[object] = None,
+    ) -> tuple[float, _ClusterScoreTelemetry]:
+        """Prefer the computed challenger at the V3 payload scorer seam."""
+        score = fake_score(pos, problem, cluster_ids, aesthetic_profile, all_pairs_dist)
+        return (
+            score,
+            _ClusterScoreTelemetry(
+                extended_score=score,
+                old_score=score,
+                metrics={},
+                v3_tiered=score,
+            ),
+        )
+
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_run_native_problem)
     monkeypatch.setattr(dagua_native, "_collinear_dodge", lambda *args, **kwargs: None)
     monkeypatch.setattr(dagua_native, "_unshear_bimodal_edges", lambda *args, **kwargs: None)
@@ -1702,6 +1921,7 @@ def test_skipped_predicted_arm_contest_returns_best_computed_arm(
     monkeypatch.setattr(nu, "_predicted_undirected_arm_budget_available", lambda *args: False)
     monkeypatch.setattr(nu, "_proxy_undirected_candidate", fake_score)
     monkeypatch.setattr(nu, "_score_undirected_candidate_cached", fake_score)
+    monkeypatch.setattr(nu, "_score_undirected_candidate_payload", fake_score_payload)
 
     result = layout_native_undirected_portfolio(
         problem,

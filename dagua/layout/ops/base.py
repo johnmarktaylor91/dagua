@@ -24,6 +24,65 @@ import torch
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory
 
+
+def _deterministic_finite_positions_like(pos: torch.Tensor) -> torch.Tensor:
+    """Build deterministic finite fallback positions matching a tensor.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Reference position tensor with shape ``[N, 2]``. Device, dtype, and
+        leading node count are preserved in the fallback.
+
+    Returns
+    -------
+    torch.Tensor
+        Finite fallback positions with shape ``[N, 2]``.
+    """
+    num_nodes = int(pos.shape[0])
+    fallback = torch.zeros_like(pos.detach())
+    if num_nodes <= 1 or int(pos.shape[1]) < 2:
+        return fallback
+    side = int(torch.ceil(torch.sqrt(torch.tensor(float(num_nodes)))).item())
+    indices = torch.arange(num_nodes, device=pos.device, dtype=pos.dtype)
+    fallback[:, 0] = torch.remainder(indices, side)
+    fallback[:, 1] = torch.div(indices, side, rounding_mode="floor")
+    return fallback
+
+
+def finite_checkpoint_or_restore(
+    pos: torch.Tensor,
+    last_finite: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return a finite stage-boundary tensor and updated checkpoint.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    last_finite : torch.Tensor, optional
+        Last known finite positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Finite positions to keep in the solve state and the checkpoint for the
+        next boundary.
+    """
+    if bool(torch.isfinite(pos).all().item()):
+        checkpoint = pos.detach().clone()
+        return pos, checkpoint
+    if (
+        last_finite is not None
+        and tuple(last_finite.shape) == tuple(pos.shape)
+        and bool(torch.isfinite(last_finite).all().item())
+    ):
+        restored = last_finite.to(device=pos.device, dtype=pos.dtype).clone()
+        return restored, restored.detach().clone()
+    fallback = _deterministic_finite_positions_like(pos)
+    return fallback, fallback.detach().clone()
+
+
 # ---------------------------------------------------------------------------
 # Op -- base class for all operations
 # ---------------------------------------------------------------------------
@@ -267,12 +326,20 @@ class Pipeline(Op):
         SolveState
             Final state after all operations have run.
         """
+        last_finite_pos: Optional[torch.Tensor] = None
+        if state.pos is not None:
+            state.pos, last_finite_pos = finite_checkpoint_or_restore(state.pos, None)
         for op in self.ops:
             if self.trace_between:
                 ctx.trace_sink.op_start(op.name, state.step)
                 if state.pos is not None:
                     ctx.trace_sink.snapshot(state.pos, state.step)
             state = op.apply(problem, state, ctx)
+            if state.pos is not None:
+                state.pos, last_finite_pos = finite_checkpoint_or_restore(
+                    state.pos,
+                    last_finite_pos,
+                )
             state.ops_applied.append(op.name)
             if len(state.ops_applied) > 100:
                 state.ops_applied = state.ops_applied[-100:]
