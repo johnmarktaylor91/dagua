@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -471,6 +472,109 @@ def test_terminal_global_scale_sweep_accepts_anisotropic_layered_improvement() -
     winner = next(candidate for candidate in result.candidates if candidate.selected)
     assert winner.scale_x == pytest.approx(0.7)
     assert winner.scale_y == pytest.approx(8.0)
+
+
+def test_terminal_global_scale_sweep_finds_near_round_annular_aspect_win() -> None:
+    """Near-round annular rows evaluate the mild 2D aspect-normalization grid."""
+    angles = torch.arange(160, dtype=torch.float32) * (2.0 * math.pi / 160.0)
+    pos = torch.stack((torch.cos(angles), torch.sin(angles)), dim=1) * 100.0
+    raw_span = torch.max(pos, dim=0).values - torch.min(pos, dim=0).values
+    calls: list[tuple[float, float]] = []
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 win only at the centered mild aspect correction.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        span = torch.max(candidate, dim=0).values - torch.min(candidate, dim=0).values
+        key = (
+            round(float((span[0] / raw_span[0]).item()), 2),
+            round(float((span[1] / raw_span[1]).item()), 2),
+        )
+        calls.append(key)
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0 if key == (0.92, 1.10) else 10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is True
+    assert result.winner_scale_x == pytest.approx(0.92)
+    assert result.winner_scale_y == pytest.approx(1.10)
+    assert (0.90, 1.05) in calls
+    assert (0.92, 1.10) in calls
+    assert (0.98, 1.15) in calls
+
+
+def test_terminal_global_scale_sweep_keeps_filled_near_round_blob_gate_closed() -> None:
+    """Filled near-round blobs do not spend the mild annular aspect arm."""
+    angles = torch.arange(160, dtype=torch.float32) * (2.0 * math.pi / 160.0)
+    radii = torch.linspace(0.0, 100.0, 160, dtype=torch.float32)
+    pos = torch.stack((torch.cos(angles), torch.sin(angles)), dim=1) * radii[:, None]
+    raw_span = torch.max(pos, dim=0).values - torch.min(pos, dim=0).values
+    calls: list[tuple[float, float]] = []
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Record evaluated scale pairs and return a tied V3 score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a tied restricted V3 score.
+        """
+        span = torch.max(candidate, dim=0).values - torch.min(candidate, dim=0).values
+        calls.append(
+            (
+                round(float((span[0] / raw_span[0]).item()), 2),
+                round(float((span[1] / raw_span[1]).item()), 2),
+            )
+        )
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert len(calls) == 7
+    assert all(scale_x == scale_y for scale_x, scale_y in calls)
 
 
 def test_terminal_global_scale_sweep_leaves_nonlayered_rows_unchanged() -> None:

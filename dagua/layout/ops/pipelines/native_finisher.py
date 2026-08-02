@@ -109,6 +109,31 @@ _W5_TERMINAL_ANISO_STRONG_MULTIPLIERS = (
     (0.75, 6.0),
     (0.7, 8.0),
 )
+_W5_TERMINAL_ANISO_MILD_MIN_NODES = 128
+_W5_TERMINAL_ANISO_MILD_ASPECT_MIN = 0.75
+_W5_TERMINAL_ANISO_MILD_ASPECT_MAX = 1.50
+_W5_TERMINAL_ANISO_MILD_RADIAL_CV_MAX = 0.16
+_W5_TERMINAL_ANISO_MILD_INNER_RADIUS_FRACTION = 0.50
+_W5_TERMINAL_ANISO_MILD_INNER_MASS_MAX = 0.02
+_W5_TERMINAL_ANISO_MILD_BASE_SCALES = (0.85, 0.90, 0.95, 1.0)
+_W5_TERMINAL_ANISO_MILD_MULTIPLIERS = (
+    (0.90, 1.05),
+    (0.90, 1.10),
+    (0.90, 1.15),
+    (0.92, 1.05),
+    (0.92, 1.10),
+    (0.92, 1.15),
+    (0.94, 1.05),
+    (0.94, 1.10),
+    (0.94, 1.15),
+    (0.96, 1.05),
+    (0.96, 1.10),
+    (0.96, 1.15),
+    (0.98, 1.05),
+    (0.98, 1.10),
+    (0.98, 1.15),
+)
+_W5_TERMINAL_ANISO_MILD_MAX_PAIRS = 64
 _W5_TERMINAL_SCALE_TIE_EPS = 1.0e-6
 _W5_SMALL_N_ANNEAL_MAX_NODES = 50
 _W5_SMALL_N_ANNEAL_TRIALS = 800
@@ -3870,11 +3895,79 @@ def _wide_axis_aspect_ratio(pos: torch.Tensor) -> float:
     return width / height
 
 
+def _is_near_round_annular_layout(pos: torch.Tensor) -> bool:
+    """Return whether positions describe a compact near-round annular layout.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the layout has enough nodes, a non-extreme AABB aspect,
+        low radial variation, and an empty center. This structural gate admits
+        ring-like near-round rows for mild 2D aspect correction without naming
+        any graph.
+    """
+    if int(pos.shape[0]) < _W5_TERMINAL_ANISO_MILD_MIN_NODES:
+        return False
+    aspect = _wide_axis_aspect_ratio(pos)
+    if not (_W5_TERMINAL_ANISO_MILD_ASPECT_MIN <= aspect <= _W5_TERMINAL_ANISO_MILD_ASPECT_MAX):
+        return False
+    work = pos.detach()
+    if work.ndim != 2 or int(work.shape[1]) != 2:
+        return False
+    centered = work - torch.mean(work, dim=0, keepdim=True)
+    radii = torch.linalg.norm(centered, dim=1)
+    mean_radius = float(torch.mean(radii).item())
+    if not math.isfinite(mean_radius) or mean_radius <= 1.0e-12:
+        return False
+    radial_cv = float((torch.std(radii, unbiased=False) / mean_radius).item())
+    if not math.isfinite(radial_cv) or radial_cv > _W5_TERMINAL_ANISO_MILD_RADIAL_CV_MAX:
+        return False
+    median_radius = float(torch.median(radii).item())
+    if not math.isfinite(median_radius) or median_radius <= 1.0e-12:
+        return False
+    inner_limit = _W5_TERMINAL_ANISO_MILD_INNER_RADIUS_FRACTION * median_radius
+    inner_mass = float(torch.mean((radii < inner_limit).to(dtype=torch.float32)).item())
+    return math.isfinite(inner_mass) and inner_mass <= _W5_TERMINAL_ANISO_MILD_INNER_MASS_MAX
+
+
+def _mild_terminal_anisotropic_scale_pairs() -> tuple[tuple[float, float], ...]:
+    """Return mild 2D aspect candidates across nearby global scales.
+
+    Returns
+    -------
+    tuple[tuple[float, float], ...]
+        Deterministic ``(scale_x, scale_y)`` pairs. The direct aspect grid is
+        emitted first, followed by the same aspect corrections composed with
+        nearby global shrink scales so the terminal sweep covers the intended
+        aspect-by-scale family without graph-specific constants.
+    """
+    pairs: list[tuple[float, float]] = []
+    seen: set[tuple[float, float]] = set()
+    for base_scale in _W5_TERMINAL_ANISO_MILD_BASE_SCALES:
+        for scale_x, scale_y in _W5_TERMINAL_ANISO_MILD_MULTIPLIERS:
+            pair = (
+                round(float(base_scale) * float(scale_x), 12),
+                round(float(base_scale) * float(scale_y), 12),
+            )
+            if pair in seen:
+                continue
+            seen.add(pair)
+            pairs.append(pair)
+            if len(pairs) >= _W5_TERMINAL_ANISO_MILD_MAX_PAIRS:
+                return tuple(pairs)
+    return tuple(pairs)
+
+
 def _terminal_anisotropic_scale_pairs(
     pos: torch.Tensor,
     incumbent_score_pair: W5ScorePair,
 ) -> tuple[tuple[float, float], ...]:
-    """Return aspect-normalizing terminal scale pairs for lopsided layouts.
+    """Return aspect-normalizing terminal scale pairs for eligible layouts.
 
     Parameters
     ----------
@@ -3888,13 +3981,15 @@ def _terminal_anisotropic_scale_pairs(
     -------
     tuple[tuple[float, float], ...]
         Deterministic ``(scale_x, scale_y)`` pairs. Empty means the structural
-        aspect/C4 gate is closed.
+        aspect gate is closed.
     """
     del incumbent_score_pair
     aspect = _wide_axis_aspect_ratio(pos)
-    if aspect < _W5_TERMINAL_ANISO_ASPECT_MIN:
-        return ()
-    return _W5_TERMINAL_ANISO_STRONG_MULTIPLIERS
+    if aspect >= _W5_TERMINAL_ANISO_ASPECT_MIN:
+        return _W5_TERMINAL_ANISO_STRONG_MULTIPLIERS
+    if _is_near_round_annular_layout(pos):
+        return _mild_terminal_anisotropic_scale_pairs()
+    return ()
 
 
 def _w5_c5_band_scale_candidate(pair: W5ScorePair) -> Optional[float]:
