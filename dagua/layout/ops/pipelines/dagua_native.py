@@ -72,6 +72,9 @@ _LOGGER = logging.getLogger(__name__)
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
 _DOT_DEFAULT_RANK_CENTER_SEP = 72.0
 _DOT_DEFAULT_NODE_SEP = 18.0
+_DOT_COLLINEAR_CLUSTER_X_EPS_FACTOR = 0.15
+_DOT_COLLINEAR_CLUSTER_LANE_FACTOR = 0.55
+_DOT_COLLINEAR_CLUSTER_LANES = (0.0, -0.5, 0.5, -0.25, 0.25)
 _DOT_AUX_EDGE_MINLEN = 1.0
 _DOT_VIRTUAL_EDGE_WEIGHT = 8.0
 _DOT_LATTICE_LP_MAX_MATRIX_BYTES = 200 * 1024 * 1024
@@ -1042,6 +1045,68 @@ def _separate_dot_cluster_siblings(
     return out
 
 
+def _spread_collinear_dot_cluster_internals(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    clusters: Mapping[str, Sequence[int]],
+    parents: Mapping[str, Optional[str]],
+    ranks: Sequence[int],
+    pitch_x: float,
+) -> torch.Tensor:
+    """Give degenerate leaf-cluster rank chains a deterministic 2D interior.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Dot rank-row position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    clusters : Mapping[str, Sequence[int]]
+        Normalized cluster membership.
+    parents : Mapping[str, str | None]
+        Normalized cluster parent mapping.
+    ranks : Sequence[int]
+        Integer rank per node.
+    pitch_x : float
+        Horizontal rank slot pitch used by the surrounding dot-cluster pass.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with near-collinear leaf-cluster interiors spread
+        across stable local lanes while retaining existing rank y positions.
+    """
+    out = pos.detach().clone()
+    if not clusters:
+        return out
+    median_width = float(node_sizes[:, 0].median().item()) if node_sizes.numel() > 0 else 0.0
+    collinear_x_eps = max(median_width * _DOT_COLLINEAR_CLUSTER_X_EPS_FACTOR, 1.0e-4)
+    lane_pitch = max(float(pitch_x) * _DOT_COLLINEAR_CLUSTER_LANE_FACTOR, median_width * 0.5)
+    parent_names = {parent for parent in parents.values() if parent is not None}
+    leaf_names = [name for name in clusters if name not in parent_names]
+    leaf_names.sort(key=lambda name: (-_dot_cluster_depth(name, parents), name))
+    for name in leaf_names:
+        members = tuple(int(node) for node in clusters[name])
+        if len(members) < 3:
+            continue
+        member_ranks = [int(ranks[node]) for node in members]
+        min_rank = min(member_ranks)
+        max_rank = max(member_ranks)
+        if max_rank == min_rank:
+            continue
+        idx = torch.tensor(members, dtype=torch.long, device=out.device)
+        member_x = out[idx, 0]
+        if float((member_x.max() - member_x.min()).item()) > collinear_x_eps:
+            continue
+        center_x = float(member_x.median().item())
+        ordered = sorted(members, key=lambda node: (int(ranks[node]), node))
+        for node in ordered:
+            local_rank = int(ranks[node]) - min_rank
+            lane = _DOT_COLLINEAR_CLUSTER_LANES[local_rank % len(_DOT_COLLINEAR_CLUSTER_LANES)]
+            out[node, 0] = center_x + float(lane) * lane_pitch
+    return out
+
+
 def _apply_dot_cluster_fidelity_layout(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -1112,6 +1177,14 @@ def _apply_dot_cluster_fidelity_layout(
                 out[node, 0] = center_x + (used_start + slot) * pitch_x
                 out[node, 1] = float(rank) * _DOT_DEFAULT_RANK_CENTER_SEP
 
+    out = _spread_collinear_dot_cluster_internals(
+        out,
+        node_sizes,
+        normalized_clusters,
+        parents,
+        ranks,
+        pitch_x,
+    )
     clearance = max(float(node_sizes[:, 0].median().item()) * 0.25, _DOT_DEFAULT_NODE_SEP)
     # A bottom-up x-separation pass approximates Graphviz's merge_ranks slot
     # insertion: child clusters reserve a contiguous rank segment before their

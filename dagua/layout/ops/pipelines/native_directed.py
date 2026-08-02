@@ -90,6 +90,7 @@ DIRECTED_DAGRE_COMPOUND_NODE_SEP = 40.0
 DIRECTED_DAGRE_COMPOUND_RANK_SEP = 60.0
 DIRECTED_DAGRE_COMPOUND_EDGE_SEP = 20.0
 DIRECTED_DAGRE_COMPOUND_PRIOR_S = 20.0
+DIRECTED_CLUSTER_DEFAULT_SUGIYAMA_PRIOR_S = 5.0
 DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
 DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
 DIRECTED_NESTED_STRESS_MIN_NODES = 6
@@ -838,6 +839,31 @@ def _full_sugiyama_grid_enabled(problem: LayoutProblem, config: LayoutConfig) ->
     from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
 
     return _portfolio_has_budget(config, min_remaining_s=DIRECTED_LARGE_GRID_MIN_REMAINING_S)
+
+
+def _default_sugiyama_cluster_arm_enabled(problem: LayoutProblem) -> bool:
+    """Return whether clustered directed rows may try default Sugiyama.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Candidate contest problem with optional declared clusters and
+        classified graph structure.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded clustered DAG-style problems. The arm is
+        structural: no graph names or corpus-specific constants are used.
+    """
+    if not problem.clusters:
+        return False
+    if int(problem.num_nodes) > DIRECTED_DAGRE_COMPOUND_MAX_NODES:
+        return False
+    structure = problem.structure
+    if structure is not None and not bool(getattr(structure, "is_directed_acyclic", True)):
+        return False
+    return True
 
 
 def _predicted_arm_budget_available(
@@ -5488,6 +5514,55 @@ def layout_native_directed_portfolio(
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
+
+            if _default_sugiyama_cluster_arm_enabled(problem):
+                default_sugiyama_cost = _directed_opaque_arm_cost(
+                    problem,
+                    config,
+                    DIRECTED_CLUSTER_DEFAULT_SUGIYAMA_PRIOR_S,
+                )
+                default_sugiyama_cost_s = (
+                    default_sugiyama_cost.generation_dwu + default_sugiyama_cost.reserved_score_dwu
+                )
+                if not _predicted_arm_budget_available(
+                    config,
+                    default_sugiyama_cost_s,
+                ) or not admit_native_work(
+                    config,
+                    default_sugiyama_cost,
+                    "optional_directed_cluster_default_sugiyama",
+                ):
+                    _LOGGER.info("Skipped directed default-Sugiyama cluster arm: budget")
+                else:
+                    candidate_started = time.perf_counter()
+                    candidate_started_process = time.process_time()
+                    default_sugiyama = layout_sugiyama_pipeline(
+                        edge_index=cpu_edges,
+                        num_nodes=n,
+                        node_sizes=cpu_sizes,
+                        seed=seed,
+                        edge_weights=cpu_weights,
+                        config=config,
+                    )
+                    if not isinstance(default_sugiyama, torch.Tensor):
+                        raise RuntimeError(
+                            "default clustered Sugiyama returned non-position output"
+                        )
+                    _register_challenger_variants(
+                        "default_sugiyama_clustered",
+                        default_sugiyama,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+                    default_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                    _LOGGER.info(
+                        "Directed candidate runtime family=sugiyama arm=default_clustered "
+                        "cpu_seconds=%.3f",
+                        default_cpu_s,
+                    )
 
             sugiyama_cost = _directed_opaque_arm_cost(
                 problem,

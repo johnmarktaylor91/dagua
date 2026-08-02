@@ -2094,6 +2094,35 @@ def test_dot_cluster_fidelity_layout_separates_sibling_cluster_boxes() -> None:
         assert float(out[node, 1].item()) == float((rank - rank_mean) * 72.0)
 
 
+def test_dot_cluster_fidelity_layout_spreads_collinear_leaf_cluster_internals() -> None:
+    """Leaf clusters with one node per rank should get nonzero internal width."""
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 4, 5, 6],
+            [1, 2, 3, 5, 6, 7],
+        ],
+        dtype=torch.long,
+    )
+    node_sizes = torch.full((8, 2), 20.0, dtype=torch.float32)
+    base_pos = torch.zeros((8, 2), dtype=torch.float32)
+    clusters = {"left": (0, 1, 2, 3), "right": (4, 5, 6, 7)}
+
+    out = _apply_dot_cluster_fidelity_layout(
+        base_pos,
+        edge_index,
+        node_sizes,
+        clusters,
+        cluster_parents=None,
+    )
+
+    for members in clusters.values():
+        idx = torch.tensor(members, dtype=torch.long)
+        x_span = float((out[idx, 0].max() - out[idx, 0].min()).item())
+        y_span = float((out[idx, 1].max() - out[idx, 1].min()).item())
+        assert x_span > 0.0
+        assert y_span > 0.0
+
+
 def test_dagua_native_pipeline_cluster_fidelity_mode_is_invokable() -> None:
     """The public native pipeline should accept the narrow cluster fidelity mode."""
     edge_index = torch.tensor(
