@@ -3,21 +3,40 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Optional
 
 import pytest
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
 from dagua.layout.ops.pipelines.native_finisher import (
+    DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
+    W5Checkpoint,
+    W5CostPlan,
+    W5FinisherResult,
     W5HonestAxes,
     W5ScorePair,
     W5Seed,
+    _deep_tree_max_child_centroid_offset_ratio,
+    _deep_tree_rank_band_max_std,
+    _honest_scale_line_search,
+    _scale_positions_about_centroid,
+    _scale_positions_about_centroid_xy,
+    _w5_scaled_candidate_should_fallback,
     log_w5_telemetry,
     run_w5_finisher,
+    run_w5_terminal_continuous_facet_polish,
+    run_w5_terminal_global_scale_sweep,
+    run_w5_terminal_smacof_stress_polish,
+    run_w5_terminal_small_n_anneal,
     w5_dominates,
+    w5_legacy_tallied_sole_failure,
     w5_predicted_skip_reason,
 )
 
@@ -61,6 +80,1293 @@ def _tiny_layout() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return pos, edge_index, node_sizes
 
 
+def _deterministic_budget_config() -> LayoutConfig:
+    """Return a config carrying the deterministic-native budget ledger.
+
+    Returns
+    -------
+    LayoutConfig
+        Test config admitted for budgeted terminal anneal work.
+    """
+    config = LayoutConfig(seed=42)
+    install_budget_ledger(config, 900.0)
+    return config
+
+
+def test_w5_scale_search_evaluates_c5_scale_down_candidate() -> None:
+    """Analytic C5 search can spend the large-row cap on a scale below 1.0."""
+    checkpoint_pos = torch.stack(
+        (
+            torch.arange(300, dtype=torch.float32),
+            torch.zeros(300, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    raw_span = float((checkpoint_pos[:, 0].max() - checkpoint_pos[:, 0].min()).item())
+    scored_scales: list[float] = []
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Return a V3 score that is maximized by the analytic shrink.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying an out-of-band C5 ratio.
+        """
+        span = float((pos[:, 0].max() - pos[:, 0].min()).item())
+        scale = span / raw_span
+        scored_scales.append(scale)
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-abs(scale - 0.8),
+            c5_whitespace_ratio=25.0,
+        )
+
+    result = _honest_scale_line_search(
+        checkpoint_pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+        keepalive=[],
+    )
+
+    assert result.evals == 3
+    assert result.scale == 0.8
+    assert any(scale < 1.0 for scale in scored_scales)
+
+
+def test_scaled_overlap_regression_survives_when_v3_dominates() -> None:
+    """Overlap-regressed analytic scale candidates are kept when V3 dominates."""
+    scaled_pos = torch.tensor([[0.0, 0.0], [100.0, 0.0], [101.0, 0.0]], dtype=torch.float32)
+    size_work = torch.full((3, 2), 4.0, dtype=torch.float32)
+    incumbent = W5ScorePair(directed=10.0, undirected=10.0, v3=10.0)
+    candidate = W5ScorePair(directed=0.0, undirected=0.0, v3=10.2)
+
+    assert not _w5_scaled_candidate_should_fallback(
+        scaled_pos,
+        size_work,
+        None,
+        incumbent_overlap=0,
+        candidate_score=candidate,
+        incumbent_score=incumbent,
+        candidate_referee_key=(1, -0.0),
+        incumbent_referee_key=(1, -0.0),
+        tallied_axis="undirected",
+        accept_margin=0.05,
+    )
+
+
+def test_terminal_global_scale_sweep_selects_strict_v3_argmax() -> None:
+    """Terminal scale sweep chooses the best strict restricted-V3 multiplier."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+    raw_span = float((pos[:, 0].max() - pos[:, 0].min()).item())
+    score_by_scale = {
+        0.85: 10.1,
+        0.9: 10.2,
+        0.95: 10.3,
+        1.05: 10.4,
+        1.1: 10.5,
+        1.2: 11.0,
+        1.35: 10.9,
+    }
+    calls: list[float] = []
+
+    def scale_key(candidate: torch.Tensor) -> float:
+        """Return the candidate scale inferred from its x-span.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        float
+            Rounded uniform scale factor.
+        """
+        span = float((candidate[:, 0].max() - candidate[:, 0].min()).item())
+        return round(span / raw_span, 2)
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 score keyed by the inferred scale.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        scale = scale_key(candidate)
+        calls.append(scale)
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=score_by_scale[scale],
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert calls == [0.85, 0.9, 0.95, 1.05, 1.1, 1.2, 1.35]
+    assert result.selected is True
+    assert result.winner_scale == pytest.approx(1.2)
+    assert result.winner_score_pair.v3 == pytest.approx(11.0)
+    assert torch.equal(result.winner_pos, _scale_positions_about_centroid(pos, 1.2))
+
+
+def test_terminal_global_scale_sweep_keeps_incumbent_on_ties() -> None:
+    """Terminal scale sweep is a no-op when every multiplier ties V3."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 tie for every scaled candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a tied restricted V3 score.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent_pair = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent_pair,
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.winner_scale == 1.0
+    assert result.winner_score_pair is incumbent_pair
+    assert result.winner_pos is pos
+
+
+def test_terminal_global_scale_sweep_treats_tiny_float_delta_as_tie() -> None:
+    """Terminal scale sweep no-ops on scorer-noise-sized V3 deltas."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return only sub-epsilon V3 movement for every scale.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a near-tied restricted V3 score.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0 + 5.0e-8,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.winner_scale == 1.0
+    assert result.winner_pos is pos
+
+
+def test_terminal_global_scale_sweep_rejects_new_degeneracy_flag() -> None:
+    """Terminal scale sweep rejects the best V3 score when it adds a frozen flag."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+    raw_span = float((pos[:, 0].max() - pos[:, 0].min()).item())
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high but newly degenerate score at x1.2.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair with optional champion-ineligible flags.
+        """
+        span = float((candidate[:, 0].max() - candidate[:, 0].min()).item())
+        scale = round(span / raw_span, 2)
+        flags = frozenset({"DEGENERATE_SCALE"}) if scale == 1.2 else frozenset()
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0 if scale == 1.2 else 10.0,
+            champion_ineligibility_flags=flags,
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.winner_scale == 1.0
+    assert any(
+        candidate.scale == pytest.approx(1.2)
+        and candidate.reason == "introduced_champion_ineligible_flag"
+        for candidate in result.candidates
+    )
+
+
+def test_terminal_global_scale_sweep_preserves_declared_layered_reading() -> None:
+    """Declared-layered scale sweep rejects V3 gains that regress G1 facets."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high-V3 score with degraded frozen G1 facets.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.88,
+            g1_depth_order=0.97,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        g1_directed_flow=0.95,
+        g1_depth_order=0.98,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        score_fn=score_fn,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.winner_pos is pos
+    assert {candidate.reason for candidate in result.candidates} == {"layered_reading_regressed"}
+
+
+def test_terminal_global_scale_sweep_accepts_anisotropic_layered_improvement() -> None:
+    """Aspect-gated anisotropic candidates can win when G1 facets improve."""
+    pos = torch.tensor(
+        [[0.0, 0.0], [100.0, 0.0], [0.0, 10.0], [100.0, 10.0]],
+        dtype=torch.float32,
+    )
+    raw_span = torch.max(pos, dim=0).values - torch.min(pos, dim=0).values
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 win only for the measured strong-anisotropic pair.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        span = torch.max(candidate, dim=0).values - torch.min(candidate, dim=0).values
+        scale_x = round(float((span[0] / raw_span[0]).item()), 2)
+        scale_y = round(float((span[1] / raw_span[1]).item()), 2)
+        is_aniso_win = scale_x == 0.7 and scale_y == 8.0
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0 if is_aniso_win else 10.0,
+            g1_directed_flow=1.0 if is_aniso_win else 0.8,
+            g1_depth_order=1.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        g1_directed_flow=0.7,
+        g1_depth_order=1.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        score_fn=score_fn,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is True
+    assert result.winner_scale_x == pytest.approx(0.7)
+    assert result.winner_scale_y == pytest.approx(8.0)
+    torch.testing.assert_close(
+        result.winner_pos,
+        _scale_positions_about_centroid_xy(pos, 0.7, 8.0),
+    )
+    winner = next(candidate for candidate in result.candidates if candidate.selected)
+    assert winner.scale_x == pytest.approx(0.7)
+    assert winner.scale_y == pytest.approx(8.0)
+
+
+def test_terminal_global_scale_sweep_finds_near_round_annular_aspect_win() -> None:
+    """Near-round annular rows evaluate the mild 2D aspect-normalization grid."""
+    angles = torch.arange(160, dtype=torch.float32) * (2.0 * math.pi / 160.0)
+    pos = torch.stack((torch.cos(angles), torch.sin(angles)), dim=1) * 100.0
+    raw_span = torch.max(pos, dim=0).values - torch.min(pos, dim=0).values
+    calls: list[tuple[float, float]] = []
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 win only at the centered mild aspect correction.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        span = torch.max(candidate, dim=0).values - torch.min(candidate, dim=0).values
+        key = (
+            round(float((span[0] / raw_span[0]).item()), 2),
+            round(float((span[1] / raw_span[1]).item()), 2),
+        )
+        calls.append(key)
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0 if key == (0.92, 1.10) else 10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is True
+    assert result.winner_scale_x == pytest.approx(0.92)
+    assert result.winner_scale_y == pytest.approx(1.10)
+    assert (0.90, 1.05) in calls
+    assert (0.92, 1.10) in calls
+    assert (0.98, 1.15) in calls
+
+
+def test_terminal_global_scale_sweep_keeps_filled_near_round_blob_gate_closed() -> None:
+    """Filled near-round blobs do not spend the mild annular aspect arm."""
+    angles = torch.arange(160, dtype=torch.float32) * (2.0 * math.pi / 160.0)
+    radii = torch.linspace(0.0, 100.0, 160, dtype=torch.float32)
+    pos = torch.stack((torch.cos(angles), torch.sin(angles)), dim=1) * radii[:, None]
+    raw_span = torch.max(pos, dim=0).values - torch.min(pos, dim=0).values
+    calls: list[tuple[float, float]] = []
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Record evaluated scale pairs and return a tied V3 score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a tied restricted V3 score.
+        """
+        span = torch.max(candidate, dim=0).values - torch.min(candidate, dim=0).values
+        calls.append(
+            (
+                round(float((span[0] / raw_span[0]).item()), 2),
+                round(float((span[1] / raw_span[1]).item()), 2),
+            )
+        )
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert len(calls) == 7
+    assert all(scale_x == scale_y for scale_x, scale_y in calls)
+
+
+def test_terminal_global_scale_sweep_leaves_nonlayered_rows_unchanged() -> None:
+    """Non-layered scale sweep can still accept a V3 gain with lower G1 facets."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high-V3 score with irrelevant G1 facet movement.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.0,
+            g1_depth_order=0.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_global_scale_sweep(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            g1_directed_flow=1.0,
+            g1_depth_order=1.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+        direction_is_declared=False,
+    )
+
+    assert result.selected is True
+    assert result.winner_score_pair.v3 == pytest.approx(12.0)
+
+
+def test_terminal_smacof_stress_polish_preserves_declared_layered_reading() -> None:
+    """Declared-layered SMACOF rejects V3 gains that regress G1 facets."""
+    incumbent = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 0.1, dtype=torch.float32)
+    all_pairs = [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Return incumbent facets for incumbent and regressed facets otherwise.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        if torch.allclose(pos.detach().cpu(), incumbent):
+            return W5ScorePair(
+                directed=0.0,
+                undirected=0.0,
+                v3=10.0,
+                g1_directed_flow=0.95,
+                g1_depth_order=0.98,
+                champion_ineligibility_flags=frozenset(),
+            )
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.88,
+            g1_depth_order=0.97,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=score_fn(incumbent),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=all_pairs,
+        score_fn=score_fn,
+        referee_key_fn=lambda pos: (1, -0.0),
+        config=_deterministic_budget_config(),
+        iterations=(20,),
+        output_scales=(1.0,),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.winner_pos is incumbent
+    assert result.candidates[0].reason == "layered_reading_regressed"
+
+
+def _deep_tree_polish_structure() -> SimpleNamespace:
+    """Return a synthetic deep-tree structure for continuous-facet polish tests.
+
+    Returns
+    -------
+    SimpleNamespace
+        Classifier-like payload matching the structural deep-tree gate.
+    """
+    return SimpleNamespace(
+        family=SimpleNamespace(name="TREE"),
+        max_layer_width=24,
+        num_layers=6,
+        num_layers_effective=5,
+        edge_to_node_ratio=0.98,
+        topology_tags=(),
+    )
+
+
+def _medium_cluster_polish_structure() -> SimpleNamespace:
+    """Return a synthetic medium-cluster structure for polish gate tests.
+
+    Returns
+    -------
+    SimpleNamespace
+        Classifier-like payload matching the structural clustered gate.
+    """
+    return SimpleNamespace(
+        family=SimpleNamespace(name="GENERAL"),
+        max_layer_width=3,
+        num_layers=75,
+        num_layers_effective=24,
+        edge_to_node_ratio=1.93,
+        topology_tags=(),
+    )
+
+
+def _chain_edges(num_nodes: int) -> torch.Tensor:
+    """Return a deterministic directed chain edge tensor.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the chain.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, max(N - 1, 0)]``.
+    """
+    if num_nodes <= 1:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.stack(
+        [
+            torch.arange(num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+
+
+def test_terminal_continuous_facet_polish_selects_rank_warp_v3_argmax() -> None:
+    """Select a strict deep-tree rank warp without moving nodes in x."""
+    num_nodes = 64
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 8],
+        dim=1,
+    )
+    edge_index = _chain_edges(num_nodes)
+    node_sizes = torch.full((num_nodes, 2), 1.0)
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        g1_directed_flow=0.99,
+        g1_depth_order=0.99,
+        g4_layered_parent_centering=0.99,
+        g4_layered_subtree_congruence=0.99,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    original_x = pos[:, 0].detach().clone()
+    original_y_span = float((pos[:, 1].max() - pos[:, 1].min()).item())
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a V3 score that improves only when rank gaps deepen.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair carrying V3 and G1 facet payloads.
+        """
+        y_span = float((candidate[:, 1].max() - candidate[:, 1].min()).item())
+        x_unchanged = bool(torch.equal(candidate[:, 0], original_x))
+        score = 11.0 if x_unchanged and y_span > original_y_span else 9.5
+        return W5ScorePair(
+            directed=score,
+            undirected=score,
+            v3=score,
+            g1_directed_flow=0.99,
+            g1_depth_order=0.99,
+            g4_layered_parent_centering=0.99,
+            g4_layered_subtree_congruence=0.99,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is True
+    assert result.gate_reason == "deep_tree_fan_spacing"
+    assert result.accepted[0].node == -1
+    assert result.winner_score_pair.v3 == pytest.approx(11.0)
+    torch.testing.assert_close(result.winner_pos[:, 0], original_x)
+    assert _deep_tree_rank_band_max_std(
+        result.winner_pos, torch.arange(num_nodes)
+    ) == pytest.approx(0.0)
+
+
+def test_terminal_continuous_facet_polish_rejects_decentered_deep_tree() -> None:
+    """Reject strict deep-tree V3 wins when child centering is not preserved."""
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [-10.0, 1.0],
+            [10.0, 1.0],
+            [-15.0, 2.0],
+            [-5.0, 2.0],
+            [5.0, 2.0],
+            [15.0, 2.0],
+        ],
+        dtype=torch.float32,
+    )
+    bad_pos = pos.detach().clone()
+    bad_pos[0, 0] = 8.0
+    edge_index = torch.tensor([[0, 0, 1, 1, 2, 2], [1, 2, 3, 4, 5, 6]], dtype=torch.long)
+    assert _deep_tree_max_child_centroid_offset_ratio(pos, edge_index) == pytest.approx(0.0)
+    assert _deep_tree_max_child_centroid_offset_ratio(bad_pos, edge_index) > 0.1
+
+
+def test_terminal_continuous_facet_polish_preserves_declared_layered_reading() -> None:
+    """Reject strict V3 moves that regress declared layered reading."""
+    num_nodes = 64
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 8],
+        dim=1,
+    )
+    edge_index = _chain_edges(num_nodes)
+    node_sizes = torch.full((num_nodes, 2), 1.0)
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        g1_directed_flow=0.99,
+        g1_depth_order=0.99,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a higher V3 score with a degraded G1 flow payload.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair rejected by the layered guard.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=11.0,
+            undirected=11.0,
+            v3=11.0,
+            g1_directed_flow=0.50,
+            g1_depth_order=0.99,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.skipped_reason == "no_rank_warp_improved_v3"
+
+
+def test_terminal_continuous_facet_polish_preserves_deep_tree_shape() -> None:
+    """Reject deep-tree V3 moves that visibly break G4 tree-shape facets."""
+    num_nodes = 64
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 8],
+        dim=1,
+    )
+    edge_index = _chain_edges(num_nodes)
+    node_sizes = torch.full((num_nodes, 2), 1.0)
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        g1_directed_flow=0.99,
+        g1_depth_order=0.99,
+        g4_layered_parent_centering=0.99,
+        g4_layered_subtree_congruence=0.99,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a higher V3 score with degraded deep-tree G4 shape.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair rejected by the deep-tree shape guard.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=11.0,
+            undirected=11.0,
+            v3=11.0,
+            g1_directed_flow=0.99,
+            g1_depth_order=0.99,
+            g4_layered_parent_centering=0.80,
+            g4_layered_subtree_congruence=0.99,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.skipped_reason == "no_rank_warp_improved_v3"
+
+
+def test_terminal_continuous_facet_polish_structural_gates_exclude_controls() -> None:
+    """Keep binary-tree and lattice-like compound controls out of the new arm."""
+    binary_pos = torch.stack(
+        [torch.arange(11, dtype=torch.float32), torch.arange(11, dtype=torch.float32) % 4],
+        dim=1,
+    )
+    binary_result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=binary_pos,
+        incumbent_score_pair=W5ScorePair(10.0, 10.0, v3=10.0),
+        edge_index=_chain_edges(11),
+        node_sizes=torch.ones((11, 2)),
+        score_fn=lambda candidate: W5ScorePair(11.0, 11.0, v3=11.0),
+        structure=_deep_tree_polish_structure(),
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+    compound_structure = SimpleNamespace(
+        family=SimpleNamespace(name="GENERAL"),
+        max_layer_width=1,
+        num_layers=150,
+        num_layers_effective=1,
+        edge_to_node_ratio=1.4,
+        topology_tags=("lattice_like",),
+    )
+    clusters = {
+        f"compound_stage_{index}": list(range(index * 30, (index + 1) * 30)) for index in range(5)
+    }
+    compound_pos = torch.stack(
+        [torch.arange(150, dtype=torch.float32), torch.arange(150, dtype=torch.float32) % 5],
+        dim=1,
+    )
+    compound_result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=compound_pos,
+        incumbent_score_pair=W5ScorePair(10.0, 10.0, v3=10.0),
+        edge_index=_chain_edges(150),
+        node_sizes=torch.ones((150, 2)),
+        score_fn=lambda candidate: W5ScorePair(11.0, 11.0, v3=11.0),
+        structure=compound_structure,
+        clusters=clusters,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert binary_result.skipped_reason == "structural_gate_closed"
+    assert compound_result.skipped_reason == "structural_gate_closed"
+
+
+def test_terminal_continuous_facet_polish_medium_cluster_gate_selects() -> None:
+    """Admit a flat medium-cluster signature without relying on graph names."""
+    num_nodes = 100
+    pos = torch.stack(
+        [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 10],
+        dim=1,
+    )
+    clusters = {f"cluster_{index}": list(range(index * 20, (index + 1) * 20)) for index in range(5)}
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a strict V3 gain when the first node moves right.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Synthetic score pair with no champion-ineligible flags.
+        """
+        moved_right = float(candidate[0, 0].item()) > float(pos[0, 0].item())
+        score = 12.0 if moved_right else 10.0
+        return W5ScorePair(
+            directed=score,
+            undirected=score,
+            v3=score,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_continuous_facet_polish(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            10.0,
+            10.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=torch.stack(
+            [
+                torch.arange(193, dtype=torch.long) % num_nodes,
+                (torch.arange(193, dtype=torch.long) + 3) % num_nodes,
+            ]
+        ),
+        node_sizes=torch.ones((num_nodes, 2)),
+        score_fn=score_fn,
+        structure=_medium_cluster_polish_structure(),
+        clusters=clusters,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is True
+    assert result.gate_reason == "medium_cluster_neighborhood_spacing"
+
+
+def test_terminal_small_n_anneal_selects_strict_v3_argmax() -> None:
+    """Small-N anneal accepts only strict restricted-V3 improvements."""
+    pos, edge_index, node_sizes = _tiny_layout()
+    calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a monotonically improving test V3 score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        nonlocal calls
+        del candidate
+        calls += 1
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0 + float(calls),
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=4,
+    )
+
+    assert result.selected is True
+    assert result.accepted_count == 4
+    assert result.trials_completed == 4
+    assert result.winner_score_pair.v3 == pytest.approx(14.0)
+    assert [candidate.selected for candidate in result.candidates] == [False, False, False, True]
+    assert [candidate.reason for candidate in result.candidates[:-1]] == [
+        "superseded_v3_argmax",
+        "superseded_v3_argmax",
+        "superseded_v3_argmax",
+    ]
+
+
+def test_terminal_small_n_anneal_keeps_incumbent_on_ties() -> None:
+    """Small-N anneal no-ops when every perturbation ties restricted V3."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a tied V3 score for every perturbation.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=5,
+    )
+
+    assert result.selected is False
+    assert result.accepted_count == 0
+    assert result.winner_pos is pos
+    assert result.winner_score_pair is incumbent
+    assert {candidate.reason for candidate in result.candidates} == {"does_not_improve_v3"}
+
+
+def test_terminal_small_n_anneal_rejects_new_degeneracy_flag() -> None:
+    """Small-N anneal rejects high V3 perturbations with fresh frozen flags."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a high but newly degenerate score for every perturbation.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair with optional champion-ineligible flags.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            champion_ineligibility_flags=frozenset({"SPRAWL_COLLAPSE"}),
+        )
+
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=3,
+    )
+
+    assert result.selected is False
+    assert result.accepted_count == 0
+    assert {candidate.reason for candidate in result.candidates} == {
+        "introduced_champion_ineligible_flag"
+    }
+
+
+def test_terminal_small_n_anneal_preserves_declared_layered_reading() -> None:
+    """Declared-layered anneal rejects V3 gains that regress G1 facets."""
+    pos, edge_index, node_sizes = _tiny_layout()
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a strict V3 gain with lower layered-reading facets.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying V3 and G1 facet telemetry.
+        """
+        del candidate
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=12.0,
+            g1_directed_flow=0.88,
+            g1_depth_order=0.97,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    incumbent = W5ScorePair(
+        directed=0.0,
+        undirected=0.0,
+        v3=10.0,
+        g1_directed_flow=0.95,
+        g1_depth_order=0.98,
+        champion_ineligibility_flags=frozenset(),
+    )
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        config=_deterministic_budget_config(),
+        trials=3,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        direction_is_declared=True,
+    )
+
+    assert result.selected is False
+    assert result.accepted_count == 0
+    assert result.winner_pos is pos
+    assert {candidate.reason for candidate in result.candidates} == {"layered_reading_regressed"}
+
+
+def test_terminal_small_n_anneal_respects_structural_n_gate() -> None:
+    """Small-N anneal skips rows above the structural node-count cap."""
+    pos = torch.stack((torch.arange(51, dtype=torch.float32), torch.zeros(51)), dim=1)
+    edge_index = torch.stack((torch.arange(50, dtype=torch.long), torch.arange(1, 51)))
+    node_sizes = torch.full((51, 2), 2.0)
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if the structural gate lets a candidate score through.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Unused score pair.
+        """
+        del candidate
+        raise AssertionError("small-N anneal scored a graph above the N gate")
+
+    result = run_w5_terminal_small_n_anneal(
+        incumbent_pos=pos,
+        incumbent_score_pair=W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+    )
+
+    assert result.selected is False
+    assert result.skipped_reason == "too_many_nodes"
+    assert result.trials_completed == 0
+
+
+def test_terminal_small_n_anneal_is_byte_deterministic() -> None:
+    """Fixed-seed anneal returns byte-identical tensors across invocations."""
+    pos, edge_index, node_sizes = _tiny_layout()
+    target = pos + torch.tensor([[0.2, -0.1], [0.0, 0.3], [-0.2, 0.1], [0.1, 0.0]])
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a deterministic geometry-derived V3 score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Test score pair carrying a finite restricted V3 score.
+        """
+        score = -float(torch.sum((candidate.detach().cpu() - target) ** 2).item())
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=score,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    kwargs = {
+        "incumbent_pos": pos,
+        "incumbent_score_pair": W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-1.0e9,
+            champion_ineligibility_flags=frozenset(),
+        ),
+        "edge_index": edge_index,
+        "node_sizes": node_sizes,
+        "score_fn": score_fn,
+        "config": _deterministic_budget_config(),
+        "trials": 16,
+    }
+    first = run_w5_terminal_small_n_anneal(**kwargs)
+    kwargs["config"] = _deterministic_budget_config()
+    second = run_w5_terminal_small_n_anneal(**kwargs)
+
+    assert torch.equal(first.winner_pos, second.winner_pos)
+    assert first.winner_score_pair.v3 == second.winner_score_pair.v3
+    assert [candidate.changed_nodes for candidate in first.candidates] == [
+        candidate.changed_nodes for candidate in second.candidates
+    ]
+
+
 def test_w5_dominates_uses_referee_prefix_before_scores() -> None:
     """Severe-G6 keys are senior to the unchanged W5 score comparison."""
     compliant_low = _pair(1.0, 1.0)
@@ -87,6 +1393,134 @@ def test_w5_dominates_uses_referee_prefix_before_scores() -> None:
         incumbent_referee_key=(0, -0.50),
     )
     assert w5_dominates(_pair(10.2, 10.2), _pair(10.0, 10.0))
+
+
+def test_w5_dominates_admits_v3_gain_despite_removed_tallied_veto() -> None:
+    """V3-branch admission no longer vetoes on the old tallied composite."""
+    incumbent = W5ScorePair(directed=90.0, undirected=90.0, v3=70.0)
+    candidate = W5ScorePair(directed=10.0, undirected=10.0, v3=70.2)
+
+    assert w5_dominates(candidate, incumbent, tallied_axis="directed")
+    assert w5_legacy_tallied_sole_failure(candidate, incumbent, tallied_axis="directed")
+
+
+def test_w5_dominates_rejects_fresh_champion_ineligible_flag() -> None:
+    """Fresh frozen degeneracy flags replace the old tallied-composite veto."""
+    incumbent = W5ScorePair(
+        directed=90.0,
+        undirected=90.0,
+        v3=70.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    candidate = W5ScorePair(
+        directed=91.0,
+        undirected=91.0,
+        v3=70.2,
+        champion_ineligibility_flags=frozenset({"SPRAWL_COLLAPSE"}),
+    )
+
+    assert not w5_dominates(candidate, incumbent, tallied_axis="directed")
+
+
+def test_w5_dominates_rejects_declared_layered_reading_regression() -> None:
+    """Declared-layered W5 dominance requires G1 facet preservation."""
+    incumbent = W5ScorePair(
+        directed=90.0,
+        undirected=90.0,
+        v3=70.0,
+        g1_directed_flow=0.95,
+        g1_depth_order=0.98,
+        champion_ineligibility_flags=frozenset(),
+    )
+    candidate = W5ScorePair(
+        directed=91.0,
+        undirected=91.0,
+        v3=70.2,
+        g1_directed_flow=0.88,
+        g1_depth_order=0.97,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    assert not w5_dominates(candidate, incumbent, preserve_layered_reading=True)
+    assert not w5_dominates(
+        candidate,
+        incumbent,
+        candidate_referee_key=(1, -0.0),
+        incumbent_referee_key=(0, -1.0),
+        preserve_layered_reading=True,
+    )
+    assert w5_dominates(candidate, incumbent, preserve_layered_reading=False)
+
+
+def test_w5_dominates_logs_v3_missing_champion_flags(caplog: pytest.LogCaptureFixture) -> None:
+    """V3-branch hand-built pairs with missing flag payloads leave debug telemetry."""
+    incumbent = W5ScorePair(directed=90.0, undirected=90.0, v3=70.0)
+    candidate = W5ScorePair(directed=91.0, undirected=91.0, v3=70.2)
+
+    with caplog.at_level(logging.DEBUG, logger="dagua.layout.ops.pipelines.native_finisher"):
+        assert w5_dominates(candidate, incumbent, tallied_axis="directed")
+
+    assert "missing champion ineligibility flags" in caplog.text
+
+
+def test_degeneracy_champion_ineligible_flag_copies_match() -> None:
+    """Runtime, sprint scoring, and re-baseline flag copies must not drift."""
+    from scripts import freeze_v3_rebaseline, native_sprint_score
+
+    assert (
+        DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+        == native_sprint_score.DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+    )
+    assert (
+        DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+        == freeze_v3_rebaseline.DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+    )
+
+
+def test_w5_telemetry_counts_legacy_tallied_sole_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W5 telemetry reports checkpoints admitted by removing the legacy veto."""
+    telemetry_path = tmp_path / "w5.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    pos, _, _ = _tiny_layout()
+    incumbent = W5ScorePair(directed=90.0, undirected=90.0, v3=70.0)
+    candidate = W5ScorePair(directed=10.0, undirected=10.0, v3=70.2)
+    checkpoint = W5Checkpoint(
+        seed="sample",
+        mode="surrogate",
+        pass_id=1,
+        step=1,
+        surrogate_delta=0.0,
+        honest_delta=-80.0,
+        undirected_honest_delta=-80.0,
+        honest_score_pair=candidate,
+        accepted=True,
+        reason="dominates",
+        pass_spend_s=0.0,
+        legacy_tallied_sole_failure=True,
+    )
+
+    log_w5_telemetry(
+        W5FinisherResult(
+            winner_pos=pos,
+            incumbent_score_pair=incumbent,
+            winner_score_pair=candidate,
+            winner_name="sample",
+            deadline_returned=False,
+            accepted=(),
+            rejected=(),
+            checkpoints=(checkpoint,),
+            mode="surrogate",
+            steps=1,
+        ),
+        None,
+    )
+
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+    assert records[0]["legacy_tallied_sole_failure_checkpoint_count"] == 1
+    assert records[0]["checkpoints"][0]["legacy_tallied_sole_failure"]
 
 
 def test_w5_finisher_demotes_referee_breaching_high_score_checkpoint(
@@ -172,6 +1606,345 @@ def test_w5_finisher_returns_exact_incumbent_when_candidates_are_worse() -> None
     assert result.winner_score_pair == _pair(10.0, 10.0)
     assert result.accepted == ()
     assert all(not checkpoint.accepted for checkpoint in result.checkpoints)
+
+
+def test_w5_scale_line_search_prefers_honest_v3_scale() -> None:
+    """Global scale search uses V3 scores and keeps a deterministic eval cap."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    score_calls: list[torch.Tensor] = []
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Score candidates by closeness to a 1.5x global scale.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Score pair carrying the synthetic V3 scalar.
+        """
+        score_calls.append(candidate.detach().clone())
+        width = float((candidate[1, 0] - candidate[0, 0]).abs().item())
+        scale = width / 10.0
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-abs(scale - 1.5),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    keepalive: list[torch.Tensor] = []
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+        keepalive=keepalive,
+    )
+
+    assert result.evals == 6
+    assert len(score_calls) == 6
+    assert len(keepalive) == 6
+    assert result.scale != pytest.approx(1.0)
+    assert result.score_pair.v3 is not None
+    assert result.score_pair.v3 > score_fn(pos).v3
+
+
+def test_w5_scale_line_search_stops_when_next_referee_eval_exceeds_dwu() -> None:
+    """Scale search returns the best current score when the ledger cannot pay."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.stack(
+        (
+            torch.arange(1000, dtype=torch.float32),
+            torch.zeros(1000, dtype=torch.float32),
+        ),
+        dim=1,
+    )
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=5.0)
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a scale-sensitive V3 score while charging the test ledger.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Score pair carrying the synthetic V3 scalar.
+        """
+        nonlocal score_calls
+        score_calls += 1
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=float(score_calls),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    keepalive: list[torch.Tensor] = []
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=config,
+        keepalive=keepalive,
+    )
+
+    assert result.evals == 1
+    assert score_calls == 1
+    assert len(keepalive) == 1
+    assert result.scale == pytest.approx(1.0)
+
+
+def test_w5_scale_line_search_skips_scale_invariant_facets() -> None:
+    """Facet gate avoids extra V3 referee calls when scale cannot help."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return in-band C4/C5 facets for one candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            V3 score pair whose scale-sensitive facets are already in band.
+        """
+        nonlocal score_calls
+        del candidate
+        score_calls += 1
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=1.0,
+            c5_whitespace_ratio=1.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+        keepalive=[],
+    )
+
+    assert result.evals == 1
+    assert score_calls == 1
+    assert result.scale == pytest.approx(1.0)
+
+
+def test_w5_scale_line_search_caps_large_rows_at_three_evals() -> None:
+    """Large-row scale search uses the runtime cap including raw score."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.stack((torch.arange(300, dtype=torch.float32), torch.zeros(300)), dim=1)
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Score a large out-of-band C5 candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            V3 score pair that admits the line search.
+        """
+        nonlocal score_calls
+        score_calls += 1
+        scale = float((candidate[-1, 0] - candidate[0, 0]).abs().item()) / 299.0
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=-abs(scale - 1.5),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    result = native_finisher._honest_scale_line_search(
+        pos,
+        score_fn,
+        "undirected",
+        deadline=float("inf"),
+        config=None,
+        keepalive=[],
+    )
+
+    assert result.evals == 3
+    assert score_calls == 3
+
+
+def test_w5_scale_line_search_keeps_scaled_tensor_alive_on_score_exception() -> None:
+    """Run-level keepalive survives scorer exceptions after cache insertion."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    pos = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    keepalive: list[torch.Tensor] = []
+    score_calls = 0
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Raise on the first scaled candidate after it has been retained.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Raw score pair that admits scale search.
+        """
+        nonlocal score_calls
+        score_calls += 1
+        if score_calls > 1:
+            raise RuntimeError("synthetic scorer failure")
+        return W5ScorePair(
+            directed=0.0,
+            undirected=0.0,
+            v3=0.0,
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    with pytest.raises(RuntimeError, match="synthetic scorer failure"):
+        native_finisher._honest_scale_line_search(
+            pos,
+            score_fn,
+            "undirected",
+            deadline=float("inf"),
+            config=None,
+            keepalive=keepalive,
+        )
+
+    assert score_calls == 2
+    assert len(keepalive) == 2
+    assert keepalive[0] is pos
+    assert keepalive[1] is not pos
+
+
+def test_w5_finisher_admits_v3_dominant_scaled_overlap_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scaled line-search winner can survive overlap regression by V3."""
+    import importlib
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    incumbent = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    candidate = incumbent.clone()
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    node_sizes = torch.full((2, 2), 8.0)
+
+    def fake_optimize_seed(
+        seed: W5Seed,
+        edge_work: torch.Tensor,
+        size_work: torch.Tensor,
+        topo_depth: torch.Tensor,
+        mode: str,
+        deadline: float,
+        honest_axes: Optional[W5HonestAxes] = None,
+        *,
+        max_steps: Optional[int] = None,
+        max_checkpoints: int = 2,
+        pass_id: int = 1,
+        stress_sample: Optional[object] = None,
+        neighborhood_sample: Optional[object] = None,
+        shape_geometry: Optional[object] = None,
+    ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
+        """Return one raw viable checkpoint whose best scale overlaps."""
+        del (
+            seed,
+            edge_work,
+            size_work,
+            topo_depth,
+            mode,
+            deadline,
+            honest_axes,
+            max_steps,
+            max_checkpoints,
+            pass_id,
+            stress_sample,
+            neighborhood_sample,
+            shape_geometry,
+        )
+        return candidate, 1, 2.0, [(1, candidate, 1.0)]
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Prefer a shrinking global scale that violates overlap viability.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Dominating V3 score pair with out-of-band C5 facets.
+        """
+        width = float((pos[1, 0] - pos[0, 0]).abs().item())
+        scale = width / 10.0
+        return W5ScorePair(
+            directed=100.0,
+            undirected=100.0,
+            v3=-abs(scale - 0.6),
+            c5_whitespace_ratio=20.0,
+            c4_clearance_penalty=0.0,
+            c4_clearance_contact_pairs=0,
+        )
+
+    monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
+
+    result = run_w5_finisher(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=W5ScorePair(0.0, 0.0, v3=-1.0),
+        seeds=[W5Seed("incumbent", incumbent)],
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        score_fn=score_fn,
+        is_semantically_directed=False,
+        declared_hierarchical=False,
+    )
+
+    assert result.accepted
+    assert not torch.equal(result.winner_pos, candidate)
+    assert result.viability_counts["scaled_viability_fallback"] >= 1
 
 
 def test_w5_finisher_deadline_returns_exact_incumbent() -> None:
@@ -337,7 +2110,7 @@ def test_measured_cost_plan_uses_wall_surrogate_and_restores_small_row_work() ->
     )
     assert small_plan is not None
     assert small_plan.steps == 36
-    assert small_plan.seeds == 3
+    assert small_plan.seeds == 1
     assert small_plan.predicted_s == pytest.approx(
         small_plan.seeds
         * (
@@ -494,13 +2267,7 @@ def test_measured_cost_plan_uses_largest_fitting_non_tier_step_count(
         honest_axes=None,
     )
 
-    assert plan is not None
-    assert plan.steps == 36
-    assert plan.checkpoints == 2
-    assert plan.predicted_s == pytest.approx(
-        plan.seeds * (plan.steps * 0.0437 + plan.checkpoints * 0.019)
-    )
-    assert plan.shadow_step_s == pytest.approx(0.1)
+    assert plan is None
 
 
 def test_tiny_measured_cost_plan_uses_deterministic_budget_units(
@@ -639,6 +2406,53 @@ def test_tiny_w5_deterministic_costs_use_installed_ledger() -> None:
     assert not hasattr(config, PROCESS_DEADLINE_ATTR)
 
 
+def test_w5_telemetry_marks_non_tiny_ledger_costs_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ledger-backed medium W5 rows report deterministic modeled-cost telemetry."""
+    from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
+
+    telemetry_path = tmp_path / "w5.jsonl"
+    monkeypatch.setenv("DAGUA_W5_TELEMETRY_PATH", str(telemetry_path))
+    config = LayoutConfig()
+    install_budget_ledger(config, timeout_s=300.0, return_reserve_dwu=5.0)
+    pos = torch.zeros((500, 2), dtype=torch.float32)
+    result = W5FinisherResult(
+        winner_pos=pos,
+        incumbent_score_pair=_pair(1.0, 1.0),
+        winner_score_pair=_pair(1.0, 1.0),
+        winner_name="incumbent",
+        deadline_returned=False,
+        accepted=(),
+        rejected=(),
+        checkpoints=(),
+        mode="barrier_2d",
+        steps=96,
+        node_count=500,
+        edge_count=0,
+        cost_plan=W5CostPlan(
+            seeds=1,
+            steps=96,
+            checkpoints=4,
+            measured_step_s=0.0437,
+            warmup_s=0.0,
+            referee_s=0.019,
+            budget_s=20.0,
+            budget_usable_s=18.0,
+            predicted_s=4.2712,
+        ),
+    )
+
+    log_w5_telemetry(result, config)
+
+    capsys.readouterr()
+    records = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+    assert records[-1]["node_count"] == 500
+    assert records[-1]["use_deterministic_costs"] is True
+
+
 def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -703,14 +2517,11 @@ def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
         pass_id: int = 1,
         stress_sample: Optional[object] = None,
     ) -> tuple[torch.Tensor, int, float, list[tuple[int, torch.Tensor, float]]]:
-        """Record pass order and assert only pass 2 receives the fixed sample."""
+        """Record pass order and assert both passes receive the fixed sample."""
         del edge_work, size_work, topo_depth, mode, deadline, honest_axes, max_checkpoints
         assert max_steps == 5
         events.append(f"{seed.name} pass {pass_id}")
-        if pass_id == 1 and "stress build" not in events:
-            assert stress_sample is None
-        if pass_id == 2:
-            assert stress_sample is sample
+        assert stress_sample is sample
         return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
 
     monkeypatch.setattr(native_finisher, "_measured_cost_plan", fake_plan)
@@ -737,9 +2548,9 @@ def test_w5_finisher_builds_stress_sample_after_admitted_pass_one(
     assert result.cost_plan is not None
     assert events[:5] == [
         "plan",
-        "seed_a pass 1",
         "closed",
         "stress build",
+        "seed_a pass 1",
         "seed_a_p1 pass 2",
     ]
     assert "seed_b pass 1" in events
@@ -799,10 +2610,10 @@ def test_w5_finisher_runs_pass_two_despite_process_spend_noise(
     def fake_w5_spent_s(config_arg: object, started_perf: Optional[float] = None) -> float:
         """Allow seed entry, then deny the pass-2 admission guard."""
         del config_arg, started_perf
-        return 0.0 if events != ["plan", "seed_a pass 1"] else 999.0
+        return 0.0 if events != ["plan", "stress build", "seed_a pass 1"] else 999.0
 
     def fake_build_stress_sample(*args: object, **kwargs: object) -> None:
-        """Record pass-2 sample construction."""
+        """Record promoted pass-1 sample construction."""
         del args, kwargs
         events.append("stress build")
         return None
@@ -824,15 +2635,15 @@ def test_w5_finisher_runs_pass_two_despite_process_spend_noise(
         config=config,
     )
 
-    assert events == ["plan", "seed_a pass 1", "stress build", "seed_a_p1 pass 2"]
+    assert events == ["plan", "stress build", "seed_a pass 1", "seed_a_p1 pass 2"]
     assert result.deadline_returned is False
     assert result.steps == 2
 
 
-def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
+def test_measured_cost_plan_prices_scale_search_at_v3_anchor_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rgg_500 boundary fixture is modeled rather than probe-sized."""
+    """The rgg_500 boundary fixture rejects stale-flat scale-search pricing."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -878,12 +2689,8 @@ def test_measured_cost_plan_keeps_a3c_boundary_terminal_checkpoint(
         honest_axes=None,
     )
 
-    assert plan is not None
-    assert (plan.seeds, plan.steps, plan.checkpoints) == (1, 21, 1)
-    assert plan.referee_s == pytest.approx(0.019)
-    assert plan.budget_usable_s == pytest.approx(0.950)
-    assert plan.predicted_s == pytest.approx(0.9367)
-    assert native_finisher._checkpoint_steps(21, 1) == {21}
+    assert plan is None
+    assert native_finisher._checkpoint_steps(20, 1) == {20}
 
 
 def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
@@ -905,7 +2712,7 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
         targets=torch.tensor([1], dtype=torch.long),
         graph_distances=torch.tensor([1.0], dtype=torch.float32),
     )
-    pass_two_samples: list[object] = []
+    samples_by_pass: dict[int, list[object]] = {1: [], 2: []}
 
     def fake_measure(*args: object) -> object:
         """Return a tiny-row step cost that admits the raised continuation fixture."""
@@ -940,8 +2747,7 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
         del edge_work, size_work, depth_work, mode, deadline, honest_axes
         assert max_steps == 96
         assert max_checkpoints == 4
-        if pass_id == 2:
-            pass_two_samples.append(stress_sample)
+        samples_by_pass.setdefault(pass_id, []).append(stress_sample)
         return seed.pos, 1, 2.0, [(1, seed.pos, 1.0)]
 
     monkeypatch.setattr(native_finisher, "_measure_one_surrogate_step_s", fake_measure)
@@ -986,8 +2792,10 @@ def test_measured_cost_plan_tiny_fixture_retains_raised_work_and_sample(
     assert (plan.steps, plan.checkpoints) == (96, 4)
     assert result.cost_plan is not None
     assert (result.cost_plan.steps, result.cost_plan.checkpoints) == (96, 4)
-    assert pass_two_samples
-    assert all(seen is sample for seen in pass_two_samples)
+    assert samples_by_pass[1]
+    assert samples_by_pass[2]
+    assert all(seen is sample for seen in samples_by_pass[1])
+    assert all(seen is sample for seen in samples_by_pass[2])
 
 
 def test_w5_finisher_slow_shadow_probe_does_not_force_skip(
@@ -1370,10 +3178,10 @@ def test_w5_projects_overlapping_checkpoint_before_viability(
     assert result.viability_drop_counts == {}
 
 
-def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
+def test_w5_scores_checkpoint_when_projection_still_overlap_regresses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A checkpoint that remains overlap-regressed after projection is not scored."""
+    """A checkpoint that remains overlap-regressed after projection is referee-scored."""
     import importlib
 
     native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
@@ -1418,10 +3226,21 @@ def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
         del size_work
         return checkpoint_pos
 
-    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
-        """Fail if an overlap-regressed checkpoint reaches honest scoring."""
+    def non_dominating_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Return a score that cannot beat the incumbent.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Non-dominating score pair.
+        """
         del candidate
-        raise AssertionError("overlap-regressed checkpoint should be dropped")
+        return _pair(-1.0, -1.0)
 
     monkeypatch.setattr(native_finisher, "_optimize_seed", fake_optimize_seed)
     monkeypatch.setattr(native_finisher, "_project_checkpoint_for_viability", no_op_project)
@@ -1432,15 +3251,16 @@ def test_w5_drops_checkpoint_when_projection_still_overlap_regresses(
         seeds=[W5Seed("overlap", pos)],
         edge_index=edge_index,
         node_sizes=node_sizes,
-        score_fn=forbidden_score_fn,
+        score_fn=non_dominating_score_fn,
         is_semantically_directed=False,
         declared_hierarchical=False,
     )
 
-    assert result.checkpoints == ()
-    assert result.skipped_reason == "no_checkpoint"
-    assert result.viability_counts["drop_overlap_regressed"] == 2
-    assert result.viability_drop_counts == {"overlap_regressed": 2}
+    assert result.accepted == ()
+    assert len(result.checkpoints) == 2
+    assert result.skipped_reason == "no_checkpoint_improved"
+    assert result.viability_counts["scored_overlap_regressed"] == 2
+    assert result.viability_drop_counts == {}
 
 
 def test_w5_late_entry_prediction_uses_process_time_parity(

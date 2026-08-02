@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Union
 
 import torch
 
@@ -30,12 +30,15 @@ class PipelineReimplementationSpec:
         Graph-size cap used by the benchmark scheduler.
     default_params : Mapping[str, Any]
         Keyword arguments forwarded to the pipeline for reference fidelity.
+    supports_clusters : bool
+        Whether the adapter should receive clustered benchmark graphs.
     """
 
     name: str
     pipeline_name: str
     max_nodes: int
     default_params: Mapping[str, Any]
+    supports_clusters: bool = False
 
 
 class PipelineReimplementationCompetitor(CompetitorBase):
@@ -131,6 +134,12 @@ class PipelineReimplementationCompetitor(CompetitorBase):
             params.setdefault("edge_weights", graph.edge_weights)
         if "seed" in signature.parameters:
             params.setdefault("seed", 42 if seed is None else int(seed))
+        if "clusters" in signature.parameters and graph.clusters:
+            params.setdefault("clusters", graph.clusters)
+        if "cluster_parents" in signature.parameters and graph.cluster_parents:
+            params.setdefault("cluster_parents", graph.cluster_parents)
+        if "cluster_labels" in signature.parameters and graph.cluster_labels:
+            params.setdefault("cluster_labels", graph.cluster_labels)
 
         start = time.perf_counter()
         try:
@@ -164,6 +173,7 @@ def _register_pipeline_reimplementation(
     pipeline_name: str,
     max_nodes: int,
     default_params: Optional[Mapping[str, Any]] = None,
+    supports_clusters: bool = False,
 ) -> None:
     """Register one pipeline-backed reimplementation competitor.
 
@@ -177,6 +187,8 @@ def _register_pipeline_reimplementation(
         Benchmark graph-size cap.
     default_params : Mapping[str, Any] | None, default=None
         Pipeline keyword defaults.
+    supports_clusters : bool, default=False
+        Whether this reimplementation accepts clustered benchmark graphs.
 
     Returns
     -------
@@ -188,17 +200,27 @@ def _register_pipeline_reimplementation(
         pipeline_name=pipeline_name,
         max_nodes=max_nodes,
         default_params={} if default_params is None else dict(default_params),
+        supports_clusters=supports_clusters,
     )
     class_name = "".join(part.capitalize() for part in name.replace("-", "_").split("_"))
     competitor_cls = type(
         f"{class_name}Competitor",
         (PipelineReimplementationCompetitor,),
-        {"__doc__": f"Dagua reimplementation adapter for ``{pipeline_name}``.", "spec": spec},
+        {
+            "__doc__": f"Dagua reimplementation adapter for ``{pipeline_name}``.",
+            "spec": spec,
+            "supports_clusters": supports_clusters,
+        },
     )
     register(competitor_cls)
 
 
-_PIPELINE_REIMPLEMENTATIONS: tuple[tuple[str, str, int, Mapping[str, Any]], ...] = (
+_PipelineRegistration = Union[
+    tuple[str, str, int, Mapping[str, Any]],
+    tuple[str, str, int, Mapping[str, Any], bool],
+]
+
+_PIPELINE_REIMPLEMENTATIONS: tuple[_PipelineRegistration, ...] = (
     ("dagre_reimpl", "dagre", 1_500, {"nodesep": 40.0, "ranksep": 60.0, "edgesep": 20.0}),
     ("elk_layered_reimpl", "elk", 15_000, {}),
     ("elk_force_reimpl", "elk_force", 15_000, {}),
@@ -212,7 +234,7 @@ _PIPELINE_REIMPLEMENTATIONS: tuple[tuple[str, str, int, Mapping[str, Any]], ...]
     ("d3_cluster_radial_reimpl", "d3_cluster_radial", 10_000, {}),
     ("circo_reimpl", "circo", 10_000, {}),
     ("twopi_reimpl", "twopi", 10_000, {}),
-    ("osage_reimpl", "osage", 10_000, {}),
+    ("osage_reimpl", "osage", 10_000, {}, True),
     ("ogdf_balloon_reimpl", "balloon", 100_000, {}),
     ("ogdf_bertault_reimpl", "bertault", 10_000, {}),
     ("ogdf_fpp_reimpl", "fpp", 100_000, {}),
@@ -251,12 +273,15 @@ _PIPELINE_REIMPLEMENTATIONS: tuple[tuple[str, str, int, Mapping[str, Any]], ...]
     ("nnpnet_reimpl", "nnpnet", 100_000, {}),
 )
 
-for _name, _pipeline_name, _max_nodes, _default_params in _PIPELINE_REIMPLEMENTATIONS:
+for _registration in _PIPELINE_REIMPLEMENTATIONS:
+    _name, _pipeline_name, _max_nodes, _default_params = _registration[:4]
+    _supports_clusters = bool(_registration[4]) if len(_registration) > 4 else False
     _register_pipeline_reimplementation(
         name=_name,
         pipeline_name=_pipeline_name,
         max_nodes=_max_nodes,
         default_params=_default_params,
+        supports_clusters=_supports_clusters,
     )
 
 

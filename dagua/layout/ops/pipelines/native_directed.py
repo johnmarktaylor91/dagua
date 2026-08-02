@@ -8,6 +8,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from itertools import permutations
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional, Sequence, Tuple
 
 import numpy as np
@@ -15,8 +16,12 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.base import Op, Pipeline
-from dagua.layout.ops.pipelines.native_budget import admit_native_work
-from dagua.layout.ops.pipelines.native_cost_model import NativeWorkCost, estimate_native_work_cost
+from dagua.layout.ops.pipelines.native_budget import admit_native_work, charge
+from dagua.layout.ops.pipelines.native_cost_model import (
+    NativeWorkCost,
+    estimate_native_work_cost,
+    estimate_v3_referee_cost,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -64,9 +69,56 @@ DIRECTED_RECOMBINANT_MIN_NODES = 80
 DIRECTED_RECOMBINANT_MAX_NODES = 600
 DIRECTED_RECOMBINANT_MAX_CANDIDATES = 6
 DIRECTED_RECOMBINANT_PRIOR_S = 15.0
+DIRECTED_WIDE_DAG_MIN_NODES = 40
+DIRECTED_WIDE_DAG_MAX_NODES = 800
+DIRECTED_WIDE_DAG_MAX_CANDIDATES = 4
+DIRECTED_WIDE_DAG_PRIOR_S = 20.0
+DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE = 6
+DIRECTED_WIDE_DAG_MIN_WIDTH_DEPTH_RATIO = 4.0
+DIRECTED_WIDE_DAG_MIN_LAYER_WIDTH = 12
+DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_WIDTH = 10
+DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_LAYERS = 4
+DIRECTED_DOT_ORDER_MIN_NODES = 4
+DIRECTED_DOT_ORDER_MAX_NODES = 800
+DIRECTED_DOT_ORDER_MAX_CANDIDATES = 3
+DIRECTED_DOT_ORDER_PRIOR_S = 20.0
+DIRECTED_DOT_ORDER_MAX_EXPANDED_NODES = 6000
+DIRECTED_DOT_ORDER_MAX_EXPANSION_RATIO = 8.0
+DIRECTED_DAGRE_COMPOUND_MAX_NODES = 1500
+DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS = (1.0, 0.6)
+DIRECTED_DAGRE_COMPOUND_NODE_SEP = 40.0
+DIRECTED_DAGRE_COMPOUND_RANK_SEP = 60.0
+DIRECTED_DAGRE_COMPOUND_EDGE_SEP = 20.0
+DIRECTED_DAGRE_COMPOUND_PRIOR_S = 20.0
+DIRECTED_CLUSTER_DEFAULT_SUGIYAMA_PRIOR_S = 5.0
+DIRECTED_FAN_COMPACTION_MIN_SPOKES = 4
+DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION = 0.45
+DIRECTED_NESTED_STRESS_MIN_NODES = 6
+DIRECTED_NESTED_STRESS_MAX_NODES = 2000
+DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX = 3.0
+DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH = 8
+DIRECTED_NESTED_STRESS_STEPS = 100
+DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER = 4.0
+DIRECTED_NESTED_STRESS_DAG_FLOOR = 0.50
 DIRECTED_MRTREE_EDGE_NODE_RATIO_MAX = 3.0
 DIRECTED_MRTREE_MAX_RANK_WIDTH = 6
+DIRECTED_PURE_STRESS_MIN_NODES = 6
+DIRECTED_PURE_STRESS_MAX_NODES = 128
+DIRECTED_PURE_STRESS_SMACOF_MAX_NODES = 128
+DIRECTED_DAVIDSON_HAREL_SMALL_NODE_CAP = 16
 DIRECTED_STRESS_BLEND_WEIGHTS = (0.2, 0.4)
+DIRECTED_NESTED_STRESS_PARETO_KEYS = (
+    "ksm_score",
+    "edge_crossing_score",
+    "node_occlusion_score",
+    "neighborhood_preservation_score",
+    "edge_length_deviation_score",
+    "cluster_sibling_overlap_score",
+    "cluster_nesting_fidelity_score",
+    "gabriel_score",
+    "crossing_angle_score",
+    "angular_resolution_score",
+)
 SCALED_SUGIYAMA_RANK_SEP = 72.0
 SCALED_SUGIYAMA_NODE_SEP = 18.0
 EXACT_CROSSING_COUNT_VECTOR_PAIR_CAP = 5_000_000
@@ -91,6 +143,25 @@ class _RecombinantLayeredSpec:
 
 
 @dataclass(frozen=True)
+class _DotOrderSpec:
+    """One bounded expanded-graph dot-mincross candidate arm."""
+
+    name: str
+    layering: str
+    xcoord: str
+    warm_start: bool
+
+
+@dataclass(frozen=True)
+class _DagreCompoundCandidate:
+    """One packaged compound-dagre directed candidate."""
+
+    pos: torch.Tensor
+    y_compaction: float
+    target_edge_length: float
+
+
+@dataclass(frozen=True)
 class _DirectedClusterScoreTelemetry:
     """Old and extended directed composites from one full-ruler metric pass.
 
@@ -105,18 +176,25 @@ class _DirectedClusterScoreTelemetry:
     v3_referee_eligibility_key : tuple[int, float]
         Severe-G6 referee prefix. It is neutral ``(1, -0.0)`` when the input
         graph is outside the declared-weight gate.
+    v3_tiered : float
+        Runtime-restricted V3 tiered headline score.
     v3_severe_g6_breach : bool
         Whether the frozen V3 severe-G6 oracle found an absolute breach.
     v3_referee_ineligibility_reason : str
         Human-readable telemetry reason for the selected prefix.
+    champion_ineligibility_flags : frozenset[str], optional
+        Frozen V3 row flags that disqualify a candidate from champion
+        selection. ``None`` preserves callers without V3 flag payloads.
     """
 
     extended_score: float
     old_score: float
     metrics: Dict[str, float]
     v3_referee_eligibility_key: Tuple[int, float] = (1, -0.0)
+    v3_tiered: float = float("-inf")
     v3_severe_g6_breach: bool = False
     v3_referee_ineligibility_reason: str = "not_weighted_input"
+    champion_ineligibility_flags: Optional[frozenset[str]] = None
 
 
 def _weighted_referee_active(problem: LayoutProblem) -> bool:
@@ -159,13 +237,9 @@ def _runtime_referee_graph_meta(problem: LayoutProblem) -> Dict[str, Any]:
     dict[str, Any]
         Metadata sufficient for the frozen V3 G6 group oracle.
     """
-    meta: Dict[str, Any] = {}
-    if problem.edge_weights is not None:
-        meta["edge_weights"] = (
-            problem.edge_weights.detach().to(device="cpu", dtype=torch.float64).flatten().tolist()
-        )
-        meta["weight_mode"] = "distance"
-    return meta
+    from dagua.layout.ops.pipelines.native_v3_referee import _runtime_v3_graph_meta
+
+    return _runtime_v3_graph_meta(problem)
 
 
 def _runtime_referee_telemetry(
@@ -186,57 +260,32 @@ def _runtime_referee_telemetry(
     tuple[tuple[int, float], bool, str]
         Eligibility prefix, breach flag, and telemetry reason.
     """
-    if not _weighted_referee_active(problem):
-        return (1, -0.0), False, "not_weighted_input"
-    from dagua.eval.ruler_v3 import (
-        SEVERE_G6_FACETS,
-        RulerV3Facet,
-        RulerV3Result,
-        referee_eligibility_key,
-        severe_g6_breach,
-    )
-    from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
+    from dagua.eval.ruler_v3 import severe_g6_breach
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
 
-    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
-    node_sizes = (
-        torch.ones((int(problem.num_nodes), 2), dtype=torch.float32)
-        if problem.node_sizes is None
-        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
-    )
-    group_results = evaluate_conditional_groups(
-        cpu_pos,
-        problem.edge_index.detach().to(device="cpu"),
-        node_sizes,
-        _runtime_referee_graph_meta(problem),
-    )
-    facets: Dict[str, RulerV3Facet] = {}
-    for group in group_results.values():
-        for code, group_facet in group.facets.items():
-            if code not in SEVERE_G6_FACETS:
-                continue
-            facets[code] = RulerV3Facet(
-                code=group_facet.code,
-                name=group_facet.name,
-                tier=group_facet.tier,
-                score=group_facet.score,
-                base_weight=group_facet.base_weight,
-                effective_weight=group_facet.effective_weight,
-                applicable=group_facet.applicable,
-                applicability_reason=group_facet.applicability_reason,
-                metadata=group_facet.metadata,
-            )
-    result = RulerV3Result(
-        facets=facets,
-        scores={"tiered": 0.0, "equal": 0.0, "tier1_only": 0.0},
-        flags=tuple(),
-        applicability={code: facet.applicable for code, facet in facets.items()},
-        coverage={},
-        metadata={"runtime_referee": "severe_g6_only"},
-    )
-    key = referee_eligibility_key(result)
+    result = score_v3_runtime_result(pos, problem)
+    key = _runtime_referee_key_from_result(result)
     breached = severe_g6_breach(result)
     reason = "severe_g6_breach" if breached else "compliant"
     return key, breached, reason
+
+
+def _runtime_referee_key_from_result(result: object) -> Tuple[int, float]:
+    """Return the severe-G6 eligibility key for a runtime V3 result.
+
+    Parameters
+    ----------
+    result : object
+        Frozen V3 result.
+
+    Returns
+    -------
+    tuple[int, float]
+        Native selection eligibility prefix.
+    """
+    from dagua.eval.ruler_v3 import referee_eligibility_key
+
+    return referee_eligibility_key(result)
 
 
 def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
@@ -255,6 +304,42 @@ def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
     return {key: value for key, value in metrics.items() if key not in CLUSTER_EXTENDED_SCORE_KEYS}
 
 
+def _admit_v3_referee_score(
+    problem: LayoutProblem,
+    config: Optional[LayoutConfig],
+    *,
+    mandatory_floor: bool,
+) -> bool:
+    """Return whether one V3 finalist score is admitted by the DWU ledger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Candidate contest problem.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying the optional budget ledger.
+    mandatory_floor : bool
+        Whether this score is part of the incumbent/top-1 scoring floor.
+
+    Returns
+    -------
+    bool
+        ``True`` when scoring may proceed.
+    """
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    cost = estimate_v3_referee_cost(
+        int(problem.num_nodes),
+        edge_count,
+        bool(problem.clusters),
+        problem.edge_weights is not None,
+        _native_device_class(config),
+    )
+    if mandatory_floor:
+        charge(config, cost.reserved_score_dwu, "mandatory_v3_referee_floor")
+        return True
+    return admit_native_work(config, cost, "v3_referee")
+
+
 def _directed_cluster_candidate_is_dual_admissible(
     candidate: _DirectedClusterScoreTelemetry,
     incumbent: _DirectedClusterScoreTelemetry,
@@ -271,13 +356,19 @@ def _directed_cluster_candidate_is_dual_admissible(
     Returns
     -------
     bool
-        ``True`` iff extended improves by the honest margin and old-ruler
-        score does not decrease.
+        ``True`` iff V3 improves by the honest margin and the candidate does
+        not introduce a frozen champion-ineligible degeneracy flag.
     """
-    return (
-        candidate.extended_score > incumbent.extended_score + CLUSTER_DUAL_ACCEPTANCE_MARGIN
-        and candidate.old_score >= incumbent.old_score
+    from dagua.layout.ops.pipelines.native_finisher import (
+        candidate_introduces_champion_ineligible_flag,
     )
+
+    if candidate_introduces_champion_ineligible_flag(
+        candidate.champion_ineligibility_flags,
+        incumbent.champion_ineligibility_flags,
+    ):
+        return False
+    return candidate.v3_tiered > incumbent.v3_tiered + CLUSTER_DUAL_ACCEPTANCE_MARGIN
 
 
 def _score_directed_candidate(
@@ -365,26 +456,25 @@ def _score_directed_candidate_referee_payload(
     old_score = float(
         composite_auto(_old_cluster_ruler_metrics(numeric_float), is_semantically_directed=True)
     )
-    telemetry = None
-    v3_key, v3_breach, v3_reason = _runtime_referee_telemetry(pos, problem)
-    if problem.clusters:
-        telemetry = _DirectedClusterScoreTelemetry(
-            extended_score=score,
-            old_score=old_score,
-            metrics=numeric_float,
-            v3_referee_eligibility_key=v3_key,
-            v3_severe_g6_breach=v3_breach,
-            v3_referee_ineligibility_reason=v3_reason,
-        )
-    elif _weighted_referee_active(problem):
-        telemetry = _DirectedClusterScoreTelemetry(
-            extended_score=score,
-            old_score=old_score,
-            metrics=numeric_float,
-            v3_referee_eligibility_key=v3_key,
-            v3_severe_g6_breach=v3_breach,
-            v3_referee_ineligibility_reason=v3_reason,
-        )
+    from dagua.eval.ruler_v3 import severe_g6_breach
+    from dagua.layout.ops.pipelines.native_finisher import DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+
+    v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
+    v3_key = _runtime_referee_key_from_result(v3_result)
+    v3_breach = severe_g6_breach(v3_result)
+    v3_reason = "severe_g6_breach" if v3_breach else "compliant"
+    telemetry = _DirectedClusterScoreTelemetry(
+        extended_score=score,
+        old_score=old_score,
+        metrics=numeric_float,
+        v3_referee_eligibility_key=v3_key,
+        v3_tiered=float(v3_result.scores["tiered"]),
+        v3_severe_g6_breach=v3_breach,
+        v3_referee_ineligibility_reason=v3_reason,
+        champion_ineligibility_flags=frozenset(str(flag) for flag in v3_result.flags)
+        & DEGENERACY_CHAMPION_INELIGIBLE_FLAGS,
+    )
     return score, telemetry
 
 
@@ -478,7 +568,11 @@ def _score_directed_candidate_payload(
         Directed/undirected composites and honest W5 routing axes from the
         same metric pass.
     """
-    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair, w5_honest_axes_from_metrics
+    from dagua.layout.ops.pipelines.native_finisher import (
+        w5_honest_axes_from_metrics,
+        w5_score_pair_from_v3_result,
+    )
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
     from dagua.metrics import composite, composite_undirected, full
 
     numeric = full(
@@ -499,10 +593,12 @@ def _score_directed_candidate_payload(
         cluster_labels=problem.cluster_labels,
     )
     numeric["declared_hierarchical"] = True
+    v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
     return (
-        W5ScorePair(
+        w5_score_pair_from_v3_result(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
+            v3_result=v3_result,
         ),
         w5_honest_axes_from_metrics(numeric),
     )
@@ -515,7 +611,7 @@ def _directed_ordering_candidate_dual_dominates(
     cluster_ids: Optional[torch.Tensor],
     all_pairs_dist: Optional[np.ndarray],
     incumbent_referee_key: Tuple[int, float] = (1, -0.0),
-) -> tuple[bool, "W5ScorePair"]:
+) -> tuple[bool, "W5ScorePair", Tuple[int, float]]:
     """Return whether an ordering candidate may enter the winner contest.
 
     Parameters
@@ -535,9 +631,9 @@ def _directed_ordering_candidate_dual_dominates(
 
     Returns
     -------
-    tuple[bool, W5ScorePair]
+    tuple[bool, W5ScorePair, tuple[int, float]]
         Whether the candidate dominates under both rulers and the candidate
-        score pair.
+        score pair plus the already-computed severe-G6 referee key.
     """
     from dagua.layout.ops.pipelines.native_finisher import w5_dominates
 
@@ -548,15 +644,14 @@ def _directed_ordering_candidate_dual_dominates(
         all_pairs_dist,
     )
     candidate_referee_key = _runtime_referee_telemetry(candidate, problem)[0]
-    return (
-        w5_dominates(
-            candidate_pair,
-            incumbent_pair,
-            candidate_referee_key=candidate_referee_key,
-            incumbent_referee_key=incumbent_referee_key,
-        ),
+    dominates = w5_dominates(
         candidate_pair,
+        incumbent_pair,
+        candidate_referee_key=candidate_referee_key,
+        incumbent_referee_key=incumbent_referee_key,
+        tallied_axis="directed",
     )
+    return dominates, candidate_pair, candidate_referee_key
 
 
 def _select_directed_winner(
@@ -593,9 +688,14 @@ def _select_directed_winner(
                 continue
             candidate_key = (
                 candidate_telemetry.v3_referee_eligibility_key,
-                candidate_telemetry.old_score,
+                candidate_telemetry.v3_tiered,
+                candidate_telemetry.extended_score,
             )
-            best_key = (best_telemetry.v3_referee_eligibility_key, best_telemetry.old_score)
+            best_key = (
+                best_telemetry.v3_referee_eligibility_key,
+                best_telemetry.v3_tiered,
+                best_telemetry.extended_score,
+            )
             if candidate_key > best_key:
                 best_name = name
         elif score > scores[best_name]:
@@ -627,7 +727,8 @@ def _proxy_directed_candidate(
     float
         Higher-is-better proxy composite score.
     """
-    from dagua.metrics import cluster_silhouette_score, composite_auto, quick
+    from dagua.layout.ops.pipelines.native_v3_referee import v3_proxy_fold
+    from dagua.metrics import cluster_silhouette_score, quick
 
     cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
     cpu_edges = problem.edge_index.detach().to(device="cpu")
@@ -645,7 +746,7 @@ def _proxy_directed_candidate(
     if cluster_ids is not None:
         numeric.update(cluster_silhouette_score(cpu_pos, cluster_ids))
     numeric["declared_hierarchical"] = True
-    return float(composite_auto(numeric, is_semantically_directed=True))
+    return v3_proxy_fold(numeric, int(problem.num_nodes))
 
 
 def _directed_candidate_family(candidate_name: str) -> str:
@@ -738,6 +839,31 @@ def _full_sugiyama_grid_enabled(problem: LayoutProblem, config: LayoutConfig) ->
     from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
 
     return _portfolio_has_budget(config, min_remaining_s=DIRECTED_LARGE_GRID_MIN_REMAINING_S)
+
+
+def _default_sugiyama_cluster_arm_enabled(problem: LayoutProblem) -> bool:
+    """Return whether clustered directed rows may try default Sugiyama.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Candidate contest problem with optional declared clusters and
+        classified graph structure.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded clustered DAG-style problems. The arm is
+        structural: no graph names or corpus-specific constants are used.
+    """
+    if not problem.clusters:
+        return False
+    if int(problem.num_nodes) > DIRECTED_DAGRE_COMPOUND_MAX_NODES:
+        return False
+    structure = problem.structure
+    if structure is not None and not bool(getattr(structure, "is_directed_acyclic", True)):
+        return False
+    return True
 
 
 def _predicted_arm_budget_available(
@@ -907,6 +1033,186 @@ def _directed_recombinant_layered_enabled(problem: LayoutProblem) -> bool:
     )
 
 
+def _directed_wide_dag_ordering_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the wide-DAG ordering arm may build candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem inspected using only runtime graph structure.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded semantic DAGs with wide rank fanout, either from
+        a high maximum out-degree or from a large width-to-depth ratio.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_WIDE_DAG_MIN_NODES or n > DIRECTED_WIDE_DAG_MAX_NODES or edge_count == 0:
+        return False
+    structure = problem.structure
+    if structure is None:
+        return False
+    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+    tags = set(getattr(structure, "topology_tags", ()))
+    if "planar_dag" in tags or "dense_dag" in tags:
+        return False
+
+    ranks, max_width, _long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
+    depth = len({int(rank) for rank in ranks})
+    width_depth_ratio = float(max_width) / float(max(depth, 1))
+    weighted_layered_skew = (
+        _weighted_referee_active(problem)
+        and depth >= DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_LAYERS
+        and max_width >= DIRECTED_WIDE_DAG_WEIGHTED_SKEW_MIN_WIDTH
+    )
+    if "lattice_like" in tags and not weighted_layered_skew:
+        return False
+    out_degree = [0] * n
+    for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i != dst_i and 0 <= src_i < n and 0 <= dst_i < n:
+            out_degree[src_i] += 1
+    max_out_degree = max(out_degree, default=0)
+    high_fanout = max_out_degree >= max(
+        DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE,
+        int(round(0.06 * float(n))),
+    )
+    broad_layers = (
+        max_width >= DIRECTED_WIDE_DAG_MIN_LAYER_WIDTH
+        and width_depth_ratio >= DIRECTED_WIDE_DAG_MIN_WIDTH_DEPTH_RATIO
+    )
+    return high_fanout or broad_layers or weighted_layered_skew
+
+
+def _directed_dot_order_enabled(problem: LayoutProblem) -> bool:
+    """Return whether expanded-graph dot-order candidates may be built.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem inspected using only runtime graph structure.
+
+    Returns
+    -------
+    bool
+        ``True`` only for bounded semantic DAGs with clean high-fanout hub
+        structure where expanded-graph mincross has proven useful.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_DOT_ORDER_MIN_NODES or n > DIRECTED_DOT_ORDER_MAX_NODES or edge_count == 0:
+        return False
+    if problem.clusters:
+        return False
+    structure = problem.structure
+    if structure is None:
+        return False
+    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
+        return False
+    if getattr(structure, "is_semantically_directed", True) is False:
+        return False
+
+    ranks, _max_width, _long_edge_ratio = _directed_rank_profile(problem.edge_index, n)
+    expanded_n = n
+    out_degree = [0] * n
+    for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i != dst_i and 0 <= src_i < n and 0 <= dst_i < n:
+            out_degree[src_i] += 1
+            expanded_n += max(0, int(ranks[dst_i]) - int(ranks[src_i]) - 1)
+    if not _expanded_size_within_dot_order_ladder(expanded_n, n):
+        return False
+    high_fanout_threshold = max(
+        DIRECTED_WIDE_DAG_MIN_MAX_OUT_DEGREE,
+        int(round(0.06 * float(n))),
+    )
+    return max(out_degree, default=0) >= high_fanout_threshold
+
+
+def _clean_fan_bundle_for_compaction(problem: LayoutProblem) -> bool:
+    """Return whether the directed fan-compaction arm may be built.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem whose topology is inspected.
+
+    Returns
+    -------
+    bool
+        ``True`` only for clean hub-spoke/fan-bundle DAGs where dominant hubs
+        own many one-hop spoke branches that reconverge downstream. The
+        predicate is a runtime-cost pre-filter only; acceptance is guarded by
+        drawing properties after the candidate is built.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < 6 or n > DIRECTED_RECOMBINANT_MAX_NODES or edge_count == 0:
+        return False
+    structure = problem.structure
+    if structure is not None:
+        if not bool(
+            getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+        ):
+            return False
+        if getattr(structure, "is_semantically_directed", True) is False:
+            return False
+        tags = set(getattr(structure, "topology_tags", ()))
+        if tags.intersection({"planar_dag", "lattice_like", "bipartite_dag", "wide_layered"}):
+            return False
+
+    edges = [
+        (int(src), int(dst))
+        for src, dst in problem.edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist()
+        if int(src) != int(dst) and 0 <= int(src) < n and 0 <= int(dst) < n
+    ]
+    if not edges:
+        return False
+    successors: list[list[int]] = [[] for _ in range(n)]
+    predecessors: list[list[int]] = [[] for _ in range(n)]
+    for src, dst in edges:
+        successors[src].append(dst)
+        predecessors[dst].append(src)
+
+    fan_hub_count = 0
+    fan_spoke_count = 0
+    has_non_spoke_continuation = False
+    for hub, children in enumerate(successors):
+        if len(children) < DIRECTED_FAN_COMPACTION_MIN_SPOKES:
+            continue
+        sink_counts: dict[int, int] = {}
+        spoke_children: set[int] = set()
+        for child in children:
+            child_successors = successors[child]
+            if len(child_successors) != 1 or len(predecessors[child]) != 1:
+                continue
+            sink = int(child_successors[0])
+            sink_counts[sink] = sink_counts.get(sink, 0) + 1
+            spoke_children.add(child)
+        best_spokes = max(sink_counts.values(), default=0)
+        if best_spokes < DIRECTED_FAN_COMPACTION_MIN_SPOKES:
+            continue
+        fan_hub_count += 1
+        fan_spoke_count += best_spokes
+        has_non_spoke_continuation = has_non_spoke_continuation or any(
+            child not in spoke_children for child in children
+        )
+
+    if fan_hub_count == 0:
+        return False
+    spoke_fraction = float(fan_spoke_count) / max(float(n), 1.0)
+    if spoke_fraction < DIRECTED_FAN_COMPACTION_MIN_SPOKE_FRACTION:
+        return False
+    return fan_hub_count >= 2 or has_non_spoke_continuation
+
+
 def _recombinant_layered_specs() -> tuple[_RecombinantLayeredSpec, ...]:
     """Return the curated bounded IDEA-2 layered-stage crosses.
 
@@ -1035,6 +1341,24 @@ def _recombinant_rank_values(
         )
         return _dense_rank_values(ranks)
     if spec.layering == "network_simplex_tightened":
+        from dagua.layout.ops.ordering import _expanded_layered_graph
+
+        longest_path_ranks, _max_width, _long_edge_ratio = _directed_rank_profile(
+            problem.edge_index,
+            int(problem.num_nodes),
+        )
+        expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+            rank_values=longest_path_ranks,
+            edge_index=problem.edge_index,
+            edge_weights=problem.edge_weights,
+        )
+        if not _lever2_expanded_x_assignment_enabled(
+            len(expanded_ranks),
+            int(problem.num_nodes),
+        ):
+            # Network-simplex ranking can dominate runtime on rows whose
+            # virtual-chain expansion would be outside the Lever-2 ladder.
+            return _dense_rank_values(longest_path_ranks)
         try:
             from dagua.layout.ops.elk import _network_simplex_layers
 
@@ -1179,11 +1503,65 @@ def _apply_recombinant_ordering(
     tuple[list[list[int]], torch.Tensor]
         Ordered layers and positions after ordering.
     """
-    layers = torch.tensor(rank_values, dtype=torch.long)
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    expanded_ranks, expanded_edges, virtual_ids, _edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    n_expanded = len(expanded_ranks)
+    rank_sep = float(getattr(config, "_dagua_native_rank_sep", config.rank_sep))
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    expanded_initial = _initial_recombinant_positions(
+        expanded_ranks,
+        None,
+        rank_sep,
+        node_sep,
+    )
+    if initial_pos.shape[0] == int(problem.num_nodes):
+        expanded_initial[: int(problem.num_nodes)] = initial_pos.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
+    layers = torch.tensor(expanded_ranks, dtype=torch.long)
     state = SolveState(
-        pos=initial_pos.detach().clone(),
+        pos=expanded_initial.detach().clone(),
         layers=layers,
-        adjacency=_recombinant_adjacency_lists(problem.edge_index, int(problem.num_nodes)),
+        adjacency=_recombinant_adjacency_lists(expanded_edges, n_expanded),
+    )
+    state.extras["expanded_graph"] = SimpleNamespace(
+        edge_index=expanded_edges,
+        layers=layers,
+        num_nodes=n_expanded,
+        virtual_ids=virtual_ids,
+    )
+    expanded_sizes = (
+        torch.cat(
+            (
+                problem.node_sizes.detach().to(device="cpu", dtype=torch.float32),
+                torch.zeros(
+                    (max(0, n_expanded - int(problem.num_nodes)), 2),
+                    dtype=torch.float32,
+                ),
+            ),
+            dim=0,
+        )
+        if problem.node_sizes is not None and n_expanded > int(problem.num_nodes)
+        else (
+            problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+            if problem.node_sizes is not None
+            else None
+        )
+    )
+    expanded_problem = LayoutProblem(
+        edge_index=expanded_edges,
+        num_nodes=n_expanded,
+        node_sizes=expanded_sizes,
+        direction=problem.direction,
+        structure=problem.structure,
+        edge_weights=torch.tensor(_edge_penalties, dtype=torch.float32),
+        seed=problem.seed,
     )
     ctx = RuntimeContext()
     if spec.ordering == "barycenter_transpose":
@@ -1195,36 +1573,38 @@ def _apply_recombinant_ordering(
         )
 
         state = BarycenterSweep(BarycenterSweepConfig(passes=12, direction="both")).apply(
-            problem,
+            expanded_problem,
             state,
             ctx,
         )
-        state = TransposeHeuristic(TransposeHeuristicConfig(passes=4)).apply(problem, state, ctx)
+        state = TransposeHeuristic(TransposeHeuristicConfig(passes=4)).apply(
+            expanded_problem,
+            state,
+            ctx,
+        )
     elif spec.ordering == "median":
         from dagua.layout.ops.ordering import MedianSweep, MedianSweepConfig
 
-        state = MedianSweep(MedianSweepConfig(passes=12)).apply(problem, state, ctx)
+        state = MedianSweep(MedianSweepConfig(passes=12)).apply(expanded_problem, state, ctx)
     elif spec.ordering == "discrete":
         ordered_pos = _rank_local_zero_crossing_swap_candidate(
-            initial_pos,
-            problem.edge_index,
-            max_passes=_ordering_portfolio_max_passes(int(problem.num_nodes)),
+            expanded_initial,
+            expanded_edges,
+            max_passes=_ordering_portfolio_max_passes(n_expanded),
             config=config,
         )
         state.pos = ordered_pos
         state.ordering = None
     if spec.ordering == "discrete":
-        rank_to_nodes = _rank_to_nodes_from_incumbent_y(
-            state.pos,
-            problem.edge_index,
-            problem.num_nodes,
-        )
+        expanded_rank_to_nodes: dict[int, list[int]] = {}
+        for node, rank in enumerate(expanded_ranks):
+            expanded_rank_to_nodes.setdefault(int(rank), []).append(node)
         ordered_layers = [
             sorted(nodes, key=lambda node: float(state.pos[node, 0].item()))
-            for _rank, nodes in sorted(rank_to_nodes.items())
+            for _rank, nodes in sorted(expanded_rank_to_nodes.items())
         ]
     else:
-        ordered_layers = _ordered_layers_from_ordering(rank_values, state.ordering)
+        ordered_layers = _ordered_layers_from_ordering(expanded_ranks, state.ordering)
     return ordered_layers, state.pos.detach().to(device="cpu", dtype=torch.float32)
 
 
@@ -1253,11 +1633,57 @@ def _assign_recombinant_x_coordinates(
         X coordinates with shape ``[N]``, or ``None`` if the existing x solver
         cannot run.
     """
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
     n = int(problem.num_nodes)
+    rank_values = [0] * max(n, 0)
+    for rank, layer in enumerate(ordered_layers):
+        for node in layer:
+            node_i = int(node)
+            if 0 <= node_i < n:
+                rank_values[node_i] = int(rank)
+    expanded_ranks, expanded_edges, virtual_ids, edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    n_expanded = len(expanded_ranks)
+    ordered_node_ids = {int(node) for layer in ordered_layers for node in layer}
+    expanded_layers = [list(layer) for layer in ordered_layers]
+    if any(node >= n for node in ordered_node_ids):
+        expanded_layers = [list(layer) for layer in ordered_layers]
+    else:
+        for virtual_node in sorted(virtual_ids):
+            rank = int(expanded_ranks[virtual_node])
+            while len(expanded_layers) <= rank:
+                expanded_layers.append([])
+            expanded_layers[rank].append(virtual_node)
+        expanded_layers = [[int(node) for node in layer] for layer in expanded_layers]
+    use_expanded_x = _lever2_expanded_x_assignment_enabled(n_expanded, n)
+    x_layers = (
+        expanded_layers if use_expanded_x else _raw_layers_from_expanded_order(ordered_layers, n)
+    )
+    x_edge_index = expanded_edges if use_expanded_x else problem.edge_index
     sizes = (
         problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
         if problem.node_sizes is not None
         else torch.full((n, 2), float(node_sep), dtype=torch.float32)
+    )
+    extra_count = max(0, n_expanded - n)
+    expanded_widths = (
+        torch.cat((sizes[:, 0], torch.zeros(extra_count, dtype=torch.float32)))
+        if extra_count > 0
+        else sizes[:, 0]
+    )
+    x_widths = expanded_widths if use_expanded_x else sizes[:, 0]
+    x_edge_weights = (
+        torch.tensor(edge_penalties, dtype=torch.float32)
+        if use_expanded_x
+        else (
+            problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+            if problem.edge_weights is not None
+            else None
+        )
     )
     if spec.xcoord == "dot_lp":
         try:
@@ -1265,52 +1691,47 @@ def _assign_recombinant_x_coordinates(
                 _graphviz_dot_x_position_network_simplex,
             )
 
-            return _graphviz_dot_x_position_network_simplex(
-                rank_ordering=ordered_layers,
-                node_widths=sizes[:, 0],
-                edge_index=problem.edge_index.detach().to(device="cpu"),
+            x_all = _graphviz_dot_x_position_network_simplex(
+                rank_ordering=x_layers,
+                node_widths=x_widths,
+                edge_index=x_edge_index,
                 node_sep=node_sep,
-                edge_weights=(
-                    None
-                    if problem.edge_weights is None
-                    else problem.edge_weights.detach().to(device="cpu")
-                ),
+                edge_weights=x_edge_weights,
                 center=True,
             ).to(dtype=torch.float32)
+            x_values = x_all[:n].to(dtype=torch.float32)
+            return x_values - x_values.mean()
         except Exception:
             return None
     if spec.xcoord == "brandes_koepf":
         try:
             from dagua.layout.ops.brandes_koepf import brandes_koepf_x_assignment
 
+            x_node_count = int(x_widths.numel())
+            x_dummy_nodes = virtual_ids if use_expanded_x else set()
             order_index = {
-                int(node): order for layer in ordered_layers for order, node in enumerate(layer)
+                int(node): order for layer in x_layers for order, node in enumerate(layer)
             }
-            rank_index = {
-                int(node): rank for rank, layer in enumerate(ordered_layers) for node in layer
-            }
-            predecessors: dict[int, list[int]] = {node: [] for node in range(n)}
-            successors: dict[int, list[int]] = {node: [] for node in range(n)}
-            candidate_edges = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+            predecessors: dict[int, list[int]] = {node: [] for node in range(x_node_count)}
+            successors: dict[int, list[int]] = {node: [] for node in range(x_node_count)}
+            candidate_edges = x_edge_index.detach().to(device="cpu", dtype=torch.long)
             for src, dst in candidate_edges.t().tolist():
                 src_i = int(src)
                 dst_i = int(dst)
-                if src_i == dst_i or not (0 <= src_i < n and 0 <= dst_i < n):
-                    continue
-                if abs(rank_index.get(dst_i, 0) - rank_index.get(src_i, 0)) != 1:
+                if src_i == dst_i or not (0 <= src_i < x_node_count and 0 <= dst_i < x_node_count):
                     continue
                 successors[src_i].append(dst_i)
                 predecessors[dst_i].append(src_i)
-            for node in range(n):
+            for node in range(x_node_count):
                 predecessors[node].sort(key=lambda item: (order_index.get(item, 0), item))
                 successors[node].sort(key=lambda item: (order_index.get(item, 0), item))
-            widths = {node: float(sizes[node, 0].item()) for node in range(n)}
+            widths = {node: float(x_widths[node].item()) for node in range(x_node_count)}
             x_map = brandes_koepf_x_assignment(
-                layering=ordered_layers,
+                layering=x_layers,
                 predecessors=predecessors,
                 successors=successors,
                 widths=widths,
-                dummy_nodes=set(),
+                dummy_nodes=x_dummy_nodes,
                 node_sep=node_sep,
             )
             x_values = torch.tensor([float(x_map.get(node, 0.0)) for node in range(n)])
@@ -1318,6 +1739,42 @@ def _assign_recombinant_x_coordinates(
         except Exception:
             return None
     return None
+
+
+def _recombinant_expansion_volume(
+    spec: _RecombinantLayeredSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+) -> Optional[float]:
+    """Return the expanded-node pricing volume for a recombinant spec.
+
+    Parameters
+    ----------
+    spec : _RecombinantLayeredSpec
+        Candidate specification whose layering determines long-edge expansion.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float or None
+        Expanded-node-to-real-node ratio, or ``None`` when ranks cannot be
+        derived for the candidate.
+    """
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    n = int(problem.num_nodes)
+    rank_values = _recombinant_rank_values(spec, problem, incumbent)
+    if rank_values is None or len(rank_values) != n:
+        return None
+    expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    return float(len(expanded_ranks)) / float(max(n, 1))
 
 
 def _build_recombinant_layered_candidate(
@@ -1398,17 +1855,20 @@ def _directed_recombinant_layered_candidates(
     if not _directed_recombinant_layered_enabled(problem):
         return {}
     candidates: dict[str, torch.Tensor] = {}
-    predicted_cost = estimate_native_work_cost(
-        problem,
-        "directed_recombinant",
-        {"volume": 1.0},
-        _native_device_class(config),
-    )
-    predicted_cost.metadata["legacy_prior_s"] = DIRECTED_RECOMBINANT_PRIOR_S
-    predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
     for spec in _recombinant_layered_specs():
         if len(candidates) >= DIRECTED_RECOMBINANT_MAX_CANDIDATES:
             break
+        expansion_volume = _recombinant_expansion_volume(spec, problem, incumbent)
+        if expansion_volume is None:
+            continue
+        predicted_cost = estimate_native_work_cost(
+            problem,
+            "directed_recombinant",
+            {"volume": expansion_volume},
+            _native_device_class(config),
+        )
+        predicted_cost.metadata["legacy_prior_s"] = DIRECTED_RECOMBINANT_PRIOR_S
+        predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
         if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
             config,
             predicted_cost,
@@ -1427,6 +1887,1778 @@ def _directed_recombinant_layered_candidates(
             continue
         candidates[spec.name] = candidate
     return candidates
+
+
+def _wide_dag_layered_specs() -> tuple[_RecombinantLayeredSpec, ...]:
+    """Return bounded layered-stage crosses for wide-DAG ordering.
+
+    Returns
+    -------
+    tuple[_RecombinantLayeredSpec, ...]
+        Four ELK/Sugiyama-style in-house layer/order/x-coordinate candidates.
+    """
+    return (
+        _RecombinantLayeredSpec(
+            name="wide_ns_bary_bk",
+            layering="network_simplex_tightened",
+            ordering="barycenter_transpose",
+            xcoord="brandes_koepf",
+        ),
+        _RecombinantLayeredSpec(
+            name="wide_ns_median_lp",
+            layering="network_simplex_tightened",
+            ordering="median",
+            xcoord="dot_lp",
+        ),
+        _RecombinantLayeredSpec(
+            name="wide_lp_bary_lp",
+            layering="longest_path",
+            ordering="barycenter_transpose",
+            xcoord="dot_lp",
+        ),
+        _RecombinantLayeredSpec(
+            name="wide_native_bary_bk",
+            layering="native_current",
+            ordering="barycenter_transpose",
+            xcoord="brandes_koepf",
+        ),
+    )
+
+
+def _directed_wide_dag_ordering_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> dict[str, torch.Tensor]:
+    """Build bounded wide-DAG layered-ordering candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying deadline and telemetry fields.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate names mapped to complete layered layouts.
+    """
+    setattr(config, "_dagua_native_wide_dag_ordering_fired", False)
+    if not bool(getattr(config, "use_wide_dag_ordering_arm", True)):
+        return {}
+    if not _directed_wide_dag_ordering_enabled(problem):
+        return {}
+    setattr(config, "_dagua_native_wide_dag_ordering_fired", True)
+    candidates: dict[str, torch.Tensor] = {}
+    for spec in _wide_dag_layered_specs():
+        if len(candidates) >= DIRECTED_WIDE_DAG_MAX_CANDIDATES:
+            break
+        expansion_volume = _recombinant_expansion_volume(spec, problem, incumbent)
+        if expansion_volume is None:
+            continue
+        predicted_cost = estimate_native_work_cost(
+            problem,
+            "directed_recombinant",
+            {"volume": expansion_volume},
+            _native_device_class(config),
+        )
+        predicted_cost.metadata["legacy_prior_s"] = DIRECTED_WIDE_DAG_PRIOR_S
+        predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
+        if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
+            config,
+            predicted_cost,
+            f"optional_directed_wide_dag_ordering_{spec.name}",
+        ):
+            break
+        process_started = time.process_time()
+        candidate = _build_recombinant_layered_candidate(spec, problem, incumbent, config)
+        wide_cpu_s = _prediction_cpu_elapsed_s(process_started)
+        _LOGGER.info(
+            "Directed candidate runtime family=wide_dag_ordering arm=%s cpu_seconds=%.3f",
+            spec.name,
+            wide_cpu_s,
+        )
+        if candidate is None:
+            continue
+        candidates[spec.name] = candidate
+    return candidates
+
+
+def _dot_order_specs() -> tuple[_DotOrderSpec, ...]:
+    """Return the bounded expanded-graph dot-mincross candidate specs.
+
+    Returns
+    -------
+    tuple[_DotOrderSpec, ...]
+        Three deterministic candidates using dot ordering over virtual-chain
+        expanded layered graphs.
+    """
+    return (
+        _DotOrderSpec(
+            name="dot_ns_dotx",
+            layering="network_simplex_tightened",
+            xcoord="dot_lp",
+            warm_start=False,
+        ),
+        _DotOrderSpec(
+            name="dot_native_dotx",
+            layering="native_current",
+            xcoord="dot_lp",
+            warm_start=True,
+        ),
+        _DotOrderSpec(
+            name="dot_native_bk",
+            layering="native_current",
+            xcoord="brandes_koepf",
+            warm_start=True,
+        ),
+    )
+
+
+def _dot_order_iterations(expanded_nodes: int) -> int:
+    """Return the deterministic mincross iteration count for expanded size.
+
+    Parameters
+    ----------
+    expanded_nodes : int
+        Number of real plus virtual nodes.
+
+    Returns
+    -------
+    int
+        Graphviz-mincross iteration budget from the structural ladder.
+    """
+    if expanded_nodes <= 2000:
+        return 24
+    if expanded_nodes <= 4000:
+        return 12
+    return 8
+
+
+def _rank_ordering_from_values(
+    rank_values: Sequence[int],
+    incumbent: Optional[torch.Tensor] = None,
+) -> list[list[int]]:
+    """Build rank groups, optionally seeded by incumbent x order.
+
+    Parameters
+    ----------
+    rank_values : sequence of int
+        Per-node rank values.
+    incumbent : torch.Tensor, optional
+        Incumbent positions with shape ``[N, 2]`` used as a deterministic
+        warm-start order for real nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Nodes grouped by rank in left-to-right seed order.
+    """
+    rank_to_nodes: dict[int, list[int]] = {}
+    for node, rank in enumerate(rank_values):
+        rank_to_nodes.setdefault(int(rank), []).append(node)
+    if incumbent is None:
+        return [rank_to_nodes[rank] for rank in sorted(rank_to_nodes)]
+    x_values = incumbent.detach().to(device="cpu", dtype=torch.float32)[:, 0]
+    real_count = int(x_values.numel())
+    layers: list[list[int]] = []
+    for rank in sorted(rank_to_nodes):
+        nodes = rank_to_nodes[rank]
+        nodes.sort(
+            key=lambda node: (
+                float(x_values[node].item()) if node < real_count else 0.0,
+                node >= real_count,
+                node,
+            )
+        )
+        layers.append(nodes)
+    return layers
+
+
+def _expanded_size_within_dot_order_ladder(expanded_nodes: int, real_nodes: int) -> bool:
+    """Return whether expanded graph size is within the dot-order ladder.
+
+    Parameters
+    ----------
+    expanded_nodes : int
+        Number of real plus virtual nodes.
+    real_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when both absolute and relative expansion caps hold.
+    """
+    if expanded_nodes > DIRECTED_DOT_ORDER_MAX_EXPANDED_NODES:
+        return False
+    return float(expanded_nodes) <= DIRECTED_DOT_ORDER_MAX_EXPANSION_RATIO * float(
+        max(real_nodes, 1)
+    )
+
+
+def _lever2_expanded_x_assignment_enabled(expanded_nodes: int, real_nodes: int) -> bool:
+    """Return whether recombinant/wide x assignment may use expanded nodes.
+
+    Parameters
+    ----------
+    expanded_nodes : int
+        Number of real plus virtual nodes in the Lever-2 expanded layered graph.
+    real_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when the expanded graph is within the same absolute and
+        relative size ladder used by the retired dot-order arm.
+    """
+    return _expanded_size_within_dot_order_ladder(expanded_nodes, real_nodes)
+
+
+def _raw_layers_from_expanded_order(
+    ordered_layers: Sequence[Sequence[int]],
+    real_nodes: int,
+) -> list[list[int]]:
+    """Drop virtual nodes from expanded ordered layers for raw x assignment.
+
+    Parameters
+    ----------
+    ordered_layers : sequence[sequence[int]]
+        Ordered layers, potentially from a virtual-chain expanded graph.
+    real_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Non-empty raw layers preserving the real-node order chosen upstream.
+    """
+    raw_layers: list[list[int]] = []
+    for layer in ordered_layers:
+        raw_layer = [int(node) for node in layer if 0 <= int(node) < real_nodes]
+        if raw_layer:
+            raw_layers.append(raw_layer)
+    return raw_layers
+
+
+def _dot_order_rank_values(
+    spec: _DotOrderSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+) -> Optional[list[int]]:
+    """Return real-node ranks for one dot-order spec.
+
+    Parameters
+    ----------
+    spec : _DotOrderSpec
+        Dot-order candidate specification.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    list[int] or None
+        Dense rank values, or ``None`` when the requested ranker cannot solve.
+    """
+    if spec.layering == "network_simplex_tightened":
+        from dagua.layout.ops.ordering import _expanded_layered_graph
+
+        longest_path_ranks, _max_width, _long_edge_ratio = _directed_rank_profile(
+            problem.edge_index,
+            int(problem.num_nodes),
+        )
+        expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+            rank_values=longest_path_ranks,
+            edge_index=problem.edge_index,
+            edge_weights=problem.edge_weights,
+        )
+        if not _expanded_size_within_dot_order_ladder(
+            len(expanded_ranks),
+            int(problem.num_nodes),
+        ):
+            return None
+    rank_spec = _RecombinantLayeredSpec(
+        name=spec.name,
+        layering=spec.layering,
+        ordering="graphviz_mincross",
+        xcoord=spec.xcoord,
+    )
+    return _recombinant_rank_values(rank_spec, problem, incumbent)
+
+
+def _build_dot_order_candidate(
+    spec: _DotOrderSpec,
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    rank_values: Optional[Sequence[int]] = None,
+) -> tuple[Optional[torch.Tensor], int]:
+    """Build one expanded-graph dot-order candidate.
+
+    Parameters
+    ----------
+    spec : _DotOrderSpec
+        Dot-order candidate specification.
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+    rank_values : sequence of int, optional
+        Precomputed real-node rank values for the spec.
+
+    Returns
+    -------
+    tuple[torch.Tensor or None, int]
+        Candidate positions with shape ``[N, 2]`` and expanded node count.
+    """
+    from dagua.layout.ops._dot_mincross import graphviz_mincross
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    n = int(problem.num_nodes)
+    rank_values = (
+        _dot_order_rank_values(spec, problem, incumbent)
+        if rank_values is None
+        else list(rank_values)
+    )
+    if rank_values is None or len(rank_values) != n:
+        return None, n
+    expanded_ranks, expanded_edges, _virtual_ids, edge_penalties = _expanded_layered_graph(
+        rank_values=rank_values,
+        edge_index=problem.edge_index,
+        edge_weights=problem.edge_weights,
+    )
+    expanded_n = len(expanded_ranks)
+    if not _expanded_size_within_dot_order_ladder(expanded_n, n):
+        return None, expanded_n
+    seed_pos = incumbent if spec.warm_start else None
+    seed_layers = _rank_ordering_from_values(expanded_ranks, seed_pos)
+    node_order = [int(node) for layer in seed_layers for node in layer]
+    ordered_layers = graphviz_mincross(
+        ranks=seed_layers,
+        edges=expanded_edges,
+        iterations=_dot_order_iterations(expanded_n),
+        edge_penalties=edge_penalties,
+        node_order=node_order,
+    )
+    x_spec = _RecombinantLayeredSpec(
+        name=spec.name,
+        layering=spec.layering,
+        ordering="graphviz_mincross",
+        xcoord=spec.xcoord,
+    )
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    x_values = _assign_recombinant_x_coordinates(x_spec, ordered_layers, problem, node_sep)
+    if x_values is None or int(x_values.numel()) != n:
+        return None, expanded_n
+    rank_sep = float(getattr(config, "_dagua_native_rank_sep", config.rank_sep))
+    y_values = torch.tensor(rank_values, dtype=torch.float32) * rank_sep
+    out = torch.stack([x_values.to(dtype=torch.float32), y_values], dim=1)
+    out[:, 1] = out[:, 1] - out[:, 1].mean()
+    if not torch.isfinite(out).all():
+        return None, expanded_n
+    return out, expanded_n
+
+
+def _directed_dot_order_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> dict[str, torch.Tensor]:
+    """Build bounded expanded-graph dot-order candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying deadline and telemetry fields.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate names mapped to complete layered layouts.
+    """
+    setattr(config, "_dagua_native_dot_order_fired", False)
+    if not bool(getattr(config, "use_dot_order_arm", True)):
+        return {}
+    if not _directed_dot_order_enabled(problem):
+        return {}
+    setattr(config, "_dagua_native_dot_order_fired", True)
+    candidates: dict[str, torch.Tensor] = {}
+    n = int(problem.num_nodes)
+    from dagua.layout.ops.ordering import _expanded_layered_graph
+
+    for spec in _dot_order_specs():
+        if len(candidates) >= DIRECTED_DOT_ORDER_MAX_CANDIDATES:
+            break
+        rank_values = _dot_order_rank_values(spec, problem, incumbent)
+        if rank_values is None or len(rank_values) != n:
+            continue
+        expanded_ranks, _expanded_edges, _virtual_ids, _edge_penalties = _expanded_layered_graph(
+            rank_values=rank_values,
+            edge_index=problem.edge_index,
+            edge_weights=problem.edge_weights,
+        )
+        expanded_n = len(expanded_ranks)
+        if not _expanded_size_within_dot_order_ladder(expanded_n, n):
+            break
+        predicted_cost = estimate_native_work_cost(
+            problem,
+            "directed_recombinant",
+            {"volume": float(expanded_n) / float(max(n, 1))},
+            _native_device_class(config),
+        )
+        predicted_cost.metadata["legacy_prior_s"] = DIRECTED_DOT_ORDER_PRIOR_S
+        predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
+        if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
+            config,
+            predicted_cost,
+            f"optional_directed_dot_order_{spec.name}",
+        ):
+            break
+        process_started = time.process_time()
+        candidate, _confirmed_expanded_n = _build_dot_order_candidate(
+            spec,
+            problem,
+            incumbent,
+            config,
+            rank_values=rank_values,
+        )
+        dot_order_cpu_s = _prediction_cpu_elapsed_s(process_started)
+        _LOGGER.info(
+            "Directed candidate runtime family=dot_order arm=%s cpu_seconds=%.3f expanded_n=%d",
+            spec.name,
+            dot_order_cpu_s,
+            expanded_n,
+        )
+        if candidate is None:
+            continue
+        candidates[spec.name] = candidate
+    return candidates
+
+
+def _register_dot_order_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    positions: Dict[str, torch.Tensor],
+    scores: Dict[str, float],
+    incumbent_pair: Optional["W5ScorePair"],
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    arm_timings: Dict[str, Tuple[float, float]],
+) -> Optional["W5ScorePair"]:
+    """Register only dual-ruler-dominating dot-order candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with candidate telemetry.
+    positions : dict[str, torch.Tensor]
+        Candidate registry updated in place.
+    scores : dict[str, float]
+        Directed score registry updated for admitted variants.
+    incumbent_pair : W5ScorePair, optional
+        Cached incumbent dual-ruler score pair.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    arm_timings : dict[str, tuple[float, float]]
+        Per-arm timing registry updated for admitted candidates.
+
+    Returns
+    -------
+    W5ScorePair or None
+        Cached incumbent score pair when computed, otherwise ``None``.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    if not _portfolio_has_budget(config, min_remaining_s=2.0):
+        return incumbent_pair
+    raw_candidates = _directed_dot_order_candidates(problem, incumbent, config)
+    if not raw_candidates:
+        return incumbent_pair
+    if incumbent_pair is None:
+        incumbent_pair = _score_directed_candidate_pair(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+    incumbent_referee_key = _runtime_referee_telemetry(incumbent, problem)[0]
+    telemetry = list(getattr(config, "_dagua_native_dot_order_telemetry", []))
+    for name, raw_candidate in raw_candidates.items():
+        candidate_started = time.perf_counter()
+        variants: Dict[str, torch.Tensor] = {}
+        _register_challenger_variants(
+            name,
+            raw_candidate,
+            problem,
+            config,
+            variants,
+            preserve_rank_order=True,
+        )
+        for variant_name, candidate in variants.items():
+            dominates, candidate_pair, candidate_referee_key = (
+                _directed_ordering_candidate_dual_dominates(
+                    candidate,
+                    incumbent_pair,
+                    problem,
+                    cluster_ids,
+                    all_pairs_dist,
+                    incumbent_referee_key,
+                )
+            )
+            from dagua.layout.ops.pipelines.native_finisher import w5_legacy_tallied_sole_failure
+
+            legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
+                candidate_pair,
+                incumbent_pair,
+                candidate_referee_key=candidate_referee_key,
+                incumbent_referee_key=incumbent_referee_key,
+                tallied_axis="directed",
+            )
+            selected = bool(dominates)
+            telemetry.append(
+                {
+                    "name": variant_name,
+                    "incumbent_directed": incumbent_pair.directed,
+                    "incumbent_undirected": incumbent_pair.undirected,
+                    "candidate_directed": candidate_pair.directed,
+                    "candidate_undirected": candidate_pair.undirected,
+                    "legacy_tallied_sole_failure": legacy_tallied_sole_failure,
+                    "selected": selected,
+                }
+            )
+            if not selected:
+                continue
+            positions[variant_name] = candidate
+            scores[variant_name] = candidate_pair.directed
+            arm_timings[variant_name] = (candidate_started, time.perf_counter())
+    setattr(config, "_dagua_native_dot_order_telemetry", telemetry)
+    return incumbent_pair
+
+
+def maybe_accept_dot_order_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> torch.Tensor:
+    """Return incumbent or a selected expanded-graph dot-order candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current layered positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with arm telemetry.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        The incumbent or the highest directed-score dot-order candidate that
+        already dominates the incumbent under both frozen rulers.
+    """
+    positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
+    incumbent_score = _score_directed_candidate_cached(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    scores: Dict[str, float] = {"incumbent": incumbent_score}
+    arm_timings: Dict[str, Tuple[float, float]] = {}
+    _register_dot_order_candidates(
+        problem=problem,
+        incumbent=incumbent,
+        config=config,
+        positions=positions,
+        scores=scores,
+        incumbent_pair=None,
+        cluster_ids=cluster_ids,
+        all_pairs_dist=all_pairs_dist,
+        arm_timings=arm_timings,
+    )
+    best_name = max(scores, key=lambda name: (scores[name], name))
+    if best_name == "incumbent":
+        return incumbent
+    setattr(config, "_dagua_native_dot_order_selected", best_name)
+    return positions[best_name].to(device=incumbent.device, dtype=incumbent.dtype)
+
+
+def _register_wide_dag_ordering_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    positions: Dict[str, torch.Tensor],
+    scores: Dict[str, float],
+    incumbent_pair: Optional["W5ScorePair"],
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    arm_timings: Dict[str, Tuple[float, float]],
+) -> Optional["W5ScorePair"]:
+    """Register only dual-ruler-dominating wide-DAG ordering candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with candidate telemetry.
+    positions : dict[str, torch.Tensor]
+        Candidate registry updated in place.
+    scores : dict[str, float]
+        Directed score registry updated for admitted variants.
+    incumbent_pair : W5ScorePair, optional
+        Cached incumbent dual-ruler score pair.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    arm_timings : dict[str, tuple[float, float]]
+        Per-arm timing registry updated for admitted candidates.
+
+    Returns
+    -------
+    W5ScorePair or None
+        Cached incumbent score pair when computed, otherwise ``None``.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    if not _portfolio_has_budget(config, min_remaining_s=2.0):
+        return incumbent_pair
+    raw_candidates = _directed_wide_dag_ordering_candidates(problem, incumbent, config)
+    if not raw_candidates:
+        return incumbent_pair
+    if incumbent_pair is None:
+        incumbent_pair = _score_directed_candidate_pair(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+    incumbent_referee_key = _runtime_referee_telemetry(incumbent, problem)[0]
+    telemetry = list(getattr(config, "_dagua_native_wide_dag_ordering_telemetry", []))
+    for name, raw_candidate in raw_candidates.items():
+        candidate_started = time.perf_counter()
+        variants: Dict[str, torch.Tensor] = {}
+        _register_challenger_variants(
+            name,
+            raw_candidate,
+            problem,
+            config,
+            variants,
+            preserve_rank_order=True,
+        )
+        for variant_name, candidate in variants.items():
+            dominates, candidate_pair, candidate_referee_key = (
+                _directed_ordering_candidate_dual_dominates(
+                    candidate,
+                    incumbent_pair,
+                    problem,
+                    cluster_ids,
+                    all_pairs_dist,
+                    incumbent_referee_key,
+                )
+            )
+            from dagua.layout.ops.pipelines.native_finisher import w5_legacy_tallied_sole_failure
+
+            legacy_tallied_sole_failure = w5_legacy_tallied_sole_failure(
+                candidate_pair,
+                incumbent_pair,
+                candidate_referee_key=candidate_referee_key,
+                incumbent_referee_key=incumbent_referee_key,
+                tallied_axis="directed",
+            )
+            selected = bool(dominates)
+            telemetry.append(
+                {
+                    "name": variant_name,
+                    "incumbent_directed": incumbent_pair.directed,
+                    "incumbent_undirected": incumbent_pair.undirected,
+                    "candidate_directed": candidate_pair.directed,
+                    "candidate_undirected": candidate_pair.undirected,
+                    "legacy_tallied_sole_failure": legacy_tallied_sole_failure,
+                    "selected": selected,
+                }
+            )
+            if not selected:
+                continue
+            positions[variant_name] = candidate
+            scores[variant_name] = candidate_pair.directed
+            arm_timings[variant_name] = (candidate_started, time.perf_counter())
+    setattr(config, "_dagua_native_wide_dag_ordering_telemetry", telemetry)
+    return incumbent_pair
+
+
+def maybe_accept_wide_dag_ordering_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> torch.Tensor:
+    """Return incumbent or a selected wide-DAG ordering candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current layered positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with arm telemetry.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        The incumbent or the highest directed-score wide-DAG candidate that
+        already dominates the incumbent under both frozen rulers.
+    """
+    positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
+    incumbent_score = _score_directed_candidate_cached(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    scores: Dict[str, float] = {"incumbent": incumbent_score}
+    arm_timings: Dict[str, Tuple[float, float]] = {}
+    _register_wide_dag_ordering_candidates(
+        problem=problem,
+        incumbent=incumbent,
+        config=config,
+        positions=positions,
+        scores=scores,
+        incumbent_pair=None,
+        cluster_ids=cluster_ids,
+        all_pairs_dist=all_pairs_dist,
+        arm_timings=arm_timings,
+    )
+    best_name = max(scores, key=lambda name: (scores[name], name))
+    if best_name == "incumbent":
+        return incumbent
+    setattr(config, "_dagua_native_wide_dag_ordering_selected", best_name)
+    return positions[best_name].to(device=incumbent.device, dtype=incumbent.dtype)
+
+
+def _fan_compaction_visual_box_area(pos: torch.Tensor, problem: LayoutProblem) -> float:
+    """Return the node visual-box bounding area for fan-arm admission.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed layout problem carrying optional node sizes.
+
+    Returns
+    -------
+    float
+        Axis-aligned area enclosing all node boxes.
+    """
+    n = int(problem.num_nodes)
+    if n == 0:
+        return 0.0
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float64)
+    if problem.node_sizes is None:
+        sizes = torch.ones((n, 2), dtype=torch.float64)
+    else:
+        sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float64)
+    mins = cpu_pos - sizes / 2.0
+    maxes = cpu_pos + sizes / 2.0
+    bbox_min = torch.min(mins, dim=0).values
+    bbox_max = torch.max(maxes, dim=0).values
+    bbox_size = torch.clamp(bbox_max - bbox_min, min=0.0)
+    return float((bbox_size[0] * bbox_size[1]).item())
+
+
+def _fan_compaction_overlap_count(pos: torch.Tensor, problem: LayoutProblem) -> int:
+    """Return node-overlap count for fan-arm admission.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed layout problem carrying optional node sizes.
+
+    Returns
+    -------
+    int
+        Count of strictly overlapping node boxes.
+    """
+    from dagua.metrics import count_overlaps_detailed
+
+    n = int(problem.num_nodes)
+    if problem.node_sizes is None:
+        sizes = torch.ones((n, 2), dtype=torch.float32)
+    else:
+        sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    return int(
+        count_overlaps_detailed(
+            pos.detach().to(device="cpu", dtype=torch.float32),
+            sizes,
+            seed=int(problem.seed) if problem.seed is not None else None,
+        )["overlap_count"]
+    )
+
+
+def _fan_compaction_candidate_is_accepted(
+    incumbent: torch.Tensor,
+    candidate: torch.Tensor,
+    problem: LayoutProblem,
+) -> bool:
+    """Return whether the fan-compaction arm replaces the incumbent.
+
+    Parameters
+    ----------
+    incumbent : torch.Tensor
+        Current directed incumbent positions with shape ``[N, 2]``.
+    candidate : torch.Tensor
+        Fan-compaction challenger positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed layout problem.
+
+    Returns
+    -------
+    bool
+        ``True`` only when visual-box whitespace at least halves, exact edge
+        crossings do not increase, and node overlaps do not increase.
+    """
+    incumbent_area = _fan_compaction_visual_box_area(incumbent, problem)
+    candidate_area = _fan_compaction_visual_box_area(candidate, problem)
+    if not (
+        math.isfinite(incumbent_area)
+        and math.isfinite(candidate_area)
+        and candidate_area <= 0.5 * incumbent_area
+    ):
+        return False
+    incumbent_crossings = _exact_crossing_count(incumbent, problem.edge_index)
+    candidate_crossings = _exact_crossing_count(candidate, problem.edge_index)
+    if candidate_crossings > incumbent_crossings:
+        return False
+    incumbent_overlaps = _fan_compaction_overlap_count(incumbent, problem)
+    candidate_overlaps = _fan_compaction_overlap_count(candidate, problem)
+    return candidate_overlaps <= incumbent_overlaps
+
+
+def _build_fan_compaction_candidate(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> Optional[torch.Tensor]:
+    """Build the single co-signed fan-compaction candidate arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current directed incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+
+    Returns
+    -------
+    torch.Tensor or None
+        ``recomb_ns_median_lp`` candidate positions when construction succeeds,
+        otherwise ``None``.
+    """
+    spec = _RecombinantLayeredSpec(
+        name="recomb_ns_median_lp",
+        layering="network_simplex_tightened",
+        ordering="median",
+        xcoord="dot_lp",
+    )
+    return _build_recombinant_layered_candidate(spec, problem, incumbent, config)
+
+
+def _maybe_accept_fan_compaction_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> torch.Tensor:
+    """Return incumbent or the accepted directed fan-compaction arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Current directed incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying the public kill switch.
+
+    Returns
+    -------
+    torch.Tensor
+        The accepted ``recomb_ns_median_lp`` fan arm, or the original incumbent
+        when the pre-filter is closed or the drawing-property comparator fails.
+    """
+    setattr(config, "_dagua_native_fan_compaction_built", False)
+    setattr(config, "_dagua_native_fan_compaction_accepted", False)
+    if not bool(getattr(config, "use_fan_compaction_arm", True)):
+        return incumbent
+    if not _clean_fan_bundle_for_compaction(problem):
+        return incumbent
+    setattr(config, "_dagua_native_fan_compaction_built", True)
+    candidate = _build_fan_compaction_candidate(problem, incumbent, config)
+    if candidate is None:
+        return incumbent
+    if not _fan_compaction_candidate_is_accepted(incumbent, candidate, problem):
+        return incumbent
+    setattr(config, "_dagua_native_fan_compaction_accepted", True)
+    return candidate
+
+
+def _directed_edges_are_acyclic(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether directed edges form an acyclic graph.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when Kahn traversal can consume every node.
+    """
+    if num_nodes <= 0:
+        return True
+    outgoing: list[list[int]] = [[] for _ in range(num_nodes)]
+    indegree = [0] * num_nodes
+    for src, dst in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i == dst_i or not (0 <= src_i < num_nodes and 0 <= dst_i < num_nodes):
+            continue
+        outgoing[src_i].append(dst_i)
+        indegree[dst_i] += 1
+    queue = [node for node, degree in enumerate(indegree) if degree == 0]
+    cursor = 0
+    while cursor < len(queue):
+        src = queue[cursor]
+        cursor += 1
+        for dst in outgoing[src]:
+            indegree[dst] -= 1
+            if indegree[dst] == 0:
+                queue.append(dst)
+    return cursor == num_nodes
+
+
+def _directed_edges_are_weakly_connected(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether all nodes belong to one weak component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when every node is reachable after treating edges as
+        undirected.
+    """
+    if num_nodes <= 1:
+        return True
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    for src, dst in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i == dst_i or not (0 <= src_i < num_nodes and 0 <= dst_i < num_nodes):
+            continue
+        adjacency[src_i].append(dst_i)
+        adjacency[dst_i].append(src_i)
+    if any(not neighbors for neighbors in adjacency):
+        return False
+    seen = {0}
+    queue = [0]
+    cursor = 0
+    while cursor < len(queue):
+        node = queue[cursor]
+        cursor += 1
+        for neighbor in adjacency[node]:
+            if neighbor in seen:
+                continue
+            seen.add(neighbor)
+            queue.append(neighbor)
+    return len(seen) == num_nodes
+
+
+def _nested_compound_structure_declared(problem: LayoutProblem) -> bool:
+    """Return whether runtime graph metadata declares compound nesting.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem with optional cluster metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when cluster membership and a nested or parented compound
+        structure are available from the input graph.
+    """
+    if not problem.clusters:
+        return False
+    if problem.cluster_parents:
+        parents = [parent for parent in problem.cluster_parents.values() if parent is not None]
+        return bool(parents) or len(problem.cluster_parents) >= 2
+    return len(problem.clusters) >= 2
+
+
+def _max_declared_cluster_parent_depth(cluster_parents: Optional[Dict[str, Optional[str]]]) -> int:
+    """Return the maximum declared cluster parent-chain depth.
+
+    Parameters
+    ----------
+    cluster_parents : dict[str, str | None], optional
+        Runtime cluster hierarchy mapping from child cluster id to parent
+        cluster id, with ``None`` for root-level clusters.
+
+    Returns
+    -------
+    int
+        Largest finite parent-chain depth, where root-level clusters have
+        depth ``0``. Cycles are treated as over-depth so malformed metadata
+        cannot open the nested-stress arm.
+    """
+    if not cluster_parents:
+        return 0
+    max_depth = 0
+    for cluster_name in cluster_parents:
+        depth = 0
+        seen: set[str] = set()
+        current: Optional[str] = cluster_name
+        while current is not None:
+            if current in seen:
+                return DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH + 1
+            seen.add(current)
+            parent = cluster_parents.get(current)
+            if parent is None:
+                break
+            depth += 1
+            current = parent
+        max_depth = max(max_depth, depth)
+    return max_depth
+
+
+def _bounded_connected_nested_dag_for_stress(problem: LayoutProblem) -> bool:
+    """Return whether the nested-DAG stress arm may be constructed.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem inspected using runtime-computable topology and
+        compound metadata only.
+
+    Returns
+    -------
+    bool
+        ``True`` for bounded, weakly connected, acyclic compound DAGs.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    edge_node_ratio = edge_count / float(max(n, 1))
+    if (
+        n < DIRECTED_NESTED_STRESS_MIN_NODES
+        or n > DIRECTED_NESTED_STRESS_MAX_NODES
+        or edge_count == 0
+        or edge_node_ratio > DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX
+        or _max_declared_cluster_parent_depth(problem.cluster_parents)
+        > DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH
+        or not _nested_compound_structure_declared(problem)
+    ):
+        return False
+    structure = problem.structure
+    if structure is not None:
+        if not bool(
+            getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+        ):
+            return False
+        if getattr(structure, "is_semantically_directed", True) is False:
+            return False
+    if not _directed_edges_are_acyclic(problem.edge_index, n):
+        return False
+    return _directed_edges_are_weakly_connected(problem.edge_index, n)
+
+
+def _median_node_box_diagonal(node_sizes: Optional[torch.Tensor], fallback: float) -> float:
+    """Return a finite median node-box diagonal.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor, optional
+        Node boxes with shape ``[N, 2]``.
+    fallback : float
+        Fallback width/height when explicit node sizes are unavailable.
+
+    Returns
+    -------
+    float
+        Positive median diagonal in drawing units.
+    """
+    if node_sizes is None or node_sizes.numel() == 0:
+        return math.sqrt(2.0) * max(float(fallback), 1.0)
+    sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    diagonals = torch.linalg.vector_norm(sizes, dim=1)
+    finite = diagonals[torch.isfinite(diagonals) & (diagonals > 0.0)]
+    if finite.numel() == 0:
+        return math.sqrt(2.0) * max(float(fallback), 1.0)
+    return float(finite.median().item())
+
+
+def _scale_to_median_edge_length(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    target_length: float,
+) -> torch.Tensor:
+    """Scale positions so the median drawn edge length reaches the target.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    target_length : float
+        Desired median edge length in drawing units.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered and uniformly scaled positions with shape ``[N, 2]``.
+    """
+    out = positions.detach().to(device="cpu", dtype=torch.float32).clone()
+    if out.numel() == 0 or edge_index.numel() == 0:
+        return out
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    lengths = torch.linalg.vector_norm(out[edges[0]] - out[edges[1]], dim=1)
+    finite = lengths[torch.isfinite(lengths) & (lengths > 1.0e-6)]
+    if finite.numel() == 0:
+        return out - out.mean(dim=0, keepdim=True)
+    current = float(finite.median().item())
+    if not math.isfinite(current) or current <= 1.0e-6:
+        return out - out.mean(dim=0, keepdim=True)
+    centered = out - out.mean(dim=0, keepdim=True)
+    return centered * (max(float(target_length), 1.0e-6) / current)
+
+
+def _median_drawn_edge_length(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    fallback: float,
+) -> float:
+    """Return a finite median edge length for candidate packaging.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Candidate or incumbent positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    fallback : float
+        Positive fallback length when no valid edge span is available.
+
+    Returns
+    -------
+    float
+        Positive median drawn edge length in layout units.
+    """
+    out = positions.detach().to(device="cpu", dtype=torch.float32)
+    if out.numel() == 0 or edge_index.numel() == 0:
+        return max(float(fallback), 1.0e-6)
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    valid = (
+        (edges[0] >= 0)
+        & (edges[0] < out.shape[0])
+        & (edges[1] >= 0)
+        & (edges[1] < out.shape[0])
+        & (edges[0] != edges[1])
+    )
+    if not bool(valid.any()):
+        return max(float(fallback), 1.0e-6)
+    valid_edges = edges[:, valid]
+    lengths = torch.linalg.vector_norm(out[valid_edges[0]] - out[valid_edges[1]], dim=1)
+    finite = lengths[torch.isfinite(lengths) & (lengths > 1.0e-6)]
+    if finite.numel() == 0:
+        return max(float(fallback), 1.0e-6)
+    return max(float(finite.median().item()), 1.0e-6)
+
+
+def _directed_dagre_compound_enabled(problem: LayoutProblem) -> bool:
+    """Return whether the compound-dagre arm should construct candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed portfolio problem with optional declared cluster metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` only for bounded, declared-cluster, acyclic directed rows.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if (
+        n <= 0
+        or n > DIRECTED_DAGRE_COMPOUND_MAX_NODES
+        or edge_count == 0
+        or not bool(problem.clusters)
+    ):
+        return False
+    structure = problem.structure
+    if structure is not None:
+        if not bool(
+            getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+        ):
+            return False
+    return _directed_edges_are_acyclic(problem.edge_index, n)
+
+
+def _build_dagre_compound_candidate(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    y_compaction: float,
+) -> Optional[_DagreCompoundCandidate]:
+    """Build one y-compacted compound-dagre candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Declared-cluster directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration used for direction fallback.
+    y_compaction : float
+        Multiplicative factor applied to dagre's vertical coordinates around
+        the candidate center.
+
+    Returns
+    -------
+    _DagreCompoundCandidate or None
+        Packaged candidate when dagre returns finite positions, otherwise
+        ``None``.
+    """
+    if not _directed_dagre_compound_enabled(problem):
+        return None
+    from dagua.layout.ops.pipelines.dagre import layout_dagre_pipeline
+
+    edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+    node_sizes = (
+        None
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    edge_weights = (
+        None
+        if problem.edge_weights is None
+        else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    rankdir = str(problem.direction or getattr(config, "direction", "TB"))
+    raw = layout_dagre_pipeline(
+        edge_index=edge_index,
+        num_nodes=int(problem.num_nodes),
+        node_sizes=node_sizes,
+        seed=int(problem.seed),
+        edge_weights=edge_weights,
+        rankdir=rankdir,
+        nodesep=DIRECTED_DAGRE_COMPOUND_NODE_SEP,
+        ranksep=DIRECTED_DAGRE_COMPOUND_RANK_SEP,
+        edgesep=DIRECTED_DAGRE_COMPOUND_EDGE_SEP,
+        config=config,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+    )
+    candidate = raw.detach().to(device="cpu", dtype=torch.float32).clone()
+    if candidate.shape != (int(problem.num_nodes), 2) or not bool(torch.isfinite(candidate).all()):
+        return None
+
+    center = candidate.mean(dim=0, keepdim=True)
+    candidate[:, 1] = center[0, 1] + (candidate[:, 1] - center[0, 1]) * float(y_compaction)
+    fallback = _median_node_box_diagonal(problem.node_sizes, fallback=10.0) * 4.0
+    target_length = _median_drawn_edge_length(
+        incumbent.detach().to(device="cpu", dtype=torch.float32),
+        edge_index,
+        fallback,
+    )
+    packaged = _scale_to_median_edge_length(candidate, edge_index, target_length)
+    packaged = packaged + incumbent.detach().to(device="cpu", dtype=torch.float32).mean(
+        dim=0,
+        keepdim=True,
+    )
+    if not bool(torch.isfinite(packaged).all()):
+        return None
+    return _DagreCompoundCandidate(
+        pos=packaged,
+        y_compaction=float(y_compaction),
+        target_edge_length=target_length,
+    )
+
+
+def _directed_dagre_compound_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+) -> Dict[str, _DagreCompoundCandidate]:
+    """Return all bounded y-compacted compound-dagre candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Declared-cluster directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration used for direction fallback.
+
+    Returns
+    -------
+    dict[str, _DagreCompoundCandidate]
+        Candidate payloads keyed by portfolio arm name.
+    """
+    candidates: Dict[str, _DagreCompoundCandidate] = {}
+    for y_compaction in DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS:
+        candidate = _build_dagre_compound_candidate(problem, incumbent, config, y_compaction)
+        if candidate is None:
+            continue
+        name = f"dagre_compound_y{float(y_compaction):g}"
+        candidates[name] = candidate
+    return candidates
+
+
+def _register_dagre_compound_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    positions: Dict[str, torch.Tensor],
+    scores: Dict[str, float],
+    cluster_score_telemetry: Dict[str, _DirectedClusterScoreTelemetry],
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    arm_timings: Dict[str, Tuple[float, float]],
+) -> None:
+    """Register only referee-admissible compound-dagre candidates.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Declared-cluster directed layout problem.
+    incumbent : torch.Tensor
+        Current incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration updated with arm telemetry.
+    positions : dict[str, torch.Tensor]
+        Candidate registry updated in place for admitted winners only.
+    scores : dict[str, float]
+        Full-ruler score registry updated for admitted candidates only.
+    cluster_score_telemetry : dict[str, _DirectedClusterScoreTelemetry]
+        Clustered referee telemetry updated for admitted candidates.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    arm_timings : dict[str, tuple[float, float]]
+        Per-arm timing registry updated for admitted candidates.
+
+    Returns
+    -------
+    None
+        Candidate state and telemetry are updated in place.
+    """
+    from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
+
+    telemetry = list(getattr(config, "_dagua_native_dagre_compound_telemetry", []))
+    setattr(config, "_dagua_native_dagre_compound_mechanism_fired", False)
+    setattr(config, "_dagua_native_dagre_compound_dual_admissible", False)
+    if not _portfolio_has_budget(config, min_remaining_s=2.0):
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    predicted_cost = _directed_opaque_arm_cost(
+        problem,
+        config,
+        DIRECTED_DAGRE_COMPOUND_PRIOR_S,
+    )
+    predicted_cost_s = predicted_cost.generation_dwu + predicted_cost.reserved_score_dwu
+    if not _predicted_arm_budget_available(config, predicted_cost_s) or not admit_native_work(
+        config,
+        predicted_cost,
+        "optional_directed_dagre_compound",
+    ):
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    candidate_started = time.perf_counter()
+    raw_candidates = _directed_dagre_compound_candidates(problem, incumbent, config)
+    mechanism_fired = bool(raw_candidates)
+    setattr(config, "_dagua_native_dagre_compound_mechanism_fired", mechanism_fired)
+    if not raw_candidates:
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    incumbent_telemetry = cluster_score_telemetry.get("incumbent")
+    if incumbent_telemetry is None:
+        incumbent_score, incumbent_telemetry = _score_directed_candidate_referee_payload(
+            incumbent,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+        scores["incumbent"] = incumbent_score
+        if incumbent_telemetry is not None:
+            cluster_score_telemetry["incumbent"] = incumbent_telemetry
+    if incumbent_telemetry is None:
+        telemetry.append({"mechanism_fired": mechanism_fired, "dual_admissible": False})
+        setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+        return
+
+    any_dual_admissible = False
+    for name, candidate in raw_candidates.items():
+        if not _admit_v3_referee_score(problem, config, mandatory_floor=False):
+            continue
+        score, score_telemetry = _score_directed_candidate_referee_payload(
+            candidate.pos,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
+        dual_admissible = (
+            score_telemetry is not None
+            and _directed_cluster_candidate_is_dual_admissible(
+                score_telemetry,
+                incumbent_telemetry,
+            )
+        )
+        any_dual_admissible = any_dual_admissible or dual_admissible
+        telemetry.append(
+            {
+                "name": name,
+                "mechanism_fired": mechanism_fired,
+                "dual_admissible": dual_admissible,
+                "selected": dual_admissible,
+                "y_compaction": candidate.y_compaction,
+                "target_edge_length": candidate.target_edge_length,
+                "incumbent_extended": incumbent_telemetry.extended_score,
+                "incumbent_v3_tiered": incumbent_telemetry.v3_tiered,
+                "candidate_extended": score,
+                "candidate_v3_tiered": (
+                    float("-inf") if score_telemetry is None else score_telemetry.v3_tiered
+                ),
+            }
+        )
+        if not dual_admissible or score_telemetry is None:
+            continue
+        positions[name] = candidate.pos
+        scores[name] = score
+        cluster_score_telemetry[name] = score_telemetry
+        arm_timings[name] = (candidate_started, time.perf_counter())
+    setattr(config, "_dagua_native_dagre_compound_dual_admissible", any_dual_admissible)
+    setattr(config, "_dagua_native_dagre_compound_telemetry", telemetry)
+
+
+def _d4_oriented_by_declared_flow(candidate: torch.Tensor, problem: LayoutProblem) -> torch.Tensor:
+    """Return the D4 transform with the strongest declared-flow properties.
+
+    Parameters
+    ----------
+    candidate : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed problem carrying edges and drawing direction.
+
+    Returns
+    -------
+    torch.Tensor
+        Axis-flipped or rotated candidate maximizing ``dag_consistency`` then
+        ``directed_flow_score``.
+    """
+    from dagua.metrics import dag_consistency, directed_flow_score
+
+    base = candidate.detach().to(device="cpu", dtype=torch.float32)
+    transforms = (
+        base,
+        torch.stack([-base[:, 1], base[:, 0]], dim=1),
+        -base,
+        torch.stack([base[:, 1], -base[:, 0]], dim=1),
+        torch.stack([-base[:, 0], base[:, 1]], dim=1),
+        torch.stack([base[:, 0], -base[:, 1]], dim=1),
+        torch.stack([base[:, 1], base[:, 0]], dim=1),
+        torch.stack([-base[:, 1], -base[:, 0]], dim=1),
+    )
+    best = transforms[0]
+    best_key = (-math.inf, -math.inf)
+    for transformed in transforms:
+        dag_value = float(
+            dag_consistency(
+                transformed,
+                problem.edge_index.detach().to(device="cpu"),
+                direction=problem.direction,
+            )["dag_consistency"]
+        )
+        flow_value = float(
+            directed_flow_score(
+                transformed,
+                problem.edge_index.detach().to(device="cpu"),
+                direction=problem.direction,
+            )["directed_flow_score"]
+        )
+        key = (dag_value, flow_value)
+        if key > best_key:
+            best = transformed
+            best_key = key
+    return best
+
+
+def _nested_stress_raw_metrics(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+) -> Dict[str, float]:
+    """Return raw drawing-property metrics for nested-stress admission.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Directed nested-DAG problem.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached unweighted shortest paths with shape ``[N, N]``.
+
+    Returns
+    -------
+    dict[str, float]
+        Numeric raw drawing properties from ``dagua.metrics.full``.
+    """
+    from dagua.metrics import full
+
+    raw = full(
+        pos.detach().to(device="cpu", dtype=torch.float32),
+        problem.edge_index.detach().to(device="cpu"),
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        cluster_ids=cluster_ids,
+        direction=problem.direction,
+        label_positions=problem.label_positions,
+        edge_labels=problem.edge_labels,
+        all_pairs_dist=all_pairs_dist,
+        clusters=problem.clusters,
+        cluster_parents=problem.cluster_parents,
+        cluster_labels=problem.cluster_labels,
+    )
+    return {key: float(value) for key, value in raw.items() if isinstance(value, (int, float))}
+
+
+def _nested_stress_candidate_pareto_admissible(
+    candidate_metrics: Dict[str, float],
+    incumbent_metrics: Dict[str, float],
+) -> bool:
+    """Return whether a nested-stress candidate strictly Pareto-dominates.
+
+    Parameters
+    ----------
+    candidate_metrics : dict[str, float]
+        Raw drawing-property metrics for the Stress-SGD candidate.
+    incumbent_metrics : dict[str, float]
+        Raw drawing-property metrics for the live production incumbent.
+
+    Returns
+    -------
+    bool
+        ``True`` iff all shared raw properties are no worse, at least one is
+        strictly better, and ``dag_consistency`` satisfies the hard floor.
+    """
+    dag_value = candidate_metrics.get("dag_consistency")
+    if (
+        dag_value is None
+        or not math.isfinite(dag_value)
+        or dag_value < DIRECTED_NESTED_STRESS_DAG_FLOOR
+    ):
+        return False
+    comparable_keys = [
+        key
+        for key in DIRECTED_NESTED_STRESS_PARETO_KEYS
+        if key in candidate_metrics
+        and key in incumbent_metrics
+        and math.isfinite(candidate_metrics[key])
+        and math.isfinite(incumbent_metrics[key])
+    ]
+    if not comparable_keys:
+        return False
+    if any(candidate_metrics[key] < incumbent_metrics[key] for key in comparable_keys):
+        return False
+    return any(candidate_metrics[key] > incumbent_metrics[key] for key in comparable_keys)
+
+
+def _build_nested_stress_candidate(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    seed: int,
+) -> torch.Tensor:
+    """Build the warm-started nested-DAG Stress-SGD candidate.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed nested-DAG problem.
+    incumbent : torch.Tensor
+        Live production incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration.
+    seed : int
+        Deterministic Stress-SGD seed.
+
+    Returns
+    -------
+    torch.Tensor
+        D4-oriented, point-calibrated Stress-SGD candidate with shape
+        ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.stress_sgd import layout_stress_sgd_pipeline
+
+    n = int(problem.num_nodes)
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    stress = layout_stress_sgd_pipeline(
+        edge_index=problem.edge_index.detach().to(device="cpu"),
+        num_nodes=n,
+        node_sizes=(
+            None
+            if problem.node_sizes is None
+            else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        ),
+        init_pos=incumbent.detach().to(device="cpu", dtype=torch.float32).clone(),
+        steps=DIRECTED_NESTED_STRESS_STEPS,
+        seed=seed,
+        edge_weights=(
+            None
+            if problem.edge_weights is None
+            else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        ),
+    )
+    if isinstance(stress, tuple):
+        stress = stress[0]
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    calibrated = _scale_to_median_edge_length(stress, problem.edge_index, target)
+    return _d4_oriented_by_declared_flow(calibrated, problem)
+
+
+def _maybe_accept_nested_stress_arm(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    cluster_ids: Optional[torch.Tensor],
+    all_pairs_dist: Optional[np.ndarray],
+    seed: int,
+) -> torch.Tensor:
+    """Return incumbent or the accepted nested-DAG stress-relaxation arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Live production incumbent positions with shape ``[N, 2]``.
+    config : LayoutConfig
+        Prepared native configuration carrying ``use_nested_stress_arm``.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster ids with shape ``[N]``.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached shortest-path matrix with shape ``[N, N]``.
+    seed : int
+        Deterministic Stress-SGD seed.
+
+    Returns
+    -------
+    torch.Tensor
+        Accepted stress candidate, or the original incumbent tensor when the
+        pre-filter is closed or strict raw Pareto admission fails.
+    """
+    setattr(config, "_dagua_native_nested_stress_built", False)
+    setattr(config, "_dagua_native_nested_stress_accepted", False)
+    if not bool(getattr(config, "use_nested_stress_arm", True)):
+        return incumbent
+    if not _bounded_connected_nested_dag_for_stress(problem):
+        return incumbent
+    setattr(config, "_dagua_native_nested_stress_built", True)
+    candidate = _build_nested_stress_candidate(problem, incumbent, config, seed)
+    if (
+        candidate.shape != incumbent.detach().to(device="cpu").shape
+        or not torch.isfinite(candidate).all()
+    ):
+        return incumbent
+    incumbent_metrics = _nested_stress_raw_metrics(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    candidate_metrics = _nested_stress_raw_metrics(
+        candidate,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
+    setattr(
+        config,
+        "_dagua_native_nested_stress_nbp",
+        (
+            incumbent_metrics.get("neighborhood_preservation_score"),
+            candidate_metrics.get("neighborhood_preservation_score"),
+        ),
+    )
+    if not _nested_stress_candidate_pareto_admissible(candidate_metrics, incumbent_metrics):
+        return incumbent
+    setattr(config, "_dagua_native_nested_stress_accepted", True)
+    return candidate.to(device=incumbent.device, dtype=incumbent.dtype)
 
 
 def _register_recombinant_layered_candidates(
@@ -1498,12 +3730,14 @@ def _register_recombinant_layered_candidates(
             # admitted only when the same frozen directed and undirected
             # composites both beat the incumbent. Off-class rows never reach
             # candidate construction at all.
-            dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                candidate,
-                incumbent_pair,
-                problem,
-                cluster_ids,
-                all_pairs_dist,
+            dominates, candidate_pair, _candidate_referee_key = (
+                _directed_ordering_candidate_dual_dominates(
+                    candidate,
+                    incumbent_pair,
+                    problem,
+                    cluster_ids,
+                    all_pairs_dist,
+                )
             )
             if not dominates:
                 continue
@@ -1959,6 +4193,157 @@ def _directed_stress_blend_candidates(
         f"stress_blend_{weight:g}": incumbent_cpu * (1.0 - weight) + aligned * weight
         for weight in DIRECTED_STRESS_BLEND_WEIGHTS
     }
+
+
+def _directed_pure_stress_candidates(
+    problem: LayoutProblem,
+    incumbent: torch.Tensor,
+    config: LayoutConfig,
+    seed: int,
+) -> dict[str, torch.Tensor]:
+    """Build cold-start pure native-stress challengers.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    incumbent : torch.Tensor
+        Full-scored incumbent positions with shape ``[N, 2]``. Accepted for
+        API symmetry with the stress-blend builder; pure stress is cold-started.
+    config : LayoutConfig
+        Prepared native configuration.
+    seed : int
+        Deterministic stress solver seed.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Pure-stress family names mapped to calibrated positions.
+    """
+    del incumbent
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n < DIRECTED_PURE_STRESS_MIN_NODES or n > DIRECTED_PURE_STRESS_MAX_NODES or edge_count == 0:
+        return {}
+
+    from dagua.layout.ops.pipelines.native_undirected import _reraise_worker_timeout
+    from dagua.layout.ops.pipelines.smacof_nonmetric import layout_smacof_nonmetric_pipeline
+    from dagua.layout.ops.pipelines.stress_majorization import (
+        layout_stress_majorization_pipeline,
+    )
+
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    cpu_sizes = (
+        None
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    cpu_weights = (
+        None
+        if problem.edge_weights is None
+        else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    candidates: dict[str, torch.Tensor] = {}
+
+    try:
+        stress_majorization = layout_stress_majorization_pipeline(
+            edge_index=cpu_edges,
+            num_nodes=n,
+            node_sizes=cpu_sizes,
+            seed=seed,
+            edge_weights=cpu_weights,
+        )
+        if isinstance(stress_majorization, tuple):
+            stress_majorization = stress_majorization[0]
+        calibrated = _scale_to_median_edge_length(stress_majorization, problem.edge_index, target)
+        candidates["pure_stress_majorization"] = _d4_oriented_by_declared_flow(calibrated, problem)
+    except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed pure stress-majorization challenger failed", exc_info=True)
+
+    if n <= DIRECTED_PURE_STRESS_SMACOF_MAX_NODES:
+        try:
+            smacof = layout_smacof_nonmetric_pipeline(
+                edge_index=cpu_edges,
+                num_nodes=n,
+                node_sizes=cpu_sizes,
+                seed=seed,
+                edge_weights=cpu_weights,
+                fidelity_dtype=torch.float32,
+            )
+            calibrated = _scale_to_median_edge_length(smacof, problem.edge_index, target)
+            candidates["pure_smacof_nonmetric"] = _d4_oriented_by_declared_flow(calibrated, problem)
+        except Exception as exc:  # noqa: BLE001 -- pure challengers cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed pure SMACOF challenger failed", exc_info=True)
+
+    return candidates
+
+
+def _directed_davidson_harel_small_candidates(
+    problem: LayoutProblem,
+    config: LayoutConfig,
+    seed: int,
+) -> dict[str, torch.Tensor]:
+    """Build the small-N Davidson-Harel uncrossing challenger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Directed layout problem.
+    config : LayoutConfig
+        Prepared native configuration.
+    seed : int
+        Deterministic Davidson-Harel seed.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Candidate family names mapped to calibrated positions.
+    """
+    n = int(problem.num_nodes)
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    if n <= 1 or n > DIRECTED_DAVIDSON_HAREL_SMALL_NODE_CAP or edge_count == 0:
+        return {}
+
+    from dagua.layout.ops.pipelines.davidson_harel import layout_davidson_harel_pipeline
+    from dagua.layout.ops.pipelines.native_undirected import _reraise_worker_timeout
+
+    node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        problem.node_sizes, node_sep
+    )
+    cpu_edges = problem.edge_index.detach().to(device="cpu")
+    cpu_sizes = (
+        None
+        if problem.node_sizes is None
+        else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    cpu_weights = (
+        None
+        if problem.edge_weights is None
+        else problem.edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    candidates: dict[str, torch.Tensor] = {}
+    try:
+        raw = layout_davidson_harel_pipeline(
+            edge_index=cpu_edges,
+            num_nodes=n,
+            node_sizes=cpu_sizes,
+            seed=seed,
+            edge_weights=cpu_weights,
+            fidelity_dtype=torch.float32,
+        )
+        calibrated = _scale_to_median_edge_length(raw, problem.edge_index, target)
+        candidates["davidson_harel_small"] = _d4_oriented_by_declared_flow(calibrated, problem)
+    except Exception as exc:  # noqa: BLE001 -- DH challengers cannot sink incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed Davidson-Harel small-N challenger failed", exc_info=True)
+    return candidates
 
 
 def _segments_cross(
@@ -2773,7 +5158,14 @@ def layout_native_directed_portfolio(
         getattr(incumbent_config, "_dagua_native_terminal_w5_seed_bank", [])
     ):
         _append_terminal_w5_seed(config, f"directed_incumbent_{seed_name}", seed_pos)
+    incumbent = _maybe_accept_fan_compaction_arm(problem, incumbent, config)
     arm_timings["incumbent"] = (incumbent_started, time.perf_counter())
+    if bool(getattr(config, "_dagua_native_fan_compaction_accepted", False)):
+        _LOGGER.info(
+            "Directed contest gate=fan_compaction winner=recomb_ns_median_lp wall_time_s=%.3f",
+            time.perf_counter() - started,
+        )
+        return incumbent
     n = int(problem.num_nodes)
 
     positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
@@ -2797,21 +5189,13 @@ def layout_native_directed_portfolio(
     offsets, targets = _build_csr(cpu_edges, n)
     all_pairs_dist = _all_pairs_unweighted(offsets, targets, n, max_dist=n)
     cluster_ids = _build_cluster_ids(problem)
-    if problem.clusters or _weighted_referee_active(problem):
-        incumbent_score, incumbent_score_telemetry = _score_directed_candidate_referee_payload(
-            incumbent,
-            problem,
-            cluster_ids,
-            all_pairs_dist,
-        )
-    else:
-        incumbent_score = _score_directed_candidate_cached(
-            incumbent,
-            problem,
-            cluster_ids,
-            all_pairs_dist,
-        )
-        incumbent_score_telemetry = None
+    _admit_v3_referee_score(problem, config, mandatory_floor=True)
+    incumbent_score, incumbent_score_telemetry = _score_directed_candidate_referee_payload(
+        incumbent,
+        problem,
+        cluster_ids,
+        all_pairs_dist,
+    )
     scores: Dict[str, float] = {"incumbent": incumbent_score}
     cluster_score_telemetry: Dict[str, _DirectedClusterScoreTelemetry] = {}
     if incumbent_score_telemetry is not None:
@@ -2834,6 +5218,7 @@ def layout_native_directed_portfolio(
         )
         return incumbent
     incumbent_pair: Optional["W5ScorePair"] = None
+    directed_dh_w5_seeds: list[tuple[str, torch.Tensor]] = []
     if _portfolio_has_budget(config, min_remaining_s=2.0):
         try:
             pivot_cost = _directed_flat_arm_cost(problem, config, "directed_pivot_mds")
@@ -2938,6 +5323,74 @@ def layout_native_directed_portfolio(
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed stress-blend challenger failed", exc_info=True)
     if _portfolio_has_budget(config, min_remaining_s=2.0):
+        try:
+            pure_stress_cost = _directed_flat_arm_cost(
+                problem,
+                config,
+                "directed_pure_stress",
+            )
+            pure_stress_cost_s = (
+                pure_stress_cost.generation_dwu + pure_stress_cost.reserved_score_dwu
+            )
+            if not _predicted_arm_budget_available(
+                config, pure_stress_cost_s
+            ) or not admit_native_work(
+                config,
+                pure_stress_cost,
+                "optional_directed_pure_stress_package",
+            ):
+                _LOGGER.info("Skipped directed pure-stress: insufficient predicted budget")
+            else:
+                candidate_started = time.perf_counter()
+                for name, candidate in _directed_pure_stress_candidates(
+                    problem,
+                    incumbent,
+                    config,
+                    seed,
+                ).items():
+                    _register_challenger_variants(
+                        name,
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed pure-stress challenger package failed", exc_info=True)
+    if _portfolio_has_budget(config, min_remaining_s=2.0):
+        try:
+            dh_cost = _directed_flat_arm_cost(problem, config, "directed_davidson_harel_small")
+            dh_cost_s = dh_cost.generation_dwu + dh_cost.reserved_score_dwu
+            if not _predicted_arm_budget_available(config, dh_cost_s) or not admit_native_work(
+                config,
+                dh_cost,
+                "optional_directed_davidson_harel_small",
+            ):
+                _LOGGER.info("Skipped directed Davidson-Harel small-N: insufficient budget")
+            else:
+                candidate_started = time.perf_counter()
+                for name, candidate in _directed_davidson_harel_small_candidates(
+                    problem,
+                    config,
+                    seed,
+                ).items():
+                    _register_challenger_variants(
+                        name,
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+                    directed_dh_w5_seeds.append((name, candidate))
+        except Exception as exc:  # noqa: BLE001 -- DH challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed Davidson-Harel challenger package failed", exc_info=True)
+    if _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
         ordering_rank_to_nodes = _rank_to_nodes_from_incumbent_y(
             incumbent.detach().to(device="cpu", dtype=torch.float32),
@@ -2991,12 +5444,14 @@ def layout_native_directed_portfolio(
                                 cluster_ids,
                                 all_pairs_dist,
                             )
-                        dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                            candidate,
-                            incumbent_pair,
-                            problem,
-                            cluster_ids,
-                            all_pairs_dist,
+                        dominates, candidate_pair, _candidate_referee_key = (
+                            _directed_ordering_candidate_dual_dominates(
+                                candidate,
+                                incumbent_pair,
+                                problem,
+                                cluster_ids,
+                                all_pairs_dist,
+                            )
                         )
                         if dominates:
                             if n <= DIRECTED_ORDERING_W5_NODE_CAP:
@@ -3024,9 +5479,90 @@ def layout_native_directed_portfolio(
         except Exception as exc:  # noqa: BLE001 -- recombinant candidates cannot sink incumbent
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed recombinant layered challenger failed", exc_info=True)
+    if _directed_wide_dag_ordering_enabled(problem):
+        try:
+            incumbent_pair = _register_wide_dag_ordering_candidates(
+                problem=problem,
+                incumbent=incumbent,
+                config=config,
+                positions=positions,
+                scores=scores,
+                incumbent_pair=incumbent_pair,
+                cluster_ids=cluster_ids,
+                all_pairs_dist=all_pairs_dist,
+                arm_timings=arm_timings,
+            )
+        except Exception as exc:  # noqa: BLE001 -- wide-DAG candidates cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed wide-DAG ordering challenger failed", exc_info=True)
+    if not bool(problem.clusters) and _directed_dot_order_enabled(problem):
+        try:
+            incumbent_pair = _register_dot_order_candidates(
+                problem=problem,
+                incumbent=incumbent,
+                config=config,
+                positions=positions,
+                scores=scores,
+                incumbent_pair=incumbent_pair,
+                cluster_ids=cluster_ids,
+                all_pairs_dist=all_pairs_dist,
+                arm_timings=arm_timings,
+            )
+        except Exception as exc:  # noqa: BLE001 -- dot-order candidates cannot sink incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed dot-order challenger failed", exc_info=True)
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline
+
+            if _default_sugiyama_cluster_arm_enabled(problem):
+                default_sugiyama_cost = _directed_opaque_arm_cost(
+                    problem,
+                    config,
+                    DIRECTED_CLUSTER_DEFAULT_SUGIYAMA_PRIOR_S,
+                )
+                default_sugiyama_cost_s = (
+                    default_sugiyama_cost.generation_dwu + default_sugiyama_cost.reserved_score_dwu
+                )
+                if not _predicted_arm_budget_available(
+                    config,
+                    default_sugiyama_cost_s,
+                ) or not admit_native_work(
+                    config,
+                    default_sugiyama_cost,
+                    "optional_directed_cluster_default_sugiyama",
+                ):
+                    _LOGGER.info("Skipped directed default-Sugiyama cluster arm: budget")
+                else:
+                    candidate_started = time.perf_counter()
+                    candidate_started_process = time.process_time()
+                    default_sugiyama = layout_sugiyama_pipeline(
+                        edge_index=cpu_edges,
+                        num_nodes=n,
+                        node_sizes=cpu_sizes,
+                        seed=seed,
+                        edge_weights=cpu_weights,
+                        config=config,
+                    )
+                    if not isinstance(default_sugiyama, torch.Tensor):
+                        raise RuntimeError(
+                            "default clustered Sugiyama returned non-position output"
+                        )
+                    _register_challenger_variants(
+                        "default_sugiyama_clustered",
+                        default_sugiyama,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+                    default_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                    _LOGGER.info(
+                        "Directed candidate runtime family=sugiyama arm=default_clustered "
+                        "cpu_seconds=%.3f",
+                        default_cpu_s,
+                    )
 
             sugiyama_cost = _directed_opaque_arm_cost(
                 problem,
@@ -3307,6 +5843,22 @@ def layout_native_directed_portfolio(
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed YifanHu challenger failed", exc_info=True)
 
+    try:
+        _register_dagre_compound_candidates(
+            problem=problem,
+            incumbent=incumbent,
+            config=config,
+            positions=positions,
+            scores=scores,
+            cluster_score_telemetry=cluster_score_telemetry,
+            cluster_ids=cluster_ids,
+            all_pairs_dist=all_pairs_dist,
+            arm_timings=arm_timings,
+        )
+    except Exception as exc:  # noqa: BLE001 -- referee-gated arm cannot sink incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed dagre-compound challenger failed", exc_info=True)
+
     proxy_scores = {
         name: _proxy_directed_candidate(candidate, problem, cluster_ids, all_pairs_dist)
         for name, candidate in positions.items()
@@ -3352,15 +5904,11 @@ def layout_native_directed_portfolio(
     for name in finalist_names:
         if name == "incumbent":
             continue
-        if not problem.clusters and not _weighted_referee_active(problem):
-            if name in scores:
-                continue
-            scores[name] = _score_directed_candidate_cached(
-                positions[name],
-                problem,
-                cluster_ids,
-                all_pairs_dist,
-            )
+        if not _admit_v3_referee_score(
+            problem,
+            config,
+            mandatory_floor=name == finalist_names[1] if len(finalist_names) > 1 else False,
+        ):
             continue
         if name in scores and name in cluster_score_telemetry:
             continue
@@ -3439,13 +5987,15 @@ def layout_native_directed_portfolio(
                             best_position,
                             problem,
                         )[0]
-                        dominates, candidate_pair = _directed_ordering_candidate_dual_dominates(
-                            candidate,
-                            best_pair_for_ordering,
-                            problem,
-                            cluster_ids,
-                            all_pairs_dist,
-                            best_referee_key_for_ordering,
+                        dominates, candidate_pair, _candidate_referee_key = (
+                            _directed_ordering_candidate_dual_dominates(
+                                candidate,
+                                best_pair_for_ordering,
+                                problem,
+                                cluster_ids,
+                                all_pairs_dist,
+                                best_referee_key_for_ordering,
+                            )
                         )
                         if dominates:
                             name = f"{best_name}_rank_local_zero_crossing_swap"
@@ -3457,6 +6007,26 @@ def layout_native_directed_portfolio(
             except Exception as exc:  # noqa: BLE001 -- late ordering cannot sink the winner
                 _reraise_worker_timeout(exc)
                 _LOGGER.warning("directed late rank-local swap challenger failed", exc_info=True)
+    nested_started = time.perf_counter()
+    try:
+        nested_candidate = _maybe_accept_nested_stress_arm(
+            problem,
+            best_position,
+            config,
+            cluster_ids,
+            all_pairs_dist,
+            seed,
+        )
+        arm_timings["nested_stress"] = (nested_started, time.perf_counter())
+        if bool(getattr(config, "_dagua_native_nested_stress_accepted", False)):
+            _LOGGER.info(
+                "Directed contest gate=nested_stress winner=nested_stress_sgd wall_time_s=%.3f",
+                time.perf_counter() - started,
+            )
+            return nested_candidate
+    except Exception as exc:  # noqa: BLE001 -- stress arm cannot sink the incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed nested stress challenger failed", exc_info=True)
     if ordering_w5_seed is not None and not bool(getattr(config, "_dagua_native_defer_w5", False)):
         try:
             from dagua.layout.ops.pipelines.native_finisher import (
@@ -3539,25 +6109,16 @@ def layout_native_directed_portfolio(
                 "config": config,
                 "incumbent_axes": best_axes,
             }
-            if _weighted_referee_active(problem):
-                w5_kwargs["referee_key_fn"] = referee_key_w5_candidate
+            w5_kwargs["referee_key_fn"] = referee_key_w5_candidate
             w5_result = run_w5_finisher(**w5_kwargs)
             log_w5_telemetry(w5_result, config)
-            w5_referee_key_fn = (
-                referee_key_w5_candidate if _weighted_referee_active(problem) else None
-            )
             if w5_result.accepted and w5_dominates(
                 w5_result.winner_score_pair,
                 best_pair,
                 0.05,
-                candidate_referee_key=(
-                    w5_referee_key_fn(w5_result.winner_pos)
-                    if w5_referee_key_fn is not None
-                    else (1, -0.0)
-                ),
-                incumbent_referee_key=(
-                    w5_referee_key_fn(best_position) if w5_referee_key_fn is not None else (1, -0.0)
-                ),
+                candidate_referee_key=referee_key_w5_candidate(w5_result.winner_pos),
+                incumbent_referee_key=referee_key_w5_candidate(best_position),
+                tallied_axis="directed",
             ):
                 best_name = w5_result.winner_name
                 best_position = w5_result.winner_pos
@@ -3587,6 +6148,8 @@ def layout_native_directed_portfolio(
     _append_terminal_w5_seed(config, "directed_candidate_a", incumbent)
     if ordering_w5_seed is not None:
         _append_terminal_w5_seed(config, "directed_ordering", ordering_w5_seed)
+    for seed_name, seed_pos in directed_dh_w5_seeds:
+        _append_terminal_w5_seed(config, f"directed_{seed_name}", seed_pos)
     for seed_rank, seed_name in enumerate(
         sorted(scores, key=lambda name: (-scores[name], name))[:3],
         start=1,

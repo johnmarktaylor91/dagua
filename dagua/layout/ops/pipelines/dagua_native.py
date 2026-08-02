@@ -14,7 +14,7 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
-from dagua.layout.ops.base import Pipeline
+from dagua.layout.ops.base import Pipeline, finite_checkpoint_or_restore
 from dagua.layout.ops.coordinate import (
     ComponentTilingCrossingRisk,
     ComponentTilingCrossingRiskConfig,
@@ -72,6 +72,9 @@ _LOGGER = logging.getLogger(__name__)
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
 _DOT_DEFAULT_RANK_CENTER_SEP = 72.0
 _DOT_DEFAULT_NODE_SEP = 18.0
+_DOT_COLLINEAR_CLUSTER_X_EPS_FACTOR = 0.15
+_DOT_COLLINEAR_CLUSTER_LANE_FACTOR = 0.55
+_DOT_COLLINEAR_CLUSTER_LANES = (0.0, -0.5, 0.5, -0.25, 0.25)
 _DOT_AUX_EDGE_MINLEN = 1.0
 _DOT_VIRTUAL_EDGE_WEIGHT = 8.0
 _DOT_LATTICE_LP_MAX_MATRIX_BYTES = 200 * 1024 * 1024
@@ -80,6 +83,9 @@ _ANYTIME_LARGE_ROW_MIN_NODES = 250
 _ANYTIME_LARGE_ROW_MIN_EDGES = 700
 _ANYTIME_FALLBACK_NODE_SEP_FACTOR = 1.4
 _TERMINAL_W5_SEED_BANK_MAX = 6
+_TERMINAL_WEIGHTED_STRESS_MAX_NODES = 128
+_TERMINAL_WEIGHTED_STRESS_MAX_EDGES = 512
+_TERMINAL_WEIGHTED_STRESS_MIN_WEIGHT_RATIO = 1.0001
 
 
 @dataclass(frozen=True)
@@ -1039,6 +1045,68 @@ def _separate_dot_cluster_siblings(
     return out
 
 
+def _spread_collinear_dot_cluster_internals(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    clusters: Mapping[str, Sequence[int]],
+    parents: Mapping[str, Optional[str]],
+    ranks: Sequence[int],
+    pitch_x: float,
+) -> torch.Tensor:
+    """Give degenerate leaf-cluster rank chains a deterministic 2D interior.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Dot rank-row position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    clusters : Mapping[str, Sequence[int]]
+        Normalized cluster membership.
+    parents : Mapping[str, str | None]
+        Normalized cluster parent mapping.
+    ranks : Sequence[int]
+        Integer rank per node.
+    pitch_x : float
+        Horizontal rank slot pitch used by the surrounding dot-cluster pass.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with near-collinear leaf-cluster interiors spread
+        across stable local lanes while retaining existing rank y positions.
+    """
+    out = pos.detach().clone()
+    if not clusters:
+        return out
+    median_width = float(node_sizes[:, 0].median().item()) if node_sizes.numel() > 0 else 0.0
+    collinear_x_eps = max(median_width * _DOT_COLLINEAR_CLUSTER_X_EPS_FACTOR, 1.0e-4)
+    lane_pitch = max(float(pitch_x) * _DOT_COLLINEAR_CLUSTER_LANE_FACTOR, median_width * 0.5)
+    parent_names = {parent for parent in parents.values() if parent is not None}
+    leaf_names = [name for name in clusters if name not in parent_names]
+    leaf_names.sort(key=lambda name: (-_dot_cluster_depth(name, parents), name))
+    for name in leaf_names:
+        members = tuple(int(node) for node in clusters[name])
+        if len(members) < 3:
+            continue
+        member_ranks = [int(ranks[node]) for node in members]
+        min_rank = min(member_ranks)
+        max_rank = max(member_ranks)
+        if max_rank == min_rank:
+            continue
+        idx = torch.tensor(members, dtype=torch.long, device=out.device)
+        member_x = out[idx, 0]
+        if float((member_x.max() - member_x.min()).item()) > collinear_x_eps:
+            continue
+        center_x = float(member_x.median().item())
+        ordered = sorted(members, key=lambda node: (int(ranks[node]), node))
+        for node in ordered:
+            local_rank = int(ranks[node]) - min_rank
+            lane = _DOT_COLLINEAR_CLUSTER_LANES[local_rank % len(_DOT_COLLINEAR_CLUSTER_LANES)]
+            out[node, 0] = center_x + float(lane) * lane_pitch
+    return out
+
+
 def _apply_dot_cluster_fidelity_layout(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -1109,6 +1177,14 @@ def _apply_dot_cluster_fidelity_layout(
                 out[node, 0] = center_x + (used_start + slot) * pitch_x
                 out[node, 1] = float(rank) * _DOT_DEFAULT_RANK_CENTER_SEP
 
+    out = _spread_collinear_dot_cluster_internals(
+        out,
+        node_sizes,
+        normalized_clusters,
+        parents,
+        ranks,
+        pitch_x,
+    )
     clearance = max(float(node_sizes[:, 0].median().item()) * 0.25, _DOT_DEFAULT_NODE_SEP)
     # A bottom-up x-separation pass approximates Graphviz's merge_ranks slot
     # insertion: child clusters reserve a contiguous rank segment before their
@@ -1357,6 +1433,12 @@ class RouterV2Config:
     # 2D meshes have diameter ~ 2*sqrt(N); small-world/SBM diameters scale
     # like log N. Requiring diameter >= factor * sqrt(N) separates them.
     mesh_diameter_sqrt_factor: float = 1.2
+    # Mesh regularization is narrower than candidate shortlisting: long
+    # ring-lattice/small-world controls can pass the lower diameter bound, but
+    # finite 2D patches stay below roughly 2*sqrt(N). The strict arm keeps
+    # those controls byte-identical while still covering grids, triangular
+    # patches, and recursive planar meshes.
+    regular_mesh_diameter_sqrt_max: float = 2.05
     # Standard "meaningful community structure" bar for modularity of a
     # label-propagation partition.
     community_modularity_min: float = 0.30
@@ -1420,6 +1502,41 @@ def _mesh_features_strong(structure: Optional[GraphStructure], num_nodes: int) -
         and float(getattr(structure, "hub_edge_fraction", 1.0))
         <= ROUTER_V2.mesh_hub_edge_fraction_max
         and float(diameter) >= ROUTER_V2.mesh_diameter_sqrt_factor * math.sqrt(float(num_nodes))
+    )
+
+
+def _regular_mesh_features_strong(structure: Optional[GraphStructure], num_nodes: int) -> bool:
+    """Return whether a graph should receive local mesh regularization.
+
+    This is a stricter structural gate than ``_mesh_features_strong``. It
+    keeps the existing broad geodesic-stress shortlist intact, but only adds
+    the local edge/angle regularizer for finite planar mesh patches whose
+    measured diameter sits in the 2D-patch band. No graph names, corpus row
+    ids, or drawing/ruler scores participate.
+
+    Parameters
+    ----------
+    structure : GraphStructure, optional
+        Classified graph topology.
+    num_nodes : int
+        Number of nodes (``<= 0`` means unknown).
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph is a regular planar mesh/lattice candidate.
+    """
+    if not _mesh_features_strong(structure, num_nodes):
+        return False
+    assert structure is not None
+    if bool(getattr(structure, "is_planar", False)) is not True:
+        return False
+    diameter = float(getattr(structure, "diameter_estimate", 0))
+    diameter_ratio = diameter / math.sqrt(float(num_nodes))
+    return (
+        diameter_ratio <= ROUTER_V2.regular_mesh_diameter_sqrt_max
+        and int(getattr(structure, "max_degree", 0)) <= 6
+        and float(getattr(structure, "edge_to_node_ratio", 0.0)) <= 2.4
     )
 
 
@@ -1516,6 +1633,8 @@ def _undirected_route_shortlist(
         if max_degree <= 4:
             candidates.append("lattice_cert")
         candidates.append("geodesic_stress")
+    if _regular_mesh_features_strong(structure, num_nodes):
+        candidates.append("mesh_regularized")
     if _community_features_strong(structure, num_nodes):
         classes.append("community")
         candidates.append("community_scaffold")
@@ -1941,10 +2060,15 @@ def _run_native_problem(
         )
 
     selected = _choose_native_pipeline(structure=structure, config=config)
+    last_finite_pos: Optional[torch.Tensor] = None
+    if state.pos is not None and bool(torch.isfinite(state.pos).all().item()):
+        last_finite_pos = state.pos.detach().clone()
     if selected == "legacy_monolith":
-        return dagua_native_legacy._run_native_problem(problem, state, ctx, config)
+        result = dagua_native_legacy._run_native_problem(problem, state, ctx, config)
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
     if selected == "force_directed":
-        return layout_native_force_directed_pipeline(
+        result = layout_native_force_directed_pipeline(
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
             node_sizes=problem.node_sizes,
@@ -1952,6 +2076,8 @@ def _run_native_problem(
             seed=problem.seed,
             edge_weights=problem.edge_weights,
         )
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
     if selected == "undirected_portfolio":
         # Early return like force_directed: the incumbent candidate runs the
         # full baseline path (including its own polish battery) inside the
@@ -1961,23 +2087,27 @@ def _run_native_problem(
             layout_native_undirected_portfolio,
         )
 
-        return layout_native_undirected_portfolio(
+        result = layout_native_undirected_portfolio(
             problem=problem,
             state=state,
             ctx=ctx,
             config=config,
         )
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
     if selected == "directed_portfolio":
         from dagua.layout.ops.pipelines.native_directed import (
             layout_native_directed_portfolio,
         )
 
-        return layout_native_directed_portfolio(
+        result = layout_native_directed_portfolio(
             problem=problem,
             state=state,
             ctx=ctx,
             config=config,
         )
+        result, _ = finite_checkpoint_or_restore(result.detach(), last_finite_pos)
+        return result
 
     try:
         final_state = build_dagua_pipeline(config).apply(problem, state, ctx)
@@ -1996,6 +2126,7 @@ def _run_native_problem(
     result = final_state.pos.detach()
     if result.shape[0] > problem.num_nodes:
         result = result[: problem.num_nodes]
+    result, last_finite_pos = finite_checkpoint_or_restore(result, last_finite_pos)
     # Best-of-polish edge-equalize. The gradient pipeline
     # converges to a local minimum where edge_length_variance_loss is
     # saturated (confirmed empirically: w=0..200 produces identical
@@ -2027,6 +2158,7 @@ def _run_native_problem(
             config=config,
             edge_weights=problem.edge_weights,
         )
+        result, _ = finite_checkpoint_or_restore(result, last_finite_pos)
     return result
 
 
@@ -4893,8 +5025,10 @@ def _w5_referee_key_fn(
     node_sizes: Optional[torch.Tensor],
     edge_weights: Optional[torch.Tensor],
     direction: str,
+    all_pairs_dist: Optional[np.ndarray] = None,
+    result_fn: Optional[Callable[[torch.Tensor], Any]] = None,
 ) -> Optional[Callable[[torch.Tensor], tuple[int, float]]]:
-    """Build a severe-G6 referee-key scorer for weighted W5 gates.
+    """Build a severe-G6 referee-key scorer for W5 gates.
 
     Parameters
     ----------
@@ -4908,17 +5042,19 @@ def _w5_referee_key_fn(
         Declared edge weights with shape ``[E]``.
     direction : str
         Layout direction stored on the synthetic runtime problem.
+    all_pairs_dist : numpy.ndarray, optional
+        Cached unweighted shortest-path distances with shape ``[N, N]``.
+    result_fn : Callable[[torch.Tensor], object], optional
+        Shared V3 result provider. When supplied, the key is derived from the
+        already-cached full V3 result used for ``W5ScorePair.v3``.
 
     Returns
     -------
     Callable[[torch.Tensor], tuple[int, float]] or None
-        Referee-key scorer when declared weights are non-degenerate, otherwise
-        ``None`` so W5 keeps the neutral score-only path.
+        Referee-key scorer for runtime-restricted V3 selection.
     """
-    from dagua.layout.ops.pipelines.native_directed import (
-        _runtime_referee_telemetry,
-        _weighted_referee_active,
-    )
+    from dagua.eval.ruler_v3 import referee_eligibility_key
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -4926,9 +5062,8 @@ def _w5_referee_key_fn(
         node_sizes=node_sizes,
         edge_weights=edge_weights,
         direction=direction,
+        structure=classify_graph(edge_index, int(num_nodes)),
     )
-    if not _weighted_referee_active(problem):
-        return None
 
     def referee_key(pos: torch.Tensor) -> tuple[int, float]:
         """Return the severe-G6 referee prefix for one W5 candidate.
@@ -4943,9 +5078,145 @@ def _w5_referee_key_fn(
         tuple[int, float]
             Eligibility key from the frozen severe-G6 referee.
         """
-        return _runtime_referee_telemetry(pos, problem)[0]
+        if result_fn is not None:
+            return referee_eligibility_key(result_fn(pos))
+        return score_v3_runtime(pos, problem, all_pairs_dist=all_pairs_dist)[0]
 
     return referee_key
+
+
+def _terminal_weighted_stress_majorization_candidate(
+    *,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
+    node_sep: float,
+    seed: int,
+) -> Optional[torch.Tensor]:
+    """Build a terminal weighted-stress candidate for declared weighted rows.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes represented by the candidate.
+    node_sizes : torch.Tensor, optional
+        Node-size tensor with shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Declared edge weights with shape ``[E]``.
+    node_sep : float
+        Fallback node separation used for scale calibration.
+    seed : int
+        Deterministic stress-majorization seed.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Scaled weighted stress-majorization positions with shape ``[N, 2]``,
+        or ``None`` when the structural weighted gate does not apply.
+    """
+    n = int(num_nodes)
+    edge_count = int(edge_index.shape[1]) if edge_index.ndim == 2 else 0
+    if (
+        edge_weights is None
+        or n <= 1
+        or n > _TERMINAL_WEIGHTED_STRESS_MAX_NODES
+        or edge_count == 0
+        or edge_count > _TERMINAL_WEIGHTED_STRESS_MAX_EDGES
+    ):
+        return None
+    cpu_weights = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    if cpu_weights.numel() != edge_count:
+        return None
+    finite_positive = cpu_weights[torch.isfinite(cpu_weights) & (cpu_weights > 0.0)]
+    if finite_positive.numel() != cpu_weights.numel():
+        return None
+    weight_min = float(finite_positive.min().item())
+    weight_max = float(finite_positive.max().item())
+    if weight_max / max(weight_min, 1.0e-12) < _TERMINAL_WEIGHTED_STRESS_MIN_WEIGHT_RATIO:
+        return None
+
+    from dagua.layout.ops.pipelines.native_directed import (
+        DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER,
+        _median_node_box_diagonal,
+        _scale_to_median_edge_length,
+    )
+    from dagua.layout.ops.pipelines.stress_majorization import (
+        layout_stress_majorization_pipeline,
+    )
+
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    cpu_sizes = (
+        None if node_sizes is None else node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    )
+    raw = layout_stress_majorization_pipeline(
+        edge_index=cpu_edges,
+        num_nodes=n,
+        node_sizes=cpu_sizes,
+        seed=seed,
+        edge_weights=cpu_weights,
+    )
+    if isinstance(raw, tuple):
+        raw = raw[0]
+    target = DIRECTED_NESTED_STRESS_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
+        cpu_sizes,
+        node_sep,
+    )
+    return _scale_to_median_edge_length(raw, cpu_edges, target)
+
+
+def _native_v3_referee_device_class(config: Optional[LayoutConfig]) -> str:
+    """Return the device class used to price a runtime V3 referee score.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared native configuration carrying a device string.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` for CUDA configs, otherwise ``"cpu"``.
+    """
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    return "cuda" if device.startswith("cuda") else "cpu"
+
+
+def _charge_runtime_v3_referee_score(
+    problem: LayoutProblem,
+    config: Optional[LayoutConfig],
+    reason: str,
+) -> None:
+    """Charge one actual runtime V3 referee result to the DWU ledger.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Runtime problem whose V3 scorer is being invoked.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying the optional DWU ledger.
+    reason : str
+        Stable budget-ledger reason for this mandatory score.
+
+    Returns
+    -------
+    None
+        The optional ledger is debited when installed.
+    """
+    from dagua.layout.ops.pipelines.native_budget import charge
+    from dagua.layout.ops.pipelines.native_cost_model import estimate_v3_referee_cost
+
+    edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    cost = estimate_v3_referee_cost(
+        int(problem.num_nodes),
+        edge_count,
+        bool(problem.clusters),
+        problem.edge_weights is not None,
+        _native_v3_referee_device_class(config),
+    )
+    charge(config, cost.reserved_score_dwu, reason)
 
 
 def _best_of_polish(
@@ -5026,7 +5297,9 @@ def _best_of_polish(
         is_worker_timeout_like_exception,
         w5_dominates,
         w5_honest_axes_from_metrics,
+        w5_score_pair_from_v3_result,
     )
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
     from dagua.metrics import (
         _all_pairs_unweighted,
         _build_csr,
@@ -5044,6 +5317,14 @@ def _best_of_polish(
     cpu_edge_index = edge_index.detach().to(device="cpu")
     cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
     cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
+    v3_problem = LayoutProblem(
+        edge_index=cpu_edge_index,
+        num_nodes=int(base_pos.shape[0]),
+        node_sizes=cpu_node_sizes,
+        direction=direction,
+        structure=classify_graph(cpu_edge_index, int(base_pos.shape[0])),
+        edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
+    )
     offsets, targets = _build_csr(cpu_edge_index, int(base_pos.shape[0]))
     all_pairs_dist = _all_pairs_unweighted(
         offsets, targets, int(base_pos.shape[0]), max_dist=int(base_pos.shape[0])
@@ -5059,6 +5340,38 @@ def _best_of_polish(
     )
 
     honest_score_cache: dict[int, tuple[W5ScorePair, W5HonestAxes]] = {}
+    v3_result_cache: dict[int, Any] = {}
+    v3_result_keepalive: list[torch.Tensor] = []
+
+    def v3_result_for(pos: torch.Tensor) -> Any:
+        """Return the cached restricted V3 result for one W5 candidate.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        object
+            Runtime-restricted V3 result for ``pos``.
+        """
+        cache_key = id(pos)
+        cached = v3_result_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        # The scorer cache is keyed by Python object id for speed. Retain every
+        # scored tensor so a later short-lived W5 candidate cannot inherit a
+        # recycled id and receive stale V3 geometry.
+        v3_result_keepalive.append(pos)
+        result = score_v3_runtime_result(
+            pos,
+            v3_problem,
+            all_pairs_dist=all_pairs_dist,
+        )
+        _charge_runtime_v3_referee_score(v3_problem, config, "w5_v3_referee")
+        v3_result_cache[cache_key] = result
+        return result
 
     def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
         """Score one finalist and expose its honest W5 routing axes.
@@ -5089,9 +5402,10 @@ def _best_of_polish(
             all_pairs_dist=all_pairs_dist,
         )
         numeric["declared_hierarchical"] = declared_hierarchical
-        score_pair = W5ScorePair(
+        score_pair = w5_score_pair_from_v3_result(
             directed=float(composite(numeric)),
             undirected=float(composite_undirected(numeric)),
+            v3_result=v3_result_for(pos),
         )
         payload = (score_pair, w5_honest_axes_from_metrics(numeric))
         honest_score_cache[cache_key] = payload
@@ -5512,9 +5826,11 @@ def _best_of_polish(
                 referee_key_fn = _w5_referee_key_fn(
                     edge_index=edge_index,
                     num_nodes=int(honest_best_pos.shape[0]),
-                    node_sizes=node_sizes,
+                    node_sizes=cpu_node_sizes,
                     edge_weights=edge_weights,
                     direction=direction,
+                    all_pairs_dist=all_pairs_dist,
+                    result_fn=v3_result_for,
                 )
                 w5_kwargs: dict[str, Any] = {
                     "incumbent_pos": honest_best_pos,
@@ -5547,6 +5863,11 @@ def _best_of_polish(
                     ),
                     incumbent_referee_key=(
                         referee_key_fn(honest_best_pos) if referee_key_fn is not None else (1, -0.0)
+                    ),
+                    tallied_axis=(
+                        "directed"
+                        if is_semantically_directed and declared_hierarchical
+                        else "undirected"
                     ),
                 ):
                     register_anytime_best = getattr(
@@ -5702,6 +6023,7 @@ def _terminal_w5_polish(
     direction: str,
     clusters: Optional[dict[str, Any]] = None,
     cluster_parents: Optional[dict[str, Optional[str]]] = None,
+    cluster_labels: Optional[dict[str, str]] = None,
     shape_geometry: Optional[NativeShapeGeometry] = None,
     extra_seeds: Optional[Sequence[tuple[str, torch.Tensor]]] = None,
     register_anytime_best: Optional[Callable[[torch.Tensor, str], None]] = None,
@@ -5730,6 +6052,8 @@ def _terminal_w5_polish(
         Cluster membership metadata.
     cluster_parents : dict[str, str | None], optional
         Nested-cluster parent metadata.
+    cluster_labels : dict[str, str], optional
+        Cluster label text keyed by cluster name for declared-cluster facets.
     shape_geometry : NativeShapeGeometry, optional
         Optional non-box shape descriptors for W5 overlap geometry.
     extra_seeds : Sequence[tuple[str, torch.Tensor]], optional
@@ -5763,13 +6087,20 @@ def _terminal_w5_polish(
             W5ScorePair,
             W5Seed,
             _finisher_slice_s,
+            build_cluster_tightening_candidates,
             log_w5_telemetry,
             make_w5_skip_result,
             run_w5_finisher,
+            run_w5_terminal_continuous_facet_polish,
+            run_w5_terminal_global_scale_sweep,
+            run_w5_terminal_smacof_stress_polish,
+            run_w5_terminal_small_n_anneal,
             w5_dominates,
             w5_honest_axes_from_metrics,
             w5_predicted_skip_reason,
+            w5_score_pair_from_v3_result,
         )
+        from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
         from dagua.metrics import (
             _all_pairs_unweighted,
             _build_csr,
@@ -5803,6 +6134,16 @@ def _terminal_w5_polish(
                 )
             )
         cpu_cluster_ids = cluster_ids.detach().to(device="cpu") if cluster_ids is not None else None
+        v3_problem = LayoutProblem(
+            edge_index=cpu_edge_index,
+            num_nodes=int(final_pos.shape[0]),
+            node_sizes=cpu_node_sizes,
+            direction=direction,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            structure=terminal_structure,
+            edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
+        )
         offsets, targets = _build_csr(cpu_edge_index, int(final_pos.shape[0]))
         all_pairs_dist = _all_pairs_unweighted(
             offsets,
@@ -5810,6 +6151,38 @@ def _terminal_w5_polish(
             int(final_pos.shape[0]),
             max_dist=int(final_pos.shape[0]),
         )
+        v3_result_cache: dict[int, Any] = {}
+        v3_result_keepalive: list[torch.Tensor] = []
+
+        def v3_result_for(pos: torch.Tensor) -> Any:
+            """Return the cached restricted V3 result for one terminal W5 candidate.
+
+            Parameters
+            ----------
+            pos : torch.Tensor
+                Candidate positions with shape ``[N, 2]``.
+
+            Returns
+            -------
+            object
+                Runtime-restricted V3 result for ``pos``.
+            """
+            cache_key = id(pos)
+            cached = v3_result_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            # The finisher scores many short-lived tensors before the terminal
+            # scale sweep. Retain id-keyed tensors so Python cannot recycle an
+            # object id and return a stale V3 result for a later scale candidate.
+            v3_result_keepalive.append(pos)
+            result = score_v3_runtime_result(
+                pos,
+                v3_problem,
+                all_pairs_dist=all_pairs_dist,
+            )
+            _charge_runtime_v3_referee_score(v3_problem, config, "terminal_w5_v3_referee")
+            v3_result_cache[cache_key] = result
+            return result
 
         def honest_score_payload(pos: torch.Tensor) -> tuple[W5ScorePair, W5HonestAxes]:
             """Score one terminal W5 candidate with the frozen metrics ruler.
@@ -5834,12 +6207,16 @@ def _terminal_w5_polish(
                 direction=direction,
                 declared_hierarchical=declared_hierarchical,
                 all_pairs_dist=all_pairs_dist,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+                cluster_labels=cluster_labels,
             )
             numeric["declared_hierarchical"] = declared_hierarchical
             return (
-                W5ScorePair(
+                w5_score_pair_from_v3_result(
                     directed=float(composite(numeric)),
                     undirected=float(composite_undirected(numeric)),
+                    v3_result=v3_result_for(pos),
                 ),
                 w5_honest_axes_from_metrics(numeric),
             )
@@ -5861,6 +6238,134 @@ def _terminal_w5_polish(
 
         referee_started = time.perf_counter()
         incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
+        cluster_tightening_telemetry: list[dict[str, Any]] = []
+        cluster_selected = False
+        cluster_seed_positions: list[tuple[str, torch.Tensor]] = []
+        tallied_axis = (
+            "directed" if is_semantically_directed and declared_hierarchical else "undirected"
+        )
+        referee_key_fn = _w5_referee_key_fn(
+            edge_index=cpu_edge_index,
+            num_nodes=int(final_pos.shape[0]),
+            node_sizes=cpu_node_sizes,
+            edge_weights=edge_weights,
+            direction=direction,
+            all_pairs_dist=all_pairs_dist,
+            result_fn=v3_result_for,
+        )
+        weighted_stress_candidate = _terminal_weighted_stress_majorization_candidate(
+            edge_index=cpu_edge_index,
+            num_nodes=int(final_pos.shape[0]),
+            node_sizes=cpu_node_sizes,
+            edge_weights=edge_weights,
+            node_sep=float(getattr(config, "_dagua_native_node_sep", config.node_sep)),
+            seed=int(getattr(config, "seed", 42) or 42),
+        )
+        if weighted_stress_candidate is not None:
+            candidate_score_pair, candidate_axes = honest_score_payload(weighted_stress_candidate)
+            candidate_key = (
+                referee_key_fn(weighted_stress_candidate)
+                if referee_key_fn is not None
+                else (1, -0.0)
+            )
+            incumbent_key = referee_key_fn(final_pos) if referee_key_fn is not None else (1, -0.0)
+            if w5_dominates(
+                candidate_score_pair,
+                incumbent_score_pair,
+                0.05,
+                candidate_referee_key=candidate_key,
+                incumbent_referee_key=incumbent_key,
+                tallied_axis=tallied_axis,
+            ):
+                final_pos = weighted_stress_candidate.to(
+                    device=final_pos.device,
+                    dtype=final_pos.dtype,
+                )
+                incumbent_score_pair = candidate_score_pair
+                incumbent_axes = candidate_axes
+                if register_anytime_best is not None:
+                    register_anytime_best(final_pos, "terminal_weighted_stress_accept")
+        selected_cluster_candidate: (
+            tuple[
+                str,
+                torch.Tensor,
+                W5ScorePair,
+                W5HonestAxes,
+            ]
+            | None
+        ) = None
+        selected_cluster_v3 = float("-inf")
+        for cluster_candidate in build_cluster_tightening_candidates(
+            final_pos,
+            cpu_edge_index,
+            cpu_node_sizes,
+            clusters,
+            cluster_parents,
+        ):
+            candidate_score_pair, candidate_axes = honest_score_payload(cluster_candidate.pos)
+            selected = w5_dominates(
+                candidate_score_pair,
+                incumbent_score_pair,
+                1.0e-9,
+                tallied_axis=tallied_axis,
+            )
+            candidate_v3 = candidate_score_pair.v3
+            candidate_v3_float = (
+                float(candidate_v3)
+                if candidate_v3 is not None and math.isfinite(float(candidate_v3))
+                else float("-inf")
+            )
+            if selected and candidate_v3_float > selected_cluster_v3:
+                selected_cluster_candidate = (
+                    cluster_candidate.name,
+                    cluster_candidate.pos,
+                    candidate_score_pair,
+                    candidate_axes,
+                )
+                selected_cluster_v3 = candidate_v3_float
+            cluster_tightening_telemetry.append(
+                {
+                    "name": cluster_candidate.name,
+                    "gate_reason": cluster_candidate.gate_reason,
+                    "cluster_count": cluster_candidate.cluster_count,
+                    "max_depth": cluster_candidate.max_depth,
+                    "incumbent_score_pair": {
+                        "directed": incumbent_score_pair.directed,
+                        "undirected": incumbent_score_pair.undirected,
+                    },
+                    "candidate_score_pair": {
+                        "directed": candidate_score_pair.directed,
+                        "undirected": candidate_score_pair.undirected,
+                    },
+                    "selected": False,
+                }
+            )
+            cluster_seed_positions.append((cluster_candidate.name, cluster_candidate.pos))
+        if selected_cluster_candidate is not None:
+            (
+                selected_cluster_name,
+                selected_cluster_pos,
+                incumbent_score_pair,
+                incumbent_axes,
+            ) = selected_cluster_candidate
+            final_pos = selected_cluster_pos.to(device=final_pos.device, dtype=final_pos.dtype)
+            cluster_selected = True
+            for record in cluster_tightening_telemetry:
+                if record["name"] == selected_cluster_name:
+                    record["selected"] = True
+                    break
+            if register_anytime_best is not None:
+                register_anytime_best(final_pos, "cluster_tightening_accept")
+        if cluster_tightening_telemetry:
+            existing_cluster_telemetry = list(
+                getattr(config, "_dagua_native_cluster_tightening_telemetry", [])
+            )
+            existing_cluster_telemetry.extend(cluster_tightening_telemetry)
+            setattr(
+                config,
+                "_dagua_native_cluster_tightening_telemetry",
+                existing_cluster_telemetry,
+            )
         setattr(
             config,
             "_dagua_native_w5_referee_cost_s",
@@ -5893,8 +6398,14 @@ def _terminal_w5_polish(
             )
             return final_pos
 
-        seed_bank = [W5Seed("terminal_final", final_pos)]
-        for seed_name, seed_pos in list(getattr(config, "_dagua_native_terminal_w5_seed_bank", [])):
+        seed_bank = [
+            W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
+            for seed_name, seed_pos in list(
+                getattr(config, "_dagua_native_terminal_w5_seed_bank", [])
+            )
+        ]
+        seed_bank.append(W5Seed("terminal_final", final_pos))
+        for seed_name, seed_pos in cluster_seed_positions:
             seed_bank.append(
                 W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
             )
@@ -5904,13 +6415,6 @@ def _terminal_w5_polish(
                 for seed_name, seed_pos in extra_seeds
             )
 
-        referee_key_fn = _w5_referee_key_fn(
-            edge_index=cpu_edge_index,
-            num_nodes=int(final_pos.shape[0]),
-            node_sizes=cpu_node_sizes,
-            edge_weights=edge_weights,
-            direction=direction,
-        )
         w5_kwargs: dict[str, Any] = {
             "incumbent_pos": final_pos,
             "incumbent_score_pair": incumbent_score_pair,
@@ -5932,6 +6436,9 @@ def _terminal_w5_polish(
         # W5 runs once, sentinel-owned, on the true final tensor, monotone,
         # fidelity no-op. Weighted inputs add the severe-G6 prefix before the
         # unchanged dual-ruler comparison.
+        terminal_winner_pos = final_pos
+        terminal_winner_pair = incumbent_score_pair
+        terminal_winner_reason: Optional[str] = None
         if w5_result.accepted and w5_dominates(
             w5_result.winner_score_pair,
             incumbent_score_pair,
@@ -5942,10 +6449,103 @@ def _terminal_w5_polish(
             incumbent_referee_key=(
                 referee_key_fn(final_pos) if referee_key_fn is not None else (1, -0.0)
             ),
+            tallied_axis=(
+                "directed" if is_semantically_directed and declared_hierarchical else "undirected"
+            ),
         ):
+            terminal_winner_pos = w5_result.winner_pos
+            terminal_winner_pair = w5_result.winner_score_pair
+            terminal_winner_reason = "terminal_w5_accept"
+        scale_sweep = run_w5_terminal_global_scale_sweep(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            score_fn=honest_score,
+            referee_key_fn=referee_key_fn,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+        if scale_sweep.selected:
+            terminal_winner_pos = scale_sweep.winner_pos.to(
+                device=final_pos.device,
+                dtype=final_pos.dtype,
+            )
+            terminal_winner_pair = scale_sweep.winner_score_pair
+            if abs(scale_sweep.winner_scale_x - scale_sweep.winner_scale_y) <= 1.0e-12:
+                terminal_winner_reason = f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}"
+            else:
+                terminal_winner_reason = (
+                    "terminal_scale_sweep_"
+                    f"sx{scale_sweep.winner_scale_x:g}_sy{scale_sweep.winner_scale_y:g}"
+                )
+        smacof_stress = run_w5_terminal_smacof_stress_polish(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            edge_index=edge_index,
+            node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            all_pairs_dist=all_pairs_dist,
+            score_fn=honest_score,
+            referee_key_fn=referee_key_fn,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+        if smacof_stress.selected:
+            terminal_winner_pos = smacof_stress.winner_pos.to(
+                device=final_pos.device,
+                dtype=final_pos.dtype,
+            )
+            terminal_winner_pair = smacof_stress.winner_score_pair
+            terminal_winner_reason = "terminal_smacof_stress_polish"
+        continuous_facet_polish = run_w5_terminal_continuous_facet_polish(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            edge_index=edge_index,
+            node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            score_fn=honest_score,
+            structure=terminal_structure,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            referee_key_fn=referee_key_fn,
+            config=config,
+            has_weights=edge_weights is not None,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+        if continuous_facet_polish.selected:
+            terminal_winner_pos = continuous_facet_polish.winner_pos.to(
+                device=final_pos.device,
+                dtype=final_pos.dtype,
+            )
+            terminal_winner_pair = continuous_facet_polish.winner_score_pair
+            terminal_winner_reason = "terminal_continuous_facet_polish"
+        small_n_anneal = run_w5_terminal_small_n_anneal(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            edge_index=edge_index,
+            node_sizes=cpu_node_sizes.to(device=edge_index.device),
+            score_fn=honest_score,
+            referee_key_fn=referee_key_fn,
+            config=config,
+            has_clusters=bool(clusters),
+            has_weights=edge_weights is not None,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+        if small_n_anneal.selected:
             if register_anytime_best is not None:
-                register_anytime_best(w5_result.winner_pos, "terminal_w5_accept")
-            return w5_result.winner_pos
+                register_anytime_best(small_n_anneal.winner_pos, "terminal_small_n_anneal")
+            return small_n_anneal.winner_pos.to(device=final_pos.device, dtype=final_pos.dtype)
+        if terminal_winner_reason is not None:
+            if register_anytime_best is not None:
+                register_anytime_best(terminal_winner_pos, terminal_winner_reason)
+            return terminal_winner_pos
+        if cluster_selected:
+            return final_pos
     except Exception as exc:  # noqa: BLE001 -- terminal W5 cannot sink the returned layout
         if is_worker_timeout_like_exception(exc):
             raise
@@ -6236,6 +6836,7 @@ def layout_dagua_native_pipeline(
                     direction=effective_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    cluster_labels=cluster_labels,
                     shape_geometry=shape_geometry,
                 )
             )
@@ -6375,6 +6976,7 @@ def layout_dagua_native_pipeline(
                                         direction=effective_config.direction,
                                         clusters=clusters,
                                         cluster_parents=cluster_parents,
+                                        cluster_labels=cluster_labels,
                                         shape_geometry=shape_geometry,
                                     )
                                 )
@@ -6456,6 +7058,7 @@ def layout_dagua_native_pipeline(
                     direction=effective_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    cluster_labels=cluster_labels,
                     shape_geometry=shape_geometry,
                     extra_seeds=w5_seed_positions,
                 )
@@ -6566,10 +7169,13 @@ def layout_dagua_native_pipeline(
         None
             The prepared config receives the current anytime record.
         """
+        previous = getattr(prepared_config, "_dagua_native_anytime_best", None)
+        previous_pos = previous.pos if previous is not None else None
+        finite_pos, _ = finite_checkpoint_or_restore(pos.detach(), previous_pos)
         setattr(
             prepared_config,
             "_dagua_native_anytime_best",
-            _AnytimeBestRecord(pos=pos.detach().clone(), provenance=provenance),
+            _AnytimeBestRecord(pos=finite_pos.detach().clone(), provenance=provenance),
         )
 
     setattr(prepared_config, "_dagua_native_register_anytime_best", register_anytime_best)
@@ -6594,6 +7200,27 @@ def layout_dagua_native_pipeline(
         torch.Tensor
             Finished native positions with shape ``[N, 2]``.
         """
+        last_finite_pos: Optional[torch.Tensor] = None
+        if prepared_init_pos is not None and bool(torch.isfinite(prepared_init_pos).all().item()):
+            last_finite_pos = prepared_init_pos.detach().clone()
+
+        def ensure_finite_boundary(pos: torch.Tensor) -> torch.Tensor:
+            """Restore a finite native stage-boundary tensor when needed.
+
+            Parameters
+            ----------
+            pos : torch.Tensor
+                Candidate positions with shape ``[N, 2]``.
+
+            Returns
+            -------
+            torch.Tensor
+                Finite positions with shape ``[N, 2]``.
+            """
+            nonlocal last_finite_pos
+            pos, last_finite_pos = finite_checkpoint_or_restore(pos.detach(), last_finite_pos)
+            return pos
+
         state = SolveState(pos=prepared_init_pos)
         ctx = RuntimeContext(
             plan=ExecutionPlan(
@@ -6701,7 +7328,7 @@ def layout_dagua_native_pipeline(
             )
             if outer_state.pos is None:
                 raise RuntimeError("dagua_native component tiling did not produce positions.")
-            result = outer_state.pos.detach()
+            result = ensure_finite_boundary(outer_state.pos)
             register_anytime_best(result, "post_base_contest")
             # Also polish the per-component-tiled output. Closes
             # +2.96 on disconnected_label_cycle_collage (the (50, 0.05)
@@ -6721,21 +7348,23 @@ def layout_dagua_native_pipeline(
                 is_semantically_directed, declared_hierarchical = _honest_ruler_flags(
                     contest_structure
                 )
-                result = _best_of_polish(
-                    result,
-                    prepared_edge_index,
-                    normalized_node_sizes,
-                    is_semantically_directed=is_semantically_directed,
-                    declared_hierarchical=declared_hierarchical,
-                    direction_is_declared=bool(
-                        getattr(contest_structure, "direction_is_declared", False)
-                    ),
-                    direction=prepared_config.direction,
-                    polish_battery=str(
-                        getattr(prepared_config, "_dagua_native_polish_battery", "full")
-                    ),
-                    config=prepared_config,
-                    edge_weights=prepared_edge_weights,
+                result = ensure_finite_boundary(
+                    _best_of_polish(
+                        result,
+                        prepared_edge_index,
+                        normalized_node_sizes,
+                        is_semantically_directed=is_semantically_directed,
+                        declared_hierarchical=declared_hierarchical,
+                        direction_is_declared=bool(
+                            getattr(contest_structure, "direction_is_declared", False)
+                        ),
+                        direction=prepared_config.direction,
+                        polish_battery=str(
+                            getattr(prepared_config, "_dagua_native_polish_battery", "full")
+                        ),
+                        config=prepared_config,
+                        edge_weights=prepared_edge_weights,
+                    )
                 )
                 register_anytime_best(result, "post_polish_accept")
             risk_state = ComponentTilingCrossingRisk(
@@ -6751,9 +7380,92 @@ def layout_dagua_native_pipeline(
                 ctx,
             )
             if risk_state.pos is not None:
-                result = risk_state.pos.detach()
+                result = ensure_finite_boundary(risk_state.pos)
             if dot_cluster_fidelity:
-                result = _apply_dot_cluster_fidelity_layout(
+                result = ensure_finite_boundary(
+                    _apply_dot_cluster_fidelity_layout(
+                        result,
+                        prepared_edge_index,
+                        normalized_node_sizes,
+                        clusters,
+                        cluster_parents,
+                        shape_geometry,
+                    )
+                )
+            if owns_terminal_w5:
+                result = ensure_finite_boundary(
+                    _terminal_w5_polish(
+                        result,
+                        edge_index=prepared_edge_index,
+                        node_sizes=normalized_node_sizes,
+                        edge_weights=prepared_edge_weights,
+                        config=prepared_config,
+                        structure=problem.structure,
+                        direction=prepared_config.direction,
+                        clusters=clusters,
+                        cluster_parents=cluster_parents,
+                        cluster_labels=cluster_labels,
+                        shape_geometry=shape_geometry,
+                        register_anytime_best=register_anytime_best,
+                    )
+                )
+            return result
+
+        result = ensure_finite_boundary(_run_native_problem(problem, state, ctx, prepared_config))
+        register_anytime_best(result, "post_base_contest")
+        try:
+            from dagua.layout.ops.pipelines.native_directed import (
+                _directed_dot_order_enabled,
+                _directed_wide_dag_ordering_enabled,
+                maybe_accept_dot_order_arm,
+                maybe_accept_wide_dag_ordering_arm,
+            )
+            from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+            dot_order_anytime_enabled = not bool(problem.clusters) and _directed_dot_order_enabled(
+                problem,
+            )
+            if _directed_wide_dag_ordering_enabled(problem) or dot_order_anytime_enabled:
+                cpu_edge_index = prepared_edge_index.detach().to(device="cpu")
+                offsets, targets = _build_csr(cpu_edge_index, int(problem.num_nodes))
+                all_pairs_dist = _all_pairs_unweighted(
+                    offsets,
+                    targets,
+                    int(problem.num_nodes),
+                    max_dist=int(problem.num_nodes),
+                )
+                wide_cluster_ids = _problem_cluster_ids(problem)
+                if dot_order_anytime_enabled:
+                    dot_result = maybe_accept_dot_order_arm(
+                        problem,
+                        result,
+                        prepared_config,
+                        wide_cluster_ids,
+                        all_pairs_dist,
+                    )
+                    if dot_result is not result:
+                        result = ensure_finite_boundary(dot_result)
+                        register_anytime_best(result, "dot_order_accept")
+                wide_result = maybe_accept_wide_dag_ordering_arm(
+                    problem,
+                    result,
+                    prepared_config,
+                    wide_cluster_ids,
+                    all_pairs_dist,
+                )
+                if wide_result is not result:
+                    result = ensure_finite_boundary(wide_result)
+                    register_anytime_best(result, "wide_dag_ordering_accept")
+        except Exception as exc:  # noqa: BLE001 -- wide-DAG arm cannot sink base layout
+            if is_worker_timeout_like_exception(exc):
+                raise
+            _LOGGER.warning(
+                "directed ordering challenger failed; preserving base result",
+                exc_info=True,
+            )
+        if dot_cluster_fidelity:
+            result = ensure_finite_boundary(
+                _apply_dot_cluster_fidelity_layout(
                     result,
                     prepared_edge_index,
                     normalized_node_sizes,
@@ -6761,8 +7473,10 @@ def layout_dagua_native_pipeline(
                     cluster_parents,
                     shape_geometry,
                 )
-            if owns_terminal_w5:
-                result = _terminal_w5_polish(
+            )
+        if owns_terminal_w5:
+            result = ensure_finite_boundary(
+                _terminal_w5_polish(
                     result,
                     edge_index=prepared_edge_index,
                     node_sizes=normalized_node_sizes,
@@ -6772,35 +7486,10 @@ def layout_dagua_native_pipeline(
                     direction=prepared_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
+                    cluster_labels=cluster_labels,
                     shape_geometry=shape_geometry,
                     register_anytime_best=register_anytime_best,
                 )
-            return result
-
-        result = _run_native_problem(problem, state, ctx, prepared_config)
-        register_anytime_best(result, "post_base_contest")
-        if dot_cluster_fidelity:
-            result = _apply_dot_cluster_fidelity_layout(
-                result,
-                prepared_edge_index,
-                normalized_node_sizes,
-                clusters,
-                cluster_parents,
-                shape_geometry,
-            )
-        if owns_terminal_w5:
-            result = _terminal_w5_polish(
-                result,
-                edge_index=prepared_edge_index,
-                node_sizes=normalized_node_sizes,
-                edge_weights=prepared_edge_weights,
-                config=prepared_config,
-                structure=problem.structure,
-                direction=prepared_config.direction,
-                clusters=clusters,
-                cluster_parents=cluster_parents,
-                shape_geometry=shape_geometry,
-                register_anytime_best=register_anytime_best,
             )
         return result
 

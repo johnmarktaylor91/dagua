@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import types
+from pathlib import Path
 from typing import Any, Optional
 
 import pytest
@@ -528,8 +529,8 @@ def test_classic_sugiyama_uses_times_metrics_for_dot_cluster_labels() -> None:
     assert round(widths["cross"]) == 104
 
 
-def test_classic_sugiyama_enables_only_certified_cluster_inventory() -> None:
-    """Enable the typed cluster path only for an instrumented exact oracle."""
+def test_classic_sugiyama_enables_computed_cluster_path_without_oracle() -> None:
+    """Enable the computed cluster path without injecting fixture oracles."""
     edges = [
         ("input", "embed"),
         ("embed", "router"),
@@ -555,61 +556,31 @@ def test_classic_sugiyama_enables_only_certified_cluster_inventory() -> None:
     classic_competitor._apply_sugiyama_graphviz_metadata(graph=graph, extra_kwargs=kwargs)
 
     assert kwargs["graphviz_enable_cluster_skeleton"] is True
-    assert kwargs["graphviz_expected_x_inventory"][0] == 28
-    assert sum(record[2] for record in kwargs["graphviz_expected_x_inventory"][1]) == 36
+    assert "graphviz_expected_x_inventory" not in kwargs
 
 
-def test_classic_sugiyama_cluster_handoff_requires_endpoint_digest() -> None:
-    """Gate the clustered handoff row on its exact endpoint/order digest."""
-    edges = [
-        ("input", "preprocess.tokenize"),
-        ("preprocess.tokenize", "encoder.stage_1_attention_projection"),
-        ("encoder.stage_1_attention_projection", "encoder.stage_1_feedforward"),
-        ("encoder.stage_1_feedforward", "handoff"),
-        ("input", "handoff"),
-        ("handoff", "decoder.cross_attention_query"),
-        ("handoff", "decoder.cross_attention_key_value"),
-        ("decoder.cross_attention_query", "decoder.merge"),
-        ("decoder.cross_attention_key_value", "decoder.merge"),
-        ("decoder.merge", "LongOutputProjectionLayerWithAuxiliaryCalibration"),
-        ("LongOutputProjectionLayerWithAuxiliaryCalibration", "output"),
-    ]
-    graph = DaguaGraph.from_edge_list(edges)
-    graph.add_edge("handoff", "decoder.cross_attention_key_value")
-    node_by_label = {label: index for index, label in enumerate(graph.node_labels)}
-    graph.add_cluster(
-        "encoder",
-        [
-            node_by_label["encoder.stage_1_attention_projection"],
-            node_by_label["encoder.stage_1_feedforward"],
-        ],
-        label="Encoder",
+def test_graphviz_dot_production_sources_do_not_contain_fixture_oracle_hooks() -> None:
+    """Reject production fixture-memorization hooks in the Graphviz-dot path."""
+    repo_root = Path(__file__).resolve().parents[1]
+    production_sources = (
+        repo_root / "dagua/eval/competitors/classic_competitor.py",
+        repo_root / "dagua/layout/ops/sugiyama.py",
+        repo_root / "dagua/layout/ops/pipelines/sugiyama.py",
+        repo_root / "dagua/layout/ops/pipelines/dot.py",
     )
-    graph.add_cluster(
-        "decoder",
-        [
-            node_by_label["decoder.cross_attention_query"],
-            node_by_label["decoder.cross_attention_key_value"],
-            node_by_label["decoder.merge"],
-        ],
-        label="Decoder",
-    )
-    graph.add_cluster(
-        "decoder.cross_attention",
-        [
-            node_by_label["decoder.cross_attention_query"],
-            node_by_label["decoder.cross_attention_key_value"],
-        ],
-        label="Cross Attention",
-        parent="decoder",
+    forbidden = (
+        "_graphviz_typed_cluster_inventory_oracle",
+        "graphviz_expected_x_inventory",
+        "_GRAPHVIZ_705_SIMPLEX_CERTIFIED_DIGESTS",
+        "topology_digest",
+        "allowlist secret",
+        "(num_original_nodes, len(cluster_members), len(edges))",
     )
 
-    oracle = classic_competitor._graphviz_typed_cluster_inventory_oracle(graph)
-
-    assert oracle is not None
-    assert len(oracle) == 3
-    assert oracle[0] == 35
-    assert len(oracle[2]) == 64
+    for source_path in production_sources:
+        source = source_path.read_text()
+        for token in forbidden:
+            assert token not in source, f"{token!r} remains in {source_path}"
 
 
 def test_classic_sugiyama_graphviz_fidelity_guards_mixed_label_cluster_metadata(
