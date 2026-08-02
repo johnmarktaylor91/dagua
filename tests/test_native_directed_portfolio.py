@@ -39,6 +39,7 @@ from dagua.layout.ops.pipelines.native_directed import (
     _clean_fan_bundle_for_compaction,
     _crossing_edge_pairs,
     _DagreCompoundCandidate,
+    _default_sugiyama_cluster_arm_enabled,
     _directed_cluster_candidate_is_dual_admissible,
     _directed_dagre_compound_enabled,
     _directed_davidson_harel_small_candidates,
@@ -240,6 +241,28 @@ def test_dagre_compound_arm_gate_and_builder_are_deterministic() -> None:
     assert first.pos.shape == incumbent.shape
     assert torch.isfinite(first.pos).all()
     torch.testing.assert_close(first.pos, second.pos, rtol=0.0, atol=0.0)
+
+
+def test_default_sugiyama_cluster_arm_gate_is_structural() -> None:
+    """Default Sugiyama cluster arm opens only for bounded clustered DAGs."""
+    problem = _nested_dag_problem()
+    plain = LayoutProblem(
+        edge_index=problem.edge_index,
+        num_nodes=problem.num_nodes,
+        node_sizes=problem.node_sizes,
+        direction=problem.direction,
+    )
+    oversized = LayoutProblem(
+        edge_index=problem.edge_index,
+        num_nodes=2000,
+        node_sizes=torch.ones((2000, 2), dtype=torch.float32),
+        clusters={"cluster": list(range(2000))},
+        direction=problem.direction,
+    )
+
+    assert _default_sugiyama_cluster_arm_enabled(problem)
+    assert not _default_sugiyama_cluster_arm_enabled(plain)
+    assert not _default_sugiyama_cluster_arm_enabled(oversized)
 
 
 def test_dagre_compound_arm_registers_only_dual_admissible_candidates(
