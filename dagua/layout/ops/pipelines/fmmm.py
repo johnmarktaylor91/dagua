@@ -6992,6 +6992,55 @@ def _graphviz_fdp_prism_scale_lists(
         y_positions[node_index] *= scale
 
 
+def _graphviz_fdp_prism_sanitize_position_lists(
+    x_positions: List[float],
+    y_positions: List[float],
+) -> None:
+    """Sanitize PRISM coordinates before proximity calculations.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+
+    Returns
+    -------
+    None
+        Updates coordinate lists in place.
+    """
+    import numpy as np
+
+    num_nodes = len(x_positions)
+    if num_nodes <= 1:
+        return
+    points = np.column_stack(
+        [
+            np.asarray(x_positions, dtype=float),
+            np.asarray(y_positions, dtype=float),
+        ]
+    )
+    if not np.isfinite(points).all():
+        points = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+    centered = points - points.mean(axis=0, keepdims=True)
+    degenerate = (
+        np.unique(points, axis=0).shape[0] < num_nodes
+        or np.linalg.matrix_rank(centered, tol=1.0e-12) < 2
+    )
+    if degenerate:
+        span = float(np.ptp(points, axis=0).max())
+        jitter_scale = max(span, 1.0) * 1.0e-9
+        angles = np.arange(num_nodes, dtype=float) * 2.399963229728653
+        radii = np.sqrt(np.arange(num_nodes, dtype=float) + 1.0)
+        points = points.copy()
+        points[:, 0] += np.cos(angles) * radii * jitter_scale
+        points[:, 1] += np.sin(angles) * radii * jitter_scale
+    for node_index in range(num_nodes):
+        x_positions[node_index] = float(points[node_index, 0])
+        y_positions[node_index] = float(points[node_index, 1])
+
+
 def _graphviz_fdp_prism_delaunay_edges(
     x_positions: Sequence[float],
     y_positions: Sequence[float],
@@ -7029,7 +7078,20 @@ def _graphviz_fdp_prism_delaunay_edges(
         ]
     )
     if not np.isfinite(points).all():
-        return set()
+        points = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+    centered = points - points.mean(axis=0, keepdims=True)
+    degenerate = (
+        np.unique(points, axis=0).shape[0] < num_nodes
+        or np.linalg.matrix_rank(centered, tol=1.0e-12) < 2
+    )
+    if degenerate:
+        span = float(np.ptp(points, axis=0).max())
+        jitter_scale = max(span, 1.0) * 1.0e-9
+        angles = np.arange(num_nodes, dtype=float) * 2.399963229728653
+        radii = np.sqrt(np.arange(num_nodes, dtype=float) + 1.0)
+        points = points.copy()
+        points[:, 0] += np.cos(angles) * radii * jitter_scale
+        points[:, 1] += np.sin(angles) * radii * jitter_scale
 
     from scipy.spatial import Delaunay, QhullError
 
@@ -7549,6 +7611,7 @@ def _graphviz_fdp_prism_overlap(
     cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
     x_positions = [float(cpu_positions[node_index, 0].item()) for node_index in range(num_nodes)]
     y_positions = [float(cpu_positions[node_index, 1].item()) for node_index in range(num_nodes)]
+    _graphviz_fdp_prism_sanitize_position_lists(x_positions, y_positions)
     half_widths, half_heights = _graphviz_fdp_prism_half_size_lists_in_inches(
         node_sizes,
         num_nodes,

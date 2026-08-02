@@ -61,6 +61,7 @@ class DaguaCompetitor(CompetitorBase):
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+        deterministic_native: bool = False,
     ) -> CompetitorResult:
         """Run dagua layout on the best available device.
 
@@ -73,6 +74,11 @@ class DaguaCompetitor(CompetitorBase):
         seed : int | None, default=None
             Random seed forwarded to ``LayoutConfig``. ``None`` preserves the
             adapter's historical default of ``42``.
+        deterministic_native : bool, default=False
+            Whether benchmark deterministic mode is active. Deterministic
+            measurement forces CPU execution and omits the wall-clock deadline
+            attribute so native admission gates use only the deterministic DWU
+            ledger.
 
         Returns
         -------
@@ -87,16 +93,20 @@ class DaguaCompetitor(CompetitorBase):
         start = time.perf_counter()
         budget_s = max(0.001, float(timeout))
         config = LayoutConfig(
-            device=self.device,
+            device="cpu" if deterministic_native else self.device,
             verbose=False,
             seed=seed if seed is not None else 42,
         )
-        setattr(
-            config,
-            "_dagua_native_deadline_s",
-            start + max(0.001, float(timeout) - _TIMEOUT_CUSHION_SECONDS),
-        )
-        install_budget_ledger(config, budget_s, return_reserve_dwu=_RETURN_RESERVE_DWU)
+        if deterministic_native:
+            setattr(config, "_dagua_native_deterministic_measurement", True)
+            install_budget_ledger(config, budget_s, return_reserve_dwu=_RETURN_RESERVE_DWU)
+        else:
+            setattr(
+                config,
+                "_dagua_native_deadline_s",
+                start + max(0.001, float(timeout) - _TIMEOUT_CUSHION_SECONDS),
+            )
+            install_budget_ledger(config, budget_s, return_reserve_dwu=_RETURN_RESERVE_DWU)
 
         try:
             with suspend_torchlens_decoration():

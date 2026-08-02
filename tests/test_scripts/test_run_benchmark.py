@@ -47,6 +47,15 @@ def test_parse_args_accepts_seed_start(monkeypatch: MonkeyPatch) -> None:
     assert args.seed_start == 50
 
 
+def test_parse_args_accepts_deterministic_native(monkeypatch: MonkeyPatch) -> None:
+    """The benchmark CLI should expose deterministic native measurement mode."""
+    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--deterministic-native"])
+
+    args = parse_args()
+
+    assert args.deterministic_native is True
+
+
 def test_position_relative_path_sanitizes_and_formats_seed_suffixes() -> None:
     """Saved tensor paths should match the documented naming scheme."""
     deterministic_path = position_relative_path("grid 5/5", "dagua", None)

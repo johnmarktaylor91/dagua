@@ -369,6 +369,61 @@ def test_dagua_competitor_signature_uses_device_and_source_hash(monkeypatch):
 
 
 @pytest.mark.smoke
+def test_dagua_competitor_scopes_deterministic_budget_to_det_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production keeps deadline plus ledger while det mode stays ledger-only."""
+    import importlib
+
+    layout_module = importlib.import_module("dagua.layout")
+
+    captured_configs: list[object] = []
+
+    def fake_layout(graph: DaguaGraph, config: object) -> torch.Tensor:
+        """Capture the forwarded config and return a valid position tensor.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph passed through the competitor adapter.
+        config : LayoutConfig
+            Adapter-created layout configuration.
+
+        Returns
+        -------
+        torch.Tensor
+            Zero positions with shape ``[N, 2]``.
+        """
+        captured_configs.append(config)
+        return torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(layout_module, "layout", fake_layout)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    graph = DaguaGraph.from_edge_list([("a", "b")])
+    competitor = DaguaCompetitor()
+
+    production_result = competitor.layout(graph, timeout=30.0, seed=42)
+    deterministic_result = competitor.layout(
+        graph,
+        timeout=30.0,
+        seed=42,
+        deterministic_native=True,
+    )
+
+    assert production_result.error is None
+    assert deterministic_result.error is None
+    production_config, deterministic_config = captured_configs
+    assert hasattr(production_config, "_dagua_native_deadline_s")
+    assert getattr(production_config, "_dagua_native_deterministic_budget_s") == pytest.approx(30.0)
+    assert not hasattr(deterministic_config, "_dagua_native_deadline_s")
+    assert getattr(deterministic_config, "_dagua_native_deterministic_budget_s") == pytest.approx(
+        30.0
+    )
+    assert getattr(deterministic_config, "_dagua_native_deterministic_measurement") is True
+    assert deterministic_config.device == "cpu"
+
+
+@pytest.mark.smoke
 def test_competitor_signatures_cover_extended_families(monkeypatch):
     """Ensure the benchmark cache key logic covers all supported families."""
     source_signature = "abc123def4567890"  # pragma: allowlist secret

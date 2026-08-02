@@ -33,8 +33,8 @@ def test_cost_model_volume_helpers() -> None:
     assert w5_step_volume(mode="barrier_2d", steps=8, seeds=2, checkpoints=3) == pytest.approx(22.0)
 
 
-def test_estimate_native_work_cost_uses_problem_shape_and_w5_tiny_constants() -> None:
-    """W5 estimator preserves the tiny-row calibrated constants.
+def test_estimate_native_work_cost_uses_problem_shape_and_w5_v3_referee_curve() -> None:
+    """W5 estimator prices referee reservations through the V3 curve.
 
     Returns
     -------
@@ -55,11 +55,32 @@ def test_estimate_native_work_cost_uses_problem_shape_and_w5_tiny_constants() ->
 
     assert cost.family == "w5"
     assert cost.generation_dwu == pytest.approx(96.0 * 0.0437)
-    assert cost.reserved_score_dwu == pytest.approx(2.0 * 0.019)
+    assert cost.reserved_score_dwu == pytest.approx(2.0 * 0.02)
     assert cost.metadata["num_nodes"] == 4
     assert cost.metadata["num_edges"] == 3
     assert cost.metadata["provenance"] == PROVENANCE_REF
     assert cost.metadata["terms"] == {"step": 96.0, "referee": 2.0, "combined": 98.0}
+    assert cost.metadata["referee_dwu_per_eval"] == pytest.approx(0.02)
+
+
+def test_w5_referee_reservation_matches_large_v3_referee_anchor() -> None:
+    """Large W5 plans reserve the same per-eval cost as runtime V3 scoring.
+
+    Returns
+    -------
+    None
+        Assertions validate that W5 does not retain the stale flat referee
+        price at scale.
+    """
+    cost = estimate_native_work_cost(
+        {"num_nodes": 1000, "num_edges": 2038},
+        family="w5",
+        knobs={"steps": 1, "seeds": 1, "checkpoints": 3, "mode": "unit"},
+        device_class="cpu",
+    )
+
+    assert cost.reserved_score_dwu == pytest.approx(3.0 * 5.36)
+    assert cost.metadata["referee_dwu_per_eval"] == pytest.approx(5.36)
 
 
 def test_estimate_native_work_cost_prices_unknown_family_as_opaque() -> None:
@@ -110,6 +131,63 @@ def test_directed_flat_arm_families_use_calibrated_priors() -> None:
     assert sugiyama.generation_dwu == pytest.approx(2.2)
     assert recombinant.generation_dwu == pytest.approx(2.5)
     assert sugiyama.metadata["provenance"] == PROVENANCE_REF
+
+
+def test_v3_referee_cost_tracks_measured_full_scorer_cpu_anchors() -> None:
+    """V3 referee pricing reproduces the PF3 B3 measured CPU scorer anchors.
+
+    Returns
+    -------
+    None
+        Assertions validate predicted-vs-measured DWU at the calibration rows.
+    """
+    anchors = (
+        (50, 70, 0.033),
+        (120, 237, 0.325),
+        (500, 1470, 3.2183127469552315),
+        (1000, 2038, 5.36),
+    )
+
+    for num_nodes, num_edges, measured_dwu in anchors:
+        cost = cost_model.estimate_v3_referee_cost(
+            num_nodes,
+            num_edges,
+            has_clusters=True,
+            has_weights=True,
+            device_class="cpu",
+        )
+
+        assert cost.reserved_score_dwu == pytest.approx(measured_dwu, rel=1e-9)
+        assert cost.metadata["terms"]["anchor_curve"] == pytest.approx(cost.reserved_score_dwu)
+
+
+def test_v3_referee_cost_is_monotone_and_graph_size_deterministic() -> None:
+    """V3 referee pricing is a deterministic graph-size curve.
+
+    Returns
+    -------
+    None
+        Assertions validate monotonicity and independence from runtime flags
+        that do not change the measured full-scorer CPU path.
+    """
+    previous = 0.0
+    for num_nodes in (1, 25, 50, 80, 120, 200, 500, 750, 1000, 1500):
+        current = cost_model.estimate_v3_referee_cost(
+            num_nodes,
+            max(num_nodes - 1, 0),
+            has_clusters=False,
+            has_weights=False,
+            device_class="cpu",
+        ).reserved_score_dwu
+
+        assert current >= previous
+        previous = current
+
+    cpu_cost = cost_model.estimate_v3_referee_cost(1000, 2038, True, True, "cpu")
+    cuda_cost = cost_model.estimate_v3_referee_cost(1000, 2038, False, False, "cuda")
+
+    assert cpu_cost.reserved_score_dwu == pytest.approx(cuda_cost.reserved_score_dwu)
+    assert cpu_cost.reserved_score_dwu == pytest.approx(5.36)
 
 
 def test_fcose_exact_regime_prices_small_rows_at_true_tiny_cost() -> None:

@@ -144,13 +144,19 @@ def test_graphviz_cluster_containment_keeps_rank_blocks_contiguous() -> None:
 
 
 def test_graphviz_cluster_skeleton_flag_uses_class1_interleaved_order() -> None:
-    """Pin interleaved ordering after traced recursive skeleton installation."""
+    """Pin the honest in-house mincross cluster-skeleton order.
+
+    The DOT de-cheat removed the graph-specific memorized cluster orders from
+    ``sugiyama.py``. The honest general mincross reproduces the same rank
+    membership as the Graphviz trace but with a benign within-rank tiebreak
+    difference (nodes 4/6 and 7/11) -- the accepted fidelity residual.
+    """
     assert _cluster_skeleton_visible_order("interleaved_cluster_crosstalk") == [
         [0],
         [2, 1],
         [5, 3, 8, 9],
-        [6, 4, 10],
-        [11, 7],
+        [4, 6, 10],
+        [7, 11],
     ]
 
 

@@ -22,6 +22,7 @@ BRANDES_KOEPF_PREDECESSORS_KEY = "brandes_koepf_predecessors"
 BRANDES_KOEPF_SUCCESSORS_KEY = "brandes_koepf_successors"
 BRANDES_KOEPF_WIDTHS_KEY = "brandes_koepf_widths"
 BRANDES_KOEPF_DUMMY_NODES_KEY = "brandes_koepf_dummy_nodes"
+BRANDES_KOEPF_BORDER_TYPES_KEY = "brandes_koepf_border_types"
 BRANDES_KOEPF_X_KEY = "brandes_koepf_x"
 
 
@@ -117,6 +118,111 @@ def _find_type1_conflicts(
                             _add_conflict(conflicts, predecessor, scan_node)
                 scan_position = layer_index + 1
                 previous_inner_position = next_inner_position
+    return conflicts
+
+
+def _find_type2_conflicts(
+    layering: Sequence[Sequence[LayerNode]],
+    predecessors: Mapping[LayerNode, Sequence[LayerNode]],
+    dummy_nodes: Set[LayerNode],
+    border_types: Mapping[LayerNode, str],
+) -> Set[frozenset[LayerNode]]:
+    """Find border conflicts between inner segments and cluster boundaries.
+
+    Parameters
+    ----------
+    layering : sequence[sequence[Hashable]]
+        Ordered nodes for each rank.
+    predecessors : mapping[Hashable, sequence[Hashable]]
+        Ordered predecessor ids for each node.
+    dummy_nodes : set[Hashable]
+        Nodes representing normalized dummy segments.
+    border_types : mapping[Hashable, str]
+        Border dummy type keyed by node id.
+
+    Returns
+    -------
+    set[frozenset[Hashable]]
+        Symmetric node-pair conflicts matching dagre.js ``findType2Conflicts``.
+    """
+    conflicts: Set[frozenset[LayerNode]] = set()
+    if not border_types or len(layering) < 2:
+        return conflicts
+
+    def scan(
+        south: Sequence[LayerNode],
+        south_position: int,
+        south_end: int,
+        previous_north_border: int,
+        next_north_border: int,
+        previous_positions: Mapping[LayerNode, int],
+    ) -> None:
+        """Scan one interval between border segments.
+
+        Parameters
+        ----------
+        south : sequence[Hashable]
+            Current lower layer.
+        south_position : int
+            Inclusive start index.
+        south_end : int
+            Exclusive end index.
+        previous_north_border : int
+            Previous north border order.
+        next_north_border : int
+            Next north border order.
+        previous_positions : mapping[Hashable, int]
+            North-layer positions.
+
+        Returns
+        -------
+        None
+            ``conflicts`` is mutated.
+        """
+        for index in range(south_position, south_end):
+            node = south[index]
+            if node not in dummy_nodes:
+                continue
+            for predecessor in predecessors.get(node, ()):
+                predecessor_order = previous_positions.get(predecessor)
+                if (
+                    predecessor in dummy_nodes
+                    and predecessor_order is not None
+                    and (
+                        predecessor_order < previous_north_border
+                        or predecessor_order > next_north_border
+                    )
+                ):
+                    _add_conflict(conflicts, predecessor, node)
+
+    for north, south in zip(layering, layering[1:]):
+        north_positions = {node: index for index, node in enumerate(north)}
+        previous_north_position = -1
+        next_north_position = len(north)
+        south_position = 0
+        for south_lookahead, node in enumerate(south):
+            if border_types.get(node):
+                node_predecessors = predecessors.get(node, ())
+                if node_predecessors:
+                    next_north_position = north_positions.get(node_predecessors[0], len(north))
+                    scan(
+                        south,
+                        south_position,
+                        south_lookahead,
+                        previous_north_position,
+                        next_north_position,
+                        north_positions,
+                    )
+                    south_position = south_lookahead
+                    previous_north_position = next_north_position
+        scan(
+            south,
+            south_position,
+            len(south),
+            previous_north_position,
+            next_north_position,
+            north_positions,
+        )
     return conflicts
 
 
@@ -333,8 +439,10 @@ def _horizontal_compaction(
     align: Mapping[LayerNode, LayerNode],
     widths: Mapping[LayerNode, float],
     dummy_nodes: Set[LayerNode],
+    border_types: Mapping[LayerNode, str],
     node_sep: float,
     edge_sep: float,
+    reverse_sep: bool,
 ) -> Dict[LayerNode, float]:
     """Compact one alignment with Dagre's modified two-pass block solve.
 
@@ -350,10 +458,14 @@ def _horizontal_compaction(
         Adjusted node widths.
     dummy_nodes : set[Hashable]
         Dummy nodes receiving edge separation.
+    border_types : mapping[Hashable, str]
+        Border dummy type keyed by node id.
     node_sep : float
         Real-node separation.
     edge_sep : float
         Dummy-edge separation.
+    reverse_sep : bool
+        Whether this is a right-biased horizontal pass.
 
     Returns
     -------
@@ -385,7 +497,8 @@ def _horizontal_compaction(
             ),
             default=float("inf"),
         )
-        if upper_bound != float("inf"):
+        border_type = "borderLeft" if reverse_sep else "borderRight"
+        if upper_bound != float("inf") and border_types.get(block) != border_type:
             x_coordinates[block] = max(x_coordinates[block], upper_bound)
     return {node: x_coordinates[root_node] for node, root_node in root.items()}
 
@@ -421,6 +534,7 @@ def brandes_koepf_x_assignment(
     successors: Mapping[LayerNode, Sequence[LayerNode]],
     widths: Mapping[LayerNode, float],
     dummy_nodes: Set[LayerNode],
+    border_types: Optional[Mapping[LayerNode, str]] = None,
     node_sep: float = 50.0,
     edge_sep: float = 20.0,
     align: Optional[str] = None,
@@ -439,6 +553,8 @@ def brandes_koepf_x_assignment(
         Adjusted node widths.
     dummy_nodes : set[Hashable]
         Normalized edge and self-edge dummy nodes.
+    border_types : mapping[Hashable, str] | None, optional
+        Border dummy type keyed by node id for compound layouts.
     node_sep : float, default=50.0
         Gap between real-node boxes.
     edge_sep : float, default=20.0
@@ -466,7 +582,11 @@ def brandes_koepf_x_assignment(
     if not nodes:
         return {}
 
+    resolved_border_types = border_types or {}
     conflicts = _find_type1_conflicts(layering, predecessors, dummy_nodes)
+    conflicts.update(
+        _find_type2_conflicts(layering, predecessors, dummy_nodes, resolved_border_types)
+    )
     assignments: "OrderedDict[str, Dict[LayerNode, float]]" = OrderedDict()
     for vertical in ("u", "d"):
         vertical_layers = [list(layer) for layer in layering]
@@ -484,8 +604,10 @@ def brandes_koepf_x_assignment(
                 alignment,
                 widths=widths,
                 dummy_nodes=dummy_nodes,
+                border_types=resolved_border_types,
                 node_sep=node_sep,
                 edge_sep=edge_sep,
+                reverse_sep=horizontal == "r",
             )
             if horizontal == "r":
                 coordinates = {node: -value for node, value in coordinates.items()}
@@ -572,6 +694,7 @@ class BrandesKoepfXAssignment(Op):
             successors=state.extras[BRANDES_KOEPF_SUCCESSORS_KEY],
             widths=state.extras[BRANDES_KOEPF_WIDTHS_KEY],
             dummy_nodes=state.extras[BRANDES_KOEPF_DUMMY_NODES_KEY],
+            border_types=state.extras.get(BRANDES_KOEPF_BORDER_TYPES_KEY),
             node_sep=self.config.node_sep,
             edge_sep=self.config.edge_sep,
             align=self.config.align,
@@ -581,6 +704,7 @@ class BrandesKoepfXAssignment(Op):
 
 __all__ = [
     "BRANDES_KOEPF_DUMMY_NODES_KEY",
+    "BRANDES_KOEPF_BORDER_TYPES_KEY",
     "BRANDES_KOEPF_LAYERING_KEY",
     "BRANDES_KOEPF_PREDECESSORS_KEY",
     "BRANDES_KOEPF_SUCCESSORS_KEY",

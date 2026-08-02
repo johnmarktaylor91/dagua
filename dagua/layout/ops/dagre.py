@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, Hashable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, ClassVar, Dict, Hashable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.brandes_koepf import (
+    BRANDES_KOEPF_BORDER_TYPES_KEY,
     BRANDES_KOEPF_DUMMY_NODES_KEY,
     BRANDES_KOEPF_LAYERING_KEY,
     BRANDES_KOEPF_PREDECESSORS_KEY,
@@ -36,6 +38,15 @@ class _DagreNode:
     rank: Optional[int] = None
     order: Optional[int] = None
     dummy: Optional[str] = None
+    min_rank: Optional[int] = None
+    max_rank: Optional[int] = None
+    border_top: Optional[NodeId] = None
+    border_bottom: Optional[NodeId] = None
+    border_left: Dict[int, NodeId] = field(default_factory=dict)
+    border_right: Dict[int, NodeId] = field(default_factory=dict)
+    border_type: Optional[str] = None
+    edge_source: Optional[NodeId] = None
+    edge_target: Optional[NodeId] = None
 
 
 @dataclass
@@ -49,6 +60,7 @@ class _DagreEdge:
     original_index: int
     active: bool = True
     reversed: bool = False
+    nesting_edge: bool = False
 
 
 @dataclass
@@ -59,6 +71,7 @@ class _DagreGraph:
     node_order: List[NodeId]
     edges: List[_DagreEdge]
     num_original_nodes: int
+    original_node_ids: List[NodeId]
     rank_sep: float
     node_sep: float
     edge_sep: float
@@ -66,6 +79,10 @@ class _DagreGraph:
     ranker: str
     acyclicer: str
     self_edges: Dict[int, List[_DagreEdge]] = field(default_factory=dict)
+    parents: Dict[NodeId, Optional[NodeId]] = field(default_factory=dict)
+    nesting_root: Optional[NodeId] = None
+    node_rank_factor: int = 1
+    dummy_chains: List[NodeId] = field(default_factory=list)
     next_dummy_id: int = 0
 
     def add_dummy(self, dummy_type: str, width: float = 0.0, height: float = 0.0) -> NodeId:
@@ -91,6 +108,79 @@ class _DagreGraph:
         self.node_order.append(node_id)
         return node_id
 
+    def set_parent(self, node: NodeId, parent: Optional[NodeId]) -> None:
+        """Assign one compound parent relation.
+
+        Parameters
+        ----------
+        node : Hashable
+            Child node or cluster id.
+        parent : Hashable | None
+            Parent cluster id. ``None`` makes the child a graph root.
+
+        Returns
+        -------
+        None
+            The parent map is updated.
+        """
+        if node not in self.nodes:
+            raise ValueError(f"Unknown Dagre compound child: {node!r}")
+        if parent is not None and parent not in self.nodes:
+            raise ValueError(f"Unknown Dagre compound parent: {parent!r}")
+        if parent == node:
+            raise ValueError("Dagre compound node cannot parent itself.")
+        self.parents[node] = parent
+
+    def parent_of(self, node: NodeId) -> Optional[NodeId]:
+        """Return the direct compound parent for one node.
+
+        Parameters
+        ----------
+        node : Hashable
+            Node or cluster id.
+
+        Returns
+        -------
+        Hashable | None
+            Parent cluster id when assigned.
+        """
+        return self.parents.get(node)
+
+    def children(self, parent: Optional[NodeId] = None) -> List[NodeId]:
+        """Return direct children in graph insertion order.
+
+        Parameters
+        ----------
+        parent : Hashable | None, optional
+            Parent cluster id. ``None`` returns graph-root children.
+
+        Returns
+        -------
+        list[Hashable]
+            Direct children ordered like graphlib's node list.
+        """
+        return [node for node in self.node_order if self.parents.get(node) == parent]
+
+    def has_compound(self) -> bool:
+        """Return whether any node participates in a compound hierarchy.
+
+        Returns
+        -------
+        bool
+            ``True`` when at least one node has a direct parent.
+        """
+        return any(parent is not None for parent in self.parents.values())
+
+    def non_compound_node_order(self) -> List[NodeId]:
+        """Return nodes included by dagre's ``asNonCompoundGraph`` helper.
+
+        Returns
+        -------
+        list[Hashable]
+            Nodes without children, preserving graph insertion order.
+        """
+        return [node for node in self.node_order if not self.children(node)]
+
     def add_edge(
         self,
         source: NodeId,
@@ -99,6 +189,7 @@ class _DagreGraph:
         minlen: int,
         original_index: int,
         reversed_edge: bool = False,
+        nesting_edge: bool = False,
     ) -> _DagreEdge:
         """Append one active multigraph edge.
 
@@ -116,6 +207,8 @@ class _DagreGraph:
             Source edge index in the caller's tensor.
         reversed_edge : bool, default=False
             Whether the acyclic stage reversed this edge.
+        nesting_edge : bool, default=False
+            Whether this is a temporary nesting-graph edge.
 
         Returns
         -------
@@ -129,6 +222,7 @@ class _DagreGraph:
             minlen=minlen,
             original_index=original_index,
             reversed=reversed_edge,
+            nesting_edge=nesting_edge,
         )
         self.edges.append(edge)
         return edge
@@ -224,6 +318,229 @@ def _unique(values: Sequence[NodeId] | object) -> List[NodeId]:
             seen.add(value)
             output.append(value)
     return output
+
+
+def _cluster_node_id(cluster_name: str) -> NodeId:
+    """Return the internal node id for one declared cluster.
+
+    Parameters
+    ----------
+    cluster_name : str
+        External cluster identifier.
+
+    Returns
+    -------
+    Hashable
+        Internal cluster node id.
+    """
+    return ("cluster", cluster_name)
+
+
+def _flatten_cluster_members(members: Any) -> List[int]:
+    """Return integer leaf node ids from nested cluster membership payloads.
+
+    Parameters
+    ----------
+    members : Any
+        Cluster member payload from ``LayoutProblem.clusters``.
+
+    Returns
+    -------
+    list[int]
+        Flattened node indices in encounter order.
+    """
+    output: List[int] = []
+
+    def visit(value: Any) -> None:
+        """Collect leaves from one nested membership value.
+
+        Parameters
+        ----------
+        value : Any
+            Nested member payload.
+
+        Returns
+        -------
+        None
+            ``output`` is mutated.
+        """
+        if isinstance(value, Mapping):
+            for child_value in value.values():
+                visit(child_value)
+            return
+        if isinstance(value, (str, bytes)):
+            try:
+                output.append(int(value))
+            except ValueError:
+                return
+            return
+        if isinstance(value, Iterable):
+            for child_value in value:
+                visit(child_value)
+            return
+        try:
+            output.append(int(value))
+        except (TypeError, ValueError):
+            return
+
+    visit(members)
+    return output
+
+
+def _cluster_children_by_parent(
+    clusters: Mapping[str, Any],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> Dict[Optional[str], List[str]]:
+    """Build a deterministic cluster-child map.
+
+    Parameters
+    ----------
+    clusters : mapping[str, Any]
+        Declared cluster membership mapping.
+    cluster_parents : mapping[str, str | None] | None
+        Optional cluster parent mapping.
+
+    Returns
+    -------
+    dict[str | None, list[str]]
+        Cluster names grouped by valid parent, sorted by cluster id.
+    """
+    by_parent: Dict[Optional[str], List[str]] = {}
+    parents = cluster_parents or {}
+    for cluster_name in sorted(str(name) for name in clusters):
+        parent = parents.get(cluster_name)
+        if parent not in clusters:
+            parent = None
+        by_parent.setdefault(parent, []).append(cluster_name)
+    return by_parent
+
+
+def _validate_compound_tree(
+    clusters: Mapping[str, Any],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> bool:
+    """Return whether the declared cluster parent graph is a tree forest.
+
+    Parameters
+    ----------
+    clusters : mapping[str, Any]
+        Declared clusters.
+    cluster_parents : mapping[str, str | None] | None
+        Optional cluster parent map.
+
+    Returns
+    -------
+    bool
+        ``False`` when a parent cycle is detected.
+    """
+    parents = cluster_parents or {}
+    for cluster_name in clusters:
+        seen: Set[str] = set()
+        parent = parents.get(str(cluster_name))
+        while parent in clusters:
+            if parent in seen:
+                return False
+            seen.add(parent)
+            parent = parents.get(parent)
+    return True
+
+
+def _compound_tree_depths(graph: _DagreGraph) -> Dict[NodeId, int]:
+    """Return dagre.js nesting depths for every compound-tree node.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Prepared graph carrying parent metadata.
+
+    Returns
+    -------
+    dict[Hashable, int]
+        Depth per graph-root subtree node.
+    """
+    depths: Dict[NodeId, int] = {}
+
+    def visit(node: NodeId, depth: int) -> None:
+        """Assign depths recursively.
+
+        Parameters
+        ----------
+        node : Hashable
+            Current node or cluster.
+        depth : int
+            Dagre nesting depth.
+
+        Returns
+        -------
+        None
+            ``depths`` is mutated.
+        """
+        children = graph.children(node)
+        if children:
+            for child in children:
+                visit(child, depth + 1)
+        depths[node] = depth
+
+    for child in graph.children(None):
+        visit(child, 1)
+    return depths
+
+
+def _remove_empty_compound_ranks(graph: _DagreGraph) -> None:
+    """Remove non-node border ranks the way dagre.js ``removeEmptyRanks`` does.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Ranked compound graph.
+
+    Returns
+    -------
+    None
+        Node ranks are compacted in place.
+    """
+    ranked_nodes = [node for node in graph.node_order if graph.nodes[node].rank is not None]
+    if not ranked_nodes:
+        return
+    offset = min(int(graph.nodes[node].rank or 0) for node in ranked_nodes)
+    layers: Dict[int, List[NodeId]] = {}
+    for node in ranked_nodes:
+        rank = int(graph.nodes[node].rank or 0) - offset
+        layers.setdefault(rank, []).append(node)
+    max_rank = max(layers, default=-1)
+    delta = 0
+    factor = max(int(graph.node_rank_factor), 1)
+    for rank in range(max_rank + 1):
+        layer = layers.get(rank)
+        if layer is None and rank % factor != 0:
+            delta -= 1
+        elif delta and layer is not None:
+            for node in layer:
+                old_rank = graph.nodes[node].rank
+                if old_rank is not None:
+                    graph.nodes[node].rank = old_rank + delta
+
+
+def _normalize_ranks(graph: _DagreGraph) -> None:
+    """Shift all ranked nodes so the minimum rank is zero.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Ranked working graph.
+
+    Returns
+    -------
+    None
+        Node ranks are shifted in place.
+    """
+    ranks = [int(node.rank) for node in graph.nodes.values() if node.rank is not None]
+    if not ranks:
+        return
+    minimum = min(ranks)
+    for node in graph.nodes.values():
+        if node.rank is not None:
+            node.rank = int(node.rank - minimum)
 
 
 def _require_graph(state: SolveState) -> _DagreGraph:
@@ -417,15 +734,40 @@ class DagrePrepareGraph(Op):
         if weights.shape != (edge_index.shape[1],):
             raise ValueError("edge_weights must have shape [E].")
 
-        nodes = {
-            node: _DagreNode(width=float(sizes[node, 0]), height=float(sizes[node, 1]))
-            for node in range(problem.num_nodes)
+        normalized_clusters: Dict[str, Any] = {
+            str(name): members for name, members in (problem.clusters or {}).items()
         }
+        normalized_parents: Dict[str, Optional[str]] = {
+            str(name): None if parent is None else str(parent)
+            for name, parent in (problem.cluster_parents or {}).items()
+        }
+        if not _validate_compound_tree(normalized_clusters, normalized_parents):
+            normalized_clusters = {}
+            normalized_parents = {}
+        compound_node_order = [
+            _cluster_node_id(cluster_name) for cluster_name in sorted(normalized_clusters)
+        ]
+        original_node_ids: List[NodeId] = (
+            [str(node) for node in range(problem.num_nodes)]
+            if normalized_clusters
+            else list(range(problem.num_nodes))
+        )
+        nodes = {node: _DagreNode(width=0.0, height=0.0) for node in compound_node_order}
+        nodes.update(
+            {
+                original_node_ids[node]: _DagreNode(
+                    width=float(sizes[node, 0]),
+                    height=float(sizes[node, 1]),
+                )
+                for node in range(problem.num_nodes)
+            }
+        )
         graph = _DagreGraph(
             nodes=nodes,
-            node_order=list(range(problem.num_nodes)),
+            node_order=[*compound_node_order, *original_node_ids],
             edges=[],
             num_original_nodes=problem.num_nodes,
+            original_node_ids=original_node_ids,
             # Dagre always halves ranksep and doubles minlen to reserve the
             # half-ranks used by potential edge labels, even when labels are empty.
             rank_sep=self.rank_sep / 2.0,
@@ -435,11 +777,59 @@ class DagrePrepareGraph(Op):
             ranker=self.ranker,
             acyclicer=self.acyclicer,
         )
-        edges_by_pair: Dict[Tuple[int, int], _DagreEdge] = {}
+        if normalized_clusters:
+            children_by_parent = _cluster_children_by_parent(
+                normalized_clusters,
+                normalized_parents,
+            )
+            emitted_nodes: Set[int] = set()
+
+            def emit_cluster(cluster_name: str) -> None:
+                """Assign direct dagre parents for one cluster subtree.
+
+                Parameters
+                ----------
+                cluster_name : str
+                    Cluster being emitted.
+
+                Returns
+                -------
+                None
+                    Parent metadata on ``graph`` is mutated.
+                """
+                cluster_id = _cluster_node_id(cluster_name)
+                parent_name = normalized_parents.get(cluster_name)
+                if parent_name in normalized_clusters:
+                    graph.set_parent(cluster_id, _cluster_node_id(parent_name))
+                child_clusters = children_by_parent.get(cluster_name, [])
+                for child_name in child_clusters:
+                    emit_cluster(child_name)
+
+                descendant_members: Set[int] = set()
+                for child_name in child_clusters:
+                    descendant_members.update(
+                        index
+                        for index in _flatten_cluster_members(normalized_clusters[child_name])
+                        if 0 <= index < problem.num_nodes
+                    )
+                for node_index in _flatten_cluster_members(normalized_clusters[cluster_name]):
+                    if (
+                        node_index in descendant_members
+                        or node_index in emitted_nodes
+                        or node_index < 0
+                        or node_index >= problem.num_nodes
+                    ):
+                        continue
+                    graph.set_parent(original_node_ids[node_index], cluster_id)
+                    emitted_nodes.add(node_index)
+
+            for root_cluster in children_by_parent.get(None, []):
+                emit_cluster(root_cluster)
+        edges_by_pair: Dict[Tuple[NodeId, NodeId], _DagreEdge] = {}
         for edge_index_value, (source, target) in enumerate(
             zip(edge_index[0].tolist(), edge_index[1].tolist())
         ):
-            pair = (int(source), int(target))
+            pair = (original_node_ids[int(source)], original_node_ids[int(target)])
             edge = edges_by_pair.get(pair)
             if edge is None:
                 edge = graph.add_edge(
@@ -641,13 +1031,131 @@ class DagreMakeAcyclic(Op):
         return state
 
 
-def _simplified_rank_edges(graph: _DagreGraph) -> List[Tuple[NodeId, NodeId, int, int]]:
+@register_op
+class DagreNestingGraph(Op):
+    """Add dagre.js compound nesting nodes and ranking constraints."""
+
+    name: ClassVar[str] = "dagre_nesting_graph"
+    category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run dagre.js ``nesting-graph.run`` for compound inputs.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable inputs; unused after graph preparation.
+        state : SolveState
+            State holding an acyclic compound graph.
+        ctx : RuntimeContext
+            Runtime infrastructure; unused.
+
+        Returns
+        -------
+        SolveState
+            State whose working graph has temporary nesting constraints.
+        """
+        del problem, ctx
+        graph = _require_graph(state)
+        if not graph.has_compound():
+            return state
+        root = graph.add_dummy("root")
+        depths = _compound_tree_depths(graph)
+        height = max(depths.values(), default=1) - 1
+        node_sep = 2 * height + 1
+        graph.nesting_root = root
+        graph.node_rank_factor = node_sep
+        for edge in graph.active_edges():
+            edge.minlen *= node_sep
+        weight = sum(edge.weight for edge in graph.active_edges()) + 1.0
+
+        def visit(node: NodeId) -> None:
+            """Create border nodes and nesting edges for one subtree.
+
+            Parameters
+            ----------
+            node : Hashable
+                Current compound-tree child.
+
+            Returns
+            -------
+            None
+                The working graph is mutated.
+            """
+            children = graph.children(node)
+            if not children:
+                if node != root:
+                    graph.add_edge(root, node, weight=0.0, minlen=node_sep, original_index=-1)
+                return
+
+            top = graph.add_dummy("border")
+            bottom = graph.add_dummy("border")
+            label = graph.nodes[node]
+            graph.set_parent(top, node)
+            graph.set_parent(bottom, node)
+            label.border_top = top
+            label.border_bottom = bottom
+
+            for child in children:
+                visit(child)
+                child_node = graph.nodes[child]
+                child_top = child_node.border_top if child_node.border_top is not None else child
+                child_bottom = (
+                    child_node.border_bottom if child_node.border_bottom is not None else child
+                )
+                edge_weight = weight if child_node.border_top is not None else 2.0 * weight
+                minlen = 1 if child_top != child_bottom else height - depths.get(node, 1) + 1
+                graph.add_edge(
+                    top,
+                    child_top,
+                    weight=edge_weight,
+                    minlen=minlen,
+                    original_index=-1,
+                    nesting_edge=True,
+                )
+                graph.add_edge(
+                    child_bottom,
+                    bottom,
+                    weight=edge_weight,
+                    minlen=minlen,
+                    original_index=-1,
+                    nesting_edge=True,
+                )
+
+            if graph.parent_of(node) is None:
+                graph.add_edge(
+                    root,
+                    top,
+                    weight=0.0,
+                    minlen=height + depths.get(node, 1),
+                    original_index=-1,
+                )
+
+        for child in graph.children(None):
+            if child != root:
+                visit(child)
+        return state
+
+
+def _simplified_rank_edges(
+    graph: _DagreGraph,
+    allowed_nodes: Optional[Set[NodeId]] = None,
+) -> List[Tuple[NodeId, NodeId, int, int]]:
     """Aggregate multiedges for Dagre's rank stage.
 
     Parameters
     ----------
     graph : _DagreGraph
         Acyclic working graph.
+    allowed_nodes : set[Hashable] | None, optional
+        Optional node filter matching dagre's non-compound rank view.
 
     Returns
     -------
@@ -656,6 +1164,10 @@ def _simplified_rank_edges(graph: _DagreGraph) -> List[Tuple[NodeId, NodeId, int
     """
     records: Dict[Tuple[NodeId, NodeId], Tuple[int, int]] = {}
     for edge in graph.active_edges():
+        if allowed_nodes is not None and (
+            edge.source not in allowed_nodes or edge.target not in allowed_nodes
+        ):
+            continue
         pair = (edge.source, edge.target)
         old_weight, old_minlen = records.get(pair, (0, 1))
         records[pair] = (old_weight + int(edge.weight), max(old_minlen, edge.minlen))
@@ -1573,28 +2085,99 @@ class DagreAssignRanks(Op):
         """
         del problem, ctx
         graph = _require_graph(state)
-        root = graph.add_dummy("root")
-        original_edges = _simplified_rank_edges(graph)
-        rank_edges = [*original_edges]
-        for node in graph.node_order:
-            if node != root:
-                rank_edges.append((root, node, 1, 0))
+        if graph.has_compound():
+            rank_node_order = graph.non_compound_node_order()
+            rank_node_set = set(rank_node_order)
+            rank_edges = _simplified_rank_edges(graph, rank_node_set)
+        else:
+            root = graph.add_dummy("root")
+            rank_node_order = list(graph.node_order)
+            original_edges = _simplified_rank_edges(graph)
+            rank_edges = [*original_edges]
+            for node in graph.node_order:
+                if node != root:
+                    rank_edges.append((root, node, 1, 0))
 
         if graph.ranker == "longest-path":
-            ranks = _longest_path_ranks(graph.node_order, rank_edges)
+            ranks = _longest_path_ranks(rank_node_order, rank_edges)
         elif graph.ranker == "tight-tree":
-            ranks = _tight_tree_ranks(graph.node_order, rank_edges)
+            ranks = _tight_tree_ranks(rank_node_order, rank_edges)
         else:
-            ranks = _dagre_network_simplex_ranks(graph.node_order, rank_edges)
+            ranks = _dagre_network_simplex_ranks(rank_node_order, rank_edges)
 
-        graph.node_order.remove(root)
-        del graph.nodes[root]
-        minimum = min((ranks[node] for node in graph.node_order), default=0)
+        if graph.has_compound():
+            for node in rank_node_order:
+                graph.nodes[node].rank = int(ranks[node])
+        else:
+            graph.node_order.remove(root)
+            del graph.nodes[root]
+            minimum = min((ranks[node] for node in graph.node_order), default=0)
+            for node in graph.node_order:
+                graph.nodes[node].rank = int(ranks[node] - minimum)
+            original_ranks = [int(graph.nodes[node].rank or 0) for node in graph.original_node_ids]
+            state.extras[_DAGRE_RANKS_KEY] = original_ranks
+            state.layers = torch.tensor(original_ranks, dtype=torch.long)
+        return state
+
+
+@register_op
+class DagreCleanupNestingGraph(Op):
+    """Remove temporary nesting edges and assign cluster rank spans."""
+
+    name: ClassVar[str] = "dagre_cleanup_nesting_graph"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras", "layers")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run dagre.js nesting cleanup, rank compaction, and span assignment.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable inputs; unused after graph preparation.
+        state : SolveState
+            State holding ranked compound graph.
+        ctx : RuntimeContext
+            Runtime infrastructure; unused.
+
+        Returns
+        -------
+        SolveState
+            State with normalized ranks and original-node layer snapshot.
+        """
+        del problem, ctx
+        graph = _require_graph(state)
+        if not graph.has_compound():
+            return state
+        _remove_empty_compound_ranks(graph)
+        if graph.nesting_root is not None and graph.nesting_root in graph.nodes:
+            removed_root = graph.nesting_root
+            graph.node_order.remove(graph.nesting_root)
+            del graph.nodes[graph.nesting_root]
+            graph.parents.pop(graph.nesting_root, None)
+            for edge in graph.edges:
+                if edge.source == removed_root or edge.target == removed_root:
+                    edge.active = False
+        graph.nesting_root = None
+        for edge in graph.edges:
+            if edge.nesting_edge:
+                edge.active = False
+        _normalize_ranks(graph)
         for node in graph.node_order:
-            graph.nodes[node].rank = int(ranks[node] - minimum)
-        original_ranks = [
-            int(graph.nodes[node].rank or 0) for node in range(graph.num_original_nodes)
-        ]
+            node_data = graph.nodes[node]
+            if node_data.border_top is not None and node_data.border_bottom is not None:
+                top_rank = graph.nodes[node_data.border_top].rank
+                bottom_rank = graph.nodes[node_data.border_bottom].rank
+                if top_rank is not None and bottom_rank is not None:
+                    node_data.min_rank = int(top_rank)
+                    node_data.max_rank = int(bottom_rank)
+        original_ranks = [int(graph.nodes[node].rank or 0) for node in graph.original_node_ids]
         state.extras[_DAGRE_RANKS_KEY] = original_ranks
         state.layers = torch.tensor(original_ranks, dtype=torch.long)
         return state
@@ -1642,9 +2225,15 @@ class DagreNormalizeEdges(Op):
                 continue
             edge.active = False
             previous = edge.source
+            first_dummy: Optional[NodeId] = None
             for rank in range(source_rank + 1, target_rank):
                 dummy = graph.add_dummy("edge")
-                graph.nodes[dummy].rank = rank
+                dummy_node = graph.nodes[dummy]
+                dummy_node.rank = rank
+                dummy_node.edge_source = edge.source
+                dummy_node.edge_target = edge.target
+                if first_dummy is None:
+                    first_dummy = dummy
                 graph.add_edge(
                     source=previous,
                     target=dummy,
@@ -1654,6 +2243,8 @@ class DagreNormalizeEdges(Op):
                     reversed_edge=edge.reversed,
                 )
                 previous = dummy
+            if first_dummy is not None:
+                graph.dummy_chains.append(first_dummy)
             graph.add_edge(
                 source=previous,
                 target=edge.target,
@@ -1662,6 +2253,283 @@ class DagreNormalizeEdges(Op):
                 original_index=edge.original_index,
                 reversed_edge=edge.reversed,
             )
+        return state
+
+
+def _compound_postorder_numbers(
+    graph: _DagreGraph,
+) -> Dict[Optional[NodeId], Tuple[int, int]]:
+    """Return dagre.js parent-tree postorder intervals.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Compound graph.
+
+    Returns
+    -------
+    dict[Hashable | None, tuple[int, int]]
+        ``(low, lim)`` intervals for children traversed from graph roots.
+    """
+    result: Dict[Optional[NodeId], Tuple[int, int]] = {}
+    limit = 0
+
+    def visit(node: NodeId) -> None:
+        """Visit one compound-tree node.
+
+        Parameters
+        ----------
+        node : Hashable
+            Current node.
+
+        Returns
+        -------
+        None
+            ``result`` and ``limit`` are mutated.
+        """
+        nonlocal limit
+        low = limit
+        for child in graph.children(node):
+            visit(child)
+        result[node] = (low, limit)
+        limit += 1
+
+    for child in graph.children(None):
+        visit(child)
+    result[None] = (0, limit)
+    return result
+
+
+def _compound_path_through_lca(
+    graph: _DagreGraph,
+    postorder_nums: Mapping[Optional[NodeId], Tuple[int, int]],
+    source: NodeId,
+    target: NodeId,
+) -> Tuple[List[Optional[NodeId]], Optional[NodeId]]:
+    """Return the parent path from source to target through their LCA.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Compound graph.
+    postorder_nums : mapping[Hashable | None, tuple[int, int]]
+        Parent-tree intervals from :func:`_compound_postorder_numbers`.
+    source : Hashable
+        Original edge source.
+    target : Hashable
+        Original edge target.
+
+    Returns
+    -------
+    tuple[list[Hashable | None], Hashable | None]
+        Full parent path and lowest common ancestor.
+    """
+    source_low, source_lim = postorder_nums.get(source, (0, 0))
+    target_low, target_lim = postorder_nums.get(target, (0, 0))
+    low = min(source_low, target_low)
+    lim = max(source_lim, target_lim)
+    source_path: List[Optional[NodeId]] = []
+    parent = source
+    while True:
+        parent = graph.parent_of(parent)
+        source_path.append(parent)
+        parent_low, parent_lim = postorder_nums.get(parent, (0, lim))
+        if parent is None or (parent_low <= low and lim <= parent_lim):
+            break
+    lca = parent
+
+    target_path: List[Optional[NodeId]] = []
+    parent = target
+    while True:
+        parent = graph.parent_of(parent)
+        if parent == lca:
+            break
+        target_path.append(parent)
+        if parent is None:
+            break
+    return source_path + list(reversed(target_path)), lca
+
+
+@register_op
+class DagreParentDummyChains(Op):
+    """Assign normalized edge dummies to the correct compound parent."""
+
+    name: ClassVar[str] = "dagre_parent_dummy_chains"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Port dagre.js ``parent-dummy-chains``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable inputs; unused after graph preparation.
+        state : SolveState
+            State holding normalized dummy chains.
+        ctx : RuntimeContext
+            Runtime infrastructure; unused.
+
+        Returns
+        -------
+        SolveState
+            State with dummy parent assignments updated.
+        """
+        del problem, ctx
+        graph = _require_graph(state)
+        if not graph.has_compound() or not graph.dummy_chains:
+            return state
+        postorder_nums = _compound_postorder_numbers(graph)
+        for chain_start in graph.dummy_chains:
+            current = chain_start
+            node = graph.nodes[current]
+            if node.edge_source is None or node.edge_target is None:
+                continue
+            path, lca = _compound_path_through_lca(
+                graph,
+                postorder_nums,
+                node.edge_source,
+                node.edge_target,
+            )
+            path_index = 0
+            path_node = path[path_index] if path else None
+            ascending = True
+            while current != node.edge_target:
+                current_node = graph.nodes[current]
+                if current_node.rank is None:
+                    break
+                if ascending:
+                    while path_node != lca:
+                        if path_node is None:
+                            break
+                        path_label = graph.nodes[path_node]
+                        if path_label.max_rank is None or path_label.max_rank >= current_node.rank:
+                            break
+                        path_index += 1
+                        path_node = path[path_index] if path_index < len(path) else None
+                    if path_node == lca:
+                        ascending = False
+                if not ascending:
+                    while path_index < len(path) - 1:
+                        next_path_node = path[path_index + 1]
+                        if next_path_node is None:
+                            break
+                        next_label = graph.nodes[next_path_node]
+                        if next_label.min_rank is None or next_label.min_rank > current_node.rank:
+                            break
+                        path_index += 1
+                    path_node = path[path_index] if path_index < len(path) else None
+                graph.set_parent(current, path_node)
+                successors = graph.successors(current)
+                if not successors:
+                    break
+                current = successors[0]
+        return state
+
+
+@register_op
+class DagreBorderSegments(Op):
+    """Add per-rank left and right border segment dummies for clusters."""
+
+    name: ClassVar[str] = "dagre_border_segments"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Port dagre.js ``add-border-segments``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable inputs; unused after graph preparation.
+        state : SolveState
+            State holding ranked compound graph.
+        ctx : RuntimeContext
+            Runtime infrastructure; unused.
+
+        Returns
+        -------
+        SolveState
+            State with border dummy nodes and segment edges inserted.
+        """
+        del problem, ctx
+        graph = _require_graph(state)
+        if not graph.has_compound():
+            return state
+
+        def add_border_node(
+            prop: str,
+            cluster: NodeId,
+            cluster_node: _DagreNode,
+            rank: int,
+        ) -> None:
+            """Append one border dummy and link it to the previous segment.
+
+            Parameters
+            ----------
+            prop : str
+                ``borderLeft`` or ``borderRight``.
+            cluster : Hashable
+                Owning cluster id.
+            cluster_node : _DagreNode
+                Owning cluster label.
+            rank : int
+                Rank for the border dummy.
+
+            Returns
+            -------
+            None
+                Graph state is mutated.
+            """
+            storage = (
+                cluster_node.border_left if prop == "borderLeft" else cluster_node.border_right
+            )
+            previous = storage.get(rank - 1)
+            current = graph.add_dummy("border")
+            current_node = graph.nodes[current]
+            current_node.rank = rank
+            current_node.border_type = prop
+            storage[rank] = current
+            graph.set_parent(current, cluster)
+            if previous is not None:
+                graph.add_edge(previous, current, weight=1.0, minlen=1, original_index=-1)
+
+        def visit(node: NodeId) -> None:
+            """Visit one compound-tree node after children.
+
+            Parameters
+            ----------
+            node : Hashable
+                Current node or cluster.
+
+            Returns
+            -------
+            None
+                Border nodes are inserted for cluster nodes.
+            """
+            for child in graph.children(node):
+                visit(child)
+            node_data = graph.nodes[node]
+            if node_data.min_rank is None or node_data.max_rank is None:
+                return
+            for rank in range(node_data.min_rank, node_data.max_rank + 1):
+                add_border_node("borderLeft", node, node_data, rank)
+                add_border_node("borderRight", node, node_data, rank)
+
+        for child in graph.children(None):
+            visit(child)
         return state
 
 
@@ -1838,7 +2706,7 @@ def _sort_rank(
 
 
 def _cross_count(graph: _DagreGraph, layers: Sequence[Sequence[NodeId]]) -> float:
-    """Return Dagre's weighted crossing count.
+    """Return Dagre's weighted crossing count with indexed bilayer scans.
 
     Parameters
     ----------
@@ -1863,11 +2731,714 @@ def _cross_count(graph: _DagreGraph, layers: Sequence[Sequence[NodeId]]) -> floa
                 if edge.target in south_positions
             ]
             entries.extend(sorted(node_entries, key=lambda entry: entry[0]))
-        for entry_index, (position, weight) in enumerate(entries):
-            for later_position, later_weight in entries[entry_index + 1 :]:
-                if later_position < position:
-                    crossings += weight * later_weight
+        if len(entries) < 2:
+            continue
+
+        tree = [0.0] * (len(south_positions) + 1)
+        seen_weight = 0.0
+        for position, weight in entries:
+            index = position + 1
+            prefix_weight = 0.0
+            scan = index
+            while scan > 0:
+                prefix_weight += tree[scan]
+                scan -= scan & -scan
+            crossings += weight * (seen_weight - prefix_weight)
+            while index < len(tree):
+                tree[index] += weight
+                index += index & -index
+            seen_weight += weight
     return crossings
+
+
+@dataclass
+class _LayerNode:
+    """Layer-graph node label used by dagre's compound ordering pass."""
+
+    order: Optional[int] = None
+    border_left: Optional[NodeId] = None
+    border_right: Optional[NodeId] = None
+
+
+@dataclass
+class _LayerGraph:
+    """Small compound graph view for one ordering sweep rank."""
+
+    root: NodeId
+    nodes: Dict[NodeId, _LayerNode] = field(default_factory=dict)
+    parents: Dict[NodeId, Optional[NodeId]] = field(default_factory=dict)
+    edge_weights: Dict[Tuple[NodeId, NodeId], float] = field(default_factory=dict)
+    node_order: List[NodeId] = field(default_factory=list)
+
+    def set_node(self, node: NodeId, label: Optional[_LayerNode] = None) -> None:
+        """Add or replace one node label.
+
+        Parameters
+        ----------
+        node : Hashable
+            Layer-graph node id.
+        label : _LayerNode | None, optional
+            Node label to store.
+
+        Returns
+        -------
+        None
+            The layer graph is mutated.
+        """
+        if node not in self.nodes:
+            self.node_order.append(node)
+        self.nodes[node] = label or self.nodes.get(node, _LayerNode())
+
+    def set_parent(self, node: NodeId, parent: Optional[NodeId]) -> None:
+        """Assign a parent in the layer graph.
+
+        Parameters
+        ----------
+        node : Hashable
+            Child node.
+        parent : Hashable | None
+            Parent node.
+
+        Returns
+        -------
+        None
+            Parent metadata is updated.
+        """
+        self.parents[node] = parent
+
+    def add_edge(self, source: NodeId, target: NodeId, weight: float) -> None:
+        """Add or aggregate one weighted edge.
+
+        Parameters
+        ----------
+        source : Hashable
+            Edge tail.
+        target : Hashable
+            Edge head.
+        weight : float
+            Edge weight to add.
+
+        Returns
+        -------
+        None
+            Edge weights are updated.
+        """
+        self.set_node(source)
+        self.set_node(target)
+        pair = (source, target)
+        self.edge_weights[pair] = self.edge_weights.get(pair, 0.0) + weight
+
+    def children(self, parent: NodeId) -> List[NodeId]:
+        """Return direct children in insertion order.
+
+        Parameters
+        ----------
+        parent : Hashable
+            Parent id.
+
+        Returns
+        -------
+        list[Hashable]
+            Child ids.
+        """
+        return [node for node in self.node_order if self.parents.get(node) == parent]
+
+    def parent_of(self, node: NodeId) -> Optional[NodeId]:
+        """Return one layer-graph parent.
+
+        Parameters
+        ----------
+        node : Hashable
+            Node id.
+
+        Returns
+        -------
+        Hashable | None
+            Parent id.
+        """
+        return self.parents.get(node)
+
+    def in_edges(self, node: NodeId) -> List[Tuple[NodeId, NodeId, float]]:
+        """Return incoming weighted edges.
+
+        Parameters
+        ----------
+        node : Hashable
+            Target node.
+
+        Returns
+        -------
+        list[tuple[Hashable, Hashable, float]]
+            Incoming edges in insertion order.
+        """
+        return [
+            (source, target, weight)
+            for (source, target), weight in self.edge_weights.items()
+            if target == node
+        ]
+
+    def predecessors(self, node: NodeId) -> List[NodeId]:
+        """Return distinct predecessors.
+
+        Parameters
+        ----------
+        node : Hashable
+            Target node.
+
+        Returns
+        -------
+        list[Hashable]
+            Source node ids.
+        """
+        return _unique([source for source, _target, _weight in self.in_edges(node)])
+
+
+@dataclass
+class _SortEntry:
+    """Sortable barycenter entry for compound ordering."""
+
+    vs: List[NodeId]
+    i: int
+    barycenter: Optional[float] = None
+    weight: float = 0.0
+
+
+@dataclass
+class _SortResult:
+    """Recursive sort result from ``sort-subgraph``."""
+
+    vs: List[NodeId]
+    barycenter: Optional[float] = None
+    weight: float = 0.0
+
+
+def _compound_initial_order(graph: _DagreGraph) -> List[List[NodeId]]:
+    """Build dagre's DFS initial order over simple compound nodes.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Ranked normalized compound graph.
+
+    Returns
+    -------
+    list[list[Hashable]]
+        Initial layer matrix.
+    """
+    simple_nodes = [node for node in graph.node_order if not graph.children(node)]
+    max_rank = max((graph.nodes[node].rank or 0 for node in simple_nodes), default=-1)
+    layers: List[List[NodeId]] = [[] for _ in range(max_rank + 1)]
+    visited: Set[NodeId] = set()
+
+    def visit(node: NodeId) -> None:
+        """Visit one node in successor-first DFS order.
+
+        Parameters
+        ----------
+        node : Hashable
+            Current node.
+
+        Returns
+        -------
+        None
+            ``layers`` and ``visited`` are mutated.
+        """
+        if node in visited:
+            return
+        visited.add(node)
+        rank = graph.nodes[node].rank
+        if rank is None:
+            return
+        layers[rank].append(node)
+        for successor in graph.successors(node):
+            visit(successor)
+
+    for node in sorted(simple_nodes, key=lambda item: graph.nodes[item].rank or 0):
+        visit(node)
+    return layers
+
+
+def _build_compound_layer_graph(
+    graph: _DagreGraph,
+    rank: int,
+    relationship: str,
+) -> _LayerGraph:
+    """Build dagre's subgraph-aware layer graph for one rank.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Full compound working graph.
+    rank : int
+        Rank to sort.
+    relationship : str
+        ``"in"`` or ``"out"`` incident-edge selector.
+
+    Returns
+    -------
+    _LayerGraph
+        Layer graph rooted at a synthetic node.
+    """
+    root: NodeId = ("layer_root", rank, relationship)
+    layer_graph = _LayerGraph(root=root)
+    layer_graph.set_node(root)
+    for node in graph.node_order:
+        node_data = graph.nodes[node]
+        spans_rank = node_data.rank == rank or (
+            node_data.min_rank is not None
+            and node_data.max_rank is not None
+            and node_data.min_rank <= rank <= node_data.max_rank
+        )
+        if not spans_rank:
+            continue
+        label = _LayerNode(order=node_data.order)
+        if node_data.min_rank is not None:
+            label.border_left = node_data.border_left.get(rank)
+            label.border_right = node_data.border_right.get(rank)
+        layer_graph.set_node(node, label)
+        layer_graph.set_parent(node, graph.parent_of(node) or root)
+        incident = graph.in_edges(node) if relationship == "in" else graph.out_edges(node)
+        for edge in incident:
+            other = edge.source if edge.target == node else edge.target
+            other_order = graph.nodes[other].order
+            layer_graph.set_node(other, _LayerNode(order=other_order))
+            layer_graph.add_edge(other, node, edge.weight)
+    return layer_graph
+
+
+def _compound_barycenters(layer_graph: _LayerGraph, movable: Sequence[NodeId]) -> List[_SortEntry]:
+    """Compute weighted barycenters for one layer-graph child list.
+
+    Parameters
+    ----------
+    layer_graph : _LayerGraph
+        Layer graph.
+    movable : sequence[Hashable]
+        Child ids to sort.
+
+    Returns
+    -------
+    list[_SortEntry]
+        Barycenter entries.
+    """
+    entries: List[_SortEntry] = []
+    for index, node in enumerate(movable):
+        incoming = layer_graph.in_edges(node)
+        if not incoming:
+            entries.append(_SortEntry(vs=[node], i=index))
+            continue
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for source, _target, weight in incoming:
+            source_order = layer_graph.nodes[source].order
+            if source_order is None:
+                continue
+            weighted_sum += weight * source_order
+            total_weight += weight
+        if total_weight == 0.0:
+            entries.append(_SortEntry(vs=[node], i=index))
+        else:
+            entries.append(
+                _SortEntry(
+                    vs=[node],
+                    i=index,
+                    barycenter=weighted_sum / total_weight,
+                    weight=total_weight,
+                )
+            )
+    return entries
+
+
+def _merge_barycenters(target: _SortEntry, other: _SortResult) -> None:
+    """Merge recursive subgraph barycenter data into a parent entry.
+
+    Parameters
+    ----------
+    target : _SortEntry
+        Parent entry to update.
+    other : _SortResult
+        Child subgraph result.
+
+    Returns
+    -------
+    None
+        ``target`` is mutated.
+    """
+    if other.barycenter is None or other.weight == 0.0:
+        return
+    if target.barycenter is not None:
+        total = target.weight + other.weight
+        target.barycenter = (
+            target.barycenter * target.weight + other.barycenter * other.weight
+        ) / total
+        target.weight = total
+    else:
+        target.barycenter = other.barycenter
+        target.weight = other.weight
+
+
+def _resolve_compound_conflicts(
+    entries: Sequence[_SortEntry],
+    constraints: Sequence[Tuple[NodeId, NodeId]],
+) -> List[_SortEntry]:
+    """Resolve barycenter order conflicts against subgraph constraints.
+
+    Parameters
+    ----------
+    entries : sequence[_SortEntry]
+        Initial entries.
+    constraints : sequence[tuple[Hashable, Hashable]]
+        Constraint graph edges in insertion order.
+
+    Returns
+    -------
+    list[_SortEntry]
+        Coalesced entries.
+    """
+    mapped: Dict[NodeId, Dict[str, Any]] = {}
+    for index, entry in enumerate(entries):
+        item: Dict[str, Any] = {
+            "indegree": 0,
+            "in": [],
+            "out": [],
+            "vs": list(entry.vs),
+            "i": index,
+            "barycenter": entry.barycenter,
+            "weight": entry.weight,
+            "merged": False,
+        }
+        mapped[entry.vs[0]] = item
+    for source, target in constraints:
+        source_entry = mapped.get(source)
+        target_entry = mapped.get(target)
+        if source_entry is None or target_entry is None:
+            continue
+        target_entry["indegree"] += 1
+        source_entry["out"].append(target_entry)
+    source_set = [
+        mapped[node] for node in _graphlib_key_order(list(mapped)) if not mapped[node]["indegree"]
+    ]
+    resolved: List[Dict[str, Any]] = []
+
+    def merge_entries(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+        """Merge two constrained entries.
+
+        Parameters
+        ----------
+        target : dict[str, Any]
+            Entry that survives.
+        source : dict[str, Any]
+            Entry merged into target.
+
+        Returns
+        -------
+        None
+            Dictionaries are mutated.
+        """
+        total_sum = 0.0
+        total_weight = 0.0
+        if source.get("weight"):
+            total_sum += float(source["barycenter"]) * float(source["weight"])
+            total_weight += float(source["weight"])
+        if target.get("weight"):
+            total_sum += float(target["barycenter"]) * float(target["weight"])
+            total_weight += float(target["weight"])
+        target["vs"] = list(source["vs"]) + list(target["vs"])
+        target["barycenter"] = total_sum / total_weight if total_weight else None
+        target["weight"] = total_weight
+        target["i"] = min(int(source["i"]), int(target["i"]))
+        source["merged"] = True
+
+    while source_set:
+        entry = source_set.pop()
+        resolved.append(entry)
+        for incoming in reversed(entry["in"]):
+            if incoming["merged"]:
+                continue
+            if (
+                incoming.get("barycenter") is None
+                or entry.get("barycenter") is None
+                or float(incoming["barycenter"]) >= float(entry["barycenter"])
+            ):
+                merge_entries(entry, incoming)
+        for outgoing in entry["out"]:
+            outgoing["in"].append(entry)
+            outgoing["indegree"] -= 1
+            if outgoing["indegree"] == 0:
+                source_set.append(outgoing)
+    return [
+        _SortEntry(
+            vs=list(entry["vs"]),
+            i=int(entry["i"]),
+            barycenter=entry.get("barycenter"),
+            weight=float(entry.get("weight") or 0.0),
+        )
+        for entry in resolved
+        if not entry["merged"]
+    ]
+
+
+def _sort_compound_entries(entries: Sequence[_SortEntry], bias_right: bool) -> _SortResult:
+    """Sort barycenter entries using dagre's stable bias rule.
+
+    Parameters
+    ----------
+    entries : sequence[_SortEntry]
+        Entries to sort.
+    bias_right : bool
+        Reverse tie bias.
+
+    Returns
+    -------
+    _SortResult
+        Flattened sorted nodes plus merged barycenter.
+    """
+    sortable = [entry for entry in entries if entry.barycenter is not None]
+    unsortable = sorted(
+        (entry for entry in entries if entry.barycenter is None),
+        key=lambda entry: -entry.i,
+    )
+    sortable.sort(
+        key=lambda entry: (
+            float(entry.barycenter),
+            -entry.i if bias_right else entry.i,
+        )
+    )
+    output_chunks: List[List[NodeId]] = []
+    output_index = 0
+    weighted_sum = 0.0
+    total_weight = 0.0
+
+    def consume_unsortable() -> None:
+        """Consume fixed entries whose insertion index has been reached.
+
+        Returns
+        -------
+        None
+            Local output state is mutated.
+        """
+        nonlocal output_index
+        while unsortable and unsortable[-1].i <= output_index:
+            entry = unsortable.pop()
+            output_chunks.append(entry.vs)
+            output_index += 1
+
+    consume_unsortable()
+    for entry in sortable:
+        output_index += len(entry.vs)
+        output_chunks.append(entry.vs)
+        weighted_sum += float(entry.barycenter) * entry.weight
+        total_weight += entry.weight
+        consume_unsortable()
+    flattened = [node for chunk in output_chunks for node in chunk]
+    if total_weight:
+        return _SortResult(
+            vs=flattened,
+            barycenter=weighted_sum / total_weight,
+            weight=total_weight,
+        )
+    return _SortResult(vs=flattened)
+
+
+def _sort_compound_subgraph(
+    layer_graph: _LayerGraph,
+    node: NodeId,
+    constraints: Sequence[Tuple[NodeId, NodeId]],
+    bias_right: bool,
+) -> _SortResult:
+    """Recursively sort a compound subgraph for one rank.
+
+    Parameters
+    ----------
+    layer_graph : _LayerGraph
+        Layer graph.
+    node : Hashable
+        Root or cluster node to sort.
+    constraints : sequence[tuple[Hashable, Hashable]]
+        Persistent subgraph constraint graph.
+    bias_right : bool
+        Reverse tie bias.
+
+    Returns
+    -------
+    _SortResult
+        Sorted child ids and optional barycenter.
+    """
+    movable = layer_graph.children(node)
+    node_label = layer_graph.nodes.get(node)
+    border_left = node_label.border_left if node_label is not None else None
+    border_right = node_label.border_right if node_label is not None else None
+    if border_left is not None and border_right is not None:
+        movable = [child for child in movable if child not in {border_left, border_right}]
+    subgraphs: Dict[NodeId, _SortResult] = {}
+    entries = _compound_barycenters(layer_graph, movable)
+    for entry in entries:
+        child = entry.vs[0]
+        if layer_graph.children(child):
+            result = _sort_compound_subgraph(layer_graph, child, constraints, bias_right)
+            subgraphs[child] = result
+            _merge_barycenters(entry, result)
+    resolved = _resolve_compound_conflicts(entries, constraints)
+    for entry in resolved:
+        expanded: List[NodeId] = []
+        for child in entry.vs:
+            expanded.extend(subgraphs[child].vs if child in subgraphs else [child])
+        entry.vs = expanded
+    result = _sort_compound_entries(resolved, bias_right)
+    if border_left is not None and border_right is not None:
+        result.vs = [border_left, *result.vs, border_right]
+        left_predecessors = layer_graph.predecessors(border_left)
+        right_predecessors = layer_graph.predecessors(border_right)
+        if left_predecessors and right_predecessors:
+            left_order = layer_graph.nodes[left_predecessors[0]].order
+            right_order = layer_graph.nodes[right_predecessors[0]].order
+            if left_order is not None and right_order is not None:
+                if result.barycenter is None:
+                    result.barycenter = 0.0
+                    result.weight = 0.0
+                result.barycenter = (
+                    result.barycenter * result.weight + left_order + right_order
+                ) / (result.weight + 2.0)
+                result.weight += 2.0
+    return result
+
+
+def _add_compound_subgraph_constraints(
+    layer_graph: _LayerGraph,
+    constraints: List[Tuple[NodeId, NodeId]],
+    constraint_set: Set[Tuple[NodeId, NodeId]],
+    ordered: Sequence[NodeId],
+) -> None:
+    """Add dagre's ordering constraints between adjacent subgraph blocks.
+
+    Parameters
+    ----------
+    layer_graph : _LayerGraph
+        Layer graph.
+    constraints : list[tuple[Hashable, Hashable]]
+        Constraint graph to update.
+    constraint_set : set[tuple[Hashable, Hashable]]
+        Existing constraint edges.
+    ordered : sequence[Hashable]
+        Sorted flattened ids for the current rank.
+
+    Returns
+    -------
+    None
+        ``constraints`` is mutated.
+    """
+    previous_by_parent: Dict[NodeId, NodeId] = {}
+    root_previous: Optional[NodeId] = None
+    for node in ordered:
+        child = layer_graph.parent_of(node)
+        while child is not None:
+            parent = layer_graph.parent_of(child)
+            if parent is not None:
+                previous_child = previous_by_parent.get(parent)
+                previous_by_parent[parent] = child
+            else:
+                previous_child = root_previous
+                root_previous = child
+            if previous_child is not None and previous_child != child:
+                edge = (previous_child, child)
+                if edge not in constraint_set:
+                    constraint_set.add(edge)
+                    constraints.append(edge)
+                return
+            child = parent
+
+
+def _compound_order_graph(graph: _DagreGraph) -> List[List[NodeId]]:
+    """Run dagre's recursive compound ordering sweeps.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Ranked normalized compound graph.
+
+    Returns
+    -------
+    list[list[Hashable]]
+        Best layer matrix.
+    """
+    layers = _compound_initial_order(graph)
+    _assign_order(graph, layers)
+    max_rank = len(layers) - 1
+    down_layer_graphs = [
+        _build_compound_layer_graph(graph, rank, "in") for rank in range(1, max_rank + 1)
+    ]
+    up_layer_graphs = [
+        _build_compound_layer_graph(graph, rank, "out") for rank in range(max_rank - 1, -1, -1)
+    ]
+    best_crossings = float("inf")
+    best = [list(layer) for layer in layers]
+    iteration = 0
+    iterations_since_best = 0
+    while iterations_since_best < 4:
+        layer_graphs = down_layer_graphs if iteration % 2 else up_layer_graphs
+        bias_right = iteration % 4 >= 2
+        constraints: List[Tuple[NodeId, NodeId]] = []
+        constraint_set: Set[Tuple[NodeId, NodeId]] = set()
+        for layer_graph in layer_graphs:
+            for node, label in layer_graph.nodes.items():
+                if node in graph.nodes:
+                    label.order = graph.nodes[node].order
+            sorted_result = _sort_compound_subgraph(
+                layer_graph,
+                layer_graph.root,
+                constraints,
+                bias_right,
+            )
+            for order, node in enumerate(sorted_result.vs):
+                layer_graph.nodes[node].order = order
+                if node in graph.nodes:
+                    graph.nodes[node].order = order
+            _add_compound_subgraph_constraints(
+                layer_graph,
+                constraints,
+                constraint_set,
+                sorted_result.vs,
+            )
+        layers = _build_layer_matrix(graph)
+        crossing_count = _cross_count(graph, layers)
+        if crossing_count < best_crossings:
+            best_crossings = crossing_count
+            best = [list(layer) for layer in layers]
+            iterations_since_best = 0
+        iteration += 1
+        iterations_since_best += 1
+    _assign_order(graph, best)
+    return best
+
+
+def _build_layer_matrix(graph: _DagreGraph) -> List[List[NodeId]]:
+    """Build a rank/order matrix from current node labels.
+
+    Parameters
+    ----------
+    graph : _DagreGraph
+        Ordered working graph.
+
+    Returns
+    -------
+    list[list[Hashable]]
+        Layer matrix.
+    """
+    max_rank = max(
+        (int(node.rank) for node in graph.nodes.values() if node.rank is not None),
+        default=-1,
+    )
+    layers: List[List[NodeId]] = [[] for _ in range(max_rank + 1)]
+    for node in graph.node_order:
+        node_data = graph.nodes[node]
+        if node_data.rank is None or node_data.order is None:
+            continue
+        rank = int(node_data.rank)
+        order = int(node_data.order)
+        while len(layers[rank]) <= order:
+            layers[rank].append(node)
+        layers[rank][order] = node
+    return layers
 
 
 def _order_graph(graph: _DagreGraph) -> List[List[NodeId]]:
@@ -1949,13 +3520,18 @@ class DagreOrderNodes(Op):
         """
         del problem, ctx
         graph = _require_graph(state)
-        layers = _order_graph(graph)
+        layers = _compound_order_graph(graph) if graph.has_compound() else _order_graph(graph)
         for rank, layer in enumerate(layers):
             expanded: List[NodeId] = []
             for node in layer:
                 expanded.append(node)
-                if isinstance(node, int):
-                    for _self_edge in graph.self_edges.get(node, []):
+                original_index_by_id = {
+                    original_node: index
+                    for index, original_node in enumerate(graph.original_node_ids)
+                }
+                original_index = original_index_by_id.get(node)
+                if original_index is not None:
+                    for _self_edge in graph.self_edges.get(original_index, []):
                         dummy = graph.add_dummy("selfedge")
                         graph.nodes[dummy].rank = rank
                         expanded.append(dummy)
@@ -1963,8 +3539,8 @@ class DagreOrderNodes(Op):
         _assign_order(graph, layers)
 
         original_ordering = [0] * graph.num_original_nodes
-        for node in range(graph.num_original_nodes):
-            original_ordering[node] = int(graph.nodes[node].order or 0)
+        for node_index, node in enumerate(graph.original_node_ids):
+            original_ordering[node_index] = int(graph.nodes[node].order or 0)
         state.extras[_DAGRE_ORDERING_KEY] = original_ordering
         state.ordering = torch.tensor(original_ordering, dtype=torch.long)
 
@@ -1976,11 +3552,17 @@ class DagreOrderNodes(Op):
             for node in graph.node_order
         }
         dummy_nodes = {node for node in graph.node_order if graph.nodes[node].dummy is not None}
+        border_types = {
+            node: node_data.border_type
+            for node, node_data in graph.nodes.items()
+            if node_data.border_type is not None
+        }
         state.extras[BRANDES_KOEPF_LAYERING_KEY] = layers
         state.extras[BRANDES_KOEPF_PREDECESSORS_KEY] = predecessors
         state.extras[BRANDES_KOEPF_SUCCESSORS_KEY] = successors
         state.extras[BRANDES_KOEPF_WIDTHS_KEY] = widths
         state.extras[BRANDES_KOEPF_DUMMY_NODES_KEY] = dummy_nodes
+        state.extras[BRANDES_KOEPF_BORDER_TYPES_KEY] = border_types
         return state
 
 
@@ -2032,7 +3614,9 @@ class DagreAssignY(Op):
                 y_coordinates[node] = previous_y + max_height / 2.0
             previous_y += max_height + graph.rank_sep
         state.extras[_DAGRE_INTERNAL_POSITIONS_KEY] = {
-            node: (x_coordinates[node], y_coordinates[node]) for node in graph.node_order
+            node: (x_coordinates[node], y_coordinates[node])
+            for node in graph.node_order
+            if node in x_coordinates and node in y_coordinates
         }
         return state
 
@@ -2159,10 +3743,10 @@ class DagreFinalizeCoordinates(Op):
             min_x = 0.0
             min_y = 0.0
         positions = torch.zeros((graph.num_original_nodes, 2), dtype=torch.float64)
-        for node in range(graph.num_original_nodes):
+        for node_index, node in enumerate(graph.original_node_ids):
             x, y = oriented[node]
-            positions[node, 0] = x - min_x
-            positions[node, 1] = y - min_y
+            positions[node_index, 0] = x - min_x
+            positions[node_index, 1] = y - min_y
         if self.config is not None:
             positions = _project_hard_pins(positions, self.config)
         state.pos = positions.to(device=problem.edge_index.device)
@@ -2172,9 +3756,13 @@ class DagreFinalizeCoordinates(Op):
 __all__ = [
     "DagreAssignRanks",
     "DagreAssignY",
+    "DagreBorderSegments",
+    "DagreCleanupNestingGraph",
     "DagreFinalizeCoordinates",
     "DagreMakeAcyclic",
+    "DagreNestingGraph",
     "DagreNormalizeEdges",
     "DagreOrderNodes",
+    "DagreParentDummyChains",
     "DagrePrepareGraph",
 ]
