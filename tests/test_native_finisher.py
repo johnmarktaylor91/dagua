@@ -23,6 +23,8 @@ from dagua.layout.ops.pipelines.native_finisher import (
     W5HonestAxes,
     W5ScorePair,
     W5Seed,
+    _deep_tree_max_child_centroid_offset_ratio,
+    _deep_tree_rank_band_max_std,
     _honest_scale_line_search,
     _scale_positions_about_centroid,
     _scale_positions_about_centroid_xy,
@@ -752,8 +754,8 @@ def _chain_edges(num_nodes: int) -> torch.Tensor:
     )
 
 
-def test_terminal_continuous_facet_polish_selects_strict_v3_argmax() -> None:
-    """Select a structural deep-tree move only after strict V3 improvement."""
+def test_terminal_continuous_facet_polish_selects_rank_warp_v3_argmax() -> None:
+    """Select a strict deep-tree rank warp without moving nodes in x."""
     num_nodes = 64
     pos = torch.stack(
         [torch.arange(num_nodes, dtype=torch.float32), torch.arange(num_nodes) % 8],
@@ -772,8 +774,11 @@ def test_terminal_continuous_facet_polish_selects_strict_v3_argmax() -> None:
         champion_ineligibility_flags=frozenset(),
     )
 
+    original_x = pos[:, 0].detach().clone()
+    original_y_span = float((pos[:, 1].max() - pos[:, 1].min()).item())
+
     def score_fn(candidate: torch.Tensor) -> W5ScorePair:
-        """Return a V3 score that improves only when node 0 moves right.
+        """Return a V3 score that improves only when rank gaps deepen.
 
         Parameters
         ----------
@@ -785,8 +790,9 @@ def test_terminal_continuous_facet_polish_selects_strict_v3_argmax() -> None:
         W5ScorePair
             Synthetic score pair carrying V3 and G1 facet payloads.
         """
-        moved_right = float(candidate[0, 0].item()) > float(pos[0, 0].item())
-        score = 11.0 if moved_right else 9.5
+        y_span = float((candidate[:, 1].max() - candidate[:, 1].min()).item())
+        x_unchanged = bool(torch.equal(candidate[:, 0], original_x))
+        score = 11.0 if x_unchanged and y_span > original_y_span else 9.5
         return W5ScorePair(
             directed=score,
             undirected=score,
@@ -812,8 +818,33 @@ def test_terminal_continuous_facet_polish_selects_strict_v3_argmax() -> None:
 
     assert result.selected is True
     assert result.gate_reason == "deep_tree_fan_spacing"
-    assert result.accepted[0].node == 0
+    assert result.accepted[0].node == -1
     assert result.winner_score_pair.v3 == pytest.approx(11.0)
+    torch.testing.assert_close(result.winner_pos[:, 0], original_x)
+    assert _deep_tree_rank_band_max_std(
+        result.winner_pos, torch.arange(num_nodes)
+    ) == pytest.approx(0.0)
+
+
+def test_terminal_continuous_facet_polish_rejects_decentered_deep_tree() -> None:
+    """Reject strict deep-tree V3 wins when child centering is not preserved."""
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [-10.0, 1.0],
+            [10.0, 1.0],
+            [-15.0, 2.0],
+            [-5.0, 2.0],
+            [5.0, 2.0],
+            [15.0, 2.0],
+        ],
+        dtype=torch.float32,
+    )
+    bad_pos = pos.detach().clone()
+    bad_pos[0, 0] = 8.0
+    edge_index = torch.tensor([[0, 0, 1, 1, 2, 2], [1, 2, 3, 4, 5, 6]], dtype=torch.long)
+    assert _deep_tree_max_child_centroid_offset_ratio(pos, edge_index) == pytest.approx(0.0)
+    assert _deep_tree_max_child_centroid_offset_ratio(bad_pos, edge_index) > 0.1
 
 
 def test_terminal_continuous_facet_polish_preserves_declared_layered_reading() -> None:
@@ -870,7 +901,7 @@ def test_terminal_continuous_facet_polish_preserves_declared_layered_reading() -
     )
 
     assert result.selected is False
-    assert result.skipped_reason == "no_move_improved_v3"
+    assert result.skipped_reason == "no_rank_warp_improved_v3"
 
 
 def test_terminal_continuous_facet_polish_preserves_deep_tree_shape() -> None:
@@ -931,7 +962,7 @@ def test_terminal_continuous_facet_polish_preserves_deep_tree_shape() -> None:
     )
 
     assert result.selected is False
-    assert result.skipped_reason == "no_move_improved_v3"
+    assert result.skipped_reason == "no_rank_warp_improved_v3"
 
 
 def test_terminal_continuous_facet_polish_structural_gates_exclude_controls() -> None:
