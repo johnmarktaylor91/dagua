@@ -58,6 +58,7 @@ def build_grid_pyramid(
     max_cells_per_axis: int = 256,
     max_levels: int = 6,
     force_cpu: bool = False,
+    deterministic_sort: bool = True,
 ) -> GridPyramid:
     """Build a deterministic density pyramid from node positions.
 
@@ -75,6 +76,10 @@ def build_grid_pyramid(
         Maximum number of pooled levels.
     force_cpu : bool, default=False
         Build on CPU even when positions live on CUDA.
+    deterministic_sort : bool, default=True
+        Use stable cell sorting plus segmented reductions for weighted cell
+        accumulations. This avoids CUDA weighted ``bincount`` atomics and makes
+        per-device pyramid builds byte-deterministic.
 
     Returns
     -------
@@ -112,7 +117,14 @@ def build_grid_pyramid(
     )
     cell_size = span / desired.to(device=work_pos.device, dtype=torch.float32)
     origin = min_xy - 0.5 * cell_size
-    fine = _build_grid_level(work_pos, work_mass, origin=origin, cell_size=cell_size, shape=desired)
+    fine = _build_grid_level(
+        work_pos,
+        work_mass,
+        origin=origin,
+        cell_size=cell_size,
+        shape=desired,
+        deterministic_sort=deterministic_sort,
+    )
     levels = [fine]
     current = fine
     while len(levels) < max(1, int(max_levels)):
@@ -220,8 +232,14 @@ def choose_pyramid_device(num_nodes: int, requested_device: str) -> str:
     str
         ``"cuda"`` only when CUDA is requested and available, else ``"cpu"``.
     """
-    del num_nodes
     if str(requested_device).startswith("cuda") and torch.cuda.is_available():
+        estimated_peak = _estimate_pyramid_peak_bytes(int(num_nodes))
+        try:
+            free_bytes, _total_bytes = torch.cuda.mem_get_info()
+        except RuntimeError:
+            return "cpu"
+        if estimated_peak > int(free_bytes * 0.70):
+            return "cpu"
         return "cuda"
     return "cpu"
 
@@ -233,6 +251,7 @@ def _build_grid_level(
     origin: torch.Tensor,
     cell_size: torch.Tensor,
     shape: torch.Tensor,
+    deterministic_sort: bool = True,
 ) -> GridLevel:
     """Scatter node masses and centroids into one grid level.
 
@@ -248,6 +267,9 @@ def _build_grid_level(
         Cell size with shape ``[2]``.
     shape : torch.Tensor
         Integer ``[W, H]`` cell counts.
+    deterministic_sort : bool, default=True
+        Whether weighted accumulations use stable sort/segment reductions
+        instead of weighted ``bincount``.
 
     Returns
     -------
@@ -261,21 +283,30 @@ def _build_grid_level(
     y = torch.clamp(ij[:, 1], 0, height - 1)
     cell_id = y * width + x
     cell_count = width * height
-    flat_mass = torch.bincount(
-        cell_id,
-        weights=masses,
-        minlength=cell_count,
-    ).to(dtype=torch.float32)
-    flat_x = torch.bincount(
-        cell_id,
-        weights=masses * pos[:, 0],
-        minlength=cell_count,
-    ).to(dtype=torch.float32)
-    flat_y = torch.bincount(
-        cell_id,
-        weights=masses * pos[:, 1],
-        minlength=cell_count,
-    ).to(dtype=torch.float32)
+    if deterministic_sort:
+        flat_mass, flat_x, flat_y = _sorted_cell_sums(
+            cell_id,
+            masses,
+            masses * pos[:, 0],
+            masses * pos[:, 1],
+            cell_count=cell_count,
+        )
+    else:
+        flat_mass = torch.bincount(
+            cell_id,
+            weights=masses,
+            minlength=cell_count,
+        ).to(dtype=torch.float32)
+        flat_x = torch.bincount(
+            cell_id,
+            weights=masses * pos[:, 0],
+            minlength=cell_count,
+        ).to(dtype=torch.float32)
+        flat_y = torch.bincount(
+            cell_id,
+            weights=masses * pos[:, 1],
+            minlength=cell_count,
+        ).to(dtype=torch.float32)
     centroid = torch.stack((flat_x, flat_y), dim=1)
     nonzero = flat_mass > 0.0
     centroid[nonzero] = centroid[nonzero] / flat_mass[nonzero].unsqueeze(1)
@@ -287,6 +318,71 @@ def _build_grid_level(
         cell_size=cell_size.detach().clone(),
         origin=origin.detach().clone(),
     )
+
+
+def _sorted_cell_sums(
+    cell_id: torch.Tensor,
+    mass: torch.Tensor,
+    weighted_x: torch.Tensor,
+    weighted_y: torch.Tensor,
+    *,
+    cell_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return deterministic cell sums by stable sorting nodes by cell.
+
+    Parameters
+    ----------
+    cell_id : torch.Tensor
+        Flattened cell IDs with shape ``[N]``.
+    mass : torch.Tensor
+        Node masses with shape ``[N]``.
+    weighted_x : torch.Tensor
+        ``mass * x`` values with shape ``[N]``.
+    weighted_y : torch.Tensor
+        ``mass * y`` values with shape ``[N]``.
+    cell_count : int
+        Total number of cells in the grid.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Flat mass, weighted-x, and weighted-y sums with shape ``[cell_count]``.
+    """
+    device = cell_id.device
+    flat_mass = torch.zeros((int(cell_count),), dtype=torch.float32, device=device)
+    flat_x = torch.zeros_like(flat_mass)
+    flat_y = torch.zeros_like(flat_mass)
+    if cell_id.numel() == 0:
+        return flat_mass, flat_x, flat_y
+    order = cell_id.argsort(stable=True)
+    sorted_cell = cell_id[order]
+    counts = torch.bincount(sorted_cell, minlength=int(cell_count))
+    occupied = torch.nonzero(counts > 0, as_tuple=False).flatten()
+    lengths = counts[occupied].to(dtype=torch.long)
+    sorted_mass = mass[order].to(dtype=torch.float32)
+    sorted_x = weighted_x[order].to(dtype=torch.float32)
+    sorted_y = weighted_y[order].to(dtype=torch.float32)
+    flat_mass[occupied] = torch.segment_reduce(sorted_mass, "sum", lengths=lengths)
+    flat_x[occupied] = torch.segment_reduce(sorted_x, "sum", lengths=lengths)
+    flat_y[occupied] = torch.segment_reduce(sorted_y, "sum", lengths=lengths)
+    return flat_mass, flat_x, flat_y
+
+
+def _estimate_pyramid_peak_bytes(num_nodes: int) -> int:
+    """Estimate CUDA pyramid temporary bytes for device selection.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Node count.
+
+    Returns
+    -------
+    int
+        Conservative bytes for copied positions, cell IDs, stable sort
+        permutation, and reduction values.
+    """
+    return int(num_nodes) * (2 * 4 + 4 + 8 + 8 + 3 * 4) * 2
 
 
 def _pool_level(level: GridLevel) -> GridLevel:

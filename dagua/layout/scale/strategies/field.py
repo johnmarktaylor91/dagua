@@ -6,13 +6,14 @@ import copy
 import math
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional, cast
 
 import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.ops.pipelines.stress_sgd import layout_stress_sgd_pipeline
 from dagua.layout.ops.state import LayoutProblem
+from dagua.layout.scale.checkpoint import ScaleCheckpointManager, release_memory
 from dagua.layout.scale.coarsen import (
     ScaleGraph,
     ScaleHierarchy,
@@ -20,7 +21,11 @@ from dagua.layout.scale.coarsen import (
     prolong_positions,
 )
 from dagua.layout.scale.coarsest import anytime_native_coarsest
-from dagua.layout.scale.pyramid import build_grid_pyramid, far_field_repulsion_force
+from dagua.layout.scale.pyramid import (
+    build_grid_pyramid,
+    choose_pyramid_device,
+    far_field_repulsion_force,
+)
 from dagua.layout.scale.sketch import TopologySketch
 
 _DEFAULT_COARSEST_TARGET = 2_000
@@ -29,6 +34,7 @@ _DEFAULT_EDGE_CHUNK = 2_000_000
 _DEFAULT_BASE_CELL_MULTIPLIER = 1.2
 _DEFAULT_MAX_GRID_AXIS = 1_024
 _DEFAULT_PYRAMID_LEVELS = 10
+_DEFAULT_STREAMING_NODE_THRESHOLD = 5_000_000
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,10 @@ class FieldTelemetry:
         End-to-end FIELD wall time.
     pyramid_device : str
         Device kind used by the last pyramid build.
+    checkpoint_armed : bool
+        Whether checkpointing was armed for the run.
+    resumed : bool
+        Whether the run resumed from an existing checkpoint.
     """
 
     coarsest_nodes: int
@@ -54,6 +64,8 @@ class FieldTelemetry:
     coarsest_solver: str
     wall_s: float
     pyramid_device: str
+    checkpoint_armed: bool = False
+    resumed: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """Return JSON-friendly telemetry.
@@ -69,6 +81,8 @@ class FieldTelemetry:
             "coarsest_solver": self.coarsest_solver,
             "wall_s": float(self.wall_s),
             "pyramid_device": self.pyramid_device,
+            "checkpoint_armed": bool(self.checkpoint_armed),
+            "resumed": bool(self.resumed),
         }
 
 
@@ -105,6 +119,33 @@ class FieldScaleStrategy:
         started = time.perf_counter()
         params = config.algorithm_params
         seed = int(config.seed if config.seed is not None else 42)
+        checkpoint = ScaleCheckpointManager.from_config(config, sketch, strategy="FIELD")
+        final_record = checkpoint.record_for("final", 0) if checkpoint.armed else None
+        if final_record is not None:
+            pos = checkpoint.load_tensors("final", 0)["pos"].to(dtype=torch.float32)
+            telemetry = FieldTelemetry(
+                coarsest_nodes=int(cast(Any, final_record.telemetry.get("coarsest_nodes", 0))),
+                levels=int(cast(Any, final_record.telemetry.get("levels", 0))),
+                coarsest_solver=str(final_record.telemetry.get("coarsest_solver", "unknown")),
+                wall_s=time.perf_counter() - started,
+                pyramid_device=str(final_record.telemetry.get("pyramid_device", "unknown")),
+                checkpoint_armed=True,
+                resumed=True,
+            )
+            setattr(config, "_dagua_field_telemetry", telemetry.to_dict())
+            return pos
+        streaming_threshold = int(
+            params.get("field_streaming_node_threshold", _DEFAULT_STREAMING_NODE_THRESHOLD)
+        )
+        if int(graph.num_nodes) >= streaming_threshold:
+            return _layout_streaming_field(
+                graph,
+                config,
+                sketch,
+                checkpoint,
+                started=started,
+                seed=seed,
+            )
         node_sizes = _resolved_graph_node_sizes(graph)
         hierarchy = build_scale_hierarchy(
             graph.edge_index,
@@ -117,9 +158,31 @@ class FieldScaleStrategy:
             topk_per_node=int(params.get("field_topk_per_node", _DEFAULT_TOPK)),
             min_shrink_ratio=float(params.get("field_min_shrink_ratio", 0.50)),
         )
+        if checkpoint.armed:
+            _checkpoint_hierarchy(checkpoint, hierarchy)
         coarsest_solver = str(params.get("field_coarsest_solver", "auto")).lower()
-        pos = _solve_coarsest(hierarchy, config, seed=seed, solver=coarsest_solver)
-        for level_index in range(len(hierarchy.levels) - 1, -1, -1):
+        resumed = False
+        latest_refine = _latest_refine_record(checkpoint) if checkpoint.armed else None
+        if latest_refine is not None:
+            pos = checkpoint.load_tensors("refine", latest_refine.level)["pos"].to(
+                dtype=torch.float32
+            )
+            start_level = int(latest_refine.level) - 1
+            resumed = True
+        else:
+            pos = _solve_coarsest(hierarchy, config, seed=seed, solver=coarsest_solver)
+            start_level = len(hierarchy.levels) - 1
+            if checkpoint.armed:
+                _record_refine_checkpoint(
+                    checkpoint,
+                    level=len(hierarchy.levels),
+                    pos=pos,
+                    telemetry={
+                        "phase": "coarsest",
+                        "coarsest_nodes": hierarchy.coarsest_graph.num_nodes,
+                    },
+                )
+        for level_index in range(start_level, -1, -1):
             transition = hierarchy.levels[level_index]
             jitter = _jitter_scale_for_level(config, transition.fine_num_nodes)
             pos = _expand_for_prolongation(
@@ -155,6 +218,18 @@ class FieldScaleStrategy:
                 seed=seed + level_index,
                 is_finest=level_index == 0,
             )
+            if checkpoint.armed:
+                _record_refine_checkpoint(
+                    checkpoint,
+                    level=level_index,
+                    pos=pos,
+                    telemetry={
+                        "phase": "refine",
+                        "fine_num_nodes": transition.fine_num_nodes,
+                        "coarse_num_nodes": transition.coarse_num_nodes,
+                    },
+                )
+                _maybe_exit_after_checkpoint(config, level=level_index)
         if not hierarchy.levels:
             pos = _refine_level(
                 pos,
@@ -179,8 +254,18 @@ class FieldScaleStrategy:
             levels=len(hierarchy.levels),
             coarsest_solver=coarsest_solver,
             wall_s=time.perf_counter() - started,
-            pyramid_device="cpu",
+            pyramid_device=str(getattr(config, "_dagua_field_last_pyramid_device", "cpu")),
+            checkpoint_armed=checkpoint.armed,
+            resumed=resumed,
         )
+        if checkpoint.armed:
+            _record_refine_checkpoint(
+                checkpoint,
+                level=0,
+                pos=pos,
+                phase="final",
+                telemetry=telemetry.to_dict(),
+            )
         setattr(config, "_dagua_field_telemetry", telemetry.to_dict())
         return pos
 
@@ -211,6 +296,303 @@ def layout_field(
         Position tensor with shape ``[N, 2]``.
     """
     return FieldScaleStrategy().layout(graph, config, sketch, trace=trace)
+
+
+def _checkpoint_hierarchy(checkpoint: ScaleCheckpointManager, hierarchy: ScaleHierarchy) -> None:
+    """Persist hierarchy tensors as independent per-level records.
+
+    Parameters
+    ----------
+    checkpoint : ScaleCheckpointManager
+        Armed checkpoint manager.
+    hierarchy : ScaleHierarchy
+        Scale hierarchy to persist.
+
+    Returns
+    -------
+    None
+        Existing records are left in place.
+    """
+    if checkpoint.record_for("coarsest", 0) is None:
+        before, after, _released = release_memory()
+        checkpoint.record(
+            phase="coarsest",
+            level=0,
+            tensors={
+                "edge_index": hierarchy.coarsest_graph.edge_index,
+                "edge_weight": hierarchy.coarsest_graph.edge_weight,
+                "node_sizes": hierarchy.coarsest_node_sizes,
+                "node_masses": hierarchy.coarsest_node_masses,
+            },
+            telemetry={
+                "coarsest_nodes": hierarchy.coarsest_graph.num_nodes,
+                "levels": len(hierarchy.levels),
+            },
+            rss_before_release=before,
+            rss_after_release=after,
+        )
+    for level_index, transition in enumerate(hierarchy.levels):
+        if checkpoint.record_for("hierarchy", level_index) is not None:
+            continue
+        before, after, _released = release_memory()
+        checkpoint.record(
+            phase="hierarchy",
+            level=level_index,
+            tensors={
+                "fine_to_coarse": transition.fine_to_coarse,
+                "edge_index": transition.edge_index,
+                "edge_weight": transition.edge_weight,
+                "node_sizes": transition.node_sizes,
+                "node_masses": transition.node_masses,
+            },
+            telemetry={
+                "fine_num_nodes": transition.fine_num_nodes,
+                "coarse_num_nodes": transition.coarse_num_nodes,
+            },
+            rss_before_release=before,
+            rss_after_release=after,
+        )
+
+
+def _latest_refine_record(checkpoint: ScaleCheckpointManager) -> Any:
+    """Return the most recently written FIELD refine record.
+
+    Parameters
+    ----------
+    checkpoint : ScaleCheckpointManager
+        Checkpoint manager.
+
+    Returns
+    -------
+    Any
+        Latest checkpoint record or ``None``.
+    """
+    manifest = checkpoint.manifest
+    if manifest is None:
+        return None
+    records = [
+        record for record in manifest.records if record.phase == "refine" and record.completed
+    ]
+    if not records:
+        return None
+    return max(records, key=lambda record: record.written_at)
+
+
+def _record_refine_checkpoint(
+    checkpoint: ScaleCheckpointManager,
+    *,
+    level: int,
+    pos: torch.Tensor,
+    phase: str = "refine",
+    telemetry: Optional[dict[str, object]] = None,
+) -> None:
+    """Persist one FIELD position checkpoint.
+
+    Parameters
+    ----------
+    checkpoint : ScaleCheckpointManager
+        Armed checkpoint manager.
+    level : int
+        Completed V-cycle level.
+    pos : torch.Tensor
+        Position tensor with shape ``[N_level, 2]``.
+    phase : str, default="refine"
+        Checkpoint phase.
+    telemetry : dict[str, object], optional
+        JSON-friendly telemetry.
+
+    Returns
+    -------
+    None
+        Position tensor is saved on CPU.
+    """
+    before, after, _released = release_memory()
+    checkpoint.record(
+        phase=phase,
+        level=int(level),
+        tensors={"pos": pos},
+        telemetry=dict(telemetry or {}),
+        rss_before_release=before,
+        rss_after_release=after,
+    )
+
+
+def _maybe_exit_after_checkpoint(config: LayoutConfig, *, level: int) -> None:
+    """Terminate for checkpoint kill/resume tests when explicitly requested.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout config carrying ``scale_checkpoint_exit_after_level``.
+    level : int
+        Just-completed level.
+
+    Returns
+    -------
+    None
+        Calls ``os._exit(137)`` only for the private explicit test knob.
+    """
+    value = config.algorithm_params.get("scale_checkpoint_exit_after_level", None)
+    if value is not None and int(value) == int(level):
+        import os
+
+        os._exit(137)
+
+
+def _layout_streaming_field(
+    graph: Any,
+    config: LayoutConfig,
+    sketch: TopologySketch,
+    checkpoint: ScaleCheckpointManager,
+    *,
+    started: float,
+    seed: int,
+) -> torch.Tensor:
+    """Compute the 10M FIELD rung without Python adjacency materialization.
+
+    Parameters
+    ----------
+    graph : Any
+        Tensor graph exposing ``edge_index`` and ``num_nodes``.
+    config : LayoutConfig
+        Layout configuration.
+    sketch : TopologySketch
+        Topology sketch used for manifest fingerprints.
+    checkpoint : ScaleCheckpointManager
+        Checkpoint manager for this run.
+    started : float
+        ``time.perf_counter`` value captured by the caller.
+    seed : int
+        Deterministic seed.
+
+    Returns
+    -------
+    torch.Tensor
+        Finite positions with shape ``[N, 2]``.
+    """
+    del sketch
+    params = config.algorithm_params
+    n = int(graph.num_nodes)
+    node_sizes = _resolved_graph_node_sizes(graph)
+    base_sep = _target_separation(config, node_sizes)
+    init_record = checkpoint.record_for("streaming", 0) if checkpoint.armed else None
+    if init_record is not None:
+        pos = checkpoint.load_tensors("streaming", 0)["pos"].to(dtype=torch.float32)
+        resumed = True
+    else:
+        pos = _streaming_initial_positions(n, base_sep=base_sep, seed=seed)
+        resumed = False
+        if checkpoint.armed:
+            _record_refine_checkpoint(
+                checkpoint,
+                level=0,
+                pos=pos,
+                phase="streaming",
+                telemetry={"phase": "streaming_init", "num_nodes": n},
+            )
+            _maybe_exit_after_checkpoint(config, level=0)
+    steps = max(0, int(params.get("field_streaming_refine_steps", 1)))
+    masses = torch.ones((n,), dtype=torch.float32)
+    edge_weight = _streaming_edge_weight(graph)
+    graph_payload = ScaleGraph(
+        num_nodes=n,
+        edge_index=graph.edge_index,
+        edge_weight=edge_weight,
+        adjacency=[],
+    )
+    refine_config = copy.copy(config)
+    refine_config.algorithm_params = dict(config.algorithm_params)
+    refine_config.algorithm_params["field_refine_steps"] = int(
+        params.get("field_streaming_inner_steps", 1)
+    )
+    for step in range(steps):
+        pos = _refine_level(
+            pos,
+            graph_payload,
+            node_sizes,
+            masses,
+            refine_config,
+            seed=seed + step,
+            is_finest=True,
+        )
+        setattr(
+            config,
+            "_dagua_field_last_pyramid_device",
+            getattr(refine_config, "_dagua_field_last_pyramid_device", "cpu"),
+        )
+        if checkpoint.armed:
+            _record_refine_checkpoint(
+                checkpoint,
+                level=step + 1,
+                pos=pos,
+                phase="streaming_refine",
+                telemetry={"phase": "streaming_refine", "step": step + 1},
+            )
+    pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    if not bool(torch.isfinite(pos).all().item()):
+        raise RuntimeError("streaming FIELD strategy produced non-finite positions.")
+    telemetry = FieldTelemetry(
+        coarsest_nodes=n,
+        levels=0,
+        coarsest_solver="streaming",
+        wall_s=time.perf_counter() - started,
+        pyramid_device=str(getattr(config, "_dagua_field_last_pyramid_device", "cpu")),
+        checkpoint_armed=checkpoint.armed,
+        resumed=resumed,
+    )
+    if checkpoint.armed:
+        _record_refine_checkpoint(
+            checkpoint,
+            level=0,
+            pos=pos,
+            phase="final",
+            telemetry=telemetry.to_dict(),
+        )
+    setattr(config, "_dagua_field_telemetry", telemetry.to_dict())
+    return pos
+
+
+def _streaming_initial_positions(num_nodes: int, *, base_sep: float, seed: int) -> torch.Tensor:
+    """Return deterministic low-memory initial positions for FIELD streaming.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Node count.
+    base_sep : float
+        Target local separation.
+    seed : int
+        Seed folded into the angular phase.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]``.
+    """
+    node = torch.arange(int(num_nodes), dtype=torch.float32)
+    angle = (node * 2.39996323 + float(seed) * 0.0174533).remainder(6.283185307179586)
+    radius = torch.sqrt(node + 1.0) * max(float(base_sep), 1.0) * 0.35
+    return torch.stack((torch.cos(angle) * radius, torch.sin(angle) * radius), dim=1)
+
+
+def _streaming_edge_weight(graph: Any) -> torch.Tensor:
+    """Return CPU edge weights for a tensor-only graph.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing optional ``edge_weights``.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge weights with shape ``[E]``.
+    """
+    edge_weights = getattr(graph, "edge_weights", None)
+    edge_count = int(graph.edge_index.shape[1])
+    if edge_weights is None:
+        return torch.ones((edge_count,), dtype=torch.float32)
+    return edge_weights.detach().to(device="cpu", dtype=torch.float32)
 
 
 def _resolved_graph_node_sizes(graph: Any) -> torch.Tensor:
@@ -472,9 +854,13 @@ def _refine_level(
             chunk_size=int(params.get("field_edge_chunk", _DEFAULT_EDGE_CHUNK)),
             spring_model=str(params.get("field_spring_model", "fr")),
         )
+        pyramid_device = choose_pyramid_device(work.shape[0], str(config.device))
+        setattr(config, "_dagua_field_last_pyramid_device", pyramid_device)
+        pyramid_work = work.to(device=pyramid_device) if pyramid_device == "cuda" else work
+        pyramid_masses = masses.to(device=pyramid_device) if pyramid_device == "cuda" else masses
         pyramid = build_grid_pyramid(
-            work,
-            masses,
+            pyramid_work,
+            pyramid_masses,
             base_cell_size=base_sep
             * float(
                 params.get(
@@ -484,16 +870,16 @@ def _refine_level(
             ),
             max_cells_per_axis=int(params.get("field_max_grid_axis", _DEFAULT_MAX_GRID_AXIS)),
             max_levels=int(params.get("field_pyramid_levels", _DEFAULT_PYRAMID_LEVELS)),
-            force_cpu=True,
+            force_cpu=pyramid_device == "cpu",
         )
         repel = far_field_repulsion_force(
-            work,
+            pyramid_work,
             pyramid,
             strength=repel_strength,
             softening=base_sep * 0.25,
             max_displacement=step0 * 4.0,
             level_stride=int(params.get("field_pyramid_stride", 2)),
-        )
+        ).to(device=work.device)
         disp = spring + repel
         norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp_min(1.0e-9)
         disp = disp * torch.clamp(step_cap / norm, max=1.0)

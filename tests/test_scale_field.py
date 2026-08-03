@@ -119,3 +119,26 @@ def test_field_dispatch_completes_and_is_byte_deterministic() -> None:
     assert metadata["decision"]["strategy"] == "FIELD"
     assert "temporary_fallback" not in metadata
     assert metadata["field"]["coarsest_nodes"] <= 8
+
+
+def test_field_streaming_branch_is_deterministic() -> None:
+    """FIELD streaming rung avoids hierarchy coarsening and stays deterministic."""
+    config = LayoutConfig(
+        algorithm_params={
+            "scale_node_gate": 10,
+            "scale_edge_gate": 10_000,
+            "field_streaming_node_threshold": 16,
+            "field_streaming_refine_steps": 0,
+        },
+        seed=42,
+    )
+    first_graph = _cyclic_fixture(24)
+    second_graph = _cyclic_fixture(24)
+
+    first = dagua.layout(first_graph, config)
+    second = dagua.layout(second_graph, config)
+
+    assert torch.isfinite(first).all()
+    assert torch.equal(first, second)
+    metadata = getattr(first_graph, "_dagua_scale_route_decision")
+    assert metadata["field"]["coarsest_solver"] == "streaming"
