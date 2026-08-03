@@ -6076,6 +6076,8 @@ def _terminal_w5_polish(
         or not bool(getattr(config, "_dagua_native_terminal_w5_owner", False))
     ):
         return final_pos
+    if bool(getattr(config, "_dagua_scale_anytime_native", False)):
+        return final_pos
     expected_nodes = int(node_sizes.shape[0]) if node_sizes is not None else int(final_pos.shape[0])
     max_edge_node = int(edge_index.max().item()) if edge_index.numel() else -1
     if int(final_pos.shape[0]) != expected_nodes or max_edge_node >= int(final_pos.shape[0]):
@@ -7170,8 +7172,44 @@ def layout_dagua_native_pipeline(
             The prepared config receives the current anytime record.
         """
         previous = getattr(prepared_config, "_dagua_native_anytime_best", None)
+        if previous is None:
+            initial_pos = getattr(prepared_config, "_dagua_native_initial_anytime_best", None)
+            if initial_pos is not None:
+                previous = _AnytimeBestRecord(
+                    pos=initial_pos.detach().clone(),
+                    provenance="stress_sgd_fallback",
+                )
+                setattr(prepared_config, "_dagua_native_anytime_best", previous)
         previous_pos = previous.pos if previous is not None else None
         finite_pos, _ = finite_checkpoint_or_restore(pos.detach(), previous_pos)
+        if bool(getattr(prepared_config, "_dagua_scale_anytime_native", False)):
+            score_problem = getattr(prepared_config, "_dagua_native_anytime_score_problem", None)
+            previous_score = getattr(prepared_config, "_dagua_native_initial_anytime_score", None)
+            if previous is not None and previous_score is None:
+                from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime
+
+                key, score, _facets = score_v3_runtime(previous.pos, score_problem or problem)
+                previous_score = (key, float(score))
+            if previous_score is not None:
+                from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime
+
+                candidate_key, candidate_score, _facets = score_v3_runtime(
+                    finite_pos,
+                    score_problem or problem,
+                )
+                if not (
+                    candidate_key > previous_score[0]
+                    or (
+                        candidate_key == previous_score[0]
+                        and float(candidate_score) > float(previous_score[1])
+                    )
+                ):
+                    return
+                setattr(
+                    prepared_config,
+                    "_dagua_native_initial_anytime_score",
+                    (candidate_key, float(candidate_score)),
+                )
         setattr(
             prepared_config,
             "_dagua_native_anytime_best",
@@ -7425,7 +7463,9 @@ def layout_dagua_native_pipeline(
             dot_order_anytime_enabled = not bool(problem.clusters) and _directed_dot_order_enabled(
                 problem,
             )
-            if _directed_wide_dag_ordering_enabled(problem) or dot_order_anytime_enabled:
+            if not bool(getattr(prepared_config, "_dagua_scale_anytime_native", False)) and (
+                _directed_wide_dag_ordering_enabled(problem) or dot_order_anytime_enabled
+            ):
                 cpu_edge_index = prepared_edge_index.detach().to(device="cpu")
                 offsets, targets = _build_csr(cpu_edge_index, int(problem.num_nodes))
                 all_pairs_dist = _all_pairs_unweighted(

@@ -5148,6 +5148,21 @@ def layout_native_directed_portfolio(
     )
 
     started = time.perf_counter()
+    n = int(problem.num_nodes)
+    if bool(getattr(config, "_dagua_scale_anytime_native", False)):
+        fallback = getattr(config, "_dagua_native_initial_anytime_best", None)
+        incumbent_cost = estimate_native_work_cost(
+            problem,
+            "stress",
+            {"steps": 10, "samples": None},
+            _native_device_class(config),
+        )
+        incumbent_cost_s = incumbent_cost.generation_dwu + incumbent_cost.reserved_score_dwu
+        if fallback is not None and (
+            not _portfolio_has_budget(config, min_remaining_s=1.0)
+            or not _predicted_arm_budget_available(config, incumbent_cost_s)
+        ):
+            return fallback.detach().to(device=problem.edge_index.device, dtype=torch.float32)
     incumbent_config = copy.copy(config)
     setattr(incumbent_config, "_dagua_native_suppress_portfolio", True)
     incumbent_state = SolveState(pos=None if state.pos is None else state.pos.detach().clone())
@@ -5166,7 +5181,6 @@ def layout_native_directed_portfolio(
             time.perf_counter() - started,
         )
         return incumbent
-    n = int(problem.num_nodes)
 
     positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
     seed = int(problem.seed) if problem.seed is not None else 42

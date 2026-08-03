@@ -2998,11 +2998,26 @@ def layout_native_undirected_portfolio(
         incumbent_state = SolveState(pos=None if state.pos is None else state.pos.detach().clone())
         return _run_native_problem(problem, incumbent_state, ctx, incumbent_config)
 
+    n = int(problem.num_nodes)
+    if bool(getattr(config, "_dagua_scale_anytime_native", False)):
+        fallback = getattr(config, "_dagua_native_initial_anytime_best", None)
+        incumbent_cost = estimate_native_work_cost(
+            problem,
+            "stress",
+            {"steps": 10, "samples": None},
+            _native_device_class(config),
+        )
+        incumbent_cost_s = incumbent_cost.generation_dwu + incumbent_cost.reserved_score_dwu
+        if fallback is not None and (
+            not _portfolio_has_budget(config, min_remaining_s=1.0)
+            or not _predicted_undirected_arm_budget_available(config, incumbent_cost_s)
+        ):
+            return fallback.detach().to(device=problem.edge_index.device, dtype=torch.float32)
+
     # Contest predicate: the corpus-backed node cap and an explicit caller
     # deadline are deterministic inputs. Within the cap, fixed size-scaled
     # iteration schedules govern challenger work; machine load never changes
     # candidate eligibility.
-    n = int(problem.num_nodes)
     if (
         n <= MAX_CONTEST_NODES
         and getattr(config, "time_budget_s", None) is None
