@@ -237,18 +237,23 @@ def _positions_from_layers(
     sorted_nodes = layer_index.sorted_nodes.to(dtype=torch.long)
     counts = layer_index.layer_sizes().to(dtype=torch.long)
     max_width = int(counts.max().item()) if counts.numel() else 0
-    ordinal_sorted = torch.arange(n, dtype=torch.float32) - torch.repeat_interleave(
-        layer_index.layer_offsets[:-1].to(dtype=torch.float32),
-        counts,
-    )
-    width_sorted = torch.repeat_interleave(counts.to(dtype=torch.float32), counts).clamp_min(1.0)
     node_sep = _node_separation(graph, config)
     rank_sep = max(float(config.rank_sep), node_sep)
-    x_sorted = (ordinal_sorted - (width_sorted - 1.0) * 0.5) * node_sep
-    y_sorted = layer_assignments[sorted_nodes].to(dtype=torch.float32) * rank_sep
-    pos_sorted = torch.stack((x_sorted, y_sorted), dim=1)
     pos = torch.empty((n, 2), dtype=torch.float32)
-    pos[sorted_nodes] = pos_sorted
+    for layer_id in range(layer_index.num_layers):
+        start = int(layer_index.layer_offsets[layer_id].item())
+        end = int(layer_index.layer_offsets[layer_id + 1].item())
+        count = end - start
+        if count <= 0:
+            continue
+        nodes = sorted_nodes[start:end]
+        # Use local float64 ordinals so late, wide ranks never subtract two
+        # large float32 global indices and lose adjacent-node resolution.
+        ordinal = torch.arange(count, dtype=torch.float64)
+        width = float(count)
+        x_values = (ordinal - (width - 1.0) * 0.5) * float(node_sep)
+        pos[nodes, 0] = x_values.to(dtype=torch.float32)
+        pos[nodes, 1] = float(layer_id) * float(rank_sep)
     return pos, int(layer_index.num_layers), max_width
 
 

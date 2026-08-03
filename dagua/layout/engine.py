@@ -1485,6 +1485,11 @@ def _ensure_scale_node_sizes(graph: Any, config: LayoutConfig) -> None:
         and node_sizes.shape[1] == 2
     ):
         return
+    materialize_threshold = int(
+        config.algorithm_params.get("scale_node_size_materialize_threshold", 50_000_000)
+    )
+    if int(graph.num_nodes) >= materialize_threshold:
+        return
     default_size = max(1.0, float(getattr(config, "node_sep", 70.0)) * 0.20)
     graph.node_sizes = torch.full((int(graph.num_nodes), 2), default_size, dtype=torch.float32)
 
@@ -1515,22 +1520,59 @@ def _layout_scale_default(
         should continue into the existing native pipeline.
     """
     from dagua.layout.scale.budget import BudgetGuard
-    from dagua.layout.scale.router import ScaleStrategy, depth_cap_from_config, route
-    from dagua.layout.scale.sketch import TopologySketch, estimate_topology_peak_bytes
+    from dagua.layout.scale.router import (
+        ScaleStrategy,
+        declared_topology_from_config,
+        depth_cap_from_config,
+        route,
+    )
+    from dagua.layout.scale.sketch import (
+        TopologySketch,
+        estimate_bounded_topology_peak_bytes,
+        estimate_declared_topology_peak_bytes,
+        estimate_topology_peak_bytes,
+    )
 
     n = int(graph.num_nodes)
     e = _edge_count_for_scale_gate(graph)
     guard = BudgetGuard(device="cpu")
-    guard.check("scale_sketch", estimate_topology_peak_bytes(n, e))
-    sketch = TopologySketch.from_edge_index(
-        graph.edge_index,
-        n,
-        depth_cap=depth_cap_from_config(config),
-    )
+    declared = declared_topology_from_config(config)
+    if declared is not None:
+        sketch_mode = "declared"
+        guard.check("scale_sketch_declared", estimate_declared_topology_peak_bytes(n, e))
+        sketch = TopologySketch.from_declared_topology(
+            graph.edge_index,
+            n,
+            declared.topology,
+            declared_num_edges=e,
+            depth_cap=depth_cap_from_config(config),
+            depth=declared.depth,
+            depth_cap_tripped=declared.depth_cap_tripped,
+        )
+    else:
+        sketch_peak = estimate_topology_peak_bytes(n, e)
+        sketch_mode = "exact"
+        try:
+            guard.check("scale_sketch", sketch_peak)
+        except MemoryError:
+            sketch_mode = "bounded"
+            guard.check("scale_sketch_bounded", estimate_bounded_topology_peak_bytes(n, e))
+            sketch = TopologySketch.from_edge_index_bounded(
+                graph.edge_index,
+                n,
+                depth_cap=depth_cap_from_config(config),
+            )
+        else:
+            sketch = TopologySketch.from_edge_index(
+                graph.edge_index,
+                n,
+                depth_cap=depth_cap_from_config(config),
+            )
     decision = route(sketch, config)
     metadata = {
         "decision": decision.to_dict(),
         "sketch": sketch.to_dict(),
+        "sketch_mode": sketch_mode,
     }
     _record_scale_route_metadata(graph, metadata)
     if config.verbose:
