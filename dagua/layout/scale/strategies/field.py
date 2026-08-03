@@ -26,8 +26,9 @@ from dagua.layout.scale.sketch import TopologySketch
 _DEFAULT_COARSEST_TARGET = 2_000
 _DEFAULT_TOPK = 16
 _DEFAULT_EDGE_CHUNK = 2_000_000
-_DEFAULT_BASE_CELL_MULTIPLIER = 2.5
-_DEFAULT_MAX_GRID_AXIS = 192
+_DEFAULT_BASE_CELL_MULTIPLIER = 1.2
+_DEFAULT_MAX_GRID_AXIS = 1_024
+_DEFAULT_PYRAMID_LEVELS = 10
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,12 @@ class FieldScaleStrategy:
         for level_index in range(len(hierarchy.levels) - 1, -1, -1):
             transition = hierarchy.levels[level_index]
             jitter = _jitter_scale_for_level(config, transition.fine_num_nodes)
+            pos = _expand_for_prolongation(
+                pos,
+                fine_num_nodes=transition.fine_num_nodes,
+                coarse_num_nodes=transition.coarse_num_nodes,
+                expand_gain=float(params.get("field_prolong_expand", 1.0)),
+            )
             pos = prolong_positions(
                 pos,
                 transition.fine_to_coarse,
@@ -158,6 +165,12 @@ class FieldScaleStrategy:
                 seed=seed,
                 is_finest=True,
             )
+        pos = _pack_components(
+            pos,
+            hierarchy.finest_graph.edge_index,
+            int(graph.num_nodes),
+            base_sep=_target_separation(config, node_sizes),
+        )
         pos = pos.detach().to(device="cpu", dtype=torch.float32)
         if not bool(torch.isfinite(pos).all().item()):
             raise RuntimeError("FIELD strategy produced non-finite positions.")
@@ -437,19 +450,27 @@ def _refine_level(
     sizes = node_sizes.detach().to(dtype=torch.float32)
     masses = node_masses.detach().to(dtype=torch.float32)
     base_sep = _target_separation(config, sizes)
-    edge_strength = float(params.get("field_edge_strength", 0.08))
-    repel_strength = float(params.get("field_repel_strength", base_sep * base_sep * 0.015))
-    cooling = float(params.get("field_cooling", 0.82))
-    max_step = float(params.get("field_max_step", base_sep * 0.45))
+    mean_mass = float(masses.mean().item()) if masses.numel() else 1.0
+    edge_strength = float(params.get("field_edge_strength", 0.15))
+    repel_strength = float(
+        params.get(
+            "field_repel_strength",
+            base_sep * base_sep * 0.12 / max(1.0, mean_mass),
+        )
+    )
+    cooling = float(params.get("field_cooling", 0.90))
+    step0 = float(params.get("field_step0", base_sep * 0.90))
+    overlap_strength = float(params.get("field_overlap_strength", 0.0))
     for step in range(steps):
-        step_scale = cooling**step
+        step_cap = step0 * cooling**step
         spring = _edge_spring_displacement(
             work,
             graph.edge_index,
             graph.edge_weight,
             target_length=base_sep,
-            strength=edge_strength * step_scale,
+            strength=edge_strength,
             chunk_size=int(params.get("field_edge_chunk", _DEFAULT_EDGE_CHUNK)),
+            spring_model=str(params.get("field_spring_model", "fr")),
         )
         pyramid = build_grid_pyramid(
             work,
@@ -462,24 +483,29 @@ def _refine_level(
                 )
             ),
             max_cells_per_axis=int(params.get("field_max_grid_axis", _DEFAULT_MAX_GRID_AXIS)),
-            max_levels=int(params.get("field_pyramid_levels", 6)),
+            max_levels=int(params.get("field_pyramid_levels", _DEFAULT_PYRAMID_LEVELS)),
             force_cpu=True,
         )
         repel = far_field_repulsion_force(
             work,
             pyramid,
-            strength=repel_strength * step_scale,
+            strength=repel_strength,
             softening=base_sep * 0.25,
-            max_displacement=max_step * step_scale,
+            max_displacement=step0 * 4.0,
+            level_stride=int(params.get("field_pyramid_stride", 2)),
         )
-        work = work + spring + repel
-        work = _grid_local_overlap_projection(
-            work,
-            sizes,
-            cell_size=base_sep,
-            strength=float(params.get("field_overlap_strength", 0.20)),
-            max_displacement=max_step * 0.5,
-        )
+        disp = spring + repel
+        norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp_min(1.0e-9)
+        disp = disp * torch.clamp(step_cap / norm, max=1.0)
+        work = work + disp
+        if overlap_strength > 0.0:
+            work = _grid_local_overlap_projection(
+                work,
+                sizes,
+                cell_size=base_sep,
+                strength=overlap_strength,
+                max_displacement=step_cap * 0.5,
+            )
     return _normalize_positions(work)
 
 
@@ -507,11 +533,18 @@ def _refine_steps_for_level(
     """
     if "field_refine_steps" in params:
         return max(0, int(params["field_refine_steps"]))
-    if int(num_nodes) >= 1_000_000:
-        return 2 if is_finest else 1
-    if int(num_nodes) >= 100_000:
-        return 3 if is_finest else 2
-    return 4
+    n = int(num_nodes)
+    if n <= 5_000:
+        base = 40
+    elif n <= 30_000:
+        base = 22
+    elif n <= 120_000:
+        base = 10
+    elif n <= 400_000:
+        base = 8
+    else:
+        base = 6
+    return base + (5 if is_finest and n <= 30_000 else 0)
 
 
 def _edge_spring_displacement(
@@ -522,6 +555,7 @@ def _edge_spring_displacement(
     target_length: float,
     strength: float,
     chunk_size: int,
+    spring_model: str = "fr",
 ) -> torch.Tensor:
     """Return chunked edge-spring displacement.
 
@@ -539,6 +573,10 @@ def _edge_spring_displacement(
         Spring multiplier.
     chunk_size : int
         Number of edges processed per chunk.
+    spring_model : str, default="fr"
+        ``"fr"`` uses Fruchterman-Reingold attraction ``d^2 / target`` so edge
+        lengths adapt to local density (the sfdp model); ``"linear"`` pulls
+        every edge toward ``target_length``.
 
     Returns
     -------
@@ -550,6 +588,7 @@ def _edge_spring_displacement(
         return disp
     edges = edge_index.to(device=pos.device, dtype=torch.long)
     weights = edge_weight.to(device=pos.device, dtype=torch.float32)
+    weights = weights / weights.mean().clamp_min(1.0e-6)
     edge_count = int(edges.shape[1])
     chunk = max(1, int(chunk_size))
     for start in range(0, edge_count, chunk):
@@ -558,12 +597,15 @@ def _edge_spring_displacement(
         dst = edges[1, start:end]
         delta = pos[dst] - pos[src]
         dist = torch.linalg.norm(delta, dim=1, keepdim=True).clamp_min(1.0e-6)
-        force = delta / dist * ((dist - float(target_length)) * weights[start:end].unsqueeze(1))
+        if spring_model == "fr":
+            magnitude = dist * dist / max(float(target_length), 1.0e-6)
+        else:
+            magnitude = dist - float(target_length)
+        force = delta / dist * (magnitude * weights[start:end].unsqueeze(1))
         force = force * float(strength)
         disp.index_add_(0, src, force)
         disp.index_add_(0, dst, -force)
-    norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp_min(1.0)
-    return disp * torch.clamp(float(target_length) * 0.35 / norm, max=1.0)
+    return disp
 
 
 def _grid_local_overlap_projection(
@@ -632,6 +674,156 @@ def _grid_local_overlap_projection(
     amount = (crowded - 1.0).clamp_min(0.0) / crowded * size_scale * float(strength)
     amount = torch.clamp(amount, max=float(max_displacement))
     return pos + direction * amount
+
+
+def _connected_component_labels(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Label weakly connected components with deterministic min-label hooking.
+
+    Uses scatter-min hooking plus pointer-jumping compression, converging in
+    ``O(log N)`` rounds without any non-torch dependency.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Undirected edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-node component labels with shape ``[N]`` (min node id per component).
+    """
+    labels = torch.arange(int(num_nodes), dtype=torch.long)
+    if edge_index.numel() == 0:
+        return labels
+    src = edge_index[0].to(dtype=torch.long)
+    dst = edge_index[1].to(dtype=torch.long)
+    for _ in range(64):
+        prev = labels.clone()
+        merged = torch.minimum(labels[src], labels[dst])
+        labels.scatter_reduce_(0, src, merged, reduce="amin")
+        labels.scatter_reduce_(0, dst, merged, reduce="amin")
+        labels = torch.minimum(labels, labels[labels])
+        labels = torch.minimum(labels, labels[labels])
+        if bool(torch.equal(labels, prev)):
+            break
+    return labels
+
+
+def _pack_components(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    *,
+    base_sep: float,
+) -> torch.Tensor:
+    """Shelf-pack non-giant components below the giant component.
+
+    Mirrors the graphviz pack behavior: the giant component keeps its layout
+    while every smaller component (including singletons) is moved into
+    deterministic rows below the giant bounding box instead of being flung
+    outward by the global far-field repulsion.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Finest positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Finest undirected edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    base_sep : float
+        Target separation used as packing padding.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed positions with shape ``[N, 2]``.
+    """
+    if int(num_nodes) <= 1:
+        return pos
+    labels = _connected_component_labels(edge_index, int(num_nodes))
+    uniq, inverse, counts = torch.unique(labels, return_inverse=True, return_counts=True)
+    if int(uniq.numel()) <= 1:
+        return pos
+    comp_count = int(uniq.numel())
+    finite_pos = pos.detach().to(dtype=torch.float32)
+    lo = torch.full((comp_count, 2), float("inf"), dtype=torch.float32)
+    hi = torch.full((comp_count, 2), float("-inf"), dtype=torch.float32)
+    index2 = inverse.unsqueeze(1).expand(-1, 2)
+    lo.scatter_reduce_(0, index2, finite_pos, reduce="amin")
+    hi.scatter_reduce_(0, index2, finite_pos, reduce="amax")
+    giant = int(torch.argmax(counts).item())
+    pad = max(1.0, float(base_sep))
+    widths = (hi[:, 0] - lo[:, 0]).clamp_min(pad).tolist()
+    heights = (hi[:, 1] - lo[:, 1]).clamp_min(pad).tolist()
+    lo_list = lo.tolist()
+    order = sorted(
+        (index for index in range(comp_count) if index != giant),
+        key=lambda index: (-heights[index], index),
+    )
+    strip_width = max(
+        widths[giant],
+        math.sqrt(sum((widths[i] + pad) * (heights[i] + pad) for i in order)),
+    )
+    offset_rows = [[0.0, 0.0] for _ in range(comp_count)]
+    cursor_x = 0.0
+    cursor_y = lo_list[giant][1] - 2.0 * pad
+    row_height = 0.0
+    origin_x = lo_list[giant][0]
+    for index in order:
+        w = widths[index]
+        h = heights[index]
+        if cursor_x > 0.0 and cursor_x + w > strip_width:
+            cursor_x = 0.0
+            cursor_y -= row_height + pad
+            row_height = 0.0
+        offset_rows[index][0] = origin_x + cursor_x - lo_list[index][0]
+        offset_rows[index][1] = (cursor_y - h) - lo_list[index][1]
+        cursor_x += w + pad
+        row_height = max(row_height, h)
+    offsets = torch.tensor(offset_rows, dtype=torch.float32)
+    return finite_pos + offsets[inverse]
+
+
+def _expand_for_prolongation(
+    pos: torch.Tensor,
+    *,
+    fine_num_nodes: int,
+    coarse_num_nodes: int,
+    expand_gain: float,
+) -> torch.Tensor:
+    """Expand coarse positions before prolongation to preserve density.
+
+    The fine level carries ``fine_num_nodes / coarse_num_nodes`` more nodes
+    than the coarse level, so the drawing area must grow by the same factor
+    (linear scale ``sqrt(ratio)``) or every prolongation collapses siblings
+    onto their parents (the FM3 multilevel scale-up step).
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Coarse positions with shape ``[N_coarse, 2]``.
+    fine_num_nodes : int
+        Node count at the fine side of the transition.
+    coarse_num_nodes : int
+        Node count at the coarse side of the transition.
+    expand_gain : float
+        User multiplier on the density-preserving expansion factor.
+
+    Returns
+    -------
+    torch.Tensor
+        Expanded coarse positions with shape ``[N_coarse, 2]``.
+    """
+    if pos.shape[0] <= 1:
+        return pos
+    ratio = float(fine_num_nodes) / float(max(1, coarse_num_nodes))
+    scale = math.sqrt(max(1.0, ratio)) * float(expand_gain)
+    scale = min(max(scale, 1.0), 4.0)
+    center = pos.mean(dim=0, keepdim=True)
+    return center + (pos - center) * scale
 
 
 def _target_separation(config: LayoutConfig, node_sizes: torch.Tensor) -> float:

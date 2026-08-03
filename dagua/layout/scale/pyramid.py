@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 _EPS = 1.0e-6
+_MAX_FULL_GATHER_CELLS = 128
 
 
 @dataclass(frozen=True)
@@ -129,8 +130,14 @@ def far_field_repulsion_force(
     strength: float = 1.0,
     softening: float = 1.0,
     max_displacement: float = 25.0,
+    level_stride: int = 1,
 ) -> torch.Tensor:
     """Return grid-pyramid repulsion displacement without autograd tracking.
+
+    Each node gathers a 3x3 cell window at the finest level for near-field
+    repulsion. Every coarser gathered level contributes only the cells that
+    lie fully outside the finer gathered window (no double counting), and the
+    coarsest level gathers the full grid so all far mass is felt globally.
 
     Parameters
     ----------
@@ -141,9 +148,13 @@ def far_field_repulsion_force(
     strength : float, default=1.0
         Repulsion multiplier.
     softening : float, default=1.0
-        Distance softening in layout units.
+        Per-pair distance softening in layout units.
     max_displacement : float, default=25.0
         Per-node displacement norm cap.
+    level_stride : int, default=1
+        Gather every ``level_stride``-th level (always including the finest
+        and coarsest); skipped mass is simply counted at the next-coarser
+        gathered level.
 
     Returns
     -------
@@ -153,11 +164,24 @@ def far_field_repulsion_force(
     with torch.no_grad():
         work_pos = pos.detach().to(dtype=torch.float32)
         force = torch.zeros_like(work_pos)
-        for level_index, level in enumerate(pyramid.levels):
-            level_force = _level_repulsion(work_pos, level)
-            force = force + level_force / float(2**level_index)
+        soft2 = float(softening) * float(softening)
+        window: Optional[tuple[torch.Tensor, torch.Tensor]] = None
+        last = len(pyramid.levels) - 1
+        stride = max(1, int(level_stride))
+        selected = sorted(set(range(0, last + 1, stride)) | {last})
+        for level_index in selected:
+            level = pyramid.levels[level_index]
+            full = level_index == last and int(level.mass.numel()) <= _MAX_FULL_GATHER_CELLS
+            level_force, window = _level_repulsion(
+                work_pos,
+                level,
+                soft2=soft2,
+                exclude_window=window,
+                gather_full=full,
+            )
+            force = force + level_force
         force = force * float(strength)
-        norm = torch.linalg.norm(force, dim=1, keepdim=True).clamp_min(float(softening))
+        norm = torch.linalg.norm(force, dim=1, keepdim=True).clamp_min(_EPS)
         capped = force * torch.clamp(float(max_displacement) / norm, max=1.0)
         return capped.to(device=pos.device, dtype=torch.float32)
 
@@ -314,8 +338,15 @@ def _pool_level(level: GridLevel) -> GridLevel:
     )
 
 
-def _level_repulsion(pos: torch.Tensor, level: GridLevel) -> torch.Tensor:
-    """Gather 3x3 cell repulsion for every node at one pyramid level.
+def _level_repulsion(
+    pos: torch.Tensor,
+    level: GridLevel,
+    *,
+    soft2: float = _EPS,
+    exclude_window: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    gather_full: bool = False,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    """Gather cell repulsion for every node at one pyramid level.
 
     Parameters
     ----------
@@ -323,34 +354,68 @@ def _level_repulsion(pos: torch.Tensor, level: GridLevel) -> torch.Tensor:
         Positions with shape ``[N, 2]``.
     level : GridLevel
         Pyramid level.
+    soft2 : float, default=_EPS
+        Squared per-pair distance softening.
+    exclude_window : tuple[torch.Tensor, torch.Tensor], optional
+        Per-node world-coordinate ``(lo, hi)`` boxes already covered by a
+        finer level; cells fully inside are skipped.
+    gather_full : bool, default=False
+        Gather every grid cell instead of the 3x3 window (coarsest level).
 
     Returns
     -------
-    torch.Tensor
-        Level displacement with shape ``[N, 2]``.
+    tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]
+        Level displacement with shape ``[N, 2]`` and this level's per-node
+        covered window boxes for the next-coarser exclusion.
     """
     height, width = level.mass.shape
-    ij = torch.floor(
-        (pos - level.origin.to(pos.device)) / level.cell_size.to(pos.device).clamp_min(_EPS)
-    ).to(dtype=torch.long)
+    origin = level.origin.to(pos.device)
+    cell_size = level.cell_size.to(pos.device).clamp_min(_EPS)
+    ij = torch.floor((pos - origin) / cell_size).to(dtype=torch.long)
     base_x = torch.clamp(ij[:, 0], 0, width - 1)
     base_y = torch.clamp(ij[:, 1], 0, height - 1)
     force = torch.zeros_like(pos)
     mass = level.mass.to(device=pos.device)
     centroid = level.centroid.to(device=pos.device)
-    for dy in (-1, 0, 1):
-        y = torch.clamp(base_y + dy, 0, height - 1)
-        for dx in (-1, 0, 1):
-            x = torch.clamp(base_x + dx, 0, width - 1)
-            cell_mass = mass[y, x].unsqueeze(1)
-            cell_centroid = centroid[y, x]
-            delta = pos - cell_centroid
-            dist2 = (delta * delta).sum(dim=1, keepdim=True).clamp_min(_EPS)
-            # Remove a node's own cell contribution only when the aggregate is
-            # a singleton-like self hit; this avoids exact zero self-forces.
-            contribution = cell_mass * delta / dist2
-            force = force + contribution
-    return force
+
+    def _accumulate(x: torch.Tensor, y: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        xc = torch.clamp(x, 0, width - 1)
+        yc = torch.clamp(y, 0, height - 1)
+        cell_mass = mass[yc, xc]
+        keep = valid & (cell_mass > 0.0)
+        if exclude_window is not None:
+            cell_lo = origin + torch.stack((xc, yc), dim=1).to(dtype=pos.dtype) * cell_size
+            cell_hi = cell_lo + cell_size
+            lo, hi = exclude_window
+            inside = (
+                (cell_lo[:, 0] >= lo[:, 0] - _EPS)
+                & (cell_lo[:, 1] >= lo[:, 1] - _EPS)
+                & (cell_hi[:, 0] <= hi[:, 0] + _EPS)
+                & (cell_hi[:, 1] <= hi[:, 1] + _EPS)
+            )
+            keep = keep & ~inside
+        delta = pos - centroid[yc, xc]
+        dist2 = (delta * delta).sum(dim=1, keepdim=True) + float(soft2)
+        contribution = cell_mass.unsqueeze(1) * delta / dist2
+        return torch.where(keep.unsqueeze(1), contribution, torch.zeros_like(contribution))
+
+    if gather_full:
+        occupied = torch.nonzero(mass > 0.0, as_tuple=False).tolist()
+        valid_all = torch.ones_like(base_x, dtype=torch.bool)
+        for gy, gx in occupied:
+            x = torch.full_like(base_x, int(gx))
+            y = torch.full_like(base_y, int(gy))
+            force = force + _accumulate(x, y, valid_all)
+    else:
+        for dy in (-1, 0, 1):
+            y = base_y + dy
+            for dx in (-1, 0, 1):
+                x = base_x + dx
+                valid = (x >= 0) & (x < width) & (y >= 0) & (y < height)
+                force = force + _accumulate(x, y, valid)
+    window_lo = origin + (torch.stack((base_x, base_y), dim=1) - 1).to(dtype=pos.dtype) * cell_size
+    window_hi = window_lo + 3.0 * cell_size
+    return force, (window_lo, window_hi)
 
 
 def _cell_centers(
