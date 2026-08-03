@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from importlib import import_module
 from typing import List, Tuple
 
 import pytest
@@ -182,25 +181,8 @@ def test_below_gate_default_never_constructs_sketch(monkeypatch: pytest.MonkeyPa
     assert not hasattr(graph, "_dagua_scale_route_decision")
 
 
-def test_above_gate_layers_dispatches_to_legacy_multilevel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Above-gate acyclic layouts route through the temporary LAYERS fallback."""
-    calls = {"multilevel": 0}
-
-    def fake_multilevel_layout(
-        graph: DaguaGraph,
-        config: LayoutConfig,
-        trace: object = None,
-    ) -> torch.Tensor:
-        """Return deterministic finite positions for the routed graph."""
-        del config, trace
-        calls["multilevel"] += 1
-        return torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
-
-    multilevel_module = import_module("dagua.layout.multilevel")
-    monkeypatch.setattr(multilevel_module, "multilevel_layout", fake_multilevel_layout)
-
+def test_above_gate_layers_dispatches_to_layers_strategy() -> None:
+    """Above-gate acyclic layouts route through the tensor-native LAYERS path."""
     graph = _wide_layered_dag(4)
     pos = dagua.layout(
         graph,
@@ -213,12 +195,12 @@ def test_above_gate_layers_dispatches_to_legacy_multilevel(
         ),
     )
 
-    assert calls == {"multilevel": 1}
     assert torch.isfinite(pos).all()
     assert pos.shape == (12, 2)
     metadata = getattr(graph, "_dagua_scale_route_decision")
     assert metadata["decision"]["strategy"] == "LAYERS"
     assert metadata["decision"]["reason_codes"] == ["acyclic", "depth_cap_passed"]
+    assert metadata["layers"]["num_layers"] == 3
 
 
 def test_above_gate_field_dispatches_to_field_strategy() -> None:

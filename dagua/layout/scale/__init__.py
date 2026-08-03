@@ -1,5 +1,6 @@
 """Scale-layout substrate helpers."""
 
+from dagua.layout.scale.checkpoint import ScaleCheckpointManager
 from dagua.layout.scale.coarsen import ScaleHierarchy, build_scale_hierarchy, prolong_positions
 from dagua.layout.scale.coarsest import anytime_native_coarsest
 from dagua.layout.scale.pyramid import build_grid_pyramid, far_field_repulsion_force
@@ -17,4 +18,5 @@ __all__ = [
     "prolong_positions",
     "route",
     "ScaleHierarchy",
+    "ScaleCheckpointManager",
 ]
