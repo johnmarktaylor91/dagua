@@ -1554,10 +1554,12 @@ def _layout_scale_default(
             field_metadata["field"] = getattr(scale_config, "_dagua_field_telemetry", {})
             _record_scale_route_metadata(graph, field_metadata)
         else:
-            from dagua.layout.multilevel import multilevel_layout
+            from dagua.layout.scale.strategies.layers import layout_layers
 
-            scale_config.algorithm = None
-            pos = multilevel_layout(graph, scale_config, trace=trace)
+            pos = layout_layers(graph, scale_config, sketch, trace=trace)
+            layers_metadata = dict(metadata)
+            layers_metadata["layers"] = getattr(scale_config, "_dagua_layers_telemetry", {})
+            _record_scale_route_metadata(graph, layers_metadata)
         graph.cache_layout(pos)
         return pos.to(dtype=torch.float32)
     finally:
