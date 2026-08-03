@@ -40,6 +40,10 @@ _DEFAULT_PYRAMID_LEVELS = 10
 _DEFAULT_STREAMING_NODE_THRESHOLD = 50_000_000
 _DEFAULT_STREAMING_CHUNK_NODES = 2_000_000
 _DEFAULT_STREAMING_EDGE_CHUNK = 5_000_000
+_FIELD_VRAM_BUDGET_FRACTION = 0.70
+_FIELD_RESIDENT_HEADROOM_FACTOR = 3.5
+_FIELD_STABLE_ARGSORT_SCRATCH_FACTOR = 2
+_FIELD_SORTED_SPRING_GATHER_SCATTER_BYTES_PER_EDGE = 80
 
 
 @dataclass(frozen=True)
@@ -631,7 +635,10 @@ def _should_use_streaming_field(graph: Any, config: LayoutConfig) -> bool:
     -------
     bool
         ``True`` when explicitly enabled, the configured node threshold is
-        crossed, or the ordinary CUDA refine working set exceeds 70% VRAM.
+        crossed on CPU, or the ordinary CUDA refine working set exceeds 70%
+        VRAM. The CUDA check is evaluated before the node threshold so
+        edge-heavy graphs stream as the primary mode instead of first trying a
+        resident sorted spring pass.
     """
     params = config.algorithm_params
     n = int(graph.num_nodes)
@@ -641,16 +648,18 @@ def _should_use_streaming_field(graph: Any, config: LayoutConfig) -> bool:
         return True
     if bool(params.get("field_allow_streaming_fallback", False)) and n >= threshold:
         return True
-    if n < threshold:
-        return False
     if not str(config.device).startswith("cuda") or not torch.cuda.is_available():
+        if n < threshold:
+            return False
         return bool(params.get("field_streaming_cpu_above_threshold", True))
     estimated_peak = _estimate_refine_peak_bytes(n, e)
     try:
         free_bytes, _total_bytes = torch.cuda.mem_get_info()
     except RuntimeError:
         return True
-    return estimated_peak > int(free_bytes * 0.70)
+    if estimated_peak > int(free_bytes * _FIELD_VRAM_BUDGET_FRACTION):
+        return True
+    return False
 
 
 def _streaming_initial_positions(num_nodes: int, *, base_sep: float, seed: int) -> torch.Tensor:
@@ -1379,9 +1388,69 @@ def _choose_refine_device(num_nodes: int, num_edges: int, requested_device: str)
         free_bytes, _total_bytes = torch.cuda.mem_get_info()
     except RuntimeError:
         return "cpu"
-    if estimated_peak > int(free_bytes * 0.70):
+    if estimated_peak > int(free_bytes * _FIELD_VRAM_BUDGET_FRACTION):
         return "cpu"
     return "cuda"
+
+
+def _estimate_edge_spring_sort_workspace_bytes(num_edges: int) -> int:
+    """Estimate CUDA stable-argsort bytes in FIELD's sorted spring pass.
+
+    Parameters
+    ----------
+    num_edges : int
+        Level edge count. The sorted reduction sorts ``2 * E`` endpoint node
+        ids because each edge contributes to both source and destination.
+
+    Returns
+    -------
+    int
+        Bytes for the argsort permutation plus conservative stable-sort
+        scratch. The input key tensor is counted by
+        ``_estimate_sorted_edge_spring_workspace_bytes()``.
+    """
+    directed_endpoints = max(0, int(num_edges)) * 2
+    endpoint_key_bytes = directed_endpoints * 8
+    permutation_bytes = directed_endpoints * 8
+    scratch_bytes = endpoint_key_bytes * _FIELD_STABLE_ARGSORT_SCRATCH_FACTOR
+    return int(permutation_bytes + scratch_bytes)
+
+
+def _estimate_sorted_edge_spring_workspace_bytes(num_nodes: int, num_edges: int) -> int:
+    """Estimate CUDA temporaries for FIELD's sorted edge-spring reduction.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Level node count.
+    num_edges : int
+        Level edge count.
+
+    Returns
+    -------
+    int
+        Peak bytes for the global ``2E`` endpoint/contribution tensors and
+        stable argsort workspace used by ``_edge_spring_displacement_sorted``.
+
+    Notes
+    -----
+    The resident FIELD path is deterministic on CUDA because it sorts edge
+    contributions by endpoint before segment reductions. At billion scale that
+    sort has a peak workspace proportional to ``E``; omitting it lets the
+    selector launch a resident pass that then OOMs inside ``argsort``.
+    The gather/scatter term covers source/destination position gathers, force
+    staging, sorted contribution gathers, and segment-reduction staging around
+    the stable sort.
+    """
+    del num_nodes
+    directed_endpoints = max(0, int(num_edges)) * 2
+    endpoint_key_bytes = directed_endpoints * 8
+    contribution_bytes = directed_endpoints * 2 * 4
+    sort_workspace_bytes = _estimate_edge_spring_sort_workspace_bytes(num_edges)
+    gather_scatter_bytes = int(num_edges) * _FIELD_SORTED_SPRING_GATHER_SCATTER_BYTES_PER_EDGE
+    return int(
+        endpoint_key_bytes + contribution_bytes + sort_workspace_bytes + gather_scatter_bytes
+    )
 
 
 def _estimate_refine_peak_bytes(num_nodes: int, num_edges: int) -> int:
@@ -1398,13 +1467,19 @@ def _estimate_refine_peak_bytes(num_nodes: int, num_edges: int) -> int:
     -------
     int
         Conservative bytes for positions, displacement, sizes, masses, copied
-        edge tensors, weights, and chunk-local spring buffers.
+        edge tensors, weights, chunk-local spring buffers, and the global
+        sorted edge-spring workspace used by the CUDA deterministic path.
     """
     node_bytes = int(num_nodes) * (2 * 4 + 2 * 4 + 2 * 4 + 4)
     edge_bytes = int(num_edges) * (2 * 8 + 4)
     chunk_edges = min(int(num_edges), _DEFAULT_EDGE_CHUNK)
     chunk_bytes = chunk_edges * (2 * 8 + 2 * 2 * 4 + 4 + 2 * 4)
-    return int((node_bytes + edge_bytes + chunk_bytes) * 1.5)
+    resident_bytes = int((node_bytes + edge_bytes + chunk_bytes) * _FIELD_RESIDENT_HEADROOM_FACTOR)
+    sorted_spring_workspace_bytes = _estimate_sorted_edge_spring_workspace_bytes(
+        int(num_nodes),
+        int(num_edges),
+    )
+    return int(resident_bytes + sorted_spring_workspace_bytes)
 
 
 def _refine_steps_for_level(

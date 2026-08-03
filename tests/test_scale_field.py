@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from types import SimpleNamespace
+from typing import Any, List, Tuple
 
 import pytest
 import torch
@@ -13,7 +14,15 @@ from dagua.graph import DaguaGraph
 from dagua.layout.scale import coarsen as scale_coarsen
 from dagua.layout.scale.coarsen import build_scale_hierarchy, prolong_positions
 from dagua.layout.scale.pyramid import build_grid_pyramid, far_field_repulsion_force
-from dagua.layout.scale.strategies.field import _streaming_initial_positions_from_edges
+from dagua.layout.scale.strategies import field as field_strategy
+from dagua.layout.scale.strategies.field import (
+    _estimate_edge_spring_sort_workspace_bytes,
+    _estimate_refine_peak_bytes,
+    _should_use_streaming_field,
+    _streaming_initial_positions_from_edges,
+)
+
+_L40_48GB_BYTES = 48_000_000_000
 
 
 def _graph_from_edges(edges: List[Tuple[int, int]], num_nodes: int) -> DaguaGraph:
@@ -37,6 +46,105 @@ def _graph_from_edges(edges: List[Tuple[int, int]], num_nodes: int) -> DaguaGrap
         else torch.empty((2, 0), dtype=torch.long)
     )
     return DaguaGraph.from_edge_index(edge_index, num_nodes=num_nodes)
+
+
+def _shape_only_scale_graph(num_nodes: int, num_edges: int) -> Any:
+    """Build a graph stub that exposes only selector-required shape fields.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes to report.
+    num_edges : int
+        Number of graph edges to report.
+
+    Returns
+    -------
+    Any
+        Lightweight graph stub with ``num_nodes`` and ``edge_index.shape``.
+    """
+    return SimpleNamespace(
+        num_nodes=int(num_nodes),
+        edge_index=SimpleNamespace(shape=(2, int(num_edges))),
+    )
+
+
+def _cuda_field_config() -> LayoutConfig:
+    """Return a FIELD config that requests CUDA selection.
+
+    Returns
+    -------
+    LayoutConfig
+        Configuration with a CUDA device string and deterministic seed.
+    """
+    return LayoutConfig(device="cuda", seed=42)
+
+
+def test_field_refine_peak_estimate_includes_stable_sort_workspace() -> None:
+    """FIELD peak VRAM model includes the missing sorted spring argsort workspace."""
+    edge_count = 600_000_000
+
+    sort_workspace = _estimate_edge_spring_sort_workspace_bytes(edge_count)
+    peak = _estimate_refine_peak_bytes(300_000_000, edge_count)
+
+    assert sort_workspace == 28_800_000_000
+    assert peak >= sort_workspace
+
+
+def test_field_auto_selector_streams_large_cuda_levels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large FIELD graphs stream immediately on a 48GB L40 budget."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (_L40_48GB_BYTES, _L40_48GB_BYTES))
+    config = _cuda_field_config()
+
+    assert _should_use_streaming_field(_shape_only_scale_graph(300_000_000, 600_000_000), config)
+    assert _should_use_streaming_field(
+        _shape_only_scale_graph(1_000_000_000, 3_000_000_000),
+        config,
+    )
+
+
+def test_field_auto_selector_keeps_measured_fit_cuda_levels_resident(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured-fit 10M and 100M FIELD rungs keep the resident CUDA path."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (_L40_48GB_BYTES, _L40_48GB_BYTES))
+    config = _cuda_field_config()
+
+    assert not _should_use_streaming_field(_shape_only_scale_graph(10_000_000, 10_000_000), config)
+    assert not _should_use_streaming_field(
+        _shape_only_scale_graph(100_000_000, 100_000_000),
+        config,
+    )
+
+
+def test_field_auto_selector_uses_vram_bound_below_node_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge-heavy FIELD levels stream from a VRAM-derived bound, not a bare N gate."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (_L40_48GB_BYTES, _L40_48GB_BYTES))
+    config = LayoutConfig(
+        device="cuda",
+        algorithm_params={"field_streaming_node_threshold": 1_000_000_000},
+        seed=42,
+    )
+
+    assert _should_use_streaming_field(_shape_only_scale_graph(300_000_000, 600_000_000), config)
+
+
+def test_field_refine_device_uses_corrected_peak_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resident CUDA refinement is rejected before launching the sorted spring argsort."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (_L40_48GB_BYTES, _L40_48GB_BYTES))
+
+    assert field_strategy._choose_refine_device(300_000_000, 600_000_000, "cuda") == "cpu"
+    assert field_strategy._choose_refine_device(10_000_000, 10_000_000, "cuda") == "cuda"
 
 
 def _cyclic_fixture(num_nodes: int = 24) -> DaguaGraph:
