@@ -1420,6 +1420,115 @@ def _project_hard_constraints_from_flex_data(pos: torch.Tensor, flex_data: dict[
         )
 
 
+def _edge_count_for_scale_gate(graph: Any) -> int:
+    """Return the directed edge count without touching layout-prep state.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing ``edge_index``.
+
+    Returns
+    -------
+    int
+        Number of directed edge entries.
+    """
+    edge_index = getattr(graph, "edge_index", None)
+    if edge_index is None or edge_index.numel() == 0:
+        return 0
+    return int(edge_index.shape[1])
+
+
+def _record_scale_route_metadata(graph: Any, metadata: dict[str, object]) -> None:
+    """Attach scale-route metadata to graph-like results.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object that can accept dynamic attributes.
+    metadata : dict[str, object]
+        Route decision and sketch summary.
+
+    Returns
+    -------
+    None
+        Metadata is stored best-effort for callers and tests.
+    """
+    try:
+        setattr(graph, "_dagua_scale_route_decision", metadata)
+    except Exception:
+        return
+
+
+def _layout_scale_default(
+    graph: Any,
+    config: LayoutConfig,
+    *,
+    trace: Any = None,
+) -> Optional[torch.Tensor]:
+    """Dispatch an above-gate default layout through the scale router.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing the Dagua layout interface.
+    config : LayoutConfig
+        Default-path config that has already been remapped to
+        ``algorithm="dagua_native"``.
+    trace : Any, optional
+        Optional trace sink forwarded to the temporary legacy scale fallback.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Completed scale layout when the router selects a scale strategy.
+        ``None`` means the explicit override selected ``NATIVE`` and the caller
+        should continue into the existing native pipeline.
+    """
+    from dagua.layout.multilevel import multilevel_layout
+    from dagua.layout.scale.budget import BudgetGuard
+    from dagua.layout.scale.router import ScaleStrategy, depth_cap_from_config, route
+    from dagua.layout.scale.sketch import TopologySketch, estimate_topology_peak_bytes
+
+    n = int(graph.num_nodes)
+    e = _edge_count_for_scale_gate(graph)
+    guard = BudgetGuard(device="cpu")
+    guard.check("scale_sketch", estimate_topology_peak_bytes(n, e))
+    sketch = TopologySketch.from_edge_index(
+        graph.edge_index,
+        n,
+        depth_cap=depth_cap_from_config(config),
+    )
+    decision = route(sketch, config)
+    metadata = {
+        "decision": decision.to_dict(),
+        "sketch": sketch.to_dict(),
+    }
+    if decision.strategy == ScaleStrategy.FIELD:
+        metadata["temporary_fallback"] = "legacy_multilevel"
+        metadata["todo"] = "TODO(M2): replace FIELD fallback with family-agnostic field solver."
+    _record_scale_route_metadata(graph, metadata)
+    if config.verbose:
+        print(
+            f"[dagua] Scale route: {decision.strategy.value} ({', '.join(decision.reason_codes)})",
+            flush=True,
+        )
+    if decision.strategy == ScaleStrategy.NATIVE:
+        return None
+
+    guard.check("scale_dispatch", sketch.peak_bytes)
+    graph.compute_node_sizes()
+    graph._prepare_for_layout()
+    try:
+        scale_config = copy.copy(config)
+        scale_config.algorithm = None
+        pos = multilevel_layout(graph, scale_config, trace=trace)
+        graph.cache_layout(pos)
+        return pos.to(dtype=torch.float32)
+    finally:
+        graph._restore_after_layout()
+
+
 def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None) -> torch.Tensor:
     """Compute layout positions for all nodes.
 
@@ -1495,6 +1604,18 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         graph_direction = getattr(graph, "direction", None)
         if config.direction == "TB" and graph_direction in {"TB", "BT", "LR", "RL"}:
             config.direction = graph_direction
+
+    if remapped_from_default:
+        from dagua.layout.scale.router import should_enter_scale_gate
+
+        if should_enter_scale_gate(
+            int(graph.num_nodes),
+            _edge_count_for_scale_gate(graph),
+            config,
+        ):
+            scale_pos = _layout_scale_default(graph, config, trace=trace)
+            if scale_pos is not None:
+                return scale_pos
 
     if config.algorithm is not None:
         import inspect
