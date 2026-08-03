@@ -184,6 +184,7 @@ def _run_budgeted_native(
     seed: int,
     fallback_pos: torch.Tensor,
     fallback_score: Tuple[Tuple[int, float], float],
+    native_max_nodes: int = _NATIVE_ATTEMPT_MAX_NODES,
 ) -> Optional[torch.Tensor]:
     """Run native with scale-only hard-budget metadata installed.
 
@@ -201,6 +202,8 @@ def _run_budgeted_native(
         Stress-SGD fallback positions with shape ``[N, 2]``.
     fallback_score : tuple[tuple[int, float], float]
         Frozen-ruler score for ``fallback_pos``.
+    native_max_nodes : int, default=_NATIVE_ATTEMPT_MAX_NODES
+        Scale-private admission cap for native attempts.
 
     Returns
     -------
@@ -210,7 +213,7 @@ def _run_budgeted_native(
         stress fallback.
     """
     remaining_s = max(0.001, float(deadline_s) - time.perf_counter())
-    if int(problem.num_nodes) > _NATIVE_ATTEMPT_MAX_NODES or remaining_s <= _RETURN_RESERVE_S:
+    if int(problem.num_nodes) > int(native_max_nodes) or remaining_s <= _RETURN_RESERVE_S:
         return None
 
     native_config = copy.copy(config)
@@ -296,6 +299,9 @@ def anytime_native_coarsest(
     deadline_s = started + float(time_budget_s)
     fallback_pos = _stress_sgd_fallback(cpu_problem, int(seed))
     fallback_score = _score_v3_position(cpu_problem, fallback_pos)
+    native_max_nodes = int(
+        config.algorithm_params.get("scale_native_max_nodes", _NATIVE_ATTEMPT_MAX_NODES)
+    )
     native_pos = _run_budgeted_native(
         cpu_problem,
         config,
@@ -303,6 +309,7 @@ def anytime_native_coarsest(
         seed=int(seed),
         fallback_pos=fallback_pos,
         fallback_score=fallback_score,
+        native_max_nodes=native_max_nodes,
     )
     if native_pos is None:
         return fallback_pos
