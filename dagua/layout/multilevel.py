@@ -239,7 +239,7 @@ def _resolve_multilevel_temp_root(config: LayoutConfig, graph: Any) -> Optional[
     )
     if raw_root in (None, ""):
         return None
-    root = Path(raw_root).expanduser()
+    root = Path(str(raw_root)).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -2311,9 +2311,9 @@ def _polish_layered_positions(
     if pos.numel() == 0 or layer_assignments.numel() == 0:
         return pos
     original_device = pos.device
-    work = pos.detach().to(device="cpu", dtype=torch.float32).clone()
+    work = pos.detach().to(device="cpu", dtype=torch.float64).clone()
     sizes = _ensure_node_sizes_2d(node_sizes.detach().to(device="cpu"), work.shape[0]).to(
-        dtype=torch.float32
+        dtype=torch.float64
     )
     layers = layer_assignments.detach().to(device="cpu")
     if layer_index is None or layer_index.node_to_layer.shape[0] != work.shape[0]:
@@ -2557,8 +2557,11 @@ def multilevel_layout(
                 if extra_levels:
                     levels.extend(extra_levels)
                     n_ext = len(extra_levels)
-                    coarsest = levels[-1].num_nodes
-                    _vlog(f"  Extended hierarchy by {n_ext} levels -> {coarsest:,} coarsest nodes")
+                    coarsest_nodes = levels[-1].num_nodes
+                    _vlog(
+                        f"  Extended hierarchy by {n_ext} levels -> "
+                        f"{coarsest_nodes:,} coarsest nodes"
+                    )
         else:
             _t_hier = _time.perf_counter()
             # Capture references then free the graph object's copies.

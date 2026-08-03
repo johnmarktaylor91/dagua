@@ -13,6 +13,7 @@ from dagua.graph import DaguaGraph
 from dagua.layout.scale import coarsen as scale_coarsen
 from dagua.layout.scale.coarsen import build_scale_hierarchy, prolong_positions
 from dagua.layout.scale.pyramid import build_grid_pyramid, far_field_repulsion_force
+from dagua.layout.scale.strategies.field import _streaming_initial_positions_from_edges
 
 
 def _graph_from_edges(edges: List[Tuple[int, int]], num_nodes: int) -> DaguaGraph:
@@ -123,8 +124,8 @@ def test_field_dispatch_completes_and_is_byte_deterministic() -> None:
     assert metadata["field"]["coarsest_nodes"] <= 8
 
 
-def test_field_streaming_threshold_does_not_bypass_hierarchy_by_default() -> None:
-    """FIELD streaming threshold alone does not bypass the real hierarchy."""
+def test_field_streaming_threshold_auto_selects_streaming_regime() -> None:
+    """FIELD streams through the real hierarchy when the threshold is crossed."""
     config = LayoutConfig(
         algorithm_params={
             "scale_node_gate": 10,
@@ -143,18 +144,20 @@ def test_field_streaming_threshold_does_not_bypass_hierarchy_by_default() -> Non
 
     assert torch.isfinite(pos).all()
     metadata = getattr(graph, "_dagua_scale_route_decision")
-    assert metadata["field"]["coarsest_solver"] != "streaming"
+    assert str(metadata["field"]["coarsest_solver"]).startswith("streaming_hierarchy_")
     assert metadata["field"]["levels"] > 0
+    assert metadata["field"]["coarsest_nodes"] <= 8
 
 
 def test_field_streaming_branch_is_explicit_fallback_only() -> None:
-    """FIELD streaming rung is deterministic only when explicitly allowed."""
+    """FIELD streaming hierarchy is deterministic only when explicitly allowed."""
     config = LayoutConfig(
         algorithm_params={
             "scale_node_gate": 10,
             "scale_edge_gate": 10_000,
             "field_streaming_node_threshold": 16,
             "field_allow_streaming_fallback": True,
+            "field_coarsest_target": 8,
             "field_streaming_refine_steps": 0,
         },
         seed=42,
@@ -168,7 +171,33 @@ def test_field_streaming_branch_is_explicit_fallback_only() -> None:
     assert torch.isfinite(first).all()
     assert torch.equal(first, second)
     metadata = getattr(first_graph, "_dagua_scale_route_decision")
-    assert metadata["field"]["coarsest_solver"] == "streaming"
+    assert str(metadata["field"]["coarsest_solver"]).startswith("streaming_hierarchy_")
+    assert metadata["field"]["levels"] > 0
+
+
+def test_field_streaming_initializer_is_graph_informed_not_spiral() -> None:
+    """Streaming FIELD initialization uses edge neighborhoods, not radial node order."""
+    graph = _cyclic_fixture(32)
+
+    first = _streaming_initial_positions_from_edges(
+        graph.edge_index,
+        graph.num_nodes,
+        base_sep=10.0,
+        seed=42,
+        chunk_size=8,
+    )
+    second = _streaming_initial_positions_from_edges(
+        graph.edge_index,
+        graph.num_nodes,
+        base_sep=10.0,
+        seed=42,
+        chunk_size=8,
+    )
+    radius = torch.linalg.norm(first, dim=1)
+
+    assert torch.equal(first, second)
+    assert torch.isfinite(first).all()
+    assert not bool(torch.all(radius[1:] >= radius[:-1]).item())
 
 
 def test_scale_hierarchy_uses_tensor_coarsening_without_large_adjacency(

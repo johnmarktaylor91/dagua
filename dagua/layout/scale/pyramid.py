@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 _EPS = 1.0e-6
 _MAX_FULL_GATHER_CELLS = 128
+_DEFAULT_STREAM_CHUNK_NODES = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,90 @@ def build_grid_pyramid(
     return GridPyramid(levels=levels, device_kind=work_pos.device.type)
 
 
+def build_grid_pyramid_streaming(
+    pos: torch.Tensor,
+    masses: Optional[torch.Tensor] = None,
+    *,
+    base_cell_size: float = 50.0,
+    max_cells_per_axis: int = 256,
+    max_levels: int = 6,
+    chunk_nodes: int = _DEFAULT_STREAM_CHUNK_NODES,
+) -> GridPyramid:
+    """Build a CPU grid pyramid without materializing per-node sort buffers.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        CPU position tensor with shape ``[N, 2]``.
+    masses : torch.Tensor, optional
+        CPU node masses with shape ``[N]``. Missing masses default to one.
+    base_cell_size : float, default=50.0
+        Desired finest cell size in layout units.
+    max_cells_per_axis : int, default=256
+        Per-axis grid cap for memory control.
+    max_levels : int, default=6
+        Maximum number of pooled levels.
+    chunk_nodes : int, default=2_000_000
+        Number of nodes processed per streaming chunk.
+
+    Returns
+    -------
+    GridPyramid
+        Fine-to-coarse density pyramid with CPU-resident tensors.
+
+    Notes
+    -----
+    The regular builder uses stable sorting to make CUDA reductions
+    deterministic. At 100M nodes those sort buffers dominate memory, so this
+    path uses CPU ``scatter_add_`` chunks against a bounded grid instead.
+    """
+    if pos.ndim != 2 or pos.shape[1] != 2:
+        raise ValueError("pos must have shape [N, 2].")
+    work_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    if masses is None:
+        work_mass: Optional[torch.Tensor] = None
+    else:
+        work_mass = masses.detach().to(device="cpu", dtype=torch.float32)
+        if work_mass.shape != (work_pos.shape[0],):
+            raise ValueError("masses must have shape [N].")
+    if work_pos.shape[0] == 0:
+        return build_grid_pyramid(
+            work_pos,
+            work_mass,
+            base_cell_size=base_cell_size,
+            max_cells_per_axis=max_cells_per_axis,
+            max_levels=max_levels,
+            force_cpu=True,
+        )
+
+    min_xy = work_pos.min(dim=0).values
+    max_xy = work_pos.max(dim=0).values
+    span = torch.clamp(max_xy - min_xy, min=float(base_cell_size))
+    desired = torch.clamp(
+        torch.ceil(span / max(float(base_cell_size), _EPS)).to(dtype=torch.long),
+        min=1,
+        max=max(1, int(max_cells_per_axis)),
+    )
+    cell_size = span / desired.to(dtype=torch.float32)
+    origin = min_xy - 0.5 * cell_size
+    fine = _build_grid_level_streaming(
+        work_pos,
+        work_mass,
+        origin=origin,
+        cell_size=cell_size,
+        shape=desired,
+        chunk_nodes=chunk_nodes,
+    )
+    levels = [fine]
+    current = fine
+    while len(levels) < max(1, int(max_levels)):
+        if current.mass.shape[0] <= 1 and current.mass.shape[1] <= 1:
+            break
+        current = _pool_level(current)
+        levels.append(current)
+    return GridPyramid(levels=levels, device_kind="cpu_streaming")
+
+
 def far_field_repulsion_force(
     pos: torch.Tensor,
     pyramid: GridPyramid,
@@ -244,6 +329,66 @@ def choose_pyramid_device(num_nodes: int, requested_device: str) -> str:
     return "cpu"
 
 
+def choose_streaming_chunk_device(
+    chunk_nodes: int,
+    requested_device: str,
+    *,
+    resident_pyramid_bytes: int = 0,
+) -> str:
+    """Choose the device for one CPU-resident streaming chunk.
+
+    Parameters
+    ----------
+    chunk_nodes : int
+        Number of positions processed in the chunk.
+    requested_device : str
+        Requested layout device.
+    resident_pyramid_bytes : int, default=0
+        Bytes needed to copy the small pyramid payload to the chunk device.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` when the chunk plus pyramid fit under 70% free VRAM,
+        otherwise ``"cpu"``.
+    """
+    if not str(requested_device).startswith("cuda") or not torch.cuda.is_available():
+        return "cpu"
+    estimated = _estimate_streaming_force_chunk_bytes(
+        int(chunk_nodes),
+        int(resident_pyramid_bytes),
+    )
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info()
+    except RuntimeError:
+        return "cpu"
+    if estimated > int(free_bytes * 0.70):
+        return "cpu"
+    return "cuda"
+
+
+def pyramid_tensor_bytes(pyramid: GridPyramid) -> int:
+    """Return resident tensor bytes for a grid pyramid.
+
+    Parameters
+    ----------
+    pyramid : GridPyramid
+        Density pyramid.
+
+    Returns
+    -------
+    int
+        Sum of tensor payload bytes across all levels.
+    """
+    total = 0
+    for level in pyramid.levels:
+        total += int(level.mass.numel() * level.mass.element_size())
+        total += int(level.centroid.numel() * level.centroid.element_size())
+        total += int(level.cell_size.numel() * level.cell_size.element_size())
+        total += int(level.origin.numel() * level.origin.element_size())
+    return total
+
+
 def _build_grid_level(
     pos: torch.Tensor,
     masses: torch.Tensor,
@@ -320,6 +465,73 @@ def _build_grid_level(
     )
 
 
+def _build_grid_level_streaming(
+    pos: torch.Tensor,
+    masses: Optional[torch.Tensor],
+    *,
+    origin: torch.Tensor,
+    cell_size: torch.Tensor,
+    shape: torch.Tensor,
+    chunk_nodes: int,
+) -> GridLevel:
+    """Scatter node masses and centroids into one grid using CPU chunks.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        CPU positions with shape ``[N, 2]``.
+    masses : torch.Tensor or None
+        Optional CPU masses with shape ``[N]``.
+    origin : torch.Tensor
+        Grid origin with shape ``[2]``.
+    cell_size : torch.Tensor
+        Cell size with shape ``[2]``.
+    shape : torch.Tensor
+        Integer ``[W, H]`` cell counts.
+    chunk_nodes : int
+        Maximum node rows per chunk.
+
+    Returns
+    -------
+    GridLevel
+        Scattered CPU grid level.
+    """
+    width = int(shape[0].item())
+    height = int(shape[1].item())
+    cell_count = width * height
+    flat_mass = torch.zeros((cell_count,), dtype=torch.float32)
+    flat_x = torch.zeros_like(flat_mass)
+    flat_y = torch.zeros_like(flat_mass)
+    chunk = max(1, int(chunk_nodes))
+    clamped_cell = cell_size.to(dtype=torch.float32).clamp_min(_EPS)
+    for start in range(0, int(pos.shape[0]), chunk):
+        end = min(int(pos.shape[0]), start + chunk)
+        pos_chunk = pos[start:end].to(dtype=torch.float32)
+        mass_chunk = (
+            torch.ones((end - start,), dtype=torch.float32)
+            if masses is None
+            else masses[start:end].to(dtype=torch.float32)
+        )
+        ij = torch.floor((pos_chunk - origin) / clamped_cell).to(dtype=torch.long)
+        x = torch.clamp(ij[:, 0], 0, width - 1)
+        y = torch.clamp(ij[:, 1], 0, height - 1)
+        cell_id = y * width + x
+        flat_mass.scatter_add_(0, cell_id, mass_chunk)
+        flat_x.scatter_add_(0, cell_id, mass_chunk * pos_chunk[:, 0])
+        flat_y.scatter_add_(0, cell_id, mass_chunk * pos_chunk[:, 1])
+    centroid = torch.stack((flat_x, flat_y), dim=1)
+    nonzero = flat_mass > 0.0
+    centroid[nonzero] = centroid[nonzero] / flat_mass[nonzero].unsqueeze(1)
+    centers = _cell_centers(width, height, origin, cell_size, torch.device("cpu"))
+    centroid[~nonzero] = centers[~nonzero]
+    return GridLevel(
+        mass=flat_mass.reshape(height, width),
+        centroid=centroid.reshape(height, width, 2),
+        cell_size=cell_size.detach().clone(),
+        origin=origin.detach().clone(),
+    )
+
+
 def _sorted_cell_sums(
     cell_id: torch.Tensor,
     mass: torch.Tensor,
@@ -383,6 +595,25 @@ def _estimate_pyramid_peak_bytes(num_nodes: int) -> int:
         permutation, and reduction values.
     """
     return int(num_nodes) * (2 * 4 + 4 + 8 + 8 + 3 * 4) * 2
+
+
+def _estimate_streaming_force_chunk_bytes(chunk_nodes: int, resident_pyramid_bytes: int) -> int:
+    """Estimate CUDA bytes for one streaming far-field chunk.
+
+    Parameters
+    ----------
+    chunk_nodes : int
+        Number of nodes processed in the chunk.
+    resident_pyramid_bytes : int
+        Bytes needed for the copied pyramid levels.
+
+    Returns
+    -------
+    int
+        Conservative temporary byte estimate.
+    """
+    per_node = 2 * 4 + 2 * 4 + 2 * 4 + 2 * 8 + 4
+    return int((int(chunk_nodes) * per_node + int(resident_pyramid_bytes)) * 1.5)
 
 
 def _pool_level(level: GridLevel) -> GridLevel:
@@ -552,7 +783,10 @@ __all__ = [
     "GridLevel",
     "GridPyramid",
     "build_grid_pyramid",
+    "build_grid_pyramid_streaming",
     "choose_pyramid_device",
+    "choose_streaming_chunk_device",
     "density_image",
     "far_field_repulsion_force",
+    "pyramid_tensor_bytes",
 ]
