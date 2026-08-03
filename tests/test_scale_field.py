@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+import pytest
 import torch
 
 import dagua
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
+from dagua.layout.scale import coarsen as scale_coarsen
 from dagua.layout.scale.coarsen import build_scale_hierarchy, prolong_positions
 from dagua.layout.scale.pyramid import build_grid_pyramid, far_field_repulsion_force
 
@@ -121,13 +123,38 @@ def test_field_dispatch_completes_and_is_byte_deterministic() -> None:
     assert metadata["field"]["coarsest_nodes"] <= 8
 
 
-def test_field_streaming_branch_is_deterministic() -> None:
-    """FIELD streaming rung avoids hierarchy coarsening and stays deterministic."""
+def test_field_streaming_threshold_does_not_bypass_hierarchy_by_default() -> None:
+    """FIELD streaming threshold alone does not bypass the real hierarchy."""
     config = LayoutConfig(
         algorithm_params={
             "scale_node_gate": 10,
             "scale_edge_gate": 10_000,
             "field_streaming_node_threshold": 16,
+            "field_coarsest_target": 8,
+            "field_coarsest_solver": "stress_sgd",
+            "field_refine_steps": 0,
+            "field_max_grid_axis": 16,
+        },
+        seed=42,
+    )
+    graph = _cyclic_fixture(24)
+
+    pos = dagua.layout(graph, config)
+
+    assert torch.isfinite(pos).all()
+    metadata = getattr(graph, "_dagua_scale_route_decision")
+    assert metadata["field"]["coarsest_solver"] != "streaming"
+    assert metadata["field"]["levels"] > 0
+
+
+def test_field_streaming_branch_is_explicit_fallback_only() -> None:
+    """FIELD streaming rung is deterministic only when explicitly allowed."""
+    config = LayoutConfig(
+        algorithm_params={
+            "scale_node_gate": 10,
+            "scale_edge_gate": 10_000,
+            "field_streaming_node_threshold": 16,
+            "field_allow_streaming_fallback": True,
             "field_streaming_refine_steps": 0,
         },
         seed=42,
@@ -142,3 +169,25 @@ def test_field_streaming_branch_is_deterministic() -> None:
     assert torch.equal(first, second)
     metadata = getattr(first_graph, "_dagua_scale_route_decision")
     assert metadata["field"]["coarsest_solver"] == "streaming"
+
+
+def test_scale_hierarchy_uses_tensor_coarsening_without_large_adjacency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large FIELD levels avoid Python adjacency while still reducing."""
+    monkeypatch.setattr(scale_coarsen, "_ADJACENCY_BUILD_NODE_LIMIT", 8)
+    graph = _cyclic_fixture(64)
+    sizes = torch.full((64, 2), 10.0, dtype=torch.float32)
+
+    hierarchy = build_scale_hierarchy(
+        graph.edge_index,
+        graph.num_nodes,
+        sizes,
+        target_nodes=12,
+        seed=42,
+        topk_per_node=4,
+    )
+
+    assert hierarchy.levels
+    assert hierarchy.finest_graph.adjacency == []
+    assert hierarchy.coarsest_graph.num_nodes <= 12

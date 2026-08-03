@@ -34,7 +34,7 @@ _DEFAULT_EDGE_CHUNK = 2_000_000
 _DEFAULT_BASE_CELL_MULTIPLIER = 1.2
 _DEFAULT_MAX_GRID_AXIS = 1_024
 _DEFAULT_PYRAMID_LEVELS = 10
-_DEFAULT_STREAMING_NODE_THRESHOLD = 5_000_000
+_DEFAULT_STREAMING_NODE_THRESHOLD = 50_000_000
 
 
 @dataclass(frozen=True)
@@ -137,7 +137,8 @@ class FieldScaleStrategy:
         streaming_threshold = int(
             params.get("field_streaming_node_threshold", _DEFAULT_STREAMING_NODE_THRESHOLD)
         )
-        if int(graph.num_nodes) >= streaming_threshold:
+        streaming_allowed = bool(params.get("field_allow_streaming_fallback", False))
+        if streaming_allowed and int(graph.num_nodes) >= streaming_threshold:
             return _layout_streaming_field(
                 graph,
                 config,
@@ -240,12 +241,13 @@ class FieldScaleStrategy:
                 seed=seed,
                 is_finest=True,
             )
-        pos = _pack_components(
-            pos,
-            hierarchy.finest_graph.edge_index,
-            int(graph.num_nodes),
-            base_sep=_target_separation(config, node_sizes),
-        )
+        if _should_pack_components(int(graph.num_nodes), params):
+            pos = _pack_components(
+                pos,
+                hierarchy.finest_graph.edge_index,
+                int(graph.num_nodes),
+                base_sep=_target_separation(config, node_sizes),
+            )
         pos = pos.detach().to(device="cpu", dtype=torch.float32)
         if not bool(torch.isfinite(pos).all().item()):
             raise RuntimeError("FIELD strategy produced non-finite positions.")
@@ -828,9 +830,14 @@ def _refine_level(
     steps = _refine_steps_for_level(graph.num_nodes, params, is_finest=is_finest)
     if steps <= 0:
         return pos.detach().to(dtype=torch.float32)
-    work = pos.detach().to(dtype=torch.float32).clone()
-    sizes = node_sizes.detach().to(dtype=torch.float32)
-    masses = node_masses.detach().to(dtype=torch.float32)
+    refine_device = _choose_refine_device(
+        graph.num_nodes,
+        int(graph.edge_index.shape[1]),
+        str(config.device),
+    )
+    work = pos.detach().to(device=refine_device, dtype=torch.float32).clone()
+    sizes = node_sizes.detach().to(device=refine_device, dtype=torch.float32)
+    masses = node_masses.detach().to(device=refine_device, dtype=torch.float32)
     base_sep = _target_separation(config, sizes)
     mean_mass = float(masses.mean().item()) if masses.numel() else 1.0
     edge_strength = float(params.get("field_edge_strength", 0.15))
@@ -892,7 +899,60 @@ def _refine_level(
                 strength=overlap_strength,
                 max_displacement=step_cap * 0.5,
             )
-    return _normalize_positions(work)
+    return _normalize_positions(work).to(device="cpu", dtype=torch.float32)
+
+
+def _choose_refine_device(num_nodes: int, num_edges: int, requested_device: str) -> str:
+    """Choose the measured-safe device for one FIELD refinement level.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Current level node count.
+    num_edges : int
+        Current level edge count.
+    requested_device : str
+        User-requested layout device.
+
+    Returns
+    -------
+    str
+        ``"cuda"`` when the level's positions, edges, and spring temporaries
+        fit under 70% of free VRAM; otherwise ``"cpu"``.
+    """
+    if not str(requested_device).startswith("cuda") or not torch.cuda.is_available():
+        return "cpu"
+    estimated_peak = _estimate_refine_peak_bytes(int(num_nodes), int(num_edges))
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info()
+    except RuntimeError:
+        return "cpu"
+    if estimated_peak > int(free_bytes * 0.70):
+        return "cpu"
+    return "cuda"
+
+
+def _estimate_refine_peak_bytes(num_nodes: int, num_edges: int) -> int:
+    """Estimate FIELD refinement peak VRAM for a single level.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Level node count.
+    num_edges : int
+        Level edge count.
+
+    Returns
+    -------
+    int
+        Conservative bytes for positions, displacement, sizes, masses, copied
+        edge tensors, weights, and chunk-local spring buffers.
+    """
+    node_bytes = int(num_nodes) * (2 * 4 + 2 * 4 + 2 * 4 + 4)
+    edge_bytes = int(num_edges) * (2 * 8 + 4)
+    chunk_edges = min(int(num_edges), _DEFAULT_EDGE_CHUNK)
+    chunk_bytes = chunk_edges * (2 * 8 + 2 * 2 * 4 + 4 + 2 * 4)
+    return int((node_bytes + edge_bytes + chunk_bytes) * 1.5)
 
 
 def _refine_steps_for_level(
@@ -931,6 +991,27 @@ def _refine_steps_for_level(
     else:
         base = 6
     return base + (5 if is_finest and n <= 30_000 else 0)
+
+
+def _should_pack_components(num_nodes: int, params: dict[str, Any]) -> bool:
+    """Return whether FIELD should run the component packing pass.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Finest graph node count.
+    params : dict[str, Any]
+        Algorithm parameters.
+
+    Returns
+    -------
+    bool
+        ``True`` when the exact component pass is within the configured node
+        budget. The pass is skipped by default at million-scale because it is
+        a repeated global edge scan after the layout has already converged.
+    """
+    threshold = int(params.get("field_pack_components_node_threshold", 1_000_000))
+    return int(num_nodes) <= threshold
 
 
 def _edge_spring_displacement(
@@ -975,6 +1056,15 @@ def _edge_spring_displacement(
     edges = edge_index.to(device=pos.device, dtype=torch.long)
     weights = edge_weight.to(device=pos.device, dtype=torch.float32)
     weights = weights / weights.mean().clamp_min(1.0e-6)
+    if pos.device.type == "cuda":
+        return _edge_spring_displacement_sorted(
+            pos,
+            edges,
+            weights,
+            target_length=target_length,
+            strength=strength,
+            spring_model=spring_model,
+        )
     edge_count = int(edges.shape[1])
     chunk = max(1, int(chunk_size))
     for start in range(0, edge_count, chunk):
@@ -991,6 +1081,71 @@ def _edge_spring_displacement(
         force = force * float(strength)
         disp.index_add_(0, src, force)
         disp.index_add_(0, dst, -force)
+    return disp
+
+
+def _edge_spring_displacement_sorted(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor,
+    *,
+    target_length: float,
+    strength: float,
+    spring_model: str,
+) -> torch.Tensor:
+    """Return deterministic edge-spring displacement by sorted reductions.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]`` on CUDA.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]`` on ``pos.device``.
+    edge_weight : torch.Tensor
+        Normalized edge weights with shape ``[E]`` on ``pos.device``.
+    target_length : float
+        Preferred edge length.
+    strength : float
+        Spring multiplier.
+    spring_model : str
+        ``"fr"`` or ``"linear"`` spring model.
+
+    Returns
+    -------
+    torch.Tensor
+        Displacement tensor with shape ``[N, 2]``.
+    """
+    src = edge_index[0]
+    dst = edge_index[1]
+    delta = pos[dst] - pos[src]
+    dist = torch.linalg.norm(delta, dim=1, keepdim=True).clamp_min(1.0e-6)
+    if spring_model == "fr":
+        magnitude = dist * dist / max(float(target_length), 1.0e-6)
+    else:
+        magnitude = dist - float(target_length)
+    force = delta / dist * (magnitude * edge_weight.unsqueeze(1))
+    force = force * float(strength)
+    node = torch.cat((src, dst))
+    contribution = torch.cat((force, -force), dim=0)
+    order = node.argsort(stable=True)
+    sorted_node = node[order]
+    first = torch.ones_like(sorted_node, dtype=torch.bool)
+    first[1:] = sorted_node[1:] != sorted_node[:-1]
+    starts = torch.nonzero(first, as_tuple=False).flatten()
+    lengths = torch.diff(
+        torch.cat(
+            (
+                starts,
+                torch.tensor([sorted_node.numel()], dtype=torch.long, device=pos.device),
+            )
+        )
+    )
+    summed_x = torch.segment_reduce(contribution[order, 0], "sum", lengths=lengths)
+    summed_y = torch.segment_reduce(contribution[order, 1], "sum", lengths=lengths)
+    disp = torch.zeros_like(pos)
+    unique_node = sorted_node[starts]
+    disp[unique_node, 0] = summed_x
+    disp[unique_node, 1] = summed_y
     return disp
 
 

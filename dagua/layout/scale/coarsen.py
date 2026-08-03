@@ -12,6 +12,10 @@ _MIN_COARSE_SIZE = 4
 _MIN_HEM_REDUCTION = 0.75
 _DEFAULT_MIN_SHRINK = 0.50
 _DEFAULT_BUCKET_SIZE = 8
+_ADJACENCY_BUILD_NODE_LIMIT = 250_000
+_ADJACENCY_BUILD_EDGE_LIMIT = 2_000_000
+_VECTOR_MATCHING_ROUNDS = 8
+_HASH_MASK = (1 << 62) - 1
 
 
 @dataclass(frozen=True)
@@ -181,6 +185,7 @@ def build_scale_hierarchy(
         raise ValueError("min_shrink_ratio must be in [0, 1).")
 
     graph = normalize_scale_graph(edge_index, int(num_nodes), edge_weights)
+    finest_graph = graph
     sizes = _resolved_node_sizes(node_sizes, int(num_nodes))
     masses = torch.ones((int(num_nodes),), dtype=torch.float32)
     levels: list[ScaleCoarsenLevel] = []
@@ -231,7 +236,7 @@ def build_scale_hierarchy(
         masses = coarse_masses
 
     return ScaleHierarchy(
-        finest_graph=normalize_scale_graph(edge_index, int(num_nodes), edge_weights),
+        finest_graph=finest_graph,
         levels=levels,
         coarsest_graph=graph,
         coarsest_node_sizes=sizes,
@@ -390,19 +395,33 @@ def _build_graph_from_edges(
     ScaleGraph
         Unique undirected weighted graph.
     """
-    edge_totals: dict[tuple[int, int], float] = {}
-    sources = edge_index[0].tolist()
-    targets = edge_index[1].tolist()
-    weights = edge_weight.tolist()
-    for source, target, weight in zip(sources, targets, weights):
-        if source == target:
-            continue
-        lo = int(min(source, target))
-        hi = int(max(source, target))
-        edge_totals[(lo, hi)] = edge_totals.get((lo, hi), 0.0) + float(weight)
+    if edge_index.numel() == 0:
+        return _graph_from_tensors(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            int(num_nodes),
+        )
+    source = edge_index[0].to(dtype=torch.long)
+    target = edge_index[1].to(dtype=torch.long)
+    keep = source != target
+    if not bool(keep.any()):
+        return _graph_from_tensors(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            int(num_nodes),
+        )
+    lo = torch.minimum(source[keep], target[keep])
+    hi = torch.maximum(source[keep], target[keep])
+    weights = edge_weight[keep].to(dtype=torch.float32)
+    edge_index_out, edge_weight_out = _aggregate_sorted_edges(lo, hi, weights, int(num_nodes))
     if topk_per_node > 0:
-        edge_totals = _prune_topk_edges(edge_totals, int(num_nodes), int(topk_per_node))
-    return _graph_from_edge_totals(edge_totals, int(num_nodes))
+        edge_index_out, edge_weight_out = _prune_topk_tensors(
+            edge_index_out,
+            edge_weight_out,
+            int(num_nodes),
+            int(topk_per_node),
+        )
+    return _graph_from_tensors(edge_index_out, edge_weight_out, int(num_nodes))
 
 
 def _build_graph_from_mapping(
@@ -431,77 +450,155 @@ def _build_graph_from_mapping(
         Aggregated coarse graph.
     """
     if graph.edge_index.numel() == 0:
-        return _graph_from_edge_totals({}, int(coarse_num_nodes))
+        return _graph_from_tensors(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            int(coarse_num_nodes),
+        )
     parent = fine_to_coarse.to(dtype=torch.long)
     coarse_src = parent[graph.edge_index[0]]
     coarse_tgt = parent[graph.edge_index[1]]
     cross = coarse_src != coarse_tgt
     if not bool(cross.any()):
-        return _graph_from_edge_totals({}, int(coarse_num_nodes))
-    lo = torch.minimum(coarse_src[cross], coarse_tgt[cross]).tolist()
-    hi = torch.maximum(coarse_src[cross], coarse_tgt[cross]).tolist()
-    weights = graph.edge_weight[cross].tolist()
-    totals: dict[tuple[int, int], float] = {}
-    for source, target, weight in zip(lo, hi, weights):
-        key = (int(source), int(target))
-        totals[key] = totals.get(key, 0.0) + float(weight)
+        return _graph_from_tensors(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            int(coarse_num_nodes),
+        )
+    lo = torch.minimum(coarse_src[cross], coarse_tgt[cross])
+    hi = torch.maximum(coarse_src[cross], coarse_tgt[cross])
+    weights = graph.edge_weight[cross].to(dtype=torch.float32)
+    edge_index_out, edge_weight_out = _aggregate_sorted_edges(
+        lo,
+        hi,
+        weights,
+        int(coarse_num_nodes),
+    )
     if topk_per_node > 0:
-        totals = _prune_topk_edges(totals, int(coarse_num_nodes), int(topk_per_node))
-    return _graph_from_edge_totals(totals, int(coarse_num_nodes))
+        edge_index_out, edge_weight_out = _prune_topk_tensors(
+            edge_index_out,
+            edge_weight_out,
+            int(coarse_num_nodes),
+            int(topk_per_node),
+        )
+    return _graph_from_tensors(edge_index_out, edge_weight_out, int(coarse_num_nodes))
 
 
-def _graph_from_edge_totals(
-    edge_totals: dict[tuple[int, int], float],
+def _aggregate_sorted_edges(
+    lo: torch.Tensor,
+    hi: torch.Tensor,
+    weights: torch.Tensor,
     num_nodes: int,
-) -> ScaleGraph:
-    """Build tensor and adjacency payloads from weighted edge totals.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Aggregate sorted endpoint tensors with one stable key sort.
 
     Parameters
     ----------
-    edge_totals : dict[tuple[int, int], float]
-        Undirected edge totals keyed by sorted endpoint pair.
+    lo : torch.Tensor
+        Lower endpoints with shape ``[E]``.
+    hi : torch.Tensor
+        Upper endpoints with shape ``[E]``.
+    weights : torch.Tensor
+        Edge weights with shape ``[E]``.
+    num_nodes : int
+        Node count used to encode dense pair keys.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Unique edge tensor with shape ``[2, E_unique]`` and summed weights.
+    """
+    if lo.numel() == 0:
+        return (
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+        )
+    keys = lo.to(dtype=torch.long) * int(num_nodes) + hi.to(dtype=torch.long)
+    order = keys.argsort(stable=True)
+    sorted_keys = keys[order]
+    first = torch.ones_like(sorted_keys, dtype=torch.bool)
+    first[1:] = sorted_keys[1:] != sorted_keys[:-1]
+    starts = torch.nonzero(first, as_tuple=False).flatten()
+    lengths = torch.diff(
+        torch.cat(
+            (
+                starts,
+                torch.tensor([sorted_keys.numel()], dtype=torch.long),
+            )
+        )
+    )
+    unique_keys = sorted_keys[starts]
+    summed = torch.segment_reduce(
+        weights[order].to(dtype=torch.float32),
+        "sum",
+        lengths=lengths,
+    )
+    edge_index = torch.stack(
+        (
+            torch.div(unique_keys, int(num_nodes), rounding_mode="floor"),
+            unique_keys.remainder(int(num_nodes)),
+        ),
+        dim=0,
+    ).to(dtype=torch.long)
+    return edge_index.contiguous(), summed.to(dtype=torch.float32).contiguous()
+
+
+def _graph_from_tensors(
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor,
+    num_nodes: int,
+) -> ScaleGraph:
+    """Build a scale graph from unique sorted edge tensors.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Unique undirected edge tensor with shape ``[2, E]``.
+    edge_weight : torch.Tensor
+        Positive edge weights with shape ``[E]``.
     num_nodes : int
         Number of nodes.
 
     Returns
     -------
     ScaleGraph
-        Graph payload with deterministic edge and adjacency ordering.
+        Graph payload. The Python adjacency list is built only for small
+        levels where list materialization is budget-safe.
     """
-    ordered = sorted(edge_totals)
-    adjacency: list[list[tuple[int, float]]] = [[] for _ in range(int(num_nodes))]
-    if not ordered:
-        return ScaleGraph(
-            num_nodes=int(num_nodes),
-            edge_index=torch.empty((2, 0), dtype=torch.long),
-            edge_weight=torch.empty((0,), dtype=torch.float32),
-            adjacency=adjacency,
-        )
-    weights = [float(edge_totals[pair]) for pair in ordered]
-    for (source, target), weight in zip(ordered, weights):
-        adjacency[source].append((target, weight))
-        adjacency[target].append((source, weight))
-    for neighbors in adjacency:
-        neighbors.sort(key=lambda item: (-item[1], item[0]))
+    adjacency: list[list[tuple[int, float]]] = []
+    edge_count = int(edge_index.shape[1])
+    if int(num_nodes) <= _ADJACENCY_BUILD_NODE_LIMIT and edge_count <= _ADJACENCY_BUILD_EDGE_LIMIT:
+        adjacency = [[] for _ in range(int(num_nodes))]
+        sources = edge_index[0].tolist()
+        targets = edge_index[1].tolist()
+        weights = edge_weight.tolist()
+        for source, target, weight in zip(sources, targets, weights):
+            adjacency[int(source)].append((int(target), float(weight)))
+            adjacency[int(target)].append((int(source), float(weight)))
+        for neighbors in adjacency:
+            neighbors.sort(key=lambda item: (-item[1], item[0]))
     return ScaleGraph(
         num_nodes=int(num_nodes),
-        edge_index=torch.tensor(ordered, dtype=torch.long).transpose(0, 1).contiguous(),
-        edge_weight=torch.tensor(weights, dtype=torch.float32),
+        edge_index=edge_index.to(dtype=torch.long).contiguous(),
+        edge_weight=edge_weight.to(dtype=torch.float32).contiguous(),
         adjacency=adjacency,
     )
 
 
-def _prune_topk_edges(
-    edge_totals: dict[tuple[int, int], float],
+def _prune_topk_tensors(
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor,
     num_nodes: int,
     topk_per_node: int,
-) -> dict[tuple[int, int], float]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Keep edges selected by either endpoint's top-k weighted neighborhood.
 
     Parameters
     ----------
-    edge_totals : dict[tuple[int, int], float]
-        Candidate coarse edges.
+    edge_index : torch.Tensor
+        Candidate edge tensor with shape ``[2, E]``.
+    edge_weight : torch.Tensor
+        Candidate weights with shape ``[E]``.
     num_nodes : int
         Number of coarse nodes.
     topk_per_node : int
@@ -509,19 +606,45 @@ def _prune_topk_edges(
 
     Returns
     -------
-    dict[tuple[int, int], float]
-        Pruned edge totals preserving deterministic endpoint coverage.
+    tuple[torch.Tensor, torch.Tensor]
+        Pruned edge tensor and weights.
     """
-    adjacency: list[list[tuple[int, int, float]]] = [[] for _ in range(int(num_nodes))]
-    for (source, target), weight in edge_totals.items():
-        adjacency[source].append((source, target, float(weight)))
-        adjacency[target].append((source, target, float(weight)))
-    keep: set[tuple[int, int]] = set()
-    for neighbors in adjacency:
-        neighbors.sort(key=lambda item: (-item[2], item[0], item[1]))
-        for source, target, _weight in neighbors[: int(topk_per_node)]:
-            keep.add((source, target))
-    return {pair: weight for pair, weight in edge_totals.items() if pair in keep}
+    edge_count = int(edge_index.shape[1])
+    if edge_count == 0 or int(topk_per_node) <= 0:
+        return edge_index, edge_weight
+    if edge_count <= int(num_nodes) * int(topk_per_node):
+        return edge_index, edge_weight
+
+    src = edge_index[0].to(dtype=torch.long)
+    dst = edge_index[1].to(dtype=torch.long)
+    directed_src = torch.cat((src, dst))
+    directed_other = torch.cat((dst, src))
+    directed_weight = torch.cat((edge_weight, edge_weight)).to(dtype=torch.float32)
+    directed_edge = torch.arange(edge_count, dtype=torch.long).repeat(2)
+
+    order = directed_other.argsort(stable=True)
+    order = order[(-directed_weight[order]).argsort(stable=True)]
+    order = order[directed_src[order].argsort(stable=True)]
+    sorted_src = directed_src[order]
+    first = torch.ones_like(sorted_src, dtype=torch.bool)
+    first[1:] = sorted_src[1:] != sorted_src[:-1]
+    starts = torch.nonzero(first, as_tuple=False).flatten()
+    lengths = torch.diff(
+        torch.cat(
+            (
+                starts,
+                torch.tensor([sorted_src.numel()], dtype=torch.long),
+            )
+        )
+    )
+    ordinal = torch.arange(sorted_src.numel(), dtype=torch.long) - torch.repeat_interleave(
+        starts,
+        lengths,
+    )
+    kept_directed = directed_edge[order][ordinal < int(topk_per_node)]
+    keep_edge = torch.zeros((edge_count,), dtype=torch.bool)
+    keep_edge[kept_directed] = True
+    return edge_index[:, keep_edge].contiguous(), edge_weight[keep_edge].contiguous()
 
 
 def _heavy_edge_matching(
@@ -546,6 +669,8 @@ def _heavy_edge_matching(
     num_nodes = int(graph.num_nodes)
     if num_nodes < _MIN_COARSE_SIZE:
         return None
+    if not graph.adjacency:
+        return _tensor_heavy_edge_matching(graph, seed=int(generator.initial_seed()))
     order = torch.randperm(num_nodes, generator=generator).tolist()
     matched = bytearray(num_nodes)
     mapping = [-1] * num_nodes
@@ -574,6 +699,122 @@ def _heavy_edge_matching(
     return torch.tensor(mapping, dtype=torch.long), int(coarse_node)
 
 
+def _tensor_heavy_edge_matching(
+    graph: ScaleGraph,
+    *,
+    seed: int,
+) -> Optional[tuple[torch.Tensor, int]]:
+    """Coarsen one level with bounded-memory tensor matching.
+
+    Parameters
+    ----------
+    graph : ScaleGraph
+        Current graph without a Python adjacency list.
+    seed : int
+        Deterministic seed used in edge-priority hashing.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int] or None
+        Fine-to-coarse mapping and coarse node count, or ``None`` on a weak
+        reduction.
+    """
+    num_nodes = int(graph.num_nodes)
+    if graph.edge_index.numel() == 0:
+        return None
+    src_all = graph.edge_index[0].to(dtype=torch.long)
+    dst_all = graph.edge_index[1].to(dtype=torch.long)
+    weights_all = graph.edge_weight.to(dtype=torch.float32)
+    unmatched = torch.ones((num_nodes,), dtype=torch.bool)
+    matched_sources: list[torch.Tensor] = []
+    matched_targets: list[torch.Tensor] = []
+
+    for round_index in range(_VECTOR_MATCHING_ROUNDS):
+        active = unmatched[src_all] & unmatched[dst_all]
+        if not bool(active.any()):
+            break
+        src = src_all[active]
+        dst = dst_all[active]
+        weights = weights_all[active]
+
+        best_weight = torch.full((num_nodes,), -float("inf"), dtype=torch.float32)
+        best_weight.scatter_reduce_(0, src, weights, reduce="amax")
+        best_weight.scatter_reduce_(0, dst, weights, reduce="amax")
+        heavy = (weights >= best_weight[src]) & (weights >= best_weight[dst])
+        if not bool(heavy.any()):
+            break
+
+        src = src[heavy]
+        dst = dst[heavy]
+        priority = _edge_hash_priority(src, dst, seed=seed + round_index)
+        best_priority = torch.full((num_nodes,), int(_HASH_MASK), dtype=torch.long)
+        best_priority.scatter_reduce_(0, src, priority, reduce="amin")
+        best_priority.scatter_reduce_(0, dst, priority, reduce="amin")
+        selected = (priority <= best_priority[src]) & (priority <= best_priority[dst])
+        if not bool(selected.any()):
+            break
+
+        matched_src = src[selected]
+        matched_dst = dst[selected]
+        matched_sources.append(matched_src)
+        matched_targets.append(matched_dst)
+        unmatched[matched_src] = False
+        unmatched[matched_dst] = False
+
+        if float(unmatched.to(dtype=torch.float32).mean().item()) <= 0.02:
+            break
+
+    if matched_sources:
+        pair_src = torch.cat(matched_sources)
+        pair_dst = torch.cat(matched_targets)
+        pair_count = int(pair_src.numel())
+    else:
+        pair_src = torch.empty((0,), dtype=torch.long)
+        pair_dst = torch.empty((0,), dtype=torch.long)
+        pair_count = 0
+    unmatched_nodes = torch.nonzero(unmatched, as_tuple=False).flatten()
+    coarse_node = pair_count + int(unmatched_nodes.numel())
+    if coarse_node == num_nodes or coarse_node < _MIN_COARSE_SIZE:
+        return None
+    if coarse_node > int(_MIN_HEM_REDUCTION * float(num_nodes)):
+        return None
+    mapping = torch.empty((num_nodes,), dtype=torch.long)
+    pair_ids = torch.arange(pair_count, dtype=torch.long)
+    mapping[pair_src] = pair_ids
+    mapping[pair_dst] = pair_ids
+    mapping[unmatched_nodes] = pair_count + torch.arange(
+        int(unmatched_nodes.numel()),
+        dtype=torch.long,
+    )
+    return mapping, int(coarse_node)
+
+
+def _edge_hash_priority(src: torch.Tensor, dst: torch.Tensor, *, seed: int) -> torch.Tensor:
+    """Return deterministic positive int64 priorities for undirected edges.
+
+    Parameters
+    ----------
+    src : torch.Tensor
+        Source endpoints with shape ``[E]``.
+    dst : torch.Tensor
+        Target endpoints with shape ``[E]``.
+    seed : int
+        Seed folded into the hash.
+
+    Returns
+    -------
+    torch.Tensor
+        Positive priority values with shape ``[E]`` where lower is preferred.
+    """
+    lo = torch.minimum(src, dst).to(dtype=torch.long)
+    hi = torch.maximum(src, dst).to(dtype=torch.long)
+    value = lo * 1_103_515_245 + hi * 2_654_435_761 + int(seed) * 97_531
+    value = value ^ (value >> 16)
+    value = value * 2_246_822_519
+    value = value ^ (value >> 13)
+    return torch.bitwise_and(value, _HASH_MASK)
+
+
 def _star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
     """Build a deterministic hub-star contraction mapping.
 
@@ -588,6 +829,8 @@ def _star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
         Fine-to-coarse mapping and coarse node count.
     """
     num_nodes = int(graph.num_nodes)
+    if not graph.adjacency:
+        return _tensor_star_contraction_mapping(graph)
     degrees = [len(neighbors) for neighbors in graph.adjacency]
     order = sorted(range(num_nodes), key=lambda node: (-degrees[node], node))
     mapping = [-1] * num_nodes
@@ -604,6 +847,45 @@ def _star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
         target = max(1, math.ceil(num_nodes / _DEFAULT_BUCKET_SIZE))
         return _bucket_contraction_mapping(num_nodes, target)
     return torch.tensor(mapping, dtype=torch.long), coarse_node
+
+
+def _tensor_star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
+    """Build a tensor-native hub contraction mapping.
+
+    Parameters
+    ----------
+    graph : ScaleGraph
+        Current graph without adjacency materialization.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int]
+        Fine-to-coarse mapping and coarse node count.
+    """
+    num_nodes = int(graph.num_nodes)
+    if graph.edge_index.numel() == 0 and num_nodes > _DEFAULT_BUCKET_SIZE:
+        target = max(1, math.ceil(num_nodes / _DEFAULT_BUCKET_SIZE))
+        return _bucket_contraction_mapping(num_nodes, target)
+    if graph.edge_index.numel() == 0:
+        return torch.arange(num_nodes, dtype=torch.long), num_nodes
+
+    src = graph.edge_index[0].to(dtype=torch.long)
+    dst = graph.edge_index[1].to(dtype=torch.long)
+    degree = torch.bincount(
+        torch.cat((src, dst)),
+        minlength=num_nodes,
+    ).to(dtype=torch.long)
+    src_wins = (degree[src] > degree[dst]) | ((degree[src] == degree[dst]) & (src < dst))
+    hub = torch.where(src_wins, src, dst)
+    leaf = torch.where(src_wins, dst, src)
+    priority = -degree[hub] * num_nodes + hub
+    best_priority = torch.full((num_nodes,), int(_HASH_MASK), dtype=torch.long)
+    best_priority.scatter_reduce_(0, leaf, priority, reduce="amin")
+    parent = torch.arange(num_nodes, dtype=torch.long)
+    attached = best_priority < int(_HASH_MASK)
+    parent[attached] = torch.remainder(best_priority[attached], num_nodes)
+    unique_parent, dense = torch.unique(parent, sorted=True, return_inverse=True)
+    return dense.to(dtype=torch.long), int(unique_parent.numel())
 
 
 def _bucket_contraction_mapping(num_nodes: int, target: int) -> tuple[torch.Tensor, int]:
@@ -647,12 +929,25 @@ def _sibling_ordinals(fine_to_coarse: torch.Tensor) -> torch.Tensor:
         Zero-based sibling ordinals with shape ``[N_fine]``.
     """
     parent = fine_to_coarse.to(device="cpu", dtype=torch.long)
-    counts: dict[int, int] = {}
+    if parent.numel() == 0:
+        return torch.empty_like(parent)
+    order = parent.argsort(stable=True)
+    sorted_parent = parent[order]
+    first = torch.ones_like(sorted_parent, dtype=torch.bool)
+    first[1:] = sorted_parent[1:] != sorted_parent[:-1]
+    starts = torch.nonzero(first, as_tuple=False).flatten()
+    lengths = torch.diff(
+        torch.cat(
+            (
+                starts,
+                torch.tensor([sorted_parent.numel()], dtype=torch.long),
+            )
+        )
+    )
+    repeated_starts = torch.repeat_interleave(starts, lengths)
+    ordinal_sorted = torch.arange(sorted_parent.numel(), dtype=torch.long) - repeated_starts
     ordinals = torch.empty_like(parent)
-    for index, raw_parent in enumerate(parent.tolist()):
-        value = counts.get(int(raw_parent), 0)
-        ordinals[index] = value
-        counts[int(raw_parent)] = value + 1
+    ordinals[order] = ordinal_sorted
     return ordinals
 
 
