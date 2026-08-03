@@ -2,6 +2,7 @@
 
 import importlib
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -28,7 +29,9 @@ from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_gr
 from dagua.layout.layers import build_layer_index
 from dagua.layout.losses import edge_attraction_loss, edge_straightness_loss
 from dagua.layout.multilevel import (
+    LayerReductionStall,
     _coarsen_once_streaming,
+    _polish_layered_positions,
     _scaled_amortization,
     _scaled_final_refine_steps,
     _scaled_sample_cap,
@@ -319,6 +322,204 @@ def test_build_hierarchy_accepts_precomputed_layer_assignments():
     assert not captured
     assert torch.equal(levels[0].fine_layer_assignments, precomputed)
     assert levels[0].coarse_layer_assignments is not None
+
+
+def test_multilevel_coarsest_solve_uses_propagated_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coarsest LAYERS solve should not recompute longest-path layers."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+    calls: list[tuple[int, bool, bool]] = []
+
+    def _fake_layout_inner(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: torch.Tensor,
+        config: LayoutConfig,
+        device: str = "cpu",
+        optimizer_type: str = "adam",
+        init_pos: torch.Tensor | None = None,
+        clusters: dict | None = None,
+        cluster_parents: dict | None = None,
+        layer_assignments: torch.Tensor | None = None,
+        progress_context: object | None = None,
+        trace: object | None = None,
+        *,
+        graph_structure: object | None = None,
+        prebuilt_layer_index: object | None = None,
+        skip_classification: bool = False,
+        progress_file_path: object | None = None,
+        progress_metadata: dict[str, object] | None = None,
+    ) -> torch.Tensor:
+        """Capture layer handoff state and return finite positions."""
+        del (
+            edge_index,
+            node_sizes,
+            config,
+            device,
+            optimizer_type,
+            init_pos,
+            clusters,
+            cluster_parents,
+            progress_context,
+            trace,
+            graph_structure,
+            skip_classification,
+            progress_file_path,
+            progress_metadata,
+        )
+        calls.append((num_nodes, layer_assignments is not None, prebuilt_layer_index is not None))
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    graph = DaguaGraph()
+    graph.num_nodes = 4
+    graph._edge_index_tensor = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
+    graph.node_sizes = torch.full((4, 2), 20.0)
+    level = multilevel_module.CoarseLevel(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        node_sizes=torch.full((2, 2), 20.0),
+        num_nodes=2,
+        fine_to_coarse=torch.tensor([0, 0, 1, 1], dtype=torch.long),
+        num_fine=4,
+        fine_layer_assignments=torch.tensor([0, 0, 1, 1], dtype=torch.long),
+        coarse_layer_assignments=torch.tensor([0, 1], dtype=torch.long),
+    )
+
+    monkeypatch.setattr(
+        multilevel_module,
+        "classify_graph",
+        lambda *args, **kwargs: GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=0,
+            num_layers=0,
+            avg_layer_width=0.0,
+            is_planar_hint=False,
+        ),
+    )
+    monkeypatch.setattr(multilevel_module, "build_hierarchy", lambda *args, **kwargs: [level])
+    monkeypatch.setattr(engine_module, "_layout_inner", _fake_layout_inner)
+    monkeypatch.setattr(engine_module, "_apply_direction", lambda pos, direction: pos)
+
+    multilevel_module.multilevel_layout(
+        graph,
+        LayoutConfig(
+            steps=1,
+            multilevel_min_nodes=1,
+            multilevel_coarse_steps=1,
+            multilevel_refine_steps=1,
+            offload_to_disk=False,
+        ),
+    )
+
+    assert calls[0] == (2, True, True)
+
+
+def test_multilevel_first_level_stall_reroutes_to_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime LAYERS shrink stalls should dispatch the original graph to FIELD."""
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+    field_module = importlib.import_module("dagua.layout.scale.strategies.field")
+    graph = DaguaGraph()
+    graph.num_nodes = 6
+    graph._edge_index_tensor = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long)
+    graph.node_sizes = torch.full((6, 2), 20.0)
+    calls: list[int] = []
+
+    def _raise_stall(*args: object, **kwargs: object) -> list[object]:
+        """Simulate a hostile first LAYERS coarsening level."""
+        del args, kwargs
+        raise LayerReductionStall(fine_nodes=6, coarse_nodes=5, min_reduction=0.30)
+
+    def _fake_layout_field(
+        routed_graph: DaguaGraph,
+        config: LayoutConfig,
+        sketch: object,
+        trace: object = None,
+    ) -> torch.Tensor:
+        """Capture FIELD reroute and return finite positions."""
+        del config, sketch, trace
+        calls.append(routed_graph.num_nodes)
+        return torch.zeros((routed_graph.num_nodes, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(
+        multilevel_module,
+        "classify_graph",
+        lambda *args, **kwargs: GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=0,
+            num_layers=0,
+            avg_layer_width=0.0,
+            is_planar_hint=False,
+        ),
+    )
+    monkeypatch.setattr(multilevel_module, "build_hierarchy", _raise_stall)
+    monkeypatch.setattr(field_module, "layout_field", _fake_layout_field)
+
+    pos = multilevel_module.multilevel_layout(
+        graph,
+        LayoutConfig(
+            steps=1,
+            multilevel_min_nodes=1,
+            offload_to_disk=False,
+        ),
+    )
+
+    assert calls == [6]
+    assert pos.shape == (6, 2)
+    metadata = getattr(graph, "_dagua_scale_route_decision")
+    assert metadata["decision"]["strategy"] == "FIELD"
+    assert metadata["layers_reroute"]["reason"] == "first_level_reduction_stall"
+
+
+def test_multilevel_source_has_no_locker_hardcode() -> None:
+    """LAYERS should not contain stale network-mount checkpoint paths."""
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+    source = Path(multilevel_module.__file__).read_text(encoding="utf-8")
+
+    forbidden = "/mnt" + "/locker"
+    assert forbidden not in source
+
+
+def test_layers_polish_spreads_ranks_bounds_aspect_and_preserves_flow() -> None:
+    """Final LAYERS polish should resolve rank overlap without back edges."""
+    pos = torch.tensor(
+        [
+            [0.0, -500.0],
+            [0.0, -500.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 500.0],
+            [0.0, 500.0],
+        ],
+        dtype=torch.float32,
+    )
+    layers = torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.long)
+    node_sizes = torch.full((6, 2), 20.0)
+    config = LayoutConfig(
+        adaptive_spacing=False,
+        node_sep=40.0,
+        rank_sep=500.0,
+        algorithm_params={"layers_aspect_target": 4.0, "layers_within_rank_gap": 5.0},
+    )
+
+    polished = _polish_layered_positions(pos, layers, node_sizes, config)
+    for layer_id in range(3):
+        nodes = torch.nonzero(layers == layer_id, as_tuple=False).flatten()
+        ordered = nodes[polished[nodes, 0].argsort(stable=True)]
+        x_values = polished[ordered, 0]
+        assert float((x_values[1:] - x_values[:-1]).min().item()) >= 25.0
+
+    width = float((polished[:, 0].max() - polished[:, 0].min()).item()) + 20.0
+    height = float((polished[:, 1].max() - polished[:, 1].min()).item()) + 20.0
+    aspect = max(width / height, height / width)
+    assert aspect <= 4.05
+
+    edge_index = torch.tensor([[0, 1, 2, 3], [2, 3, 4, 5]], dtype=torch.long)
+    assert bool((polished[edge_index[1], 1] > polished[edge_index[0], 1]).all().item())
 
 
 def test_coarsening_reaches_min_nodes() -> None:
