@@ -145,22 +145,30 @@ class TopologySketch:
             )
 
         sources, targets = _validate_edges(edges, n)
-        out_neighbors, in_neighbors, undirected_neighbors = _build_adjacency(sources, targets, n)
-        total_degree = [len(out_neighbors[node]) + len(in_neighbors[node]) for node in range(n)]
-        components, largest_component = _weak_components(undirected_neighbors)
-        scc_sizes = _strongly_connected_component_sizes(out_neighbors)
-        largest_scc = max(scc_sizes) if scc_sizes else 0
-        has_self_loop = any(source == target for source, target in zip(sources, targets))
-        is_acyclic = largest_scc <= 1 and not has_self_loop
-        depth, depth_tripped, scanned = _capped_longest_path_depth(
-            out_neighbors,
-            in_neighbors,
-            depth_cap=int(depth_cap),
-            edge_budget=max(int(depth_cap) * max(e, 1), e),
+        total_degree = _total_degrees_from_edges(edges, n)
+        components, largest_component, scc_sizes, is_directed = _component_summary_from_edges(
+            edges,
+            n,
         )
+        largest_scc = max(scc_sizes) if scc_sizes else 0
+        has_self_loop = bool((edges[0] == edges[1]).any().item())
+        is_acyclic = largest_scc <= 1 and not has_self_loop
         if not is_acyclic:
             depth = None
             depth_tripped = False
+            scanned = 0
+        else:
+            out_neighbors, in_neighbors, _undirected_neighbors = _build_adjacency(
+                sources,
+                targets,
+                n,
+            )
+            depth, depth_tripped, scanned = _capped_longest_path_depth(
+                out_neighbors,
+                in_neighbors,
+                depth_cap=int(depth_cap),
+                edge_budget=max(int(depth_cap) * max(e, 1), e),
+            )
         return cls(
             schema_version=SKETCH_SCHEMA_VERSION,
             fingerprint=_fingerprint_edges(edges, n),
@@ -175,7 +183,7 @@ class TopologySketch:
             largest_component_size=largest_component,
             scc_count=len(scc_sizes),
             largest_scc_size=largest_scc,
-            is_directed=_has_asymmetric_edge(sources, targets),
+            is_directed=is_directed,
             is_acyclic=is_acyclic,
             depth=depth,
             depth_cap=int(depth_cap),
@@ -270,6 +278,110 @@ def _validate_edges(edge_index: torch.Tensor, num_nodes: int) -> Tuple[List[int]
         if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
             raise ValueError("edge_index contains a node outside [0, num_nodes).")
     return sources, targets
+
+
+def _total_degrees_from_edges(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+    """Return total directed degree for every node.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[int]
+        ``out_degree + in_degree`` for each node.
+    """
+    out_degree = torch.bincount(edge_index[0], minlength=int(num_nodes))
+    in_degree = torch.bincount(edge_index[1], minlength=int(num_nodes))
+    return (out_degree + in_degree).to(dtype=torch.long).tolist()
+
+
+def _component_summary_from_edges(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> Tuple[int, int, List[int], bool]:
+    """Return weak/SCC component summaries using CSR when available.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    tuple[int, int, list[int], bool]
+        Weak component count, largest weak component size, exact SCC sizes, and
+        whether the directed adjacency is asymmetric.
+    """
+    try:
+        return _component_summary_scipy(edge_index, int(num_nodes))
+    except Exception:
+        sources = edge_index[0].tolist()
+        targets = edge_index[1].tolist()
+        out_neighbors, _in_neighbors, undirected_neighbors = _build_adjacency(
+            sources,
+            targets,
+            int(num_nodes),
+        )
+        components, largest_component = _weak_components(undirected_neighbors)
+        scc_sizes = _strongly_connected_component_sizes(out_neighbors)
+        return components, largest_component, scc_sizes, _has_asymmetric_edge(sources, targets)
+
+
+def _component_summary_scipy(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> Tuple[int, int, List[int], bool]:
+    """Return exact component summaries through scipy sparse graph kernels.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    tuple[int, int, list[int], bool]
+        Weak component count, largest weak component size, exact SCC sizes, and
+        directedness.
+    """
+    import numpy as np
+    from scipy import sparse
+    from scipy.sparse import csgraph
+
+    rows = edge_index[0].numpy()
+    cols = edge_index[1].numpy()
+    data = np.ones((int(edge_index.shape[1]),), dtype=np.uint8)
+    matrix = sparse.csr_matrix((data, (rows, cols)), shape=(int(num_nodes), int(num_nodes)))
+    weak_count, weak_labels = csgraph.connected_components(
+        matrix,
+        directed=True,
+        connection="weak",
+        return_labels=True,
+    )
+    weak_sizes = np.bincount(weak_labels, minlength=int(weak_count))
+    strong_count, strong_labels = csgraph.connected_components(
+        matrix,
+        directed=True,
+        connection="strong",
+        return_labels=True,
+    )
+    strong_sizes = np.bincount(strong_labels, minlength=int(strong_count)).astype(np.int64)
+    asymmetry = (matrix != matrix.transpose()).nnz > 0
+    return (
+        int(weak_count),
+        int(weak_sizes.max()) if weak_sizes.size else 0,
+        [int(value) for value in strong_sizes.tolist()],
+        bool(asymmetry),
+    )
 
 
 def _build_adjacency(

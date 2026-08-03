@@ -221,23 +221,8 @@ def test_above_gate_layers_dispatches_to_legacy_multilevel(
     assert metadata["decision"]["reason_codes"] == ["acyclic", "depth_cap_passed"]
 
 
-def test_above_gate_field_dispatches_to_temporary_legacy_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Above-gate cyclic layouts route to FIELD metadata and complete via fallback."""
-
-    def fake_multilevel_layout(
-        graph: DaguaGraph,
-        config: LayoutConfig,
-        trace: object = None,
-    ) -> torch.Tensor:
-        """Return deterministic finite positions for the routed cyclic graph."""
-        del config, trace
-        return torch.ones((graph.num_nodes, 2), dtype=torch.float32)
-
-    multilevel_module = import_module("dagua.layout.multilevel")
-    monkeypatch.setattr(multilevel_module, "multilevel_layout", fake_multilevel_layout)
-
+def test_above_gate_field_dispatches_to_field_strategy() -> None:
+    """Above-gate cyclic layouts route to FIELD and no longer use legacy fallback."""
     graph = _cyclic_er_like(8)
     pos = dagua.layout(
         graph,
@@ -246,6 +231,10 @@ def test_above_gate_field_dispatches_to_temporary_legacy_fallback(
                 "scale_node_gate": 5,
                 "scale_edge_gate": 200,
                 "scale_depth_cap": 8,
+                "field_coarsest_target": 4,
+                "field_coarsest_solver": "stress_sgd",
+                "field_refine_steps": 1,
+                "field_max_grid_axis": 8,
             }
         ),
     )
@@ -254,4 +243,5 @@ def test_above_gate_field_dispatches_to_temporary_legacy_fallback(
     assert pos.shape == (8, 2)
     metadata = getattr(graph, "_dagua_scale_route_decision")
     assert metadata["decision"]["strategy"] == "FIELD"
-    assert metadata["temporary_fallback"] == "legacy_multilevel"
+    assert "temporary_fallback" not in metadata
+    assert metadata["field"]["coarsest_nodes"] <= 4

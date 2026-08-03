@@ -1460,6 +1460,35 @@ def _record_scale_route_metadata(graph: Any, metadata: dict[str, object]) -> Non
         return
 
 
+def _ensure_scale_node_sizes(graph: Any, config: LayoutConfig) -> None:
+    """Ensure above-gate layouts have node boxes without expensive text fitting.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing ``node_sizes`` and ``num_nodes``.
+    config : LayoutConfig
+        Layout configuration used to derive conservative default scale boxes.
+
+    Returns
+    -------
+    None
+        Existing valid node sizes are preserved; missing sizes get uniform
+        boxes so scale strategies do not run per-label matplotlib measurement
+        on 100K+ synthetic/default-labeled graphs.
+    """
+    node_sizes = getattr(graph, "node_sizes", None)
+    if (
+        node_sizes is not None
+        and node_sizes.ndim == 2
+        and node_sizes.shape[0] == int(graph.num_nodes)
+        and node_sizes.shape[1] == 2
+    ):
+        return
+    default_size = max(1.0, float(getattr(config, "node_sep", 70.0)) * 0.20)
+    graph.node_sizes = torch.full((int(graph.num_nodes), 2), default_size, dtype=torch.float32)
+
+
 def _layout_scale_default(
     graph: Any,
     config: LayoutConfig,
@@ -1485,7 +1514,6 @@ def _layout_scale_default(
         ``None`` means the explicit override selected ``NATIVE`` and the caller
         should continue into the existing native pipeline.
     """
-    from dagua.layout.multilevel import multilevel_layout
     from dagua.layout.scale.budget import BudgetGuard
     from dagua.layout.scale.router import ScaleStrategy, depth_cap_from_config, route
     from dagua.layout.scale.sketch import TopologySketch, estimate_topology_peak_bytes
@@ -1504,9 +1532,6 @@ def _layout_scale_default(
         "decision": decision.to_dict(),
         "sketch": sketch.to_dict(),
     }
-    if decision.strategy == ScaleStrategy.FIELD:
-        metadata["temporary_fallback"] = "legacy_multilevel"
-        metadata["todo"] = "TODO(M2): replace FIELD fallback with family-agnostic field solver."
     _record_scale_route_metadata(graph, metadata)
     if config.verbose:
         print(
@@ -1517,12 +1542,22 @@ def _layout_scale_default(
         return None
 
     guard.check("scale_dispatch", sketch.peak_bytes)
-    graph.compute_node_sizes()
+    _ensure_scale_node_sizes(graph, config)
     graph._prepare_for_layout()
     try:
         scale_config = copy.copy(config)
-        scale_config.algorithm = None
-        pos = multilevel_layout(graph, scale_config, trace=trace)
+        if decision.strategy == ScaleStrategy.FIELD:
+            from dagua.layout.scale.strategies.field import layout_field
+
+            pos = layout_field(graph, scale_config, sketch, trace=trace)
+            field_metadata = dict(metadata)
+            field_metadata["field"] = getattr(scale_config, "_dagua_field_telemetry", {})
+            _record_scale_route_metadata(graph, field_metadata)
+        else:
+            from dagua.layout.multilevel import multilevel_layout
+
+            scale_config.algorithm = None
+            pos = multilevel_layout(graph, scale_config, trace=trace)
         graph.cache_layout(pos)
         return pos.to(dtype=torch.float32)
     finally:
