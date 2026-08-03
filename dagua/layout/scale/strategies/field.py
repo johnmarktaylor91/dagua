@@ -23,8 +23,11 @@ from dagua.layout.scale.coarsen import (
 from dagua.layout.scale.coarsest import anytime_native_coarsest
 from dagua.layout.scale.pyramid import (
     build_grid_pyramid,
+    build_grid_pyramid_streaming,
     choose_pyramid_device,
+    choose_streaming_chunk_device,
     far_field_repulsion_force,
+    pyramid_tensor_bytes,
 )
 from dagua.layout.scale.sketch import TopologySketch
 
@@ -35,6 +38,8 @@ _DEFAULT_BASE_CELL_MULTIPLIER = 1.2
 _DEFAULT_MAX_GRID_AXIS = 1_024
 _DEFAULT_PYRAMID_LEVELS = 10
 _DEFAULT_STREAMING_NODE_THRESHOLD = 50_000_000
+_DEFAULT_STREAMING_CHUNK_NODES = 2_000_000
+_DEFAULT_STREAMING_EDGE_CHUNK = 5_000_000
 
 
 @dataclass(frozen=True)
@@ -134,11 +139,7 @@ class FieldScaleStrategy:
             )
             setattr(config, "_dagua_field_telemetry", telemetry.to_dict())
             return pos
-        streaming_threshold = int(
-            params.get("field_streaming_node_threshold", _DEFAULT_STREAMING_NODE_THRESHOLD)
-        )
-        streaming_allowed = bool(params.get("field_allow_streaming_fallback", False))
-        if streaming_allowed and int(graph.num_nodes) >= streaming_threshold:
+        if _should_use_streaming_field(graph, config):
             return _layout_streaming_field(
                 graph,
                 config,
@@ -450,7 +451,7 @@ def _layout_streaming_field(
     started: float,
     seed: int,
 ) -> torch.Tensor:
-    """Compute the 10M FIELD rung without Python adjacency materialization.
+    """Compute a FIELD rung without Python adjacency or full-GPU residency.
 
     Parameters
     ----------
@@ -475,68 +476,130 @@ def _layout_streaming_field(
     del sketch
     params = config.algorithm_params
     n = int(graph.num_nodes)
-    node_sizes = _resolved_graph_node_sizes(graph)
-    base_sep = _target_separation(config, node_sizes)
-    init_record = checkpoint.record_for("streaming", 0) if checkpoint.armed else None
-    if init_record is not None:
-        pos = checkpoint.load_tensors("streaming", 0)["pos"].to(dtype=torch.float32)
-        resumed = True
-    else:
-        pos = _streaming_initial_positions(n, base_sep=base_sep, seed=seed)
+    node_sizes = _resolved_graph_node_sizes_for_streaming(graph, config)
+    hierarchy = build_scale_hierarchy(
+        graph.edge_index,
+        n,
+        node_sizes,
+        getattr(graph, "edge_weights", None),
+        target_nodes=int(params.get("field_coarsest_target", _DEFAULT_COARSEST_TARGET)),
+        max_levels=int(params.get("field_max_levels", 24)),
+        seed=seed,
+        topk_per_node=int(params.get("field_topk_per_node", _DEFAULT_TOPK)),
+        min_shrink_ratio=float(params.get("field_min_shrink_ratio", 0.50)),
+    )
+    if checkpoint.armed:
+        _checkpoint_hierarchy(checkpoint, hierarchy)
+
+    if hierarchy.levels:
+        coarsest_solver = str(params.get("field_coarsest_solver", "auto")).lower()
+        pos = _solve_coarsest(hierarchy, config, seed=seed, solver=coarsest_solver)
+        if checkpoint.armed:
+            _record_refine_checkpoint(
+                checkpoint,
+                level=len(hierarchy.levels),
+                pos=pos,
+                telemetry={
+                    "phase": "streaming_hierarchy_coarsest",
+                    "coarsest_nodes": hierarchy.coarsest_graph.num_nodes,
+                },
+            )
+        for level_index in range(len(hierarchy.levels) - 1, -1, -1):
+            transition = hierarchy.levels[level_index]
+            jitter = _jitter_scale_for_level(config, transition.fine_num_nodes)
+            pos = _expand_for_prolongation(
+                pos,
+                fine_num_nodes=transition.fine_num_nodes,
+                coarse_num_nodes=transition.coarse_num_nodes,
+                expand_gain=float(params.get("field_prolong_expand", 1.0)),
+            )
+            pos = prolong_positions(
+                pos,
+                transition.fine_to_coarse,
+                seed=seed + level_index,
+                jitter_scale=jitter,
+            )
+            level_graph = _fine_graph_for_transition(hierarchy, level_index)
+            level_sizes = _fine_sizes_for_transition(hierarchy, level_index, n, node_sizes)
+            level_masses = _fine_masses_for_transition(hierarchy, level_index, n)
+            pos = _refine_streaming_level(
+                pos,
+                level_graph.edge_index,
+                level_graph.edge_weight,
+                level_sizes,
+                level_masses,
+                config,
+                seed=seed + level_index,
+            )
+            if checkpoint.armed:
+                _record_refine_checkpoint(
+                    checkpoint,
+                    level=level_index,
+                    pos=pos,
+                    phase="streaming_refine",
+                    telemetry={
+                        "phase": "streaming_hierarchy_refine",
+                        "fine_num_nodes": transition.fine_num_nodes,
+                        "coarse_num_nodes": transition.coarse_num_nodes,
+                    },
+                )
         resumed = False
-        if checkpoint.armed:
-            _record_refine_checkpoint(
-                checkpoint,
-                level=0,
-                pos=pos,
-                phase="streaming",
-                telemetry={"phase": "streaming_init", "num_nodes": n},
+        coarsest_solver = f"streaming_hierarchy_{coarsest_solver}"
+    else:
+        base_sep = _target_separation(config, node_sizes)
+        init_record = checkpoint.record_for("streaming", 0) if checkpoint.armed else None
+        if init_record is not None:
+            pos = checkpoint.load_tensors("streaming", 0)["pos"].to(dtype=torch.float32)
+            resumed = True
+        else:
+            pos = _streaming_initial_positions_from_edges(
+                graph.edge_index,
+                n,
+                base_sep=base_sep,
+                seed=seed,
+                chunk_size=int(
+                    params.get("field_streaming_edge_chunk", _DEFAULT_STREAMING_EDGE_CHUNK)
+                ),
             )
-            _maybe_exit_after_checkpoint(config, level=0)
-    steps = max(0, int(params.get("field_streaming_refine_steps", 1)))
-    masses = torch.ones((n,), dtype=torch.float32)
-    edge_weight = _streaming_edge_weight(graph)
-    graph_payload = ScaleGraph(
-        num_nodes=n,
-        edge_index=graph.edge_index,
-        edge_weight=edge_weight,
-        adjacency=[],
-    )
-    refine_config = copy.copy(config)
-    refine_config.algorithm_params = dict(config.algorithm_params)
-    refine_config.algorithm_params["field_refine_steps"] = int(
-        params.get("field_streaming_inner_steps", 1)
-    )
-    for step in range(steps):
-        pos = _refine_level(
-            pos,
-            graph_payload,
-            node_sizes,
-            masses,
-            refine_config,
-            seed=seed + step,
-            is_finest=True,
-        )
-        setattr(
-            config,
-            "_dagua_field_last_pyramid_device",
-            getattr(refine_config, "_dagua_field_last_pyramid_device", "cpu"),
-        )
-        if checkpoint.armed:
-            _record_refine_checkpoint(
-                checkpoint,
-                level=step + 1,
-                pos=pos,
-                phase="streaming_refine",
-                telemetry={"phase": "streaming_refine", "step": step + 1},
+            resumed = False
+            if checkpoint.armed:
+                _record_refine_checkpoint(
+                    checkpoint,
+                    level=0,
+                    pos=pos,
+                    phase="streaming",
+                    telemetry={"phase": "streaming_init", "num_nodes": n},
+                )
+                _maybe_exit_after_checkpoint(config, level=0)
+        masses = torch.ones((n,), dtype=torch.float32)
+        edge_weight = _streaming_edge_weight(graph)
+        steps = max(0, int(params.get("field_streaming_refine_steps", 1)))
+        for step in range(steps):
+            pos = _refine_streaming_level(
+                pos,
+                graph.edge_index,
+                edge_weight,
+                node_sizes,
+                masses,
+                config,
+                seed=seed + step,
             )
+            if checkpoint.armed:
+                _record_refine_checkpoint(
+                    checkpoint,
+                    level=step + 1,
+                    pos=pos,
+                    phase="streaming_refine",
+                    telemetry={"phase": "streaming_refine", "step": step + 1},
+                )
+        coarsest_solver = "streaming_cell_field"
     pos = pos.detach().to(device="cpu", dtype=torch.float32)
     if not bool(torch.isfinite(pos).all().item()):
         raise RuntimeError("streaming FIELD strategy produced non-finite positions.")
     telemetry = FieldTelemetry(
-        coarsest_nodes=n,
-        levels=0,
-        coarsest_solver="streaming",
+        coarsest_nodes=hierarchy.coarsest_graph.num_nodes,
+        levels=len(hierarchy.levels),
+        coarsest_solver=coarsest_solver,
         wall_s=time.perf_counter() - started,
         pyramid_device=str(getattr(config, "_dagua_field_last_pyramid_device", "cpu")),
         checkpoint_armed=checkpoint.armed,
@@ -552,6 +615,42 @@ def _layout_streaming_field(
         )
     setattr(config, "_dagua_field_telemetry", telemetry.to_dict())
     return pos
+
+
+def _should_use_streaming_field(graph: Any, config: LayoutConfig) -> bool:
+    """Return whether FIELD must use the CPU-resident streaming regime.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing ``num_nodes`` and ``edge_index``.
+    config : LayoutConfig
+        Layout configuration.
+
+    Returns
+    -------
+    bool
+        ``True`` when explicitly enabled, the configured node threshold is
+        crossed, or the ordinary CUDA refine working set exceeds 70% VRAM.
+    """
+    params = config.algorithm_params
+    n = int(graph.num_nodes)
+    e = int(graph.edge_index.shape[1])
+    threshold = int(params.get("field_streaming_node_threshold", _DEFAULT_STREAMING_NODE_THRESHOLD))
+    if bool(params.get("field_force_streaming", False)):
+        return True
+    if bool(params.get("field_allow_streaming_fallback", False)) and n >= threshold:
+        return True
+    if n < threshold:
+        return False
+    if not str(config.device).startswith("cuda") or not torch.cuda.is_available():
+        return bool(params.get("field_streaming_cpu_above_threshold", True))
+    estimated_peak = _estimate_refine_peak_bytes(n, e)
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info()
+    except RuntimeError:
+        return True
+    return estimated_peak > int(free_bytes * 0.70)
 
 
 def _streaming_initial_positions(num_nodes: int, *, base_sep: float, seed: int) -> torch.Tensor:
@@ -575,6 +674,359 @@ def _streaming_initial_positions(num_nodes: int, *, base_sep: float, seed: int) 
     angle = (node * 2.39996323 + float(seed) * 0.0174533).remainder(6.283185307179586)
     radius = torch.sqrt(node + 1.0) * max(float(base_sep), 1.0) * 0.35
     return torch.stack((torch.cos(angle) * radius, torch.sin(angle) * radius), dim=1)
+
+
+def _streaming_initial_positions_from_edges(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    *,
+    base_sep: float,
+    seed: int,
+    chunk_size: int,
+) -> torch.Tensor:
+    """Return graph-informed deterministic positions for streaming FIELD.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Node count.
+    base_sep : float
+        Target local separation.
+    seed : int
+        Seed folded into deterministic tie-break offsets.
+    chunk_size : int
+        Edge rows processed per chunk.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU positions with shape ``[N, 2]``.
+
+    Notes
+    -----
+    The old 100M fallback was a golden-angle spiral. This initializer instead
+    builds a one-pass neighborhood barycenter field and assigns nodes to
+    deterministic cells by that field, giving edges local baselines before the
+    chunked force pass.
+    """
+    n = int(num_nodes)
+    if n <= 0:
+        return torch.empty((0, 2), dtype=torch.float32)
+    if edge_index.numel() == 0:
+        return _streaming_block_positions(n, base_sep=base_sep, seed=seed)
+
+    degree = torch.zeros((n,), dtype=torch.float32)
+    neighbor_sum = torch.zeros((n,), dtype=torch.float32)
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    chunk = max(1, int(chunk_size))
+    for start in range(0, int(edges.shape[1]), chunk):
+        end = min(int(edges.shape[1]), start + chunk)
+        src = edges[0, start:end]
+        dst = edges[1, start:end]
+        valid = (src >= 0) & (src < n) & (dst >= 0) & (dst < n) & (src != dst)
+        if not bool(valid.any()):
+            continue
+        src = src[valid]
+        dst = dst[valid]
+        ones = torch.ones((int(src.numel()),), dtype=torch.float32)
+        degree.scatter_add_(0, src, ones)
+        degree.scatter_add_(0, dst, ones)
+        neighbor_sum.scatter_add_(0, src, dst.to(dtype=torch.float32))
+        neighbor_sum.scatter_add_(0, dst, src.to(dtype=torch.float32))
+
+    node = torch.arange(n, dtype=torch.float32)
+    anchor = torch.where(degree > 0.0, neighbor_sum / degree.clamp_min(1.0), node)
+    del degree, neighbor_sum
+    width = int(math.ceil(math.sqrt(n)))
+    bucket = max(1, int(math.ceil(n / width)))
+    cell = torch.div(anchor.to(dtype=torch.long), bucket, rounding_mode="floor")
+    local = torch.remainder(torch.arange(n, dtype=torch.long), width).to(dtype=torch.float32)
+    x = (cell.to(dtype=torch.float32) - float(width) * 0.5) * float(base_sep)
+    y = (local - float(width) * 0.5) * float(base_sep)
+    phase = (node * 12.9898 + anchor * 78.233 + float(seed) * 0.0174533).remainder(
+        6.283185307179586
+    )
+    jitter = max(float(base_sep), 1.0) * 0.18
+    x = x + torch.cos(phase) * jitter
+    y = y + torch.sin(phase) * jitter
+    return _normalize_positions(torch.stack((x, y), dim=1))
+
+
+def _streaming_block_positions(num_nodes: int, *, base_sep: float, seed: int) -> torch.Tensor:
+    """Return deterministic grid-block positions for edgeless streaming inputs.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Node count.
+    base_sep : float
+        Target local separation.
+    seed : int
+        Seed folded into deterministic cell jitter.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU positions with shape ``[N, 2]``.
+    """
+    n = int(num_nodes)
+    side = int(math.ceil(math.sqrt(max(1, n))))
+    node = torch.arange(n, dtype=torch.float32)
+    x = node.remainder(side)
+    y = torch.div(node, side, rounding_mode="floor")
+    phase = (node * 2.39996323 + float(seed) * 0.0174533).remainder(6.283185307179586)
+    jitter = max(float(base_sep), 1.0) * 0.12
+    pos = torch.stack(
+        (
+            (x - float(side) * 0.5) * float(base_sep) + torch.cos(phase) * jitter,
+            (y - float(side) * 0.5) * float(base_sep) + torch.sin(phase) * jitter,
+        ),
+        dim=1,
+    )
+    return _normalize_positions(pos)
+
+
+def _refine_streaming_level(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor,
+    node_sizes: torch.Tensor,
+    node_masses: torch.Tensor,
+    config: LayoutConfig,
+    *,
+    seed: int,
+) -> torch.Tensor:
+    """Refine CPU-resident FIELD positions with chunked force passes.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        CPU positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    edge_weight : torch.Tensor
+        Edge weights with shape ``[E]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    node_masses : torch.Tensor
+        Node masses with shape ``[N]``.
+    config : LayoutConfig
+        Layout configuration.
+    seed : int
+        Deterministic seed for this streaming pass.
+
+    Returns
+    -------
+    torch.Tensor
+        Refined CPU positions with shape ``[N, 2]``.
+    """
+    del seed
+    params = config.algorithm_params
+    work = pos.detach().to(device="cpu", dtype=torch.float32).contiguous()
+    base_sep = _target_separation(config, node_sizes)
+    step_cap = float(params.get("field_streaming_step_cap", base_sep * 0.75))
+    edge_strength = float(params.get("field_edge_strength", 0.15))
+    repel_strength = float(params.get("field_repel_strength", base_sep * base_sep * 0.08))
+    spring = _streaming_edge_spring_displacement(
+        work,
+        edge_index,
+        edge_weight,
+        target_length=base_sep,
+        strength=edge_strength,
+        chunk_size=int(params.get("field_streaming_edge_chunk", _DEFAULT_STREAMING_EDGE_CHUNK)),
+    )
+    pyramid = build_grid_pyramid_streaming(
+        work,
+        node_masses,
+        base_cell_size=base_sep
+        * float(params.get("field_base_cell_multiplier", _DEFAULT_BASE_CELL_MULTIPLIER)),
+        max_cells_per_axis=int(params.get("field_max_grid_axis", _DEFAULT_MAX_GRID_AXIS)),
+        max_levels=int(params.get("field_pyramid_levels", _DEFAULT_PYRAMID_LEVELS)),
+        chunk_nodes=int(params.get("field_streaming_chunk_nodes", _DEFAULT_STREAMING_CHUNK_NODES)),
+    )
+    repel = _streaming_far_field_displacement(
+        work,
+        pyramid,
+        config,
+        strength=repel_strength,
+        softening=base_sep * 0.25,
+        max_displacement=step_cap * 4.0,
+    )
+    disp = spring + repel
+    norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp_min(1.0e-9)
+    disp = disp * torch.clamp(step_cap / norm, max=1.0)
+    return _normalize_positions(work + disp)
+
+
+def _streaming_edge_spring_displacement(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor,
+    *,
+    target_length: float,
+    strength: float,
+    chunk_size: int,
+) -> torch.Tensor:
+    """Return deterministic CPU edge-spring displacement in chunks.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        CPU positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    edge_weight : torch.Tensor
+        Edge weights with shape ``[E]``.
+    target_length : float
+        Preferred edge length.
+    strength : float
+        Spring multiplier.
+    chunk_size : int
+        Number of edges processed per chunk.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU displacement with shape ``[N, 2]``.
+    """
+    disp = torch.zeros_like(pos)
+    if edge_index.numel() == 0 or float(strength) == 0.0:
+        return disp
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    weights = edge_weight.detach().to(device="cpu", dtype=torch.float32)
+    weights = weights / weights.mean().clamp_min(1.0e-6)
+    chunk = max(1, int(chunk_size))
+    for start in range(0, int(edges.shape[1]), chunk):
+        end = min(int(edges.shape[1]), start + chunk)
+        src = edges[0, start:end]
+        dst = edges[1, start:end]
+        delta = pos[dst] - pos[src]
+        dist = torch.linalg.norm(delta, dim=1, keepdim=True).clamp_min(1.0e-6)
+        magnitude = dist * dist / max(float(target_length), 1.0e-6)
+        force = delta / dist * (magnitude * weights[start:end].unsqueeze(1))
+        force = force * float(strength)
+        disp.index_add_(0, src, force)
+        disp.index_add_(0, dst, -force)
+    return disp
+
+
+def _streaming_far_field_displacement(
+    pos: torch.Tensor,
+    pyramid: Any,
+    config: LayoutConfig,
+    *,
+    strength: float,
+    softening: float,
+    max_displacement: float,
+) -> torch.Tensor:
+    """Return far-field displacement by processing CPU positions in chunks.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        CPU positions with shape ``[N, 2]``.
+    pyramid : Any
+        Grid pyramid built from the full CPU-resident positions.
+    config : LayoutConfig
+        Layout configuration.
+    strength : float
+        Repulsion strength.
+    softening : float
+        Distance softening.
+    max_displacement : float
+        Per-node displacement cap.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU displacement with shape ``[N, 2]``.
+    """
+    params = config.algorithm_params
+    chunk = max(1, int(params.get("field_streaming_chunk_nodes", _DEFAULT_STREAMING_CHUNK_NODES)))
+    resident_bytes = pyramid_tensor_bytes(pyramid)
+    out = torch.empty_like(pos)
+    used_device = "cpu"
+    for start in range(0, int(pos.shape[0]), chunk):
+        end = min(int(pos.shape[0]), start + chunk)
+        chunk_device = choose_streaming_chunk_device(
+            end - start,
+            str(config.device),
+            resident_pyramid_bytes=resident_bytes,
+        )
+        used_device = "cuda" if chunk_device == "cuda" else used_device
+        chunk_pos = pos[start:end].to(device=chunk_device, dtype=torch.float32)
+        chunk_pyramid = (
+            _pyramid_to_device(pyramid, chunk_device) if chunk_device == "cuda" else pyramid
+        )
+        out[start:end] = far_field_repulsion_force(
+            chunk_pos,
+            chunk_pyramid,
+            strength=float(strength),
+            softening=float(softening),
+            max_displacement=float(max_displacement),
+            level_stride=int(params.get("field_pyramid_stride", 2)),
+        ).to(device="cpu")
+        if chunk_device == "cuda":
+            del chunk_pos, chunk_pyramid
+            torch.cuda.empty_cache()
+    setattr(
+        config,
+        "_dagua_field_last_pyramid_device",
+        f"{pyramid.device_kind}+{used_device}_chunks",
+    )
+    return out
+
+
+def _pyramid_to_device(pyramid: Any, device: str) -> Any:
+    """Copy a small grid pyramid to the requested chunk device.
+
+    Parameters
+    ----------
+    pyramid : Any
+        Grid pyramid.
+    device : str
+        Target device.
+
+    Returns
+    -------
+    Any
+        Grid pyramid with all level tensors on ``device``.
+    """
+    from dagua.layout.scale.pyramid import GridLevel, GridPyramid
+
+    levels = [
+        GridLevel(
+            mass=level.mass.to(device=device),
+            centroid=level.centroid.to(device=device),
+            cell_size=level.cell_size.to(device=device),
+            origin=level.origin.to(device=device),
+        )
+        for level in pyramid.levels
+    ]
+    return GridPyramid(levels=levels, device_kind=str(device))
+
+
+def _resolved_graph_node_sizes_for_streaming(graph: Any, config: LayoutConfig) -> torch.Tensor:
+    """Return node sizes for streaming FIELD.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object with optional ``node_sizes``.
+    config : LayoutConfig
+        Layout config used for a default size.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU node-size tensor with shape ``[N, 2]``.
+    """
+    if getattr(graph, "node_sizes", None) is not None:
+        return _resolved_graph_node_sizes(graph)
+    default_size = max(1.0, float(getattr(config, "node_sep", 70.0)) * 0.20)
+    return torch.full((int(graph.num_nodes), 2), default_size, dtype=torch.float32)
 
 
 def _streaming_edge_weight(graph: Any) -> torch.Tensor:

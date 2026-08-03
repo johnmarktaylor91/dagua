@@ -1877,7 +1877,7 @@ def _build_csr(
         except Exception:
             pass
 
-    chunked = num_nodes > _STREAMING_NODE_THRESHOLD
+    chunked = num_nodes >= _STREAMING_NODE_THRESHOLD
     val_dtype = torch.int32 if chunked else torch.long
 
     out_degree = torch.zeros(num_nodes, dtype=val_dtype, device=device)
@@ -1911,7 +1911,7 @@ def _get_numba_scatter() -> Optional[Callable]:
         from numba import njit
 
         @njit
-        def _scatter(src, tgt, offsets, out):  # type: ignore[misc]
+        def _scatter(src, tgt, offsets, out):
             write = offsets[:-1].copy()
             for i in range(len(src)):
                 s = src[i]
@@ -2097,7 +2097,7 @@ def _longest_path_layering_vectorized(
     iteration processes an entire topological layer with tensor ops.
     Deep graphs (few nodes per wave): use CSR + numpy BFS — true O(V+E).
 
-    For N > 100M, uses chunked edge processing to avoid [E]-sized temporaries
+    For N >= 100M, uses chunked edge processing to avoid [E]-sized temporaries
     (saves ~12 GB at 1B nodes).
 
     Heuristic: run 10 waves. If average wave size > 1000, continue with waves.
@@ -2152,7 +2152,7 @@ def _longest_path_layering_vectorized(
         if src.device.type != compute_device:
             src = src.to(compute_device)
             tgt = tgt.to(compute_device)
-        chunked = N > _STREAMING_NODE_THRESHOLD
+        chunked = N >= _STREAMING_NODE_THRESHOLD
 
         # Use int32 for working arrays when chunked (saves 12 GB at 1B nodes).
         # Max in-degree and layer index both fit comfortably in int32.
@@ -2311,10 +2311,10 @@ def _longest_path_layering_vectorized(
                 if in_deg[child] == 0:
                     queue.append(child)
 
-        unresolved = layer_arr < 0
-        if np.any(unresolved):
-            fill_layer = int(layer_arr[~unresolved].max()) + 1 if np.any(~unresolved) else 0
-            layer_arr[unresolved] = fill_layer
+        unresolved_np = layer_arr < 0
+        if np.any(unresolved_np):
+            fill_layer = int(layer_arr[~unresolved_np].max()) + 1 if np.any(~unresolved_np) else 0
+            layer_arr[unresolved_np] = fill_layer
 
         _progress_close()
         return torch.from_numpy(layer_arr)

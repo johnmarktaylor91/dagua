@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dagua.config import LayoutConfig
 from dagua.layout.scale.sketch import TopologySketch
@@ -17,6 +17,7 @@ GIANT_SCC_MIN_FRACTION = 0.05
 NONTRIVIAL_SCC_MIN_SIZE = 2
 DEFAULT_REDUCTION_STALL_DEGREE = 4_096
 DEFAULT_REDUCTION_STALL_FRACTION = 0.20
+DECLARED_TOPOLOGY_VALUES = {"directed_cyclic", "directed_acyclic", "undirected"}
 
 
 class ScaleStrategy(str, Enum):
@@ -59,6 +60,26 @@ class RouteDecision:
         payload = asdict(self)
         payload["strategy"] = self.strategy.value
         return payload
+
+
+@dataclass(frozen=True)
+class DeclaredTopology:
+    """Caller-declared topology facts for the scale-sketch bypass.
+
+    Parameters
+    ----------
+    topology : str
+        One of ``"directed_cyclic"``, ``"directed_acyclic"``, or
+        ``"undirected"``.
+    depth : int or None
+        Optional known DAG depth.
+    depth_cap_tripped : bool or None
+        Optional known depth-cap result for declared DAGs.
+    """
+
+    topology: str
+    depth: Optional[int]
+    depth_cap_tripped: Optional[bool]
 
 
 def route(sketch: TopologySketch, config: LayoutConfig) -> RouteDecision:
@@ -161,6 +182,36 @@ def depth_cap_from_config(config: LayoutConfig) -> int:
         Positive depth cap used by :class:`TopologySketch`.
     """
     return max(1, int(config.algorithm_params.get("scale_depth_cap", DEFAULT_DEPTH_CAP)))
+
+
+def declared_topology_from_config(config: LayoutConfig) -> Optional[DeclaredTopology]:
+    """Return caller-declared topology facts from ``algorithm_params``.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout configuration that may carry ``scale_declared_topology`` and
+        optional declared depth metadata.
+
+    Returns
+    -------
+    DeclaredTopology or None
+        Normalized declaration, or ``None`` when no bypass was requested.
+    """
+    value = config.algorithm_params.get("scale_declared_topology", None)
+    if value is None or str(value).strip() == "":
+        return None
+    topology = str(value).strip().lower()
+    if topology not in DECLARED_TOPOLOGY_VALUES:
+        allowed = ", ".join(sorted(DECLARED_TOPOLOGY_VALUES))
+        raise ValueError(f"scale_declared_topology must be one of: {allowed}")
+    depth = config.algorithm_params.get("scale_declared_depth", None)
+    tripped = config.algorithm_params.get("scale_declared_depth_cap_tripped", None)
+    return DeclaredTopology(
+        topology=topology,
+        depth=None if depth is None else int(depth),
+        depth_cap_tripped=None if tripped is None else bool(tripped),
+    )
 
 
 def _has_nontrivial_giant_scc(sketch: TopologySketch) -> bool:
