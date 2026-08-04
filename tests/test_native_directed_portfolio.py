@@ -1986,8 +1986,7 @@ def test_ordering_pair_sweep_checks_budget_internally(monkeypatch: object) -> No
         edge_index,
         max_pairs=64,
         config=config,
-        started_at=time.perf_counter(),
-        wall_time_cap_s=10.0,
+        budget=native_directed._OrderingWorkBudget(remaining_pair_checks=1.0),
     )
 
     assert crossings == []
