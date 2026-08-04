@@ -6979,7 +6979,11 @@ def run_w5_finisher(
             steps=0,
             skipped_reason="no_finite_seed",
         )
-    deadline = time.monotonic() + slice_s
+    # The anytime wall deadline only exists in wall-deadline benchmark mode
+    # (an installed hard wall deadline). The deterministic default path runs
+    # the fixed step/checkpoint plan with an infinite deadline so the output
+    # can never depend on machine load (wall-clock robustness invariant).
+    deadline = time.monotonic() + slice_s if _remaining_s(config) is not None else float("inf")
     edge_work = edge_index.detach().to(device=kept_seeds[0].pos.device, dtype=torch.long)
     size_work = node_sizes.detach().to(device=kept_seeds[0].pos.device, dtype=torch.float32)
     shape_work = (
