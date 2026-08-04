@@ -147,6 +147,7 @@ def build_scale_hierarchy(
     seed: int = 42,
     topk_per_node: int = 16,
     min_shrink_ratio: float = _DEFAULT_MIN_SHRINK,
+    star_cap: Optional[int] = None,
 ) -> ScaleHierarchy:
     """Build a target-guaranteed family-agnostic coarsening hierarchy.
 
@@ -171,6 +172,14 @@ def build_scale_hierarchy(
     min_shrink_ratio : float, default=0.50
         Heavy-edge levels below this shrink escalate to deterministic hub-star
         contraction.
+    star_cap : int, optional
+        Maximum leaves one star hub may absorb per level. ``None`` keeps the
+        legacy unbounded absorption. Unbounded stars condense repeatedly:
+        the biggest hub wins every leaf again at each level, and by a few
+        levels one super-node holds ~96% of the graph mass, after which any
+        prolongation collapses the layout to a point (the 1B FIELD
+        scale-collapse). A small cap keeps per-level shrink while bounding
+        the mass skew.
 
     Returns
     -------
@@ -201,12 +210,13 @@ def build_scale_hierarchy(
             use_star = shrink_ratio < float(min_shrink_ratio)
 
         if use_star:
-            fine_to_coarse, coarse_num_nodes = _star_contraction_mapping(graph)
+            fine_to_coarse, coarse_num_nodes = _star_contraction_mapping(graph, star_cap=star_cap)
             target_floor = max(_MIN_COARSE_SIZE, int(target_nodes) // 2)
-            if coarse_num_nodes >= graph.num_nodes or coarse_num_nodes < target_floor:
+            stalled = coarse_num_nodes > int(0.98 * float(graph.num_nodes))
+            if coarse_num_nodes >= graph.num_nodes or coarse_num_nodes < target_floor or stalled:
                 fine_to_coarse, coarse_num_nodes = _bucket_contraction_mapping(
                     graph.num_nodes,
-                    int(target_nodes),
+                    max(int(target_nodes), graph.num_nodes // 8),
                 )
 
         if coarse_num_nodes >= graph.num_nodes:
@@ -311,6 +321,7 @@ def prolong_positions(
     *,
     seed: int = 42,
     jitter_scale: float = 1.0,
+    jitter_per_node: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Interpolate fine positions from coarse parents with deterministic offsets.
 
@@ -324,6 +335,11 @@ def prolong_positions(
         Seed folded into the deterministic angular offset.
     jitter_scale : float, default=1.0
         Offset radius in layout units.
+    jitter_per_node : torch.Tensor, optional
+        Per-fine-node offset radius with shape ``[N_fine]``. When present it
+        multiplies ``jitter_scale`` so children of heavy coarse parents can
+        scatter across their parent's larger territory instead of stacking
+        at a point.
 
     Returns
     -------
@@ -341,6 +357,10 @@ def prolong_positions(
         6.283185307179586
     )
     radius = float(jitter_scale) * torch.sqrt(ordinals + 1.0) / torch.sqrt(ordinals + 2.0)
+    if jitter_per_node is not None:
+        radius = radius * jitter_per_node.to(
+            device=coarse_pos.device, dtype=torch.float32
+        ).clamp_min(0.0)
     offset = torch.stack((torch.cos(phase), torch.sin(phase)), dim=1) * radius.unsqueeze(1)
     return (fine_pos + offset).to(dtype=torch.float32)
 
@@ -815,13 +835,18 @@ def _edge_hash_priority(src: torch.Tensor, dst: torch.Tensor, *, seed: int) -> t
     return torch.bitwise_and(value, _HASH_MASK)
 
 
-def _star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
+def _star_contraction_mapping(
+    graph: ScaleGraph,
+    star_cap: Optional[int] = None,
+) -> tuple[torch.Tensor, int]:
     """Build a deterministic hub-star contraction mapping.
 
     Parameters
     ----------
     graph : ScaleGraph
         Current graph.
+    star_cap : int, optional
+        Maximum leaves one hub may absorb; ``None`` keeps unbounded stars.
 
     Returns
     -------
@@ -830,18 +855,23 @@ def _star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
     """
     num_nodes = int(graph.num_nodes)
     if not graph.adjacency:
-        return _tensor_star_contraction_mapping(graph)
+        return _tensor_star_contraction_mapping(graph, star_cap=star_cap)
     degrees = [len(neighbors) for neighbors in graph.adjacency]
     order = sorted(range(num_nodes), key=lambda node: (-degrees[node], node))
+    cap = num_nodes if star_cap is None else max(1, int(star_cap))
     mapping = [-1] * num_nodes
     coarse_node = 0
     for node in order:
         if mapping[node] >= 0:
             continue
         mapping[node] = coarse_node
+        absorbed = 0
         for neighbor, _weight in graph.adjacency[node]:
+            if absorbed >= cap:
+                break
             if mapping[neighbor] < 0:
                 mapping[neighbor] = coarse_node
+                absorbed += 1
         coarse_node += 1
     if graph.edge_index.numel() == 0 and num_nodes > _DEFAULT_BUCKET_SIZE:
         target = max(1, math.ceil(num_nodes / _DEFAULT_BUCKET_SIZE))
@@ -849,13 +879,21 @@ def _star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
     return torch.tensor(mapping, dtype=torch.long), coarse_node
 
 
-def _tensor_star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, int]:
+def _tensor_star_contraction_mapping(
+    graph: ScaleGraph,
+    star_cap: Optional[int] = None,
+) -> tuple[torch.Tensor, int]:
     """Build a tensor-native hub contraction mapping.
 
     Parameters
     ----------
     graph : ScaleGraph
         Current graph without adjacency materialization.
+    star_cap : int, optional
+        Maximum leaves one hub may absorb; ``None`` keeps unbounded stars.
+        Rejected leaves stay singleton coarse nodes and pair up at the next
+        level, which bounds the per-level mass skew instead of letting the
+        highest-degree hub condense the whole graph.
 
     Returns
     -------
@@ -884,6 +922,11 @@ def _tensor_star_contraction_mapping(graph: ScaleGraph) -> tuple[torch.Tensor, i
     parent = torch.arange(num_nodes, dtype=torch.long)
     attached = best_priority < int(_HASH_MASK)
     parent[attached] = torch.remainder(best_priority[attached], num_nodes)
+    if star_cap is not None:
+        ordinals = _sibling_ordinals(parent)
+        is_leaf = parent != torch.arange(num_nodes, dtype=torch.long)
+        rejected = is_leaf & (ordinals >= max(1, int(star_cap)))
+        parent[rejected] = torch.arange(num_nodes, dtype=torch.long)[rejected]
     unique_parent, dense = torch.unique(parent, sorted=True, return_inverse=True)
     return dense.to(dtype=torch.long), int(unique_parent.numel())
 
