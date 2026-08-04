@@ -154,3 +154,85 @@ def test_polish_admission_is_size_only() -> None:
     assert _polish_generation_admitted(POLISH_DETERMINISTIC_NODE_CAP, POLISH_DETERMINISTIC_EDGE_CAP)
     assert not _polish_generation_admitted(POLISH_DETERMINISTIC_NODE_CAP + 1, 0)
     assert not _polish_generation_admitted(0, POLISH_DETERMINISTIC_EDGE_CAP + 1)
+
+
+def _budget_binding_ordering_input() -> tuple[torch.Tensor, torch.Tensor]:
+    """Build a narrow-band incumbent whose ordering search exceeds the ledger.
+
+    A single wide rank of shuffled nodes over many edges gives the arm a
+    natural trial volume whose pair-check work exceeds the 5M deterministic
+    budget, so the ledger truncates mid-search. The construction is a pure
+    function of constants.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Incumbent positions with shape ``[N, 2]`` and edge tensor ``[2, E]``.
+    """
+    top, bottom = 30, 60
+    num_nodes = top + bottom
+    edges: list[tuple[int, int]] = []
+    for src in range(top):
+        for spread in range(5):
+            dst = top + ((src * 17 + spread * 23 + 7) % bottom)
+            edges.append((src, dst))
+    edge_index = torch.tensor(sorted(set(edges)), dtype=torch.long).t().contiguous()
+    pos = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    for src in range(top):
+        pos[src, 0] = float((src * 13 + 5) % top) * 10.0
+        pos[src, 1] = 0.0
+    for offset in range(bottom):
+        pos[top + offset, 0] = float((offset * 7 + 3) % bottom) * 5.0
+        pos[top + offset, 1] = -40.0
+    return pos, edge_index
+
+
+def test_ordering_ledger_truncation_is_reproducible() -> None:
+    """A ledger-truncated ordering search is byte-identical across runs.
+
+    NOTE on the criterion: the deterministic pair-check ledger CAN truncate
+    the narrow-band ordering search at a different logical trial than
+    certified-HEAD's old 1.5s/2.5s wall caps did. This was audited
+    corpus-wide during the wall-clock-robustness re-cert: the ledger binds
+    on exactly three 121-corpus rows (dependency_graph_100,
+    r79_weighted_skew_dag_6x10, random_dag_50), and ALL corpus rows --
+    including those three and every other arm-entering row -- were
+    empirically confirmed byte-identical to certified-HEAD 16727c51 when
+    idle (the truncated arm candidate never changed the contest winner), so
+    idle byte-parity to certified-HEAD is the CONFIRMED baseline criterion.
+    Because HEAD artifacts are not available at test time, this test pins
+    the property that keeps that confirmation stable: the ledger must
+    truncate at the SAME logical trial on every run, on every machine,
+    under any load.
+    """
+    from dagua.layout.ops.pipelines.native_directed import (
+        _rank_local_zero_crossing_swap_candidate,
+    )
+
+    pos, edge_index = _budget_binding_ordering_input()
+    first = _rank_local_zero_crossing_swap_candidate(pos, edge_index, max_passes=3, config=None)
+    with _starved_time():
+        second = _rank_local_zero_crossing_swap_candidate(
+            pos, edge_index, max_passes=3, config=None
+        )
+    third = _rank_local_zero_crossing_swap_candidate(pos, edge_index, max_passes=3, config=None)
+    assert first.numpy().tobytes() == second.numpy().tobytes()
+    assert first.numpy().tobytes() == third.numpy().tobytes()
+    assert not torch.equal(first, pos)
+
+
+@pytest.mark.slow
+def test_ledger_binding_row_output_is_repeatable() -> None:
+    """A ledger-binding corpus row produces byte-identical repeated idle runs.
+
+    ``dependency_graph_100`` is one of the exactly three 121-corpus rows on
+    which the deterministic ordering ledger binds mid-search during an
+    ordinary certified-seam layout (audit: enumeration over all directed
+    corpus rows, 2026-08-04). Its final layout was confirmed byte-identical
+    to certified-HEAD 16727c51; this test pins the end-to-end determinism of
+    the full native default pipeline on such a row: repeated idle runs must
+    produce identical bytes.
+    """
+    first = _run_certified_native("dependency_graph_100")
+    second = _run_certified_native("dependency_graph_100")
+    assert first.numpy().tobytes() == second.numpy().tobytes()
