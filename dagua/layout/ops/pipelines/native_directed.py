@@ -56,10 +56,16 @@ DIRECTED_ORDERING_EXHAUSTIVE_WIDTH_CAP = 8
 DIRECTED_ORDERING_EXHAUSTIVE_PERM_CAP = 50_000
 DIRECTED_ORDERING_EXHAUSTIVE_PER_RANK_PERM_CAP = 720
 DIRECTED_ORDERING_DEADLINE_CHECK_INTERVAL = 16
-DIRECTED_ORDERING_SMALL_WALL_TIME_CAP_S = 1.5
-DIRECTED_ORDERING_MEDIUM_WALL_TIME_CAP_S = 2.5
 DIRECTED_ORDERING_MEDIUM_EDGE_PAIR_CAP = 250_000
 DIRECTED_ORDERING_TRIAL_PAIR_CAP = 5_000_000
+# Deterministic replacement for the historical per-arm wall-clock caps
+# (1.5s/2.5s). The ordering arm now spends a modeled pair-check ledger:
+# every exact-crossing evaluation charges the edge-pair count it scans, and
+# the arm stops when the ledger is exhausted. Identical work is admitted on
+# every machine and under any load. The budget equals the medium-band
+# admission product cap so the arm's total work is bounded up front by
+# structure, never by elapsed time.
+DIRECTED_ORDERING_DETERMINISTIC_PAIR_BUDGET = float(DIRECTED_ORDERING_TRIAL_PAIR_CAP)
 DIRECTED_ORDERING_Y_TOLERANCE = 1.0e-4
 DIRECTED_ORDERING_NUDGE_CROSSING_CAP = 64
 DIRECTED_ORDERING_NUDGE_TRIAL_CAP = 256
@@ -4487,8 +4493,7 @@ def _crossing_edge_pairs(
     edge_index: torch.Tensor,
     max_pairs: int,
     config: Optional[LayoutConfig] = None,
-    started_at: Optional[float] = None,
-    wall_time_cap_s: Optional[float] = None,
+    budget: Optional[_OrderingWorkBudget] = None,
 ) -> list[tuple[int, int, int, int]]:
     """Return a bounded list of exact crossing edge endpoint ids.
 
@@ -4502,10 +4507,8 @@ def _crossing_edge_pairs(
         Maximum number of crossing pairs to return.
     config : LayoutConfig, optional
         Prepared native configuration carrying an optional benchmark deadline.
-    started_at : float, optional
-        ``time.perf_counter()`` value captured when the ordering arm started.
-    wall_time_cap_s : float, optional
-        Absolute wall-clock cap for this invocation.
+    budget : _OrderingWorkBudget, optional
+        Deterministic pair-check ledger charged at the scan cadence.
 
     Returns
     -------
@@ -4520,11 +4523,11 @@ def _crossing_edge_pairs(
     for left_idx, (src_a, dst_a) in enumerate(edges):
         for src_b, dst_b in edges[left_idx + 1 :]:
             pairs_examined += 1
-            if (
-                pairs_examined % DIRECTED_ORDERING_PAIR_BUDGET_CHECK_INTERVAL == 0
-                and not _ordering_budget_available(config, started_at, wall_time_cap_s)
-            ):
-                return crossings
+            if pairs_examined % DIRECTED_ORDERING_PAIR_BUDGET_CHECK_INTERVAL == 0:
+                if budget is not None:
+                    budget.spend(DIRECTED_ORDERING_PAIR_BUDGET_CHECK_INTERVAL)
+                if not _ordering_budget_available(config, budget):
+                    return crossings
             if len({src_a, dst_a, src_b, dst_b}) < 4:
                 continue
             if _segments_cross(pos[src_a], pos[dst_a], pos[src_b], pos[dst_b]):
@@ -4607,22 +4610,46 @@ def _rank_order_from_neighbor_stat(
     return [node for _key, _ordinal, node in sorted(keyed)]
 
 
-def _ordering_wall_time_cap_s(num_nodes: int) -> float:
-    """Return the absolute wall-clock cap for the ordering arm.
+@dataclass
+class _OrderingWorkBudget:
+    """Deterministic pair-check ledger for one ordering-arm invocation.
 
     Parameters
     ----------
-    num_nodes : int
-        Number of nodes in the graph.
-
-    Returns
-    -------
-    float
-        Maximum seconds allowed for the rank-order search.
+    remaining_pair_checks : float
+        Modeled pair evaluations still admitted. Every exact-crossing count
+        charges the edge-pair volume it scans; the crossing-pair scan charges
+        pairs at its existing check cadence. The ledger depends only on graph
+        structure and admitted trial counts, never on elapsed time, so the
+        arm performs identical work under any machine load.
     """
-    if int(num_nodes) <= DIRECTED_NARROW_SEED_NODE_CAP:
-        return DIRECTED_ORDERING_SMALL_WALL_TIME_CAP_S
-    return DIRECTED_ORDERING_MEDIUM_WALL_TIME_CAP_S
+
+    remaining_pair_checks: float
+
+    def spend(self, pair_checks: float) -> None:
+        """Debit modeled pair evaluations from the ledger.
+
+        Parameters
+        ----------
+        pair_checks : float
+            Non-negative pair evaluations to charge.
+
+        Returns
+        -------
+        None
+            The ledger is mutated in place.
+        """
+        self.remaining_pair_checks -= max(0.0, float(pair_checks))
+
+    def exhausted(self) -> bool:
+        """Return whether the deterministic ledger is spent.
+
+        Returns
+        -------
+        bool
+            ``True`` once the remaining pair-check balance is non-positive.
+        """
+        return self.remaining_pair_checks <= 0.0
 
 
 def _ordering_portfolio_max_passes(num_nodes: int) -> int:
@@ -4747,8 +4774,7 @@ def _ordering_cost_admissible(
 
 def _ordering_budget_available(
     config: Optional[LayoutConfig],
-    started_at: Optional[float] = None,
-    wall_time_cap_s: Optional[float] = None,
+    budget: Optional[_OrderingWorkBudget] = None,
 ) -> bool:
     """Return whether the ordering arm may perform another trial.
 
@@ -4756,24 +4782,19 @@ def _ordering_budget_available(
     ----------
     config : LayoutConfig, optional
         Prepared native configuration carrying an optional benchmark deadline.
-    started_at : float, optional
-        ``time.perf_counter()`` value captured when the ordering arm started.
-    wall_time_cap_s : float, optional
-        Absolute wall-clock cap for this invocation.
+    budget : _OrderingWorkBudget, optional
+        Deterministic pair-check ledger for this invocation.
 
     Returns
     -------
     bool
-        ``True`` when the benchmark deadline and local wall-clock cap both have
-        room for another trial.
+        ``True`` when the benchmark budget and the deterministic pair-check
+        ledger both have room for another trial. Neither criterion consults
+        elapsed time, so the answer is identical under any machine load.
     """
     from dagua.layout.ops.pipelines.native_undirected import _portfolio_has_budget
 
-    if (
-        started_at is not None
-        and wall_time_cap_s is not None
-        and time.perf_counter() - float(started_at) >= float(wall_time_cap_s)
-    ):
+    if budget is not None and budget.exhausted():
         return False
     return _portfolio_has_budget(config, min_remaining_s=DIRECTED_FULL_SCORE_MIN_REMAINING_S)
 
@@ -4819,8 +4840,8 @@ def _try_crossing_endpoint_nudges(
     edge_index: torch.Tensor,
     best_crossings: int,
     config: Optional[LayoutConfig],
-    started_at: float,
-    wall_time_cap_s: float,
+    budget: Optional[_OrderingWorkBudget],
+    pair_count: int,
 ) -> tuple[torch.Tensor, int]:
     """Move crossing endpoints horizontally when slot permutations cannot help.
 
@@ -4834,10 +4855,10 @@ def _try_crossing_endpoint_nudges(
         Current exact crossing count.
     config : LayoutConfig, optional
         Prepared native configuration carrying an optional benchmark deadline.
-    started_at : float
-        ``time.perf_counter()`` value captured when the ordering arm started.
-    wall_time_cap_s : float
-        Absolute wall-clock cap for this invocation.
+    budget : _OrderingWorkBudget, optional
+        Deterministic pair-check ledger shared with the enclosing arm.
+    pair_count : int
+        Edge-pair volume charged per exact-crossing evaluation.
 
     Returns
     -------
@@ -4851,15 +4872,14 @@ def _try_crossing_endpoint_nudges(
     gap = max(1.0, span * 0.05)
     trials = 0
     while trials < DIRECTED_ORDERING_NUDGE_TRIAL_CAP and best_crossings > 0:
-        if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+        if not _ordering_budget_available(config, budget):
             return pos, best_crossings
         crossing_pairs = _crossing_edge_pairs(
             pos,
             edge_index,
             max_pairs=DIRECTED_ORDERING_NUDGE_CROSSING_CAP,
             config=config,
-            started_at=started_at,
-            wall_time_cap_s=wall_time_cap_s,
+            budget=budget,
         )
         best_candidate: Optional[torch.Tensor] = None
         best_trial_crossings = best_crossings
@@ -4892,8 +4912,10 @@ def _try_crossing_endpoint_nudges(
                     displacement = abs(candidate_x - original_x)
                     if displacement <= 1.0e-6:
                         continue
-                    if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+                    if not _ordering_budget_available(config, budget):
                         return pos, best_crossings
+                    if budget is not None:
+                        budget.spend(pair_count)
                     candidate = pos.clone()
                     candidate[node, 0] = candidate_x
                     crossings = _exact_crossing_count(candidate, edge_index)
@@ -4936,12 +4958,10 @@ def _rank_local_zero_crossing_swap_candidate(
     torch.Tensor
         Candidate positions with shape ``[N, 2]``.
     """
-    started_at = time.perf_counter()
     pos = incumbent.detach().to(device="cpu", dtype=torch.float32).clone()
     n = int(pos.shape[0])
     if n <= 2 or n > DIRECTED_ORDERING_MEDIUM_NODE_CAP:
         return pos
-    wall_time_cap_s = _ordering_wall_time_cap_s(n)
     rank_to_nodes = _rank_to_nodes_from_incumbent_y(pos, edge_index, n)
     max_width = max((len(nodes) for nodes in rank_to_nodes.values()), default=0)
     if max_width < 2:
@@ -4949,10 +4969,12 @@ def _rank_local_zero_crossing_swap_candidate(
     edge_count = int(edge_index.shape[1]) if edge_index.numel() else 0
     if not _ordering_cost_admissible(n, edge_count, rank_to_nodes, max_passes):
         return pos
+    pair_count = edge_count * max(edge_count - 1, 0) // 2
+    budget = _OrderingWorkBudget(DIRECTED_ORDERING_DETERMINISTIC_PAIR_BUDGET)
     best_crossings = _exact_crossing_count(pos, edge_index)
     if best_crossings == 0:
         return pos
-    if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+    if not _ordering_budget_available(config, budget):
         return pos
 
     exhaustive_trials = 0
@@ -4972,9 +4994,10 @@ def _rank_local_zero_crossing_swap_candidate(
             rank_best_crossings = best_crossings
             for trial_index, permuted in enumerate(permutations(current_order), start=1):
                 if trial_index % check_interval == 0 and not _ordering_budget_available(
-                    config, started_at, wall_time_cap_s
+                    config, budget
                 ):
                     break
+                budget.spend(pair_count)
                 candidate = _apply_rank_order(pos, nodes, list(permuted))
                 crossings = _exact_crossing_count(candidate, edge_index)
                 if crossings < rank_best_crossings:
@@ -4984,16 +5007,12 @@ def _rank_local_zero_crossing_swap_candidate(
             if rank_best_crossings < best_crossings:
                 pos = rank_best_pos
                 best_crossings = rank_best_crossings
-            if best_crossings == 0 or not _ordering_budget_available(
-                config,
-                started_at,
-                wall_time_cap_s,
-            ):
+            if best_crossings == 0 or not _ordering_budget_available(config, budget):
                 return pos
 
     if n <= DIRECTED_NARROW_SEED_NODE_CAP:
         for _pass in range(max(0, int(max_passes))):
-            if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+            if not _ordering_budget_available(config, budget):
                 break
             changed = False
             for nodes in rank_to_nodes.values():
@@ -5018,8 +5037,9 @@ def _rank_local_zero_crossing_swap_candidate(
                         reinserted.insert(target_index, node)
                         rank_orders.append(reinserted)
                 for rank_order in rank_orders:
-                    if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+                    if not _ordering_budget_available(config, budget):
                         break
+                    budget.spend(pair_count)
                     pos, best_crossings, improved = _try_rank_order(
                         pos,
                         edge_index,
@@ -5037,8 +5057,8 @@ def _rank_local_zero_crossing_swap_candidate(
             edge_index,
             best_crossings,
             config,
-            started_at,
-            wall_time_cap_s,
+            budget,
+            pair_count,
         )
         return pos
 
@@ -5052,7 +5072,7 @@ def _rank_local_zero_crossing_swap_candidate(
             incoming[dst_i].append(src_i)
     rank_items = sorted(rank_to_nodes.items())
     for _pass in range(max(0, int(max_passes))):
-        if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+        if not _ordering_budget_available(config, budget):
             break
         changed = False
         for _rank, nodes in rank_items:
@@ -5064,8 +5084,9 @@ def _rank_local_zero_crossing_swap_candidate(
                 (incoming, True),
                 (outgoing, True),
             ):
-                if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+                if not _ordering_budget_available(config, budget):
                     break
+                budget.spend(pair_count)
                 ordered_nodes = _rank_order_from_neighbor_stat(nodes, pos, neighbors, use_median)
                 pos, best_crossings, improved = _try_rank_order(
                     pos,
@@ -5079,8 +5100,9 @@ def _rank_local_zero_crossing_swap_candidate(
                     return pos
             ordered = sorted(nodes, key=lambda node: float(pos[node, 0].item()))
             for left_index in range(len(ordered) - 1):
-                if not _ordering_budget_available(config, started_at, wall_time_cap_s):
+                if not _ordering_budget_available(config, budget):
                     break
+                budget.spend(pair_count)
                 swapped = list(ordered)
                 swapped[left_index], swapped[left_index + 1] = (
                     swapped[left_index + 1],
@@ -5105,8 +5127,8 @@ def _rank_local_zero_crossing_swap_candidate(
         edge_index,
         best_crossings,
         config,
-        started_at,
-        wall_time_cap_s,
+        budget,
+        pair_count,
     )
     return pos
 

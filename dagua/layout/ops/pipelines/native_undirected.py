@@ -89,9 +89,40 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # nodes (see .project-context/research/r79_native/P8_PORTFOLIO_PROBE.md);
 # probe data for larger graphs would be needed before raising this.
 MAX_CONTEST_NODES = 1500
-# Shared by the legacy native polish battery; portfolio challenger acceptance
-# below is intentionally governed only by deterministic size schedules.
-DEFAULT_CANDIDATE_BUDGET_S = 25.0
+# Deterministic replacement for the historical 25s wall-clock polish
+# candidate guard. Admission depends only on graph size (decided up front),
+# never on measured elapsed time, so the candidate set is byte-identical
+# under any machine load. The caps sit far above the native scale gate
+# (~20K nodes), so every graph routed onto the polish path is admitted;
+# they exist to keep direct callers on pathological inputs deterministically
+# bounded (each polish primitive is fixed-iteration in n and m).
+POLISH_DETERMINISTIC_NODE_CAP = 50_000
+POLISH_DETERMINISTIC_EDGE_CAP = 200_000
+
+
+def _polish_generation_admitted(num_nodes: int, num_edges: int) -> bool:
+    """Return whether polish candidate generation is admitted for this size.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    num_edges : int
+        Number of graph edges.
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph is below the deterministic polish caps. The
+        decision is a pure function of graph size so it cannot vary with
+        machine load, unlike the wall-clock candidate budget it replaces.
+    """
+    return (
+        int(num_nodes) <= POLISH_DETERMINISTIC_NODE_CAP
+        and int(num_edges) <= POLISH_DETERMINISTIC_EDGE_CAP
+    )
+
+
 FULL_REFEREE_TOP_K = 8
 CLUSTER_EXTENDED_SCORE_KEYS = (
     "cluster_exclusion_score",

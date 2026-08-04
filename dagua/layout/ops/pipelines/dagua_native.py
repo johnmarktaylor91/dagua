@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import logging
 import math
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -5493,12 +5492,22 @@ def _best_of_polish(
         return candidate_score
 
     from dagua.layout.ops.pipelines.native_undirected import (
-        DEFAULT_CANDIDATE_BUDGET_S,
         _candidate_is_eligible,
+        _polish_generation_admitted,
     )
 
     best_pos = base_pos
     best_score = score(base_pos)
+    # Deterministic up-front admission replaces the historical 25s wall-clock
+    # candidate guard: the decision depends only on graph size, never on
+    # measured elapsed time, so the candidate set is identical under any
+    # machine load. Worst-case work stays bounded because every polish
+    # primitive is fixed-iteration and this path sits below the native scale
+    # gate.
+    polish_generation_admitted = _polish_generation_admitted(
+        int(base_pos.shape[0]),
+        int(edge_index.shape[1]) if edge_index.ndim == 2 else 0,
+    )
 
     edge_equalize_candidates: list[
         tuple[str, Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]]
@@ -5523,10 +5532,9 @@ def _best_of_polish(
     best_edge_score = best_score
     edge_seed_positions: list[tuple[str, torch.Tensor]] = []
     for edge_name, make_candidate in edge_equalize_candidates:
-        started = time.monotonic()
-        cand = make_candidate(base_pos, edge_index, node_sizes)
-        if time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+        if not polish_generation_admitted:
             continue
+        cand = make_candidate(base_pos, edge_index, node_sizes)
         cand_score = safe_score(cand)
         if cand_score is None:
             continue
@@ -5709,7 +5717,8 @@ def _best_of_polish(
             ]
         )
     for candidate_name, make_polish_candidate in polish_candidates:
-        started = time.monotonic()
+        if not polish_generation_admitted:
+            continue
         try:
             cand = make_polish_candidate(best_pos, edge_index, node_sizes)
         except Exception as exc:  # noqa: BLE001 -- polish failures must not sink the solve
@@ -5717,7 +5726,7 @@ def _best_of_polish(
                 raise
             _LOGGER.warning("Polish candidate %s failed", candidate_name, exc_info=True)
             continue
-        if cand is None or time.monotonic() - started > DEFAULT_CANDIDATE_BUDGET_S:
+        if cand is None:
             continue
         candidate_input = (
             base_pos
@@ -6238,7 +6247,6 @@ def _terminal_w5_polish(
             """
             return honest_score_payload(pos)[0]
 
-        referee_started = time.perf_counter()
         incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
         cluster_tightening_telemetry: list[dict[str, Any]] = []
         cluster_selected = False
@@ -6368,10 +6376,22 @@ def _terminal_w5_polish(
                 "_dagua_native_cluster_tightening_telemetry",
                 existing_cluster_telemetry,
             )
+        # The referee cost hint is priced by the frozen deterministic cost
+        # model rather than a measured wall-clock span so no downstream
+        # admission decision can depend on machine load.
+        from dagua.layout.ops.pipelines.native_cost_model import estimate_v3_referee_cost
+
+        modeled_referee_cost = estimate_v3_referee_cost(
+            int(final_pos.shape[0]),
+            int(cpu_edge_index.shape[1]) if cpu_edge_index.ndim == 2 else 0,
+            bool(clusters),
+            edge_weights is not None,
+            "cuda" if str(getattr(config, "device", "cpu")).startswith("cuda") else "cpu",
+        )
         setattr(
             config,
             "_dagua_native_w5_referee_cost_s",
-            max(1.0e-6, time.perf_counter() - referee_started),
+            max(1.0e-6, float(modeled_referee_cost.reserved_score_dwu)),
         )
         setattr(config, "_dagua_native_w5_measured_sizing", True)
         predicted_skip_reason = w5_predicted_skip_reason(
