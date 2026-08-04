@@ -159,10 +159,11 @@ class FieldScaleStrategy:
             node_sizes,
             getattr(graph, "edge_weights", None),
             target_nodes=int(params.get("field_coarsest_target", _DEFAULT_COARSEST_TARGET)),
-            max_levels=int(params.get("field_max_levels", 24)),
+            max_levels=int(params.get("field_max_levels", 32)),
             seed=seed,
             topk_per_node=int(params.get("field_topk_per_node", _DEFAULT_TOPK)),
-            min_shrink_ratio=float(params.get("field_min_shrink_ratio", 0.50)),
+            min_shrink_ratio=float(params.get("field_min_shrink_ratio", 0.30)),
+            star_cap=_star_cap_param(params),
         )
         if checkpoint.armed:
             _checkpoint_hierarchy(checkpoint, hierarchy)
@@ -487,10 +488,11 @@ def _layout_streaming_field(
         node_sizes,
         getattr(graph, "edge_weights", None),
         target_nodes=int(params.get("field_coarsest_target", _DEFAULT_COARSEST_TARGET)),
-        max_levels=int(params.get("field_max_levels", 24)),
+        max_levels=int(params.get("field_max_levels", 32)),
         seed=seed,
         topk_per_node=int(params.get("field_topk_per_node", _DEFAULT_TOPK)),
-        min_shrink_ratio=float(params.get("field_min_shrink_ratio", 0.50)),
+        min_shrink_ratio=float(params.get("field_min_shrink_ratio", 0.30)),
+        star_cap=_star_cap_param(params),
     )
     if checkpoint.armed:
         _checkpoint_hierarchy(checkpoint, hierarchy)
@@ -498,6 +500,20 @@ def _layout_streaming_field(
     if hierarchy.levels:
         coarsest_solver = str(params.get("field_coarsest_solver", "auto")).lower()
         pos = _solve_coarsest(hierarchy, config, seed=seed, solver=coarsest_solver)
+        base_sep = _target_separation(config, node_sizes)
+        target_rms = _mass_anchor_rms_target(n, base_sep)
+        pos = _anchor_scale_by_edge_length(
+            pos,
+            hierarchy.coarsest_graph.edge_index,
+            torch.sqrt(hierarchy.coarsest_node_masses.clamp_min(1.0)),
+            base_sep=base_sep,
+        )
+        pos = _rescale_to_mass_rms(
+            pos,
+            hierarchy.coarsest_node_masses,
+            target_rms=target_rms,
+            floor_frac=float(params.get("field_streaming_rms_floor", 0.5)),
+        )
         if checkpoint.armed:
             _record_refine_checkpoint(
                 checkpoint,
@@ -508,24 +524,34 @@ def _layout_streaming_field(
                     "coarsest_nodes": hierarchy.coarsest_graph.num_nodes,
                 },
             )
+        expand_gain = params.get("field_prolong_expand", None)
+        rms_floor_frac = float(params.get("field_streaming_rms_floor", 0.5))
+        outlier_cap = float(params.get("field_streaming_outlier_cap_rms", 8.0))
         for level_index in range(len(hierarchy.levels) - 1, -1, -1):
             transition = hierarchy.levels[level_index]
-            jitter = _jitter_scale_for_level(config, transition.fine_num_nodes)
-            pos = _expand_for_prolongation(
-                pos,
-                fine_num_nodes=transition.fine_num_nodes,
-                coarse_num_nodes=transition.coarse_num_nodes,
-                expand_gain=float(params.get("field_prolong_expand", 1.0)),
-            )
+            level_masses = _fine_masses_for_transition(hierarchy, level_index, n)
+            if expand_gain is not None:
+                pos = _expand_for_prolongation(
+                    pos,
+                    fine_num_nodes=transition.fine_num_nodes,
+                    coarse_num_nodes=transition.coarse_num_nodes,
+                    expand_gain=float(expand_gain),
+                )
             pos = prolong_positions(
                 pos,
                 transition.fine_to_coarse,
                 seed=seed + level_index,
-                jitter_scale=jitter,
+                jitter_scale=float(params.get("field_prolong_jitter_gain", 0.5)) * base_sep,
+                jitter_per_node=torch.sqrt(level_masses.clamp_min(1.0)),
+            )
+            pos = _rescale_to_mass_rms(
+                pos,
+                level_masses,
+                target_rms=target_rms,
+                floor_frac=rms_floor_frac,
             )
             level_graph = _fine_graph_for_transition(hierarchy, level_index)
             level_sizes = _fine_sizes_for_transition(hierarchy, level_index, n, node_sizes)
-            level_masses = _fine_masses_for_transition(hierarchy, level_index, n)
             pos = _refine_streaming_level(
                 pos,
                 level_graph.edge_index,
@@ -534,6 +560,8 @@ def _layout_streaming_field(
                 level_masses,
                 config,
                 seed=seed + level_index,
+                steps=_streaming_refine_steps_for_level(transition.fine_num_nodes, params),
+                outlier_cap_rms=outlier_cap,
             )
             if checkpoint.armed:
                 _record_refine_checkpoint(
@@ -806,8 +834,10 @@ def _refine_streaming_level(
     config: LayoutConfig,
     *,
     seed: int,
+    steps: int = 1,
+    outlier_cap_rms: float = 0.0,
 ) -> torch.Tensor:
-    """Refine CPU-resident FIELD positions with chunked force passes.
+    """Refine CPU-resident FIELD positions with chunked cooled force passes.
 
     Parameters
     ----------
@@ -825,48 +855,85 @@ def _refine_streaming_level(
         Layout configuration.
     seed : int
         Deterministic seed for this streaming pass.
+    steps : int, default=1
+        Number of cooled force passes at this level.
+    outlier_cap_rms : float, default=0.0
+        When positive, winsorize radial outliers beyond this multiple of the
+        RMS radius after the force passes. ``0`` disables the guard.
 
     Returns
     -------
     torch.Tensor
         Refined CPU positions with shape ``[N, 2]``.
+
+    Notes
+    -----
+    The level's characteristic separation is mass-scaled
+    (``base_sep * sqrt(mean_mass)``, the FM3 desired-length law): a coarse
+    node standing for ``m`` fine nodes needs ``m`` times the area, so both
+    the step caps and the far-field softening must grow with ``sqrt(m)`` or
+    coarse levels are frozen at fine-level step sizes and the mass can never
+    spread (the 1B scale-collapse mechanism).
     """
     del seed
     params = config.algorithm_params
     work = pos.detach().to(device="cpu", dtype=torch.float32).contiguous()
     base_sep = _target_separation(config, node_sizes)
-    step_cap = float(params.get("field_streaming_step_cap", base_sep * 0.75))
+    masses_cpu = node_masses.detach().to(device="cpu", dtype=torch.float32)
+    mean_mass = float(masses_cpu.mean().item()) if masses_cpu.numel() else 1.0
+    level_sep = base_sep * math.sqrt(max(1.0, mean_mass))
+    step0 = float(params.get("field_streaming_step_cap", base_sep * 0.75))
+    cooling = float(params.get("field_cooling", 0.90))
     edge_strength = float(params.get("field_edge_strength", 0.15))
-    repel_strength = float(params.get("field_repel_strength", base_sep * base_sep * 0.08))
-    spring = _streaming_edge_spring_displacement(
-        work,
-        edge_index,
-        edge_weight,
-        target_length=base_sep,
-        strength=edge_strength,
-        chunk_size=int(params.get("field_streaming_edge_chunk", _DEFAULT_STREAMING_EDGE_CHUNK)),
+    repel_strength = float(
+        params.get(
+            "field_repel_strength",
+            level_sep * level_sep * 0.08 / max(1.0, mean_mass),
+        )
     )
-    pyramid = build_grid_pyramid_streaming(
-        work,
-        node_masses,
-        base_cell_size=base_sep
-        * float(params.get("field_base_cell_multiplier", _DEFAULT_BASE_CELL_MULTIPLIER)),
-        max_cells_per_axis=int(params.get("field_max_grid_axis", _DEFAULT_MAX_GRID_AXIS)),
-        max_levels=int(params.get("field_pyramid_levels", _DEFAULT_PYRAMID_LEVELS)),
-        chunk_nodes=int(params.get("field_streaming_chunk_nodes", _DEFAULT_STREAMING_CHUNK_NODES)),
-    )
-    repel = _streaming_far_field_displacement(
-        work,
-        pyramid,
-        config,
-        strength=repel_strength,
-        softening=base_sep * 0.25,
-        max_displacement=step_cap * 4.0,
-    )
-    disp = spring + repel
-    norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp_min(1.0e-9)
-    disp = disp * torch.clamp(step_cap / norm, max=1.0)
-    return _normalize_positions(work + disp)
+    sqrt_mass = torch.sqrt(masses_cpu.clamp_min(1.0))
+    cap_vec = (step0 * sqrt_mass).unsqueeze(1)
+    cap_max = float(sqrt_mass.max().item()) * step0 if sqrt_mass.numel() else step0
+    for step in range(max(0, int(steps))):
+        cool = cooling**step
+        spring = _streaming_edge_spring_displacement(
+            work,
+            edge_index,
+            edge_weight,
+            target_length=base_sep,
+            strength=edge_strength,
+            chunk_size=int(params.get("field_streaming_edge_chunk", _DEFAULT_STREAMING_EDGE_CHUNK)),
+            sqrt_mass=sqrt_mass,
+            weight_damping=str(params.get("field_streaming_weight_damping", "sqrt")),
+            spring_model=str(params.get("field_streaming_spring_model", "linear")),
+        )
+        pyramid = build_grid_pyramid_streaming(
+            work,
+            masses_cpu,
+            base_cell_size=level_sep
+            * float(params.get("field_base_cell_multiplier", _DEFAULT_BASE_CELL_MULTIPLIER)),
+            max_cells_per_axis=int(params.get("field_max_grid_axis", _DEFAULT_MAX_GRID_AXIS)),
+            max_levels=int(params.get("field_pyramid_levels", _DEFAULT_PYRAMID_LEVELS)),
+            chunk_nodes=int(
+                params.get("field_streaming_chunk_nodes", _DEFAULT_STREAMING_CHUNK_NODES)
+            ),
+        )
+        repel = _streaming_far_field_displacement(
+            work,
+            pyramid,
+            config,
+            strength=repel_strength,
+            softening=level_sep * 0.25,
+            max_displacement=cap_max * 4.0 * cool,
+        )
+        disp = spring + repel
+        norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp_min(1.0e-9)
+        disp = disp * torch.clamp(cap_vec * cool / norm, max=1.0)
+        work = work + disp
+        del spring, repel, disp, pyramid
+    if float(outlier_cap_rms) > 0.0:
+        work = _radial_winsorize(work, cap_multiple=float(outlier_cap_rms))
+    return _normalize_positions(work)
 
 
 def _streaming_edge_spring_displacement(
@@ -877,6 +944,9 @@ def _streaming_edge_spring_displacement(
     target_length: float,
     strength: float,
     chunk_size: int,
+    sqrt_mass: Optional[torch.Tensor] = None,
+    weight_damping: str = "none",
+    spring_model: str = "fr",
 ) -> torch.Tensor:
     """Return deterministic CPU edge-spring displacement in chunks.
 
@@ -889,11 +959,25 @@ def _streaming_edge_spring_displacement(
     edge_weight : torch.Tensor
         Edge weights with shape ``[E]``.
     target_length : float
-        Preferred edge length.
+        Preferred edge length for unit-mass endpoints.
     strength : float
         Spring multiplier.
     chunk_size : int
         Number of edges processed per chunk.
+    sqrt_mass : torch.Tensor, optional
+        Per-node ``sqrt(mass)`` with shape ``[N]``. When present, each edge's
+        desired length grows with its endpoints' cluster sizes
+        (``target_length * (sqrt(m_u) + sqrt(m_v)) / 2``, the FM3 law), so
+        coarse hubs are not pulled into a fine-scale knot.
+    weight_damping : str, default="none"
+        ``"sqrt"`` compresses aggregated coarse edge multiplicities before
+        mean-normalization so hub-hub multi-edges cannot dominate every other
+        spring; ``"none"`` keeps raw weights.
+    spring_model : str, default="fr"
+        ``"fr"`` uses pure quadratic attraction ``d^2 / target``; ``"linear"``
+        uses ``d - target``, which is repulsive below the desired length. The
+        streaming hierarchy uses linear springs because pure attraction makes
+        a co-located hub knot a stable equilibrium under capped displacement.
 
     Returns
     -------
@@ -905,6 +989,8 @@ def _streaming_edge_spring_displacement(
         return disp
     edges = edge_index.detach().to(device="cpu", dtype=torch.long)
     weights = edge_weight.detach().to(device="cpu", dtype=torch.float32)
+    if weight_damping == "sqrt":
+        weights = torch.sqrt(weights.clamp_min(0.0))
     weights = weights / weights.mean().clamp_min(1.0e-6)
     chunk = max(1, int(chunk_size))
     for start in range(0, int(edges.shape[1]), chunk):
@@ -913,7 +999,16 @@ def _streaming_edge_spring_displacement(
         dst = edges[1, start:end]
         delta = pos[dst] - pos[src]
         dist = torch.linalg.norm(delta, dim=1, keepdim=True).clamp_min(1.0e-6)
-        magnitude = dist * dist / max(float(target_length), 1.0e-6)
+        if sqrt_mass is not None:
+            target = (
+                float(target_length) * 0.5 * (sqrt_mass[src] + sqrt_mass[dst]).unsqueeze(1)
+            ).clamp_min(1.0e-6)
+        else:
+            target = torch.full_like(dist, max(float(target_length), 1.0e-6))
+        if spring_model == "linear":
+            magnitude = dist - target
+        else:
+            magnitude = dist * dist / target
         force = delta / dist * (magnitude * weights[start:end].unsqueeze(1))
         force = force * float(strength)
         disp.index_add_(0, src, force)
@@ -1853,6 +1948,216 @@ def _pack_components(
         row_height = max(row_height, h)
     offsets = torch.tensor(offset_rows, dtype=torch.float32)
     return finite_pos + offsets[inverse]
+
+
+def _star_cap_param(params: dict[str, Any]) -> Optional[int]:
+    """Return the FIELD star-contraction absorption cap.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Algorithm parameters.
+
+    Returns
+    -------
+    int or None
+        Cap on leaves absorbed per star hub (default 8); nonpositive values
+        disable the cap and restore legacy unbounded stars.
+    """
+    value = int(params.get("field_star_cap", 8))
+    return value if value > 0 else None
+
+
+def _anchor_scale_by_edge_length(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    sqrt_mass: torch.Tensor,
+    *,
+    base_sep: float,
+) -> torch.Tensor:
+    """Rescale a coarsest layout so median edge length hits its FM3 target.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Coarsest positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Coarsest edge tensor with shape ``[2, E]``.
+    sqrt_mass : torch.Tensor
+        Per-node ``sqrt(mass)`` with shape ``[N]``.
+    base_sep : float
+        Local target separation at the finest level.
+
+    Returns
+    -------
+    torch.Tensor
+        Rescaled positions with shape ``[N, 2]``.
+
+    Notes
+    -----
+    The coarsest solver runs at an arbitrary internal scale, so the V-cycle
+    needs one absolute anchor. Median edge-length matching is robust to the
+    hub knots and outliers that break mass-RMS anchoring.
+    """
+    if pos.shape[0] <= 1 or edge_index.numel() == 0:
+        return pos
+    src = edge_index[0].to(dtype=torch.long)
+    dst = edge_index[1].to(dtype=torch.long)
+    lengths = torch.linalg.norm(pos[dst] - pos[src], dim=1)
+    targets = float(base_sep) * 0.5 * (sqrt_mass[src] + sqrt_mass[dst])
+    median_length = float(torch.median(lengths).clamp_min(1.0e-9).item())
+    median_target = float(torch.median(targets).clamp_min(1.0e-9).item())
+    gain = median_target / median_length
+    center = pos.mean(dim=0, keepdim=True)
+    return center + (pos - center) * gain
+
+
+def _mass_anchor_rms_target(finest_num_nodes: int, base_sep: float) -> float:
+    """Return the drawing-scale RMS radius for a uniform-density disc.
+
+    Parameters
+    ----------
+    finest_num_nodes : int
+        Number of finest-level nodes the drawing must hold.
+    base_sep : float
+        Local target separation at the finest level.
+
+    Returns
+    -------
+    float
+        RMS radius of a uniform disc holding ``finest_num_nodes`` points at
+        ``base_sep`` spacing (``base_sep * sqrt(N / (2 * pi))``).
+
+    Notes
+    -----
+    The streaming V-cycle keeps a CONSTANT drawing scale across levels: a
+    coarse node of mass ``m`` occupies ``m`` fine cells, so every level's
+    mass-weighted extent equals the finest extent. This anchor is what the
+    relative-only expansion step could never provide (the 1B collapse: a
+    wrong coarsest scale propagated through nine ratio-preserving levels).
+    """
+    n = max(1.0, float(finest_num_nodes))
+    return float(base_sep) * math.sqrt(n / (2.0 * math.pi))
+
+
+def _rescale_to_mass_rms(
+    pos: torch.Tensor,
+    masses: torch.Tensor,
+    *,
+    target_rms: float,
+    floor_frac: Optional[float] = None,
+) -> torch.Tensor:
+    """Rescale positions about the mass centroid toward a target RMS radius.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    masses : torch.Tensor
+        Node masses with shape ``[N]``.
+    target_rms : float
+        Desired mass-weighted RMS radius.
+    floor_frac : float, optional
+        When ``None``, rescale exactly to ``target_rms`` (coarsest anchor).
+        Otherwise act only as a floor guard: rescale up to
+        ``floor_frac * target_rms`` when the level has contracted below it,
+        and never rescale down.
+
+    Returns
+    -------
+    torch.Tensor
+        Rescaled positions with shape ``[N, 2]``.
+    """
+    if pos.shape[0] <= 1:
+        return pos
+    mass = masses.detach().to(device=pos.device, dtype=torch.float32).clamp_min(0.0)
+    total = mass.sum().clamp_min(1.0e-6)
+    center = (pos * mass.unsqueeze(1)).sum(dim=0, keepdim=True) / total
+    delta = pos - center
+    rms = float(
+        torch.sqrt(((delta * delta).sum(dim=1) * mass).sum() / total).clamp_min(1.0e-9).item()
+    )
+    if floor_frac is None:
+        gain = float(target_rms) / rms
+    else:
+        floor = float(target_rms) * float(floor_frac)
+        gain = floor / rms if rms < floor else 1.0
+    gain = min(gain, 64.0)
+    if abs(gain - 1.0) < 1.0e-6:
+        return pos
+    return center + delta * gain
+
+
+def _radial_winsorize(pos: torch.Tensor, *, cap_multiple: float) -> torch.Tensor:
+    """Cap radial outliers at a multiple of the RMS radius.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions with shape ``[N, 2]``.
+    cap_multiple : float
+        Radius cap as a multiple of the RMS radius.
+
+    Returns
+    -------
+    torch.Tensor
+        Positions with far-flung outliers pulled onto the cap circle.
+
+    Notes
+    -----
+    Runs two fixed passes because extreme outliers inflate the first RMS
+    estimate. Without this guard a few thousand flung nodes stretch the
+    bounding box by orders of magnitude (2000x at 1B), which hides the real
+    mass in a single density bin and blinds bbox-normalized quality metrics.
+    """
+    work = pos
+    for _ in range(2):
+        center = work.mean(dim=0, keepdim=True)
+        delta = work - center
+        radius2 = (delta * delta).sum(dim=1)
+        rms = torch.sqrt(radius2.mean()).clamp_min(1.0e-9)
+        cap = float(cap_multiple) * rms
+        radius = torch.sqrt(radius2).clamp_min(1.0e-9)
+        scale = torch.clamp(cap / radius, max=1.0)
+        work = center + delta * scale.unsqueeze(1)
+    return work
+
+
+def _streaming_refine_steps_for_level(num_nodes: int, params: dict[str, Any]) -> int:
+    """Return cooled force-pass count for one streaming hierarchy level.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Fine-side node count of the level.
+    params : dict[str, Any]
+        Algorithm parameters.
+
+    Returns
+    -------
+    int
+        Number of passes: the resident schedule at small levels, tapering at
+        huge levels where each pass is a full multi-billion-edge scan.
+
+    Notes
+    -----
+    The pre-fix streaming path ran exactly ONE capped pass per level, which
+    cannot relax a level toward its mass-scaled equilibrium; the coarse
+    skeleton therefore never spread (the 1B collapse). Structure forms at the
+    cheap coarse levels, so those get the full resident budget.
+    """
+    if "field_streaming_level_steps" in params:
+        return max(0, int(params["field_streaming_level_steps"]))
+    n = int(num_nodes)
+    if n <= 400_000:
+        return _refine_steps_for_level(n, {}, is_finest=False)
+    if n <= 5_000_000:
+        return 6
+    if n <= 50_000_000:
+        return 4
+    if n <= 250_000_000:
+        return 3
+    return 2
 
 
 def _expand_for_prolongation(
