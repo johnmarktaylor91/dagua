@@ -34,6 +34,19 @@ assert Path(dagua.__file__).resolve().as_posix().startswith(REPO_ROOT.as_posix()
 )
 
 
+def _current_scoring_signature() -> str:
+    """Return the live scoring signature (for resume-sentinel fixtures).
+
+    Returns
+    -------
+    str
+        Current ``native_sprint_score.scoring_signature()``.
+    """
+    import scripts.native_sprint_score as nss
+
+    return nss.scoring_signature()
+
+
 def _copy_fixture(corpus_dir: Path, corpus: str, filename: str) -> Path:
     """Copy one synthetic fixture into a scratch corpus directory.
 
@@ -86,14 +99,15 @@ def _run_main(argv: List[str], monkeypatch: pytest.MonkeyPatch) -> int:
     argv : List[str]
         CLI arguments.
     monkeypatch : pytest.MonkeyPatch
-        Fixture used to guarantee ``DAGUA_NATIVE_DISABLE_W5`` is unset.
+        Fixture used to guarantee every forbidden env knob is unset.
 
     Returns
     -------
     int
         Exit code.
     """
-    monkeypatch.delenv("DAGUA_NATIVE_DISABLE_W5", raising=False)
+    for variable in glados.PREFLIGHT_FORBIDDEN_ENV:
+        monkeypatch.delenv(variable, raising=False)
     return glados.main(argv)
 
 
@@ -740,6 +754,10 @@ def test_resume_skips_completed_seed_aware_rows_and_cleans_temps(
         "runtime_s": -12345.0,  # sentinel: proves the row was not recomputed
         "positions_path": None,
         "v3_tiered": 55.5,  # pre-scored: scorer must skip it too
+        # A scored row without the CURRENT scoring signature is quarantined
+        # on resume (dry-well B4-F3 / Sol B3-2); a preserved sentinel must
+        # therefore carry it, like every real scored row does.
+        "scoring_signature": _current_scoring_signature(),
         "nodes": 6,
         "edges": 6,
         "directed": False,
@@ -1021,3 +1039,432 @@ def test_load_suspect_excluded_from_tally_and_reported(
     report = (output_dir / "GLADOS_RUN_REPORT.md").read_text(encoding="utf-8")
     assert "LOAD_SUSPECT rome/collapse1" in report
     assert any("LOAD_SUSPECT excluded" in item for item in payload["assumptions"])
+
+
+# ---------------------------------------------------------------------------
+# 8. Dry-well Round-1 fix round (B4-F1..F8, Sol B3-2/B4-3/B5-1, B5-F01)
+# ---------------------------------------------------------------------------
+
+
+def _fake_published_run(directory: Path) -> Path:
+    """Create a minimal fake published run directory.
+
+    Parameters
+    ----------
+    directory : Path
+        Where to create the run.
+
+    Returns
+    -------
+    Path
+        The run directory.
+    """
+    (directory / "positions").mkdir(parents=True, exist_ok=True)
+    (directory / "results.json").write_text("{}", encoding="utf-8")
+    (directory / "positions" / "g__e__deterministic.pt").write_bytes(b"tensor")
+    return directory
+
+
+@pytest.mark.parametrize("variable", sorted(glados.PREFLIGHT_FORBIDDEN_ENV))
+def test_preflight_native_env_rejects_every_forbidden_var(
+    variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B5-F01: every behavior-changing env knob fails preflight when set."""
+    for name in glados.PREFLIGHT_FORBIDDEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, "1")
+    with pytest.raises(glados.PreflightError, match=variable):
+        glados._preflight_native_env()
+    monkeypatch.delenv(variable)
+    glados._preflight_native_env()  # clean env passes
+
+
+def test_archive_refuses_overlapping_destination(tmp_path: Path) -> None:
+    """B4-F1 (CRITICAL): archive must never rmtree/copy onto the published run.
+
+    The destination leaf is hardcoded ``glados_holdout``; with an output dir
+    of the same name, ``--archive-dir <parent-of-output>`` used to resolve
+    destination == output dir and DELETE the published run.
+    """
+    out = _fake_published_run(tmp_path / "glados_holdout")
+
+    # destination == output dir (the reproduced one-keystroke disaster).
+    warning = glados.archive_run(out, tmp_path)
+    assert warning is not None and "REFUSING" in warning
+    assert (out / "results.json").is_file()
+    assert (out / "positions" / "g__e__deterministic.pt").is_file()
+
+    # destination inside the output dir.
+    warning = glados.archive_run(out, out)
+    assert warning is not None and "REFUSING" in warning
+    assert (out / "results.json").is_file()
+
+    # destination is an ancestor of the output dir.
+    nested_out = _fake_published_run(tmp_path / "arch" / "glados_holdout" / "run")
+    warning = glados.archive_run(nested_out, tmp_path / "arch")
+    assert warning is not None and "REFUSING" in warning
+    assert (nested_out / "results.json").is_file()
+
+
+def test_archive_failed_copy_preserves_previous_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4-F1: a failed copy never destroys the previous archive, and the
+    warning only claims the run is intact after verifying it."""
+    out = _fake_published_run(tmp_path / "out")
+    archive_dir = tmp_path / "arch"
+    previous = archive_dir / "glados_holdout"
+    previous.mkdir(parents=True)
+    (previous / "MARKER.txt").write_text("previous archive", encoding="utf-8")
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("injected copy failure")
+
+    monkeypatch.setattr(glados.shutil, "copytree", boom)
+    warning = glados.archive_run(out, archive_dir)
+
+    assert warning is not None
+    assert "published run verified intact" in warning
+    assert (previous / "MARKER.txt").is_file(), "previous archive was destroyed"
+    assert (out / "results.json").is_file()
+
+
+def test_archive_success_swaps_and_keeps_manifest(tmp_path: Path) -> None:
+    """B4-F1: the temp-then-rename swap replaces a previous archive cleanly."""
+    out = _fake_published_run(tmp_path / "out")
+    archive_dir = tmp_path / "arch"
+    previous = archive_dir / "glados_holdout"
+    previous.mkdir(parents=True)
+    (previous / "MARKER.txt").write_text("old", encoding="utf-8")
+
+    assert glados.archive_run(out, archive_dir) is None
+    destination = archive_dir / "glados_holdout"
+    assert (destination / "results.json").is_file()
+    assert (destination / "MANIFEST.sha256").is_file()
+    assert not (destination / "MARKER.txt").exists()  # old archive replaced
+    assert not (archive_dir / ".glados_holdout.prev").exists()
+
+
+def test_partition_resumed_rows_quarantine_rules() -> None:
+    """B4-F3 + Sol B3-2/B4-3/B5-1: the three quarantine rules, unit-level."""
+    signature = "current-sig"
+    valid_keys = {
+        build_record_key("rome/g", "dagua", None),
+        build_record_key("rome/g", "graphviz_dot", None),
+    }
+    kept_layout = {  # layout-only row, in universe: kept, scored fresh later
+        "record_key": build_record_key("rome/g", "graphviz_dot", None),
+        "engine": "graphviz_dot",
+        "status": "OK",
+    }
+    kept_scored_native = {  # scored native row, current sig + current seed
+        "record_key": build_record_key("rome/g", "dagua", None),
+        "engine": "dagua",
+        "status": "OK",
+        "v3_tiered": 50.0,
+        "scoring_signature": signature,
+        "native_child_seed": 42,
+    }
+    stale_sig = {  # scored under an older ruler -> rescore (Sol B3-2)
+        "record_key": build_record_key("rome/g", "graphviz_dot", None),
+        "engine": "graphviz_dot",
+        "status": "OK",
+        "v3_tiered": 61.0,
+        "scoring_signature": "older-sig",
+    }
+    ghost_engine = {  # outside current field -> never a champion (Sol B4-3)
+        "record_key": build_record_key("rome/g", "zzz_ghost", None),
+        "engine": "zzz_ghost",
+        "status": "OK",
+        "v3_tiered": 99.9,
+        "scoring_signature": signature,
+    }
+    wrong_native_seed = {  # native row from a --seed 41 partial (Sol B5-1)
+        "record_key": build_record_key("rome/g", "dagua", None),
+        "engine": "dagua",
+        "status": "OK",
+        "native_child_seed": 41,
+    }
+    legacy_native = {  # predates native_child_seed: quarantined conservatively
+        "record_key": build_record_key("rome/g", "dagua", None),
+        "engine": "dagua",
+        "status": "OK",
+    }
+
+    kept, quarantined, counts = glados.partition_resumed_rows(
+        [
+            kept_layout,
+            kept_scored_native,
+            stale_sig,
+            ghost_engine,
+            wrong_native_seed,
+            legacy_native,
+        ],
+        signature,
+        valid_keys,
+        42,
+    )
+
+    assert kept == [kept_layout, kept_scored_native]
+    reasons = [row["quarantine_reason"] for row in quarantined]
+    assert reasons == [
+        "stale scoring signature",
+        "outside current subset/field/seed battery",
+        "native row generated under a different --seed",
+        "native row generated under a different --seed",
+    ]
+    assert counts == {"signature": 1, "universe": 1, "native_seed": 2}
+
+
+def test_resume_quarantine_integration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stale resumed rows are quarantined loudly and never select the champion."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+
+    stale_sig_row: Dict[str, Any] = {
+        "graph": "rome/ring6",
+        "corpus": "rome",
+        "engine": "graphviz_dot",
+        "seed": None,
+        "record_key": build_record_key("rome/ring6", "graphviz_dot", None),
+        "status": "OK",
+        "runtime_s": -1.0,
+        "positions_path": None,
+        "v3_tiered": 61.0,
+        "scoring_signature": "stale-sig-from-before-the-hotfix",
+    }
+    ghost_row: Dict[str, Any] = {
+        "graph": "rome/ring6",
+        "corpus": "rome",
+        "engine": "zzz_ghost",
+        "seed": None,
+        "record_key": build_record_key("rome/ring6", "zzz_ghost", None),
+        "status": "OK",
+        "runtime_s": -1.0,
+        "positions_path": None,
+        "v3_tiered": 99.9,  # would win field-best if it ever competed
+        "scoring_signature": _current_scoring_signature(),
+    }
+    glados.append_row(staging, stale_sig_row)
+    glados.append_row(staging, ghost_row)
+
+    exit_code = _run_main(
+        [
+            "--corpus-dir",
+            str(corpus_dir),
+            "--output-dir",
+            str(output_dir),
+            "--engines-file",
+            str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+            "--workers",
+            "1",
+            "--score-workers",
+            "1",
+            "--resume",
+        ],
+        monkeypatch,
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    quarantined = payload["quarantined_rows"]
+    assert {row["quarantine_reason"] for row in quarantined} == {
+        "stale scoring signature",
+        "outside current subset/field/seed battery",
+    }
+    assert len(quarantined) == 2
+    assert any(
+        warning.startswith("QUARANTINE: 2 stale resumed row(s)") for warning in payload["warnings"]
+    )
+    # The ghost engine never competes: the fresh in-field row is champion.
+    rows = {row["record_key"]: row for row in payload["rows"]}
+    assert build_record_key("rome/ring6", "zzz_ghost", None) not in rows
+    (detail,) = payload["tally"]["details"]
+    assert detail["field_engine"] == "graphviz_dot"
+    assert detail["field_v3_tiered"] != 99.9
+    # The stale-signature row's key was re-run and re-scored fresh.
+    fresh = rows[build_record_key("rome/ring6", "graphviz_dot", None)]
+    assert fresh["status"] == "OK"
+    assert fresh["scoring_signature"] == payload["scoring_signature"]
+    assert fresh["runtime_s"] != -1.0
+    report = (output_dir / "GLADOS_RUN_REPORT.md").read_text(encoding="utf-8")
+    assert "Quarantined stale resume rows: 2" in report
+
+
+def test_field_worker_records_harness_error_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4-F4: a worker exception becomes an ERROR row, never a vanished row."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+
+    def boom(self: Any, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise OSError("injected ENOSPC")
+
+    monkeypatch.setattr(glados.RowExecutor, "run_row", boom)
+    exit_code = _run_main(
+        [
+            "--corpus-dir",
+            str(corpus_dir),
+            "--output-dir",
+            str(output_dir),
+            "--engines-file",
+            str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+            "--workers",
+            "1",
+            "--score-workers",
+            "1",
+        ],
+        monkeypatch,
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    (row,) = payload["rows"]
+    assert row["status"] == "ERROR"
+    assert row["status_detail"] == "harness:OSError"
+    assert "injected ENOSPC" in row["error"]
+
+
+def test_load_child_message_tolerates_torn_files(tmp_path: Path) -> None:
+    """B4-F4: torn/empty child handshake files parse to None, not a crash."""
+    torn = tmp_path / "torn.json"
+    torn.write_text('{"status": "OK", "runt', encoding="utf-8")
+    assert glados._load_child_message(torn) is None
+    empty = tmp_path / "empty.json"
+    empty.write_bytes(b"")
+    assert glados._load_child_message(empty) is None
+    missing = tmp_path / "missing.json"
+    assert glados._load_child_message(missing) is None
+    nondict = tmp_path / "nondict.json"
+    nondict.write_text("[1, 2]", encoding="utf-8")
+    assert glados._load_child_message(nondict) is None
+    good = tmp_path / "good.json"
+    good.write_text('{"status": "OK"}', encoding="utf-8")
+    assert glados._load_child_message(good) == {"status": "OK"}
+
+
+def test_system_floor_memkill_during_poll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B4-F5: the system floor is enforced DURING flight, not just at dispatch."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+
+    calls: List[int] = []
+
+    def fake_available() -> int:
+        calls.append(1)
+        # First call = the dispatch-time floor check (plenty); every later
+        # call = the in-poll re-check (below the floor).
+        return 1024**4 if len(calls) == 1 else 1 * 1024**3
+
+    monkeypatch.setattr(glados, "system_available_bytes", fake_available)
+    exit_code = _run_main(
+        [
+            "--corpus-dir",
+            str(corpus_dir),
+            "--output-dir",
+            str(output_dir),
+            "--engines-file",
+            str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+            "--workers",
+            "1",
+            "--score-workers",
+            "1",
+        ],
+        monkeypatch,
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    (row,) = payload["rows"]
+    assert row["status"] == "ERROR"
+    assert row["status_detail"] == "memkill:system-floor"
+    assert "fell below" in row["error"]
+    report = (output_dir / "GLADOS_RUN_REPORT.md").read_text(encoding="utf-8")
+    assert "memkills 1" in report
+
+
+def test_fresh_run_refuses_existing_data_without_force_fresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4-F6: a non-resume run never silently destroys prior run data."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    glados.append_row(staging, {"record_key": "precious", "status": "OK"})
+
+    argv = [
+        "--corpus-dir",
+        str(corpus_dir),
+        "--output-dir",
+        str(output_dir),
+        "--engines-file",
+        str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+        "--workers",
+        "1",
+        "--score-workers",
+        "1",
+    ]
+    assert _run_main(argv, monkeypatch) == 4
+    rows, _ = glados.load_rows_tolerant(staging)
+    assert rows and rows[0]["record_key"] == "precious", "staging was destroyed"
+
+    # A published run in the output dir is protected the same way.
+    output_dir2 = tmp_path / "out2"
+    output_dir2.mkdir()
+    (output_dir2 / "results.json").write_text("{}", encoding="utf-8")
+    argv2 = list(argv)
+    argv2[argv2.index(str(output_dir))] = str(output_dir2)
+    assert _run_main(argv2, monkeypatch) == 4
+
+    # --force-fresh explicitly authorizes the destruction.
+    assert _run_main([*argv, "--force-fresh"], monkeypatch) == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    assert all(row["record_key"] != "precious" for row in payload["rows"])
+
+
+def test_edge_list_node_id_cap_prevents_wedge(tmp_path: Path) -> None:
+    """B4-F7: a 2-line poison file must fail fast, not wedge/OOM the parent."""
+    from scripts.stdcorpora_loaders import MAX_EDGE_LIST_NODES, load_graph_file
+
+    poison = tmp_path / "corpus" / "rome" / "poison.graph"
+    poison.parent.mkdir(parents=True)
+    poison.write_text("5000 1\n1 50000000\n", encoding="utf-8")
+
+    started = time.time()
+    with pytest.raises(ValueError, match="refusing pre-allocation"):
+        load_graph_file(poison, directed_override=False)
+    assert time.time() - started < 5.0, "cap must reject before any allocation"
+    assert MAX_EDGE_LIST_NODES == 100_000
+
+    _copy_fixture(tmp_path / "corpus", "rome", "ring6.graph")
+    entries, load_rows, _ = glados.load_phase(tmp_path / "corpus", None, 2000, 200_000)
+    assert [entry.name for entry in entries] == ["rome/ring6"]
+    (error_row,) = [row for row in load_rows if row["status"] == "LOAD_ERROR"]
+    assert error_row["graph"] == "rome/poison"
+    assert "refusing pre-allocation" in error_row["error"]
+
+
+def test_mtx_declared_dims_cap_pre_guard(tmp_path: Path) -> None:
+    """B4-F7 companion: absurd declared .mtx dims are rejected from the header."""
+    corpus_dir = tmp_path / "corpus"
+    big = corpus_dir / "suitesparse" / "huge.mtx"
+    big.parent.mkdir(parents=True)
+    big.write_text(
+        "%%MatrixMarket matrix coordinate pattern general\n2000000000 2000000000 1\n1 2\n",
+        encoding="utf-8",
+    )
+    _copy_fixture(corpus_dir, "suitesparse", "tri4.mtx")
+
+    started = time.time()
+    entries, load_rows, _ = glados.load_phase(corpus_dir, None, 2000, 200_000)
+    assert time.time() - started < 5.0, "pre-guard must reject without loading"
+    assert [entry.name for entry in entries] == ["suitesparse/tri4"]
+    (skip_row,) = load_rows
+    assert skip_row["status"] == "SKIP"
+    assert skip_row["reason"].startswith("mtx_dims_cap:2000000000x2000000000")

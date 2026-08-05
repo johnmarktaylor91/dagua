@@ -90,6 +90,9 @@ DEFAULT_MAX_NODES = 2000
 DEFAULT_MAX_EDGES = 200_000
 DEFAULT_CHILD_RSS_ABORT_GB = 48.0
 DEFAULT_MIN_AVAIL_GB = 15.0
+# Reject .mtx files whose HEADER declares a dimension above this before ever
+# invoking the loader (parent-process wedge guard, dry-well B4-F7 class).
+MTX_DECLARED_DIM_CAP = 100_000
 CHILD_JOIN_GRACE_SECONDS = 60.0
 CHILD_POLL_SECONDS = 2.0
 CORPUS_NAMES = ("rome", "north", "suitesparse")
@@ -345,6 +348,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--force-fresh",
+        action="store_true",
+        help=(
+            "Explicitly allow a non-resume run to destroy existing staging/"
+            "published run data in the output dir (dry-well B4-F6 guard)."
+        ),
+    )
+    parser.add_argument(
         "--seeds",
         type=int,
         default=DEFAULT_SEED_COUNT,
@@ -481,26 +492,35 @@ def preflight(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+# Environment variables that silently change engine behavior when set; the
+# sacred run must start from a clean slate (WP02A-F01 + dry-well B5-F01).
+PREFLIGHT_FORBIDDEN_ENV: Dict[str, str] = {
+    "DAGUA_NATIVE_DISABLE_W5": "disables the W5 finisher stage and weakens native rows",
+    "DAGUA_W5_TELEMETRY_PATH": "arms W5 telemetry writes inside the measured native path",
+    "DAGUA_ARM_TELEMETRY_PATH": "arms per-arm telemetry writes inside the measured native path",
+    "DAGUA_DISABLE_NUMBA": "silently swaps field-op implementations away from the certified path",
+    "DAGUA_SGD2_MULTI_ALLOW_CLONE": "re-enables the sgd2_multi network clone side effect",
+}
+
+
 def _preflight_native_env() -> None:
     """Assert the native deterministic environment is uncontaminated.
 
-    Checks that ``DAGUA_NATIVE_DISABLE_W5`` is unset (a set value silently
-    disables the W5 finisher stage and weakens native rows -- WP02A-F01) and
-    that a fresh ``LayoutConfig`` carries no ``_dagua_native_deadline_s``
-    attribute (class-level contamination would put wall-clock reads back on
-    the deterministic path).
+    Checks that every :data:`PREFLIGHT_FORBIDDEN_ENV` variable is unset
+    (WP02A-F01; dry-well B5-F01 confirmed telemetry/numba/clone knobs were
+    unguarded) and that a fresh ``LayoutConfig`` carries no
+    ``_dagua_native_deadline_s`` attribute (class-level contamination would
+    put wall-clock reads back on the deterministic path).
 
     Raises
     ------
     PreflightError
-        On either contamination signal.
+        On any contamination signal.
     """
-    disable_w5 = os.environ.get("DAGUA_NATIVE_DISABLE_W5")
-    if disable_w5 is not None:
-        raise PreflightError(
-            f"DAGUA_NATIVE_DISABLE_W5 is set ({disable_w5!r}); unset it -- it disables "
-            "the W5 finisher stage and weakens native rows"
-        )
+    for variable, effect in PREFLIGHT_FORBIDDEN_ENV.items():
+        value = os.environ.get(variable)
+        if value is not None:
+            raise PreflightError(f"{variable} is set ({value!r}); unset it -- it {effect}")
     from dagua.config import LayoutConfig
 
     config = LayoutConfig()
@@ -782,6 +802,23 @@ def load_phase(
             dims = _mtx_header_dims(path)
             telemetry["mtx_dims"] = list(dims) if dims else None
             telemetry["parse_branch"] = "mtx"
+            # Wedge-class pre-guard (dry-well B4-F7 companion): a declared
+            # dimension in the billions would pre-allocate that many nodes
+            # in the PARENT before any size filter runs. Reject from the
+            # header alone, without invoking the loader.
+            if dims and max(dims[0], dims[1]) > MTX_DECLARED_DIM_CAP:
+                load_rows.append(
+                    {
+                        "graph": name,
+                        "corpus": corpus,
+                        "relpath": relpath,
+                        "status": "SKIP",
+                        "reason": (f"mtx_dims_cap:{dims[0]}x{dims[1]}>{MTX_DECLARED_DIM_CAP}"),
+                        "source_path": str(path),
+                        "telemetry": telemetry,
+                    }
+                )
+                continue
         else:
             telemetry["raw_numeric_rows"] = None
             telemetry["parse_branch"] = suffix.lstrip(".")
@@ -1080,6 +1117,114 @@ def clean_child_temps(directory: Path) -> int:
     return removed
 
 
+def partition_resumed_rows(
+    rows: Sequence[Dict[str, Any]],
+    signature: str,
+    valid_keys: Set[str],
+    current_seed: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
+    """Split resumed rows into kept vs quarantined (dry-well B4-F3 + Sol).
+
+    A resumed row is QUARANTINED -- recorded but excluded from the tally, its
+    key vacated so an in-universe row is re-run/re-scored fresh -- when:
+
+    - it carries a score under a scoring signature other than the current one
+      (Sol B3-2; modeled on native_sprint_score's stale-signature rejection).
+      A scored row whose layout sibling row survives is rescored from its
+      existing tensor, so a mid-run scoring-policy hotfix costs rescoring,
+      not layout regeneration;
+    - its record key is outside the CURRENT subset x field x seed battery
+      (Sol B4-3: engines outside the field must never select the champion);
+    - it is a native row generated under a different ``--seed`` than this
+      invocation (Sol B5-1: the native key is seedless by pre-registered
+      convention, so the seed is checked from the row's recorded
+      ``native_child_seed``; rows predating that field are quarantined
+      conservatively).
+
+    Parameters
+    ----------
+    rows : Sequence[Dict[str, Any]]
+        Raw resumed rows (append order, pre-dedupe).
+    signature : str
+        Current scoring signature.
+    valid_keys : Set[str]
+        Record keys of the current row universe.
+    current_seed : int
+        Current run seed.
+
+    Returns
+    -------
+    Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]
+        ``(kept, quarantined, counts)``; quarantined rows carry a
+        ``quarantine_reason`` field, counts key on
+        ``signature``/``universe``/``native_seed``.
+    """
+    kept: List[Dict[str, Any]] = []
+    quarantined: List[Dict[str, Any]] = []
+    counts = {"signature": 0, "universe": 0, "native_seed": 0}
+    for row in rows:
+        reason: Optional[str] = None
+        if row.get("v3_tiered") is not None and row.get("scoring_signature") != signature:
+            reason = "stale scoring signature"
+            counts["signature"] += 1
+        elif str(row.get("record_key")) not in valid_keys:
+            reason = "outside current subset/field/seed battery"
+            counts["universe"] += 1
+        elif row.get("engine") == "dagua" and row.get("native_child_seed") != current_seed:
+            reason = "native row generated under a different --seed"
+            counts["native_seed"] += 1
+        if reason is None:
+            kept.append(row)
+        else:
+            quarantined.append({**row, "quarantine_reason": reason})
+    return kept, quarantined, counts
+
+
+def quarantine_orphan_tensors(staging: Path, rows: Sequence[Dict[str, Any]]) -> List[str]:
+    """Move position tensors with no owning OK row into ``positions/.orphaned/``.
+
+    Second line of defense for dry-well B4-F2: score-failure rows drop their
+    tensors at flip time, but a crash between tensor-save and row-append (or
+    a resumed run whose re-attempt recorded SKIP) can still leave a tensor
+    that ``validate_store`` would flag as an orphan AFTER publish. Sweep such
+    tensors into a dot-prefixed quarantine dir (ignored by the validator)
+    right before publishing, preserving them for inspection.
+
+    Parameters
+    ----------
+    staging : Path
+        Staging directory about to be published.
+    rows : Sequence[Dict[str, Any]]
+        Final (deduped) rows.
+
+    Returns
+    -------
+    List[str]
+        One warning line per quarantined tensor.
+    """
+    position_dir = staging / "positions"
+    if not position_dir.is_dir():
+        return []
+    ok_paths = {
+        str(row.get("positions_path"))
+        for row in rows
+        if row.get("status") == "OK" and row.get("positions_path")
+    }
+    warnings: List[str] = []
+    orphan_dir = position_dir / ".orphaned"
+    for path in sorted(position_dir.glob("*.pt")):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        relpath = str(Path("positions") / path.name)
+        if relpath not in ok_paths:
+            orphan_dir.mkdir(exist_ok=True)
+            path.replace(orphan_dir / path.name)
+            warnings.append(
+                f"quarantined orphan tensor without an OK row: positions/.orphaned/{path.name}"
+            )
+    return warnings
+
+
 def validate_store(directory: Path, payload: Dict[str, Any]) -> None:
     """Validate OK-row/position one-to-one mapping, ignoring dot temps.
 
@@ -1150,6 +1295,31 @@ def _write_child_message(result_path: str, message: Dict[str, Any]) -> None:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _load_child_message(result_path: Path) -> Optional[Dict[str, Any]]:
+    """Load the child's handshake JSON, tolerating torn/empty files.
+
+    A kernel OOM kill or hard crash mid-write leaves a file that exists but
+    does not parse; that must become an ERROR row, never an uncaught
+    exception that silently kills a worker thread (dry-well B4-F4).
+
+    Parameters
+    ----------
+    result_path : Path
+        Handshake JSON path.
+
+    Returns
+    -------
+    Dict[str, Any] | None
+        Parsed message, or ``None`` when missing/unparseable.
+    """
+    try:
+        with result_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def _row_layout_worker(
@@ -1394,6 +1564,12 @@ class RowExecutor:
             Completed row.
         """
         base = self._base_row(entry, engine_name, seed)
+        if is_native:
+            # Sol B5-1: the native row KEY stays seedless (pre-registered
+            # plan-7.4 convention), but the child actually runs under the
+            # run seed -- record it so resume can quarantine native rows
+            # generated under a different --seed instead of silently mixing.
+            base["native_child_seed"] = child_seed
         seed_part = "deterministic" if seed is None else f"seed{seed}"
         stem = f".{safe_component(entry.name)}__{safe_component(engine_name)}__{seed_part}"
         temp_path = self.staging / "positions" / f"{stem}.child.pt"
@@ -1454,6 +1630,27 @@ class RowExecutor:
                             "status_detail": "memkill",
                             "peak_child_rss_gb": round(peak_rss / 1024**3, 2),
                         }
+                # Aggregate-memory backstop (dry-well B4-F5): ten children
+                # under their per-child ceilings can jointly exhaust the box;
+                # re-check the system floor DURING flight, not just at
+                # dispatch, so the runner drains before the kernel OOM killer
+                # races the per-child watchdogs.
+                available = system_available_bytes()
+                if available is not None and available < self.args.min_avail_gb * 1024**3:
+                    self._kill(process)
+                    self._cleanup(temp_path, result_path)
+                    return {
+                        **base,
+                        "status": "ERROR",
+                        "runtime_s": elapsed,
+                        "positions_path": None,
+                        "error": (
+                            f"system available memory {available / 1024**3:.1f}GB fell below "
+                            f"the {self.args.min_avail_gb:.0f}GB floor while the row ran"
+                        ),
+                        "status_detail": "memkill:system-floor",
+                        "peak_child_rss_gb": round(peak_rss / 1024**3, 2),
+                    }
                 if elapsed > deadline:
                     self._kill(process)
                     self._cleanup(temp_path, result_path)
@@ -1478,8 +1675,21 @@ class RowExecutor:
                     "error": detail,
                     "status_detail": detail,
                 }
-            with result_path.open("r", encoding="utf-8") as handle:
-                message = json.load(handle)
+            message = _load_child_message(result_path)
+            if message is None:
+                # Torn/empty handshake file: the child (or the box) died
+                # mid-write -- e.g. a kernel OOM kill outside the runner's
+                # own watchdog (dry-well B4-F4). Never let this crash the
+                # worker thread; it is an ERROR row like any other crash.
+                self._cleanup(temp_path, result_path)
+                return {
+                    **base,
+                    "status": "ERROR",
+                    "runtime_s": elapsed,
+                    "positions_path": None,
+                    "error": f"child result file unreadable (child exited {exitcode})",
+                    "status_detail": "harness:child-result-torn",
+                }
             result_path.unlink()
             if message.get("status") != "OK":
                 self._cleanup(temp_path, result_path)
@@ -2062,14 +2272,25 @@ def write_report(
     errors = [row for row in rows if row.get("status") == "ERROR"]
     skips = [row for row in rows if row.get("status") == "SKIP"]
     timeouts = [row for row in errors if row.get("status_detail") == "timeout"]
-    memkills = [row for row in errors if row.get("status_detail") == "memkill"]
+    memkills = [row for row in errors if str(row.get("status_detail", "")).startswith("memkill")]
     load_rows = payload.get("load_rows", [])
+    quarantined = payload.get("quarantined_rows", [])
+    quarantine_reasons: Dict[str, int] = {}
+    for row in quarantined:
+        reason = str(row.get("quarantine_reason"))
+        quarantine_reasons[reason] = quarantine_reasons.get(reason, 0) + 1
     lines += [
         "## 6. Errors, skips, timeouts, memory events",
         "",
         f"- ERROR rows: {len(errors)} (timeouts {len(timeouts)}, memkills {len(memkills)})",
         f"- SKIP rows: {len(skips)}",
         f"- Load-phase problem rows: {len(load_rows)}",
+        f"- Quarantined stale resume rows: {len(quarantined)}"
+        + (
+            " (" + ", ".join(f"{r}: {c}" for r, c in sorted(quarantine_reasons.items())) + ")"
+            if quarantine_reasons
+            else ""
+        ),
         f"- Run aborted: {payload['aborted']} ({payload.get('aborted_reason')})",
         "",
     ]
@@ -2209,22 +2430,54 @@ def archive_run(output_dir: Path, archive_dir: Path) -> Optional[str]:
     str | None
         Warning message on failure, ``None`` on success.
     """
+    destination = archive_dir / "glados_holdout"
     try:
-        destination = archive_dir / "glados_holdout"
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(output_dir, destination)
+        # Dry-well R1 B4-F1 (CRITICAL): the destination leaf equals the
+        # default output-dir leaf, so `--archive-dir eval_output` used to
+        # resolve destination == output_dir and the rmtree-then-copy shape
+        # DELETED the published run while the swallowed exception reported
+        # "run unaffected". Refuse ANY overlap loudly before touching disk.
+        resolved_output = output_dir.resolve()
+        resolved_destination = destination.resolve()
+        if (
+            resolved_destination == resolved_output
+            or resolved_destination in resolved_output.parents
+            or resolved_output in resolved_destination.parents
+        ):
+            return (
+                f"REFUSING to archive: destination {resolved_destination} overlaps the "
+                f"published run {resolved_output}; nothing was copied or deleted"
+            )
+        # Copy to a temp sibling, manifest it, then swap atomically-enough:
+        # a failed copy can never destroy the previous archive (additive
+        # preservation, A-S2).
+        temp = archive_dir / f".glados_holdout.tmp-{os.getpid()}"
+        if temp.exists():
+            shutil.rmtree(temp)
+        shutil.copytree(output_dir, temp)
         manifest_lines = []
-        for path in sorted(destination.rglob("*")):
+        for path in sorted(temp.rglob("*")):
             if path.is_file() and path.name != "MANIFEST.sha256":
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                manifest_lines.append(f"{digest}  {path.relative_to(destination).as_posix()}")
-        (destination / "MANIFEST.sha256").write_text(
-            "\n".join(manifest_lines) + "\n", encoding="utf-8"
-        )
+                manifest_lines.append(f"{digest}  {path.relative_to(temp).as_posix()}")
+        (temp / "MANIFEST.sha256").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+        previous = archive_dir / ".glados_holdout.prev"
+        if previous.exists():
+            shutil.rmtree(previous)
+        if destination.exists():
+            destination.rename(previous)
+        temp.rename(destination)
+        if previous.exists():
+            shutil.rmtree(previous)
         return None
     except Exception as exc:  # noqa: BLE001
-        return f"archive to {archive_dir} failed (run unaffected): {type(exc).__name__}: {exc}"
+        # Never claim the run is unaffected without checking (B4-F1).
+        state = (
+            "published run verified intact"
+            if (output_dir / "results.json").is_file()
+            else "PUBLISHED RUN MAY BE DAMAGED -- inspect immediately"
+        )
+        return f"archive to {archive_dir} failed ({state}): {type(exc).__name__}: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -2403,8 +2656,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     Returns
     -------
     int
-        ``0`` ok; ``2`` no graphs; ``3`` memory abort (partial results
-        published); ``4`` preflight failure; ``5`` load-phase fatal.
+        ``0`` ok; ``2`` no graphs; ``3`` guarded abort -- memory guard or
+        unexpected harness exception -- with partial results published;
+        ``4`` preflight failure or fresh-run-over-existing-data refusal;
+        ``5`` load-phase fatal.
     """
     args = parse_args(argv)
     assumptions: List[str] = []
@@ -2483,11 +2738,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     field_engines = [engine for engine in engines if engine != "dagua"]
     availability = engine_availability(engines)
 
-    from scripts.run_benchmark import seeds_for_engine
+    from scripts.run_benchmark import build_record_key, seeds_for_engine
 
     seeds_by_engine: Dict[str, List[Optional[int]]] = {
         engine: seeds_for_engine(engine, args.seeds, args.seed) for engine in field_engines
     }
+
+    import scripts.native_sprint_score as nss
+
+    signature = nss.scoring_signature()
 
     # Staging setup + resume.
     staging = args.output_dir.with_name(f"{args.output_dir.name}.tmp")
@@ -2498,8 +2757,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.output_dir.rename(staging)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         assumptions.append("resume re-opened a previously published partial run")
-    if staging.exists() and not args.resume:
-        shutil.rmtree(staging)
+    if not args.resume:
+        # Dry-well B4-F6: dropping --resume after a crash used to silently
+        # rmtree hours of completed rows (up to 63 x 1800s of native work).
+        # Destroying existing run data now requires an explicit flag.
+        staging_nonempty = staging.exists() and any(staging.iterdir())
+        output_has_run = (
+            rows_path(args.output_dir).is_file() or (args.output_dir / "results.json").is_file()
+        )
+        if (staging_nonempty or output_has_run) and not args.force_fresh:
+            print(
+                "REFUSING to start fresh over existing run data in "
+                f"{args.output_dir} (staging populated: {staging_nonempty}, published run "
+                f"present: {output_has_run}). Pass --resume to continue it, or "
+                "--force-fresh to destroy it and start over.",
+                file=sys.stderr,
+            )
+            return 4
+        if staging.exists():
+            shutil.rmtree(staging)
     staging.mkdir(parents=True, exist_ok=True)
     removed_temps = clean_child_temps(staging)
     if removed_temps:
@@ -2508,6 +2784,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.resume:
         existing_rows, torn_warnings = load_rows_tolerant(staging)
         warnings.extend(torn_warnings)
+
+    # Resume-consistency quarantine (dry-well B4-F3, Sol B3-2/B4-3/B5-1):
+    # resumed rows must not silently compete when they were produced under a
+    # different ruler, row universe, or native seed. Quarantined rows are
+    # recorded (results.json + report), excluded from the tally, and their
+    # keys vacate so in-universe rows are re-run/re-scored under the CURRENT
+    # signature. Layout-only rows (no v3_tiered) pass through and are scored
+    # fresh; a quarantined scored row whose layout sibling row survives is
+    # rescored from its existing tensor.
+    quarantined_rows: List[Dict[str, Any]] = []
+    if args.resume and existing_rows:
+        valid_keys: Set[str] = set()
+        for entry in entries:
+            if include_native:
+                valid_keys.add(build_record_key(entry.name, "dagua", None))
+            for engine in field_engines:
+                for seed in seeds_by_engine[engine]:
+                    valid_keys.add(build_record_key(entry.name, engine, seed))
+        existing_rows, quarantined_rows, quarantine_counts = partition_resumed_rows(
+            existing_rows, signature, valid_keys, args.seed
+        )
+        if quarantined_rows:
+            summary = (
+                f"QUARANTINE: {len(quarantined_rows)} stale resumed row(s) excluded from the "
+                f"tally and re-run where in-universe (stale signature: "
+                f"{quarantine_counts['signature']}, outside row universe: "
+                f"{quarantine_counts['universe']}, native seed mismatch: "
+                f"{quarantine_counts['native_seed']})"
+            )
+            print(summary, flush=True)
+            warnings.append(summary)
     row_map: Dict[str, Dict[str, Any]] = dedupe_rows(existing_rows)
     completed_keys: Set[str] = set(row_map)
 
@@ -2522,9 +2829,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         include_native,
     )
 
-    import scripts.native_sprint_score as nss
-
-    signature = nss.scoring_signature()
     executor = RowExecutor(args, staging)
     store_lock = threading.Lock()
     state: Dict[str, Any] = {"rows_done": 0, "rss_warned": False}
@@ -2540,21 +2844,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _parent_guard(state)
 
     try:
-        # Phase 1: native rows FIRST, serial (plan 7.3).
+        # Phase 1: native rows FIRST, serial (plan 7.3). Per-row containment:
+        # an unexpected harness exception becomes an ERROR row, never a
+        # whole-run crash (dry-well B4-F4).
         if include_native:
             for entry in entries:
                 key_row = executor._base_row(entry, "dagua", None)
                 if key_row["record_key"] in completed_keys:
                     continue
-                _check_system_floor(args.min_avail_gb)
-                row = executor.run_row(
-                    entry,
-                    "dagua",
-                    seed=None,
-                    child_seed=args.seed,
-                    timeout_s=args.native_timeout,
-                    is_native=True,
-                )
+                try:
+                    _check_system_floor(args.min_avail_gb)
+                    row = executor.run_row(
+                        entry,
+                        "dagua",
+                        seed=None,
+                        child_seed=args.seed,
+                        timeout_s=args.native_timeout,
+                        is_native=True,
+                    )
+                except _AbortRun:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    row = {
+                        **key_row,
+                        "native_child_seed": args.seed,
+                        "status": "ERROR",
+                        "runtime_s": 0.0,
+                        "positions_path": None,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "status_detail": f"harness:{type(exc).__name__}",
+                    }
                 record(row)
 
         # Phase 2: field rows, threaded dispatcher over spawn children.
@@ -2570,13 +2889,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         def field_worker() -> None:
             from dagua.eval.competitors import get_competitor
 
-            try:
-                while True:
-                    with task_lock:
-                        task = next(task_iter, None)
-                    if task is None or abort_box:
-                        return
-                    entry, engine, seed = task
+            while True:
+                with task_lock:
+                    task = next(task_iter, None)
+                if task is None or abort_box:
+                    return
+                entry, engine, seed = task
+                # Per-task containment (dry-well B4-F4): a worker thread must
+                # NEVER die silently -- any unexpected exception (torn child
+                # results are handled in run_row; ENOMEM at spawn, ENOSPC at
+                # tensor move, ...) becomes an ERROR row and the worker moves
+                # on. Only _AbortRun (memory guards) drains the run.
+                try:
                     key = executor._base_row(entry, engine, seed)["record_key"]
                     if key in completed_keys:
                         continue
@@ -2603,9 +2927,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         is_native=False,
                     )
                     record(row)
-            except _AbortRun as exc:
-                abort_box.append(str(exc))
-                return
+                except _AbortRun as exc:
+                    abort_box.append(str(exc))
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    error_row = {
+                        **executor._base_row(entry, engine, seed),
+                        "status": "ERROR",
+                        "runtime_s": 0.0,
+                        "positions_path": None,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "status_detail": f"harness:{type(exc).__name__}",
+                    }
+                    try:
+                        record(error_row)
+                    except _AbortRun as abort_exc:
+                        abort_box.append(str(abort_exc))
+                        return
+                    except Exception as record_exc:  # noqa: BLE001
+                        # Cannot even record (e.g. ENOSPC on the row store):
+                        # drain and take the partial-publish abort path.
+                        abort_box.append(
+                            f"harness: row store append failed after "
+                            f"{type(exc).__name__}: {record_exc}"
+                        )
+                        return
 
         threads = [
             threading.Thread(target=field_worker, name=f"glados-field-{index}")
@@ -2648,6 +2994,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 row["status"] = "ERROR"
                 row["error"] = error
                 row["status_detail"] = f"score:{error}"
+                # Dry-well B4-F2 / Sol B4-1: a score-failure row must not
+                # leave its tensor behind -- validate_store treats every
+                # tensor without an OK row as an orphan and would crash the
+                # run AFTER publish. Drop the tensor, keep the trail.
+                relpath = row.get("positions_path")
+                if relpath:
+                    tensor_path = staging / str(relpath)
+                    if tensor_path.is_file():
+                        tensor_path.unlink()
+                    row["positions_path"] = None
+                    row["positions_path_removed"] = str(relpath)
             record(row)
 
         if score_tasks:
@@ -2670,16 +3027,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except _AbortRun as exc:
         aborted_reason = str(exc)
         print(f"ABORT: {aborted_reason}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        # Dry-well B4-F4: an unexpected exception in the serial native phase
+        # or the scoring loop must still take the abort-with-partial-publish
+        # path (exit 3) instead of crashing with rows stranded in staging.
+        aborted_reason = f"harness:{type(exc).__name__}: {exc}"
+        print(f"ABORT: {aborted_reason}", file=sys.stderr)
+        traceback.print_exc(limit=20, file=sys.stderr)
 
     # Tally + payload + report + publish (partial on abort).
     tally_entries = entries
     final_rows = list(row_map.values())
     tally = compute_tally(tally_entries, final_rows, staging)
 
+    warnings.extend(quarantine_orphan_tensors(staging, final_rows))
     slim_drop = {"metrics", "v3_facets", "graph_meta", "v3_applicability"}
     slim_rows = [
         {key: value for key, value in row.items() if key not in slim_drop}
         for row in sorted(final_rows, key=lambda row: str(row["record_key"]))
+    ]
+    slim_quarantined = [
+        {key: value for key, value in row.items() if key not in slim_drop}
+        for row in sorted(quarantined_rows, key=lambda row: str(row.get("record_key")))
     ]
     payload: Dict[str, Any] = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2705,6 +3074,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "load_stats": load_stats,
         "load_rows": load_rows,
         "rows": slim_rows,
+        "quarantined_rows": slim_quarantined,
         "tally": tally,
         "warnings": warnings,
         "assumptions": assumptions,
