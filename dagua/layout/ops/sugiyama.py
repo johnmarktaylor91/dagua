@@ -31,6 +31,10 @@ from dagua.layout.cycle import _is_acyclic as _cycle_is_acyclic
 from dagua.layout.cycle import make_acyclic, make_acyclic_robust
 from dagua.layout.ops._dot_mincross import graphviz_mincross
 from dagua.layout.ops.base import Op
+from dagua.layout.ops.cluster_geometry import (
+    break_cluster_parent_cycles as _break_cluster_parent_cycles,
+)
+from dagua.layout.ops.layering import MAX_DUMMY_EXPANSION_NODES
 from dagua.layout.ops.pipelines.dot_rank import (
     GraphvizVirtualEdge,
     graphviz_network_simplex_assignment,
@@ -1927,6 +1931,13 @@ def _expand_long_edges_with_dummy_nodes(
     -------
     _ExpandedLayeredGraph
         Expanded layered DAG with dummy nodes inserted on intermediate layers.
+
+    Raises
+    ------
+    ValueError
+        If the expansion would create more than
+        ``MAX_DUMMY_EXPANSION_NODES`` dummy nodes (WP05-F03 structural
+        guard: fail loudly instead of stalling toward OOM).
     """
     expanded_layers = _group_nodes_by_layer(
         layer_assignments=layer_assignments,
@@ -1978,6 +1989,40 @@ def _expand_long_edges_with_dummy_nodes(
         if edge_label_sizes is None
         else edge_label_sizes.detach().to(device="cpu", dtype=torch.float32)
     )
+
+    # WP05-F03 structural guard: pre-compute the exact dummy count the loop
+    # below would create (honoring graphviz representative-chain sharing for
+    # unlabeled multi-edges) and fail loudly instead of stalling toward OOM.
+    layer_list = [int(value) for value in layer_assignments.tolist()]
+    projected_dummy_nodes = 0
+    projected_chain_pairs: Set[Tuple[int, int]] = set()
+    for edge_idx in range(edge_count):
+        source = int(sources[edge_idx])
+        target = int(targets[edge_idx])
+        span = layer_list[target] - layer_list[source] - 1
+        if span <= 0:
+            continue
+        if use_graphviz_edge_order:
+            has_chain_label = (
+                label_sizes_cpu is not None
+                and edge_idx < label_sizes_cpu.shape[0]
+                and float(label_sizes_cpu[edge_idx, 0].item()) > 0.0
+            )
+            if not has_chain_label:
+                chain_pair = (source, target)
+                if chain_pair in projected_chain_pairs:
+                    continue
+                projected_chain_pairs.add(chain_pair)
+        projected_dummy_nodes += span
+    if projected_dummy_nodes > MAX_DUMMY_EXPANSION_NODES:
+        raise ValueError(
+            "dummy-node expansion would create "
+            f"{projected_dummy_nodes:,} virtual nodes "
+            f"(cap {MAX_DUMMY_EXPANSION_NODES:,}; "
+            f"N={num_original_nodes:,}, E={edge_count:,}); "
+            "the layered spans are too long to expand safely"
+        )
+
     if graphviz_virtual_node_sep is None:
         virtual_width = 0.0
         virtual_width_increment = 0.0
@@ -7255,7 +7300,8 @@ def _normalize_graphviz_cluster_parents(
     Returns
     -------
     dict[str, str | None]
-        Parent mapping where missing or unknown parents become ``None``.
+        Parent mapping where missing or unknown parents become ``None`` and
+        parent cycles are broken (every cycle member becomes a root).
     """
     known = set(cluster_names)
     raw = cluster_parents or {}
@@ -7263,7 +7309,11 @@ def _normalize_graphviz_cluster_parents(
     for name in cluster_names:
         parent = raw.get(name)
         parents[name] = parent if parent in known else None
-    return parents
+    # User metadata may contain parent cycles ("A -> B -> A" or self-parents);
+    # solve_cluster's memoize-after-recurse walk in
+    # _graphviz_cluster_rank_assignments never bottoms out on such input
+    # (WP05-F02). Acyclic mappings pass through unchanged.
+    return _break_cluster_parent_cycles(parents)
 
 
 def _graphviz_cluster_depth(name: str, parents: Mapping[str, Optional[str]]) -> int:
