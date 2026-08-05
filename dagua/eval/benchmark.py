@@ -19,6 +19,22 @@ eval_output/
 ├── visuals/
 ├── report/
 └── scaling_curve.png
+
+RECORD SCHEMA WARNING (two incompatible "results.json" flavors coexist):
+
+1. THIS module (benchmark_db suite system) writes per-competitor records with
+   fields ``competitor`` / ``positions_path`` and UPPERCASE statuses
+   ``"OK"`` / ``"FAILED"`` / ``"SKIPPED"``, nested under
+   ``payload["graphs"][<graph>]["competitors"][<name>]``.
+2. ``scripts/run_benchmark.py`` (the certified-regen harness) writes flat
+   records with fields ``engine_name`` / ``positions_file`` and lowercase
+   statuses ``"ok"`` / ``"skipped"`` / ``"error"`` / ``"timeout"`` /
+   ``"running"``.
+
+The certified 121-row tally and its gates (G-2/G-3,
+``scripts/native_sprint_score.py``) read ONLY flavor 2. Pointing tally or
+gate tooling at a benchmark_db-style results.json silently yields ZERO rows
+(field-name and status-case mismatch); it does not error.
 """
 
 from __future__ import annotations
@@ -169,6 +185,15 @@ class BenchmarkGraph:
 
 
 def _clone_test_graph(tg: TestGraph) -> TestGraph:
+    """Deep-copy a test graph via its JSON round-trip.
+
+    KNOWN LIMITATION (WP07-F05): ``graph.to_json()`` does not serialize
+    ``edge_weights``, so this clone SILENTLY STRIPS weights from weighted
+    suite graphs. The fix belongs in dagua/io.py (graph_to_json/from_json
+    weight round-trip), which is outside this module; until then, weighted
+    suite rows are laid out weight-blind by the benchmark_db suite system.
+    The certified tally path does not use this clone.
+    """
     from dagua.graph import DaguaGraph
 
     return TestGraph(
@@ -544,11 +569,22 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 
 def _update_latest_symlink(parent: Path, run_id: str) -> None:
+    """Atomically repoint ``parent/latest`` at ``parent/run_id``.
+
+    Uses a temporary symlink + ``os.replace`` so a crash mid-update can never
+    leave ``latest`` missing or dangling (the old target survives until the
+    rename commits).
+    """
     latest = parent / "latest"
     target = parent / run_id
-    if latest.exists() or latest.is_symlink():
-        latest.unlink()
-    latest.symlink_to(target.name)
+    tmp = parent / f".latest.{os.getpid()}.tmp"
+    tmp.unlink(missing_ok=True)
+    tmp.symlink_to(target.name)
+    try:
+        os.replace(tmp, latest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _graph_signature(graph) -> str:
@@ -565,6 +601,34 @@ def _graph_signature(graph) -> str:
         SHA256 hex digest of the canonical graph JSON.
     """
     payload = json.dumps(graph.to_json(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _graph_weight_signature(graph) -> Optional[str]:
+    """Weight-aware companion signature for weighted graphs (WP07-F05).
+
+    ``_graph_signature`` hashes ``graph.to_json()``, which does NOT serialize
+    ``edge_weights`` -- the structural hash is weight-BLIND, so a
+    weight-affecting drift on a weighted graph passes the structural tripwire
+    unnoticed. This ADDITIVE companion hashes the per-edge weight vector (in
+    edge order) so new consumers can detect weight drift. It deliberately does
+    NOT change ``_graph_signature`` output: existing stored signatures (both
+    weighted and unweighted rows) remain byte-identical.
+
+    Returns
+    -------
+    Optional[str]
+        SHA256 hex digest of the canonical weight vector, or ``None`` when the
+        graph has no edge weights.
+    """
+    # DaguaGraph defers edge storage: edge_weights stays None until pending
+    # edges are finalized, which the edge_index getter triggers.
+    if hasattr(graph, "edge_index"):
+        _ = graph.edge_index
+    weights = getattr(graph, "edge_weights", None)
+    if weights is None:
+        return None
+    payload = json.dumps([float(w) for w in weights.tolist()], separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -601,6 +665,31 @@ def _graph_signature_map(graphs: Sequence[BenchmarkGraph]) -> Dict[str, str]:
         Mapping from graph name to structural signature.
     """
     return {bg.test_graph.name: _graph_signature(bg.test_graph.graph) for bg in graphs}
+
+
+def _graph_weight_signature_map(graphs: Sequence[BenchmarkGraph]) -> Dict[str, str]:
+    """Build weight-aware companion signatures for weighted suite graphs.
+
+    Additive field (WP07-F05): only weighted graphs get an entry, so the map
+    is empty for fully unweighted suites and never perturbs existing
+    ``graph_signatures`` semantics.
+
+    Parameters
+    ----------
+    graphs : Sequence[BenchmarkGraph]
+        Graph definitions to hash.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping from graph name to edge-weight signature (weighted graphs only).
+    """
+    result: Dict[str, str] = {}
+    for bg in graphs:
+        signature = _graph_weight_signature(bg.test_graph.graph)
+        if signature is not None:
+            result[bg.test_graph.name] = signature
+    return result
 
 
 def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
@@ -704,8 +793,15 @@ def _load_latest_payload_and_metadata(
     metadata_path = latest_dir / "metadata.json"
     if not results_path.exists():
         return None, None, None
-    payload = _load_json(results_path)
-    metadata = _load_json(metadata_path) if metadata_path.exists() else {}
+    try:
+        payload = _load_json(results_path)
+        metadata = _load_json(metadata_path) if metadata_path.exists() else {}
+    except (json.JSONDecodeError, OSError) as exc:
+        # A crash during a previous run's final write can leave a truncated
+        # results.json behind the `latest` symlink; treat it as "no cache"
+        # instead of crashing the new run (WP07-F07).
+        print(f"WARNING: ignoring unreadable cached results at {results_path}: {exc}")
+        return None, None, None
     return payload, metadata, results_path.resolve().parent
 
 
@@ -723,8 +819,14 @@ def _load_resumable_payload_and_metadata(
         partial_path = _partial_results_path(run_dir)
         metadata_path = run_dir / "metadata.json"
         if partial_path.exists():
-            payload = _load_json(partial_path)
-            metadata = _load_json(metadata_path) if metadata_path.exists() else {}
+            try:
+                payload = _load_json(partial_path)
+                metadata = _load_json(metadata_path) if metadata_path.exists() else {}
+            except (json.JSONDecodeError, OSError) as exc:
+                # Torn/corrupt partial checkpoint: skip this run dir and keep
+                # looking at older runs instead of crashing resume (WP07-F07).
+                print(f"WARNING: skipping unreadable partial results at {partial_path}: {exc}")
+                continue
             return payload, metadata, run_dir, run_dir.name
     return None, None, None, None
 
@@ -755,6 +857,7 @@ def _reuse_cached_result(
     latest_run_dir: Optional[Path],
     graph_signatures: Dict[str, str],
     competitor_signatures: Dict[str, str],
+    graph_weight_signatures: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     if cached_payload is None or latest_run_dir is None:
         return None
@@ -771,6 +874,14 @@ def _reuse_cached_result(
         return None
     if meta_comp_sigs.get(competitor_name) != competitor_signatures.get(competitor_name):
         return None
+    # Weight-drift tripwire (WP07-F05, additive + legacy-tolerant): only
+    # enforced when BOTH sides carry the new field. Metadata written before
+    # this field existed lacks it entirely -> check skipped, existing cached
+    # artifacts stay reusable exactly as before.
+    meta_weight_sigs = (cached_metadata or {}).get("graph_weight_signatures")
+    if meta_weight_sigs is not None and graph_weight_signatures is not None:
+        if meta_weight_sigs.get(graph_name) != graph_weight_signatures.get(graph_name):
+            return None
     reused = copy.deepcopy(cached_result)
     reused_path = _copy_cached_positions(latest_run_dir, cached_result, run_dir)
     reused["positions_path"] = reused_path
@@ -1189,7 +1300,10 @@ def _run_one_competitor(
             "positions_path": None,
         }
 
-    if n_nodes > competitor.max_nodes:
+    # max_nodes == 0 means "no limit" (CompetitorBase default); without the
+    # `> 0` guard a default-max_nodes adapter would be skipped for EVERY
+    # non-empty graph (WP07-F06).
+    if competitor.max_nodes > 0 and n_nodes > competitor.max_nodes:
         return {
             "status": "SKIPPED",
             "reason": "exceeds known limit",
@@ -1283,6 +1397,7 @@ def _build_results_payload(
     latest_run_dir: Optional[Path] = None,
     graph_signatures: Optional[Dict[str, str]] = None,
     competitor_signatures: Optional[Dict[str, str]] = None,
+    graph_weight_signatures: Optional[Dict[str, str]] = None,
     rerun_competitors: Optional[Sequence[str]] = None,
     existing_payload: Optional[Dict[str, Any]] = None,
     checkpoint_each_graph: bool = False,
@@ -1318,6 +1433,9 @@ def _build_results_payload(
         Current graph signatures for cache validation.
     competitor_signatures : Optional[Dict[str, str]], optional
         Current competitor signatures for cache validation.
+    graph_weight_signatures : Optional[Dict[str, str]], optional
+        Weight-aware companion signatures (weighted graphs only) for the
+        additive weight-drift tripwire; ``None`` disables the check.
     rerun_competitors : Optional[Sequence[str]], optional
         Competitors that must ignore cache reuse.
     existing_payload : Optional[Dict[str, Any]], optional
@@ -1406,6 +1524,7 @@ def _build_results_payload(
                     latest_run_dir=latest_run_dir,
                     graph_signatures=graph_signatures,
                     competitor_signatures=competitor_signatures,
+                    graph_weight_signatures=graph_weight_signatures,
                 )
                 if reused is not None and (not retry_failed or reused.get("status") != "FAILED"):
                     competitor_result = reused
@@ -1485,23 +1604,34 @@ def merge_latest_results(output_dir: str = DEFAULT_OUTPUT_DIR) -> Dict[str, Any]
     }
     system: Dict[str, Any] = {}
 
+    def _load_optional(path: Path) -> Optional[Dict[str, Any]]:
+        # Legacy torn files (written non-atomically before WP07-F07) must not
+        # crash the merge; treat unreadable JSON as absent.
+        try:
+            return _load_json(path)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"WARNING: ignoring unreadable results at {path}: {exc}")
+            return None
+
     if standard_latest.exists():
-        standard = _load_json(standard_latest)
-        combined["generated_from"][STANDARD_SUITE] = standard.get("run_id")
-        combined["graphs"].update(standard.get("graphs", {}))
-        system.update(standard.get("system", {}))
+        standard = _load_optional(standard_latest)
+        if standard is not None:
+            combined["generated_from"][STANDARD_SUITE] = standard.get("run_id")
+            combined["graphs"].update(standard.get("graphs", {}))
+            system.update(standard.get("system", {}))
 
     if rare_latest.exists():
-        rare = _load_json(rare_latest)
-        combined["generated_from"][RARE_SUITE] = rare.get("run_id")
-        for name, graph_payload in rare.get("graphs", {}).items():
-            if name not in combined["graphs"]:
-                combined["graphs"][name] = graph_payload
-        system.update({k: v for k, v in rare.get("system", {}).items() if v is not None})
+        rare = _load_optional(rare_latest)
+        if rare is not None:
+            combined["generated_from"][RARE_SUITE] = rare.get("run_id")
+            for name, graph_payload in rare.get("graphs", {}).items():
+                if name not in combined["graphs"]:
+                    combined["graphs"][name] = graph_payload
+            system.update({k: v for k, v in rare.get("system", {}).items() if v is not None})
 
     combined["system"] = system
     combined_path = root / "combined_latest.json"
-    _save_json(combined_path, combined)
+    _save_json_atomic(combined_path, combined)
     return combined
 
 
@@ -1614,6 +1744,7 @@ def run_suite(
     competitor_list = _competitor_map(competitors)
     system = _system_metadata()
     graph_signatures = _graph_signature_map(graphs)
+    graph_weight_signatures = _graph_weight_signature_map(graphs)
     competitor_signatures = _competitor_signature_map(competitor_list, system)
     rerun_list = (
         list(rerun_competitors)
@@ -1637,7 +1768,9 @@ def run_suite(
             run_id = existing_run_id
     run_dir = _run_dir(output_dir, suite, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
-    _update_latest_symlink(run_dir.parent, run_id)
+    # NOTE: `latest` is deliberately NOT repointed here. It moves to this run
+    # only after the final results.json save succeeds, so a crashed/partial
+    # run never hides the previous complete run from cache reuse (WP07-F07).
     _save_json(
         run_dir / "metadata.json",
         {
@@ -1647,6 +1780,7 @@ def run_suite(
             "graphs": [bg.test_graph.name for bg in graphs],
             "competitors": [c.name for c in competitor_list],
             "graph_signatures": graph_signatures,
+            "graph_weight_signatures": graph_weight_signatures,
             "competitor_signatures": competitor_signatures,
             "reuse_cached": reuse_cached,
             "rerun_competitors": rerun_list,
@@ -1679,12 +1813,17 @@ def run_suite(
         latest_run_dir=latest_run_dir,
         graph_signatures=graph_signatures,
         competitor_signatures=competitor_signatures,
+        graph_weight_signatures=graph_weight_signatures,
         rerun_competitors=rerun_list,
         existing_payload=existing_payload,
         checkpoint_each_graph=checkpoint_each_graph,
         retry_failed=retry_failed,
     )
-    _save_json(run_dir / "results.json", payload)
+    # Atomic final save + repoint `latest` only after success: a crash during
+    # this write can no longer leave a truncated results.json behind `latest`
+    # nor orphan the previous complete run (WP07-F07).
+    _save_json_atomic(run_dir / "results.json", payload)
+    _update_latest_symlink(run_dir.parent, run_id)
     _write_progress(
         run_dir,
         suite,
