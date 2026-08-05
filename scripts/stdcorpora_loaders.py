@@ -20,6 +20,12 @@ from typing import Iterable, List, Optional, Set, Tuple
 from dagua.graph import DaguaGraph
 
 MAX_NODES = 2000
+# Hard ceiling on the node space an edge-list `.graph` file may DECLARE via
+# its ids. Without it, one truncated/foreign 2-line file (`"3 2000000000"`)
+# pre-allocates billions of nodes in the PARENT process before any size
+# filter applies -- a load-phase wedge/OOM with no child isolation
+# (dry-well R1 B4-F7; reproduced at 50k ids = 121s/935MB, 500k ids = hung).
+MAX_EDGE_LIST_NODES = 100_000
 
 
 @dataclass(frozen=True)
@@ -215,6 +221,11 @@ def load_graph_file(path: Path, directed_override: Optional[bool] = None) -> Loa
     offset = 1 if min_id == 1 else 0
     max_id = max(max(row[0], row[1]) for row in edge_rows)
     node_count = max_id - offset + 1
+    if node_count > MAX_EDGE_LIST_NODES:
+        raise ValueError(
+            f"{path} edge-list declares {node_count} nodes (max id {max_id}); cap is "
+            f"{MAX_EDGE_LIST_NODES} -- refusing pre-allocation of a wedge-scale graph"
+        )
     edges = [(row[0] - offset, row[1] - offset) for row in edge_rows]
     return build_graph(name, corpus, node_count, edges, directed, path)
 
