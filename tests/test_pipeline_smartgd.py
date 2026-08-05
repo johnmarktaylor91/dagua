@@ -124,3 +124,23 @@ def test_smartgd_pipeline_has_no_runtime_reference_import() -> None:
 
     assert "from smartgd.model" not in source
     assert "import smartgd" not in source
+
+
+def test_smartgd_single_node_returns_finite_position() -> None:
+    """A one-node graph should lay out instead of indexing empty pair tensors.
+
+    Returns
+    -------
+    None
+        Regression pin for the ``prepare_smartgd_data`` empty-permutation
+        guard (single-node graphs have no ordered node pairs).
+    """
+    out = layout_smartgd_pipeline(
+        torch.empty((2, 0), dtype=torch.long),
+        1,
+        config=_small_config(seed=5),
+        seed=5,
+    )
+
+    assert out.shape == (1, 2)
+    assert torch.isfinite(out).all()
