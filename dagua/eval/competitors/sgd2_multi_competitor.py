@@ -6,6 +6,7 @@ Runs the original (SGD)^2 code from github.com/tiga1231/graph-drawing
 
 from __future__ import annotations
 
+import os
 import random
 import subprocess
 import sys
@@ -25,10 +26,26 @@ if TYPE_CHECKING:
 _SGD2_REPO = Path.home() / "tools" / "dagua-refs" / "graph-drawing"
 _SGD2_REMOTE_URL = "https://github.com/tiga1231/graph-drawing"
 _SGD2_BRANCH = "sgd"
+_SGD2_CLONE_OPT_IN_ENV = "DAGUA_SGD2_MULTI_ALLOW_CLONE"
 _CROSSING_CRITERIA = frozenset({"crossings", "crossing_angle_maximization"})
 _CROSSING_CPU_THREADS = 1
 # Round 31 tracking: the upstream repository is optional and may be absent.
 # Missing files must remain explicit adapter errors, not silent zero-pair rows.
+
+
+def _clone_recovery_enabled() -> bool:
+    """Report whether network recovery of the upstream checkout is allowed.
+
+    Returns
+    -------
+    bool
+        ``True`` when :data:`_SGD2_CLONE_OPT_IN_ENV` is set to a truthy value.
+        Availability probes must otherwise stay pure (no filesystem mutation,
+        no network reach): a ``git clone`` fired from ``available()`` can
+        stall field assembly on DNS and silently introduce an unpinned
+        upstream HEAD mid-run.
+    """
+    return os.environ.get(_SGD2_CLONE_OPT_IN_ENV, "").strip().lower() not in {"", "0", "false"}
 
 
 def _sgd2_multi_available() -> bool:
@@ -38,7 +55,8 @@ def _sgd2_multi_available() -> bool:
     -------
     bool
         ``True`` when the required upstream modules are already importable or
-        can be recovered into the expected checkout path.
+        (with explicit opt-in) can be recovered into the expected checkout
+        path.
     """
     return not _ensure_sgd2_multi_sources()
 
@@ -125,6 +143,10 @@ def _crossing_cpu_thread_guard(enabled: bool) -> Iterator[None]:
 def _ensure_sgd2_multi_sources() -> list[str]:
     """Recover missing upstream SGD2 source files from the published branch.
 
+    Recovery mutates the filesystem and reaches the network (``git clone`` /
+    ``fetch``), so it only runs when :data:`_SGD2_CLONE_OPT_IN_ENV` is set;
+    otherwise missing sources are reported as-is for a clean recorded skip.
+
     Returns
     -------
     list[str]
@@ -133,6 +155,8 @@ def _ensure_sgd2_multi_sources() -> list[str]:
     missing_sources = _missing_sgd2_multi_sources()
     if not missing_sources:
         return []
+    if not _clone_recovery_enabled():
+        return missing_sources
     if not (_SGD2_REPO / ".git").exists():
         try:
             _SGD2_REPO.parent.mkdir(parents=True, exist_ok=True)
@@ -452,7 +476,8 @@ class SGD2MultiRef(CompetitorBase):
                     error=(
                         "missing upstream SGD2 source files at "
                         f"{_SGD2_REPO}: {', '.join(missing_sources)} "
-                        f"(expected {_SGD2_REMOTE_URL}/tree/{_SGD2_BRANCH})"
+                        f"(expected {_SGD2_REMOTE_URL}/tree/{_SGD2_BRANCH}; "
+                        f"set {_SGD2_CLONE_OPT_IN_ENV}=1 to allow automatic clone)"
                     ),
                 )
 

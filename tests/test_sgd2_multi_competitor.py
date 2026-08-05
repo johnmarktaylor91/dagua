@@ -341,3 +341,59 @@ class TestSGD2WrapperBugB:
         assert result.error is None, f"Expected stress fallback, got error: {result.error}"
         assert result.pos is not None
         assert result.pos.shape == (graph.graph.num_nodes, 2)
+
+
+def test_available_is_pure_without_clone_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """available() must not mkdir/clone/fetch unless explicitly opted in.
+
+    An availability probe that reaches the network can stall field assembly
+    on DNS and silently introduce an unpinned upstream HEAD mid-run.
+    """
+    from dagua.eval.competitors import sgd2_multi_competitor as module
+
+    missing_repo = tmp_path / "graph-drawing"
+    monkeypatch.setattr(module, "_SGD2_REPO", missing_repo)
+    monkeypatch.delenv(module._SGD2_CLONE_OPT_IN_ENV, raising=False)
+    monkeypatch.delitem(sys.modules, "gd2", raising=False)
+    monkeypatch.delitem(sys.modules, "criteria", raising=False)
+
+    calls: list[list[str]] = []
+
+    def _record_command(args, cwd):
+        calls.append(list(args))
+        return False, "network disabled in tests"
+
+    monkeypatch.setattr(module, "_run_sgd2_source_command", _record_command)
+
+    assert module._sgd2_multi_available() is False
+    assert calls == []
+    assert not missing_repo.exists()
+
+
+def test_clone_recovery_runs_only_with_env_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """With the env opt-in set, recovery may attempt a (stubbed) clone."""
+    from dagua.eval.competitors import sgd2_multi_competitor as module
+
+    missing_repo = tmp_path / "graph-drawing"
+    monkeypatch.setattr(module, "_SGD2_REPO", missing_repo)
+    monkeypatch.setenv(module._SGD2_CLONE_OPT_IN_ENV, "1")
+    monkeypatch.delitem(sys.modules, "gd2", raising=False)
+    monkeypatch.delitem(sys.modules, "criteria", raising=False)
+
+    calls: list[list[str]] = []
+
+    def _record_command(args, cwd):
+        calls.append(list(args))
+        return False, "network disabled in tests"
+
+    monkeypatch.setattr(module, "_run_sgd2_source_command", _record_command)
+
+    assert module._sgd2_multi_available() is False
+    assert len(calls) == 1
+    assert calls[0][:2] == ["git", "clone"]
