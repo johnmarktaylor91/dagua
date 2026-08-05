@@ -109,26 +109,30 @@ EOF
 }
 
 # Copy up to $3 files matching pattern $1 into $2, deterministically sorted,
-# ONE format per stem (prefer .graph over .gml -- WP10-F05/F18).
+# ONE format per stem (prefer .graph over .gml -- WP10-F05/F18). The pattern
+# is matched against paths RELATIVE to downloads/ (find -printf '%P'), never
+# the full path: an absolute OUT_DIR under .../projects/dagua/ used to make
+# 'dag' match EVERY file via the repo directory name and mis-corpus Rome
+# graphs into north/ (dry-well B4-F8, the WP10-F02 trap one layer earlier).
 select_text_corpus() {
   local pattern="$1"
   local dest="$2"
   local limit="$3"
   local count=0
-  local ext file stem
+  local ext rel stem
   declare -A seen_stems=()
   for ext in graph gml; do
-    while IFS= read -r file; do
+    while IFS= read -r rel; do
       if [ "${count}" -ge "${limit}" ]; then
         break
       fi
-      stem="$(basename "${file}" ".${ext}")"
+      stem="$(basename "${rel}" ".${ext}")"
       if [ -z "${seen_stems[${stem}]:-}" ]; then
         seen_stems[${stem}]=1
-        cp "${file}" "${dest}/"
+        cp "${OUT_DIR}/downloads/${rel}" "${dest}/"
         count=$((count + 1))
       fi
-    done < <(find "${OUT_DIR}/downloads" -type f -name "*.${ext}" | grep -Ei "${pattern}" | sort || true)
+    done < <(find "${OUT_DIR}/downloads" -type f -name "*.${ext}" -printf '%P\n' | grep -Ei "${pattern}" | sort || true)
   done
   echo "selected ${count} files for ${dest}" >&2
 }
@@ -189,19 +193,34 @@ fetch_suitesparse_curl() {
   [ "${fetched}" -gt 0 ]
 }
 
+# Selection freeze: once the blind subset exists, the candidate universe is
+# sealed (plan 7.2 merge-freeze anchor) -- a re-fetch would rewrite it.
+if [ -e "${OUT_DIR}/SUBSET.json" ]; then
+  echo "REFUSING to fetch: ${OUT_DIR}/SUBSET.json exists (blind selection is frozen)." >&2
+  exit 1
+fi
+
 check_space
 mkdir -p "${OUT_DIR}/downloads" "${OUT_DIR}/rome" "${OUT_DIR}/north" "${OUT_DIR}/suitesparse"
+
+# Single-generation guarantee (dry-well B4-F8): wipe prior corpus files so a
+# rerun cannot mix two fetch generations into one candidate universe;
+# FETCHED_FILES.txt below then reflects EXACTLY this run's selection.
+find "${OUT_DIR}/rome" "${OUT_DIR}/north" "${OUT_DIR}/suitesparse" -type f -delete
 
 ROME_URL="https://graphdrawing.org/data/rome/rome.tar.gz"
 NORTH_URL="https://graphdrawing.org/data/north/north.tar.gz"
 
+# A failed rome/north acquisition is a FAILED fetch: exit non-zero so an
+# orchestrator chaining `fetch && subset && run` self-arrests here
+# (dry-well B4-F8; the old `exit 0` lied to the chain).
 if ! fetch_twice "${ROME_URL}" "${OUT_DIR}/downloads/rome.tar.gz"; then
   write_readme
-  exit 0
+  exit 1
 fi
 if ! fetch_twice "${NORTH_URL}" "${OUT_DIR}/downloads/north.tar.gz"; then
   write_readme
-  exit 0
+  exit 1
 fi
 
 tar -xzf "${OUT_DIR}/downloads/rome.tar.gz" -C "${OUT_DIR}/downloads"
@@ -232,7 +251,9 @@ if [ "${suitesparse_ok}" -eq 0 ]; then
     suitesparse_ok=1
   fi
 fi
+DEGRADED=0
 if [ "${suitesparse_ok}" -eq 0 ]; then
+  DEGRADED=1
   echo "SuiteSparse acquisition failed on all fallbacks; degrading to 2 corpora (R-7)" >&2
   cat > "${OUT_DIR}/suitesparse/README.md" <<'EOF'
 # SuiteSparse sample
@@ -262,3 +283,9 @@ find "${OUT_DIR}/rome" "${OUT_DIR}/north" "${OUT_DIR}/suitesparse" -type f \
   | sort > "${OUT_DIR}/FETCHED_FILES.txt"
 echo "FETCHED_FILES.txt: $(wc -l < "${OUT_DIR}/FETCHED_FILES.txt") candidates" >&2
 check_space
+# Exit 3 = pre-registered SuiteSparse degradation (R-7): the 2-corpora
+# universe IS usable (FETCHED_FILES.txt written), but the orchestrator must
+# see a non-zero code rather than a silent success (dry-well B4-F8).
+if [ "${DEGRADED}" -eq 1 ]; then
+  exit 3
+fi
