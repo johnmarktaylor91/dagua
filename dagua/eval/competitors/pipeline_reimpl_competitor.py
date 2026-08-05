@@ -130,6 +130,11 @@ class PipelineReimplementationCompetitor(CompetitorBase):
             params.update(dict(variant_params))
 
         signature = inspect.signature(function)
+        # Guard node_sizes on the signature like every other optional kwarg:
+        # passing it unconditionally made every row of a pipeline without the
+        # parameter (sparse_stress) fail with an unexpected-keyword TypeError.
+        if "node_sizes" in signature.parameters:
+            params.setdefault("node_sizes", graph.node_sizes)
         if "edge_weights" in signature.parameters and graph.edge_weights is not None:
             params.setdefault("edge_weights", graph.edge_weights)
         if "seed" in signature.parameters:
@@ -146,7 +151,6 @@ class PipelineReimplementationCompetitor(CompetitorBase):
             result = function(
                 graph.edge_index,
                 graph.num_nodes,
-                node_sizes=graph.node_sizes,
                 **params,
             )
             positions = result[0] if isinstance(result, tuple) else result

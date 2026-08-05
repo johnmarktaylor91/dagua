@@ -116,3 +116,27 @@ def test_fa2_seed_none_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None
     explicit = competitor.layout(graph, seed=42)
     assert explicit.pos is not None
     assert torch.equal(first.pos, explicit.pos)
+
+
+def test_sparse_stress_reimpl_layout_succeeds_without_node_sizes_kwarg() -> None:
+    """The adapter must not pass node_sizes to pipelines that reject it.
+
+    layout_sparse_stress_pipeline() has no node_sizes parameter; the adapter
+    previously passed it unconditionally, so EVERY sparse_stress_reimpl row
+    failed with an unexpected-keyword TypeError (96/104 rows in the certified
+    pool carry exactly that error string).
+    """
+    competitor = get_competitor("sparse_stress_reimpl")
+    assert competitor is not None
+
+    edge_index = (
+        torch.tensor([(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], dtype=torch.long).t().contiguous()
+    )
+    graph = DaguaGraph.from_edge_index(edge_index, 4)
+
+    result = competitor.layout(graph, seed=7)
+
+    assert result.error is None
+    assert result.pos is not None
+    assert result.pos.shape == (4, 2)
+    assert torch.isfinite(result.pos).all()
