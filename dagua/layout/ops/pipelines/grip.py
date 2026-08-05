@@ -597,6 +597,13 @@ def _c_order_by_degree(adjacency: list[list[int]]) -> list[int]:
         return []
     degrees = [len(neighbors) for neighbors in adjacency]
     max_degree = max(degrees)
+    if max_degree == 0:
+        # Edgeless graph: every vertex ties in the degree-0 bucket, so the
+        # reference bucket layout degenerates to input order. The C offset
+        # arithmetic below (``offset[0] = offset[max_degree] + num_degree[
+        # max_degree]``) self-references when ``max_degree == 0`` and would
+        # index past the end of ``ordered``.
+        return list(range(num_nodes))
     num_degree = [0 for _ in range(max_degree + 1)]
     processed = [0 for _ in range(max_degree + 1)]
     for degree in degrees:

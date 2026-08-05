@@ -101,3 +101,11 @@ def test_balloon_pipeline_does_not_delegate_to_runner() -> None:
 
     assert "ogdf_runner" not in source
     assert "subprocess" not in source
+
+
+def test_layout_balloon_pipeline_empty_graph() -> None:
+    """An empty graph should produce an empty coordinate tensor, not crash."""
+    pos = layout_balloon_pipeline(_edge_index([]), 0)
+
+    assert pos.shape == (0, 2)
+    assert pos.dtype == torch.float64
