@@ -4730,8 +4730,6 @@ def _ordering_trial_estimate(rank_to_nodes: dict[int, list[int]], max_passes: in
         trials += max(0, int(max_passes)) * (
             non_adjacent_swaps + reinsertions + neighbor_orders + adjacent_swaps
         )
-    if trials > 0:
-        return trials
     return trials
 
 
@@ -5195,7 +5193,11 @@ def layout_native_directed_portfolio(
         getattr(incumbent_config, "_dagua_native_terminal_w5_seed_bank", [])
     ):
         _append_terminal_w5_seed(config, f"directed_incumbent_{seed_name}", seed_pos)
-    incumbent = _maybe_accept_fan_compaction_arm(problem, incumbent, config)
+    try:
+        incumbent = _maybe_accept_fan_compaction_arm(problem, incumbent, config)
+    except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+        _reraise_worker_timeout(exc)
+        _LOGGER.warning("directed fan-compaction challenger failed", exc_info=True)
     arm_timings["incumbent"] = (incumbent_started, time.perf_counter())
     if bool(getattr(config, "_dagua_native_fan_compaction_accepted", False)):
         _LOGGER.info(

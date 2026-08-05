@@ -853,6 +853,66 @@ def test_large_w4_seed_shortcut_uses_shortlist_holder(monkeypatch: object) -> No
     torch.testing.assert_close(result, shortcut_pos)
 
 
+def test_challenger_repair_failure_cannot_sink_the_solve(monkeypatch: object) -> None:
+    """WP02B-F02: a repair crash inside ``_add_challenger`` fails closed.
+
+    Six challenger families (cluster_sfdp, weighted_stress_majorization,
+    weighted_similarity, stress_points, small_world_reingold_tilford,
+    weighted_cluster_smacof_nonmetric) historically registered their
+    candidate AFTER their family try block closed, so an exception raised
+    inside ``_add_challenger`` -- e.g. ``_repair_flung_isolates`` raising on
+    a multi-component candidate -- escaped every handler and sank the whole
+    solve. This injects a repair failure for EVERY challenger family and
+    asserts the marketplace still completes on the incumbent.
+    """
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_undirected import layout_native_undirected_portfolio
+    from dagua.layout.ops.state import RuntimeContext, SolveState
+
+    # Small connected undirected graph: enters the marketplace and builds the
+    # point-unit stress challenger (one of the six historically unwrapped
+    # registration sites fires on any small in-budget row).
+    edges = [(i, i + 1) for i in range(11)] + [(0, 5), (3, 9)]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=12,
+        node_sizes=torch.ones((12, 2), dtype=torch.float32),
+        seed=42,
+    )
+    incumbent = torch.stack(
+        (torch.arange(12, dtype=torch.float32), torch.zeros(12, dtype=torch.float32)),
+        dim=1,
+    )
+
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+
+    def fake_incumbent(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic incumbent for the undirected portfolio."""
+        del args, kwargs
+        return incumbent
+
+    def exploding_repair(*args: object, **kwargs: object) -> torch.Tensor:
+        """Simulate the isolate-fling repair failing for every challenger."""
+        del args, kwargs
+        raise RuntimeError("isolate-fling repair did not produce positions.")
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_incumbent)
+    monkeypatch.setattr(native_undirected, "_repair_flung_isolates", exploding_repair)
+
+    result = layout_native_undirected_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(seed=42),
+    )
+
+    assert result.shape == (12, 2)
+    assert bool(torch.isfinite(result).all())
+
+
 def test_portfolio_layout_end_to_end_produces_finite_positions() -> None:
     """Full layout() on a declared-undirected graph goes through the route."""
     from dagua.layout import layout

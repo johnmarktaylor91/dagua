@@ -5728,11 +5728,7 @@ def _best_of_polish(
             continue
         if cand is None:
             continue
-        candidate_input = (
-            base_pos
-            if candidate_name.startswith("collinear_dodge") or candidate_name == "unshear"
-            else best_pos
-        )
+        candidate_input = base_pos if candidate_name.startswith("collinear_dodge") else best_pos
         eligible, _reason = _candidate_is_eligible(cand, candidate_input, node_sizes, edge_index)
         if not eligible:
             continue
@@ -6772,9 +6768,42 @@ def layout_dagua_native_pipeline(
     -------
     torch.Tensor
         Detached position tensor with shape ``[N, 2]``.
+
+    Notes
+    -----
+    **Fresh-config contract (WP02A-F02).** A ``LayoutConfig`` (plus its
+    installed budget ledger, see
+    :func:`dagua.layout.ops.pipelines.native_budget.install_budget_ledger`)
+    is single-solve state: construct a FRESH config and install a FRESH
+    ledger for every graph in a multi-graph sweep, exactly as the certified
+    benchmark seam does (``dagua/eval/competitors/dagua_competitor.py``).
+    Although this entry point shallow-copies ``config``, the copy SHARES the
+    caller's mutable ledger object (whose ``spent_dwu`` the solve charges)
+    and any telemetry lists, so reusing one config across graphs makes later
+    rows start with a depleted budget -- deterministically order-dependent,
+    progressively W5-starved output. Nothing resets this state at entry BY
+    DESIGN: the pipeline re-enters itself (multi-start candidates, the
+    legacy-monolith sub-arm) with configs that intentionally inherit solve
+    state such as ``_dagua_native_terminal_w5_owner``, so a reset here would
+    change certified behavior.
+
+    **Deterministic-measurement contract (WP13-F01).** Deterministic
+    (load-invariant) output is carried by two config facts: a DWU ledger is
+    installed AND the wall-deadline attribute ``_dagua_native_deadline_s``
+    is absent. ``_dagua_native_deterministic_measurement`` is the seam's
+    explicit declaration of that intent; this entry point refuses configs
+    that declare it while also carrying a wall deadline.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
+    if bool(getattr(config, "_dagua_native_deterministic_measurement", False)) and (
+        getattr(config, "_dagua_native_deadline_s", None) is not None
+    ):
+        raise ValueError(
+            "_dagua_native_deterministic_measurement=True requires the wall-clock "
+            "deadline attribute _dagua_native_deadline_s to be absent: deterministic "
+            "native output is budgeted by the DWU ledger only (install_budget_ledger)."
+        )
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
     public_direction = str(getattr(effective_config, "direction", "TB"))
