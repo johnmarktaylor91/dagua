@@ -167,7 +167,13 @@ def _test_graph() -> DaguaGraph:
 
 def test_all_variants_have_valid_base_engine() -> None:
     """Every registry entry should point at a usable or planned base engine."""
-    assert len(VARIANT_REGISTRY) == 159
+    # Registration guard: bump this pin when variants are deliberately added.
+    # 166 = the 159 pinned at 2c0fe2a7 plus the 7 reference-pairing defaults
+    # added by the mulment/nnpnet (89e8085b), smartgd/deepgd (1486e688), and
+    # grip/omega/tidy (2ee2c10c) waves: deepgd/grip/mulment/nnpnet/omega/
+    # smartgd/tidy _reimpl_default -- each verified below to have a valid
+    # base engine, which is the point of this test.
+    assert len(VARIANT_REGISTRY) == 166
     for variant in VARIANT_REGISTRY:
         assert (
             variant.base_engine in _CLASSIC_LAYOUT_SPECS
