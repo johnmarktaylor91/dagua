@@ -283,6 +283,11 @@ def _compute_angle_extents(tree: _BalloonTree, radii: _BalloonRadii, num_nodes: 
         Angular values that are later converted to absolute directions.
     """
     angles = [0.0] * num_nodes
+    if num_nodes == 0:
+        # Empty graphs have no BFS tree; ``tree.root`` would index into an
+        # empty children list. Mirrors the ``num_nodes == 0`` guard in
+        # ``_compute_positions``.
+        return angles
     queue: deque[int] = deque([tree.root])
     while queue:
         parent = queue.popleft()

@@ -296,6 +296,12 @@ def layout_smacof_nonmetric_pipeline(
     if num_nodes == 0:
         dtype = torch.float64 if fidelity_dtype is None else fidelity_dtype
         return torch.empty((0, 2), dtype=dtype, device=edge_index.device)
+    if num_nodes == 1:
+        # A single node has no dissimilarity pairs: the SMACOF update pins the
+        # point at the origin and the relative-stress convergence check would
+        # divide by a zero squared-distance sum.
+        dtype = torch.float64 if fidelity_dtype is None else fidelity_dtype
+        return torch.zeros((1, 2), dtype=dtype, device=edge_index.device)
 
     distances = shortest_path_distances(
         edge_index=edge_index,
