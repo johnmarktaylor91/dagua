@@ -56,7 +56,7 @@ import torch
 
 from dagua.edges import place_edge_labels, route_edges
 from dagua.eval.competitors import get_competitors
-from dagua.eval.competitors.base import CompetitorBase
+from dagua.eval.competitors.base import CompetitorBase, get_competitor
 from dagua.eval.graphs import (
     TestGraph,
     get_test_graphs,
@@ -692,8 +692,56 @@ def _graph_weight_signature_map(graphs: Sequence[BenchmarkGraph]) -> Dict[str, s
     return result
 
 
+def _adapter_source_signature(name: str) -> str:
+    """Hash the adapter's own implementing source file(s) for cache keying.
+
+    Dry-well R1-B3 finding 1: reference adapters used to be keyed solely by an
+    external dependency version (many as ``<name>:None``), so a fix to the
+    ADAPTER SOURCE (e.g. an output-parser or device-pinning fix) did not
+    invalidate previously cached rows -- a benchmark could silently reuse
+    pre-fix mis-parsed positions. This component hashes the module file that
+    defines the adapter class plus the shared ``competitors/base.py``
+    execution scaffolding (sorted file list, sha256 of bytes), so an adapter
+    edit invalidates its rows exactly like ``classic_*`` engines already do
+    via ``_dagua_source_signature``.
+
+    Parameters
+    ----------
+    name : str
+        Registered competitor name.
+
+    Returns
+    -------
+    str
+        16-hex-char digest over the adapter's implementing source. Names not
+        present in the registry fall back to the shared base module alone, so
+        the component is always real and deterministic (never ``None``).
+    """
+    import inspect
+
+    from dagua.eval.competitors import base as competitors_base
+
+    files = {Path(competitors_base.__file__)}
+    competitor = get_competitor(name)
+    if competitor is not None:
+        try:
+            files.add(Path(inspect.getfile(type(competitor))))
+        except (TypeError, OSError):
+            pass
+    hasher = hashlib.sha256()
+    for path in sorted(files):
+        hasher.update(path.read_bytes())
+    return hasher.hexdigest()[:16]
+
+
 def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
     """Build a cache signature for a competitor implementation.
+
+    Dagua-owned engines (``dagua``, ``classic_*``, ``dot``, ``fdp``) key on
+    ``_dagua_source_signature`` (unchanged). Every OTHER engine keys on its
+    external dependency version AND its own adapter source via
+    ``_adapter_source_signature`` (``:src=<hash>`` suffix), so adapter fixes
+    invalidate cached rows for all engines alike.
 
     Parameters
     ----------
@@ -748,17 +796,22 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         # Classic adapters are Dagua-owned implementations, so their cache key
         # should track our source changes instead of an external package.
         return f"{name}:{_dagua_source_signature()}"
+    # Every non-Dagua-owned engine also keys on its OWN adapter source, so an
+    # adapter implementation fix invalidates its cached rows (dry-well R1-B3
+    # finding 1); the external dependency-version component stays alongside.
+    adapter_src = _adapter_source_signature(name)
     if name.startswith("ogdf_"):
         from dagua.eval.competitors.ogdf_competitor import _ogdf_available
 
-        return f"{name}:{'ogdf_available' if _ogdf_available() else 'ogdf_unavailable'}"
+        availability = "ogdf_available" if _ogdf_available() else "ogdf_unavailable"
+        return f"{name}:{availability}:src={adapter_src}"
     if name == "tsne_graph":
-        return f"{name}:{system.get('sklearn')}:{system.get('scipy')}"
+        return f"{name}:{system.get('sklearn')}:{system.get('scipy')}:src={adapter_src}"
     if name == "umap_graph":
-        return f"{name}:{system.get('umap')}:{system.get('scipy')}"
+        return f"{name}:{system.get('umap')}:{system.get('scipy')}:src={adapter_src}"
     key = version_keys.get(name)
     value = system.get(key) if key is not None else None
-    return f"{name}:{value}"
+    return f"{name}:{value}:src={adapter_src}"
 
 
 def _competitor_signature_map(
