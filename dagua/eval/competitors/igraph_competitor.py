@@ -115,6 +115,14 @@ class _IgraphBase(CompetitorBase):
     accepts_seed_matrix: bool = False
     uses_igraph_rng: bool = False
     horizontal_output: bool = False
+    # Fallback seed applied when the harness passes ``seed=None``. Set ONLY on
+    # the harness-stochastic engines (graphopt/drl/lgl/davidson_harel), whose
+    # certified-pool rows all carry explicit seeds: pinning their seed=None
+    # path cannot alter any regenerated pool row, it only removes unseeded
+    # (irreproducible) direct calls. Engines the harness classifies as
+    # deterministic (fr/kamada_kawai/mds/rt*/sugiyama) have seed=None pool
+    # rows, so their seed=None behavior must stay byte-identical.
+    default_seed: Optional[int] = None
 
     def layout(
         self,
@@ -170,6 +178,9 @@ class _IgraphBase(CompetitorBase):
         del timeout
 
         import igraph  # noqa: F401
+
+        if seed is None:
+            seed = self.default_seed
 
         ig = _graph_to_igraph(graph)
 
@@ -269,6 +280,7 @@ class IgraphDavidsonHarel(_IgraphBase):
     layout_kwargs = {}
     accepts_seed_matrix = True
     uses_igraph_rng = True
+    default_seed = 42
     variant_param_names = frozenset({"cool_fact", "fineiter", "maxiter"})
 
 
@@ -300,6 +312,7 @@ class IgraphGraphOpt(_IgraphBase):
     layout_algo = "graphopt"
     layout_kwargs = {"niter": 500}
     accepts_seed_matrix = True
+    default_seed = 42
     variant_param_names = frozenset(
         {"niter", "node_charge", "node_mass", "spring_constant", "spring_length"}
     )
@@ -315,6 +328,7 @@ class IgraphDRL(_IgraphBase):
     layout_kwargs = {}
     accepts_seed_matrix = True
     uses_igraph_rng = True
+    default_seed = 42
     variant_param_names = frozenset({"options", "seed", "weights"})
 
 
@@ -327,6 +341,7 @@ class IgraphLGL(_IgraphBase):
     layout_algo = "lgl"
     layout_kwargs = {}
     uses_igraph_rng = True
+    default_seed = 42
     variant_param_names = frozenset(
         {"area", "cellsize", "coolexp", "maxdelta", "maxiter", "repulserad", "root"}
     )
