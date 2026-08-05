@@ -192,6 +192,57 @@ def test_deterministic_measurement_flag_contract() -> None:
         )
 
 
+def test_scale_anytime_wrapper_stale_flag_does_not_disarm_native() -> None:
+    """Drywell R1 F-1 regression: a stale seam flag must not disarm the scale arm.
+
+    The FROZEN scale anytime-native wrapper (``_run_budgeted_native`` in
+    ``dagua/layout/scale/coarsest.py``) shallow-copies the user config --
+    which on the deterministic seam carries
+    ``_dagua_native_deterministic_measurement=True`` inherited through the
+    engine's shallow copies -- then installs a wall deadline plus an anytime
+    ledger. The original WP-21 guard raised on that shape and the wrapper's
+    blanket ``except Exception`` swallowed the error, silently disarming the
+    anytime-native coarsest arm above the scale gate (stress fallback always
+    used). The narrowed guard must let this exact end-to-end shape through:
+    the wrapper call WITH the flag returns positions, and the caller's
+    config keeps its flag untouched.
+    """
+    from dagua.layout.graph_classify import classify_graph
+    from dagua.layout.ops.state import LayoutProblem
+    from dagua.layout.scale.coarsest import _run_budgeted_native, _score_v3_position
+
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+    n = 5
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=n,
+        node_sizes=torch.full((n, 2), 20.0),
+        seed=42,
+        structure=classify_graph(edge_index, n),
+    )
+    fallback_pos = torch.stack(
+        (torch.arange(n, dtype=torch.float32) * 40.0, torch.zeros(n, dtype=torch.float32)),
+        dim=1,
+    )
+    fallback_score = _score_v3_position(problem, fallback_pos)
+
+    flagged = LayoutConfig(device="cpu", verbose=False, seed=42)
+    setattr(flagged, "_dagua_native_deterministic_measurement", True)
+    pos = _run_budgeted_native(
+        problem,
+        flagged,
+        deadline_s=time.perf_counter() + 30.0,
+        seed=42,
+        fallback_pos=fallback_pos,
+        fallback_score=fallback_score,
+    )
+
+    assert pos is not None, "anytime-native coarsest arm was disarmed by the stale flag"
+    assert pos.shape == (n, 2)
+    assert bool(torch.isfinite(pos).all())
+    assert getattr(flagged, "_dagua_native_deterministic_measurement") is True
+
+
 def test_ordering_budget_is_clock_free(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ordering-arm budget ignores elapsed time entirely."""
     monkeypatch.setattr(time, "perf_counter", _starved_clock(time.perf_counter()))

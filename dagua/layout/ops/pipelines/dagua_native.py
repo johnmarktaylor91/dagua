@@ -6787,25 +6787,48 @@ def layout_dagua_native_pipeline(
     state such as ``_dagua_native_terminal_w5_owner``, so a reset here would
     change certified behavior.
 
-    **Deterministic-measurement contract (WP13-F01).** Deterministic
-    (load-invariant) output is carried by two config facts: a DWU ledger is
-    installed AND the wall-deadline attribute ``_dagua_native_deadline_s``
-    is absent. ``_dagua_native_deterministic_measurement`` is the seam's
-    explicit declaration of that intent; this entry point refuses configs
-    that declare it while also carrying a wall deadline.
+    **Deterministic-measurement contract (WP13-F01, narrowed for drywell R1
+    F-1).** Deterministic (load-invariant) output is carried by two config
+    facts: a DWU ledger is installed AND the wall-deadline attribute
+    ``_dagua_native_deadline_s`` is absent.
+    ``_dagua_native_deterministic_measurement`` is the seam's explicit
+    declaration of that intent; this entry point refuses configs that
+    declare it while simultaneously carrying BOTH a wall deadline and a
+    deterministic ledger outside the scale anytime wrapper (the runner-seam
+    contradiction). The FROZEN scale anytime-native wrapper
+    (``dagua/layout/scale/coarsest.py``) legitimately shallow-copies a
+    seam config -- inheriting a then-stale flag -- and installs a wall
+    deadline plus an anytime ledger for its above-gate anytime mode; that
+    shape (marked ``_dagua_scale_anytime_native``), and any flag+deadline
+    shape without a deterministic ledger, is NOT a contract violation: the
+    stale flag is ignored and the solve proceeds exactly as pre-guard code
+    did.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
-    if bool(getattr(config, "_dagua_native_deterministic_measurement", False)) and (
-        getattr(config, "_dagua_native_deadline_s", None) is not None
-    ):
-        raise ValueError(
-            "_dagua_native_deterministic_measurement=True requires the wall-clock "
-            "deadline attribute _dagua_native_deadline_s to be absent: deterministic "
-            "native output is budgeted by the DWU ledger only (install_budget_ledger)."
-        )
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    if bool(getattr(effective_config, "_dagua_native_deterministic_measurement", False)) and (
+        getattr(effective_config, "_dagua_native_deadline_s", None) is not None
+    ):
+        from dagua.layout.ops.pipelines.native_budget import LEDGER_ATTR
+
+        if not bool(getattr(effective_config, "_dagua_scale_anytime_native", False)) and (
+            getattr(effective_config, LEDGER_ATTR, None) is not None
+        ):
+            raise ValueError(
+                "_dagua_native_deterministic_measurement=True requires the wall-clock "
+                "deadline attribute _dagua_native_deadline_s to be absent: deterministic "
+                "native output is budgeted by the DWU ledger only (install_budget_ledger)."
+            )
+        # Drywell R1 F-1: the frozen scale anytime-native wrapper copy.copies
+        # the user config (which on the deterministic seam carries this flag
+        # through shallow copies) and installs a wall deadline + anytime
+        # ledger -- a legitimate anytime shape where the inherited flag is
+        # stale, not a contradiction. The flag is consulted only by this
+        # guard, so clearing it on OUR copy restores the pre-guard behavior
+        # above the scale gate without touching the caller's config.
+        setattr(effective_config, "_dagua_native_deterministic_measurement", False)
     public_direction = str(getattr(effective_config, "direction", "TB"))
     if public_direction in {"BT", "LR", "RL"}:
         effective_config.direction = "TB"
