@@ -515,12 +515,31 @@ _WP06_UNIT_CLOUD_DELTA_ENGINES = (
     "word2vecgd_reimpl",
 )
 
+# Drywell R1-B3-F1 (GLaDOS-prep) audited unit-cloud delta: the WP-24b/WP-25
+# adapter fixes revived the engines WP-06 had deferred as NO-EVIDENCE; live
+# span re-measurement (3 corpus graphs each, seed 42) classified these as
+# unit-cloud emitters, added to the x72 allow-list on 2026-08-06.
+# largevis_reference is x72 by twin inference (binary absent locally; its
+# reimpl twin is x72-audited and shares the parser/output convention).
+_DRYWELL_R1_UNIT_CLOUD_DELTA_ENGINES = (
+    "classic_neulay",
+    "classic_stress_maj",
+    "classic_stress_sgd",
+    "classic_umap",
+    "largevis_reference",
+    "sklearn_smacof_nonmetric",
+    "sparse_stress_reimpl",
+)
+
 # WP06-F03 escalation set (CB-6): outputs so collapsed that x72 still leaves
 # rows degenerate; deliberately NOT in the allow-list until escalation decides
 # a treatment (per-engine multiplier / adapter normalization / accept).
+# drgraph_reference joins by twin class (drywell R1-B3-F1): its reimpl twin is
+# CB-6 x72-insufficient, so the reference is not a mechanical allow-list add.
 _X72_INSUFFICIENT_ESCALATION_ENGINES = (
     "coregd_reference",
     "coregd_reimpl",
+    "drgraph_reference",
     "drgraph_reimpl",
     "nnpnet_reference",
     "omega_reimpl",
@@ -607,11 +626,12 @@ def _nearest_neighbor_fraction_below(positions: torch.Tensor, threshold: float) 
 def test_native_unit_allowlist_membership_is_pinned() -> None:
     """Pin the exact x72 allow-list so accidental edits fail a named test.
 
-    The allow-list is a static store-unit convention (WP-06 span audit); any
-    membership change flips ``scoring_signature`` and must be deliberate.
-    ``sparse_stress`` is a member while ``sparse_stress_reimpl`` is not: the
-    reimpl has never produced an ok row locally, so its unit convention is
-    unaudited (WP06-F09) -- audit spans before ever adding it.
+    The allow-list is a static store-unit convention (WP-06 span audit +
+    drywell R1-B3-F1 revived-engine audit); any membership change flips
+    ``scoring_signature`` and must be deliberate. The deferred-audit gap is
+    closed: every field engine is either span-audited into a class here, in
+    the CB-6 escalation set, or environment-unavailable (openord, which
+    records clean skips and must be span-audited if it ever produces rows).
     """
     expected = frozenset(
         {
@@ -620,9 +640,13 @@ def test_native_unit_allowlist_membership_is_pinned() -> None:
             "classic_fr_kk",
             "classic_kk",
             "classic_linlog",
+            "classic_neulay",
             "classic_sgd2_multi",
             "classic_spectral",
+            "classic_stress_maj",
+            "classic_stress_sgd",
             "classic_sugiyama",
+            "classic_umap",
             "d3_cluster_radial_reimpl",
             "d3_cluster_reimpl",
             "d3_tree_radial_reimpl",
@@ -631,6 +655,7 @@ def test_native_unit_allowlist_membership_is_pinned() -> None:
             "deepgd_reference",
             "deepgd_reimpl",
             "dot",
+            "largevis_reference",
             "largevis_reimpl",
             "linlog",
             "mulment_reference",
@@ -659,10 +684,12 @@ def test_native_unit_allowlist_membership_is_pinned() -> None:
             "pacmap",
             "pacmap_reimpl",
             "sgd2_multi_ref",
+            "sklearn_smacof_nonmetric",
             "smacof_nonmetric_reimpl",
             "smartgd_reference",
             "smartgd_reimpl",
             "sparse_stress",
+            "sparse_stress_reimpl",
             "tfdp",
             "tfdp_reimpl",
             "umap_graph",
@@ -671,7 +698,6 @@ def test_native_unit_allowlist_membership_is_pinned() -> None:
         }
     )
     assert scorer._NATIVE_UNIT_ENGINES == expected
-    assert "sparse_stress_reimpl" not in scorer._NATIVE_UNIT_ENGINES
 
 
 def test_wp06_unit_cloud_delta_engines_scale_x72() -> None:
@@ -680,15 +706,41 @@ def test_wp06_unit_cloud_delta_engines_scale_x72() -> None:
         assert scorer._engine_position_scale(engine) == 72.0, engine
 
 
+def test_drywell_r1_unit_cloud_delta_engines_scale_x72() -> None:
+    """Every drywell-R1 audited revived unit-cloud engine converts at 72.0.
+
+    Twin anchors: sklearn_smacof_nonmetric emits coordinates identical to
+    x72-listed smacof_nonmetric_reimpl; sparse_stress_reimpl matches its
+    x72-listed reference twin's spans; largevis_reference shares its
+    x72-audited reimpl twin's output convention.
+    """
+    for engine in _DRYWELL_R1_UNIT_CLOUD_DELTA_ENGINES:
+        assert scorer._engine_position_scale(engine) == 72.0, engine
+
+
 def test_points_scale_and_escalation_engines_stay_x1() -> None:
     """Verified points-scale engines and the CB-6 escalation set stay at x1.
 
     classic_tsnet / tsne_graph / tidy_reference emit point-scale layouts whose
-    small rows are genuine per-graph collapses, not a unit convention (WP-06).
-    The escalation engines are NOT silently 'fixed' at x72 because x72 leaves
-    their rows degenerate (WP06-F03); their treatment is an escalation decision.
+    small rows are genuine per-graph collapses, not a unit convention (WP-06);
+    webcola / d3dag / classic_classical_mds / classic_fcose / classic_neato
+    were span-verified points-scale by the drywell R1-B3 audit. The escalation
+    engines are NOT silently 'fixed' at x72 because x72 leaves their rows
+    degenerate (WP06-F03; drgraph_reference by twin class); their treatment is
+    an escalation decision. openord stays x1-unaudited: no binary in this env,
+    so it records clean skips; span-audit it if it ever produces rows.
     """
-    for engine in ("classic_tsnet", "tsne_graph", "tidy_reference"):
+    for engine in (
+        "classic_tsnet",
+        "tsne_graph",
+        "tidy_reference",
+        "webcola",
+        "d3dag",
+        "classic_classical_mds",
+        "classic_fcose",
+        "classic_neato",
+        "openord",
+    ):
         assert scorer._engine_position_scale(engine) == 1.0, engine
     for engine in _X72_INSUFFICIENT_ESCALATION_ENGINES:
         assert scorer._engine_position_scale(engine) == 1.0, engine
