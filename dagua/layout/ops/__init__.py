@@ -39,7 +39,6 @@ from dagua.layout.ops.edge_route import (
 from dagua.layout.ops.gem import (
     GEMApplyDisplacement,
     GEMComputeImpulse,
-    GEMConvergenceCheck,
     GEMSequentialStep,
     GEMUpdateTemperatures,
 )
@@ -188,7 +187,6 @@ __all__ = [
     "EarlyBreak",
     "LossGroup",
     "GEMApplyDisplacement",
-    "GEMConvergenceCheck",
     "GEMComputeImpulse",
     "GEMSequentialStep",
     "GEMUpdateTemperatures",
@@ -247,7 +245,6 @@ _EXPECTED_OP_MODULES = (
     "converge",
     "cose_base_compound",
     "coordinate",
-    "crossing_swap",
     "cytoscape",
     "d3dag",
     "d3force",

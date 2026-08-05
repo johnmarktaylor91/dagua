@@ -153,6 +153,10 @@ class LayoutProblem:
         Topology classification, usually computed lazily.
     flex : FlexConstraints | None
         User constraints such as pins and alignments.
+    edge_weights : torch.Tensor | None
+        Optional per-edge weights with shape ``[E]`` aligned to
+        ``edge_index``. Lives here (not in config) because most classic
+        algorithms consume it; see the class NOTE below.
     seed : int
         Base random seed for reproducible planning.
     """
@@ -238,6 +242,9 @@ class HierarchyLevel:
         Layer assignments at the finer level.
     coarse_layer_assignments : torch.Tensor | None
         Layer assignments at this level.
+    cluster_ids : torch.Tensor | None
+        Cluster membership labels for coarse nodes with shape
+        ``[num_nodes]``, when cluster-aware coarsening produced them.
     offload_path : Path | None
         Disk path for the serialized payload.
     offload_dir : Path | None
@@ -327,7 +334,11 @@ class SolveState:
     local_temperatures : torch.Tensor | None
         Per-node temperatures used by GEM and other adaptive methods.
     quadtree : Any | None
-        Barnes-Hut quadtree object reused by FA2 and SFDP.
+        Reserved Barnes-Hut quadtree slot. NOTE: no registered op writes
+        this field today -- ``BuildQuadTree`` publishes to
+        ``extras["quadtree"]``, and ``BarnesHutForce`` checks this typed
+        field first before falling back to that extras key. Retained for
+        custom ops that prefer the typed channel.
     pivot_indices : torch.Tensor | None
         Pivot node IDs with shape ``[P]``.
     pivot_distances : torch.Tensor | None
@@ -339,7 +350,11 @@ class SolveState:
     laplacian : Any | None
         Cached graph Laplacian object.
     affinity_matrix : torch.Tensor | None
-        Affinity matrix used by embedding-style initializers.
+        Reserved affinity-matrix slot. NOTE: no registered op writes this
+        field today -- ``PerplexityMatch`` publishes to
+        ``extras["tsne_probabilities"]``, and ``KLDivergenceLoss`` checks
+        this typed field first before falling back to that extras key.
+        Retained for custom ops that prefer the typed channel.
     spring_lengths : torch.Tensor | None
         Target edge lengths for spring layouts.
     spring_strengths : torch.Tensor | None
@@ -377,6 +392,9 @@ class SolveState:
     temperature : float | None
         Global temperature scalar for simulated-annealing-style layouts
         (FR, SFDP, GEM, Davidson-Harel, DRL, FMMM, native engine).
+    force_area : float | None
+        Layout area used to derive force constants (FR-style ``k``)
+        by force ops and cooling schedules.
     ordering : torch.Tensor | None
         Within-layer node ordering indices with shape ``[N]``. Used by
         Sugiyama crossing minimization and init_placement barycenter.
