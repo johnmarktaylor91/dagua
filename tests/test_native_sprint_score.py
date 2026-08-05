@@ -493,6 +493,305 @@ def test_score_position_v2_keeps_point_scale_engines(
     assert row["scoring_units"]["position_scale"] == pytest.approx(1.0)
 
 
+# WP-06 (GLaDOS-prep) audited unit-cloud delta: engines added to the x72
+# allow-list on 2026-08-05 with saved-tensor span evidence (WP06-F01/F02).
+_WP06_UNIT_CLOUD_DELTA_ENGINES = (
+    "deepgd_reference",
+    "deepgd_reimpl",
+    "largevis_reimpl",
+    "mulment_reference",
+    "mulment_reimpl",
+    "neulay",
+    "omega_reference",
+    "pacmap",
+    "pacmap_reimpl",
+    "smacof_nonmetric_reimpl",
+    "smartgd_reference",
+    "smartgd_reimpl",
+    "tfdp",
+    "tfdp_reimpl",
+    "umap_graph",
+    "word2vecgd",
+    "word2vecgd_reimpl",
+)
+
+# WP06-F03 escalation set (CB-6): outputs so collapsed that x72 still leaves
+# rows degenerate; deliberately NOT in the allow-list until escalation decides
+# a treatment (per-engine multiplier / adapter normalization / accept).
+_X72_INSUFFICIENT_ESCALATION_ENGINES = (
+    "coregd_reference",
+    "coregd_reimpl",
+    "drgraph_reimpl",
+    "nnpnet_reference",
+    "omega_reimpl",
+)
+
+
+def _unit_scale_graph(num_nodes: int) -> DaguaGraph:
+    """Build a short-label path graph with measured node boxes.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of path nodes.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph with corpus-default short-label node sizes computed.
+    """
+    graph = DaguaGraph()
+    names = [f"n{index}" for index in range(num_nodes)]
+    for name in names:
+        graph.add_node(name)
+    for left, right in zip(names, names[1:]):
+        graph.add_edge(left, right)
+    graph.compute_node_sizes()
+    return graph
+
+
+def _node_diag_mean(graph: DaguaGraph) -> float:
+    """Return the mean node-box diagonal in points.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph with computed node sizes.
+
+    Returns
+    -------
+    float
+        Mean node-box diagonal.
+    """
+    assert graph.node_sizes is not None
+    return float(torch.linalg.vector_norm(graph.node_sizes, dim=1).mean().item())
+
+
+def _mean_edge_length(positions: torch.Tensor) -> float:
+    """Return the mean adjacent-pair edge length of a path layout.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Path-node positions ordered by path index, shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Mean Euclidean edge length.
+    """
+    return float(torch.linalg.vector_norm(positions[1:] - positions[:-1], dim=1).mean().item())
+
+
+def _nearest_neighbor_fraction_below(positions: torch.Tensor, threshold: float) -> float:
+    """Return the node fraction whose nearest-neighbor distance is below a threshold.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions, shape ``[N, 2]``.
+    threshold : float
+        Distance threshold in the positions' units.
+
+    Returns
+    -------
+    float
+        Fraction of nodes with nearest-neighbor center distance below threshold.
+    """
+    distances = torch.cdist(positions, positions)
+    distances.fill_diagonal_(float("inf"))
+    nearest = distances.min(dim=1).values
+    return float((nearest < threshold).float().mean().item())
+
+
+def test_native_unit_allowlist_membership_is_pinned() -> None:
+    """Pin the exact x72 allow-list so accidental edits fail a named test.
+
+    The allow-list is a static store-unit convention (WP-06 span audit); any
+    membership change flips ``scoring_signature`` and must be deliberate.
+    ``sparse_stress`` is a member while ``sparse_stress_reimpl`` is not: the
+    reimpl has never produced an ok row locally, so its unit convention is
+    unaudited (WP06-F09) -- audit spans before ever adding it.
+    """
+    expected = frozenset(
+        {
+            "backbone",
+            "backbone_reimpl",
+            "classic_fr_kk",
+            "classic_kk",
+            "classic_linlog",
+            "classic_sgd2_multi",
+            "classic_spectral",
+            "classic_sugiyama",
+            "d3_cluster_radial_reimpl",
+            "d3_cluster_reimpl",
+            "d3_tree_radial_reimpl",
+            "d3_tree_reimpl",
+            "d3hierarchy",
+            "deepgd_reference",
+            "deepgd_reimpl",
+            "dot",
+            "largevis_reimpl",
+            "linlog",
+            "mulment_reference",
+            "mulment_reimpl",
+            "neulay",
+            "nx_arf",
+            "nx_arf_reimpl",
+            "nx_bfs",
+            "nx_bfs_reimpl",
+            "nx_bipartite",
+            "nx_bipartite_reimpl",
+            "nx_circular",
+            "nx_circular_reimpl",
+            "nx_kamada_kawai",
+            "nx_multipartite",
+            "nx_multipartite_reimpl",
+            "nx_planar",
+            "nx_planar_reimpl",
+            "nx_shell",
+            "nx_shell_reimpl",
+            "nx_spectral",
+            "nx_spectral_random_walk",
+            "nx_spiral",
+            "nx_spiral_reimpl",
+            "omega_reference",
+            "pacmap",
+            "pacmap_reimpl",
+            "sgd2_multi_ref",
+            "smacof_nonmetric_reimpl",
+            "smartgd_reference",
+            "smartgd_reimpl",
+            "sparse_stress",
+            "tfdp",
+            "tfdp_reimpl",
+            "umap_graph",
+            "word2vecgd",
+            "word2vecgd_reimpl",
+        }
+    )
+    assert scorer._NATIVE_UNIT_ENGINES == expected
+    assert "sparse_stress_reimpl" not in scorer._NATIVE_UNIT_ENGINES
+
+
+def test_wp06_unit_cloud_delta_engines_scale_x72() -> None:
+    """Every WP-06 audited unit-cloud engine converts at exactly 72.0."""
+    for engine in _WP06_UNIT_CLOUD_DELTA_ENGINES:
+        assert scorer._engine_position_scale(engine) == 72.0, engine
+
+
+def test_points_scale_and_escalation_engines_stay_x1() -> None:
+    """Verified points-scale engines and the CB-6 escalation set stay at x1.
+
+    classic_tsnet / tsne_graph / tidy_reference emit point-scale layouts whose
+    small rows are genuine per-graph collapses, not a unit convention (WP-06).
+    The escalation engines are NOT silently 'fixed' at x72 because x72 leaves
+    their rows degenerate (WP06-F03); their treatment is an escalation decision.
+    """
+    for engine in ("classic_tsnet", "tsne_graph", "tidy_reference"):
+        assert scorer._engine_position_scale(engine) == 1.0, engine
+    for engine in _X72_INSUFFICIENT_ESCALATION_ENGINES:
+        assert scorer._engine_position_scale(engine) == 1.0, engine
+
+
+def test_native_unit_allowlist_names_are_registered_engines() -> None:
+    """Every allow-list member must be a registered competitor name.
+
+    A typo in the allow-list silently reverts an engine to x1 while still
+    flipping the scoring signature; membership must track the registry.
+    """
+    from dagua.eval.competitors.base import get_competitors
+
+    registered = {competitor.name for competitor in get_competitors()}
+    unknown = sorted(scorer._NATIVE_UNIT_ENGINES - registered)
+    assert unknown == []
+
+
+def test_unit_cloud_layout_is_legible_at_x72_by_edge_and_nn_ratios() -> None:
+    """x72 restores frozen-ruler legibility ratios for a typical unit cloud.
+
+    The frozen ruler's degeneracy machinery is driven by mean-edge-length/diag
+    and nearest-neighbor/diag ratios, not by span (RULER_BUG_LEDGER section F):
+    the DEGENERATE_SCALE edge rule fires below ``DEGENERATE_SCALE_RATIO``,
+    the smooth elr fold leg saturates at 1.0 only when mean edge length
+    reaches ``0.5 * node_diag_mean``, and COINCIDENT_COLLAPSE needs >= 30% of
+    nodes within ``DEGENERATE_SCALE_RATIO * node_diag_mean``. This pins those
+    post-scale ratios for a unit-spacing cloud, not just span clearance.
+    """
+    graph = _unit_scale_graph(3)
+    diag = _node_diag_mean(graph)
+    assert 30.0 <= diag <= 110.0
+    positions = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
+
+    source_edge = _mean_edge_length(positions)
+    assert source_edge / diag < scorer.DEGENERATE_SCALE_RATIO
+    assert _nearest_neighbor_fraction_below(
+        positions, scorer.DEGENERATE_SCALE_RATIO * diag
+    ) == pytest.approx(1.0)
+
+    norm = scorer.normalize_position_units_for_scoring(graph, positions, "deepgd_reference")
+
+    assert norm.position_scale == 72.0
+    assert norm.flags == tuple()
+    rendered_edge = _mean_edge_length(norm.positions)
+    assert rendered_edge / norm.node_diag_mean >= scorer.DEGENERATE_SCALE_RATIO
+    assert rendered_edge / norm.node_diag_mean >= 0.5
+    assert (
+        _nearest_neighbor_fraction_below(
+            norm.positions, scorer.DEGENERATE_SCALE_RATIO * norm.node_diag_mean
+        )
+        < 0.3
+    )
+
+
+def test_dense_unit_cloud_edge_ratio_can_stay_degenerate_after_x72() -> None:
+    """x72 is not a universal cure: short-edge unit clouds stay edge-degenerate.
+
+    Per RULER_BUG_LEDGER section F, the frozen ruler's edge-length rule fires
+    on mean edge length below ``DEGENERATE_SCALE_RATIO * node_diag_mean`` even
+    after a correct x72 when normalized edges are short, while the harness
+    span rule clears. Span clearance therefore must never be read as full
+    legibility for these rows.
+    """
+    graph = _unit_scale_graph(12)
+    diag = _node_diag_mean(graph)
+    spacing = 0.15 * diag / 72.0
+    positions = torch.tensor([[spacing * index, 0.0] for index in range(12)], dtype=torch.float32)
+
+    norm = scorer.normalize_position_units_for_scoring(graph, positions, "deepgd_reference")
+
+    assert norm.position_scale == 72.0
+    assert norm.flags == tuple()
+    rendered_edge = _mean_edge_length(norm.positions)
+    assert rendered_edge / norm.node_diag_mean == pytest.approx(0.15, rel=1e-4)
+    assert rendered_edge / norm.node_diag_mean < scorer.DEGENERATE_SCALE_RATIO
+    assert (
+        _nearest_neighbor_fraction_below(
+            norm.positions, scorer.DEGENERATE_SCALE_RATIO * norm.node_diag_mean
+        )
+        >= 0.3
+    )
+
+
+def test_exploded_deepgd_rows_do_not_read_as_points_scale() -> None:
+    """Numerically exploded rows never flip the engine's unit classification.
+
+    deepgd_reference emits pathological layouts on some rows (spans observed
+    up to 4.4e15, WP06-F12). The scale is a static per-engine convention, so
+    such rows still convert at x72 with finite telemetry and no degeneracy
+    flag; they must not be mistaken for evidence of a points-scale store.
+    """
+    graph = _unit_scale_graph(3)
+    positions = torch.tensor([[0.0, 0.0], [2.2e15, 0.0], [4.4e15, 0.0]], dtype=torch.float32)
+
+    norm = scorer.normalize_position_units_for_scoring(graph, positions, "deepgd_reference")
+
+    assert norm.position_scale == 72.0
+    assert math.isfinite(norm.rendered_span)
+    assert norm.rendered_span == pytest.approx(4.4e15 * 72.0, rel=1e-5)
+    assert norm.flags == tuple()
+
+
 def test_score_position_v3_merges_scoring_degenerate_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
