@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from dagua.layout.ops import Pipeline
 from dagua.layout.ops.coordinate import BrandesKopf4Pass
 from dagua.layout.ops.layering import (
+    MAX_DUMMY_EXPANSION_NODES,
     BuildLayerIndex,
     BuildLayerIndexConfig,
     InsertDummyNodes,
@@ -18,6 +20,9 @@ from dagua.layout.ops.ordering import BarycenterSweep
 from dagua.layout.ops.postprocess import StripDummyNodes
 from dagua.layout.ops.preprocess import BuildAdjacency, MakeAcyclic
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.sugiyama import (
+    _expand_long_edges_with_dummy_nodes as _sugiyama_expand_long_edges_with_dummy_nodes,
+)
 
 
 def _make_dag_problem() -> LayoutProblem:
@@ -221,3 +226,76 @@ def test_full_sugiyama_pipeline_produces_finite_original_node_positions() -> Non
     assert torch.isfinite(result.pos).all()
     assert result.layers is not None
     assert result.ordering is not None
+
+
+def test_longest_path_layering_tolerates_self_loops() -> None:
+    """WP05-F04 regression: self-loops are layering-neutral, not a crash.
+
+    The raw Kahn traversal left self-looped nodes with nonzero in-degree and
+    raised ``ValueError('graph must be acyclic ...')``; the op now pre-strips
+    loops exactly like the sugiyama pipeline and
+    ``dagua.utils.longest_path_layering``.
+    """
+    looped = LayoutProblem(
+        edge_index=torch.tensor([[0, 1, 1], [1, 1, 2]], dtype=torch.long),
+        num_nodes=3,
+    )
+    loop_free = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+    )
+
+    looped_result = LongestPathLayering().apply(looped, SolveState(), RuntimeContext())
+    loop_free_result = LongestPathLayering().apply(loop_free, SolveState(), RuntimeContext())
+
+    assert looped_result.layers is not None
+    assert loop_free_result.layers is not None
+    assert looped_result.layers.tolist() == [0, 1, 2]
+    assert torch.equal(looped_result.layers, loop_free_result.layers)
+
+
+def test_dummy_expansion_structural_cap_errors_loudly() -> None:
+    """WP05-F03 regression: oversized dummy expansion raises instead of stalling.
+
+    A single edge spanning more layers than ``MAX_DUMMY_EXPANSION_NODES``
+    must be rejected up front (before any per-layer allocation), in both the
+    plain layering expansion and its graphviz-featured sugiyama twin.
+    """
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    layer_assignments = torch.tensor([0, MAX_DUMMY_EXPANSION_NODES + 2], dtype=torch.long)
+    node_sizes = torch.ones((2, 2), dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="dummy-node expansion would create"):
+        _expand_long_edges_with_dummy_nodes(
+            edge_index=edge_index,
+            layer_assignments=layer_assignments,
+            node_sizes=node_sizes,
+            num_original_nodes=2,
+            dummy_size=(0.0, 0.0),
+        )
+
+    with pytest.raises(ValueError, match="dummy-node expansion would create"):
+        _sugiyama_expand_long_edges_with_dummy_nodes(
+            edge_index=edge_index,
+            layer_assignments=layer_assignments,
+            node_sizes=node_sizes,
+            num_original_nodes=2,
+        )
+
+
+def test_dummy_expansion_below_cap_is_unaffected() -> None:
+    """The WP05-F03 guard is inert for ordinary spans."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    layer_assignments = torch.tensor([0, 4], dtype=torch.long)
+    node_sizes = torch.ones((2, 2), dtype=torch.float32)
+
+    expanded, _ = _expand_long_edges_with_dummy_nodes(
+        edge_index=edge_index,
+        layer_assignments=layer_assignments,
+        node_sizes=node_sizes,
+        num_original_nodes=2,
+        dummy_size=(0.0, 0.0),
+    )
+
+    assert expanded.num_nodes == 5
+    assert expanded.edge_paths == [[0, 2, 3, 4, 1]]

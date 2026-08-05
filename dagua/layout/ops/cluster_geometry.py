@@ -8,6 +8,48 @@ from typing import Mapping, Optional, Sequence, Tuple
 import torch
 
 
+def break_cluster_parent_cycles(
+    parents: Mapping[str, Optional[str]],
+) -> dict[str, Optional[str]]:
+    """Return a copy of ``parents`` with every parent-cycle member re-rooted.
+
+    Cluster metadata is user-supplied, and a parent cycle (``A -> B -> A`` or a
+    self-parent ``A -> A``) sends every memoize-after-recurse hierarchy walk
+    into unbounded recursion. This guard makes each cluster that participates
+    in a parent cycle a root (parent ``None``) while leaving clusters that
+    merely point INTO a cycle untouched -- they terminate at the re-rooted
+    cycle member. Acyclic mappings are returned unchanged (equal copy), so the
+    guard is inert for well-formed metadata.
+
+    Parameters
+    ----------
+    parents : Mapping[str, str | None]
+        Normalized parent mapping (values are ``None`` or known names).
+
+    Returns
+    -------
+    dict[str, str | None]
+        Parent mapping with all parent cycles broken.
+    """
+    fixed: dict[str, Optional[str]] = dict(parents)
+    resolved: set[str] = set()
+    for name in fixed:
+        if name in resolved:
+            continue
+        chain: list[str] = []
+        on_chain: set[str] = set()
+        current: Optional[str] = name
+        while current is not None and current not in resolved and current not in on_chain:
+            chain.append(current)
+            on_chain.add(current)
+            current = fixed.get(current)
+        if current is not None and current in on_chain:
+            for member in chain[chain.index(current) :]:
+                fixed[member] = None
+        resolved.update(chain)
+    return fixed
+
+
 @dataclass(frozen=True)
 class ClusterTree:
     """Tree representation of cluster hierarchy.
@@ -76,6 +118,9 @@ class ClusterTree:
         for name in cluster_names:
             parent_name = cluster_parents.get(name)
             parents[name] = parent_name if parent_name in declared_members else None
+        # User metadata may contain parent cycles; without this guard the
+        # descendant expansion below recurses forever (WP05-F02).
+        parents = break_cluster_parent_cycles(parents)
         children_lists: dict[str, list[str]] = {name: [] for name in cluster_names}
         for name in cluster_names:
             parent = parents[name]
