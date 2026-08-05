@@ -150,6 +150,7 @@ GLADOS_ENGINE_FIELD: Tuple[str, ...] = (
     "d3_cluster_reimpl",
     "d3_tree_radial_reimpl",
     "d3_tree_reimpl",
+    "d3dag",
     "d3force",
     "d3force_reimpl",
     "d3hierarchy",
@@ -158,6 +159,7 @@ GLADOS_ENGINE_FIELD: Tuple[str, ...] = (
     "deepgd_reference",
     "deepgd_reimpl",
     "dot",
+    "drgraph_reference",
     "drgraph_reimpl",
     "elk_force",
     "elk_force_reimpl",
@@ -194,6 +196,7 @@ GLADOS_ENGINE_FIELD: Tuple[str, ...] = (
     "igraph_sugiyama",
     "isom_jung",
     "isom_reimpl",
+    "largevis_reference",
     "largevis_reimpl",
     "linlog",
     "mulment_reference",
@@ -254,10 +257,12 @@ GLADOS_ENGINE_FIELD: Tuple[str, ...] = (
     "sparse_stress_reimpl",
     "tfdp",
     "tfdp_reimpl",
+    "tidy_reference",
     "tidy_reimpl",
     "tsne_graph",
     "twopi_reimpl",
     "umap_graph",
+    "webcola",
     "word2vecgd",
     "word2vecgd_reimpl",
 )
@@ -267,18 +272,10 @@ GLADOS_ENGINE_FIELD: Tuple[str, ...] = (
 # verdicts; re-adding them is conditional on WP-24b's fixes merging (then CC
 # updates this constant or passes --engines-file).
 GLADOS_ENGINE_EXCLUSIONS: Dict[str, str] = {
-    "largevis_reference": (
-        "broken_as_coded:WP09-F01 header-eating output parse corrupts every row;"
-        " conditional on WP-24b parser fix"
-    ),
-    "drgraph_reference": (
-        "broken_as_coded:WP09-F01 header-eating output parse corrupts every row;"
-        " conditional on WP-24b parser fix"
-    ),
-    "tidy_reference": (
-        "broken_as_coded:WP09-F05 multi-root ValueError and silent all-zeros layout"
-        " on rootless graphs; conditional on WP-24b fix"
-    ),
+    # (2026-08-05 integrator) The three WP-09 broken-as-coded exclusions
+    # (largevis_reference, drgraph_reference, tidy_reference) were lifted
+    # after the WP-24b adapter fixes merged; they are back in the field
+    # above, alongside the newly wired webcola/d3dag families.
 }
 
 # Parent-process memory guard knobs (module attributes so tests can
