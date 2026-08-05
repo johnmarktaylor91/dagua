@@ -370,7 +370,30 @@ class TestSFDPPipelineFidelity:
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
-        [(0, 123), (1, 123), (2, 123), (5, 123), (5, 99), (20, 123), (50, 7)],
+        [
+            (0, 123),
+            (1, 123),
+            (2, 123),
+            (5, 123),
+            (5, 99),
+            (20, 123),
+            pytest.param(
+                50,
+                7,
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    reason=(
+                        "Deliberate divergence above the Barnes-Hut threshold (N >= 45): "
+                        "commit 72f52597 replaced the ops-side default repulsion with "
+                        "_tiled_exact_repulsive_forces/_cell_fmm_repulsive_forces for "
+                        "performance, while dagua/layout/classic/sfdp.py still switches "
+                        "to the Barnes-Hut approximation at _BARNES_HUT_THRESHOLD = 45. "
+                        "The pipeline output is the certified benchmark behavior; strict "
+                        "xfail keeps this loud if exact parity is ever restored."
+                    ),
+                ),
+            ),
+        ],
     )
     def test_layout_sfdp_pipeline_matches_classic_for_requested_sizes(
         self,
