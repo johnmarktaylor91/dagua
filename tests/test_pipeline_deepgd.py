@@ -6,6 +6,7 @@ import importlib
 import inspect
 from pathlib import Path
 
+import pytest
 import torch
 
 import dagua
@@ -109,7 +110,9 @@ def test_deepgd_pretrained_checkpoint_loads_strictly_when_available() -> None:
     try:
         state_dict = torch.load(checkpoint, map_location=torch.device("cpu"))
     except FileNotFoundError:
-        return
+        # Skip (not silent PASS): a missing checkpoint must report lost
+        # coverage, not a green result (WP-11B F10).
+        pytest.skip(f"reference checkpoint not present at {checkpoint}")
 
     model = build_deepgd_model(DeepGDConfig(use_reference_checkpoint=False))
 
