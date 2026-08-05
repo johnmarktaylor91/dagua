@@ -136,3 +136,27 @@ def test_d3dag_production_pipeline_has_no_runtime_delegation() -> None:
     assert "subprocess" not in source
     assert "D3DagCompetitor" not in source
     assert "node_modules" not in source
+
+
+def test_d3dag_empty_graph_returns_empty_positions() -> None:
+    """Guard the N=0 path for every coordinate/layering variant.
+
+    The greedy coordinate op indexes into per-layer lists and used to raise
+    ``IndexError`` for empty graphs; the other paths already returned an
+    empty tensor.
+
+    Returns
+    -------
+    None
+        Every variant must return an empty ``[0, 2]`` float64 tensor.
+    """
+    empty_edges = torch.zeros((2, 0), dtype=torch.long)
+    for kwargs in (
+        {},
+        {"layering": "longestPath"},
+        {"decross": "opt"},
+        {"coord": "greedy"},
+    ):
+        positions = layout_d3dag_pipeline(empty_edges, 0, **kwargs)
+        assert positions.shape == (0, 2)
+        assert positions.dtype == torch.float64
