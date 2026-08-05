@@ -12,6 +12,7 @@ from dagua.eval.competitors import (
     coregd_competitor,  # noqa: F401
     cytoscape_competitor,  # noqa: F401
     cytoscape_fcose_competitor,  # noqa: F401
+    d3dag_competitor,  # noqa: F401
     d3force_competitor,  # noqa: F401
     d3hierarchy_competitor,  # noqa: F401
     dagre_competitor,  # noqa: F401
@@ -40,6 +41,7 @@ from dagua.eval.competitors import (
     tfdp_competitor,  # noqa: F401
     tsne_competitor,  # noqa: F401
     umap_competitor,  # noqa: F401
+    webcola_competitor,  # noqa: F401
     word2vecgd_competitor,  # noqa: F401
 )
 from dagua.eval.competitors.base import (
