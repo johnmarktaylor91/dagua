@@ -1174,6 +1174,12 @@ def _pivot_mds_layout(graph: _SparseStressGraph, number_of_pivots: int) -> np.nd
     -------
     numpy.ndarray
         Flat coordinate array with shape ``[2 * N]``.
+
+    Raises
+    ------
+    ValueError
+        If the graph is disconnected, which would otherwise poison the
+        centered kernel with infinite distances.
     """
     node_count = graph_size(graph)
     if node_count == 0:
@@ -1190,6 +1196,12 @@ def _pivot_mds_layout(graph: _SparseStressGraph, number_of_pivots: int) -> np.nd
             min_distances[node_index] = min(min_distances[node_index], distance)
             if min_distances[node_index] > min_distances[pivot_index]:
                 pivot_index = node_index
+    if any(math.isinf(distance) for row in distance_matrix for distance in row):
+        # Unreachable nodes leave infinite Dijkstra distances, which poison the
+        # centered kernel and surface as an opaque numpy LinAlgError inside
+        # ``eigh``. Fail loudly with the same contract as the other stress
+        # ports instead.
+        raise ValueError("Sparse stress requires a connected graph.")
     centered = _center_distance_matrix(distance_matrix)
     kernel = centered @ centered.T
     # The Java reference uses a custom power iteration here. NumPy's symmetric
@@ -1478,8 +1490,21 @@ def layout_sparse_stress_pipeline(
     -------
     torch.Tensor
         Final positions with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If the graph is disconnected. The reference algorithm is defined on
+        connected graphs only.
+    RuntimeError
+        If the pipeline finishes without producing positions.
     """
     resolved_dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+    if num_nodes <= 0:
+        # The reference pivot samplers draw ``nextInt(node_count)``, which is
+        # undefined for an empty graph; short-circuit with the family-standard
+        # empty layout instead of crashing inside the Java RNG port.
+        return torch.empty((0, 2), dtype=resolved_dtype, device=edge_index.device)
     config = SparseStressConfig(
         pivots=pivots,
         sampler=sampler,

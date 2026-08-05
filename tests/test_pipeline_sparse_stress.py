@@ -254,3 +254,36 @@ def test_sparse_stress_competitor_is_not_imported_by_pipeline() -> None:
 
     source = inspect.getsource(sparse_stress)
     assert "competitors" not in source
+
+
+def test_sparse_stress_empty_graph_returns_empty_layout() -> None:
+    """An empty graph should short-circuit instead of crashing the RNG port.
+
+    Returns
+    -------
+    None
+        Regression pin: ``nextInt(0)`` is undefined in the Java reference
+        sampler, so the pipeline returns the family-standard empty layout.
+    """
+    out = layout_sparse_stress_pipeline(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=0,
+        seed=42,
+    )
+
+    assert out.shape == (0, 2)
+
+
+def test_sparse_stress_disconnected_graph_raises_clean_error() -> None:
+    """Disconnected inputs should raise a clear ValueError, not a LinAlgError.
+
+    Returns
+    -------
+    None
+        Regression pin: infinite Dijkstra distances previously reached
+        ``numpy.linalg.eigh`` and surfaced as an opaque convergence failure.
+    """
+    edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="connected graph"):
+        layout_sparse_stress_pipeline(edge_index=edge_index, num_nodes=5, seed=42)
