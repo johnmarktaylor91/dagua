@@ -68,7 +68,6 @@ from dagua.layout.ops.pipelines.native_budget import (
     charge,
     has_process_budget,
     release_tail_reservation,
-    remaining_process_s,
     remaining_wall_s,
     reserve_tail,
     wall_reserve_exhausted,
@@ -489,24 +488,6 @@ def _portfolio_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
         Remaining seconds, or ``None`` when no benchmark deadline is known.
     """
     return remaining_wall_s(config)
-
-
-def _portfolio_process_remaining_s(config: Optional[LayoutConfig]) -> Optional[float]:
-    """Return process-time seconds remaining for optional portfolio gates.
-
-    Parameters
-    ----------
-    config : LayoutConfig, optional
-        Prepared native configuration, possibly carrying the benchmark
-        deadline injected by ``DaguaCompetitor``.
-
-    Returns
-    -------
-    float or None
-        Remaining process CPU seconds, or ``None`` when no benchmark
-        deadline is known.
-    """
-    return remaining_process_s(config)
 
 
 def _native_device_class(config: Optional[LayoutConfig]) -> str:
@@ -3372,12 +3353,13 @@ def layout_native_undirected_portfolio(
     ):
         try:
             cluster_sfdp_pos = _cluster_aware_sfdp_candidate(problem, config, ctx)
+            # WP02B-F02: register inside the try block so a repair/projection
+            # failure in _add_challenger cannot sink the whole solve.
+            if cluster_sfdp_pos is not None:
+                _add_challenger("cluster_sfdp", cluster_sfdp_pos)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("cluster-SFDP undirected challenger failed", exc_info=True)
-            cluster_sfdp_pos = None
-        if cluster_sfdp_pos is not None:
-            _add_challenger("cluster_sfdp", cluster_sfdp_pos)
 
     # Candidate S (R8 Arm S): stress-seeded additive cluster candidate. It is
     # built only for clustered rows, admitted through the 8A guardrail plan,
@@ -3450,21 +3432,22 @@ def layout_native_undirected_portfolio(
                 seed,
                 challenger_node_sep,
             )
+            # WP02B-F02: register inside the try block so a repair/projection
+            # failure in _add_challenger cannot sink the whole solve.
+            if weighted_sm_pos is not None:
+                _add_challenger("weighted_stress_majorization", weighted_sm_pos, include_raw=True)
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("weighted stress-majorization challenger failed", exc_info=True)
-            weighted_sm_pos = None
-        if weighted_sm_pos is not None:
-            _add_challenger("weighted_stress_majorization", weighted_sm_pos, include_raw=True)
 
         try:
             weighted_pos = _weighted_similarity_candidate(problem, seed)
+            # WP02B-F02: register inside the try block (see above).
+            if weighted_pos is not None:
+                _add_challenger("weighted_similarity", weighted_pos)
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("weighted-similarity undirected challenger failed", exc_info=True)
-            weighted_pos = None
-        if weighted_pos is not None:
-            _add_challenger("weighted_similarity", weighted_pos)
 
     # Candidate F (r81-P1.5): point-unit native stress uses the existing
     # quality-scaled stress schedule. It is additive and contest-scored, so
@@ -3482,11 +3465,13 @@ def layout_native_undirected_portfolio(
             else:
                 candidate = _stress_points_candidate(problem, seed)
                 stress_points_pos = candidate
+            # WP02B-F02: register inside the try block so a repair/projection
+            # failure in _add_challenger cannot sink the whole solve.
+            if stress_points_pos is not None:
+                _add_challenger("stress_points", stress_points_pos)
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("point-unit stress undirected challenger failed", exc_info=True)
-    if stress_points_pos is not None:
-        _add_challenger("stress_points", stress_points_pos)
 
     # Coverage-gap arms: structurally gated in-house specialists, registered
     # through the common challenger path so they can only win by the frozen
@@ -3498,12 +3483,16 @@ def layout_native_undirected_portfolio(
                 seed,
                 challenger_node_sep,
             )
+            # WP02B-F02: register inside the try block (see above).
+            if small_world_rt_pos is not None:
+                _add_challenger(
+                    "small_world_reingold_tilford",
+                    small_world_rt_pos,
+                    include_raw=True,
+                )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("small-world Reingold-Tilford challenger failed", exc_info=True)
-            small_world_rt_pos = None
-        if small_world_rt_pos is not None:
-            _add_challenger("small_world_reingold_tilford", small_world_rt_pos, include_raw=True)
 
     if _portfolio_has_budget(config):
         try:
@@ -3512,16 +3501,16 @@ def layout_native_undirected_portfolio(
                 seed,
                 challenger_node_sep,
             )
+            # WP02B-F02: register inside the try block (see above).
+            if weighted_cluster_smacof_pos is not None:
+                _add_challenger(
+                    "weighted_cluster_smacof_nonmetric",
+                    weighted_cluster_smacof_pos,
+                    include_raw=True,
+                )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("weighted-cluster nonmetric SMACOF challenger failed", exc_info=True)
-            weighted_cluster_smacof_pos = None
-        if weighted_cluster_smacof_pos is not None:
-            _add_challenger(
-                "weighted_cluster_smacof_nonmetric",
-                weighted_cluster_smacof_pos,
-                include_raw=True,
-            )
 
     # W4 narrow geometry seeds: structurally gated and referee-protected.
     # They only add seed layouts to the existing challenger marketplace; the

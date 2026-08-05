@@ -136,6 +136,62 @@ def test_native_default_output_is_load_invariant() -> None:
     assert starved_pos.numpy().tobytes() == baseline.numpy().tobytes()
 
 
+@pytest.mark.slow
+def test_native_undirected_output_is_load_invariant() -> None:
+    """Undirected-route positions are byte-identical under extreme starvation.
+
+    WP13-F02: the only full-pipeline starved-vs-idle byte-equality row was
+    the directed wide DAG ``wide_3_50_3``, so a surviving or future
+    measured-time branch specific to the undirected marketplace (the
+    fCoSE/tsNET/FR/geodesic/mesh/community/arm-S contest in
+    ``native_undirected.py``) would have passed this file unnoticed.
+    ``real_football_115`` is an undirected corpus row empirically verified
+    to enter the undirected marketplace (contest log shows
+    incumbent/sfdp/neato_prism/geodesic_stress_prism/tsnet candidates and
+    the W5 telemetry reports ``is_semantically_directed: false``); its
+    positions must be byte-identical between real clocks and the starved
+    simulation, mirroring the directed ``wide_3_50_3`` pin.
+    """
+    baseline = _run_certified_native("real_football_115")
+    with _starved_time():
+        starved_pos = _run_certified_native("real_football_115")
+    assert starved_pos.shape == baseline.shape
+    assert starved_pos.numpy().tobytes() == baseline.numpy().tobytes()
+
+
+def test_deterministic_measurement_flag_contract() -> None:
+    """The seam's deterministic-measurement declaration is explicit and enforced.
+
+    WP13-F01: determinism is carried by two config facts -- a DWU ledger is
+    installed AND the wall-deadline attribute ``_dagua_native_deadline_s``
+    is absent. ``_dagua_native_deterministic_measurement`` declares that
+    intent at the seam. This pins (a) the certified seam shape has no wall
+    deadline to consult (``remaining_wall_s`` is None), and (b) the native
+    pipeline entry refuses a config that declares the flag while also
+    carrying a wall deadline, so the flag can no longer silently drift from
+    the mechanism it documents.
+    """
+    from dagua.layout.ops.pipelines.dagua_native import layout_dagua_native_pipeline
+    from dagua.layout.ops.pipelines.native_budget import remaining_wall_s
+
+    config = LayoutConfig(device="cpu", verbose=False, seed=42)
+    setattr(config, "_dagua_native_deterministic_measurement", True)
+    install_budget_ledger(config, 1800.0, return_reserve_dwu=5.0)
+    assert remaining_wall_s(config) is None
+
+    setattr(config, "_dagua_native_deadline_s", 1e9)
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    with pytest.raises(ValueError, match="deterministic"):
+        layout_dagua_native_pipeline(
+            edge_index=edge_index,
+            num_nodes=3,
+            node_sizes=torch.ones((3, 2), dtype=torch.float32),
+            config=config,
+            device="cpu",
+            seed=42,
+        )
+
+
 def test_ordering_budget_is_clock_free(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ordering-arm budget ignores elapsed time entirely."""
     monkeypatch.setattr(time, "perf_counter", _starved_clock(time.perf_counter()))
