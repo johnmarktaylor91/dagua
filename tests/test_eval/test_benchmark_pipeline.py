@@ -1298,3 +1298,258 @@ def test_dagua_competitor_handles_multilevel_path(monkeypatch):
     assert result.error is None
     assert result.pos is not None
     assert result.pos.shape == (graph.num_nodes, 2)
+
+
+# ---------------------------------------------------------------------------
+# WP07-F05: weight-aware companion signature (additive field)
+# ---------------------------------------------------------------------------
+
+
+def _tiny_graph(weights: bool = False) -> DaguaGraph:
+    graph = DaguaGraph()
+    for index in range(3):
+        graph.add_node(index)
+    if weights:
+        graph.add_edge(0, 1, weight=2.5)
+        graph.add_edge(1, 2, weight=0.5)
+    else:
+        graph.add_edge(0, 1)
+        graph.add_edge(1, 2)
+    return graph
+
+
+def test_graph_weight_signature_none_for_unweighted() -> None:
+    from dagua.eval.benchmark import _graph_weight_signature
+
+    assert _graph_weight_signature(_tiny_graph(weights=False)) is None
+
+
+def test_graph_weight_signature_detects_weight_drift() -> None:
+    from dagua.eval.benchmark import _graph_weight_signature
+
+    weighted = _tiny_graph(weights=True)
+    signature = _graph_weight_signature(weighted)
+    assert signature is not None
+    # Deterministic: same weights -> same signature.
+    assert _graph_weight_signature(_tiny_graph(weights=True)) == signature
+
+    drifted = DaguaGraph()
+    for index in range(3):
+        drifted.add_node(index)
+    drifted.add_edge(0, 1, weight=2.5)
+    drifted.add_edge(1, 2, weight=7.0)
+    assert _graph_weight_signature(drifted) != signature
+
+
+def test_structural_graph_signature_stays_weight_blind() -> None:
+    """Pins the LEGACY field's byte-compatibility (WP07-F05 constraint).
+
+    The structural signature must remain weight-blind so every stored
+    ``graph_signatures`` value (weighted rows included) survives unchanged;
+    weight drift detection lives ONLY in the additive companion field.
+    """
+    from dagua.eval.benchmark import _graph_signature
+
+    assert _graph_signature(_tiny_graph(weights=True)) == _graph_signature(
+        _tiny_graph(weights=False)
+    )
+
+
+def test_graph_weight_signature_map_only_lists_weighted_graphs() -> None:
+    from dagua.eval.benchmark import _graph_weight_signature_map
+
+    graphs = [
+        BenchmarkGraph(
+            test_graph=TestGraph(name="unweighted", graph=_tiny_graph(weights=False)),
+            structural_category="chain",
+            suite="standard",
+        ),
+        BenchmarkGraph(
+            test_graph=TestGraph(name="weighted", graph=_tiny_graph(weights=True)),
+            structural_category="chain",
+            suite="standard",
+        ),
+    ]
+    weight_map = _graph_weight_signature_map(graphs)
+    assert set(weight_map) == {"weighted"}
+
+
+def test_reuse_cached_result_weight_tripwire_is_legacy_tolerant(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _reuse_cached_result
+
+    cached_payload = {
+        "run_id": "old-run",
+        "graphs": {"g": {"competitors": {"comp": {"status": "OK", "positions_path": None}}}},
+    }
+    base_metadata = {
+        "graph_signatures": {"g": "sig"},
+        "competitor_signatures": {"comp": "csig"},
+    }
+    common = dict(
+        graph_name="g",
+        competitor_name="comp",
+        run_dir=tmp_path / "new",
+        cached_payload=cached_payload,
+        latest_run_dir=tmp_path / "old",
+        graph_signatures={"g": "sig"},
+        competitor_signatures={"comp": "csig"},
+    )
+
+    # Legacy metadata (field absent): reuse decision unchanged even though the
+    # current run computes weight signatures.
+    reused = _reuse_cached_result(
+        cached_metadata=dict(base_metadata),
+        graph_weight_signatures={"g": "wsig-new"},
+        **common,
+    )
+    assert reused is not None and reused["status"] == "OK"
+
+    # New metadata with matching weight signature: reuse allowed.
+    matching = dict(base_metadata, graph_weight_signatures={"g": "wsig"})
+    reused = _reuse_cached_result(
+        cached_metadata=matching,
+        graph_weight_signatures={"g": "wsig"},
+        **common,
+    )
+    assert reused is not None and reused["status"] == "OK"
+
+    # New metadata with drifted weight signature: reuse refused.
+    refused = _reuse_cached_result(
+        cached_metadata=matching,
+        graph_weight_signatures={"g": "wsig-drifted"},
+        **common,
+    )
+    assert refused is None
+
+
+# ---------------------------------------------------------------------------
+# WP07-F06: max_nodes == 0 must mean "no limit", not "always skip"
+# ---------------------------------------------------------------------------
+
+
+def test_run_one_competitor_treats_max_nodes_zero_as_unlimited(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _run_one_competitor
+    from dagua.eval.competitors.base import CompetitorBase
+
+    class _DefaultLimitCompetitor(CompetitorBase):
+        name = "default_limit"
+        # Inherits max_nodes = 0 (the documented "no limit" default).
+
+        def layout(self, graph, timeout=300.0, seed=None):
+            raise RuntimeError("sentinel: gate passed, layout invoked")
+
+    bg = BenchmarkGraph(
+        test_graph=TestGraph(name="tiny", graph=_tiny_graph()),
+        structural_category="chain",
+        suite="standard",
+    )
+    result = _run_one_competitor(bg, _DefaultLimitCompetitor(), timeout=5.0, run_dir=tmp_path)
+
+    # Old bug: status == "SKIPPED" / "exceeds known limit" for EVERY graph.
+    assert result["status"] == "FAILED"
+    assert "sentinel: gate passed" in (result.get("error") or "")
+
+
+# ---------------------------------------------------------------------------
+# WP07-F07: record-IO robustness (torn JSON, latest repointing)
+# ---------------------------------------------------------------------------
+
+
+def test_load_latest_payload_survives_corrupted_results(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _load_latest_payload_and_metadata
+
+    suite_root = tmp_path / "benchmark_db" / "standard"
+    run_dir = suite_root / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "results.json").write_text('{"graphs": {  TORN', encoding="utf-8")
+    (suite_root / "latest").symlink_to("run-1")
+
+    payload, metadata, latest_dir = _load_latest_payload_and_metadata(str(tmp_path), "standard")
+    assert payload is None and metadata is None and latest_dir is None
+
+
+def test_load_resumable_payload_skips_torn_partial(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import (
+        _load_resumable_payload_and_metadata,
+        _partial_results_path,
+    )
+
+    suite_root = tmp_path / "benchmark_db" / "standard"
+    older = suite_root / "2024-01-01T00:00:00+00:00"
+    newer = suite_root / "2024-01-02T00:00:00+00:00"
+    for run_dir in (older, newer):
+        run_dir.mkdir(parents=True)
+    _partial_results_path(newer).write_text('{"graphs":  TORN', encoding="utf-8")
+    _partial_results_path(older).write_text(
+        json.dumps({"run_id": "ok-run", "graphs": {}}), encoding="utf-8"
+    )
+
+    payload, _metadata, run_dir, run_id = _load_resumable_payload_and_metadata(
+        str(tmp_path), "standard"
+    )
+    assert payload is not None and payload["run_id"] == "ok-run"
+    assert run_dir == older and run_id == older.name
+
+
+def test_update_latest_symlink_replaces_existing_target(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _update_latest_symlink
+
+    (tmp_path / "run-1").mkdir()
+    (tmp_path / "run-2").mkdir()
+    _update_latest_symlink(tmp_path, "run-1")
+    assert (tmp_path / "latest").resolve() == (tmp_path / "run-1").resolve()
+    _update_latest_symlink(tmp_path, "run-2")
+    assert (tmp_path / "latest").resolve() == (tmp_path / "run-2").resolve()
+    # No temp debris left behind.
+    assert not list(tmp_path.glob(".latest.*.tmp"))
+
+
+def test_latest_repoints_only_after_successful_final_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crashed run must leave `latest` on the previous complete run."""
+    import dagua.eval.benchmark as benchmark_module
+    from dagua.eval.benchmark import run_suite
+
+    monkeypatch.setattr(benchmark_module, "_suite_graphs", lambda suite: [])
+    monkeypatch.setattr(benchmark_module, "_competitor_map", lambda names=None: [])
+    monkeypatch.setattr(benchmark_module, "_system_metadata", lambda: {"host": "test"})
+
+    suite_root = tmp_path / "benchmark_db" / "standard"
+
+    def _boom(**kwargs):
+        raise RuntimeError("simulated crash before final save")
+
+    monkeypatch.setattr(benchmark_module, "_build_results_payload", _boom)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_suite(
+            suite="standard",
+            output_dir=str(tmp_path),
+            generate_report_artifacts=False,
+            reuse_cached=False,
+            resume_incomplete=False,
+            checkpoint_each_graph=False,
+        )
+    # Crash before the final save: latest must NOT point anywhere yet.
+    assert not (suite_root / "latest").is_symlink()
+
+    monkeypatch.undo()
+    monkeypatch.setattr(benchmark_module, "_suite_graphs", lambda suite: [])
+    monkeypatch.setattr(benchmark_module, "_competitor_map", lambda names=None: [])
+    monkeypatch.setattr(benchmark_module, "_system_metadata", lambda: {"host": "test"})
+    run_suite(
+        suite="standard",
+        output_dir=str(tmp_path),
+        generate_report_artifacts=False,
+        reuse_cached=False,
+        resume_incomplete=False,
+        checkpoint_each_graph=False,
+    )
+    latest = suite_root / "latest"
+    assert latest.is_symlink()
+    saved = json.loads((latest / "results.json").read_text(encoding="utf-8"))
+    assert saved["suite"] == "standard"
+    metadata = json.loads((latest / "metadata.json").read_text(encoding="utf-8"))
+    # Additive weight-signature field is always present (empty when no
+    # weighted graphs are in the suite).
+    assert "graph_weight_signatures" in metadata
