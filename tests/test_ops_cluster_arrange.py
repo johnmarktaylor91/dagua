@@ -182,3 +182,39 @@ def test_normalize_graphviz_cluster_parents_breaks_cycles() -> None:
 
     acyclic = _normalize_graphviz_cluster_parents(["A", "B"], {"B": "A"})
     assert acyclic == {"A": None, "B": "A"}
+
+
+def test_cluster_tree_survives_deep_linear_nesting_both_name_orders() -> None:
+    """B2-F01 regression: ~1500-deep valid linear nesting must not RecursionError.
+
+    The pre-fix memoize-after-recurse expansion crashed at ~997 levels when the
+    ROOT sorted first (parents expanded before children), while the identical
+    hierarchy with the root sorting last survived -- so both name orderings are
+    pinned here, at Python's default recursion limit.
+    """
+    import sys
+
+    from dagua.layout.ops.cluster_geometry import ClusterTree
+
+    depth = 1500
+
+    def build(names: list[str]) -> tuple[dict, dict]:
+        clusters = {name: [index] for index, name in enumerate(names)}
+        parent_of = {names[index]: names[index - 1] for index in range(1, depth)}
+        return clusters, parent_of
+
+    root_first = [f"c{index:06d}" for index in range(depth)]
+    root_last = [f"c{depth - 1 - index:06d}" for index in range(depth)]
+
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        for names in (root_first, root_last):
+            clusters, parent_of = build(names)
+            tree = ClusterTree.from_flat_membership(clusters, parent_of)
+            assert tree.roots == (names[0],)
+            assert tree.descendants_per_cluster[names[0]] == frozenset(range(depth))
+            assert tree.descendants_per_cluster[names[-1]] == frozenset({depth - 1})
+            assert tree.leaves_per_cluster[names[0]] == frozenset({0})
+    finally:
+        sys.setrecursionlimit(previous_limit)
