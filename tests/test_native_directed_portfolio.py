@@ -645,6 +645,84 @@ def test_directed_fan_compaction_acceptance_is_terminal(
     assert torch.equal(returned, challenger)
 
 
+def test_directed_fan_compaction_failure_cannot_sink_the_solve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP01-F01: an exception inside the fan-compaction arm keeps the solve alive.
+
+    The fan arm was the only directed challenger invoked outside a
+    try/except, so a crash inside it sank the whole layout instead of
+    keeping the incumbent. This forces a clean hub-spoke fan-bundle DAG
+    through the arm (``_fan_bundle_problem`` opens the pre-filter) with an
+    injected builder failure and asserts the portfolio still completes with
+    finite positions, matching every sibling arm's "challengers cannot sink
+    the incumbent" contract.
+    """
+    problem = _fan_bundle_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic incumbent for the directed portfolio."""
+        del args, kwargs
+        return incumbent
+
+    def exploding_builder(*args: object, **kwargs: object) -> torch.Tensor:
+        """Simulate a crash inside the fan-compaction candidate builder."""
+        del args, kwargs
+        raise RuntimeError("injected fan-compaction failure")
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_build_fan_compaction_candidate", exploding_builder)
+
+    assert _clean_fan_bundle_for_compaction(problem)
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert returned.shape == (problem.num_nodes, 2)
+    assert bool(torch.isfinite(returned).all())
+
+
+def test_directed_fan_compaction_worker_timeout_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP01-F01: a benchmark worker alarm inside the fan arm must re-raise."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic incumbent for the directed portfolio."""
+        del args, kwargs
+        return incumbent
+
+    def timeout_builder(*args: object, **kwargs: object) -> torch.Tensor:
+        """Simulate the benchmark worker alarm firing inside the fan arm."""
+        del args, kwargs
+        raise RuntimeError("worker layout timeout exceeded")
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_build_fan_compaction_candidate", timeout_builder)
+
+    with pytest.raises(RuntimeError, match="worker layout timeout exceeded"):
+        layout_native_directed_portfolio(
+            problem,
+            SolveState(),
+            RuntimeContext(),
+            LayoutConfig(),
+        )
+
+
 def test_directed_fan_compaction_builder_is_deterministic_without_competitor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
