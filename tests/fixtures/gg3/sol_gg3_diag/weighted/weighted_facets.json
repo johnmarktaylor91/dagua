@@ -1,0 +1,508 @@
+{
+  "attack": {
+    "blocked": true,
+    "blockregion_aggregate_delta_fraction": 0.018945905621432276,
+    "blockregion_primary_faithfulness_drop": 0.27365070896832366,
+    "blockregion_severe_g6_floor_breach": true,
+    "blockregion_shape_distance": 0.9644010430106924,
+    "buyback_headroom": 1.6980349342603618,
+    "gate_verdict": "BLOCK",
+    "max_blockregion_tier1_only_drop": 9.518570261991385,
+    "objective_mode": "tier1_loss",
+    "seed": 1040015,
+    "tier1_only_drop": 9.518570261991385
+  },
+  "baseline": {
+    "coverage": {
+      "applicable_facets": 10,
+      "applicable_groups": 1,
+      "tier1_applicable_facets": 3,
+      "total_facets": 12
+    },
+    "facets": [
+      {
+        "applicability_reason": "replaced_by:G6_weighted_ksm",
+        "applicable": false,
+        "base_weight": 4.0,
+        "code": "C1",
+        "effective_weight": 0.0,
+        "metadata": {
+          "ksm_n_pairs": 30,
+          "ksm_n_sources": 6,
+          "ksm_score": 0.4637705034631995,
+          "ksm_se": 0.043485132748376225,
+          "replaced_by": "G6_weighted_ksm"
+        },
+        "name": "ksm_stress",
+        "score": null,
+        "tier": 1,
+        "tiered_contribution": 0.0
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C10",
+        "effective_weight": 1.0,
+        "metadata": {
+          "edge_length_deviation_score": 0.9994745170925516,
+          "edge_length_relative_deviation": 0.0005257591849134733,
+          "edge_length_target_scale": 1.0007681481861466
+        },
+        "name": "edge_length_uniformity",
+        "score": 0.9994745170925516,
+        "tier": 3,
+        "tiered_contribution": 4.5895905569907605
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C2",
+        "effective_weight": 3.999935032229663,
+        "metadata": {
+          "crossing_c_max": 0,
+          "crossing_count": 0,
+          "crossing_eligible_pairs": 0.0,
+          "crossing_estimated_total": 0,
+          "crossing_n_samples": 0,
+          "crossing_rate": 0.0,
+          "crossing_se": 0.0,
+          "edge_crossing_score": 1.0,
+          "edge_crossing_score_se": 0.0
+        },
+        "name": "degree_corrected_crossings",
+        "score": 1.0,
+        "tier": 1,
+        "tiered_contribution": 18.367715973290625
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C3",
+        "effective_weight": 4.0,
+        "metadata": {
+          "multi_radius_neighborhood_preservation_score": 0.7777777777777777,
+          "neighborhood_n_rows": 6,
+          "neighborhood_radius_scores": {
+            "1": 0.3333333333333333,
+            "2": 1.0,
+            "3": 1.0
+          }
+        },
+        "name": "multi_radius_neighborhood_preservation",
+        "score": 0.7777777777777777,
+        "tier": 1,
+        "tiered_contribution": 14.286233348741169
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C4",
+        "effective_weight": 2.0,
+        "metadata": {
+          "default_node_sizes": false,
+          "label_inclusive": false,
+          "node_occlusion_score": 1.0,
+          "overlap_count": 0
+        },
+        "name": "node_occlusion",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 9.184007152762181
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C5",
+        "effective_weight": 2.0,
+        "metadata": {
+          "whitespace_area_floor": 2.08,
+          "whitespace_content_area": 0.24000000000000005,
+          "whitespace_content_floor": 0.4800000000000001,
+          "whitespace_crowding_ratio": 15.249999999999996,
+          "whitespace_crowding_score": 1.0,
+          "whitespace_edge_length_node_diag_ratio": 19.112983496725928,
+          "whitespace_edge_length_node_diag_score": 0.9612634356536949,
+          "whitespace_ratio": 3.5192307692307687,
+          "whitespace_sprawl_ratio": 3.5192307692307687,
+          "whitespace_sprawl_score": 1.0,
+          "whitespace_sprawl_side_score": 1.0,
+          "whitespace_structure_area_floor": 2.08,
+          "whitespace_visual_area": 7.319999999999999
+        },
+        "name": "whitespace_sprawl_band",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 9.184007152762181
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C6",
+        "effective_weight": 2.0,
+        "metadata": {
+          "crossing_angle_count": 0,
+          "crossing_angle_ideal_degrees": 90.0,
+          "crossing_angle_n_pairs": 0,
+          "crossing_angle_score": 1.0
+        },
+        "name": "crossing_angle",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 9.184007152762181
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C7",
+        "effective_weight": 2.0,
+        "metadata": {
+          "gabriel_g_max": 20,
+          "gabriel_intrusions": 10,
+          "gabriel_n_edges": 5,
+          "gabriel_n_nodes_per_edge": 6,
+          "gabriel_score": 0.2928932188134524
+        },
+        "name": "gabriel_edge_node_occlusion",
+        "score": 0.2928932188134524,
+        "tier": 2,
+        "tiered_contribution": 2.6899334165782856
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": false,
+        "base_weight": 2.0,
+        "code": "C8",
+        "effective_weight": 2.0,
+        "metadata": {
+          "path_continuity_n_vertices": 0,
+          "path_continuity_score": null
+        },
+        "name": "path_continuity",
+        "score": null,
+        "tier": 2,
+        "tiered_contribution": 0.0
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C9",
+        "effective_weight": 1.0,
+        "metadata": {
+          "angular_resolution_n_vertices": 1,
+          "angular_resolution_score": 0.0
+        },
+        "name": "angular_resolution",
+        "score": 0.0,
+        "tier": 3,
+        "tiered_contribution": 0.0
+      },
+      {
+        "applicability_reason": "applicable:declared_non_degenerate_weight_semantics",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "G6_local_weight_monotonicity",
+        "effective_weight": 0.7554102983100422,
+        "metadata": {
+          "gate": "declared_non_degenerate_weights_x_weight_cv_saturation",
+          "invariance": "translation_rotation_reflection_position_scale_and_unit_scale_invariant",
+          "local_weight_monotonicity_n_neighborhoods": 1,
+          "local_weight_monotonicity_score": 1.0,
+          "normalization": "mean incident-edge Spearman remapped as (rho+1)/2",
+          "weight_cv": 0.7554102983100422,
+          "weight_cv_gate": 0.7554102983100422,
+          "weight_mode": "distance"
+        },
+        "name": "local_weight_monotonicity",
+        "score": 1.0,
+        "tier": 3,
+        "tiered_contribution": 3.4688467914748204
+      },
+      {
+        "applicability_reason": "applicable:declared_non_degenerate_weight_semantics",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "G6_weighted_ksm",
+        "effective_weight": 3.021641193240169,
+        "metadata": {
+          "gate": "declared_non_degenerate_weights_x_weight_cv_saturation",
+          "invariance": "translation_rotation_reflection_position_scale_and_unit_scale_invariant",
+          "normalization": "aspect-preserving isotonic KSM on weighted APSP distances",
+          "replaces_core": "C1",
+          "weight_cv": 0.7554102983100422,
+          "weight_cv_gate": 0.7554102983100422,
+          "weight_mode": "distance",
+          "weighted_ksm_n_pairs": 30,
+          "weighted_ksm_n_sources": 6,
+          "weighted_ksm_score": 0.6925268003238172
+        },
+        "name": "weighted_shortest_path_isotonic_ksm",
+        "score": 0.6925268003238172,
+        "tier": 1,
+        "tiered_contribution": 9.609077477254388
+      }
+    ],
+    "flags": [],
+    "scores": {
+      "equal": 77.626723140076,
+      "tier1_only": 83.50542120602802,
+      "tiered": 80.56341902261659
+    }
+  },
+  "decomposition": "aggregate held within 1.89% because facets {C2, C4, C5, C6} (total weight 9.9999) stayed high while facets {C10, C3, G6_local_weight_monotonicity, G6_weighted_ksm} dropped; 0 facets changed applicability.",
+  "family": "weighted",
+  "morph": {
+    "coverage": {
+      "applicable_facets": 10,
+      "applicable_groups": 1,
+      "tier1_applicable_facets": 3,
+      "total_facets": 12
+    },
+    "facets": [
+      {
+        "applicability_reason": "replaced_by:G6_weighted_ksm",
+        "applicable": false,
+        "base_weight": 4.0,
+        "code": "C1",
+        "effective_weight": 0.0,
+        "metadata": {
+          "ksm_n_pairs": 30,
+          "ksm_n_sources": 6,
+          "ksm_score": 0.3815942226461049,
+          "ksm_se": 0.04272448403549088,
+          "replaced_by": "G6_weighted_ksm"
+        },
+        "name": "ksm_stress",
+        "score": null,
+        "tier": 1,
+        "tiered_contribution": 0.0
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C10",
+        "effective_weight": 1.0,
+        "metadata": {
+          "edge_length_deviation_score": 0.42964919877388524,
+          "edge_length_relative_deviation": 1.32748019280324,
+          "edge_length_target_scale": 0.4112879833038031
+        },
+        "name": "edge_length_uniformity",
+        "score": 0.42964919877388524,
+        "tier": 3,
+        "tiered_contribution": 1.972950657358951
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C2",
+        "effective_weight": 3.999935032229663,
+        "metadata": {
+          "crossing_c_max": 0,
+          "crossing_count": 0,
+          "crossing_eligible_pairs": 0.0,
+          "crossing_estimated_total": 0,
+          "crossing_n_samples": 0,
+          "crossing_rate": 0.0,
+          "crossing_se": 0.0,
+          "edge_crossing_score": 1.0,
+          "edge_crossing_score_se": 0.0
+        },
+        "name": "degree_corrected_crossings",
+        "score": 1.0,
+        "tier": 1,
+        "tiered_contribution": 18.367715973290625
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C3",
+        "effective_weight": 4.0,
+        "metadata": {
+          "multi_radius_neighborhood_preservation_score": 0.7222222222222223,
+          "neighborhood_n_rows": 6,
+          "neighborhood_radius_scores": {
+            "1": 0.16666666666666666,
+            "2": 1.0,
+            "3": 1.0
+          }
+        },
+        "name": "multi_radius_neighborhood_preservation",
+        "score": 0.7222222222222223,
+        "tier": 1,
+        "tiered_contribution": 13.265788109545374
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C4",
+        "effective_weight": 2.0,
+        "metadata": {
+          "default_node_sizes": false,
+          "label_inclusive": false,
+          "node_occlusion_score": 1.0,
+          "overlap_count": 0
+        },
+        "name": "node_occlusion",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 9.184007152762181
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C5",
+        "effective_weight": 2.0,
+        "metadata": {
+          "whitespace_area_floor": 2.08,
+          "whitespace_content_area": 0.24000000000000005,
+          "whitespace_content_floor": 0.4800000000000001,
+          "whitespace_crowding_ratio": 61.469070531409095,
+          "whitespace_crowding_score": 1.0,
+          "whitespace_edge_length_node_diag_ratio": 13.392813839360242,
+          "whitespace_edge_length_node_diag_score": 1.0,
+          "whitespace_ratio": 14.18517012263287,
+          "whitespace_sprawl_ratio": 14.18517012263287,
+          "whitespace_sprawl_score": 1.0,
+          "whitespace_sprawl_side_score": 1.0,
+          "whitespace_structure_area_floor": 2.08,
+          "whitespace_visual_area": 29.505153855076372
+        },
+        "name": "whitespace_sprawl_band",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 9.184007152762181
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C6",
+        "effective_weight": 2.0,
+        "metadata": {
+          "crossing_angle_count": 0,
+          "crossing_angle_ideal_degrees": 90.0,
+          "crossing_angle_n_pairs": 0,
+          "crossing_angle_score": 1.0
+        },
+        "name": "crossing_angle",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 9.184007152762181
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C7",
+        "effective_weight": 2.0,
+        "metadata": {
+          "gabriel_g_max": 20,
+          "gabriel_intrusions": 1,
+          "gabriel_n_edges": 5,
+          "gabriel_n_nodes_per_edge": 6,
+          "gabriel_score": 0.7763932022500211
+        },
+        "name": "gabriel_edge_node_occlusion",
+        "score": 0.7763932022500211,
+        "tier": 2,
+        "tiered_contribution": 7.130400722820128
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": false,
+        "base_weight": 2.0,
+        "code": "C8",
+        "effective_weight": 2.0,
+        "metadata": {
+          "path_continuity_n_vertices": 0,
+          "path_continuity_score": null
+        },
+        "name": "path_continuity",
+        "score": null,
+        "tier": 2,
+        "tiered_contribution": 0.0
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C9",
+        "effective_weight": 1.0,
+        "metadata": {
+          "angular_resolution_n_vertices": 1,
+          "angular_resolution_score": 0.47061152212771906
+        },
+        "name": "angular_resolution",
+        "score": 0.47061152212771906,
+        "tier": 3,
+        "tiered_contribution": 2.1610497926966348
+      },
+      {
+        "applicability_reason": "applicable:declared_non_degenerate_weight_semantics",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "G6_local_weight_monotonicity",
+        "effective_weight": 0.7554102983100422,
+        "metadata": {
+          "gate": "declared_non_degenerate_weights_x_weight_cv_saturation",
+          "invariance": "translation_rotation_reflection_position_scale_and_unit_scale_invariant",
+          "local_weight_monotonicity_n_neighborhoods": 1,
+          "local_weight_monotonicity_score": 0.8,
+          "normalization": "mean incident-edge Spearman remapped as (rho+1)/2",
+          "weight_cv": 0.7554102983100422,
+          "weight_cv_gate": 0.7554102983100422,
+          "weight_mode": "distance"
+        },
+        "name": "local_weight_monotonicity",
+        "score": 0.8,
+        "tier": 3,
+        "tiered_contribution": 2.7750774331798564
+      },
+      {
+        "applicability_reason": "applicable:declared_non_degenerate_weight_semantics",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "G6_weighted_ksm",
+        "effective_weight": 3.021641193240169,
+        "metadata": {
+          "gate": "declared_non_degenerate_weights_x_weight_cv_saturation",
+          "invariance": "translation_rotation_reflection_position_scale_and_unit_scale_invariant",
+          "normalization": "aspect-preserving isotonic KSM on weighted APSP distances",
+          "replaces_core": "C1",
+          "weight_cv": 0.7554102983100422,
+          "weight_cv_gate": 0.7554102983100422,
+          "weight_mode": "distance",
+          "weighted_ksm_n_pairs": 30,
+          "weighted_ksm_n_sources": 6,
+          "weighted_ksm_score": 0.41887609135549353
+        },
+        "name": "weighted_shortest_path_isotonic_ksm",
+        "score": 0.41887609135549353,
+        "tier": 1,
+        "tiered_contribution": 5.81206794209607
+      }
+    ],
+    "flags": [
+      "TIER1_TRADEOFF"
+    ],
+    "scores": {
+      "equal": 76.1775223672934,
+      "tier1_only": 73.98685094403663,
+      "tiered": 79.03707208927419
+    },
+    "shape_distance": 0.9644010430106924
+  }
+}

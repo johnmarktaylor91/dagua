@@ -58,10 +58,14 @@ FAMILY_SEEDS = {
     "weighted": 47,
     "ported": 53,
 }
-SAVED_GG3_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_fresh"
-E1_GG3_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_battery_diag"
-E1_CLUSTERED_DIR = Path.home() / ".claude/research/dagua/megasprint/gg3_clustered_forensics"
-OFFICIAL_GG3_DIAG_DIR = Path(__file__).resolve().parents[1] / "tmp/sol_gg3_diag"
+# Saved GG-3 attack payloads vendored from the megasprint campaign artifacts
+# (formerly ~/.claude/research/dagua/megasprint/gg3_* and the gitignored
+# tmp/sol_gg3_diag) so the suite is self-contained on any checkout.
+_GG3_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "gg3"
+SAVED_GG3_DIR = _GG3_FIXTURES / "gg3_fresh"
+E1_GG3_DIR = _GG3_FIXTURES / "gg3_battery_diag"
+E1_CLUSTERED_DIR = _GG3_FIXTURES / "gg3_clustered_forensics"
+OFFICIAL_GG3_DIAG_DIR = _GG3_FIXTURES / "sol_gg3_diag"
 
 
 def _result_signature(
