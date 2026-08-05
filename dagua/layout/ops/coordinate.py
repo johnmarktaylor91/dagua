@@ -776,32 +776,26 @@ def _cluster_depths(
         )
         for name in cluster_names
     }
-    # User metadata may contain parent cycles; without this guard the memoized
-    # depth recursion below never bottoms out (WP05-F02).
+    # User metadata may contain parent cycles; without this guard the parent
+    # walk below never bottoms out (WP05-F02).
     parents = _break_cluster_parent_cycles(parents)
     depths: Dict[str, int] = {}
 
-    def depth(name: str) -> int:
-        """Return one cluster depth with memoization.
-
-        Parameters
-        ----------
-        name : str
-            Cluster name.
-
-        Returns
-        -------
-        int
-            Nesting depth.
-        """
-        if name in depths:
-            return depths[name]
-        parent = parents[name]
-        depths[name] = 0 if parent is None else depth(parent) + 1
-        return depths[name]
-
+    # Iterative chain walk (drywell B2-F01): the memoize-after-recurse closure
+    # this replaces descended one frame per nesting level and crashed at ~998
+    # levels of valid linear nesting. Walk up to the nearest memoized ancestor
+    # (or a root), then assign depths ancestor-first -- the exact memoization
+    # insertion order the recursion produced.
     for cluster_name in cluster_names:
-        depth(cluster_name)
+        chain: List[str] = []
+        current: Optional[str] = cluster_name
+        while current is not None and current not in depths:
+            chain.append(current)
+            current = parents[current]
+        next_depth = 0 if current is None else depths[current] + 1
+        for name in reversed(chain):
+            depths[name] = next_depth
+            next_depth += 1
     return depths
 
 

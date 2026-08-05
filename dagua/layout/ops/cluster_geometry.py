@@ -128,31 +128,40 @@ class ClusterTree:
                 children_lists[parent].append(name)
 
         children = {name: tuple(sorted(children_lists[name])) for name in cluster_names}
+
+        # Iterative post-order expansion (drywell B2-F01): children are fully
+        # expanded before their parent, so deep LINEAR nesting cannot overflow
+        # the recursion limit. The memoize-after-recurse closure this replaces
+        # descended one frame per nesting level and crashed at ~997 levels of
+        # valid acyclic nesting whenever a parent name sorted before its child
+        # (crash-vs-success depended on cluster NAMES). Per-node set
+        # construction is unchanged: declared members first, then each sorted
+        # child's expansion, exactly as the recursion built it.
         expanded_descendants: dict[str, frozenset[int]] = {}
+        for start_name in cluster_names:
+            if start_name in expanded_descendants:
+                continue
+            stack: list[str] = [start_name]
+            while stack:
+                current = stack[-1]
+                if current in expanded_descendants:
+                    stack.pop()
+                    continue
+                pending_children = [
+                    child_name
+                    for child_name in children[current]
+                    if child_name not in expanded_descendants
+                ]
+                if pending_children:
+                    stack.extend(pending_children)
+                    continue
+                merged = set(declared_members[current])
+                for child_name in children[current]:
+                    merged.update(expanded_descendants[child_name])
+                expanded_descendants[current] = frozenset(merged)
+                stack.pop()
 
-        def expand_descendants(name: str) -> frozenset[int]:
-            """Return declared members plus all child descendants.
-
-            Parameters
-            ----------
-            name : str
-                Cluster name to expand.
-
-            Returns
-            -------
-            frozenset[int]
-                Full descendant node set for ``name``.
-            """
-            if name in expanded_descendants:
-                return expanded_descendants[name]
-            merged = set(declared_members[name])
-            for child_name in children[name]:
-                merged.update(expand_descendants(child_name))
-            expanded = frozenset(merged)
-            expanded_descendants[name] = expanded
-            return expanded
-
-        descendants = {name: expand_descendants(name) for name in cluster_names}
+        descendants = {name: expanded_descendants[name] for name in cluster_names}
         leaves: dict[str, frozenset[int]] = {}
         for name in cluster_names:
             child_descendants: set[int] = set()

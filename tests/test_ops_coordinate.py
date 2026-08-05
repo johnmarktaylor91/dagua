@@ -519,3 +519,29 @@ def test_reingold_tilford_tree_restores_recursion_limit() -> None:
 
     assert result.pos is not None
     assert torch.isfinite(result.pos).all()
+
+
+def test_cluster_depths_survives_deep_linear_nesting_both_query_orders() -> None:
+    """B2-F01 regression: ~1990-deep valid linear nesting must not RecursionError.
+
+    The pre-fix memoized recursion crashed at ~998 levels when the deepest
+    cluster was queried first (one frame per level), while a root-first query
+    order survived via memoization -- both query orders are pinned here, at
+    Python's default recursion limit.
+    """
+    depth = 1990
+    names = [f"c{index:06d}" for index in range(depth)]
+    # parent of c_i is c_{i+1}: root is LAST, so names-as-given queries the
+    # deepest cluster first (the pre-fix crash order).
+    parent_of = {names[index]: names[index + 1] for index in range(depth - 1)}
+
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        for query_order in (tuple(names), tuple(reversed(names))):
+            depths = _cluster_depths(query_order, parent_of)
+            assert depths[names[-1]] == 0
+            assert depths[names[0]] == depth - 1
+            assert len(depths) == depth
+    finally:
+        sys.setrecursionlimit(previous_limit)
