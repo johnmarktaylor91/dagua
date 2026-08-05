@@ -1536,7 +1536,13 @@ def prepare_smartgd_data(
         )
     pos = init_pos.to(device=device, dtype=torch.float32)
     pair_list = list(permutations(range(num_nodes), 2))
-    perm_index = torch.tensor(pair_list, dtype=torch.long, device=device).t().contiguous()
+    if pair_list:
+        perm_index = torch.tensor(pair_list, dtype=torch.long, device=device).t().contiguous()
+    else:
+        # Single-node graphs have no ordered pairs; keep the [2, 0] contract so
+        # downstream gathers and the stress rescale degrade to no-ops instead
+        # of indexing an empty 1-D tensor.
+        perm_index = torch.empty((2, 0), dtype=torch.long, device=device)
     dist = _all_pairs_shortest_paths(edge_index, num_nodes, device)
     apsp = dist[perm_index[0], perm_index[1]].clamp_min(1.0)
     edge_attr = torch.cat((apsp[:, None], 1.0 / apsp[:, None].square()), dim=1)
