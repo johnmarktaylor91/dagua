@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from dagua.eval.visual_audit import build_visual_audit_suite, build_visual_review_session
+
+# All three builds run real layouts + renders (measured 58-148s each on the
+# certified toolchain, 2026-08-05) -> slow tier (WP-11B F11).
+pytestmark = pytest.mark.slow
 
 
 def test_visual_audit_suite_rebuilds(tmp_path: Path):

@@ -10,6 +10,7 @@ import sys
 from collections import Counter, defaultdict, deque
 from typing import Callable
 
+import pytest
 import torch
 from _pytest.monkeypatch import MonkeyPatch
 
@@ -121,6 +122,7 @@ def _changed_snapshot_names(left: bytes, right: bytes) -> list[str]:
     return [name for name in names if left_payload.get(name) != right_payload.get(name)]
 
 
+@pytest.mark.slow
 def test_benchmark_graphs_are_hash_seed_deterministic() -> None:
     """Every benchmark graph should serialize identically across hash seeds."""
     seed_zero_snapshot = _build_graph_catalog_snapshot("0")

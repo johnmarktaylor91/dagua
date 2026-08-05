@@ -1,5 +1,6 @@
 """End-to-end integration tests."""
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -155,6 +156,7 @@ class TestFromTorchlens:
 class TestGraphvizComparison:
     """Test Graphviz comparison utilities."""
 
+    @pytest.mark.skipif(shutil.which("dot") is None, reason="graphviz dot CLI not installed")
     def test_layout_with_graphviz(self):
         from dagua.graphviz_utils import layout_with_graphviz
 
@@ -215,6 +217,7 @@ class TestGraphvizComparison:
             torch.tensor([[1.0, -2.0], [3.0, -4.0], [5.0, -6.0]]),
         )
 
+    @pytest.mark.skipif(shutil.which("dot") is None, reason="graphviz dot CLI not installed")
     def test_render_comparison(self, tmp_path):
         from dagua.graphviz_utils import layout_with_graphviz, render_comparison
 
