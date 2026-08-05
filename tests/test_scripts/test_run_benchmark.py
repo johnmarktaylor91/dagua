@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sys
-from concurrent.futures import Future
+import time
+from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -15,6 +17,7 @@ from scripts.run_benchmark import (
     POSITION_DIRNAME,
     RECOVERED_GIT_SHA_PREFIX,
     BenchmarkRecord,
+    drain_executor,
     effective_timeout,
     expired_watchdog_futures,
     final_exit_code,
@@ -25,6 +28,7 @@ from scripts.run_benchmark import (
     position_relative_path,
     recover_results_from_positions,
     refresh_watchdog_start_times,
+    register_watchdog_zombie,
     seeds_for_engine,
     serial_watchdog_warning,
 )
@@ -320,6 +324,73 @@ def test_is_record_complete_retries_watchdog_errors_only_when_asked(
         save_positions=True,
         retry_watchdog_errors=True,
     )
+
+
+def test_drain_terminates_stuck_worker_while_peer_completes() -> None:
+    """A watchdog-expired worker stuck past the budget must not wedge drain.
+
+    Regression for the dry-well R1 finding: ``Future.cancel()`` cannot stop
+    a RUNNING pool future, so a worker wedged in a long call survived
+    watchdog expiry and ``shutdown(wait=True)`` at drain time waited on it
+    forever -- the run never reached its final summary. The drain path must
+    force-terminate the pool and return promptly, while a completing peer
+    is unaffected.
+    """
+    context = multiprocessing.get_context("fork")
+    executor = ProcessPoolExecutor(max_workers=2, mp_context=context)
+    try:
+        stuck = executor.submit(time.sleep, 30.0)  # stands in for a hung C call
+        peer = executor.submit(sum, [1, 2, 3])
+
+        # The peer keeps completing normally while its neighbor is stuck.
+        assert peer.result(timeout=30.0) == 6
+        deadline = time.monotonic() + 10.0
+        while not stuck.running() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert stuck.running()
+
+        # Watchdog expiry: the running future cannot be cancelled and must
+        # be tracked as a zombie; the already-finished peer must not be.
+        zombies: set[Future[list[dict[str, object]]]] = set()
+        assert register_watchdog_zombie(stuck, zombies) is True
+        assert stuck in zombies
+        assert register_watchdog_zombie(peer, set()) is False
+
+        worker_processes = list(getattr(executor, "_processes", {}).values())
+        assert worker_processes, "pool workers should exist before drain"
+
+        # Drain must escalate to force-termination and return promptly;
+        # the old shutdown(wait=True) drain blocked for the full sleep.
+        started = time.monotonic()
+        drain_executor(executor, zombies)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 15.0, f"drain took {elapsed:.1f}s -- stuck worker wedged shutdown"
+        assert zombies == set()
+        settle = time.monotonic() + 5.0
+        while any(process.is_alive() for process in worker_processes) and time.monotonic() < settle:
+            time.sleep(0.05)
+        assert not any(process.is_alive() for process in worker_processes)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_drain_without_zombies_uses_graceful_shutdown() -> None:
+    """The happy path drains exactly like the historical wait=True shutdown."""
+    context = multiprocessing.get_context("fork")
+    executor = ProcessPoolExecutor(max_workers=1, mp_context=context)
+    fut = executor.submit(sum, [1, 2, 3])
+    assert fut.result(timeout=30.0) == 6
+
+    drain_executor(executor, set())
+
+    # Pool is fully shut down: new submissions are rejected.
+    try:
+        executor.submit(sum, [1])
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover -- regression signal
+        raise AssertionError("executor still accepts work after drain")
 
 
 def test_watchdog_timers_scope_to_active_worker_slots() -> None:
