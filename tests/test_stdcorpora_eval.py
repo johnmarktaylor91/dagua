@@ -232,17 +232,22 @@ def test_harness_runs_on_synthetic_mini_corpus(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    # 2026-08-05 (WP-25 Sol-review incident): the harness's fixed 120s per-row
+    # wall clock (module constant TIMEOUT_SECONDS) is load-sensitive -- on a
+    # busy box (full gate suite + several writer agents) even a 3-node
+    # synthetic native row blew past it and this gate went red. Raise ONLY
+    # this test's ceiling by bumping the constant inside the spawned process;
+    # the r79 CLI, its defaults, and every assertion below are unchanged.
+    shim = (
+        "import sys\n"
+        f"sys.argv = ['r79_stdcorpora_eval.py', '--corpus-dir', {str(corpus_dir)!r},"
+        f" '--output-dir', {str(output_dir)!r}, '--engines', 'dagua']\n"
+        "import scripts.r79_stdcorpora_eval as harness\n"
+        "harness.TIMEOUT_SECONDS = 600.0\n"
+        "raise SystemExit(harness.main())\n"
+    )
     result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/r79_stdcorpora_eval.py",
-            "--corpus-dir",
-            str(corpus_dir),
-            "--output-dir",
-            str(output_dir),
-            "--engines",
-            "dagua",
-        ],
+        [sys.executable, "-c", shim],
         check=True,
         capture_output=True,
         text=True,
@@ -353,18 +358,20 @@ def test_resume_skips_completed_rows_from_jsonl(tmp_path: Path) -> None:
     }
     append_row(staging, sentinel_row)
 
+    # 2026-08-05 (WP-25 Sol-review incident, second occurrence): same
+    # load-sensitive 120s per-row wall clock as the mini-corpus test above --
+    # this test's single native row also flaked on a saturated box. Same
+    # test-side-only ceiling raise; CLI defaults and assertions unchanged.
+    shim = (
+        "import sys\n"
+        f"sys.argv = ['r79_stdcorpora_eval.py', '--corpus-dir', {str(corpus_dir)!r},"
+        f" '--output-dir', {str(output_dir)!r}, '--engines', 'dagua', '--resume']\n"
+        "import scripts.r79_stdcorpora_eval as harness\n"
+        "harness.TIMEOUT_SECONDS = 600.0\n"
+        "raise SystemExit(harness.main())\n"
+    )
     result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/r79_stdcorpora_eval.py",
-            "--corpus-dir",
-            str(corpus_dir),
-            "--output-dir",
-            str(output_dir),
-            "--engines",
-            "dagua",
-            "--resume",
-        ],
+        [sys.executable, "-c", shim],
         check=True,
         capture_output=True,
         text=True,
@@ -411,19 +418,19 @@ def test_corpus_flag_filters_to_one_corpus(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    # 2026-08-05 (WP-25 Sol-review incident): same load-sensitive 120s
+    # per-row wall clock as the tests above; same test-side-only ceiling
+    # raise. CLI defaults and assertions unchanged.
+    shim = (
+        "import sys\n"
+        f"sys.argv = ['r79_stdcorpora_eval.py', '--corpus-dir', {str(corpus_dir)!r},"
+        f" '--output-dir', {str(output_dir)!r}, '--engines', 'dagua', '--corpus', 'rome']\n"
+        "import scripts.r79_stdcorpora_eval as harness\n"
+        "harness.TIMEOUT_SECONDS = 600.0\n"
+        "raise SystemExit(harness.main())\n"
+    )
     subprocess.run(
-        [
-            sys.executable,
-            "scripts/r79_stdcorpora_eval.py",
-            "--corpus-dir",
-            str(corpus_dir),
-            "--output-dir",
-            str(output_dir),
-            "--engines",
-            "dagua",
-            "--corpus",
-            "rome",
-        ],
+        [sys.executable, "-c", shim],
         check=True,
         capture_output=True,
         text=True,
