@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Validate that results.json and positions.h5 are in sync.
+"""Validate that results.json and the position store are in sync.
 
-Every 'ok' record in results.json must have a corresponding key in
-positions.h5. Every key in positions.h5 must have a corresponding
-record in results.json. Exits nonzero if ANY desync found.
+Supports BOTH position store formats:
+
+- consolidated ``positions.h5``: every 'ok' record in results.json must
+  have a corresponding key in positions.h5, and every key in positions.h5
+  must have a corresponding record in results.json.
+- per-run ``positions/*.pt`` (the format ``scripts/run_benchmark.py``
+  writes): every 'ok' record must reference an existing tensor file, and
+  every tensor file must be referenced by an 'ok' record.
+
+Exits nonzero if ANY desync found.
 
 Written as enforcement code from retro 2026-03-30 after 2 days of
 wasted compute due to results.json/positions.h5 desync.
@@ -137,6 +144,120 @@ def validate_sync(
             errors.append(f"ORPHAN: {eng} has {count} positions but no ok result")
 
     return errors
+
+
+def validate_pt_sync(
+    data_dir: Path,
+    engines: set[str] | None = None,
+) -> list[str]:
+    """Check results.json and the per-run ``positions/*.pt`` store are in sync.
+
+    Mirrors :func:`validate_sync` for the .pt store format written by
+    ``scripts/run_benchmark.py``: every ``ok`` row must reference an existing
+    tensor file, and no tensor file may be orphaned (unreferenced by any
+    ``ok`` row). Orphan tensors are dangerous because run_benchmark's
+    position-recovery path can re-adopt them as ``ok`` rows.
+
+    Parameters
+    ----------
+    data_dir : Path
+        Benchmark output directory containing ``results.json`` and
+        ``positions/``.
+    engines : set[str] | None
+        If provided, only validate ok-row completeness for these engine
+        names. The orphan check is skipped when a filter is given, because
+        .pt filenames cannot be reliably re-attributed to engines.
+
+    Returns
+    -------
+    list[str]
+        Error messages. Empty list means sync is valid.
+    """
+    results_path = data_dir / "results.json"
+    positions_dir = data_dir / "positions"
+
+    with open(results_path) as f:
+        results = json.load(f)
+
+    referenced: set[Path] = set()
+    missing_by_engine: dict[str, int] = {}
+    for record in results.values():
+        if not isinstance(record, dict):
+            continue
+        eng = record.get("engine_name", record.get("engine", ""))
+        positions_file = record.get("positions_file")
+        tensor_path: Path | None = None
+        if positions_file:
+            tensor_path = Path(str(positions_file))
+            if not tensor_path.is_absolute():
+                tensor_path = data_dir / tensor_path
+        if record.get("status", "") != "ok":
+            continue
+        if positions_file and tensor_path is not None:
+            referenced.add(tensor_path.resolve())
+        if engines and eng not in engines:
+            continue
+        if tensor_path is None or not tensor_path.exists():
+            missing_by_engine[eng] = missing_by_engine.get(eng, 0) + 1
+
+    errors: list[str] = []
+    for eng, count in sorted(missing_by_engine.items(), key=lambda x: (-x[1], x[0])):
+        errors.append(f"DESYNC: {eng} has {count} ok results but missing .pt positions")
+
+    if engines is None:
+        orphaned = sorted(
+            path for path in positions_dir.glob("*.pt") if path.resolve() not in referenced
+        )
+        if orphaned:
+            sample = ", ".join(path.name for path in orphaned[:5])
+            errors.append(
+                f"ORPHAN: positions/ has {len(orphaned)} tensor files not referenced "
+                f"by any ok result (e.g. {sample})"
+            )
+    return errors
+
+
+def validate_missing_store(
+    results_path: Path,
+    engines: set[str] | None = None,
+) -> list[str]:
+    """Flag ok rows that reference position files when NO store exists.
+
+    Reachable-store guard for directories with neither ``positions.h5`` nor
+    a ``positions/`` dir. Rows written by ``--no-positions`` runs
+    (``positions_file`` absent) are legitimately tensor-less and are not
+    flagged.
+
+    Parameters
+    ----------
+    results_path : Path
+        Path to results.json.
+    engines : set[str] | None
+        If provided, only validate these engine names.
+
+    Returns
+    -------
+    list[str]
+        Error messages. Empty list means no dangling references.
+    """
+    with open(results_path) as f:
+        results = json.load(f)
+
+    dangling = 0
+    for record in results.values():
+        if not isinstance(record, dict):
+            continue
+        eng = record.get("engine_name", record.get("engine", ""))
+        if engines and eng not in engines:
+            continue
+        if record.get("status", "") == "ok" and record.get("positions_file"):
+            dangling += 1
+    if dangling:
+        return [
+            f"MISSING STORE: neither positions.h5 nor positions/ exists but "
+            f"results.json has {dangling} ok rows referencing position files"
+        ]
+    return []
 
 
 def load_result_rows(data_dirs: list[Path]) -> list[ResultRow]:
@@ -510,11 +631,16 @@ def main() -> None:
     for data_dir in data_dirs:
         results_path = data_dir / "results.json"
         h5_path = data_dir / "positions.h5"
+        positions_dir = data_dir / "positions"
         if not results_path.exists():
             print(f"ERROR: {results_path} not found", file=sys.stderr)
             sys.exit(1)
         if h5_path.exists():
             errors.extend(validate_sync(results_path, h5_path, engine_set))
+        if positions_dir.exists():
+            errors.extend(validate_pt_sync(data_dir, engine_set))
+        if not h5_path.exists() and not positions_dir.exists():
+            errors.extend(validate_missing_store(results_path, engine_set))
 
     rows = load_result_rows(data_dirs)
     errors.extend(validate_param_sensitivity(rows))
