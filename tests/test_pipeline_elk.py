@@ -342,3 +342,43 @@ def test_elk_production_pipeline_has_no_runtime_delegation() -> None:
     assert "subprocess" not in source
     assert "ElkLayered" not in source
     assert "node_modules" not in source
+
+
+def test_layout_config_elk_named_variants_match_dedicated_wrappers() -> None:
+    """Pin registry dispatch of the ELK named variants to the direct path.
+
+    The named-variant wrappers previously used bare ``(*args, **kwargs)``
+    signatures, so the engine's signature-filtered dispatch dropped every
+    kwarg and the wrappers crashed via ``LayoutConfig(algorithm=...)``.
+
+    Returns
+    -------
+    None
+        Engine dispatch must equal the dedicated wrapper output (float32)
+        for each named variant, proving graph tensors and seed reach the
+        wrapper through the registry path.
+    """
+    variant_functions = {
+        "elk_layered_ns": layout_elk_layered_ns_pipeline,
+        "elk_layered_bk": layout_elk_layered_bk_pipeline,
+        "elk_lp": layout_elk_lp_pipeline,
+    }
+    edges = [("root", "left"), ("root", "right"), ("left", "sink"), ("right", "sink")]
+    for algorithm, variant_fn in variant_functions.items():
+        engine_positions = layout(
+            DaguaGraph.from_edge_list(edges),
+            LayoutConfig(algorithm=algorithm, seed=11),
+        )
+
+        direct_graph = DaguaGraph.from_edge_list(edges)
+        direct_graph.compute_node_sizes()
+        direct_positions = variant_fn(
+            direct_graph.edge_index,
+            direct_graph.num_nodes,
+            node_sizes=direct_graph.node_sizes,
+            seed=11,
+        ).to(torch.float32)
+
+        assert engine_positions.shape == (4, 2)
+        assert torch.isfinite(engine_positions).all()
+        assert torch.equal(engine_positions, direct_positions), algorithm

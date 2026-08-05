@@ -135,6 +135,11 @@ def layout_d3dag_pipeline(
         If the composed stages do not produce final positions.
     """
     del seed, edge_weights, fidelity_dtype, config
+    if num_nodes == 0:
+        # Empty-graph guard: the greedy coordinate op indexes into per-layer
+        # lists and crashes on zero layers. The simplex/longestPath/opt paths
+        # already return this exact empty tensor for N=0.
+        return torch.zeros((0, 2), dtype=torch.float64)
     resolved_x_gap = float(x_gap if gap is None else gap)
     resolved_y_gap = float(y_gap if gap is None else gap)
     problem = LayoutProblem(edge_index=edge_index, num_nodes=num_nodes, node_sizes=node_sizes)
