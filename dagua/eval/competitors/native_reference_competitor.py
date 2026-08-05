@@ -146,7 +146,11 @@ def _write_grip_component_file(path: Path, graph: DaguaGraph, nodes: list[int]) 
     path.write_text("\n".join(lines) + "\n")
 
 
-def _parse_position_text(text: str, num_nodes: int) -> torch.Tensor:
+def _parse_position_text(
+    text: str,
+    num_nodes: int,
+    expected_nodes: Optional[list[int]] = None,
+) -> torch.Tensor:
     """Parse ``POSITIONS`` line output from native reference runners.
 
     Parameters
@@ -154,12 +158,22 @@ def _parse_position_text(text: str, num_nodes: int) -> torch.Tensor:
     text : str
         Subprocess stdout.
     num_nodes : int
-        Expected node count.
+        Node-id space size (the returned tensor is indexed by node id).
+    expected_nodes : list[int] | None, default=None
+        Node ids that must receive coordinates. ``None`` requires coverage of
+        every id in ``range(num_nodes)``. Per-component adapters (tidy) pass
+        the component's node set so multi-component runs do not demand
+        whole-graph coverage from a single component's output.
 
     Returns
     -------
     torch.Tensor
         Position tensor with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If any expected node is missing a coordinate line.
     """
     positions = torch.zeros((num_nodes, 2), dtype=torch.float64)
     in_positions = False
@@ -178,7 +192,8 @@ def _parse_position_text(text: str, num_nodes: int) -> torch.Tensor:
             positions[node, 0] = float(parts[1])
             positions[node, 1] = float(parts[2])
             seen.add(node)
-    missing = sorted(set(range(num_nodes)) - seen)
+    expected = set(range(num_nodes)) if expected_nodes is None else set(expected_nodes)
+    missing = sorted(expected - seen)
     if missing:
         raise ValueError(f"reference omitted coordinates for nodes {missing[:5]}")
     return positions
@@ -724,13 +739,30 @@ class TidyReferenceCompetitor(CompetitorBase):
         peer_margin = float(params.get("peer_margin", 10.0))
         sizes = _node_sizes(graph)
         children, roots, parents = _tidy_children_and_roots(graph)
+        components = [_component_nodes(root, children) for root in roots]
+        covered = {node for component in components for node in component}
+        uncovered = sorted(set(range(graph.num_nodes)) - covered)
+        if uncovered:
+            # Rootless (cyclic) graphs have no roots at all and previously
+            # returned a silent all-zeros layout as a SUCCESSFUL result;
+            # partially-cyclic graphs left cycle nodes at (0, 0). Both are
+            # scoring poison, so refuse with an explicit error row instead.
+            return CompetitorResult(
+                self.name,
+                None,
+                0.0,
+                error=(
+                    "tidy reference requires forest-like input: "
+                    f"{len(uncovered)} node(s) unreachable from any root "
+                    f"(cyclic ancestry), e.g. nodes {uncovered[:5]}"
+                ),
+            )
         positions = torch.zeros((graph.num_nodes, 2), dtype=torch.float64)
         offset = 0.0
         start = time.perf_counter()
         try:
             with tempfile.TemporaryDirectory(prefix="dagua_tidy_ref_") as temp_dir:
-                for component_id, root in enumerate(roots):
-                    nodes = _component_nodes(root, children)
+                for component_id, nodes in enumerate(components):
                     input_path = Path(temp_dir) / f"component_{component_id}.txt"
                     _write_tidy_node_file(input_path, nodes, parents, sizes)
                     command = [
@@ -750,7 +782,13 @@ class TidyReferenceCompetitor(CompetitorBase):
                             time.perf_counter() - start,
                             error=(completed.stderr or completed.stdout).strip(),
                         )
-                    component_positions = _parse_position_text(completed.stdout, graph.num_nodes)
+                    # The tidy binary echoes the ORIGINAL node ids written to
+                    # its input file, so parse against this component's node
+                    # set: demanding whole-graph coverage made every
+                    # multi-root forest fail on its first component.
+                    component_positions = _parse_position_text(
+                        completed.stdout, graph.num_nodes, expected_nodes=nodes
+                    )
                     for node in nodes:
                         positions[node] = component_positions[node]
                     min_x, max_x = _component_extents(positions, nodes, sizes)
