@@ -598,9 +598,12 @@ def prepare_pipeline_config(
     # scripts/sprint_2_vcycle_bench.py, output: eval_output/native_algo/
     # sprint_2_vcycle/report.json) confirms the V-cycle path is not
     # production-ready. Threshold raised to 1_000_000 so V-cycle never
-    # fires by default; opt-in via `LayoutConfig(multilevel_threshold=20000)`
-    # to exercise it. Sprint 2b will fix the per-level loss-spacing scale
-    # and the tree_25000 state.pos None error.
+    # fires by default. NOTE: ==20000 is treated as the "unset" sentinel
+    # below and raised to 1_000_000, so explicitly passing 20000 is
+    # indistinguishable from not opting in -- opt in by setting
+    # multilevel_threshold to any OTHER value (e.g. 19999). Sprint 2b will
+    # fix the per-level loss-spacing scale and the tree_25000 state.pos
+    # None error.
     setattr(effective_config, "_dagua_native_num_nodes", num_nodes)
     vcycle_threshold = int(getattr(effective_config, "multilevel_threshold", 20000))
     if vcycle_threshold == 20000:
