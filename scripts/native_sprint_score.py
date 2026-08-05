@@ -106,6 +106,15 @@ _PLANTED_PARTITION_GRAPH_NAMES = {
     "weighted_clusters_3x10",
 }
 _RENDER_POINTS_PER_NATIVE_UNIT = 72.0
+# Engines whose stored coordinates are graph-display inches or unit-box/unit-cloud
+# clouds; the scorer multiplies their positions by 72.0 before scoring. Membership
+# is a STATIC per-engine store-unit convention audited from saved-tensor spans
+# (WP-06 scale table, GLaDOS-prep) -- it is never inferred from a row's span at
+# scoring time. NOT members (deliberately): coregd_reference, coregd_reimpl,
+# nnpnet_reference, drgraph_reimpl, omega_reimpl -- their outputs are so collapsed
+# that x72 still leaves rows degenerate (escalation CB-6, WP06-F03); and
+# sparse_stress_reimpl, which has never produced an ok row locally -- audit its
+# unit convention before adding (WP06-F09; keep the sparse_stress pair documented).
 _NATIVE_UNIT_ENGINES = frozenset(
     {
         "backbone",
@@ -121,8 +130,14 @@ _NATIVE_UNIT_ENGINES = frozenset(
         "d3_tree_radial_reimpl",
         "d3_tree_reimpl",
         "d3hierarchy",
+        "deepgd_reference",
+        "deepgd_reimpl",
         "dot",
+        "largevis_reimpl",
         "linlog",
+        "mulment_reference",
+        "mulment_reimpl",
+        "neulay",
         "nx_arf",
         "nx_arf_reimpl",
         "nx_bfs",
@@ -142,8 +157,19 @@ _NATIVE_UNIT_ENGINES = frozenset(
         "nx_spectral_random_walk",
         "nx_spiral",
         "nx_spiral_reimpl",
+        "omega_reference",
+        "pacmap",
+        "pacmap_reimpl",
         "sgd2_multi_ref",
+        "smacof_nonmetric_reimpl",
+        "smartgd_reference",
+        "smartgd_reimpl",
         "sparse_stress",
+        "tfdp",
+        "tfdp_reimpl",
+        "umap_graph",
+        "word2vecgd",
+        "word2vecgd_reimpl",
     }
 )
 
