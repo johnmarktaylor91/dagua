@@ -17,6 +17,15 @@ from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
+# Structural cap on dummy-node expansion (WP05-F03). Total dummy count equals
+# the sum over edges of (layer span - 1); dense long-span DAGs can push that
+# into the tens of millions (multi-GB of Python list/tensor state plus
+# O(N_expanded) downstream mincross/BK work), so expansion fails loudly at
+# this bound instead of stalling toward OOM. 5M dummies is far above any
+# certified or plausible holdout row (n <= 2000) while staying well inside
+# single-digit-GB memory territory.
+MAX_DUMMY_EXPANSION_NODES = 5_000_000
+
 
 @dataclass(frozen=True)
 class BuildLayerIndexConfig:
@@ -165,6 +174,15 @@ def _longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> torch.Te
     ValueError
         If the graph remains cyclic after edge reversal.
     """
+    # Self-loops are layering-neutral but leave their node with a nonzero
+    # in-degree from itself, so Kahn never schedules it and the acyclicity
+    # check below fails. Strip them up front to match the sugiyama pipeline
+    # (non_loop_mask) and dagua.utils.longest_path_layering (WP05-F04).
+    if edge_index.numel() > 0:
+        non_loop_mask = edge_index[0] != edge_index[1]
+        if not bool(non_loop_mask.all().item()):
+            edge_index = edge_index[:, non_loop_mask]
+
     children: List[List[int]] = [[] for _ in range(num_nodes)]
     in_degree = [0] * num_nodes
     src_nodes = edge_index[0].tolist()
@@ -304,7 +322,26 @@ def _expand_long_edges_with_dummy_nodes(
     -------
     tuple[_ExpandedLayeredGraph, torch.Tensor | None]
         Expanded graph and expanded edge weights.
+
+    Raises
+    ------
+    ValueError
+        If the expansion would create more than
+        ``MAX_DUMMY_EXPANSION_NODES`` dummy nodes (WP05-F03 structural
+        guard: fail loudly instead of stalling toward OOM).
     """
+    if edge_index.numel() > 0:
+        spans = layer_assignments[edge_index[1]] - layer_assignments[edge_index[0]] - 1
+        projected_dummy_nodes = int(torch.clamp(spans, min=0).sum().item())
+        if projected_dummy_nodes > MAX_DUMMY_EXPANSION_NODES:
+            raise ValueError(
+                "dummy-node expansion would create "
+                f"{projected_dummy_nodes:,} virtual nodes "
+                f"(cap {MAX_DUMMY_EXPANSION_NODES:,}; "
+                f"N={num_original_nodes:,}, E={int(edge_index.shape[1]):,}); "
+                "the layered spans are too long to expand safely"
+            )
+
     expanded_layers = _group_nodes_by_layer(
         layer_assignments=layer_assignments,
         num_nodes=num_original_nodes,
