@@ -1,0 +1,500 @@
+{
+  "attack": {
+    "blocked": false,
+    "blockregion_aggregate_delta_fraction": 0.01982966829483882,
+    "blockregion_primary_faithfulness_drop": 0.09123829503153025,
+    "blockregion_severe_g6_floor_breach": false,
+    "blockregion_shape_distance": 0.5856778192763836,
+    "buyback_headroom": 1.4334333303487026,
+    "gate_verdict": "PASS_WITH_T1_TRADEOFF",
+    "max_blockregion_tier1_only_drop": 4.275867551750679,
+    "objective_mode": "tier1_loss",
+    "seed": 10003,
+    "tier1_only_drop": 4.275867551750679
+  },
+  "baseline": {
+    "coverage": {
+      "applicable_facets": 11,
+      "applicable_groups": 1,
+      "tier1_applicable_facets": 3,
+      "total_facets": 12
+    },
+    "facets": [
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C1",
+        "effective_weight": 4.0,
+        "metadata": {
+          "ksm_n_pairs": 30,
+          "ksm_n_sources": 6,
+          "ksm_score": 0.8636625018474797,
+          "ksm_se": 0.0262497921035379
+        },
+        "name": "ksm_stress",
+        "score": 0.8636625018474797,
+        "tier": 1,
+        "tiered_contribution": 13.287148614438902
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C10",
+        "effective_weight": 1.0,
+        "metadata": {
+          "edge_length_deviation_score": 0.9467708163133646,
+          "edge_length_relative_deviation": 0.056221825566935744,
+          "edge_length_target_scale": 1.0
+        },
+        "name": "edge_length_uniformity",
+        "score": 0.9467708163133646,
+        "tier": 3,
+        "tiered_contribution": 3.641435315664221
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C2",
+        "effective_weight": 3.999935032229663,
+        "metadata": {
+          "crossing_c_max": 6,
+          "crossing_count": 0,
+          "crossing_eligible_pairs": 6.0,
+          "crossing_estimated_total": 0,
+          "crossing_n_samples": 6,
+          "crossing_rate": 0.0,
+          "crossing_se": 0.0,
+          "edge_crossing_score": 1.0,
+          "edge_crossing_score_se": 0.0
+        },
+        "name": "degree_corrected_crossings",
+        "score": 1.0,
+        "tier": 1,
+        "tiered_contribution": 15.384403950514958
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C3",
+        "effective_weight": 4.0,
+        "metadata": {
+          "multi_radius_neighborhood_preservation_score": 1.0,
+          "neighborhood_n_rows": 6,
+          "neighborhood_radius_scores": {
+            "1": 1.0,
+            "2": 1.0,
+            "3": 1.0
+          }
+        },
+        "name": "multi_radius_neighborhood_preservation",
+        "score": 1.0,
+        "tier": 1,
+        "tiered_contribution": 15.384653827179097
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C4",
+        "effective_weight": 2.0,
+        "metadata": {
+          "default_node_sizes": false,
+          "label_inclusive": false,
+          "node_occlusion_score": 1.0,
+          "overlap_count": 0
+        },
+        "name": "node_occlusion",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C5",
+        "effective_weight": 2.0,
+        "metadata": {
+          "whitespace_area_floor": 1.5999999999999999,
+          "whitespace_content_area": 0.24000000000000005,
+          "whitespace_content_floor": 0.4800000000000001,
+          "whitespace_crowding_ratio": 29.37499999999999,
+          "whitespace_crowding_score": 1.0,
+          "whitespace_edge_length_node_diag_ratio": 6.960797506845963,
+          "whitespace_edge_length_node_diag_score": 1.0,
+          "whitespace_ratio": 8.8125,
+          "whitespace_sprawl_ratio": 8.8125,
+          "whitespace_sprawl_score": 1.0,
+          "whitespace_sprawl_side_score": 1.0,
+          "whitespace_structure_area_floor": 1.5999999999999999,
+          "whitespace_visual_area": 14.099999999999998
+        },
+        "name": "whitespace_sprawl_band",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C6",
+        "effective_weight": 2.0,
+        "metadata": {
+          "crossing_angle_count": 0,
+          "crossing_angle_ideal_degrees": 90.0,
+          "crossing_angle_n_pairs": 6,
+          "crossing_angle_score": 1.0
+        },
+        "name": "crossing_angle",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C7",
+        "effective_weight": 2.0,
+        "metadata": {
+          "gabriel_g_max": 24,
+          "gabriel_intrusions": 0,
+          "gabriel_n_edges": 6,
+          "gabriel_n_nodes_per_edge": 6,
+          "gabriel_score": 1.0
+        },
+        "name": "gabriel_edge_node_occlusion",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C8",
+        "effective_weight": 2.0,
+        "metadata": {
+          "path_continuity_n_vertices": 3,
+          "path_continuity_score": 0.507314570410674
+        },
+        "name": "path_continuity",
+        "score": 0.507314570410674,
+        "tier": 2,
+        "tiered_contribution": 3.902429523626147
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C9",
+        "effective_weight": 1.0,
+        "metadata": {
+          "angular_resolution_n_vertices": 4,
+          "angular_resolution_score": 0.5676529696190042
+        },
+        "name": "angular_resolution",
+        "score": 0.5676529696190042,
+        "tier": 3,
+        "tiered_contribution": 2.1832861078896486
+      },
+      {
+        "applicability_reason": "diagnostic_only:redundant_with_G1_directed_flow_and_G4_depth",
+        "applicable": false,
+        "base_weight": 1.0,
+        "code": "G1_depth_order",
+        "effective_weight": 0.0,
+        "metadata": {
+          "audit_demotion": "sec_2_3_redundant_T3_scale_invariant_facet",
+          "declared_axis_direction": "TB",
+          "depth_spearman_raw": 1.0,
+          "diagnostic_only": true,
+          "frac_acyclic": 1.0,
+          "gate": "declared_hierarchy_x_frac_acyclic",
+          "invariance": "axis_anchored_after_declared_axis_transform;not_rotation_invariant",
+          "normalization": "directed_flow_score reused from dagua.metrics; depth=(spearman+1)/2",
+          "sample_count": 6
+        },
+        "name": "depth_spearman",
+        "score": 1.0,
+        "tier": 3,
+        "tiered_contribution": 0.0
+      },
+      {
+        "applicability_reason": "applicable:declared_hierarchy_metadata_x_acyclicity_fraction",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "G1_directed_flow",
+        "effective_weight": 2.0,
+        "metadata": {
+          "declared_axis_direction": "TB",
+          "frac_acyclic": 1.0,
+          "gate": "declared_hierarchy_x_frac_acyclic",
+          "invariance": "axis_anchored_after_declared_axis_transform;not_rotation_invariant",
+          "normalization": "directed_flow_score reused from dagua.metrics; depth=(spearman+1)/2",
+          "sample_count": 6
+        },
+        "name": "directed_flow_score",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      }
+    ],
+    "flags": [],
+    "scores": {
+      "equal": 90.71167381825437,
+      "tier1_only": 95.45539212382927,
+      "tiered": 92.24499190726071
+    }
+  },
+  "decomposition": "aggregate held within 1.98% because facets {C2, C3, C4, C5, C6, C7, G1_depth_order, G1_directed_flow} (total weight 17.9999) stayed high while facets {C1, C10} dropped; 0 facets changed applicability.",
+  "family": "dag",
+  "morph": {
+    "coverage": {
+      "applicable_facets": 11,
+      "applicable_groups": 1,
+      "tier1_applicable_facets": 3,
+      "total_facets": 12
+    },
+    "facets": [
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C1",
+        "effective_weight": 4.0,
+        "metadata": {
+          "ksm_n_pairs": 30,
+          "ksm_n_sources": 6,
+          "ksm_score": 0.7724242068159495,
+          "ksm_se": 0.019508812955291745
+        },
+        "name": "ksm_stress",
+        "score": 0.7724242068159495,
+        "tier": 1,
+        "tiered_contribution": 11.883479029596776
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C10",
+        "effective_weight": 1.0,
+        "metadata": {
+          "edge_length_deviation_score": 0.8668691887010924,
+          "edge_length_relative_deviation": 0.15357658691086873,
+          "edge_length_target_scale": 1.0
+        },
+        "name": "edge_length_uniformity",
+        "score": 0.8668691887010924,
+        "tier": 3,
+        "tiered_contribution": 3.334120595403475
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C2",
+        "effective_weight": 3.999935032229663,
+        "metadata": {
+          "crossing_c_max": 6,
+          "crossing_count": 0,
+          "crossing_eligible_pairs": 6.0,
+          "crossing_estimated_total": 0,
+          "crossing_n_samples": 6,
+          "crossing_rate": 0.0,
+          "crossing_se": 0.0,
+          "edge_crossing_score": 1.0,
+          "edge_crossing_score_se": 0.0
+        },
+        "name": "degree_corrected_crossings",
+        "score": 1.0,
+        "tier": 1,
+        "tiered_contribution": 15.384403950514958
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 4.0,
+        "code": "C3",
+        "effective_weight": 4.0,
+        "metadata": {
+          "multi_radius_neighborhood_preservation_score": 0.9629629629629629,
+          "neighborhood_n_rows": 6,
+          "neighborhood_radius_scores": {
+            "1": 0.888888888888889,
+            "2": 1.0,
+            "3": 1.0
+          }
+        },
+        "name": "multi_radius_neighborhood_preservation",
+        "score": 0.9629629629629629,
+        "tier": 1,
+        "tiered_contribution": 14.814851833579871
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C4",
+        "effective_weight": 2.0,
+        "metadata": {
+          "default_node_sizes": false,
+          "label_inclusive": false,
+          "node_occlusion_score": 1.0,
+          "overlap_count": 0
+        },
+        "name": "node_occlusion",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C5",
+        "effective_weight": 2.0,
+        "metadata": {
+          "whitespace_area_floor": 1.5999999999999999,
+          "whitespace_content_area": 0.24000000000000005,
+          "whitespace_content_floor": 0.4800000000000001,
+          "whitespace_crowding_ratio": 31.08706027867716,
+          "whitespace_crowding_score": 1.0,
+          "whitespace_edge_length_node_diag_ratio": 6.895338345233999,
+          "whitespace_edge_length_node_diag_score": 1.0,
+          "whitespace_ratio": 9.32611808360315,
+          "whitespace_sprawl_ratio": 9.32611808360315,
+          "whitespace_sprawl_score": 1.0,
+          "whitespace_sprawl_side_score": 1.0,
+          "whitespace_structure_area_floor": 1.5999999999999999,
+          "whitespace_visual_area": 14.92178893376504
+        },
+        "name": "whitespace_sprawl_band",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C6",
+        "effective_weight": 2.0,
+        "metadata": {
+          "crossing_angle_count": 0,
+          "crossing_angle_ideal_degrees": 90.0,
+          "crossing_angle_n_pairs": 6,
+          "crossing_angle_score": 1.0
+        },
+        "name": "crossing_angle",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C7",
+        "effective_weight": 2.0,
+        "metadata": {
+          "gabriel_g_max": 24,
+          "gabriel_intrusions": 0,
+          "gabriel_n_edges": 6,
+          "gabriel_n_nodes_per_edge": 6,
+          "gabriel_score": 1.0
+        },
+        "name": "gabriel_edge_node_occlusion",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "C8",
+        "effective_weight": 2.0,
+        "metadata": {
+          "path_continuity_n_vertices": 3,
+          "path_continuity_score": 0.559757984760164
+        },
+        "name": "path_continuity",
+        "score": 0.559757984760164,
+        "tier": 2,
+        "tiered_contribution": 4.305841411267258
+      },
+      {
+        "applicability_reason": "core_facet_input_applicable",
+        "applicable": true,
+        "base_weight": 1.0,
+        "code": "C9",
+        "effective_weight": 1.0,
+        "metadata": {
+          "angular_resolution_n_vertices": 4,
+          "angular_resolution_score": 0.580181511429877
+        },
+        "name": "angular_resolution",
+        "score": 0.580181511429877,
+        "tier": 3,
+        "tiered_contribution": 2.2314729275695524
+      },
+      {
+        "applicability_reason": "diagnostic_only:redundant_with_G1_directed_flow_and_G4_depth",
+        "applicable": false,
+        "base_weight": 1.0,
+        "code": "G1_depth_order",
+        "effective_weight": 0.0,
+        "metadata": {
+          "audit_demotion": "sec_2_3_redundant_T3_scale_invariant_facet",
+          "declared_axis_direction": "TB",
+          "depth_spearman_raw": 0.9710083124552245,
+          "diagnostic_only": true,
+          "frac_acyclic": 1.0,
+          "gate": "declared_hierarchy_x_frac_acyclic",
+          "invariance": "axis_anchored_after_declared_axis_transform;not_rotation_invariant",
+          "normalization": "directed_flow_score reused from dagua.metrics; depth=(spearman+1)/2",
+          "sample_count": 6
+        },
+        "name": "depth_spearman",
+        "score": 0.9855041562276122,
+        "tier": 3,
+        "tiered_contribution": 0.0
+      },
+      {
+        "applicability_reason": "applicable:declared_hierarchy_metadata_x_acyclicity_fraction",
+        "applicable": true,
+        "base_weight": 2.0,
+        "code": "G1_directed_flow",
+        "effective_weight": 2.0,
+        "metadata": {
+          "declared_axis_direction": "TB",
+          "frac_acyclic": 1.0,
+          "gate": "declared_hierarchy_x_frac_acyclic",
+          "invariance": "axis_anchored_after_declared_axis_transform;not_rotation_invariant",
+          "normalization": "directed_flow_score reused from dagua.metrics; depth=(spearman+1)/2",
+          "sample_count": 6
+        },
+        "name": "directed_flow_score",
+        "score": 1.0,
+        "tier": 2,
+        "tiered_contribution": 7.6923269135895485
+      }
+    ],
+    "flags": [
+      "TIER1_TRADEOFF"
+    ],
+    "scores": {
+      "equal": 89.39750009081382,
+      "tier1_only": 91.17952457207859,
+      "tiered": 90.41580431587964
+    },
+    "shape_distance": 0.5856778192763836
+  }
+}
