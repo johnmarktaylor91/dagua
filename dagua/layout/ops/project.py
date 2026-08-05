@@ -339,23 +339,19 @@ def _overlap_gate_proxy_composite(
 ) -> float:
     """Cheap proxy composite for :class:`OverlapProjectionGated`.
 
-    Reuses the real ``composite_auto`` weighting from ``dagua.metrics`` on a
-    partial metric dict -- overlap count, sampled crossing rate (pinned to
-    the project's fixed metric seed), and edge-length CV -- so the formulas
-    are never reimplemented. On directed graphs, ``dag_consistency`` is
-    included too (also O(|E|), no sampling -- still cheap): overlap
-    projection can resolve overlaps by pushing a node against the graph's
-    top-to-bottom (or configured) direction, which the other three terms
-    cannot see at all but which a directed composite penalizes heavily.
-    Without this, the gate accepted projections that wrecked DAG
-    consistency on directed test graphs going through the native_stress
-    pipeline (caught by
-    ``tests/test_layout/test_quality_knob.py::test_quality_high_smoke_spends_more_and_scores_near_draft``).
-    The terms this proxy still omits (depth correlation, straightness,
-    angular resolution, cluster separation) fall back to ``composite``'s /
-    ``composite_undirected``'s own neutral or worst-case defaults on both
-    the before and after evaluation, so they contribute an identical
-    constant offset that cancels out of the accept/reject delta.
+    Reuses the real ``composite_undirected`` weighting from ``dagua.metrics``
+    on a partial metric dict -- node occlusion, sampled edge crossings
+    (pinned to the project's fixed metric seed), edge-length deviation, and
+    isotonic stress -- so the formulas are never reimplemented. Since the
+    r83 honest-ruler port (8b538cbf) this gate scores common geometry only:
+    it deliberately ignores the ``direction`` / ``is_semantically_directed``
+    hints because this local gate has no declared rank metadata to score a
+    directed term against (an earlier revision included ``dag_consistency``
+    on directed graphs; that term moved to the full V3 referee). The terms
+    this proxy still omits fall back to ``composite_undirected``'s own
+    neutral or worst-case defaults on both the before and after evaluation,
+    so they contribute an identical constant offset that cancels out of the
+    accept/reject delta.
 
     Parameters
     ----------
