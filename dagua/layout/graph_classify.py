@@ -50,6 +50,11 @@ class GraphStructure:
     num_layers_effective: int = 0
     cyclicity_ratio: float = 0.0
     has_dominant_component: bool = True
+    # CAVEAT: for 1500 < n <= 2000 this field holds the Euler-formula HINT
+    # (E < 3N-6: necessary, NOT sufficient), with planar_embedding None --
+    # non-planar sparse graphs can read True here. Treat is_planar as exact
+    # only when planar_embedding is not None; consumers requiring correctness
+    # must check the embedding (native_planar does).
     is_planar: Optional[bool] = None
     planar_embedding: Any = None
     # Provenance of is_semantically_directed: True only when the graph
@@ -349,6 +354,7 @@ def _resolve_layer_assignments(
     edge_index: torch.Tensor,
     num_nodes: int,
     layer_assignments: Optional[torch.Tensor],
+    device: Optional[str] = None,
 ) -> Optional[torch.Tensor]:
     """Return layer assignments as a CPU ``torch.long`` tensor.
 
@@ -360,6 +366,11 @@ def _resolve_layer_assignments(
         Number of nodes in the graph.
     layer_assignments : torch.Tensor, optional
         Pre-computed layer assignments.
+    device : str, optional
+        Device used for the layering computation. When ``None``, CUDA is
+        preferred whenever available (legacy auto behavior). Callers with an
+        explicit device (e.g. deterministic CPU runs) pass it so no GPU work
+        launches; the layering result is device-independent.
 
     Returns
     -------
@@ -371,7 +382,14 @@ def _resolve_layer_assignments(
     if num_nodes == 0 or edge_index.numel() == 0:
         return None
 
-    prefer_device = "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu"
+    if device is not None:
+        prefer_device = str(device)
+        if prefer_device.startswith("cuda") and not torch.cuda.is_available():
+            prefer_device = "cpu"
+    else:
+        prefer_device = (
+            "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu"
+        )
     computed_layers = longest_path_layering(
         edge_index.detach().cpu(), num_nodes, device=prefer_device
     )
@@ -402,6 +420,14 @@ def _analyze_layers(
     if layer_assignments is None or layer_assignments.numel() == 0:
         return 0, 0.0, 0, 0.0
 
+    # Normalize by min before bincount (mirrors _effective_layer_count):
+    # torch.bincount raises on negative entries, and unnormalized rank
+    # assignments may carry them. Zero-count leading bins are filtered below,
+    # so this is value-identical for all non-negative inputs; the shift is
+    # only materialized when a negative entry is actually present.
+    min_layer = int(layer_assignments.min().item())
+    if min_layer < 0:
+        layer_assignments = layer_assignments - min_layer
     max_layer = int(layer_assignments.max().item())
     layer_counts = torch.bincount(layer_assignments, minlength=max_layer + 1)
     nonempty_counts = layer_counts[layer_counts > 0]
@@ -807,6 +833,13 @@ def _double_sweep_diameter(edge_index: torch.Tensor, num_nodes: int) -> int:
     a tight lower bound on general graphs -- sufficient for the router's
     "mesh-scale vs log-scale" separation.
 
+    CAVEAT: on disconnected graphs both sweeps stay inside the component
+    containing node 0, which is not necessarily the largest component, so the
+    returned value can badly understate the true structure. Router-v2
+    consumers see a distorted diameter for such graphs; any fix (e.g. BFS
+    from the largest component) perturbs router features and must be
+    byte-inertness-verified on the certified rows first.
+
     Parameters
     ----------
     edge_index : torch.Tensor
@@ -965,6 +998,7 @@ def classify_graph(
     num_nodes: int,
     layer_assignments: Optional[torch.Tensor] = None,
     graph: Optional[Any] = None,
+    device: Optional[str] = None,
 ) -> GraphStructure:
     """Classify graph structure in O(V+E).
 
@@ -980,6 +1014,11 @@ def classify_graph(
     graph : Any, optional
         Optional graph object with ``is_semantically_directed`` set to override
         heuristic inference.
+    device : str, optional
+        Device for the internal layering computation. ``None`` keeps the
+        legacy auto behavior (prefer CUDA when available); explicit-device
+        callers (e.g. ``device="cpu"``) avoid launching GPU work. The
+        classification result is device-independent either way.
 
     Returns
     -------
@@ -1103,7 +1142,9 @@ def classify_graph(
     degree_one_count = int((degree == 1).sum().item()) if degree.numel() > 0 else 0
     is_chain = is_tree and max_degree <= 2 and (num_nodes <= 2 or degree_one_count == 2)
 
-    resolved_layers = _resolve_layer_assignments(edge_index, num_nodes, layer_assignments)
+    resolved_layers = _resolve_layer_assignments(
+        edge_index, num_nodes, layer_assignments, device=device
+    )
     num_layers, avg_layer_width, max_layer_width, layer_width_cv = _analyze_layers(
         resolved_layers,
         num_nodes,
