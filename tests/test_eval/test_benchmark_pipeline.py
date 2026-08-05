@@ -479,17 +479,24 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
 
     signatures = {name: _competitor_signature(name, system) for name in names}
 
+    from dagua.eval.benchmark import _adapter_source_signature
+
+    src = {
+        probe: _adapter_source_signature(probe)
+        for probe in ("igraph_mds", "sgd2_mds", "neulay", "tsne_graph", "umap_graph", "ogdf_gem")
+    }
+
     assert all(":None" not in signature for signature in signatures.values())
     assert signatures["classic_fr"] == f"classic_fr:{source_signature}"
     assert signatures["classic_fmmm"] == f"classic_fmmm:{source_signature}"
-    assert signatures["igraph_mds"] == "igraph_mds:0.11.8"
-    assert signatures["sgd2_mds"] == "sgd2_mds:1.0.0"
-    assert signatures["neulay"] == "neulay:2.6.1"
-    assert signatures["tsne_graph"] == "tsne_graph:1.6.1:1.15.2"
-    assert signatures["umap_graph"] == "umap_graph:0.5.7:1.15.2"
+    assert signatures["igraph_mds"] == f"igraph_mds:0.11.8:src={src['igraph_mds']}"
+    assert signatures["sgd2_mds"] == f"sgd2_mds:1.0.0:src={src['sgd2_mds']}"
+    assert signatures["neulay"] == f"neulay:2.6.1:src={src['neulay']}"
+    assert signatures["tsne_graph"] == f"tsne_graph:1.6.1:1.15.2:src={src['tsne_graph']}"
+    assert signatures["umap_graph"] == f"umap_graph:0.5.7:1.15.2:src={src['umap_graph']}"
     assert signatures["ogdf_gem"] in {
-        "ogdf_gem:ogdf_available",
-        "ogdf_gem:ogdf_unavailable",
+        f"ogdf_gem:ogdf_available:src={src['ogdf_gem']}",
+        f"ogdf_gem:ogdf_unavailable:src={src['ogdf_gem']}",
     }
 
 
@@ -1553,3 +1560,103 @@ def test_latest_repoints_only_after_successful_final_save(
     # Additive weight-signature field is always present (empty when no
     # weighted graphs are in the suite).
     assert "graph_weight_signatures" in metadata
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R1-B3 finding 1: adapter-source-aware competitor cache signatures
+# ---------------------------------------------------------------------------
+
+
+def test_reference_adapter_signatures_gain_real_source_component() -> None:
+    """Formerly '<name>:None'-keyed engines must carry a real src component.
+
+    Sol's probe produced 'drgraph_reference:None', 'largevis_reference:None',
+    and 'sklearn_smacof_nonmetric:None' -- adapter parser/device fixes did not
+    invalidate those cached rows.
+    """
+    from dagua.eval.benchmark import _competitor_signature
+
+    for name in ("drgraph_reference", "largevis_reference", "sklearn_smacof_nonmetric"):
+        signature = _competitor_signature(name, {})
+        assert signature != f"{name}:None"
+        assert ":src=" in signature
+        # Deterministic within an unchanged checkout.
+        assert _competitor_signature(name, {}) == signature
+
+
+def test_adapter_source_edit_flips_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Editing an adapter's implementing module must change its cache key."""
+    import importlib.util
+    import sys
+
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    module_path = tmp_path / "fake_adapter_module.py"
+    module_path.write_text(
+        "from dagua.eval.competitors.base import CompetitorBase\n"
+        "\n"
+        "\n"
+        "class FakeAdapter(CompetitorBase):\n"
+        '    name = "fake_signature_probe"\n'
+        "\n"
+        "    def layout(self, graph, timeout=300.0, seed=None):\n"
+        "        raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("fake_adapter_module", module_path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "fake_adapter_module", module)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(_COMPETITORS, "fake_signature_probe", module.FakeAdapter())
+
+    before = _adapter_source_signature("fake_signature_probe")
+
+    with open(module_path, "a", encoding="utf-8") as handle:
+        handle.write("\n# simulated adapter fix\n")
+    after = _adapter_source_signature("fake_signature_probe")
+
+    assert before != after
+
+
+def test_unchanged_adapter_signature_is_stable_and_shared_per_module() -> None:
+    """Same checkout -> same signature; same module -> same src component."""
+    from dagua.eval.benchmark import _adapter_source_signature
+
+    first = _adapter_source_signature("igraph_mds")
+    second = _adapter_source_signature("igraph_mds")
+    assert first == second
+    # drgraph and largevis share drgraph_largevis_competitor.py.
+    assert _adapter_source_signature("drgraph_reference") == _adapter_source_signature(
+        "largevis_reference"
+    )
+    # Different implementing modules -> different components.
+    assert _adapter_source_signature("igraph_mds") != _adapter_source_signature("drgraph_reference")
+
+
+def test_dagua_owned_signatures_carry_no_adapter_src_component(monkeypatch) -> None:
+    """dagua/classic_*/dot/fdp keys are unchanged by construction."""
+    from dagua.eval.benchmark import _competitor_signature
+
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: "abc123def4567890",  # pragma: allowlist secret
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    assert _competitor_signature("dagua", {}) == "dagua:cpu:abc123def4567890"
+    assert _competitor_signature("classic_fr", {}) == "classic_fr:abc123def4567890"
+    assert _competitor_signature("dot", {}) == "dot:abc123def4567890"
+    assert _competitor_signature("fdp", {}) == "fdp:abc123def4567890"
+
+
+def test_unregistered_adapter_name_still_gets_deterministic_source_component() -> None:
+    """Names missing from the registry fall back to the shared base module."""
+    from dagua.eval.benchmark import _adapter_source_signature
+
+    first = _adapter_source_signature("definitely_not_registered_engine")
+    second = _adapter_source_signature("definitely_not_registered_engine")
+    assert first == second
+    assert len(first) == 16
