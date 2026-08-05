@@ -200,6 +200,7 @@ def test_mtx_loader_reads_coordinate_fixture(tmp_path: Path) -> None:
     assert loaded.directed is False
 
 
+@pytest.mark.slow
 def test_harness_runs_on_synthetic_mini_corpus(tmp_path: Path) -> None:
     """Run the CLI end-to-end on one fixture per supported format.
 
@@ -316,6 +317,7 @@ def test_jsonl_row_helpers_roundtrip(tmp_path: Path) -> None:
         json.loads(line)  # each line parses standalone
 
 
+@pytest.mark.slow
 def test_resume_skips_completed_rows_from_jsonl(tmp_path: Path) -> None:
     """``--resume`` must not recompute rows already present in the staging jsonl.
 
@@ -391,6 +393,7 @@ def test_resume_skips_completed_rows_from_jsonl(tmp_path: Path) -> None:
     assert by_graph["rome/beta"]["composite"] != -12345.0
 
 
+@pytest.mark.slow
 def test_corpus_flag_filters_to_one_corpus(tmp_path: Path) -> None:
     """``--corpus rome`` must exclude north/suitesparse fixtures from the run.
 
@@ -443,6 +446,7 @@ def test_corpus_flag_filters_to_one_corpus(tmp_path: Path) -> None:
     assert all(row["corpus"] == "rome" for row in rows)
 
 
+@pytest.mark.slow
 def test_rss_abort_guard_publishes_partial_results_and_creates_output_dir_early(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

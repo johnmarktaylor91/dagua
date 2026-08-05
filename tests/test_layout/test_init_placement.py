@@ -1,3 +1,5 @@
+"""Tests for the initial-placement module's device and budget handling."""
+
 import importlib
 
 import torch

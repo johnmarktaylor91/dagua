@@ -382,6 +382,7 @@ class TestDeviceTransfer:
         assert g.edge_index.device.type == "cpu"
         assert g.node_sizes.device.type == "cpu"
 
+    @pytest.mark.gpu
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_to_cuda(self, simple_chain):
         simple_chain.compute_node_sizes()

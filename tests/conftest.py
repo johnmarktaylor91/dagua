@@ -180,36 +180,6 @@ def diamond_graph():
 
 
 @pytest.fixture
-def skip_graph():
-    """Chain with skip connection: a→b→c→d, a→d."""
-    return DaguaGraph.from_edge_list(
-        [
-            ("a", "b"),
-            ("b", "c"),
-            ("c", "d"),
-            ("a", "d"),
-        ]
-    )
-
-
-@pytest.fixture
-def wide_graph():
-    """Wide parallel: input→b1,b2,b3,b4→output."""
-    return DaguaGraph.from_edge_list(
-        [
-            ("input", "b1"),
-            ("input", "b2"),
-            ("input", "b3"),
-            ("input", "b4"),
-            ("b1", "output"),
-            ("b2", "output"),
-            ("b3", "output"),
-            ("b4", "output"),
-        ]
-    )
-
-
-@pytest.fixture
 def clustered_graph():
     """Graph with clusters."""
     g = DaguaGraph.from_edge_list(
