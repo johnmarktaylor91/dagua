@@ -558,9 +558,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Seconds to wait for any worker future before assuming a worker has "
-            "died (C-level crash). Defaults to WATCHDOG_TIMEOUT=300.0. Set this "
-            "higher (e.g. 7200) for repair runs on large stochastic work groups "
-            "that legitimately take > 300s to return all seeds."
+            f"died (C-level crash). Defaults to WATCHDOG_TIMEOUT={WATCHDOG_TIMEOUT}. "
+            "Set this higher (e.g. 7200) for repair runs on large stochastic work "
+            "groups that legitimately take longer to return all seeds. NOTE: only "
+            "the parallel worker pool has a watchdog; the flag is inert with "
+            "--workers 1."
         ),
     )
     parser.add_argument(
