@@ -168,6 +168,126 @@ def expired_watchdog_futures(
     ]
 
 
+def register_watchdog_zombie(
+    fut: Future[list[dict[str, Any]]],
+    zombie_futures: set[Future[list[dict[str, Any]]]],
+) -> bool:
+    """Track a watchdog-expired future whose worker may still be running.
+
+    ``Future.cancel()`` cannot stop a future already RUNNING in a
+    ``ProcessPoolExecutor``; the stuck worker process keeps executing after
+    the future is dropped from the inflight window. Such "zombie" futures
+    must be remembered so the drain path can force-terminate the pool
+    instead of waiting on them forever.
+
+    Parameters
+    ----------
+    fut : Future[list[dict[str, Any]]]
+        Watchdog-expired future to cancel or track.
+    zombie_futures : set[Future[list[dict[str, Any]]]]
+        Mutable registry of expired-but-possibly-still-running futures.
+
+    Returns
+    -------
+    bool
+        ``True`` when the future could not be cancelled and was registered
+        as a zombie, ``False`` when it was cancelled or already finished.
+    """
+    if fut.cancel():
+        return False
+    if fut.done():
+        return False
+    zombie_futures.add(fut)
+    return True
+
+
+def force_terminate_executor(
+    executor: ProcessPoolExecutor,
+    join_timeout: float = 10.0,
+) -> None:
+    """Tear down a pool that may contain permanently stuck worker processes.
+
+    ``shutdown(wait=True)`` on a pool with a worker wedged in a C-level call
+    never returns, and even ``shutdown(wait=False)`` leaves the stuck
+    process to hang the interpreter's atexit join. Terminate the worker
+    processes explicitly: SIGTERM, bounded join, then SIGKILL escalation.
+
+    Parameters
+    ----------
+    executor : ProcessPoolExecutor
+        Pool to tear down. Its futures must already be recorded or
+        resubmitted -- their results are unrecoverable after this call.
+    join_timeout : float, default=10.0
+        Total seconds to wait for terminated workers before SIGKILL.
+
+    Returns
+    -------
+    None
+        All worker processes are dead (or kill-signalled) on return.
+    """
+    # Snapshot the worker processes BEFORE shutdown: the executor clears its
+    # internal ``_processes`` mapping during shutdown bookkeeping.
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:  # noqa: BLE001 -- process may vanish mid-teardown
+            continue
+    deadline = time.monotonic() + max(0.0, join_timeout)
+    for process in processes:
+        try:
+            process.join(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:  # noqa: BLE001
+            continue
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1.0)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def drain_executor(
+    executor: ProcessPoolExecutor,
+    zombie_futures: set[Future[list[dict[str, Any]]]],
+) -> None:
+    """Shut the pool down without wedging on watchdog-expired workers.
+
+    The happy path (no live zombies) is byte-identical to the historical
+    ``shutdown(wait=True, cancel_futures=False)``. When any watchdog-expired
+    future is still running, a graceful shutdown would block forever on its
+    stuck worker, so the pool is force-terminated instead -- the run must
+    always reach its final summary with the hung group already recorded as
+    a watchdog error.
+
+    Parameters
+    ----------
+    executor : ProcessPoolExecutor
+        Pool being drained at the end of an execution phase.
+    zombie_futures : set[Future[list[dict[str, Any]]]]
+        Registry of expired-but-possibly-still-running futures. Cleared
+        when the pool is force-terminated (the zombies die with it).
+
+    Returns
+    -------
+    None
+        The pool is fully shut down on return.
+    """
+    live_zombies = [fut for fut in zombie_futures if not fut.done()]
+    if not live_zombies:
+        executor.shutdown(wait=True, cancel_futures=False)
+        return
+    print(
+        f"[benchmark] WATCHDOG: force-terminating worker pool with "
+        f"{len(live_zombies)} stuck worker future(s) still running"
+    )
+    force_terminate_executor(executor)
+    zombie_futures.clear()
+
+
 class _WorkerLayoutTimeoutError(TimeoutError):
     """Raised when a worker exceeds its wall-clock budget."""
 
@@ -2983,6 +3103,10 @@ def main() -> int:
             # group.  This eliminates idle gaps between batches.
             inflight: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]] = {}
             watchdog_started_at: dict[Future[list[dict[str, Any]]], float] = {}
+            # Watchdog-expired futures whose workers may still be running
+            # (Future.cancel() cannot stop a RUNNING pool future); the drain
+            # path must never wait on these.
+            zombie_futures: set[Future[list[dict[str, Any]]]] = set()
             resubmit_groups: deque[Sequence[WorkItem]] = deque()
             group_iter = iter(light_groups)
 
@@ -3047,7 +3171,12 @@ def main() -> int:
                 None
                     Records are appended through ``_process_record``.
                 """
-                fut.cancel()
+                if register_watchdog_zombie(fut, zombie_futures):
+                    print(
+                        "[benchmark] WATCHDOG: expired future is still running "
+                        "(cannot cancel a running pool future); its worker will "
+                        "be force-terminated at pool teardown"
+                    )
                 watchdog_started_at.pop(fut, None)
                 for wi in stuck_group:
                     record = _record_with_pairings(
@@ -3087,7 +3216,12 @@ def main() -> int:
                 inflight.clear()
                 watchdog_started_at.clear()
                 resubmit_groups.extend(pending_groups)
-                executor.shutdown(wait=False, cancel_futures=True)
+                # Every active future expired, so every busy worker is
+                # presumed stuck: terminate the old pool's processes instead
+                # of abandoning them (an abandoned stuck worker wedges the
+                # interpreter's atexit join even after the summary prints).
+                force_terminate_executor(executor)
+                zombie_futures.clear()
                 executor = ProcessPoolExecutor(
                     max_workers=args.resolved_workers,
                     mp_context=_MP_CONTEXT,
@@ -3161,7 +3295,7 @@ def main() -> int:
                         for fut in as_completed(inflight):
                             _collect_inflight_future(fut)
             finally:
-                executor.shutdown(wait=True, cancel_futures=False)
+                drain_executor(executor, zombie_futures)
 
             # Heavy groups -- run in parallel too (memory is abundant).
             # Reuse the same rolling-window + watchdog pattern.
@@ -3178,6 +3312,7 @@ def main() -> int:
                 group_iter = iter(heavy_groups)
                 resubmit_groups.clear()
                 watchdog_started_at.clear()
+                zombie_futures.clear()
                 try:
                     _fill_inflight()
                     while inflight and not _shutdown_requested:
@@ -3197,7 +3332,7 @@ def main() -> int:
                             for fut in as_completed(inflight):
                                 _collect_inflight_future(fut)
                 finally:
-                    executor.shutdown(wait=True, cancel_futures=False)
+                    drain_executor(executor, zombie_futures)
 
     finally:
         # Always save results on exit -- whether normal, SIGINT, or exception.
