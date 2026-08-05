@@ -426,41 +426,6 @@ def _gem_degree_weights(
     return degrees / 2.5 + 1.0
 
 
-def _spring_lengths_by_node(
-    problem: LayoutProblem,
-    state: SolveState,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Resolve per-node desired spring lengths for GEM-style attraction.
-
-    Parameters
-    ----------
-    problem : LayoutProblem
-        Immutable layout inputs.
-    state : SolveState
-        Mutable solve state.
-    device : torch.device
-        Target device for the result.
-    dtype : torch.dtype
-        Target dtype for the result.
-
-    Returns
-    -------
-    torch.Tensor
-        Desired lengths with shape ``[N]``.
-    """
-    if state.spring_lengths is None:
-        return torch.full((problem.num_nodes,), 20.0, device=device, dtype=dtype)
-
-    spring_lengths = state.spring_lengths.to(device=device, dtype=dtype)
-    if spring_lengths.ndim != 1:
-        raise ValueError("state.spring_lengths must be one-dimensional.")
-    if spring_lengths.shape[0] != problem.num_nodes:
-        raise ValueError("GEM-style desired lengths require state.spring_lengths with shape [N].")
-    return spring_lengths
-
-
 def _pair_force_delta(pos: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build pairwise displacement vectors and distances.
 
@@ -2298,6 +2263,10 @@ class BarnesHutForce(Op):
         if quadtree is None:
             quadtree = state.extras.get("quadtree")
         if quadtree is None:
+            if pos.shape[0] == 0:
+                # BuildQuadTree deliberately stores ``None`` for empty inputs;
+                # with no nodes there is no repulsion to accumulate.
+                return state
             raise ValueError("BarnesHutForce requires state.quadtree or extras['quadtree'].")
 
         if isinstance(quadtree, _SFDPQuadTreeNode):
@@ -2895,6 +2864,10 @@ class GEMNodeTick(Op):
         """
         pos = _require_positions(state)
         forces = _require_forces(state)
+        if problem.num_nodes == 0:
+            # Sequential node selection pops from a permutation; empty graphs
+            # have no node to tick, so the op is a structural no-op.
+            return state
 
         node_index = _resolve_gem_node_index(problem=problem, state=state, ctx=ctx)
         degree_weights = _gem_degree_weights(

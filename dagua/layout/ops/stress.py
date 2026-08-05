@@ -518,14 +518,18 @@ class SmacofStep(Op):
         """
         del ctx
 
-        current = state.extras[CURRENT_POSITIONS_KEY]
-        current_stress = state.extras[CURRENT_STRESS_KEY]
+        # ``.get`` (rather than raw indexing) keeps the descriptive errors
+        # below reachable when a pipeline omits the SM initialization ops.
+        current = state.extras.get(CURRENT_POSITIONS_KEY)
+        current_stress = state.extras.get(CURRENT_STRESS_KEY)
         target_distances = state.distance_matrix
-        weights = state.extras[WEIGHTS_KEY]
+        weights = state.extras.get(WEIGHTS_KEY)
         laplacian_pinv = state.laplacian
 
         if not isinstance(current, np.ndarray):
             raise ValueError("sm_smacof_step requires sm_current_positions as numpy array.")
+        if current_stress is None:
+            raise ValueError("sm_smacof_step requires sm_current_stress in state.extras.")
         if not isinstance(current_stress, float):
             current_stress = float(current_stress)
         if not isinstance(target_distances, torch.Tensor):
@@ -862,7 +866,9 @@ class FinalizeStressMajorizationPositions(Op):
         """
         del self, ctx
 
-        current = state.extras[CURRENT_POSITIONS_KEY]
+        # ``.get`` keeps the descriptive error below reachable when the SM
+        # initialization ops did not run (a raw index raises KeyError first).
+        current = state.extras.get(CURRENT_POSITIONS_KEY)
         if not isinstance(current, np.ndarray):
             raise ValueError("sm_finalize_positions requires sm_current_positions in state.extras.")
 
