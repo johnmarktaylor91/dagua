@@ -1008,6 +1008,7 @@ class LBFGSStep(Op):
         traces: list[torch.Tensor] = []
 
         def _callback(pos_vec: np.ndarray) -> None:
+            """Collect a trace snapshot at the configured iteration cadence."""
             nonlocal iteration
 
             iteration += 1
