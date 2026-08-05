@@ -1,7 +1,6 @@
 """Tests for the core layout optimization loop."""
 
 import importlib
-import time
 from pathlib import Path
 
 import numpy as np
@@ -1683,12 +1682,11 @@ def test_classify_early_exit(monkeypatch: pytest.MonkeyPatch) -> None:
         _unexpected_find_root,
     )
 
-    start = time.perf_counter()
+    # No wall-clock assertion here: the _find_root monkeypatch above already
+    # proves the fast path is taken, and timing asserts are flaky under load.
     result = classify_graph(edges, n, layer_assignments=layers)
-    elapsed = time.perf_counter() - start
 
     assert result.family == GraphFamily.GENERAL
-    assert elapsed < 0.1
 
 
 def test_sampled_context_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3212,3 +3210,188 @@ def test_tiled_compute_produces_gradients(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert tiled_loss == pytest.approx(full_loss.item(), rel=1e-5, abs=1e-5)
     assert torch.allclose(tiled_grad, full_pos.grad.cpu(), atol=1e-4, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# WP-23 GLaDOS-prep robustness pins (branch glados/wp-23-engine-dispatch)
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_pipeline_preserves_seed_zero(monkeypatch) -> None:
+    """A legitimate seed of 0 must reach the cluster driver, not default to 42.
+
+    Pins WP03-F08: ``seed=config.seed or 42`` silently replaced a falsy seed
+    of 0 with 42 in ``_layout_cluster_aware_pipeline``.
+    """
+    engine_module = importlib.import_module("dagua.layout.engine")
+    state_module = importlib.import_module("dagua.layout.ops.state")
+
+    g = DaguaGraph()
+    for i in range(4):
+        g.add_node(f"n{i}")
+    g.add_edge("n0", "n1")
+    g.add_edge("n2", "n3")
+    g.add_cluster("a", ["n0", "n1"])
+    g.add_cluster("b", ["n2", "n3"])
+    g.compute_node_sizes()
+
+    recorded: list[object] = []
+
+    class _Sentinel(Exception):
+        """Abort the layout immediately after the seed is captured."""
+
+    def _spy(*args: object, **kwargs: object) -> object:
+        """Record the seed forwarded to LayoutProblem, then abort."""
+        recorded.append(kwargs.get("seed"))
+        raise _Sentinel
+
+    monkeypatch.setattr(state_module, "LayoutProblem", _spy)
+    config = LayoutConfig(algorithm="fr", seed=0)
+    with pytest.raises(_Sentinel):
+        engine_module._layout_cluster_aware_pipeline(g, config)
+    assert recorded == [0]
+
+
+def test_effective_constraint_config_never_mutates_caller() -> None:
+    """Resolving constraints must not tag caller-owned config/flex objects.
+
+    Pins WP03-F09: the no-constraint path used to setattr the idempotence
+    marker onto the user's LayoutConfig, and flex resolution pinned a graph
+    back-reference onto the user's LayoutFlex in place.
+    """
+    from dagua.flex import LayoutFlex
+
+    engine_module = importlib.import_module("dagua.layout.engine")
+    g = DaguaGraph()
+    g.add_node("a")
+    g.add_node("b")
+    g.add_edge("a", "b")
+
+    plain = LayoutConfig()
+    resolved = engine_module._effective_constraint_config(plain, g)
+    assert resolved is not plain
+    assert not hasattr(plain, "_dagua_effective_constraints")
+    assert getattr(resolved, "_dagua_effective_constraints", False) is True
+
+    flexed = LayoutConfig(flex=LayoutFlex())
+    resolved_flex = engine_module._effective_constraint_config(flexed, g)
+    assert resolved_flex is not flexed
+    assert not hasattr(flexed, "_dagua_effective_constraints")
+    assert not hasattr(flexed.flex, "_constraint_context_graph")
+    assert resolved_flex.flex is not flexed.flex
+    assert getattr(resolved_flex.flex, "_constraint_context_graph", None) is g
+
+
+def test_classify_layering_respects_explicit_cpu_device(monkeypatch) -> None:
+    """classify_graph(device='cpu') must not request CUDA layering.
+
+    Pins WP03-F13: the classifier preferred CUDA for longest-path layering
+    whenever available, even for explicit CPU-only runs. The layering result
+    is device-independent; only the requested compute device is asserted.
+    """
+    gc_module = importlib.import_module("dagua.layout.graph_classify")
+
+    requested: list[str] = []
+    original = gc_module.longest_path_layering
+
+    def _recording(
+        edge_index: torch.Tensor, num_nodes: int, device: str = "cpu", **kwargs: object
+    ) -> object:
+        """Record the requested layering device; compute on CPU regardless."""
+        requested.append(str(device))
+        return original(edge_index, num_nodes, device="cpu", **kwargs)
+
+    monkeypatch.setattr(gc_module, "longest_path_layering", _recording)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+
+    edges = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    gc_module.classify_graph(edges, 4, device="cpu")
+    assert requested, "expected the classifier to compute a layering"
+    assert set(requested) == {"cpu"}
+
+    requested.clear()
+    gc_module.classify_graph(edges, 4)
+    assert "cuda" in set(requested), "device=None must keep the legacy CUDA-auto behavior"
+
+
+def test_analyze_layers_tolerates_negative_layer_values() -> None:
+    """Negative layer IDs must analyze identically to their shifted form.
+
+    Pins WP03-F14 (classifier half): ``torch.bincount`` raises on negative
+    entries; _analyze_layers now normalizes by the minimum, which is
+    value-identical for all non-negative inputs.
+    """
+    gc_module = importlib.import_module("dagua.layout.graph_classify")
+
+    shifted = torch.tensor([-3, -3, -2, -1, -1, -1], dtype=torch.long)
+    baseline = shifted - shifted.min()
+    assert gc_module._analyze_layers(shifted, 6) == gc_module._analyze_layers(baseline, 6)
+
+
+def test_build_layer_index_rejects_negative_layers() -> None:
+    """Negative layer IDs must fail loudly with a clear message.
+
+    Pins WP03-F14 (layer-index half): layer ``k`` maps to ``layer_offsets[k]``
+    so negative IDs have no slot; the previous behavior was an opaque
+    ``torch.bincount`` RuntimeError.
+    """
+    with pytest.raises(ValueError, match="non-negative"):
+        build_layer_index(torch.tensor([-1, 0, 1], dtype=torch.long))
+
+
+def test_multilevel_restore_imports_dominate_uses() -> None:
+    """Every _gc_restore/_ctypes_restore use must be dominated by its import.
+
+    Pins WP03-F07: ``import gc as _gc_restore`` lived inside the
+    checkpoint-offload conditional while a second cleanup block used the
+    alias under a different condition -- a latent NameError at n>10M with
+    offload_to_disk=False.
+    """
+    import ast
+
+    ml = importlib.import_module("dagua.layout.multilevel")
+    tree = ast.parse(Path(ml.__file__).read_text())
+
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def _conditional_chain(node: ast.AST) -> list[ast.AST]:
+        """Return the outermost-first chain of conditional ancestors."""
+        chain: list[ast.AST] = []
+        cur = parents.get(node)
+        while cur is not None:
+            if isinstance(cur, (ast.If, ast.Try, ast.While, ast.For)):
+                chain.append(cur)
+            cur = parents.get(cur)
+        return list(reversed(chain))
+
+    aliases = ("_gc_restore", "_ctypes_restore")
+    imports: dict[str, list[ast.stmt]] = {a: [] for a in aliases}
+    uses: dict[str, list[ast.expr]] = {a: [] for a in aliases}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname in aliases:
+                    imports[alias.asname].append(node)
+        elif isinstance(node, ast.Name) and node.id in aliases and isinstance(node.ctx, ast.Load):
+            uses[node.id].append(node)
+
+    for name in aliases:
+        assert imports[name], f"expected an import aliased {name} in multilevel.py"
+        assert uses[name], f"expected uses of {name} in multilevel.py"
+        chains = [_conditional_chain(imp) for imp in imports[name]]
+        for use in uses[name]:
+            use_chain = _conditional_chain(use)
+            dominated = any(
+                len(chain) <= len(use_chain)
+                and use_chain[: len(chain)] == chain
+                and imp.lineno < use.lineno
+                for chain, imp in zip(chains, imports[name])
+            )
+            assert dominated, (
+                f"{name} used at line {use.lineno} without a dominating import: "
+                "a conditional-scoped import can NameError at runtime (WP03-F07)"
+            )
