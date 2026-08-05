@@ -188,10 +188,15 @@ def test_explicit_dagua_native_forwards_user_config_to_pipeline(
     pos = dagua.layout(graph, config)
 
     assert pos.shape == (graph.num_nodes, 2)
-    assert captured["config"] is config
+    # Dispatch forwards an equal COPY of the caller's config (copy-before-
+    # mutate, WP-23): pin the forwarding contract, not object identity, and
+    # pin that the caller's object is never mutated.
+    assert captured["config"] == config
     assert captured["config"].edge_equalize_polish is False
     assert captured["config"].direction == "LR"
-    assert captured["config"].flex is flex
+    assert captured["config"].flex == flex
+    assert config.direction == "LR"
+    assert config.flex is flex
     assert captured["clusters"] is graph.clusters
     assert captured["cluster_parents"] is graph.cluster_parents
 
