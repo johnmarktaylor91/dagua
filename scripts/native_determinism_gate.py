@@ -546,6 +546,67 @@ def _run_once_child(
         queue.put(("error", repr(exc)))
 
 
+def _collect_child_payload(
+    process: Any,
+    queue: Any,
+    run_timeout_s: float,
+    label: str,
+) -> tuple[str, Any]:
+    """Drain the child's result queue BEFORE joining the child.
+
+    A ``GateRun`` payload larger than the queue's pipe buffer (~64KB of
+    telemetry is enough) blocks the child's queue feeder thread at exit, so
+    a join-before-get deadlocks and converts a SUCCESSFUL run into a false
+    ``GateRunTimeoutError``. This helper implements the documented
+    multiprocessing rule: get items off the queue while the child runs,
+    then join.
+
+    Parameters
+    ----------
+    process : Any
+        Child process handle (`is_alive()`/`exitcode` are consulted).
+    queue : Any
+        Multiprocessing queue carrying the ``(status, payload)`` tuple.
+    run_timeout_s : float
+        External wall-clock watchdog for the gate run.
+    label : str
+        Human-readable run label for error messages.
+
+    Returns
+    -------
+    tuple[str, Any]
+        The child's ``(status, payload)`` tuple.
+
+    Raises
+    ------
+    GateRunTimeoutError
+        When no payload arrives within ``run_timeout_s`` and the child is
+        still alive.
+    RuntimeError
+        When the child exits without publishing a payload.
+    """
+    import queue as queue_module
+
+    deadline = time.monotonic() + max(1.0, float(run_timeout_s))
+    while True:
+        try:
+            return queue.get(timeout=0.5)
+        except queue_module.Empty:
+            if not process.is_alive():
+                # Child exited: give the queue feeder one final flush window.
+                try:
+                    return queue.get(timeout=1.0)
+                except queue_module.Empty:
+                    raise RuntimeError(
+                        f"{label} child exited with code {process.exitcode} "
+                        "without publishing a result"
+                    ) from None
+            if time.monotonic() >= deadline:
+                raise GateRunTimeoutError(
+                    f"run timeout exceeded for {label} after {run_timeout_s:.1f}s"
+                ) from None
+
+
 def _run_once(
     test_graph: TestGraph,
     mode: str,
@@ -575,26 +636,25 @@ def _run_once(
     """
     context = mp.get_context("spawn")
     queue: Any = context.Queue(maxsize=1)
+    label = f"{test_graph.name} {mode}[{index}]"
     process = context.Process(
         target=_run_once_child,
         args=(test_graph.name, mode, index, timeout_s, queue),
         name=f"dagua-det-{test_graph.name}-{mode}-{index}",
     )
     process.start()
-    process.join(timeout=max(1.0, float(run_timeout_s)))
+    try:
+        status, payload = _collect_child_payload(process, queue, run_timeout_s, label)
+    except GateRunTimeoutError:
+        process.terminate()
+        process.join(timeout=5.0)
+        raise
+    process.join(timeout=30.0)
     if process.is_alive():
         process.terminate()
         process.join(timeout=5.0)
-        raise GateRunTimeoutError(
-            f"run timeout exceeded for {test_graph.name} {mode}[{index}] after {run_timeout_s:.1f}s"
-        )
-    if process.exitcode not in {0, None} and queue.empty():
-        raise RuntimeError(
-            f"{test_graph.name} {mode}[{index}] child exited with code {process.exitcode}"
-        )
-    status, payload = queue.get(timeout=1.0)
     if status == "error":
-        raise RuntimeError(f"{test_graph.name} {mode}[{index}] failed: {payload}")
+        raise RuntimeError(f"{label} failed: {payload}")
     return payload
 
 
@@ -893,7 +953,9 @@ def _run_parity_replay(args: argparse.Namespace) -> int:
         try:
             baseline = _run_once(test_graph, "idle-main", 0, args.timeout, run_timeout_s)
             replay = _run_once(test_graph, "ledger-replay", 0, args.timeout, run_timeout_s)
-        except GateRunTimeoutError as exc:
+        except RuntimeError as exc:
+            # Covers GateRunTimeoutError plus child crashes/error payloads so
+            # one bad graph cannot abort the replay with a traceback.
             failures.append(f"{graph_name}: {exc}")
             continue
         baseline_signature = _replay_signature(baseline)
@@ -1014,7 +1076,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     args.load_workers,
                 )
             )
-        except GateRunTimeoutError as exc:
+        except RuntimeError as exc:
+            # Covers GateRunTimeoutError plus child crashes/error payloads:
+            # every child failure must land in the PASS/FAIL summary instead
+            # of aborting the gate with a traceback and skipping the
+            # remaining graphs.
             failures.append(f"{graph_name}: {exc}")
             continue
         _print_runs(runs)
