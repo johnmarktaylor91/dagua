@@ -19,7 +19,6 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _D3DAG_GRAPH_KEY = "d3dag_graph"
-_D3DAG_LAYERS_KEY = "d3dag_layers"
 _D3DAG_LAYER_HEIGHT_KEY = "d3dag_layer_height"
 _D3DAG_WIDTH_KEY = "d3dag_width"
 
@@ -1009,6 +1008,10 @@ def _space_layer(graph: _D3DagSugiGraph, layer: Sequence[int], x_gap: float) -> 
     None
         Node x coordinates are updated in place.
     """
+    if not layer:
+        # Degenerate empty layer (zero-node graphs reached through direct op
+        # composition): nothing to space.
+        return
     last = layer[-1]
     last_x = graph.nodes[last].x
     after = [last_x]
@@ -1062,8 +1065,13 @@ def _coord_greedy(graph: _D3DagSugiGraph, x_gap: float) -> float:
     start = math.inf
     end = -math.inf
     for layer in graph.layers:
+        if not layer:
+            continue
         start = min(start, graph.nodes[layer[0]].x - _sep(graph, None, layer[0], x_gap))
         end = max(end, graph.nodes[layer[-1]].x + _sep(graph, layer[-1], None, x_gap))
+    if math.isinf(start):
+        # Degenerate zero-node graph: no populated layers, zero width.
+        return 0.0
     for node in {node for layer in graph.layers for node in layer}:
         graph.nodes[node].x -= start
     return end - start
