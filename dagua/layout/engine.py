@@ -232,7 +232,9 @@ def _layout_cluster_aware_pipeline(graph: Any, config: LayoutConfig) -> Optional
         clusters=graph.clusters,
         cluster_parents=graph.cluster_parents,
         edge_weights=getattr(graph, "edge_weights", None),
-        seed=config.seed or 42,
+        # ``is None`` check: a legitimate seed of 0 is falsy and must not be
+        # silently replaced by the default.
+        seed=42 if config.seed is None else config.seed,
     )
     driver = ClusterAwareDriver(
         inner_pipeline=inner_pipeline.ops,
@@ -1121,6 +1123,10 @@ def _effective_constraint_config(config: LayoutConfig, graph: Any) -> LayoutConf
             setattr(resolved, "_dagua_effective_constraints", True)
             return resolved
         resolved = _resolve_flex_ids(config, graph)
+        if resolved is config:
+            # _resolve_flex_ids returns the caller's object when there is no
+            # flex; copy before tagging so caller-owned state is never mutated.
+            resolved = copy.copy(config)
         setattr(resolved, "_dagua_effective_constraints", True)
         return resolved
 
@@ -1645,7 +1651,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
         warnings.warn(
             "dagua.layout: trace-enabled runs still use the legacy engine "
-            "Set "
+            "because the pipeline path does not record traces yet. Set "
             'algorithm="_legacy" to silence this warning, or pass trace=None '
             "to use the new default pipeline.",
             DeprecationWarning,
@@ -1656,6 +1662,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
         warnings.warn(
             "dagua.layout: relax_steps>0 still uses the legacy engine because "
+            "the pipeline path has no relaxation stage yet. "
             'Set algorithm="_legacy" '
             "to silence, or set relax_steps=0 to use the new default.",
             DeprecationWarning,
@@ -1685,6 +1692,13 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             config.direction = graph_direction
 
     if remapped_from_default:
+        # The scale gate is a DEFAULT-PATH contract only: an explicit
+        # ``LayoutConfig(algorithm="dagua_native")`` call bypasses sketch/route
+        # entirely at any N and enters the native pipeline directly. Note also
+        # that ``_layout_scale_default`` calls ``graph._prepare_for_layout()``
+        # before the scale strategies read ``graph.edge_index``, so they see
+        # acyclic-ized edges, while the native path below dispatches on the
+        # raw (possibly cyclic) edges. Both are intentional.
         from dagua.layout.scale.router import should_enter_scale_gate
 
         if should_enter_scale_gate(
@@ -1735,13 +1749,37 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         }
         if graph.edge_weights is not None:
             kwargs["edge_weights"] = graph.edge_weights
+        # Reject algorithm_params that would silently replace the graph
+        # topology or the config object itself. (``seed``, ``node_sizes`` and
+        # ``edge_weights`` remain effective overrides for compatibility.)
+        reserved_collisions = {"edge_index", "num_nodes", "config"} & set(config.algorithm_params)
+        if reserved_collisions:
+            raise ValueError(
+                "dagua.layout: algorithm_params may not override reserved dispatch "
+                f"kwargs {sorted(reserved_collisions)}; these are derived from the "
+                "graph and LayoutConfig."
+            )
         kwargs.update(config.algorithm_params)
+        if "fidelity_dtype" in config.algorithm_params:
+            warnings.warn(
+                "dagua.layout: algorithm_params['fidelity_dtype'] is ignored; "
+                "set LayoutConfig(fidelity_dtype=...) instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         kwargs["fidelity_dtype"] = config.fidelity_dtype
         # Forward steps if the pipeline accepts it
         sig = inspect.signature(pipeline_fn)
         if "steps" in sig.parameters and not (
             str(config.algorithm).lower() == "cise" and config.steps <= 0
         ):
+            if "steps" in config.algorithm_params:
+                warnings.warn(
+                    "dagua.layout: algorithm_params['steps'] is ignored; "
+                    "set LayoutConfig(steps=...) instead.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             kwargs["steps"] = config.steps
 
         # Classify once here, where the real DaguaGraph is in scope, so an
@@ -1763,6 +1801,10 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 graph.edge_index,
                 graph.num_nodes,
                 graph=graph,
+                # Respect the caller's device: an explicit device="cpu" run
+                # must not launch CUDA work for classification layering.
+                # Output is device-independent (integer longest-path layers).
+                device=config.device,
             )
 
         # Forward user-facing state into the pipeline regardless of how the
@@ -1799,6 +1841,16 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             ]
 
         accepted = set(sig.parameters.keys())
+        # Surface user params the pipeline signature does not accept: the
+        # filter below silently drops them (misspelled params used to vanish).
+        dropped_user_params = set(config.algorithm_params) - accepted
+        if dropped_user_params:
+            warnings.warn(
+                f"dagua.layout: algorithm_params {sorted(dropped_user_params)} are "
+                f"not accepted by algorithm {config.algorithm!r} and were ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
         kwargs = {k: v for k, v in kwargs.items() if k in accepted}
 
         if remapped_from_default:
@@ -1905,7 +1957,9 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             # graphs keep the exact prior path (None -> _layout_inner
             # classifies internally, identical inputs).
             if getattr(graph, "is_semantically_directed", None) is not None:
-                legacy_graph_structure = classify_graph(edge_index, n, graph=graph)
+                legacy_graph_structure = classify_graph(
+                    edge_index, n, graph=graph, device=config.device
+                )
 
             pos = _layout_inner(
                 edge_index,
@@ -4881,13 +4935,18 @@ def _resolve_flex_ids(config: LayoutConfig, graph) -> LayoutConfig:
 
 
 def _resolve_config_flex(config: LayoutConfig, graph) -> LayoutConfig:
-    """Create a config copy with flex node IDs resolved to indices."""
+    """Create a config copy with flex node IDs resolved to indices.
+
+    Never mutates the caller's config or flex objects: both are copied before
+    the graph back-reference is attached.
+    """
     import copy as _c
 
     resolved_flex = _resolve_graph_flex(config.flex, graph)
     if resolved_flex is config.flex:
-        setattr(config.flex, "_constraint_context_graph", graph)
-        return config
+        # Belt-and-braces: _resolve_graph_flex copies before tagging, so this
+        # branch should not fire; copy anyway so caller state is never touched.
+        resolved_flex = _c.copy(config.flex)
     new_config = _c.copy(config)
     new_config.flex = resolved_flex
     setattr(new_config.flex, "_constraint_context_graph", graph)
@@ -5049,8 +5108,14 @@ def _resolve_graph_flex(flex, graph):
         changed = changed or resolved is not constraint
 
     if not changed:
-        setattr(flex, "_constraint_context_graph", graph)
-        return flex
+        # Copy before attaching the graph back-reference: ``flex`` may be the
+        # caller's (or the graph's) own object, and tagging it in place both
+        # mutates caller-owned state and pins a graph reference onto it.
+        import copy as _c
+
+        resolved_flex = _c.copy(flex)
+        setattr(resolved_flex, "_constraint_context_graph", graph)
+        return resolved_flex
 
     resolved_flex = LayoutFlex(
         node_sep=flex.node_sep,

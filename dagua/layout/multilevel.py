@@ -2462,6 +2462,13 @@ def multilevel_layout(
             coarsest = levels[-1]
             _vlog(f"Phase 1/3: Restored hierarchy ({n:,} nodes)... {len(levels)} levels")
 
+            # Imported unconditionally: both cleanup blocks below use these,
+            # and the second block runs even when the checkpoint-offload block
+            # is skipped (importing only there raised NameError at n>10M with
+            # offload_to_disk=False).
+            import ctypes as _ctypes_restore
+            import gc as _gc_restore
+
             # Free earlier restored levels FIRST — they're not needed for
             # continued coarsening and hold 40-60GB at billion-node scale.
             _hier_dir = getattr(graph, "_hierarchy_checkpoint_dir", None)
@@ -2472,12 +2479,9 @@ def multilevel_layout(
                         lvl.edge_index = None
                         lvl.node_sizes = None
                         lvl.offload_path = ckpt_path
-                import gc as _gc_restore
 
                 _gc_restore.collect()
                 try:
-                    import ctypes as _ctypes_restore
-
                     _ctypes_restore.CDLL("libc.so.6").malloc_trim(0)
                 except OSError:
                     pass
