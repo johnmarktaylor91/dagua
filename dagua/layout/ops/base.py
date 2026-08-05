@@ -83,6 +83,53 @@ def finite_checkpoint_or_restore(
     return fallback, fallback.detach().clone()
 
 
+def _adopt_restored_positions(
+    pos: torch.Tensor,
+    restored: torch.Tensor,
+) -> torch.Tensor:
+    """Adopt restored positions without orphaning optimizer references.
+
+    ``finite_checkpoint_or_restore`` returns ``pos`` itself when it is
+    already finite; on the restore/fallback path it returns a NEW detached
+    tensor. Rebinding ``state.pos`` to that new tensor would orphan any
+    optimizer built over the original tensor (``state.optimizer`` holds a
+    reference to ``pos``): losses would evaluate on the grad-less
+    replacement, backward would be skipped by the degenerate-loss guards,
+    and ``optimizer.step()`` would keep updating the stale tensor -- the
+    remaining iterations would spin as silent no-ops. To keep the
+    optimizer attached, copy the restored values into the existing tensor
+    in place (preserving object identity and ``requires_grad``) whenever
+    ``pos`` is a leaf of matching shape. Stale gradients from the
+    discarded non-finite trajectory are cleared so the next backward
+    starts clean.
+
+    This helper only ever fires on the non-finite fallback path; healthy
+    (all-finite) runs are byte-unaffected.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        The tensor currently bound to ``state.pos`` (non-finite when the
+        restore path fired).
+    restored : torch.Tensor
+        Finite replacement returned by ``finite_checkpoint_or_restore``.
+
+    Returns
+    -------
+    torch.Tensor
+        ``pos`` (mutated in place) when identity can be preserved,
+        otherwise ``restored``.
+    """
+    if restored is pos:
+        return pos
+    if pos.is_leaf and tuple(pos.shape) == tuple(restored.shape):
+        with torch.no_grad():
+            pos.copy_(restored)
+        pos.grad = None
+        return pos
+    return restored
+
+
 # ---------------------------------------------------------------------------
 # Op -- base class for all operations
 # ---------------------------------------------------------------------------
@@ -248,7 +295,12 @@ class LossOp(Op):
             State with ``prev_loss`` updated.
         """
         loss = self.evaluate(problem, state, ctx)
-        loss.backward()
+        # Match LossGroup's degenerate-loss guard: constant losses with no
+        # gradient path (e.g. alignment with 1 node, crossing on graphs
+        # with 0 edges) cannot drive backward. Record the value and skip
+        # the gradient step instead of crashing.
+        if loss.requires_grad:
+            loss.backward()
         state.prev_loss = loss.item()
         return state
 
@@ -328,7 +380,8 @@ class Pipeline(Op):
         """
         last_finite_pos: Optional[torch.Tensor] = None
         if state.pos is not None:
-            state.pos, last_finite_pos = finite_checkpoint_or_restore(state.pos, None)
+            finite_pos, last_finite_pos = finite_checkpoint_or_restore(state.pos, None)
+            state.pos = _adopt_restored_positions(state.pos, finite_pos)
         for op in self.ops:
             if self.trace_between:
                 ctx.trace_sink.op_start(op.name, state.step)
@@ -336,10 +389,11 @@ class Pipeline(Op):
                     ctx.trace_sink.snapshot(state.pos, state.step)
             state = op.apply(problem, state, ctx)
             if state.pos is not None:
-                state.pos, last_finite_pos = finite_checkpoint_or_restore(
+                finite_pos, last_finite_pos = finite_checkpoint_or_restore(
                     state.pos,
                     last_finite_pos,
                 )
+                state.pos = _adopt_restored_positions(state.pos, finite_pos)
             state.ops_applied.append(op.name)
             if len(state.ops_applied) > 100:
                 state.ops_applied = state.ops_applied[-100:]

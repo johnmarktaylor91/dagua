@@ -8,6 +8,7 @@ from typing import List
 import pytest
 import torch
 
+from dagua.layout.ops import loss_classic as loss_classic_module
 from dagua.layout.ops.anneal import LinearCool, LRDecay, LRDecayConfig
 from dagua.layout.ops.base import Conditional, EarlyBreak, LossGroup, LossOp, Op, Pipeline, Repeat
 from dagua.layout.ops.coarsen import HeavyEdgeMatching
@@ -19,6 +20,7 @@ from dagua.layout.ops.converge import (
 )
 from dagua.layout.ops.coordinate import BrandesKopf4Pass
 from dagua.layout.ops.distance import AllPairsShortestPaths
+from dagua.layout.ops.embed import PerplexityMatch
 from dagua.layout.ops.force import (
     ApplyDisplacement,
     InverseDistanceRepulsion,
@@ -35,6 +37,7 @@ from dagua.layout.ops.init import (
 from dagua.layout.ops.layering import InsertDummyNodes, LayerPromotion, LongestPathLayering
 from dagua.layout.ops.loss_classic import (
     ExactPairStressLoss,
+    KLDivergenceLoss,
     LinLogAttractionLoss,
     LinLogRepulsionLoss,
 )
@@ -45,6 +48,7 @@ from dagua.layout.ops.optimize import (
     CreateOptimizer,
     CreateOptimizerConfig,
     OptimizerStep,
+    OptimizerZeroGrad,
 )
 from dagua.layout.ops.ordering import BarycenterSweep
 from dagua.layout.ops.postprocess import (
@@ -882,3 +886,229 @@ def test_full_fr_pipeline_converges_on_a_five_node_graph() -> None:
     assert history
     assert result.converged is True
     assert history[-1] <= threshold
+
+
+class _InjectNaNAtStep(Op):
+    """Test helper that poisons ``state.pos`` in place on a chosen step."""
+
+    name = "inject_nan_at_step"
+    category = "test"
+
+    def __init__(self, at_step: int) -> None:
+        """Store the step index on which to inject non-finite positions.
+
+        Parameters
+        ----------
+        at_step : int
+            ``state.step`` value that triggers the one-shot NaN injection.
+        """
+
+        self.at_step = at_step
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Fill positions with NaN once when the trigger step is reached.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph inputs. Unused.
+        state : SolveState
+            Mutable solve state whose positions get poisoned.
+        ctx : RuntimeContext
+            Runtime context. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with in-place NaN positions on the trigger step.
+        """
+
+        del problem, ctx
+        if state.step == self.at_step and state.pos is not None:
+            with torch.no_grad():
+                state.pos.fill_(float("nan"))
+        return state
+
+
+class _RecordLossTrace(Op):
+    """Test helper that records ``state.prev_loss`` once per iteration."""
+
+    name = "record_loss_trace"
+    category = "test"
+
+    def __init__(self) -> None:
+        """Initialize an empty loss trace."""
+
+        self.trace: List[float] = []
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Append the current loss to the trace.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph inputs. Unused.
+        state : SolveState
+            Mutable solve state carrying ``prev_loss``.
+        ctx : RuntimeContext
+            Runtime context. Unused.
+
+        Returns
+        -------
+        SolveState
+            Unmodified state.
+        """
+
+        del problem, ctx
+        self.trace.append(state.prev_loss)
+        return state
+
+
+def test_pipeline_nan_restore_keeps_optimizer_attached_and_optimization_resumes() -> None:
+    """A mid-loop non-finite boundary must not orphan the optimizer.
+
+    Regression test for the NaN-restore optimizer orphan: the restore path
+    used to rebind ``state.pos`` to a detached tensor, so the optimizer
+    kept stepping the stale tensor and every remaining iteration became a
+    silent no-op. After the fix, the restore copies values in place, the
+    optimizer stays attached, and the loss keeps decreasing after the
+    injected NaN.
+    """
+
+    problem = _path_problem(5, seed=21)
+    recorder = _RecordLossTrace()
+    injection_step = 4
+    pipeline = Pipeline(
+        [
+            RandomUniformInit(),
+            CreateOptimizer(CreateOptimizerConfig(optimizer_type="sgd", lr=0.05)),
+            Repeat(
+                10,
+                [
+                    OptimizerZeroGrad(),
+                    LossGroup([_QuadraticLoss(scale=1.0, label="nan-restore")]),
+                    OptimizerStep(),
+                    recorder,
+                    _InjectNaNAtStep(at_step=injection_step),
+                ],
+            ),
+        ]
+    )
+
+    result = pipeline.apply(problem, SolveState(total_steps=10), _runtime_context(seed=21))
+
+    assert result.pos is not None
+    assert torch.isfinite(result.pos).all()
+    # The optimizer must still hold the very tensor bound to state.pos.
+    assert result.optimizer is not None
+    assert result.optimizer.param_groups[0]["params"][0] is result.pos
+    assert result.pos.requires_grad
+    # Optimization resumed after the restore: post-restore iterations keep
+    # strictly decreasing the quadratic loss (orphaned-optimizer behavior
+    # freezes the trace after the injection instead).
+    assert len(recorder.trace) == 10
+    post_restore = recorder.trace[injection_step + 1 :]
+    for earlier, later in zip(post_restore, post_restore[1:]):
+        assert later < earlier
+
+
+def test_loss_op_standalone_apply_skips_backward_on_constant_loss() -> None:
+    """Standalone ``LossOp.apply`` must match LossGroup's degenerate guard.
+
+    A loss with no gradient path (e.g. crossing count on a graph with zero
+    edges) used to crash standalone ``apply()`` with a backward error while
+    the same op inside a ``LossGroup`` was guarded.
+    """
+
+    @dataclass
+    class _ConstantLoss(LossOp):
+        name: str = "constant_loss"
+        category: str = "test"
+        weight_key: str = ""
+        default_weight: float = 1.0
+
+        def evaluate(
+            self,
+            problem: LayoutProblem,
+            state: SolveState,
+            ctx: RuntimeContext,
+        ) -> torch.Tensor:
+            del problem, ctx, state
+            return torch.tensor(0.5)
+
+    problem = _path_problem(3, seed=3)
+    state = SolveState(pos=torch.randn(3, 2))
+
+    result = _ConstantLoss().apply(problem, state, _runtime_context(seed=3))
+
+    assert result.prev_loss == pytest.approx(0.5)
+
+
+def test_loss_op_standalone_apply_still_backwards_differentiable_losses() -> None:
+    """The degenerate-loss guard must not skip real gradient paths."""
+
+    problem = _path_problem(3, seed=4)
+    pos = torch.randn(3, 2, requires_grad=True)
+    state = SolveState(pos=pos)
+
+    result = _QuadraticLoss(scale=1.0, label="standalone").apply(
+        problem,
+        state,
+        _runtime_context(seed=4),
+    )
+
+    assert pos.grad is not None
+    assert torch.isfinite(pos.grad).all()
+    assert result.prev_loss == pytest.approx(pos.square().sum().item())
+
+
+def test_perplexity_match_output_feeds_kl_divergence_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composing PerplexityMatch + KLDivergenceLoss must hit the cache.
+
+    The producer publishes ``extras["tsne_probabilities"]`` (the resolver's
+    key), so ``KLDivergenceLoss.evaluate`` must NOT fall back to the
+    ``[N, N]`` perplexity recompute path on any step.
+    """
+
+    calls = {"count": 0}
+    original = loss_classic_module._tsnet._high_dimensional_affinities
+
+    def _counting_affinities(*args: object, **kwargs: object) -> torch.Tensor:
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        loss_classic_module._tsnet,
+        "_high_dimensional_affinities",
+        _counting_affinities,
+    )
+
+    problem = _path_problem(4, seed=9)
+    state = SolveState(pos=torch.randn(4, 2, requires_grad=True))
+    ctx = _runtime_context(seed=9)
+    state = BuildAdjacency().apply(problem, state, ctx)
+    state = AllPairsShortestPaths().apply(problem, state, ctx)
+    state = PerplexityMatch().apply(problem, state, ctx)
+
+    assert "tsne_probabilities" in state.extras
+    assert state.extras["tsne_probabilities"] is state.extras["probabilities"]
+
+    loss_op = KLDivergenceLoss()
+    first = loss_op.evaluate(problem, state, ctx)
+    second = loss_op.evaluate(problem, state, ctx)
+
+    assert calls["count"] == 0
+    assert torch.isfinite(first).all()
+    assert torch.isfinite(second).all()
