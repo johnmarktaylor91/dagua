@@ -168,3 +168,69 @@ def test_public_repulsive_wrapper_can_force_quadtree_path() -> None:
             dtype=torch.float64,
         ),
     )
+
+
+def test_from_points_returns_none_for_empty_point_set() -> None:
+    """An empty coordinate tensor should build no tree, matching Graphviz."""
+    tree = GraphvizQuadTree.from_points(
+        coordinates=torch.empty((0, 2), dtype=torch.float64),
+        max_level=4,
+    )
+
+    assert tree is None
+
+
+def test_single_point_tree_supports_all_queries() -> None:
+    """A one-point tree should answer nearest / supernode queries safely."""
+    tree = GraphvizQuadTree.from_points(
+        coordinates=torch.tensor([[3.0, -1.0]], dtype=torch.float64),
+        max_level=4,
+    )
+
+    assert tree is not None
+    assert tree.n == 1
+    assert tree.average == [3.0, -1.0]
+
+    coord, node_id, distance = tree.get_nearest(point=[3.0, 0.0])
+    torch.testing.assert_close(coord, torch.tensor([3.0, -1.0], dtype=torch.float64))
+    assert node_id == 0
+    assert distance == 1.0
+
+    # The only stored point is the query node itself -> no supernodes.
+    centers, weights, distances, _ = tree.get_supernodes(bh=0.5, pt=[3.0, -1.0], node_id=0)
+    assert centers.shape == (0, 2)
+    assert weights.numel() == 0
+    assert distances.numel() == 0
+
+
+def test_public_repulsive_wrapper_handles_degenerate_point_sets() -> None:
+    """Empty / single / coincident point sets should stay finite and shaped."""
+    empty = graphviz_spring_electrical_repulsive_forces(
+        positions=torch.empty((0, 2), dtype=torch.float64),
+        repulsive_scale=1.0,
+        repulsive_exponent=-1.0,
+        theta=0.2,
+    )
+    assert empty.shape == (0, 2)
+
+    single = graphviz_spring_electrical_repulsive_forces(
+        positions=torch.tensor([[1.0, 2.0]], dtype=torch.float64),
+        repulsive_scale=1.0,
+        repulsive_exponent=-1.0,
+        theta=0.2,
+    )
+    torch.testing.assert_close(single, torch.zeros((1, 2), dtype=torch.float64))
+
+    # All-coincident points exercise the MINDIST clamp on both the exact
+    # path (default threshold) and the forced quadtree path.
+    coincident = torch.zeros((5, 2), dtype=torch.float64)
+    for quadtree_size in (45, 0):
+        force = graphviz_spring_electrical_repulsive_forces(
+            positions=coincident,
+            repulsive_scale=1.0,
+            repulsive_exponent=-1.0,
+            theta=0.2,
+            quadtree_size=quadtree_size,
+        )
+        assert force.shape == (5, 2)
+        assert bool(torch.isfinite(force).all())
