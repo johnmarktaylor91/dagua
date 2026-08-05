@@ -13,7 +13,6 @@ from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
-_ZERO_DISTANCE = 1.0e-10
 _DERIVATIVE_DISTANCE_EPS = 1.0e-9
 _LAGRANGIAN_TOLERANCE = -1.0e-4
 _ZERO_UPPERBOUND = -1.0e-10

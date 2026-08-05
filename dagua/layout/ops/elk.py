@@ -304,6 +304,10 @@ def _node_sizes(problem: LayoutProblem) -> torch.Tensor:
         return sizes
     sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float64)
     if sizes.shape != (problem.num_nodes, 2):
+        if problem.num_nodes == 0 and sizes.numel() == 0:
+            # Degenerate empty graphs may carry a 0-element size tensor of any
+            # shape (e.g. ``[0]`` from size computation on zero nodes).
+            return sizes.reshape(0, 2)
         raise ValueError("node_sizes must have shape [N, 2].")
     return sizes
 
@@ -1366,99 +1370,6 @@ def _layer_x_coordinates(
             coordinates[node] = cursor
             cursor += float(sizes[node, 0]) + node_spacing
     return coordinates
-
-
-def _normalize_long_edges_for_bk(
-    layers: Sequence[Sequence[int]],
-    predecessors: Mapping[int, Sequence[int]],
-    successors: Mapping[int, Sequence[int]],
-    sizes: torch.Tensor,
-) -> Tuple[
-    List[List[NodeId]],
-    Dict[NodeId, List[NodeId]],
-    Dict[NodeId, List[NodeId]],
-    Dict[NodeId, float],
-    Set[NodeId],
-]:
-    """Split long edges into dummy chains for Brandes-Koepf placement.
-
-    Parameters
-    ----------
-    layers : sequence[sequence[int]]
-        Ordered real-node layers.
-    predecessors : mapping[int, sequence[int]]
-        Real-node predecessor lists.
-    successors : mapping[int, sequence[int]]
-        Real-node successor lists.
-    sizes : torch.Tensor
-        Real node sizes with shape ``[N, 2]``.
-
-    Returns
-    -------
-    tuple
-        Normalized layers, predecessor map, successor map, width map, and the
-        set of dummy node ids introduced for long edge segments.
-    """
-    layer_by_node = {
-        node: layer_index for layer_index, layer in enumerate(layers) for node in layer
-    }
-    normalized_layers: List[List[NodeId]] = [list(layer) for layer in layers]
-    normalized_predecessors: Dict[NodeId, List[NodeId]] = {
-        node: [] for layer in normalized_layers for node in layer
-    }
-    normalized_successors: Dict[NodeId, List[NodeId]] = {
-        node: [] for layer in normalized_layers for node in layer
-    }
-    widths: Dict[NodeId, float] = {
-        node: float(sizes[node, 0]) for layer in layers for node in layer
-    }
-    dummy_nodes: Set[NodeId] = set()
-
-    def add_segment(source: NodeId, target: NodeId) -> None:
-        """Add one normalized edge segment.
-
-        Parameters
-        ----------
-        source : Hashable
-            Segment source node id.
-        target : Hashable
-            Segment target node id.
-
-        Returns
-        -------
-        None
-            Normalized predecessor and successor maps are updated in place.
-        """
-        normalized_successors.setdefault(source, []).append(target)
-        normalized_predecessors.setdefault(target, []).append(source)
-
-    edge_index = 0
-    for source in sorted(successors):
-        for target in successors[source]:
-            source_layer = layer_by_node[source]
-            target_layer = layer_by_node[target]
-            span = target_layer - source_layer
-            if abs(span) <= 1:
-                add_segment(source, target)
-                continue
-            step = 1 if span > 0 else -1
-            previous: NodeId = source
-            for layer_index in range(source_layer + step, target_layer, step):
-                dummy: NodeId = ("elk_dummy", edge_index, layer_index)
-                dummy_nodes.add(dummy)
-                widths[dummy] = 0.0
-                insertion_layer = normalized_layers[layer_index]
-                insertion_layer.append(dummy)
-                add_segment(previous, dummy)
-                previous = dummy
-            add_segment(previous, target)
-            edge_index += 1
-
-    for node in list(normalized_predecessors):
-        normalized_predecessors[node] = list(dict.fromkeys(normalized_predecessors[node]))
-    for node in list(normalized_successors):
-        normalized_successors[node] = list(dict.fromkeys(normalized_successors[node]))
-    return normalized_layers, normalized_predecessors, normalized_successors, widths, dummy_nodes
 
 
 def _normalize_long_edges_for_elk_bk(

@@ -725,7 +725,12 @@ class DagrePrepareGraph(Op):
         else:
             sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float64)
             if sizes.shape != (problem.num_nodes, 2):
-                raise ValueError("node_sizes must have shape [N, 2].")
+                if problem.num_nodes == 0 and sizes.numel() == 0:
+                    # Degenerate empty graphs may carry a 0-element size
+                    # tensor of any shape (e.g. ``[0]``).
+                    sizes = sizes.reshape(0, 2)
+                else:
+                    raise ValueError("node_sizes must have shape [N, 2].")
         weights = (
             torch.ones(edge_index.shape[1], dtype=torch.float64)
             if problem.edge_weights is None
