@@ -108,13 +108,14 @@ _PLANTED_PARTITION_GRAPH_NAMES = {
 _RENDER_POINTS_PER_NATIVE_UNIT = 72.0
 # Engines whose stored coordinates are graph-display inches or unit-box/unit-cloud
 # clouds; the scorer multiplies their positions by 72.0 before scoring. Membership
-# is a STATIC per-engine store-unit convention audited from saved-tensor spans
-# (WP-06 scale table, GLaDOS-prep) -- it is never inferred from a row's span at
-# scoring time. NOT members (deliberately): coregd_reference, coregd_reimpl,
-# nnpnet_reference, drgraph_reimpl, omega_reimpl -- their outputs are so collapsed
-# that x72 still leaves rows degenerate (escalation CB-6, WP06-F03); and
-# sparse_stress_reimpl, which has never produced an ok row locally -- audit its
-# unit convention before adding (WP06-F09; keep the sparse_stress pair documented).
+# is a STATIC per-engine store-unit convention audited from measured layout spans
+# (WP-06 scale table + drywell R1-B3-F1 revived-engine audit, GLaDOS-prep) -- it is
+# never inferred from a row's span at scoring time. NOT members (deliberately):
+# coregd_reference, coregd_reimpl, nnpnet_reference, drgraph_reimpl, omega_reimpl
+# -- their outputs are so collapsed that x72 still leaves rows degenerate
+# (escalation CB-6, WP06-F03); drgraph_reference -- same CB-6 class as its reimpl
+# twin (drywell R1-B3-F1), NOT a mechanical add; and openord -- unavailable in this
+# env (binary absent, records clean skips), audit its span if it ever produces rows.
 _NATIVE_UNIT_ENGINES = frozenset(
     {
         "backbone",
@@ -122,9 +123,13 @@ _NATIVE_UNIT_ENGINES = frozenset(
         "classic_fr_kk",
         "classic_kk",
         "classic_linlog",
+        "classic_neulay",
         "classic_sgd2_multi",
         "classic_spectral",
+        "classic_stress_maj",
+        "classic_stress_sgd",
         "classic_sugiyama",
+        "classic_umap",
         "d3_cluster_radial_reimpl",
         "d3_cluster_reimpl",
         "d3_tree_radial_reimpl",
@@ -133,6 +138,7 @@ _NATIVE_UNIT_ENGINES = frozenset(
         "deepgd_reference",
         "deepgd_reimpl",
         "dot",
+        "largevis_reference",
         "largevis_reimpl",
         "linlog",
         "mulment_reference",
@@ -161,10 +167,12 @@ _NATIVE_UNIT_ENGINES = frozenset(
         "pacmap",
         "pacmap_reimpl",
         "sgd2_multi_ref",
+        "sklearn_smacof_nonmetric",
         "smacof_nonmetric_reimpl",
         "smartgd_reference",
         "smartgd_reimpl",
         "sparse_stress",
+        "sparse_stress_reimpl",
         "tfdp",
         "tfdp_reimpl",
         "umap_graph",
