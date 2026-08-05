@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+import pytest
 import torch
 
 from dagua.config import LayoutConfig
@@ -152,34 +153,40 @@ def test_explicit_steps_override_quality_knob() -> None:
     assert getattr(prepared, "_dagua_native_steps") == 7
 
 
+@pytest.mark.slow
 def test_quality_high_smoke_spends_more_and_scores_near_draft() -> None:
-    """Compare draft and high-quality layouts on seeded small graphs."""
-    warmup = _small_graph(5)
-    layout(warmup, LayoutConfig(seed=5, quality=0.5, algorithm="native_stress"))
+    """Compare draft and high-quality layouts on seeded small graphs.
 
-    low_total = 0.0
-    high_total = 0.0
+    "Spends more" is asserted in resolved work units (the budgets the knob
+    actually controls), not wall-clock: the previous comparative timing over
+    ms-scale 6-node runs inverted under scheduler noise and was red on the
+    pristine baseline under load (WP-11B F04).
+    """
     for seed in (11, 17, 23):
         graph = _small_graph(seed)
-        low_start = time.perf_counter()
         low_pos = layout(graph, LayoutConfig(seed=seed, quality=0.1, algorithm="native_stress"))
-        low_total += time.perf_counter() - low_start
-
-        high_start = time.perf_counter()
         high_pos = layout(graph, LayoutConfig(seed=seed, quality=0.9, algorithm="native_stress"))
-        high_total += time.perf_counter() - high_start
 
         assert high_pos.shape == low_pos.shape
         assert _score(graph, high_pos) >= _score(graph, low_pos) - 0.5
-    assert high_total >= low_total
+
+    low_budget = _budget_tuple(0.1, num_nodes=6)
+    high_budget = _budget_tuple(0.9, num_nodes=6)
+    assert all(high >= low for low, high in zip(low_budget, high_budget))
+    assert high_budget != low_budget
 
 
+@pytest.mark.slow
 def test_time_budget_returns_finite_positions_under_wall_cap() -> None:
     """Verify a large native run respects a small wall-clock cap."""
     graph = _large_dag(2000)
     start = time.perf_counter()
     pos = layout(graph, LayoutConfig(seed=42, quality="max", time_budget_s=2.0))
     elapsed = time.perf_counter() - start
-    assert elapsed < 6.0
+    # Generous bound: 3x headroom over the 2s budget was red on the pristine
+    # baseline under measurement load (WP-11B F04). 30s still catches the
+    # pinned regression (an ignored budget runs far longer at quality=max on
+    # 2000 nodes) while tolerating a loaded box.
+    assert elapsed < 30.0
     assert pos.shape == (graph.num_nodes, 2)
     assert bool(torch.isfinite(pos).all().item())

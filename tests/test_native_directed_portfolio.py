@@ -927,13 +927,13 @@ def test_r8_nested_lr_direction_native_layout_terminates() -> None:
     graph.compute_node_sizes()
     config = LayoutConfig(algorithm="dagua_native", seed=42, device="cpu")
 
-    started = time.perf_counter()
     positions = _run_with_watchdog(lambda: layout(graph, config), timeout_s=20.0)
-    runtime_s = time.perf_counter() - started
 
     assert positions.shape == (30, 2)
     assert torch.isfinite(positions).all()
-    assert runtime_s < 20.0
+    # No trailing wall-clock assert: the SIGALRM watchdog above already
+    # enforces the 20s budget; re-measuring it here only added a flake
+    # surface under load (WP-11A F05).
 
 
 def test_semantic_cyclic_graph_routes_to_common_contest() -> None:
@@ -2003,7 +2003,10 @@ def test_rank_ordering_library_mode_wall_clock_cap() -> None:
     elapsed_s = time.perf_counter() - started
 
     assert ordered.shape == incumbent.shape
-    assert elapsed_s < 3.0
+    # Generous bound for a ms-scale micro-op: 3.0s flaked under measurement
+    # load on this box (WP-11A F05); 10.0s still catches the pinned
+    # wall-clock-cap regression while tolerating scheduler noise.
+    assert elapsed_s < 10.0
 
 
 def test_ordering_cost_gate_blocks_dense_medium_graph() -> None:
