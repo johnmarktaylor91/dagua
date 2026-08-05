@@ -79,24 +79,29 @@ def rank_candidates(
     Raises
     ------
     ValueError
-        If a corpus contains duplicate basenames (position files and resume
-        keys would collide downstream -- WP10-F05).
+        If a corpus contains duplicate STEMS (WP10-F05; Sol WP-25 review
+        HIGH-2). The runner keys every loaded graph ``f"{corpus}/{stem}"``,
+        so ``rome/a.graph`` and ``rome/a.gml`` collide in position files and
+        resume keys even though their basenames differ -- the guard must key
+        on the stem, and abort BEFORE anything is written.
     """
     per_corpus: Dict[str, List[Tuple[str, str, str]]] = {}
-    seen: Dict[Tuple[str, str], int] = {}
-    duplicates: List[str] = []
+    stem_sources: Dict[Tuple[str, str], List[str]] = {}
     for corpus, filename in candidates:
-        key = (corpus, filename)
-        seen[key] = seen.get(key, 0) + 1
-        if seen[key] == 2:
-            duplicates.append(f"{corpus}/{filename}")
+        stem_key = (corpus, PurePosixPath(filename).stem)
+        stem_sources.setdefault(stem_key, []).append(filename)
         per_corpus.setdefault(corpus, []).append(
             (rank_hash(seed_string, corpus, filename), corpus, filename)
         )
+    duplicates = sorted(
+        f"{corpus}/{stem} <- {sorted(filenames)}"
+        for (corpus, stem), filenames in stem_sources.items()
+        if len(filenames) > 1
+    )
     if duplicates:
         raise ValueError(
-            "duplicate basenames within a corpus (would collide in position "
-            f"files and resume keys): {sorted(duplicates)}"
+            "duplicate stems within a corpus (the runner keys rows "
+            f"'corpus/stem'; position files and resume keys would collide): {duplicates}"
         )
     for corpus in per_corpus:
         per_corpus[corpus].sort()
