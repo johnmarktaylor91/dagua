@@ -1196,6 +1196,14 @@ def _row_layout_worker(
     -------
     None
     """
+    # Own session/process group FIRST: field adapters launch their own
+    # binaries (dot, java, node, ogdf_runner, ...), and the parent's RSS/
+    # timeout watchdog must be able to kill the ENTIRE tree it measures via
+    # killpg, not just this wrapper (Sol WP-25 review, HIGH-1).
+    try:
+        os.setsid()
+    except OSError:
+        pass
     try:
         from dagua.eval.competitors import get_competitor
 
@@ -1250,6 +1258,59 @@ def _row_layout_worker(
         except BaseException:  # noqa: BLE001
             pass
         os._exit(1)
+
+
+def _kill_process_tree(process: mp.process.BaseProcess) -> None:
+    """Kill a row child AND every descendant it spawned (Sol HIGH-1).
+
+    The RSS watchdog measures the wrapper plus its recursive descendants
+    (:func:`_child_tree_rss_bytes`); containment is only real if the same
+    tree dies on memkill/timeout. Two mechanisms, layered:
+
+    1. The row child calls ``os.setsid()`` at startup, so its pgid equals its
+       pid and ``os.killpg`` reaches every descendant that did not change its
+       own process group (the common case for adapter-spawned binaries).
+    2. A psutil descendant snapshot taken BEFORE the group kill is reaped
+       individually afterwards, covering descendants that moved themselves to
+       another group (psutil guards pid reuse via creation-time identity).
+
+    No-op for a child that already exited cleanly.
+
+    Parameters
+    ----------
+    process : multiprocessing process
+        Row child wrapper.
+
+    Returns
+    -------
+    None
+    """
+    import signal
+
+    import psutil
+
+    if process.pid is None or not process.is_alive():
+        return
+    try:
+        descendants = psutil.Process(process.pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        descendants = []
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        process.terminate()
+    process.join(5.0)
+    if process.is_alive():
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            process.kill()
+        process.join()
+    for descendant in descendants:
+        try:
+            descendant.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
 
 
 def _child_tree_rss_bytes(pid: int) -> Optional[int]:
@@ -1530,7 +1591,7 @@ class RowExecutor:
 
     @staticmethod
     def _kill(process: mp.process.BaseProcess) -> None:
-        """Terminate/kill/join a child process (r79 ladder).
+        """Kill the whole row-process tree (see :func:`_kill_process_tree`).
 
         Parameters
         ----------
@@ -1541,12 +1602,7 @@ class RowExecutor:
         -------
         None
         """
-        if process.is_alive():
-            process.terminate()
-            process.join(5.0)
-            if process.is_alive():
-                process.kill()
-                process.join()
+        _kill_process_tree(process)
 
     @staticmethod
     def _cleanup(*paths: Path) -> None:
@@ -1702,7 +1758,15 @@ def compute_tally(
     """
     import scripts.native_sprint_score as nss
 
-    scored = [row for row in rows if row.get("status") == "OK" and row.get("v3_tiered") is not None]
+    # Stable input order: field rows complete on concurrent worker threads,
+    # and the imported _selection_key has no tie-break after equal V3 score,
+    # so the FIRST exact-tied row wins. Sorting by record_key makes report
+    # fields (winning engine, per-engine field-best counts) independent of
+    # completion order (Sol WP-25 review, MEDIUM-1).
+    scored = sorted(
+        (row for row in rows if row.get("status") == "OK" and row.get("v3_tiered") is not None),
+        key=lambda row: str(row.get("record_key")),
+    )
     native_best = nss.best_rows_by_graph(scored, "v3_tiered", engine="dagua")
     field_best = nss.best_rows_by_graph(scored, "v3_tiered", engine=None)
 

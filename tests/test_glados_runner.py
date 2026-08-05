@@ -10,6 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -140,8 +143,35 @@ def test_partition_selects_ceil_fraction_per_corpus_disjoint_and_complete() -> N
 
 def test_rank_candidates_duplicate_basenames_hard_error() -> None:
     """Duplicate basenames within one corpus abort selection (WP10-F05)."""
-    with pytest.raises(ValueError, match="duplicate basenames"):
+    with pytest.raises(ValueError, match="duplicate stems"):
         subset_mod.rank_candidates("s", [("rome", "a.graph"), ("rome", "a.graph")])
+
+
+def test_rank_candidates_same_stem_different_extension_hard_error() -> None:
+    """Same stem across formats collides on the runner's corpus/stem row key.
+
+    Sol WP-25 review HIGH-2: rome/a.graph + rome/a.gml both load as
+    ``rome/a`` -- the subset guard must key duplicates on (corpus, stem),
+    not (corpus, filename).
+    """
+    with pytest.raises(ValueError, match="duplicate stems"):
+        subset_mod.rank_candidates("s", [("rome", "a.graph"), ("rome", "a.gml")])
+    # Same stem in DIFFERENT corpora stays legal.
+    ranked = subset_mod.rank_candidates("s", [("rome", "a.graph"), ("north", "a.gml")])
+    assert set(ranked) == {"rome", "north"}
+
+
+def test_subset_cli_stem_collision_aborts_before_writing(tmp_path: Path) -> None:
+    """A stem collision in FETCHED_FILES.txt aborts with no SUBSET.json written."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "FETCHED_FILES.txt").write_text(
+        f"{corpus_dir.as_posix()}/rome/a.graph\n{corpus_dir.as_posix()}/rome/a.gml\n",
+        encoding="utf-8",
+    )
+    assert subset_mod.main(["--corpus-dir", str(corpus_dir)]) == 1
+    assert not (corpus_dir / "SUBSET.json").exists()
+    assert not (corpus_dir / "SEALED_REMAINDER.json").exists()
 
 
 def test_subset_cli_writes_partition_and_refuses_overwrite(
@@ -423,6 +453,178 @@ def test_dedupe_rows_last_occurrence_wins() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 4b. Process-tree containment (Sol HIGH-1)
+# ---------------------------------------------------------------------------
+
+
+def _tree_kill_probe_worker(pid_file: str, use_setsid: bool) -> None:
+    """Spawn-child probe: optionally setsid, spawn a sleeping grandchild.
+
+    Mirrors the row child: ``use_setsid=True`` matches ``_row_layout_worker``
+    (killpg path); ``use_setsid=False`` exercises the psutil-snapshot
+    fallback for descendants outside the child's process group.
+
+    Parameters
+    ----------
+    pid_file : str
+        Where to publish the grandchild pid.
+    use_setsid : bool
+        Whether to become a session leader first.
+
+    Returns
+    -------
+    None
+    """
+    import subprocess as sp
+
+    if use_setsid:
+        try:
+            os.setsid()
+        except OSError:
+            pass
+    grandchild = sp.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    Path(pid_file).write_text(str(grandchild.pid), encoding="utf-8")
+    time.sleep(300)
+
+
+def _pid_running(pid: int) -> bool:
+    """Return whether a pid is alive and not a reaped-pending zombie.
+
+    Parameters
+    ----------
+    pid : int
+        Process id.
+
+    Returns
+    -------
+    bool
+        ``True`` for a live (non-zombie) process.
+    """
+    import psutil
+
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+@pytest.mark.parametrize("use_setsid", [True, False])
+def test_kill_process_tree_kills_sleeping_grandchild(tmp_path: Path, use_setsid: bool) -> None:
+    """Memkill/timeout containment kills the WHOLE measured tree (Sol HIGH-1).
+
+    A row child spawns a sleeping grandchild (standing in for an adapter's
+    dot/java/node binary); after ``_kill_process_tree`` the grandchild must
+    be dead -- via killpg when the child owns its session (the production
+    row-child path) and via the psutil descendant snapshot otherwise.
+    """
+    import multiprocessing as mp
+
+    context = mp.get_context("spawn")
+    pid_file = tmp_path / "grandchild.pid"
+    process = context.Process(target=_tree_kill_probe_worker, args=(str(pid_file), use_setsid))
+    process.start()
+    grandchild_pid: int = -1
+    try:
+        deadline = time.time() + 90.0
+        while time.time() < deadline:
+            try:
+                grandchild_pid = int(pid_file.read_text(encoding="utf-8"))
+                break
+            except (OSError, ValueError):
+                time.sleep(0.2)
+        assert grandchild_pid > 0, "probe child never spawned its grandchild"
+        assert _pid_running(grandchild_pid)
+
+        glados._kill_process_tree(process)
+
+        assert not process.is_alive()
+        deadline = time.time() + 10.0
+        while time.time() < deadline and _pid_running(grandchild_pid):
+            time.sleep(0.2)
+        assert not _pid_running(grandchild_pid), "grandchild survived the tree kill"
+    finally:
+        if grandchild_pid > 0:
+            try:
+                os.kill(grandchild_pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if process.is_alive():
+            process.kill()
+            process.join()
+        try:
+            process.close()
+        except ValueError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 4c. Champion-selection tie stability (Sol MEDIUM-1)
+# ---------------------------------------------------------------------------
+
+
+def _fake_scored_row(
+    graph: str, engine: str, seed: Any, v3_tiered: float, corpus: str = "rome"
+) -> Dict[str, Any]:
+    """Build a minimal scored row for tally-order tests.
+
+    Parameters
+    ----------
+    graph : str
+        Graph name.
+    engine : str
+        Engine name.
+    seed : int | None
+        Row seed.
+    v3_tiered : float
+        Score.
+    corpus : str, default="rome"
+        Corpus name.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Row dict sufficient for the imported champion selection.
+    """
+    return {
+        "graph": graph,
+        "corpus": corpus,
+        "engine": engine,
+        "seed": seed,
+        "record_key": build_record_key(graph, engine, seed),
+        "status": "OK",
+        "v3_tiered": v3_tiered,
+        "positions_path": "positions/fake.pt",
+    }
+
+
+def test_tally_tie_winner_independent_of_completion_order(tmp_path: Path) -> None:
+    """Exact-tied field rows produce the same winner in either insertion order.
+
+    Sol WP-25 review MEDIUM-1: field rows complete on concurrent threads and
+    the imported selection keeps the first exact tie, so the runner must feed
+    a stable (record_key-sorted) order to best_rows_by_graph.
+    """
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    entries, _, _ = glados.load_phase(corpus_dir, None, 2000, 200_000)
+
+    native = _fake_scored_row("rome/ring6", "dagua", None, 50.0)
+    tied_a = _fake_scored_row("rome/ring6", "aaa_engine", None, 60.0)
+    tied_z = _fake_scored_row("rome/ring6", "zzz_engine", None, 60.0)
+
+    outcomes = []
+    for rows in ([native, tied_a, tied_z], [native, tied_z, tied_a]):
+        tally = glados.compute_tally(entries, rows, tmp_path)
+        (detail,) = tally["details"]
+        outcomes.append(
+            (detail["field_engine"], tuple(sorted(tally["per_engine_field_best"].items())))
+        )
+    assert outcomes[0] == outcomes[1]
+    # Deterministic rule: lexicographically-first record_key wins exact ties.
+    assert outcomes[0][0] == "aaa_engine"
+
+
+# ---------------------------------------------------------------------------
 # 5. Guards + refusals (exit codes 3 and 4)
 # ---------------------------------------------------------------------------
 
@@ -640,7 +842,7 @@ def test_runner_end_to_end_two_fixture_smoke(
             "42",
             "--native-deterministic",
             "--native-timeout",
-            "120",
+            "300",  # generous: 120s native rows flaked under load (2026-08-05 Sol review)
             "--engine-timeout",
             "60",
             "--workers",
@@ -731,7 +933,7 @@ def test_native_two_runs_byte_identical_positions(
                 "42",
                 "--native-deterministic",
                 "--native-timeout",
-                "120",
+                "300",  # generous: load-robust (2026-08-05 Sol-review incident)
                 "--workers",
                 "1",
                 "--score-workers",
