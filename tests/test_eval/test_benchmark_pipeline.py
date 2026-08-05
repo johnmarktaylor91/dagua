@@ -711,7 +711,10 @@ def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
             .hexdigest()
         },
         "competitor_signatures": {
-            "graphviz_dot": "graphviz_dot:dot 1.0",
+            # Computed (not hardcoded) so the cached fixture always matches the
+            # live signature format, incl. the adapter-source ':src=' component
+            # (dry-well R1-B3 finding 1).
+            "graphviz_dot": _competitor_signature("graphviz_dot", {"graphviz": "dot 1.0"}),
             "dagua": "dagua:cpu:newhash",
         },
     }
@@ -1061,7 +1064,10 @@ def test_standard_suite_retry_failed_reruns_failed_cached_results(tmp_path, monk
             .hexdigest()
         },
         "competitor_signatures": {
-            "graphviz_dot": "graphviz_dot:dot 1.0",
+            # Computed (not hardcoded) so the cached fixture always matches the
+            # live signature format, incl. the adapter-source ':src=' component
+            # (dry-well R1-B3 finding 1).
+            "graphviz_dot": _competitor_signature("graphviz_dot", {"graphviz": "dot 1.0"}),
             "dagua": "dagua:cpu:newhash",
         },
     }
