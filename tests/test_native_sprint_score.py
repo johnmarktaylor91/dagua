@@ -308,6 +308,7 @@ def test_scoring_signature_tracks_every_score_affecting_source(
         "dagua/render/mpl.py",
         "dagua/graph.py",
         "dagua/utils.py",
+        "dagua/styles.py",
     )
     real_sha256_file = scorer.sha256_file
     for tracked_rel in tracked:
