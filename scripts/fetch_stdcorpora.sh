@@ -121,7 +121,7 @@ select_text_corpus() {
   local count=0
   local ext rel stem
   declare -A seen_stems=()
-  for ext in graph gml; do
+  for ext in graph gml graphml; do
     while IFS= read -r rel; do
       if [ "${count}" -ge "${limit}" ]; then
         break
@@ -208,8 +208,8 @@ mkdir -p "${OUT_DIR}/downloads" "${OUT_DIR}/rome" "${OUT_DIR}/north" "${OUT_DIR}
 # FETCHED_FILES.txt below then reflects EXACTLY this run's selection.
 find "${OUT_DIR}/rome" "${OUT_DIR}/north" "${OUT_DIR}/suitesparse" -type f -delete
 
-ROME_URL="https://graphdrawing.org/data/rome/rome.tar.gz"
-NORTH_URL="https://graphdrawing.org/data/north/north.tar.gz"
+ROME_URL="https://graphdrawing.unipg.it/data/rome-graphml.tgz"
+NORTH_URL="https://graphdrawing.unipg.it/data/north-graphml.tgz"
 
 # A failed rome/north acquisition is a FAILED fetch: exit non-zero so an
 # orchestrator chaining `fetch && subset && run` self-arrests here
