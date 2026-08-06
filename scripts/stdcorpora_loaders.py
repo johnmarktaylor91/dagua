@@ -129,7 +129,7 @@ def build_graph(
             or target >= node_count
         ):
             continue
-        key = (source, target) if directed else tuple(sorted((source, target)))
+        key = (source, target) if directed or source <= target else (target, source)
         if key in seen:
             continue
         seen.add(key)

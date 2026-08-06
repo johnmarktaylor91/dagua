@@ -184,7 +184,7 @@ def validate_pt_sync(
     for record in results.values():
         if not isinstance(record, dict):
             continue
-        eng = record.get("engine_name", record.get("engine", ""))
+        eng = str(record.get("engine_name") or record.get("engine") or "")
         positions_file = record.get("positions_file")
         tensor_path: Path | None = None
         if positions_file:
