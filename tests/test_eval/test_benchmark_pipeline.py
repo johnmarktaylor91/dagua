@@ -491,7 +491,9 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
     assert signatures["classic_fmmm"] == f"classic_fmmm:{source_signature}"
     assert signatures["igraph_mds"] == f"igraph_mds:0.11.8:src={src['igraph_mds']}"
     assert signatures["sgd2_mds"] == f"sgd2_mds:1.0.0:src={src['sgd2_mds']}"
-    assert signatures["neulay"] == f"neulay:2.6.1:src={src['neulay']}"
+    # neulay's real implementation is dagua/layout/_archive code, so it also
+    # carries the dagua-tree component (monkeypatched above).
+    assert signatures["neulay"] == f"neulay:2.6.1:src={src['neulay']}:dagua={source_signature}"
     assert signatures["tsne_graph"] == f"tsne_graph:1.6.1:1.15.2:src={src['tsne_graph']}"
     assert signatures["umap_graph"] == f"umap_graph:0.5.7:1.15.2:src={src['umap_graph']}"
     assert signatures["ogdf_gem"] in {
@@ -1790,3 +1792,151 @@ def test_delegated_adapters_declare_their_execution_delegates() -> None:
     for name, delegate_file in expected.items():
         closure = {path.name for path in _COMPETITORS[name].source_files()}
         assert delegate_file in closure, f"{name} missing delegate {delegate_file}"
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R2-B3-Fable F2: dagua-owned implementations key on the whole
+# dagua tree; external backends declare their dagua-side prep artifacts
+# ---------------------------------------------------------------------------
+
+
+def _dagua_tree_hash_domain_contains(path: Path) -> bool:
+    """Mirror _dagua_source_signature's file filter: *.py under dagua/, eval excluded."""
+    import dagua
+
+    dagua_root = Path(dagua.__file__).resolve().parent
+    resolved = path.resolve()
+    if resolved.suffix != ".py" or not resolved.is_relative_to(dagua_root):
+        return False
+    return "eval" not in resolved.relative_to(dagua_root).parts
+
+
+def test_dagua_owned_engines_carry_tree_component_externals_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dagua/layout edit flips reimpl/dagua-owned keys, not external ones."""
+    from dagua.eval.benchmark import _competitor_signature
+
+    dagua_owned = ("sparse_stress_reimpl", "smacof_nonmetric_reimpl", "neulay", "word2vecgd")
+    external = ("graphviz_dot", "pacmap", "webcola", "deepgd_reference", "gephi_yifanhu")
+
+    before = {name: _competitor_signature(name, {}) for name in dagua_owned + external}
+    for name in dagua_owned:
+        assert ":dagua=" in before[name], name
+    for name in external:
+        assert ":dagua=" not in before[name], name
+
+    # Simulate a dagua/layout source edit: the tree hash changes.
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: "feedfacefeedface",  # pragma: allowlist secret
+    )
+    for name in dagua_owned:
+        assert _competitor_signature(name, {}) != before[name], name
+    for name in external:
+        assert _competitor_signature(name, {}) == before[name], name
+
+
+def test_smacof_twins_share_equal_graph_utils_treatment() -> None:
+    """Both smacof twins must invalidate when graph_utils.py changes.
+
+    R2-B3-Fable F2a: the sklearn twin declared graph_utils.py while the
+    bit-identical reimpl twin (same shortest_path_distances kernel) missed it
+    one import level down.
+    """
+    # NOTE: `import dagua.layout.ops...` (attribute-traversal form) breaks
+    # because dagua.layout the ATTRIBUTE is the layout() function.
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops import graph_utils
+
+    graph_utils_path = Path(graph_utils.__file__).resolve()
+    # sklearn twin: explicit delegate declaration puts the file in its closure.
+    assert graph_utils_path in set(_COMPETITORS["sklearn_smacof_nonmetric"].source_files())
+    # reimpl twin: the file is inside the dagua-tree hash domain and the
+    # signature carries the tree component, so the same edit flips it too.
+    assert _dagua_tree_hash_domain_contains(graph_utils_path)
+    assert ":dagua=" in _competitor_signature("smacof_nonmetric_reimpl", {})
+
+
+def test_neulay_archive_implementation_is_inside_tree_component() -> None:
+    """neulay's REAL implementation (_archive/classic/neulay.py) is hashed."""
+    import dagua
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    archive_path = (
+        Path(dagua.__file__).resolve().parent / "layout" / "_archive" / "classic" / "neulay.py"
+    )
+    assert archive_path.is_file()
+    assert _dagua_tree_hash_domain_contains(archive_path)
+    assert ":dagua=" in _competitor_signature("neulay", {})
+    # The wrapper (under dagua/eval/, EXCLUDED from the tree hash) must stay
+    # separately declared in the per-file closure.
+    closure_names = {path.name for path in _COMPETITORS["neulay"].source_files()}
+    assert "neulay_wrapper.py" in closure_names
+
+
+def test_webcola_signature_tracks_initial_positions_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """webcola's solve is seeded by ops/webcola.py; an edit must flip its key."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops import webcola as webcola_module
+
+    module_path = Path(webcola_module.__file__).resolve()
+    assert module_path in set(_COMPETITORS["webcola"].source_files())
+
+    before = _adapter_source_signature("webcola")
+    edited = tmp_path / "webcola.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated prep fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(webcola_module, "__file__", str(edited))
+    assert _adapter_source_signature("webcola") != before
+
+
+def test_neural_reference_signatures_track_smartgd_prep_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """deepgd/smartgd model input prep lives in pipelines/smartgd.py."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops.pipelines import smartgd as smartgd_module
+
+    module_path = Path(smartgd_module.__file__).resolve()
+    for name in ("deepgd_reference", "smartgd_reference"):
+        assert module_path in set(_COMPETITORS[name].source_files())
+
+    before = {n: _adapter_source_signature(n) for n in ("deepgd_reference", "smartgd_reference")}
+    edited = tmp_path / "smartgd.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated prep fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(smartgd_module, "__file__", str(edited))
+    for name in ("deepgd_reference", "smartgd_reference"):
+        assert _adapter_source_signature(name) != before[name]
+
+
+def test_gephi_signature_tracks_java_driver_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gephi's runtime-compiled java driver is declared by raw path."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.eval.competitors.gephi_competitor import GephiYifanHu
+
+    closure_names = {path.name for path in _COMPETITORS["gephi_yifanhu"].source_files()}
+    assert "gephi_layout.java" in closure_names
+
+    before = _adapter_source_signature("gephi_yifanhu")
+    edited = tmp_path / "gephi_layout.java"
+    edited.write_text(
+        GephiYifanHu._JAVA_SRC.read_text(encoding="utf-8") + "\n// simulated driver fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(GephiYifanHu, "source_delegate_files", (str(edited),))
+    assert _adapter_source_signature("gephi_yifanhu") != before

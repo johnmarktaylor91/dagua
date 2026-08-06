@@ -142,6 +142,10 @@ class WebColaCompetitor(CompetitorBase):
     max_nodes = 2_000
     supports_clusters = False
     variant_param_names = frozenset({"steps", "link_distance", "constrained", "constraints"})
+    # External Node backend, but the iterative solve is SEEDED from
+    # dagua-side webcola_initial_positions: declare that prep module in the
+    # cache-signature closure (dry-well R2-B3-Fable F2b).
+    source_delegate_modules = ("dagua.layout.ops.webcola",)
 
     def layout(
         self,

@@ -805,18 +805,33 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
     # adapter implementation fix invalidates its cached rows (dry-well R1-B3
     # finding 1); the external dependency-version component stays alongside.
     adapter_src = _adapter_source_signature(name)
+    # Engines whose substantive implementation is Dagua-owned code (all
+    # pipeline reimplementations + adapters deferring to archived Dagua
+    # implementations) ALSO key on the whole-dagua-tree source hash, exactly
+    # like dagua/classic_* engines: any dagua source edit invalidates their
+    # rows, ending the per-import closure-chasing game structurally
+    # (dry-well R2-B3-Fable F2a). External-backend adapters keep the cheap
+    # per-file closure (with declared dagua-side prep delegates).
+    competitor = get_competitor(name)
+    dagua_suffix = (
+        f":dagua={_dagua_source_signature()}"
+        if competitor is not None and getattr(competitor, "executes_dagua_source", False)
+        else ""
+    )
     if name.startswith("ogdf_"):
         from dagua.eval.competitors.ogdf_competitor import _ogdf_available
 
         availability = "ogdf_available" if _ogdf_available() else "ogdf_unavailable"
-        return f"{name}:{availability}:src={adapter_src}"
+        return f"{name}:{availability}:src={adapter_src}{dagua_suffix}"
     if name == "tsne_graph":
-        return f"{name}:{system.get('sklearn')}:{system.get('scipy')}:src={adapter_src}"
+        return (
+            f"{name}:{system.get('sklearn')}:{system.get('scipy')}:src={adapter_src}{dagua_suffix}"
+        )
     if name == "umap_graph":
-        return f"{name}:{system.get('umap')}:{system.get('scipy')}:src={adapter_src}"
+        return f"{name}:{system.get('umap')}:{system.get('scipy')}:src={adapter_src}{dagua_suffix}"
     key = version_keys.get(name)
     value = system.get(key) if key is not None else None
-    return f"{name}:{value}:src={adapter_src}"
+    return f"{name}:{value}:src={adapter_src}{dagua_suffix}"
 
 
 def _competitor_signature_map(

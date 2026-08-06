@@ -46,6 +46,10 @@ class PipelineReimplementationCompetitor(CompetitorBase):
 
     spec: PipelineReimplementationSpec
     supports_clusters = False
+    # Reimplementations execute Dagua-owned pipeline code whose kernels span
+    # the dagua tree (graph_utils, converge, stress, ...); key them on the
+    # whole-tree source hash like classic_* engines (dry-well R2-B3-Fable F2a).
+    executes_dagua_source = True
 
     def __init__(self) -> None:
         """Initialize registration metadata from the class spec."""

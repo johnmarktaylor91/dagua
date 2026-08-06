@@ -43,6 +43,22 @@ class CompetitorBase(ABC):
     # (wrapper/pipeline delegates); their files join the adapter's
     # cache-signature source closure via source_files() (dry-well R2-B3).
     source_delegate_modules: tuple = ()
+    # Non-module artifacts this adapter executes (raw file paths, e.g. a
+    # runtime-compiled .java driver); hashed into the cache-signature closure
+    # like delegate modules (dry-well R2-B3-Fable F2b).
+    source_delegate_files: tuple = ()
+    # True when the adapter's substantive layout implementation is Dagua-owned
+    # code under dagua/layout/** (all pipeline reimplementations, plus
+    # adapters that defer to archived Dagua implementations). The cache
+    # signature then ALSO includes the same whole-dagua-tree source component
+    # that dagua/classic_* engines already use (_dagua_source_signature),
+    # killing the import-closure-chasing game structurally: ANY dagua source
+    # edit invalidates these rows, exactly like classic_* semantics
+    # (dry-well R2-B3-Fable F2a). Leave False for adapters whose backend is
+    # genuinely external (subprocess binaries, java, node, external ML
+    # models); those keep the cheap per-file closure and declare their
+    # dagua-side prep modules/artifacts explicitly.
+    executes_dagua_source: bool = False
 
     @abstractmethod
     def layout(
@@ -122,7 +138,9 @@ class CompetitorBase(ABC):
         the parent class plus delegate hooks). Adapters that delegate
         execution to another module declare it via
         ``source_delegate_modules`` (static delegates) or override this
-        method (dynamic delegates).
+        method (dynamic delegates); non-module artifacts (e.g. a
+        runtime-compiled .java driver) are declared as raw paths via
+        ``source_delegate_files``.
 
         Returns
         -------
@@ -158,6 +176,15 @@ class CompetitorBase(ABC):
                 continue
             try:
                 path = Path(module_file).resolve()
+            except OSError:
+                continue
+            if path not in files:
+                files.append(path)
+        for raw_path in self.source_delegate_files:
+            try:
+                path = Path(raw_path).resolve()
+                if not path.is_file():
+                    continue
             except OSError:
                 continue
             if path not in files:
