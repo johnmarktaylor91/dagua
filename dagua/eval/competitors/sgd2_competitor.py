@@ -138,6 +138,7 @@ class SGD2(CompetitorBase):
     name = "sgd2"
     max_nodes = 50_000
     variant_param_names = frozenset({"eps", "t_max"})
+    backend_version_key = "sgd2"
 
     def layout(
         self,
@@ -257,6 +258,7 @@ class SGD2MDS(CompetitorBase):
 
     name = "sgd2_mds"
     max_nodes = 5_000
+    backend_version_key = "sgd2"
 
     def layout(
         self,

@@ -292,6 +292,10 @@ def _networkx_laplacian_spectral_array(A: Any, dim: int, normalization: str) -> 
 class _NetworkXBase(CompetitorBase):
     """Base for NetworkX layout algorithms."""
 
+    # Family backend: every nx_* member (incl. circular/shell/spiral/
+    # bipartite/multipartite/bfs/arf/planar) inherits the networkx version
+    # component (dry-well R4-B3-Sol).
+    backend_version_key = "networkx"
     layout_func: str = "spring_layout"
     layout_kwargs: dict[str, Any] = {}
     output_scale: float = 500.0

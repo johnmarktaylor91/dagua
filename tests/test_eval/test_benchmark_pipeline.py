@@ -2072,3 +2072,69 @@ def test_size_aware_externals_track_size_policy_gate(
     )
     monkeypatch.setattr(size_policy_module, "__file__", str(edited))
     assert _adapter_source_signature("dagre") != before
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R4-B3-Sol HIGH: family-based backend-version keys
+# ---------------------------------------------------------------------------
+
+
+def test_backend_family_version_flip_covers_all_sol_aliases() -> None:
+    """All 16 aliases Sol proved byte-stable must flip with their family.
+
+    The old per-name version_keys table covered only selected names per
+    backend family; siblings fell through to key=None and their signatures
+    did not move on a backend upgrade (Sol's probe: graphviz_dot's marker
+    moved, graphviz_circo's stayed byte-stable). Version keys now resolve
+    from backend_version_key on the family BASE class.
+    """
+    from dagua.eval.benchmark import _competitor_signature
+
+    aliases = (
+        "graphviz_circo",
+        "graphviz_osage",
+        "graphviz_twopi",
+        "elk_force",
+        "elk_stress",
+        "elk_mrtree",
+        "elk_radial",
+        "nx_circular",
+        "nx_shell",
+        "nx_spiral",
+        "nx_bipartite",
+        "nx_multipartite",
+        "nx_bfs",
+        "nx_arf",
+        "nx_planar",
+        "igraph_rt_circular",
+    )
+    controls = ("graphviz_dot", "elk_layered", "nx_spring", "igraph_rt")
+    old = {"graphviz": "OLD", "elk": "OLD", "networkx": "OLD", "igraph": "OLD"}
+    new = {"graphviz": "NEW", "elk": "NEW", "networkx": "NEW", "igraph": "NEW"}
+
+    for name in aliases + controls:
+        before = _competitor_signature(name, old)
+        after = _competitor_signature(name, new)
+        assert before != after, f"{name} byte-stable under backend version change"
+        assert ":None:" not in before, f"{name} missing its backend version component"
+
+
+def test_new_family_member_inherits_backend_version_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A brand-new family member needs NO table edit to be version-keyed."""
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.eval.competitors.graphviz_competitor import _GraphvizBase
+
+    class SyntheticGraphvizPatchwork(_GraphvizBase):
+        name = "graphviz_patchwork_synthetic"
+        engine = "patchwork"
+        max_nodes = 10
+
+    monkeypatch.setitem(_COMPETITORS, "graphviz_patchwork_synthetic", SyntheticGraphvizPatchwork())
+
+    old = _competitor_signature("graphviz_patchwork_synthetic", {"graphviz": "dot 12.0"})
+    new = _competitor_signature("graphviz_patchwork_synthetic", {"graphviz": "dot 13.0"})
+    assert "dot 12.0" in old
+    assert old != new
