@@ -218,7 +218,17 @@ def v2_native_scores(v2_rows: Iterable[Mapping[str, Any]]) -> Dict[str, float]:
 
 
 class ScoreCache:
-    """JSON-backed score cache keyed by (graph, position sha, ruler signature)."""
+    """JSON-backed score cache keyed by (graph, engine, position sha, signature).
+
+    The engine is part of the key because ``score_position`` is
+    engine-parameterized: the engine name selects the x72/x1 store-unit
+    multiplier, so byte-identical position tensors saved under two engines of
+    different scale classes score differently and must never share a cached
+    row (drywell R3-B3-F3: a webcola-cached row served for sparse_stress
+    scored 6.69 with a spurious DEGENERATE_SCALE instead of 36.56). Rows
+    written under the old engine-less key format are simply unreachable and
+    rescore fresh.
+    """
 
     def __init__(self, path: Path) -> None:
         """Open (or lazily create) a score cache.
@@ -235,13 +245,17 @@ class ScoreCache:
             self._rows = dict(payload.get("rows", {}))
 
     @staticmethod
-    def key(graph: str, position_sha: str, signature: str) -> str:
+    def key(graph: str, engine: str, position_sha: str, signature: str) -> str:
         """Build the cache key for one scored position.
 
         Parameters
         ----------
         graph : str
             Graph name.
+        engine : str
+            Engine name the row was scored under; scoring is
+            engine-parameterized (x72/x1 store-unit classes), so the engine
+            must discriminate otherwise-identical tensors.
         position_sha : str
             SHA-256 of the position tensor file.
         signature : str
@@ -252,15 +266,19 @@ class ScoreCache:
         str
             Composite cache key.
         """
-        return f"{graph}::{position_sha}::{signature}"
+        return f"{graph}::{engine}::{position_sha}::{signature}"
 
-    def get(self, graph: str, position_sha: str, signature: str) -> Optional[Dict[str, Any]]:
+    def get(
+        self, graph: str, engine: str, position_sha: str, signature: str
+    ) -> Optional[Dict[str, Any]]:
         """Look up a cached score row.
 
         Parameters
         ----------
         graph : str
             Graph name.
+        engine : str
+            Engine name the score is requested for.
         position_sha : str
             Position file SHA-256.
         signature : str
@@ -271,7 +289,7 @@ class ScoreCache:
         Optional[Dict[str, Any]]
             Cached raw score row, or ``None``.
         """
-        return self._rows.get(self.key(graph, position_sha, signature))
+        return self._rows.get(self.key(graph, engine, position_sha, signature))
 
     def put(self, row: Mapping[str, Any]) -> None:
         """Insert a fresh score row.
@@ -279,14 +297,18 @@ class ScoreCache:
         Parameters
         ----------
         row : Mapping[str, Any]
-            Raw row from ``score_position`` (must carry graph, sha, signature).
+            Raw row from ``score_position`` (must carry graph, engine, sha,
+            signature).
 
         Returns
         -------
         None
         """
         key = self.key(
-            str(row["graph"]), str(row["position_sha256"]), str(row["scoring_signature"])
+            str(row["graph"]),
+            str(row["engine"]),
+            str(row["position_sha256"]),
+            str(row["scoring_signature"]),
         )
         self._rows[key] = dict(row)
 
@@ -388,7 +410,7 @@ def score_positions_cached(
     fresh: List[Tuple[str, str, str]] = []
     for graph_name, engine, path_string in tasks:
         sha = sha256_file(Path(path_string))
-        cached = cache.get(graph_name, sha, signature)
+        cached = cache.get(graph_name, engine, sha, signature)
         if cached is not None:
             results[(graph_name, engine, path_string)] = dict(cached)
         else:
