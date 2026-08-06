@@ -3711,3 +3711,94 @@ def test_w5_telemetry_emits_skip_reject_accept_and_deadline(
     assert all("use_deterministic_costs" in record for record in records)
     assert all(record["torch_num_threads"] >= 1 for record in records)
     assert all(record["device"] == "unknown" for record in records)
+
+
+def test_cluster_depth_lookup_tolerates_cycles_and_deep_chains() -> None:
+    """Drywell R2-B1 F-1 regression: the W5 depth lookup must not RecursionError.
+
+    ``_cluster_depth_lookup`` was an unguarded fourth copy of the WP05-F02
+    memoize-after-recurse pattern: a self-parent/2-cycle or a ~1000-deep
+    root-sorts-last chain (callers pass ``tuple(sorted(members))``) killed it,
+    and dagua_native's blanket except then silently aborted the ENTIRE
+    terminal W5 pass. It now mirrors coordinate._cluster_depths: cycle-guarded
+    and iterative.
+    """
+    import sys
+
+    from dagua.layout.ops.coordinate import _cluster_depths
+    from dagua.layout.ops.pipelines.native_finisher import _cluster_depth_lookup
+
+    for query, parent_of in (
+        (("A",), {"A": "A"}),
+        (("A", "B"), {"A": "B", "B": "A"}),
+        (("A", "B", "C"), {"A": "B", "B": "A", "C": "A"}),
+    ):
+        assert _cluster_depth_lookup(query, parent_of) == _cluster_depths(query, parent_of)
+
+    depth = 1500
+    names = [f"c{depth - 1 - index:06d}" for index in range(depth)]  # root sorts LAST
+    parent_of = {names[index]: names[index - 1] for index in range(1, depth)}
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        depths = _cluster_depth_lookup(tuple(sorted(names)), parent_of)
+        assert max(depths.values()) == depth - 1
+        assert depths[names[0]] == 0
+    finally:
+        sys.setrecursionlimit(previous_limit)
+
+
+def test_cluster_tightening_gate_entry_tolerates_self_parent_metadata() -> None:
+    """Drywell R2-B1 F-1 regression: the public W5 gate entry must not raise.
+
+    ``build_cluster_tightening_candidates(..., {"A": "A"})`` raised
+    RecursionError through the depth lookup before the fix.
+    """
+    from dagua.layout.ops.pipelines.native_finisher import (
+        build_cluster_tightening_candidates,
+    )
+
+    pos = torch.tensor([[0.0, 0.0], [30.0, 0.0], [60.0, 0.0], [90.0, 0.0]])
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.ones((4, 2), dtype=torch.float32) * 20.0
+    candidates = build_cluster_tightening_candidates(
+        pos,
+        edge_index,
+        node_sizes,
+        {"A": [0, 1], "B": [2, 3]},
+        {"A": "A"},
+    )
+    assert isinstance(candidates, tuple)
+
+
+def test_terminal_w5_completes_self_parent_metadata_without_swallowed_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Drywell R2-B1 F-1 regression: self-parent metadata must not disarm W5.
+
+    Before the fix, a default-native run on a clustered row with a
+    self-parent emitted 4x 'terminal W5 finisher failed' (RecursionError) and
+    silently returned the unfinished layout. The run must now complete with
+    ZERO swallowed RecursionErrors and zero W5-failure warnings.
+    """
+    import dagua as dagua_module
+
+    graph = dagua_module.DaguaGraph()
+    for index in range(8):
+        graph.add_node(f"n{index}")
+    for index in range(7):
+        graph.add_edge(f"n{index}", f"n{index + 1}")
+    graph.clusters["A"] = [0, 1, 2, 3]
+    graph.clusters["B"] = [4, 5, 6, 7]
+    graph.cluster_parents["A"] = "A"  # public dict; no producer-side cycle check
+
+    with caplog.at_level(logging.WARNING):
+        pos = dagua_module.layout(graph, LayoutConfig(seed=42))
+
+    assert pos is not None and pos.shape == (8, 2)
+    assert torch.isfinite(pos).all()
+    joined = "\n".join(
+        f"{record.getMessage()}\n{record.exc_text or ''}" for record in caplog.records
+    )
+    assert "terminal W5 finisher failed" not in joined
+    assert "RecursionError" not in joined
