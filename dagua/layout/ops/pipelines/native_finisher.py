@@ -25,7 +25,10 @@ from dagua.eval.ruler_v3 import (
     _structure_area_floor,
 )
 from dagua.eval.ruler_v3_groups import evaluate_conditional_groups
-from dagua.layout.ops.cluster_geometry import build_cluster_geometry_profile
+from dagua.layout.ops.cluster_geometry import (
+    break_cluster_parent_cycles,
+    build_cluster_geometry_profile,
+)
 from dagua.layout.ops.pipelines.native_budget import (
     DETERMINISTIC_BUDGET_ATTR,
     PROCESS_DEADLINE_ATTR,
@@ -512,29 +515,29 @@ def _cluster_depth_lookup(
         )
         for name in cluster_names
     }
+    # User metadata may contain parent cycles; without this guard the parent
+    # walk below never bottoms out (drywell R2-B1 F-1, the 4th copy of the
+    # WP05-F02 pattern -- previously a RecursionError here silently aborted
+    # the whole terminal W5 pass through dagua_native's blanket except).
+    parents = break_cluster_parent_cycles(parents)
     depths: dict[str, int] = {}
 
-    def depth(name: str) -> int:
-        """Resolve one cluster depth with memoization.
-
-        Parameters
-        ----------
-        name : str
-            Cluster name.
-
-        Returns
-        -------
-        int
-            Declared nesting depth.
-        """
-        if name in depths:
-            return depths[name]
-        parent = parents[name]
-        depths[name] = 0 if parent is None else depth(parent) + 1
-        return depths[name]
-
+    # Iterative chain walk (mirrors coordinate._cluster_depths after drywell
+    # B2-F01): the memoize-after-recurse closure this replaces descended one
+    # frame per nesting level and crashed at ~1000 levels of valid linear
+    # nesting whenever the root sorted last. Walk up to the nearest memoized
+    # ancestor (or a root), then assign depths ancestor-first -- the exact
+    # memoization insertion order the recursion produced.
     for cluster_name in cluster_names:
-        depth(cluster_name)
+        chain: list[str] = []
+        current: Optional[str] = cluster_name
+        while current is not None and current not in depths:
+            chain.append(current)
+            current = parents[current]
+        next_depth = 0 if current is None else depths[current] + 1
+        for name in reversed(chain):
+            depths[name] = next_depth
+            next_depth += 1
     return depths
 
 
