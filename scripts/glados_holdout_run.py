@@ -386,6 +386,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Fake one over-ceiling child RSS poll on the first child (guard drill).",
     )
+    parser.add_argument(
+        "--accept-revision-drift",
+        action="store_true",
+        help=(
+            "Resume escape hatch for the harness-only-hotfix case: KEEP resumed "
+            "rows whose git SHA drifted but whose engine source component is "
+            "unchanged, disclosing them in results.json and the report instead "
+            "of quarantining (R2 B4-Sol-2)."
+        ),
+    )
+    parser.add_argument(
+        "--retry-memkills",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Re-run environmental memkill:* ERROR rows on resume (default on; "
+            f"capped at {MEMKILL_MAX_RETRIES} retries per row -- R2 B4-F4)."
+        ),
+    )
     args = parser.parse_args(argv)
     args.workers = max(1, min(int(args.workers), MAX_FIELD_WORKERS))
     if args.score_workers is None:
@@ -1094,9 +1113,26 @@ def load_rows_tolerant(directory: Path) -> Tuple[List[Dict[str, Any]], List[str]
                 warnings.append(
                     f"torn final JSONL line truncated on resume ({len(stripped)} chars)"
                 )
-                path.write_text(
-                    "\n".join(lines[:index]) + ("\n" if index else ""), encoding="utf-8"
-                )
+                # Repair ATOMICALLY (dry-well R2 B4-F3): the old in-place
+                # write_text could itself be interrupted, leaving an
+                # arbitrary prefix of the ONLY row store that is
+                # indistinguishable from a valid shorter store. Temp + fsync
+                # + rename means a crash mid-repair leaves either the old
+                # file (torn line tolerated again next time) or the complete
+                # repaired file -- never a silent prefix.
+                try:
+                    temp = path.with_name(path.name + ".repair")
+                    with temp.open("w", encoding="utf-8") as handle:
+                        if index:
+                            handle.write("\n".join(lines[:index]) + "\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    temp.replace(path)
+                except OSError as repair_exc:
+                    warnings.append(
+                        f"torn-line repair failed ({type(repair_exc).__name__}: "
+                        f"{repair_exc}); torn line left in place"
+                    )
                 break
             raise RuntimeError(
                 f"malformed interior JSONL line {index + 1} in {path}: {exc}"
@@ -1152,30 +1188,177 @@ def clean_child_temps(directory: Path) -> int:
     return removed
 
 
+def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, str]:
+    """Compute the per-engine run-revision marker (dry-well R2 B4-Sol-2).
+
+    Rows are stamped ``"<git_sha>:<source_component>"`` at creation so resume
+    can detect a mid-run implementation hotfix that does NOT touch scoring
+    sources (which would leave ``scoring_signature`` unchanged and silently
+    mix pre-fix and post-fix layouts under the current run's advertised SHA).
+
+    Components: field rows reuse benchmark.py's ``_adapter_source_signature``
+    (the adapter's implementing module + shared base scaffolding); native
+    rows use ``_dagua_source_signature`` (all non-eval dagua source, which
+    also covers the pipeline code reimpl adapters execute). Any COMMITTED
+    hotfix flips the git-SHA component for every row; the source component
+    then discriminates harness-only commits (component unchanged -> eligible
+    for ``--accept-revision-drift``) from engine-implementation changes
+    (component changed -> always quarantined). Uncommitted edits to a file
+    outside both component sets (i.e. runner-only edits) change neither --
+    which is exactly the class that cannot alter layouts.
+
+    Parameters
+    ----------
+    engines : Sequence[str]
+        Engine names in this run (including ``"dagua"`` when present).
+    git_sha : str
+        Current git SHA from the preflight provenance block.
+
+    Returns
+    -------
+    Dict[str, str]
+        ``engine -> marker`` map.
+    """
+    from dagua.eval.benchmark import _adapter_source_signature, _dagua_source_signature
+
+    dagua_component: Optional[str] = None
+    markers: Dict[str, str] = {}
+    for engine in engines:
+        if engine == "dagua":
+            if dagua_component is None:
+                dagua_component = _dagua_source_signature()
+            component = dagua_component
+        else:
+            component = _adapter_source_signature(engine)
+        markers[engine] = f"{git_sha}:{component}"
+    return markers
+
+
+def snapshot_row_store(directory: Path) -> Optional[Path]:
+    """Snapshot the row store before any resume-prep mutation (R2 B4-F1).
+
+    On a staging-only resume (crash BEFORE the first publish -- the most
+    common sacred-run crash shape) the staging store is the ONLY copy of
+    every completed row, and resume prep mutates it (torn-line repair,
+    quarantine rewrite). The snapshot is the durable backup; it is removed
+    only after a successful publish.
+
+    Parameters
+    ----------
+    directory : Path
+        Run directory containing the row store.
+
+    Returns
+    -------
+    Path | None
+        Snapshot path, or ``None`` when there is no store to snapshot.
+    """
+    path = rows_path(directory)
+    if not path.is_file():
+        return None
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    snapshot = path.with_name(f"{path.name}.pre-resume-{stamp}")
+    with path.open("rb") as source, snapshot.open("wb") as target:
+        shutil.copyfileobj(source, target)
+        target.flush()
+        os.fsync(target.fileno())
+    return snapshot
+
+
+def restore_row_store_snapshot(snapshot: Path, directory: Path) -> bool:
+    """Restore the row store from a resume snapshot (atomic replace).
+
+    Parameters
+    ----------
+    snapshot : Path
+        Snapshot file from :func:`snapshot_row_store`.
+    directory : Path
+        Run directory containing the row store.
+
+    Returns
+    -------
+    bool
+        ``True`` when the store was restored.
+    """
+    if not snapshot.is_file():
+        return False
+    path = rows_path(directory)
+    temp = path.with_name(path.name + ".restore")
+    with snapshot.open("rb") as source, temp.open("wb") as target:
+        shutil.copyfileobj(source, target)
+        target.flush()
+        os.fsync(target.fileno())
+    temp.replace(path)
+    return True
+
+
+def clean_row_store_snapshots(directory: Path) -> int:
+    """Remove resume snapshots after a successful publish.
+
+    Parameters
+    ----------
+    directory : Path
+        Published run directory (snapshots travel with the rename).
+
+    Returns
+    -------
+    int
+        Number of snapshots removed.
+    """
+    removed = 0
+    for snapshot in directory.glob("results.rows.jsonl.pre-resume-*"):
+        if snapshot.is_file():
+            snapshot.unlink()
+            removed += 1
+    return removed
+
+
+# Environmental memkill rows (RSS ceiling / system floor) are resume-retryable
+# by default (dry-well R2 B4-F4): a transient load blip must not permanently
+# blind native or thin the field. Capped so a genuinely over-budget row cannot
+# loop forever.
+MEMKILL_MAX_RETRIES = 2
+
+
 def partition_resumed_rows(
     rows: Sequence[Dict[str, Any]],
     signature: str,
     valid_keys: Set[str],
     current_seed: int,
     tensor_exists: Optional[Any] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
+    expected_revision: Optional[Any] = None,
+    accept_revision_drift: bool = False,
+    retry_memkills: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
     """Split resumed rows into kept vs quarantined (dry-well B4-F3 + Sol).
 
     A resumed row is QUARANTINED -- recorded but excluded from the tally, its
     key vacated so an in-universe row is re-run/re-scored fresh -- when:
 
+    - its record key is outside the CURRENT subset x field x seed battery
+      (Sol B4-3: engines outside the field must never select the champion);
+    - its run-revision marker differs from the current one for its engine
+      (dry-well R2 B4-Sol-2): a mid-run implementation hotfix invalidates
+      the LAYOUT itself, so unlike a scoring change the layout sibling rows
+      are NOT rescued -- they carry the same stale marker and quarantine
+      with it. With ``accept_revision_drift``, rows whose SOURCE component
+      is unchanged (git-SHA-only drift = the allowed harness-only-hotfix
+      class) are kept and disclosed instead; a changed source component or a
+      missing marker quarantines regardless;
     - it carries a score under a scoring signature other than the current one
       (Sol B3-2; modeled on native_sprint_score's stale-signature rejection).
       A scored row whose layout sibling row survives is rescored from its
       existing tensor, so a mid-run scoring-policy hotfix costs rescoring,
       not layout regeneration;
-    - its record key is outside the CURRENT subset x field x seed battery
-      (Sol B4-3: engines outside the field must never select the champion);
     - it is a native row generated under a different ``--seed`` than this
       invocation (Sol B5-1: the native key is seedless by pre-registered
       convention, so the seed is checked from the row's recorded
       ``native_child_seed``; rows predating that field are quarantined
-      conservatively).
+      conservatively);
+    - it is an environmental ``memkill:*`` ERROR row with fewer than
+      :data:`MEMKILL_MAX_RETRIES` recorded retries and ``retry_memkills`` is
+      on (dry-well R2 B4-F4: a transient load blip must not permanently
+      blind native or thin the field across every future resume).
 
     Parameters
     ----------
@@ -1194,42 +1377,89 @@ def partition_resumed_rows(
         quarantined out-of-universe in an earlier resume, then the engine
         re-added (Sol round-2 F2's reproduced detonation) -- is quarantined
         so its key vacates and the row is recomputed from scratch.
+    expected_revision : Callable[[str], str | None] | None, default=None
+        Current run-revision marker per engine (``None`` result skips the
+        rule for that row, e.g. engines outside the current field).
+    accept_revision_drift : bool, default=False
+        Keep-and-disclose git-SHA-only revision drift instead of
+        quarantining (the explicit harness-only-hotfix escape hatch).
+    retry_memkills : bool, default=False
+        Vacate environmental memkill rows for re-run (capped per row).
 
     Returns
     -------
-    Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]
-        ``(kept, quarantined, counts)``; quarantined rows carry a
-        ``quarantine_reason`` field, counts key on
-        ``signature``/``universe``/``native_seed``/``tensor_missing``.
+    Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]
+        ``(kept, quarantined, counts, revision_drift_rows)``; quarantined
+        rows carry a ``quarantine_reason`` field, counts key on
+        ``signature``/``universe``/``native_seed``/``tensor_missing``/
+        ``revision``/``memkill_retry``; drift rows are the kept-but-disclosed
+        rows under ``accept_revision_drift`` (annotated ``revision_drift``).
     """
     kept: List[Dict[str, Any]] = []
     quarantined: List[Dict[str, Any]] = []
-    counts = {"signature": 0, "universe": 0, "native_seed": 0, "tensor_missing": 0}
+    revision_drift_rows: List[Dict[str, Any]] = []
+    counts = {
+        "signature": 0,
+        "universe": 0,
+        "native_seed": 0,
+        "tensor_missing": 0,
+        "revision": 0,
+        "memkill_retry": 0,
+    }
     for row in rows:
         reason: Optional[str] = None
-        if row.get("v3_tiered") is not None and row.get("scoring_signature") != signature:
-            reason = "stale scoring signature"
-            counts["signature"] += 1
-        elif str(row.get("record_key")) not in valid_keys:
+        drift_accepted = False
+        expected_marker = (
+            expected_revision(str(row.get("engine"))) if expected_revision is not None else None
+        )
+        row_marker = row.get("run_revision")
+        if str(row.get("record_key")) not in valid_keys:
             reason = "outside current subset/field/seed battery"
             counts["universe"] += 1
-        elif row.get("engine") == "dagua" and row.get("native_child_seed") != current_seed:
-            reason = "native row generated under a different --seed"
-            counts["native_seed"] += 1
-        elif (
-            tensor_exists is not None
-            and row.get("status") == "OK"
-            and (not row.get("positions_path") or not tensor_exists(str(row["positions_path"])))
-        ):
-            # A kept OK row must OWN a present tensor; a null/absent path is
-            # as unpublishable as a swept one (Sol R3 F2).
-            reason = "positions tensor missing from the row store"
-            counts["tensor_missing"] += 1
+        elif expected_marker is not None and row_marker != expected_marker:
+            # Implementation revision drift (R2 B4-Sol-2). The source
+            # component (after the last ':') discriminates harness-only
+            # commits from engine-implementation changes.
+            row_component = (
+                str(row_marker).rsplit(":", 1)[-1] if isinstance(row_marker, str) else None
+            )
+            expected_component = expected_marker.rsplit(":", 1)[-1]
+            if accept_revision_drift and row_component == expected_component:
+                drift_accepted = True
+            else:
+                reason = "implementation revision drift"
+                counts["revision"] += 1
         if reason is None:
+            if row.get("v3_tiered") is not None and row.get("scoring_signature") != signature:
+                reason = "stale scoring signature"
+                counts["signature"] += 1
+            elif row.get("engine") == "dagua" and row.get("native_child_seed") != current_seed:
+                reason = "native row generated under a different --seed"
+                counts["native_seed"] += 1
+            elif (
+                retry_memkills
+                and str(row.get("status_detail", "")).startswith("memkill")
+                and int(row.get("memkill_retries") or 0) < MEMKILL_MAX_RETRIES
+            ):
+                reason = "environmental memkill retried on resume"
+                counts["memkill_retry"] += 1
+            elif (
+                tensor_exists is not None
+                and row.get("status") == "OK"
+                and (not row.get("positions_path") or not tensor_exists(str(row["positions_path"])))
+            ):
+                # A kept OK row must OWN a present tensor; a null/absent path
+                # is as unpublishable as a swept one (Sol R3 F2).
+                reason = "positions tensor missing from the row store"
+                counts["tensor_missing"] += 1
+        if reason is None:
+            if drift_accepted:
+                row = {**row, "revision_drift": True}
+                revision_drift_rows.append(row)
             kept.append(row)
         else:
             quarantined.append({**row, "quarantine_reason": reason})
-    return kept, quarantined, counts
+    return kept, quarantined, counts, revision_drift_rows
 
 
 def quarantine_orphan_tensors(staging: Path, rows: Sequence[Dict[str, Any]]) -> List[str]:
@@ -1563,10 +1793,21 @@ def _child_tree_rss_bytes(pid: int) -> Optional[int]:
 class RowExecutor:
     """Executes layout rows in spawn children with RSS watchdog and grace."""
 
-    def __init__(self, args: argparse.Namespace, staging: Path) -> None:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        staging: Path,
+        revision_markers: Optional[Dict[str, str]] = None,
+        memkill_retry_counts: Optional[Dict[str, int]] = None,
+    ) -> None:
         self.args = args
         self.staging = staging
         self.child_rss_abort_bytes = float(args.child_rss_abort_gb) * 1024**3
+        # Per-engine run-revision markers stamped onto every row at creation
+        # (R2 B4-Sol-2) and per-key environmental-memkill retry counters
+        # carried across resumes (R2 B4-F4).
+        self.revision_markers = revision_markers or {}
+        self.memkill_retry_counts = memkill_retry_counts or {}
         self._selftest_lock = threading.Lock()
         self._selftest_armed = bool(args.rss_guard_selftest)
 
@@ -1805,12 +2046,14 @@ class RowExecutor:
         """
         from scripts.run_benchmark import build_record_key
 
-        return {
+        record_key = build_record_key(entry.name, engine_name, seed)
+        row = {
             "graph": entry.name,
             "corpus": entry.corpus,
             "engine": engine_name,
             "seed": seed,
-            "record_key": build_record_key(entry.name, engine_name, seed),
+            "record_key": record_key,
+            "run_revision": self.revision_markers.get(engine_name),
             "nodes": entry.loaded.graph.num_nodes,
             "edges": int(entry.loaded.graph.edge_index.shape[1]),
             "directed": entry.directed,
@@ -1818,6 +2061,10 @@ class RowExecutor:
             "source_path": str(entry.loaded.source_path),
             "loader_telemetry": entry.telemetry,
         }
+        retries = self.memkill_retry_counts.get(record_key)
+        if retries is not None:
+            row["memkill_retries"] = retries
+        return row
 
     def skip_row(
         self, entry: GraphEntry, engine_name: str, seed: Optional[int], reason: str
@@ -2343,9 +2590,18 @@ def write_report(
             if quarantine_reasons
             else ""
         ),
+        f"- Revision-drift rows KEPT under --accept-revision-drift: "
+        f"{len(payload.get('revision_drift_rows', []))}",
         f"- Run aborted: {payload['aborted']} ({payload.get('aborted_reason')})",
         "",
     ]
+    markers = payload.get("run_revision_markers", {})
+    for row in payload.get("revision_drift_rows", []):
+        expected_marker = markers.get(str(row.get("engine")))
+        lines.append(
+            f"- REVISION DRIFT (kept): {row.get('record_key')} -- row "
+            f"{row.get('run_revision')} vs current {expected_marker}"
+        )
     for row in errors:
         lines.append(
             f"- ERROR {row['record_key']}: {row.get('status_detail')} -- {row.get('error')}"
@@ -2851,6 +3107,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     import scripts.native_sprint_score as nss
 
     signature = nss.scoring_signature()
+    # Per-engine run-revision markers (R2 B4-Sol-2): git SHA + engine source
+    # component, stamped onto every row and compared on resume.
+    revision_markers = compute_revision_markers(engines, provenance["git_sha"])
+    row_store_snapshot: Optional[Path] = None
 
     # Staging setup + resume.
     staging = args.output_dir.with_name(f"{args.output_dir.name}.tmp")
@@ -2901,18 +3161,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         warnings.append(f"removed {removed_temps} stale child temp file(s) at startup")
     existing_rows: List[Dict[str, Any]] = []
     if args.resume:
+        # Snapshot the ONLY copy of the row store BEFORE any resume-prep
+        # mutation (torn-line repair below, quarantine rewrite later):
+        # dry-well R2 B4-F1 reproduced the quarantine rewrite gutting a
+        # staging-only crashed run (1002 -> 0 bytes) on a mistyped resume
+        # invocation. The snapshot is removed only after a successful
+        # publish.
+        row_store_snapshot = snapshot_row_store(staging)
         existing_rows, torn_warnings = load_rows_tolerant(staging)
         warnings.extend(torn_warnings)
 
-    # Resume-consistency quarantine (dry-well B4-F3, Sol B3-2/B4-3/B5-1):
-    # resumed rows must not silently compete when they were produced under a
-    # different ruler, row universe, or native seed. Quarantined rows are
-    # recorded (results.json + report), excluded from the tally, and their
-    # keys vacate so in-universe rows are re-run/re-scored under the CURRENT
-    # signature. Layout-only rows (no v3_tiered) pass through and are scored
-    # fresh; a quarantined scored row whose layout sibling row survives is
-    # rescored from its existing tensor.
+    # Resume-consistency quarantine (dry-well B4-F3, Sol B3-2/B4-3/B5-1,
+    # R2 B4-Sol-2, R2 B4-F4): resumed rows must not silently compete when
+    # they were produced under a different ruler, row universe, native seed,
+    # or implementation revision. Quarantined rows are recorded
+    # (results.json + report), excluded from the tally, and their keys
+    # vacate so in-universe rows are re-run/re-scored under the CURRENT
+    # signature and revision. Layout-only rows (no v3_tiered) pass through
+    # and are scored fresh; a quarantined scored row whose layout sibling
+    # survives is rescored from its existing tensor -- EXCEPT revision
+    # drift, which invalidates the layout itself (siblings carry the same
+    # stale marker and quarantine with it).
     quarantined_rows: List[Dict[str, Any]] = []
+    revision_drift_rows: List[Dict[str, Any]] = []
+    memkill_retry_counts: Dict[str, int] = {}
     if args.resume and existing_rows:
         valid_keys: Set[str] = set()
         for entry in entries:
@@ -2921,13 +3193,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for engine in field_engines:
                 for seed in seeds_by_engine[engine]:
                     valid_keys.add(build_record_key(entry.name, engine, seed))
-        existing_rows, quarantined_rows, quarantine_counts = partition_resumed_rows(
-            existing_rows,
-            signature,
-            valid_keys,
-            args.seed,
-            tensor_exists=lambda relpath: (staging / relpath).is_file(),
+        existing_rows, quarantined_rows, quarantine_counts, revision_drift_rows = (
+            partition_resumed_rows(
+                existing_rows,
+                signature,
+                valid_keys,
+                args.seed,
+                tensor_exists=lambda relpath: (staging / relpath).is_file(),
+                expected_revision=revision_markers.get,
+                accept_revision_drift=args.accept_revision_drift,
+                retry_memkills=args.retry_memkills,
+            )
         )
+        for row in quarantined_rows:
+            if row.get("quarantine_reason") == "environmental memkill retried on resume":
+                key = str(row.get("record_key"))
+                memkill_retry_counts[key] = int(row.get("memkill_retries") or 0) + 1
         if quarantined_rows:
             # Quarantine is DURABLE (Sol round-2 F2): rewrite the primary
             # store without the quarantined rows so a later resume that
@@ -2935,12 +3216,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # resurrecting a row whose tensor was orphaned.
             try:
                 rewrite_rows(staging, existing_rows)
-            except Exception as exc:  # noqa: BLE001 - Sol R3 F1: the canonical
-                # published run was never displaced (copy-based reopen), so a
-                # rewrite failure aborts loudly with the prior run intact.
+            except Exception as exc:  # noqa: BLE001 - Sol R3 F1 / R2 B4-F1:
+                # restore the pre-resume snapshot so a failed rewrite can
+                # never leave a gutted staging-only store behind.
+                restored = row_store_snapshot is not None and restore_row_store_snapshot(
+                    row_store_snapshot, staging
+                )
                 print(
                     f"RESUME-PREP FAILED (quarantine rewrite): {type(exc).__name__}: "
-                    f"{exc}; canonical published run untouched",
+                    f"{exc}; row store "
+                    f"{'restored from pre-resume snapshot' if restored else 'left as-is'}; "
+                    "canonical published run untouched",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -2951,10 +3237,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"(stale signature: {quarantine_counts['signature']}, outside row universe: "
                 f"{quarantine_counts['universe']}, native seed mismatch: "
                 f"{quarantine_counts['native_seed']}, tensor missing: "
-                f"{quarantine_counts['tensor_missing']})"
+                f"{quarantine_counts['tensor_missing']}, revision drift: "
+                f"{quarantine_counts['revision']}, memkill retries: "
+                f"{quarantine_counts['memkill_retry']})"
             )
             print(summary, flush=True)
             warnings.append(summary)
+        if revision_drift_rows:
+            drift_line = (
+                f"REVISION DRIFT ACCEPTED: {len(revision_drift_rows)} resumed row(s) kept "
+                "across a git-revision change under --accept-revision-drift; results.json "
+                "and the report disclose them"
+            )
+            print(drift_line, flush=True)
+            warnings.append(drift_line)
     row_map: Dict[str, Dict[str, Any]] = dedupe_rows(existing_rows)
     completed_keys: Set[str] = set(row_map)
 
@@ -2969,7 +3265,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         include_native,
     )
 
-    executor = RowExecutor(args, staging)
+    executor = RowExecutor(args, staging, revision_markers, memkill_retry_counts)
     store_lock = threading.Lock()
     state: Dict[str, Any] = {"rows_done": 0, "rss_warned": False}
     aborted_reason: Optional[str] = None
@@ -3190,6 +3486,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         {key: value for key, value in row.items() if key not in slim_drop}
         for row in sorted(quarantined_rows, key=lambda row: str(row.get("record_key")))
     ]
+    slim_revision_drift = [
+        {key: value for key, value in row.items() if key not in slim_drop}
+        for row in sorted(revision_drift_rows, key=lambda row: str(row.get("record_key")))
+    ]
     payload: Dict[str, Any] = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         **provenance,
@@ -3215,6 +3515,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "load_rows": load_rows,
         "rows": slim_rows,
         "quarantined_rows": slim_quarantined,
+        "revision_drift_rows": slim_revision_drift,
+        "run_revision_markers": revision_markers,
         "tally": tally,
         "warnings": warnings,
         "assumptions": assumptions,
@@ -3232,6 +3534,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             file=sys.stderr,
         )
         return 1
+    # Publish succeeded: the pre-resume snapshots (which traveled with the
+    # staging rename) have served their purpose (R2 B4-F1).
+    removed_snapshots = clean_row_store_snapshots(args.output_dir)
+    if removed_snapshots:
+        print(f"removed {removed_snapshots} pre-resume row-store snapshot(s)", flush=True)
     print(
         f"published {args.output_dir}: tally {tally['overall']}",
         flush=True,
