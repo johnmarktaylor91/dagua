@@ -110,6 +110,9 @@ def _igraph_pos_to_tensor(layout: Any, num_nodes: int) -> torch.Tensor:
 class _IgraphBase(CompetitorBase):
     """Base for igraph layout algorithms."""
 
+    # Family backend: every igraph_* member (incl. igraph_rt_circular)
+    # inherits the igraph version component (dry-well R4-B3-Sol).
+    backend_version_key = "igraph"
     layout_algo: str = "sugiyama"
     layout_kwargs: dict[str, Any] = {}
     accepts_seed_matrix: bool = False

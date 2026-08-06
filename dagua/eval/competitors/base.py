@@ -47,6 +47,14 @@ class CompetitorBase(ABC):
     # runtime-compiled .java driver); hashed into the cache-signature closure
     # like delegate modules (dry-well R2-B3-Fable F2b).
     source_delegate_files: tuple = ()
+    # System-metadata key naming the shared external backend whose version
+    # keys this adapter's cache signature (e.g. "graphviz", "elk",
+    # "networkx", "igraph"). Declared ONCE on each family's base class so
+    # every present and future member inherits the version component
+    # structurally -- the old per-name table in benchmark.py silently
+    # dropped sibling aliases (dry-well R4-B3-Sol HIGH). None = no shared
+    # versioned backend (Dagua-owned engines, availability-probed backends).
+    backend_version_key: Optional[str] = None
     # True when the adapter's substantive layout implementation is Dagua-owned
     # code under dagua/layout/** (all pipeline reimplementations, plus
     # adapters that defer to archived Dagua implementations). The cache

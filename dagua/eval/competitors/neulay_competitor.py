@@ -47,6 +47,7 @@ class NeuLayReference(CompetitorBase):
 
     name = "neulay"
     max_nodes = 20_000
+    backend_version_key = "pyg"
     variant_param_names = frozenset({"gcn_steps", "lr", "radius", "steps", "use_gcn"})
     # Execution is delegated to the recovered wrapper; its source joins the
     # cache-signature closure so wrapper fixes invalidate cached rows. The
