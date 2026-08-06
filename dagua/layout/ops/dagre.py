@@ -364,39 +364,29 @@ def _flatten_cluster_members(members: Any) -> List[int]:
     """
     output: List[int] = []
 
-    def visit(value: Any) -> None:
-        """Collect leaves from one nested membership value.
-
-        Parameters
-        ----------
-        value : Any
-            Nested member payload.
-
-        Returns
-        -------
-        None
-            ``output`` is mutated.
-        """
+    # Iterative twin of the recursive payload walk (explicit LIFO with
+    # reversed pushes): leaves are collected in the same encounter order, and
+    # deeply nested membership payloads no longer exhaust the recursion
+    # limit.
+    pending: List[Any] = [members]
+    while pending:
+        value = pending.pop()
         if isinstance(value, Mapping):
-            for child_value in value.values():
-                visit(child_value)
-            return
+            pending.extend(reversed(list(value.values())))
+            continue
         if isinstance(value, (str, bytes)):
             try:
                 output.append(int(value))
             except ValueError:
-                return
-            return
+                pass
+            continue
         if isinstance(value, Iterable):
-            for child_value in value:
-                visit(child_value)
-            return
+            pending.extend(reversed(list(value)))
+            continue
         try:
             output.append(int(value))
         except (TypeError, ValueError):
-            return
-
-    visit(members)
+            pass
     return output
 
 
@@ -473,29 +463,21 @@ def _compound_tree_depths(graph: _DagreGraph) -> Dict[NodeId, int]:
     """
     depths: Dict[NodeId, int] = {}
 
-    def visit(node: NodeId, depth: int) -> None:
-        """Assign depths recursively.
-
-        Parameters
-        ----------
-        node : Hashable
-            Current node or cluster.
-        depth : int
-            Dagre nesting depth.
-
-        Returns
-        -------
-        None
-            ``depths`` is mutated.
-        """
+    # Iterative post-order twin of the recursive depth walk (enter/exit
+    # stack): the ``depths`` insertion order is identical, and deep cluster
+    # chains no longer exhaust the recursion limit.
+    work: List[Tuple[NodeId, int, bool]] = [
+        (child, 1, False) for child in reversed(graph.children(None))
+    ]
+    while work:
+        node, depth, expanded = work.pop()
+        if expanded:
+            depths[node] = depth
+            continue
         children = graph.children(node)
-        if children:
-            for child in children:
-                visit(child, depth + 1)
-        depths[node] = depth
-
-    for child in graph.children(None):
-        visit(child, 1)
+        work.append((node, depth, True))
+        for child in reversed(children):
+            work.append((child, depth + 1, False))
     return depths
 
 
@@ -805,41 +787,53 @@ class DagrePrepareGraph(Op):
             def emit_cluster(cluster_name: str) -> None:
                 """Assign direct dagre parents for one cluster subtree.
 
+                Iterative twin of the recursive emitter (explicit enter/exit
+                stack): the ``set_parent`` call order and the first-emitter-
+                wins ``emitted_nodes`` semantics are identical, and deep
+                cluster chains no longer exhaust the recursion limit.
+
                 Parameters
                 ----------
                 cluster_name : str
-                    Cluster being emitted.
+                    Root of the cluster subtree being emitted.
 
                 Returns
                 -------
                 None
                     Parent metadata on ``graph`` is mutated.
                 """
-                cluster_id = _cluster_node_id(cluster_name)
-                parent_name = normalized_parents.get(cluster_name)
-                if parent_name in normalized_clusters:
-                    graph.set_parent(cluster_id, _cluster_node_id(parent_name))
-                child_clusters = children_by_parent.get(cluster_name, [])
-                for child_name in child_clusters:
-                    emit_cluster(child_name)
-
-                descendant_members: Set[int] = set()
-                for child_name in child_clusters:
-                    descendant_members.update(
-                        index
-                        for index in _flatten_cluster_members(normalized_clusters[child_name])
-                        if 0 <= index < problem.num_nodes
-                    )
-                for node_index in _flatten_cluster_members(normalized_clusters[cluster_name]):
-                    if (
-                        node_index in descendant_members
-                        or node_index in emitted_nodes
-                        or node_index < 0
-                        or node_index >= problem.num_nodes
-                    ):
+                work: List[Tuple[str, bool]] = [(cluster_name, False)]
+                while work:
+                    current_name, expanded = work.pop()
+                    child_clusters = children_by_parent.get(current_name, [])
+                    if not expanded:
+                        cluster_id = _cluster_node_id(current_name)
+                        parent_name = normalized_parents.get(current_name)
+                        if parent_name in normalized_clusters:
+                            graph.set_parent(cluster_id, _cluster_node_id(parent_name))
+                        work.append((current_name, True))
+                        for child_name in reversed(child_clusters):
+                            work.append((child_name, False))
                         continue
-                    graph.set_parent(original_node_ids[node_index], cluster_id)
-                    emitted_nodes.add(node_index)
+
+                    cluster_id = _cluster_node_id(current_name)
+                    descendant_members: Set[int] = set()
+                    for child_name in child_clusters:
+                        descendant_members.update(
+                            index
+                            for index in _flatten_cluster_members(normalized_clusters[child_name])
+                            if 0 <= index < problem.num_nodes
+                        )
+                    for node_index in _flatten_cluster_members(normalized_clusters[current_name]):
+                        if (
+                            node_index in descendant_members
+                            or node_index in emitted_nodes
+                            or node_index < 0
+                            or node_index >= problem.num_nodes
+                        ):
+                            continue
+                        graph.set_parent(original_node_ids[node_index], cluster_id)
+                        emitted_nodes.add(node_index)
 
             for root_cluster in children_by_parent.get(None, []):
                 emit_cluster(root_cluster)
@@ -1094,25 +1088,74 @@ class DagreNestingGraph(Op):
             edge.minlen *= node_sep
         weight = sum(edge.weight for edge in graph.active_edges()) + 1.0
 
-        def visit(node: NodeId) -> None:
-            """Create border nodes and nesting edges for one subtree.
+        def emit_child_nesting_edges(
+            parent: NodeId,
+            child: NodeId,
+            top: NodeId,
+            bottom: NodeId,
+        ) -> None:
+            """Add the two nesting edges binding one completed child.
 
             Parameters
             ----------
-            node : Hashable
-                Current compound-tree child.
+            parent : Hashable
+                Compound node owning ``top`` and ``bottom``.
+            child : Hashable
+                Child whose subtree has just been processed.
+            top : Hashable
+                Parent's top border dummy.
+            bottom : Hashable
+                Parent's bottom border dummy.
 
             Returns
             -------
             None
                 The working graph is mutated.
             """
+            child_node = graph.nodes[child]
+            child_top = child_node.border_top if child_node.border_top is not None else child
+            child_bottom = (
+                child_node.border_bottom if child_node.border_bottom is not None else child
+            )
+            edge_weight = weight if child_node.border_top is not None else 2.0 * weight
+            minlen = 1 if child_top != child_bottom else height - depths.get(parent, 1) + 1
+            graph.add_edge(
+                top,
+                child_top,
+                weight=edge_weight,
+                minlen=minlen,
+                original_index=-1,
+                nesting_edge=True,
+            )
+            graph.add_edge(
+                child_bottom,
+                bottom,
+                weight=edge_weight,
+                minlen=minlen,
+                original_index=-1,
+                nesting_edge=True,
+            )
+
+        def enter_nesting_node(node: NodeId) -> Optional[List[Any]]:
+            """Run the pre-children half of dagre's nesting visit.
+
+            Parameters
+            ----------
+            node : Hashable
+                Compound-tree node being entered.
+
+            Returns
+            -------
+            list | None
+                A ``[node, children, next_index, top, bottom]`` frame for
+                compound nodes, or ``None`` when the node is a leaf and was
+                completed in place.
+            """
             children = graph.children(node)
             if not children:
                 if node != root:
                     graph.add_edge(root, node, weight=0.0, minlen=node_sep, original_index=-1)
-                return
-
+                return None
             top = graph.add_dummy("border")
             bottom = graph.add_dummy("border")
             label = graph.nodes[node]
@@ -1120,41 +1163,61 @@ class DagreNestingGraph(Op):
             graph.set_parent(bottom, node)
             label.border_top = top
             label.border_bottom = bottom
+            return [node, children, 0, top, bottom]
 
-            for child in children:
-                visit(child)
-                child_node = graph.nodes[child]
-                child_top = child_node.border_top if child_node.border_top is not None else child
-                child_bottom = (
-                    child_node.border_bottom if child_node.border_bottom is not None else child
-                )
-                edge_weight = weight if child_node.border_top is not None else 2.0 * weight
-                minlen = 1 if child_top != child_bottom else height - depths.get(node, 1) + 1
-                graph.add_edge(
-                    top,
-                    child_top,
-                    weight=edge_weight,
-                    minlen=minlen,
-                    original_index=-1,
-                    nesting_edge=True,
-                )
-                graph.add_edge(
-                    child_bottom,
-                    bottom,
-                    weight=edge_weight,
-                    minlen=minlen,
-                    original_index=-1,
-                    nesting_edge=True,
-                )
+        def visit(node: NodeId) -> None:
+            """Create border nodes and nesting edges for one subtree.
 
-            if graph.parent_of(node) is None:
-                graph.add_edge(
-                    root,
-                    top,
-                    weight=0.0,
-                    minlen=height + depths.get(node, 1),
-                    original_index=-1,
-                )
+            Iterative twin of dagre.js's recursive nesting walk: the exact
+            interleaving of dummy creation, parent assignment, and nesting-
+            edge insertion is preserved (children are snapshotted before the
+            border dummies are attached, and each child's two nesting edges
+            are added right after its subtree completes), while deep cluster
+            chains no longer exhaust the recursion limit.
+
+            Parameters
+            ----------
+            node : Hashable
+                Root of the compound subtree.
+
+            Returns
+            -------
+            None
+                The working graph is mutated.
+            """
+            first = enter_nesting_node(node)
+            if first is None:
+                return
+            frames: List[List[Any]] = [first]
+            while frames:
+                frame = frames[-1]
+                current, children, index, top, bottom = frame
+                if index < len(children):
+                    frame[2] = index + 1
+                    child = children[index]
+                    child_frame = enter_nesting_node(child)
+                    if child_frame is not None:
+                        frames.append(child_frame)
+                        continue
+                    emit_child_nesting_edges(current, child, top, bottom)
+                    continue
+                if graph.parent_of(current) is None:
+                    graph.add_edge(
+                        root,
+                        top,
+                        weight=0.0,
+                        minlen=height + depths.get(current, 1),
+                        original_index=-1,
+                    )
+                frames.pop()
+                if frames:
+                    parent_frame = frames[-1]
+                    emit_child_nesting_edges(
+                        parent_frame[0],
+                        parent_frame[1][parent_frame[2] - 1],
+                        parent_frame[3],
+                        parent_frame[4],
+                    )
 
         for child in graph.children(None):
             if child != root:
@@ -2308,28 +2371,23 @@ def _compound_postorder_numbers(
     result: Dict[Optional[NodeId], Tuple[int, int]] = {}
     limit = 0
 
-    def visit(node: NodeId) -> None:
-        """Visit one compound-tree node.
-
-        Parameters
-        ----------
-        node : Hashable
-            Current node.
-
-        Returns
-        -------
-        None
-            ``result`` and ``limit`` are mutated.
-        """
-        nonlocal limit
-        low = limit
-        for child in graph.children(node):
-            visit(child)
-        result[node] = (low, limit)
-        limit += 1
-
-    for child in graph.children(None):
-        visit(child)
+    # Iterative post-order twin of the recursive interval numbering
+    # (enter/exit stack): each node's ``low`` is captured at entry and its
+    # ``(low, lim)`` recorded after its children, so numbers and ``result``
+    # insertion order are identical, and deep cluster chains no longer
+    # exhaust the recursion limit.
+    work: List[Tuple[NodeId, int, bool]] = [
+        (child, 0, False) for child in reversed(graph.children(None))
+    ]
+    while work:
+        node, low, expanded = work.pop()
+        if expanded:
+            result[node] = (low, limit)
+            limit += 1
+            continue
+        work.append((node, limit, True))
+        for child in reversed(graph.children(node)):
+            work.append((child, 0, False))
     result[None] = (0, limit)
     return result
 
@@ -2540,30 +2598,26 @@ class DagreBorderSegments(Op):
             if previous is not None:
                 graph.add_edge(previous, current, weight=1.0, minlen=1, original_index=-1)
 
-        def visit(node: NodeId) -> None:
-            """Visit one compound-tree node after children.
-
-            Parameters
-            ----------
-            node : Hashable
-                Current node or cluster.
-
-            Returns
-            -------
-            None
-                Border nodes are inserted for cluster nodes.
-            """
-            for child in graph.children(node):
-                visit(child)
+        # Iterative post-order twin of the recursive border walk (enter/exit
+        # stack): border nodes are still inserted child-subtrees-first in the
+        # same order, and deep cluster chains no longer exhaust the recursion
+        # limit.
+        work: List[Tuple[NodeId, bool]] = [
+            (child, False) for child in reversed(graph.children(None))
+        ]
+        while work:
+            node, expanded = work.pop()
+            if not expanded:
+                work.append((node, True))
+                for child in reversed(graph.children(node)):
+                    work.append((child, False))
+                continue
             node_data = graph.nodes[node]
             if node_data.min_rank is None or node_data.max_rank is None:
-                return
+                continue
             for rank in range(node_data.min_rank, node_data.max_rank + 1):
                 add_border_node("borderLeft", node, node_data, rank)
                 add_border_node("borderRight", node, node_data, rank)
-
-        for child in graph.children(None):
-            visit(child)
         return state
 
 
@@ -2978,31 +3032,48 @@ def _compound_initial_order(graph: _DagreGraph) -> List[List[NodeId]]:
     layers: List[List[NodeId]] = [[] for _ in range(max_rank + 1)]
     visited: Set[NodeId] = set()
 
-    def visit(node: NodeId) -> None:
-        """Visit one node in successor-first DFS order.
+    def place(node: NodeId) -> bool:
+        """Record one node in its rank layer.
 
         Parameters
         ----------
         node : Hashable
-            Current node.
+            Node being placed.
 
         Returns
         -------
-        None
-            ``layers`` and ``visited`` are mutated.
+        bool
+            False when the node has no rank (its successors are not walked,
+            matching the recursive early return).
         """
-        if node in visited:
-            return
         visited.add(node)
         rank = graph.nodes[node].rank
         if rank is None:
-            return
+            return False
         layers[rank].append(node)
-        for successor in graph.successors(node):
-            visit(successor)
+        return True
 
-    for node in sorted(simple_nodes, key=lambda item: graph.nodes[item].rank or 0):
-        visit(node)
+    # Iterative twin of dagre's recursive successor-first compound DFS
+    # (suspended-iterator stack, matching the simple-graph ordering
+    # conversion): the layer append order is preserved exactly, and deep
+    # graphs no longer exhaust the recursion limit.
+    frames: List[Iterator[NodeId]] = []
+    for start in sorted(simple_nodes, key=lambda item: graph.nodes[item].rank or 0):
+        if start in visited:
+            continue
+        if not place(start):
+            continue
+        frames.append(iter(graph.successors(start)))
+        while frames:
+            descended = False
+            for successor in frames[-1]:
+                if successor not in visited:
+                    if place(successor):
+                        frames.append(iter(graph.successors(successor)))
+                        descended = True
+                        break
+            if not descended:
+                frames.pop()
     return layers
 
 

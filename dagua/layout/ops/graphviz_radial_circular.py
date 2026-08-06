@@ -1687,26 +1687,23 @@ def _cycle_block_order(edge_index: torch.Tensor, block: Sequence[int]) -> Option
     ordered: List[int] = []
     visited: Set[int] = set()
 
-    def visit(node: int) -> None:
-        """Visit cycle nodes in input-neighbor order.
-
-        Parameters
-        ----------
-        node : int
-            Current cycle node.
-
-        Returns
-        -------
-        None
-            The function mutates ``ordered`` and ``visited``.
-        """
-        visited.add(node)
-        ordered.append(node)
-        for neighbor in adjacency[node]:
+    # Iterative twin of the recursive input-neighbor-order walk (suspended-
+    # iterator stack): visitation order is identical, and rings larger than
+    # the recursion limit no longer crash.
+    visited.add(start)
+    ordered.append(start)
+    frames: List[Iterator[int]] = [iter(adjacency[start])]
+    while frames:
+        descended = False
+        for neighbor in frames[-1]:
             if neighbor not in visited:
-                visit(neighbor)
-
-    visit(start)
+                visited.add(neighbor)
+                ordered.append(neighbor)
+                frames.append(iter(adjacency[neighbor]))
+                descended = True
+                break
+        if not descended:
+            frames.pop()
     if len(ordered) != len(block):
         return None
     return ordered
@@ -1761,9 +1758,15 @@ def _subtree_nodes(block: _CircoBlock) -> List[int]:
     list[int]
         Nodes owned by ``block`` and all descendants.
     """
-    nodes = list(block.nodes)
-    for child in block.children:
-        nodes.extend(_subtree_nodes(child))
+    # Iterative pre-order twin of the recursive collection: the emitted node
+    # order is identical, and deep block chains no longer exhaust the
+    # recursion limit.
+    nodes: List[int] = []
+    stack: List[_CircoBlock] = [block]
+    while stack:
+        current = stack.pop()
+        nodes.extend(current.nodes)
+        stack.extend(reversed(current.children))
     return nodes
 
 
@@ -2135,6 +2138,11 @@ def _layout_circo_block_tree(
 ) -> None:
     """Lay out one block tree using Graphviz circpos formulas.
 
+    Iterative post-order twin of the recursive block-tree walk (enter/exit
+    stack): blocks are finalized deepest-first with siblings in child order,
+    exactly as the recursion did, and deep block chains no longer exhaust
+    the recursion limit.
+
     Parameters
     ----------
     block : _CircoBlock
@@ -2156,10 +2164,48 @@ def _layout_circo_block_tree(
     None
         ``points`` and block radius metadata are updated in place.
     """
-    child_count = 0
-    for child in block.children:
-        _layout_circo_block_tree(child, adjacency, edge_index, nodesep, points, node_extents)
-        child_count += 1
+    work: List[Tuple[_CircoBlock, bool]] = [(block, False)]
+    while work:
+        current, expanded = work.pop()
+        if not expanded:
+            work.append((current, True))
+            for child in reversed(current.children):
+                work.append((child, False))
+            continue
+        _finalize_circo_block(current, adjacency, edge_index, nodesep, points, node_extents)
+
+
+def _finalize_circo_block(
+    block: _CircoBlock,
+    adjacency: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    nodesep: float,
+    points: Dict[int, Tuple[float, float]],
+    node_extents: Optional[Sequence[float]] = None,
+) -> None:
+    """Finalize one block after all of its children are laid out.
+
+    Parameters
+    ----------
+    block : _CircoBlock
+        Block whose children have already been finalized.
+    adjacency : sequence[sequence[int]]
+        Strict undirected adjacency.
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
+    nodesep : float
+        Minimum separation scale.
+    points : dict[int, tuple[float, float]]
+        Mutable local point map.
+    node_extents : sequence[float], optional
+        Per-node maximum dimensions in points.
+
+    Returns
+    -------
+    None
+        ``points`` and block radius metadata are updated in place.
+    """
+    child_count = len(block.children)
 
     block.ordered = _circo_block_order(adjacency, edge_index, block)
     count = len(block.ordered)

@@ -9,7 +9,19 @@ the layered spacing options exposed by the adapter.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    ClassVar,
+    Dict,
+    Hashable,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import torch
 
@@ -385,31 +397,32 @@ def _break_cycles_depth_first(
     visited: Set[int] = set()
     stack: Set[int] = set()
 
-    def visit(node: int) -> None:
-        """Visit one node in model-order DFS.
-
-        Parameters
-        ----------
-        node : int
-            Node to visit.
-
-        Returns
-        -------
-        None
-            ``reversed_indices`` is mutated in place.
-        """
-        visited.add(node)
-        stack.add(node)
-        for edge_index, target in outgoing[node]:
-            if target in stack:
-                reversed_indices.add(edge_index)
-            elif target not in visited:
-                visit(target)
-        stack.remove(node)
-
-    for node in range(num_nodes):
-        if node not in visited:
-            visit(node)
+    # Iterative twin of ELK's recursive model-order DFS (suspended-iterator
+    # stack, matching the dagre acycler conversion): traversal order and the
+    # on-stack back-edge test are identical, and deep chains no longer
+    # exhaust the recursion limit.
+    frames: List[Tuple[int, Iterator[Tuple[int, int]]]] = []
+    for start in range(num_nodes):
+        if start in visited:
+            continue
+        visited.add(start)
+        stack.add(start)
+        frames.append((start, iter(outgoing[start])))
+        while frames:
+            node, edge_iter = frames[-1]
+            descended = False
+            for edge_index, target in edge_iter:
+                if target in stack:
+                    reversed_indices.add(edge_index)
+                elif target not in visited:
+                    visited.add(target)
+                    stack.add(target)
+                    frames.append((target, iter(outgoing[target])))
+                    descended = True
+                    break
+            if not descended:
+                stack.remove(node)
+                frames.pop()
     return [
         (target, source) if index in reversed_indices else (source, target)
         for index, (source, target) in enumerate(edges)
