@@ -1816,12 +1816,14 @@ def test_partition_revision_drift_rules() -> None:
     """R2 B4-Sol-2: revision drift quarantines; layout siblings NOT rescued."""
     signature = "sig"
     key = build_record_key("rome/g", "graphviz_dot", None)
-    markers = {"graphviz_dot": "sha2:srcA"}
+    # 3-part markers (R3 B4): <git_sha>|<full competitor signature>|<harness>.
+    full_sig = "graphviz_dot:dot - graphviz version 7.0.5:src=AAAA"
+    markers = {"graphviz_dot": f"sha2|{full_sig}|HARN"}
     layout_row = {
         "record_key": key,
         "engine": "graphviz_dot",
         "status": "OK",
-        "run_revision": "sha1:srcA",
+        "run_revision": f"sha1|{full_sig}|HARN",
         "positions_path": "positions/p.pt",
     }
     scored_row = {
@@ -1861,22 +1863,65 @@ def test_partition_revision_drift_rules() -> None:
     assert len(drift) == 2
     assert all(row.get("revision_drift") is True for row in drift)
 
-    # Source-component drift or a missing marker quarantines even WITH the
-    # flag (that is not a harness-only hotfix).
-    source_drift = {**scored_row, "run_revision": "sha1:srcOLD"}
+    # Anything but pure git-SHA drift quarantines even WITH the flag
+    # (R3 B4): dependency-version bump (Sol repro 1), dagua-tree component
+    # change under an unchanged adapter src (Sol repro 2, the circo_reimpl
+    # 5319d7aa-vs-5cf83b68 shape), harness-component drift -- committed
+    # (Fable repro, mis-certified before) or uncommitted (same SHA, zero
+    # quarantine before) -- and missing/legacy-format markers.
+    dep_bump = {
+        **scored_row,
+        "run_revision": "sha1|graphviz_dot:dot - graphviz version 6.9.9:src=AAAA|HARN",
+    }
+    circo_full_old = "circo_reimpl:None:src=6f2e4661a6a71285:dagua=OLDTREE"
+    circo_full_new = "circo_reimpl:None:src=6f2e4661a6a71285:dagua=NEWTREE"
+    circo_key = build_record_key("rome/g", "circo_reimpl", None)
+    circo_markers = {
+        "graphviz_dot": markers["graphviz_dot"],
+        "circo_reimpl": f"5cf83b68|{circo_full_new}|HARN",
+    }
+    shared_ops_drift = {
+        **scored_row,
+        "record_key": circo_key,
+        "engine": "circo_reimpl",
+        "run_revision": f"5319d7aa|{circo_full_old}|HARN",
+    }
+    harness_committed = {**scored_row, "run_revision": f"sha1|{full_sig}|OLDHARN"}
+    harness_uncommitted = {**scored_row, "run_revision": f"sha2|{full_sig}|OLDHARN"}
+    legacy_format = {**scored_row, "run_revision": "sha1:AAAA"}
     markerless = {k: v for k, v in scored_row.items() if k != "run_revision"}
     kept, quarantined, counts, drift = glados.partition_resumed_rows(
-        [source_drift, markerless],
+        [
+            dep_bump,
+            shared_ops_drift,
+            harness_committed,
+            harness_uncommitted,
+            legacy_format,
+            markerless,
+        ],
+        signature,
+        {key, circo_key},
+        42,
+        tensor_exists=lambda _p: True,
+        expected_revision=circo_markers.get,
+        accept_revision_drift=True,
+    )
+    assert kept == []
+    assert counts["revision"] == 6
+    assert drift == []
+
+    # The uncommitted-harness-hotfix shape also quarantines WITHOUT the
+    # flag (previously: zero quarantine -- Fable R3 B4 finding 1).
+    kept, quarantined, counts, drift = glados.partition_resumed_rows(
+        [harness_uncommitted],
         signature,
         {key},
         42,
         tensor_exists=lambda _p: True,
         expected_revision=markers.get,
-        accept_revision_drift=True,
     )
     assert kept == []
-    assert counts["revision"] == 2
-    assert drift == []
+    assert counts["revision"] == 1
 
     # Engines with no current marker (e.g. outside the field) skip the rule.
     kept, quarantined, counts, drift = glados.partition_resumed_rows(
@@ -2018,7 +2063,9 @@ def test_resume_hotfix_revision_drift_quarantines_and_reruns(
     _copy_fixture(corpus_dir, "rome", "ring6.graph")
     output_dir = tmp_path / "out"
     staging = output_dir.with_name(f"{output_dir.name}.tmp")
-    _seed_scored_staging_row(staging, corpus_dir, run_revision="0badc0de:0123456789abcdef")
+    _seed_scored_staging_row(
+        staging, corpus_dir, run_revision="0badc0de|stale_full_signature|0123456789abcdef"
+    )
 
     exit_code = _run_main(
         _resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"]), monkeypatch
@@ -2044,8 +2091,10 @@ def test_resume_accept_revision_drift_keeps_and_discloses(
     _copy_fixture(corpus_dir, "rome", "ring6.graph")
     output_dir = tmp_path / "out"
     staging = output_dir.with_name(f"{output_dir.name}.tmp")
-    current_component = _current_revision("graphviz_dot").rsplit(":", 1)[-1]
-    _seed_scored_staging_row(staging, corpus_dir, run_revision=f"0badc0de:{current_component}")
+    _, current_sig, current_harness = _current_revision("graphviz_dot").split("|")
+    _seed_scored_staging_row(
+        staging, corpus_dir, run_revision=f"0badc0de|{current_sig}|{current_harness}"
+    )
 
     exit_code = _run_main(
         [
