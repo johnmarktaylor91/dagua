@@ -708,6 +708,12 @@ class _GraphvizBase(CompetitorBase):
     # (graph.py/utils.py) is a documented residual: G-5 uses no caches and
     # G-3's A10 sample-check covers pool reuse.
     source_delegate_modules = ("dagua.eval.size_policy",)
+    # Layouts are a FUNCTION of dagua-computed node boxes: the GLaDOS
+    # runner folds the node-box producer stack (graph.py/utils.py/
+    # styles.py) into these engines' run-revision markers so a mid-run
+    # sizing hotfix cannot resume their OLD-box layouts while native
+    # regenerates under new boxes (dry-well R4-B3 Fable F1).
+    consumes_node_boxes = True
 
     def layout(
         self,
