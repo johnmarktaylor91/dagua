@@ -92,7 +92,9 @@ DEFAULT_CHILD_RSS_ABORT_GB = 48.0
 DEFAULT_MIN_AVAIL_GB = 15.0
 # Reject .mtx files whose HEADER declares a dimension above this before ever
 # invoking the loader (parent-process wedge guard, dry-well B4-F7 class).
-MTX_DECLARED_DIM_CAP = 100_000
+# 25_000 = below the reproduced 50k-node parent wedge, 12.5x the --max-nodes
+# 2000 acceptance default (Sol round-2 F4).
+MTX_DECLARED_DIM_CAP = 25_000
 CHILD_JOIN_GRACE_SECONDS = 60.0
 CHILD_POLL_SECONDS = 2.0
 CORPUS_NAMES = ("rome", "north", "suitesparse")
@@ -1020,6 +1022,37 @@ def append_row(directory: Path, row: Dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def rewrite_rows(directory: Path, rows: Sequence[Dict[str, Any]]) -> None:
+    """Atomically rewrite the JSONL row store to exactly ``rows``.
+
+    Used when resume quarantines rows: quarantined rows must be REMOVED from
+    the primary store (they live only in the payload's ``quarantined_rows``)
+    so a later resume that re-admits their key reruns from scratch instead
+    of resurrecting a row whose tensor was orphaned (Sol round-2 F2).
+
+    Parameters
+    ----------
+    directory : Path
+        Run directory containing the row store.
+    rows : Sequence[Dict[str, Any]]
+        Rows to keep, in append order.
+
+    Returns
+    -------
+    None
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    path = rows_path(directory)
+    temp = path.with_name(path.name + ".rewrite")
+    with temp.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(json_clean(row), sort_keys=True))
+            handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temp.replace(path)
+
+
 def load_rows_tolerant(directory: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Load the JSONL row store, tolerating a torn FINAL line only.
 
@@ -1122,6 +1155,7 @@ def partition_resumed_rows(
     signature: str,
     valid_keys: Set[str],
     current_seed: int,
+    tensor_exists: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
     """Split resumed rows into kept vs quarantined (dry-well B4-F3 + Sol).
 
@@ -1151,17 +1185,24 @@ def partition_resumed_rows(
         Record keys of the current row universe.
     current_seed : int
         Current run seed.
+    tensor_exists : Callable[[str], bool] | None, default=None
+        Existence check for a row's ``positions_path`` (relative). When
+        provided, kept OK rows must still OWN their tensors: a row whose
+        tensor is gone -- e.g. swept to ``.orphaned`` while the row was
+        quarantined out-of-universe in an earlier resume, then the engine
+        re-added (Sol round-2 F2's reproduced detonation) -- is quarantined
+        so its key vacates and the row is recomputed from scratch.
 
     Returns
     -------
     Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]
         ``(kept, quarantined, counts)``; quarantined rows carry a
         ``quarantine_reason`` field, counts key on
-        ``signature``/``universe``/``native_seed``.
+        ``signature``/``universe``/``native_seed``/``tensor_missing``.
     """
     kept: List[Dict[str, Any]] = []
     quarantined: List[Dict[str, Any]] = []
-    counts = {"signature": 0, "universe": 0, "native_seed": 0}
+    counts = {"signature": 0, "universe": 0, "native_seed": 0, "tensor_missing": 0}
     for row in rows:
         reason: Optional[str] = None
         if row.get("v3_tiered") is not None and row.get("scoring_signature") != signature:
@@ -1173,6 +1214,14 @@ def partition_resumed_rows(
         elif row.get("engine") == "dagua" and row.get("native_child_seed") != current_seed:
             reason = "native row generated under a different --seed"
             counts["native_seed"] += 1
+        elif (
+            tensor_exists is not None
+            and row.get("status") == "OK"
+            and row.get("positions_path")
+            and not tensor_exists(str(row["positions_path"]))
+        ):
+            reason = "positions tensor missing from the row store"
+            counts["tensor_missing"] += 1
         if reason is None:
             kept.append(row)
         else:
@@ -2384,7 +2433,20 @@ def _find_champion_row(
 
 
 def publish_results(output_dir: Path, staging: Path, payload: Dict[str, Any]) -> None:
-    """Publish the staging directory with the r79 rename dance.
+    """Publish the staging directory: validate staging FIRST, then swap.
+
+    Structural fix for the dry-well detonation class (Sol round-2 F3): the
+    old shape swapped staging into place, deleted the prior run, and only
+    THEN validated -- so any missing-tensor state crashed AFTER the last
+    valid run was gone. Order now:
+
+    1. ``validate_store`` runs against STAGING. A failure raises with the
+       prior published run completely untouched and staging preserved for
+       inspection/resume. Only a fully-validated staging dir ever replaces
+       the published run.
+    2. The swap keeps the prior run as ``.prev`` until the installed output
+       re-validates; on swap or re-validation failure the prior run is
+       restored (the failed candidate is kept as ``.failed-publish``).
 
     Parameters
     ----------
@@ -2398,19 +2460,44 @@ def publish_results(output_dir: Path, staging: Path, payload: Dict[str, Any]) ->
     Returns
     -------
     None
+
+    Raises
+    ------
+    RuntimeError
+        If staging (or the installed output) fails validation; the prior
+        published run is untouched or restored respectively.
     """
     with (staging / "results.json").open("w", encoding="utf-8") as handle:
         json.dump(json_clean(payload), handle, indent=2, sort_keys=True)
         handle.write("\n")
+    validate_store(staging, payload)
+
     previous = output_dir.with_name(f"{output_dir.name}.prev")
     if previous.exists():
         shutil.rmtree(previous)
+    moved_prior = False
     if output_dir.exists():
         output_dir.rename(previous)
-    staging.rename(output_dir)
+        moved_prior = True
+    try:
+        staging.rename(output_dir)
+    except BaseException:
+        if moved_prior and previous.exists() and not output_dir.exists():
+            previous.rename(output_dir)
+        raise
+    try:
+        validate_store(output_dir, payload)
+    except BaseException:
+        # Restore the prior run; keep the failed candidate for inspection.
+        if moved_prior and previous.exists():
+            failed = output_dir.with_name(f"{output_dir.name}.failed-publish")
+            if failed.exists():
+                shutil.rmtree(failed)
+            output_dir.rename(failed)
+            previous.rename(output_dir)
+        raise
     if previous.exists():
         shutil.rmtree(previous)
-    validate_store(output_dir, payload)
 
 
 def archive_run(output_dir: Path, archive_dir: Path) -> Optional[str]:
@@ -2431,27 +2518,33 @@ def archive_run(output_dir: Path, archive_dir: Path) -> Optional[str]:
         Warning message on failure, ``None`` on success.
     """
     destination = archive_dir / "glados_holdout"
+    temp = archive_dir / f".glados_holdout.tmp-{os.getpid()}"
+    previous = archive_dir / ".glados_holdout.prev"
     try:
-        # Dry-well R1 B4-F1 (CRITICAL): the destination leaf equals the
-        # default output-dir leaf, so `--archive-dir eval_output` used to
-        # resolve destination == output_dir and the rmtree-then-copy shape
-        # DELETED the published run while the swallowed exception reported
-        # "run unaffected". Refuse ANY overlap loudly before touching disk.
+        # Dry-well R1 B4-F1 (CRITICAL) + Sol round-2 F1: EVERY path this
+        # function mutates -- destination, temp, previous -- must pass the
+        # overlap predicate against the published run BEFORE any destructive
+        # op. Sol's probes aliased output_dir to the hidden temp/.prev
+        # siblings and deleted the run through them.
         resolved_output = output_dir.resolve()
-        resolved_destination = destination.resolve()
-        if (
-            resolved_destination == resolved_output
-            or resolved_destination in resolved_output.parents
-            or resolved_output in resolved_destination.parents
+        for label, candidate in (
+            ("destination", destination),
+            ("temp", temp),
+            ("previous-archive", previous),
         ):
-            return (
-                f"REFUSING to archive: destination {resolved_destination} overlaps the "
-                f"published run {resolved_output}; nothing was copied or deleted"
-            )
+            resolved = candidate.resolve()
+            if (
+                resolved == resolved_output
+                or resolved in resolved_output.parents
+                or resolved_output in resolved.parents
+            ):
+                return (
+                    f"REFUSING to archive: {label} path {resolved} overlaps the "
+                    f"published run {resolved_output}; nothing was copied or deleted"
+                )
         # Copy to a temp sibling, manifest it, then swap atomically-enough:
         # a failed copy can never destroy the previous archive (additive
         # preservation, A-S2).
-        temp = archive_dir / f".glados_holdout.tmp-{os.getpid()}"
         if temp.exists():
             shutil.rmtree(temp)
         shutil.copytree(output_dir, temp)
@@ -2461,12 +2554,19 @@ def archive_run(output_dir: Path, archive_dir: Path) -> Optional[str]:
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
                 manifest_lines.append(f"{digest}  {path.relative_to(temp).as_posix()}")
         (temp / "MANIFEST.sha256").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
-        previous = archive_dir / ".glados_holdout.prev"
         if previous.exists():
             shutil.rmtree(previous)
+        moved_previous = False
         if destination.exists():
             destination.rename(previous)
-        temp.rename(destination)
+            moved_previous = True
+        try:
+            temp.rename(destination)
+        except BaseException:
+            # Roll the old archive back so a failed swap is not destructive.
+            if moved_previous and previous.exists() and not destination.exists():
+                previous.rename(destination)
+            raise
         if previous.exists():
             shutil.rmtree(previous)
         return None
@@ -2656,10 +2756,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     Returns
     -------
     int
-        ``0`` ok; ``2`` no graphs; ``3`` guarded abort -- memory guard or
-        unexpected harness exception -- with partial results published;
-        ``4`` preflight failure or fresh-run-over-existing-data refusal;
-        ``5`` load-phase fatal.
+        ``0`` ok; ``1`` publish validation/swap failure (prior published run
+        untouched or restored, candidate data preserved); ``2`` no graphs;
+        ``3`` guarded abort -- memory guard or unexpected harness
+        exception -- with partial results published; ``4`` preflight failure
+        or fresh-run-over-existing-data refusal; ``5`` load-phase fatal.
     """
     args = parse_args(argv)
     assumptions: List[str] = []
@@ -2803,15 +2904,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for seed in seeds_by_engine[engine]:
                     valid_keys.add(build_record_key(entry.name, engine, seed))
         existing_rows, quarantined_rows, quarantine_counts = partition_resumed_rows(
-            existing_rows, signature, valid_keys, args.seed
+            existing_rows,
+            signature,
+            valid_keys,
+            args.seed,
+            tensor_exists=lambda relpath: (staging / relpath).is_file(),
         )
         if quarantined_rows:
+            # Quarantine is DURABLE (Sol round-2 F2): rewrite the primary
+            # store without the quarantined rows so a later resume that
+            # re-admits their key reruns from scratch instead of
+            # resurrecting a row whose tensor was orphaned.
+            rewrite_rows(staging, existing_rows)
             summary = (
-                f"QUARANTINE: {len(quarantined_rows)} stale resumed row(s) excluded from the "
-                f"tally and re-run where in-universe (stale signature: "
-                f"{quarantine_counts['signature']}, outside row universe: "
+                f"QUARANTINE: {len(quarantined_rows)} stale resumed row(s) removed from the "
+                f"row store, recorded in quarantined_rows, and re-run where in-universe "
+                f"(stale signature: {quarantine_counts['signature']}, outside row universe: "
                 f"{quarantine_counts['universe']}, native seed mismatch: "
-                f"{quarantine_counts['native_seed']})"
+                f"{quarantine_counts['native_seed']}, tensor missing: "
+                f"{quarantine_counts['tensor_missing']})"
             )
             print(summary, flush=True)
             warnings.append(summary)
@@ -3082,7 +3193,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "aborted_reason": aborted_reason,
     }
     write_report(staging, payload, row_map, tally, report_context, assumptions)
-    publish_results(args.output_dir, staging, payload)
+    try:
+        publish_results(args.output_dir, staging, payload)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"PUBLISH FAILED: {type(exc).__name__}: {exc}. The prior published run is "
+            f"untouched (or restored); the candidate data is preserved in {staging} "
+            "(or the .failed-publish sibling) for inspection and --resume.",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"published {args.output_dir}: tally {tally['overall']}",
         flush=True,

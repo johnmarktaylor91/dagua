@@ -1191,6 +1191,16 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         "status": "OK",
     }
 
+    tensorless = {  # OK row whose tensor vanished (e.g. orphan-swept while
+        # out-of-universe in an earlier resume) -> rerun from scratch
+        "record_key": build_record_key("rome/g", "graphviz_dot", None),
+        "engine": "graphviz_dot",
+        "status": "OK",
+        "v3_tiered": 58.0,
+        "scoring_signature": signature,
+        "positions_path": "positions/gone.pt",
+    }
+
     kept, quarantined, counts = glados.partition_resumed_rows(
         [
             kept_layout,
@@ -1199,10 +1209,12 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
             ghost_engine,
             wrong_native_seed,
             legacy_native,
+            tensorless,
         ],
         signature,
         valid_keys,
         42,
+        tensor_exists=lambda relpath: relpath != "positions/gone.pt",
     )
 
     assert kept == [kept_layout, kept_scored_native]
@@ -1212,8 +1224,9 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         "outside current subset/field/seed battery",
         "native row generated under a different --seed",
         "native row generated under a different --seed",
+        "positions tensor missing from the row store",
     ]
-    assert counts == {"signature": 1, "universe": 1, "native_seed": 2}
+    assert counts == {"signature": 1, "universe": 1, "native_seed": 2, "tensor_missing": 1}
 
 
 def test_resume_quarantine_integration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1434,13 +1447,17 @@ def test_edge_list_node_id_cap_prevents_wedge(tmp_path: Path) -> None:
 
     poison = tmp_path / "corpus" / "rome" / "poison.graph"
     poison.parent.mkdir(parents=True)
-    poison.write_text("5000 1\n1 50000000\n", encoding="utf-8")
+    # The EXACT reproduced wedge shape (dry-well B4-F7 measured 121.8s and
+    # ~935MB at 50,000 declared ids): must now be REFUSED fast, proving the
+    # cap sits below the measured failure, not just below absurdity
+    # (Sol round-2 F4).
+    poison.write_text("5000 1\n1 50000\n", encoding="utf-8")
 
     started = time.time()
     with pytest.raises(ValueError, match="refusing pre-allocation"):
         load_graph_file(poison, directed_override=False)
     assert time.time() - started < 5.0, "cap must reject before any allocation"
-    assert MAX_EDGE_LIST_NODES == 100_000
+    assert MAX_EDGE_LIST_NODES == 25_000
 
     _copy_fixture(tmp_path / "corpus", "rome", "ring6.graph")
     entries, load_rows, _ = glados.load_phase(tmp_path / "corpus", None, 2000, 200_000)
@@ -1456,7 +1473,9 @@ def test_mtx_declared_dims_cap_pre_guard(tmp_path: Path) -> None:
     big = corpus_dir / "suitesparse" / "huge.mtx"
     big.parent.mkdir(parents=True)
     big.write_text(
-        "%%MatrixMarket matrix coordinate pattern general\n2000000000 2000000000 1\n1 2\n",
+        # 50k = the measured parent-wedge scale (Sol round-2 F4), not just
+        # an absurd declaration.
+        "%%MatrixMarket matrix coordinate pattern general\n50000 50000 1\n1 2\n",
         encoding="utf-8",
     )
     _copy_fixture(corpus_dir, "suitesparse", "tri4.mtx")
@@ -1467,4 +1486,204 @@ def test_mtx_declared_dims_cap_pre_guard(tmp_path: Path) -> None:
     assert [entry.name for entry in entries] == ["suitesparse/tri4"]
     (skip_row,) = load_rows
     assert skip_row["status"] == "SKIP"
-    assert skip_row["reason"].startswith("mtx_dims_cap:2000000000x2000000000")
+    assert skip_row["reason"].startswith("mtx_dims_cap:50000x50000")
+
+
+# ---------------------------------------------------------------------------
+# 9. Dry-well fix-round 3 (Sol round-2 F1-F4: structural publish/archive/resume)
+# ---------------------------------------------------------------------------
+
+
+def test_archive_refuses_prev_and_temp_aliases(tmp_path: Path) -> None:
+    """Sol round-2 F1: the hidden swap paths must pass the overlap predicate.
+
+    Sol's probes aliased the published run to ``.glados_holdout.prev`` and
+    ``.glados_holdout.tmp-<pid>`` and deleted it through the swap's own
+    bookkeeping paths. Both shapes are refusals now.
+    """
+    archive_dir = tmp_path / "arch"
+    archive_dir.mkdir()
+
+    prev_alias = _fake_published_run(archive_dir / ".glados_holdout.prev")
+    warning = glados.archive_run(prev_alias, archive_dir)
+    assert warning is not None and "REFUSING" in warning
+    assert (prev_alias / "results.json").is_file(), "run behind the .prev alias was deleted"
+
+    temp_alias = _fake_published_run(archive_dir / f".glados_holdout.tmp-{os.getpid()}")
+    warning = glados.archive_run(temp_alias, archive_dir)
+    assert warning is not None and "REFUSING" in warning
+    assert (temp_alias / "results.json").is_file(), "run behind the temp alias was deleted"
+
+
+def test_publish_validates_staging_before_touching_prior_run(tmp_path: Path) -> None:
+    """Structural reorder: staging validates FIRST; the prior run is untouched.
+
+    Sol round-2 F3: the old shape swapped, deleted the prior run, and only
+    then validated. Now a staging payload with an OK row referencing a
+    missing tensor raises BEFORE any rename, with the prior run intact and
+    staging preserved.
+    """
+    output_dir = tmp_path / "out"
+    _fake_published_run(output_dir)
+    (output_dir / "MARKER.txt").write_text("prior run", encoding="utf-8")
+    staging = tmp_path / "out.tmp"
+    (staging / "positions").mkdir(parents=True)
+    payload = {
+        "rows": [
+            {
+                "record_key": "g::e::deterministic",
+                "status": "OK",
+                "positions_path": "positions/missing.pt",
+            }
+        ]
+    }
+
+    with pytest.raises(RuntimeError, match="missing position files"):
+        glados.publish_results(output_dir, staging, payload)
+
+    assert (output_dir / "MARKER.txt").is_file(), "prior run was touched"
+    assert (output_dir / "results.json").is_file()
+    assert staging.is_dir(), "staging must be preserved for inspection/resume"
+    assert not output_dir.with_name("out.prev").exists()
+
+
+def test_publish_restores_prior_run_when_post_swap_validation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prior run is restored if the installed output fails re-validation."""
+    output_dir = tmp_path / "out"
+    _fake_published_run(output_dir)
+    (output_dir / "MARKER.txt").write_text("prior run", encoding="utf-8")
+    staging = tmp_path / "out.tmp"
+    (staging / "positions").mkdir(parents=True)
+    payload: Dict[str, Any] = {"rows": []}
+
+    real_validate = glados.validate_store
+
+    def validate_only_staging(directory: Path, inner_payload: Dict[str, Any]) -> None:
+        if directory == output_dir:
+            raise RuntimeError("injected post-swap validation failure")
+        real_validate(directory, inner_payload)
+
+    monkeypatch.setattr(glados, "validate_store", validate_only_staging)
+    with pytest.raises(RuntimeError, match="injected post-swap"):
+        glados.publish_results(output_dir, staging, payload)
+
+    assert (output_dir / "MARKER.txt").is_file(), "prior run was not restored"
+    failed = output_dir.with_name("out.failed-publish")
+    assert failed.is_dir(), "failed candidate must be kept for inspection"
+    assert (failed / "results.json").is_file()
+
+
+def test_publish_failure_exits_1_and_preserves_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main() exits 1 on publish validation failure; staging survives."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+
+    def always_fail(directory: Path, payload: Dict[str, Any]) -> None:
+        raise RuntimeError("injected staging validation failure")
+
+    monkeypatch.setattr(glados, "validate_store", always_fail)
+    exit_code = _run_main(
+        [
+            "--corpus-dir",
+            str(corpus_dir),
+            "--output-dir",
+            str(output_dir),
+            "--engines-file",
+            str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+            "--workers",
+            "1",
+            "--score-workers",
+            "1",
+        ],
+        monkeypatch,
+    )
+
+    assert exit_code == 1
+    assert not (output_dir / "results.json").exists(), "nothing must be published"
+    assert glados.rows_path(staging).is_file(), "staging must survive for --resume"
+
+
+def test_rewrite_rows_replaces_store_atomically(tmp_path: Path) -> None:
+    """rewrite_rows leaves exactly the kept rows, readable by the loader."""
+    directory = tmp_path / "staging"
+    glados.append_row(directory, {"record_key": "a", "status": "OK"})
+    glados.append_row(directory, {"record_key": "b", "status": "OK"})
+    glados.rewrite_rows(directory, [{"record_key": "b", "status": "OK"}])
+    rows, warnings = glados.load_rows_tolerant(directory)
+    assert [row["record_key"] for row in rows] == ["b"]
+    assert warnings == []
+
+
+def test_resume_field_removal_then_readd_reruns_from_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol round-2 F2's reproduced detonation sequence, end to end.
+
+    Run 1 scores graphviz_dot; run 2 resumes WITHOUT that engine (its rows
+    quarantine out-of-universe, the store is rewritten, its tensor is
+    orphan-swept); run 3 re-adds the engine under the SAME signature. The
+    old shape resurrected the run-1 scored row pointing at the swept tensor
+    and detonated post-swap validation; now the key vacates and the row
+    reruns from scratch.
+    """
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    dot_key = build_record_key("rome/ring6", "graphviz_dot", None)
+
+    def run(engines: List[str], resume: bool) -> Dict[str, Any]:
+        argv = [
+            "--corpus-dir",
+            str(corpus_dir),
+            "--output-dir",
+            str(output_dir),
+            "--engines-file",
+            str(_write_engines_file(tmp_path, engines)),
+            "--workers",
+            "1",
+            "--score-workers",
+            "1",
+            "--seeds",
+            "1",
+        ]
+        if resume:
+            argv.append("--resume")
+        assert _run_main(argv, monkeypatch) == 0
+        return json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+
+    payload1 = run(["graphviz_dot"], resume=False)
+    rows1 = {row["record_key"]: row for row in payload1["rows"]}
+    assert rows1[dot_key]["status"] == "OK"
+    tensor1_relpath = rows1[dot_key]["positions_path"]
+    assert (output_dir / tensor1_relpath).is_file()
+
+    # Run 2: remove the field engine. Its rows quarantine, the store is
+    # rewritten without them, and the tensor is orphan-swept.
+    payload2 = run(["classic_kk"], resume=True)
+    assert all(row["engine"] != "graphviz_dot" for row in payload2["rows"])
+    assert any(
+        row["engine"] == "graphviz_dot"
+        and row["quarantine_reason"] == "outside current subset/field/seed battery"
+        for row in payload2["quarantined_rows"]
+    )
+    store_rows, _ = glados.load_rows_tolerant(output_dir)
+    assert all(row.get("record_key") != dot_key for row in store_rows), (
+        "quarantined rows must be REMOVED from the primary store"
+    )
+    assert not (output_dir / tensor1_relpath).is_file()
+
+    # Run 3: re-add the engine under the same signature -> full rerun, green
+    # publish (previously: resurrection + post-swap detonation).
+    payload3 = run(["graphviz_dot"], resume=True)
+    rows3 = {row["record_key"]: row for row in payload3["rows"]}
+    fresh = rows3[dot_key]
+    assert fresh["status"] == "OK"
+    assert fresh["v3_tiered"] is not None
+    assert fresh["scoring_signature"] == payload3["scoring_signature"]
+    assert (output_dir / fresh["positions_path"]).is_file()

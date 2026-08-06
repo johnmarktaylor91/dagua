@@ -25,7 +25,10 @@ MAX_NODES = 2000
 # pre-allocates billions of nodes in the PARENT process before any size
 # filter applies -- a load-phase wedge/OOM with no child isolation
 # (dry-well R1 B4-F7; reproduced at 50k ids = 121s/935MB, 500k ids = hung).
-MAX_EDGE_LIST_NODES = 100_000
+# 25_000 sits BELOW the reproduced 50k wedge (Sol round-2 F4) while staying
+# 12.5x above the runner's --max-nodes 2000 acceptance default -- generous
+# for any legitimate corpus file that would survive the size filter anyway.
+MAX_EDGE_LIST_NODES = 25_000
 
 
 @dataclass(frozen=True)
