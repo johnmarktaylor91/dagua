@@ -699,6 +699,12 @@ class _GraphvizBase(CompetitorBase):
     """Base class for Graphviz engine variants."""
 
     engine: str = "dot"
+    # Size-aware externals receive dagua-computed node boxes gated by
+    # size_policy (under dagua/eval/, outside the tree hash); declared per
+    # dry-well R3-B3-Fable F4 disposition. The measurement stack itself
+    # (graph.py/utils.py) is a documented residual: G-5 uses no caches and
+    # G-3's A10 sample-check covers pool reuse.
+    source_delegate_modules = ("dagua.eval.size_policy",)
 
     def layout(
         self,

@@ -121,10 +121,12 @@ class _NeuralReferenceCompetitor(CompetitorBase):
 
     spec: NeuralReferenceSpec
     supports_clusters = False
-    # External model checkpoints, but the model INPUT is built by dagua-side
-    # prepare_smartgd_data: declare that prep module in the cache-signature
-    # closure (dry-well R2-B3-Fable F2b). Inherited by SmartGD and DeepGD.
-    source_delegate_modules = ("dagua.layout.ops.pipelines.smartgd",)
+    # External model checkpoints, but the model INPUT runs the FULL dagua
+    # native-stress pipeline (prepare_smartgd_data -> smartgd.py:1530
+    # layout_native_stress_pipeline, with its converge/stress/graph_utils
+    # closure): tree-key instead of chasing per-file delegates
+    # (dry-well R3-B3-Fable F4). Inherited by SmartGD and DeepGD.
+    executes_dagua_source = True
 
     def __init__(self) -> None:
         """Initialize registration metadata from the class spec."""

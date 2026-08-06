@@ -183,6 +183,9 @@ class D3DagCompetitor(CompetitorBase):
     max_nodes = 1_000
     supports_clusters = False
     variant_param_names = frozenset({"layering", "decross", "coord", "x_gap", "y_gap"})
+    # Size-aware external: node boxes gated by dagua/eval/size_policy.py
+    # (dry-well R3-B3-Fable F4 disposition).
+    source_delegate_modules = ("dagua.eval.size_policy",)
 
     def available(self) -> bool:
         """Check whether the local ``d3-dag`` package can be required.

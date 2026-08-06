@@ -482,6 +482,9 @@ class NetworkXBipartite(_NetworkXBase):
     max_nodes = 100_000
     layout_kwargs = {"align": "vertical", "scale": 1.0, "aspect_ratio": 4.0 / 3.0}
     output_scale = 1.0
+    # The default node partition fed to nx.bipartite_layout comes from
+    # dagua-side nx_bipartite_node_set (dry-well R3-B3-Fable F4).
+    source_delegate_modules = ("dagua.layout.ops.networkx_simple",)
     duplicate_policy = "last"
     variant_param_names = frozenset(
         {"nodes", "align", "scale", "aspect_ratio", "output_dtype", "output_scale"}
@@ -548,6 +551,9 @@ class NetworkXMultipartite(_NetworkXBase):
     max_nodes = 100_000
     layout_kwargs = {"align": "vertical", "scale": 1.0, "start": 0}
     output_scale = 1.0
+    # The layer assignment fed to nx.multipartite_layout comes from dagua-side
+    # nx_bfs_layers; inherited by NetworkXBFS (dry-well R3-B3-Fable F4).
+    source_delegate_modules = ("dagua.layout.ops.networkx_simple",)
     duplicate_policy = "last"
     variant_param_names = frozenset(
         {"layers", "start", "align", "scale", "output_dtype", "output_scale"}
