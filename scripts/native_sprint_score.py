@@ -528,6 +528,7 @@ def scoring_signature() -> str:
             # under-invalidation silently poisons cached scores.
             "dagua/graph.py": sha256_file(root / "dagua" / "graph.py"),
             "dagua/utils.py": sha256_file(root / "dagua" / "utils.py"),
+            "dagua/styles.py": sha256_file(root / "dagua" / "styles.py"),
         },
     }
     return canonical_json_hash(payload)
