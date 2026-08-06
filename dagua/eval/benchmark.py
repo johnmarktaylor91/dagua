@@ -699,11 +699,20 @@ def _adapter_source_signature(name: str) -> str:
     external dependency version (many as ``<name>:None``), so a fix to the
     ADAPTER SOURCE (e.g. an output-parser or device-pinning fix) did not
     invalidate previously cached rows -- a benchmark could silently reuse
-    pre-fix mis-parsed positions. This component hashes the module file that
-    defines the adapter class plus the shared ``competitors/base.py``
-    execution scaffolding (sorted file list, sha256 of bytes), so an adapter
-    edit invalidates its rows exactly like ``classic_*`` engines already do
-    via ``_dagua_source_signature``.
+    pre-fix mis-parsed positions.
+
+    Dry-well R2-B3: hashing ``inspect.getfile(type(competitor))`` was
+    insufficient -- the 45 dynamically generated ``*_reimpl`` classes report
+    ``__module__ == "abc"`` (they resolved to the interpreter's stdlib
+    ``abc.py`` and all shared one digest), and delegated adapters (e.g.
+    ``neulay`` -> ``neulay_wrapper.py``) missed their executed delegate. The
+    file set now comes from the adapter's own ``source_files()`` hook
+    (``CompetitorBase``): MRO-derived dagua modules + declared/resolved
+    delegates (for dynamic reimpls, the pipeline module of the FUNCTION
+    returned by ``get_pipeline_function``). Sorted file list, sha256 of
+    bytes -- an edit anywhere in the adapter's real implementation closure
+    invalidates its rows exactly like ``classic_*`` engines already do via
+    ``_dagua_source_signature``.
 
     Parameters
     ----------
@@ -713,21 +722,17 @@ def _adapter_source_signature(name: str) -> str:
     Returns
     -------
     str
-        16-hex-char digest over the adapter's implementing source. Names not
-        present in the registry fall back to the shared base module alone, so
-        the component is always real and deterministic (never ``None``).
+        16-hex-char digest over the adapter's implementation-closure source.
+        Names not present in the registry fall back to the shared base module
+        alone, so the component is always real and deterministic (never
+        ``None``).
     """
-    import inspect
-
     from dagua.eval.competitors import base as competitors_base
 
-    files = {Path(competitors_base.__file__)}
+    files = {Path(competitors_base.__file__).resolve()}
     competitor = get_competitor(name)
     if competitor is not None:
-        try:
-            files.add(Path(inspect.getfile(type(competitor))))
-        except (TypeError, OSError):
-            pass
+        files.update(competitor.source_files())
     hasher = hashlib.sha256()
     for path in sorted(files):
         hasher.update(path.read_bytes())

@@ -27,6 +27,8 @@ class CoreGDCompetitor(CompetitorBase):
 
     name = "coregd_reference"
     max_nodes = 100_000
+    # Dagua-owned preprocessing/config resolution executed for every row.
+    source_delegate_modules = ("dagua.layout.ops.pipelines.coregd",)
 
     def available(self) -> bool:
         """Check whether the reference clone and checkpoint are available.
