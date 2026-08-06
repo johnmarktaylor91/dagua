@@ -268,6 +268,9 @@ class DagreCompetitor(CompetitorBase):
     name = "dagre"
     max_nodes = 1_500  # JS stack overflow at 2000 on dense graphs
     supports_clusters = True
+    # Size-aware external: node boxes gated by dagua/eval/size_policy.py
+    # (dry-well R3-B3-Fable F4 disposition).
+    source_delegate_modules = ("dagua.eval.size_policy",)
 
     def layout(
         self,

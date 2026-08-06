@@ -406,6 +406,9 @@ class ElkLayered(CompetitorBase):
     name = "elk_layered"
     max_nodes = 15_000
     supports_clusters = True
+    # Size-aware external: node boxes gated by dagua/eval/size_policy.py
+    # (dry-well R3-B3-Fable F4 disposition).
+    source_delegate_modules = ("dagua.eval.size_policy",)
 
     def layout(
         self,
@@ -490,6 +493,9 @@ class _ElkSecondary(CompetitorBase):
     algorithm_id = ""
     max_nodes = 15_000
     supports_clusters = False
+    # Size-aware external: node boxes gated by dagua/eval/size_policy.py
+    # (dry-well R3-B3-Fable F4 disposition).
+    source_delegate_modules = ("dagua.eval.size_policy",)
 
     def layout(
         self,
