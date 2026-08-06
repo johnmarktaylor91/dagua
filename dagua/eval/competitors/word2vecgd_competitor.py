@@ -20,6 +20,8 @@ class Word2VecGDReference(CompetitorBase):
 
     name = "word2vecgd"
     max_nodes = 5_000
+    # Layout is computed by the dagua-owned word2vecgd pipeline module.
+    source_delegate_modules = ("dagua.layout.ops.pipelines.word2vecgd",)
     variant_param_names = frozenset(
         {
             "embedding_dim",

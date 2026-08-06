@@ -39,6 +39,10 @@ class CompetitorBase(ABC):
     max_nodes: int = 0
     supports_clusters: bool = False
     variant_param_names: frozenset[str] = frozenset()
+    # Dotted names of modules this adapter executes but does not define
+    # (wrapper/pipeline delegates); their files join the adapter's
+    # cache-signature source closure via source_files() (dry-well R2-B3).
+    source_delegate_modules: tuple = ()
 
     @abstractmethod
     def layout(
@@ -98,6 +102,67 @@ class CompetitorBase(ABC):
         """
         del variant_params
         return self.layout(graph, timeout=timeout, seed=seed)
+
+    def source_files(self) -> tuple:
+        """Dagua-owned source files forming this adapter's implementation closure.
+
+        Consumed by the benchmark cache-signature machinery
+        (``_adapter_source_signature`` in dagua/eval/benchmark.py): the bytes
+        of these files are hashed into the adapter's cache key, so editing any
+        of them invalidates the adapter's cached benchmark rows (dry-well
+        R2-B3).
+
+        Default: the defining module of every resolvable class on the
+        adapter's MRO, plus every module declared in
+        ``source_delegate_modules``. Walking the MRO (instead of just
+        ``type(self)``) makes dynamically generated classes resolve correctly:
+        a ``type(...)``-built reimplementation class reports
+        ``__module__ == "abc"`` and would hash the interpreter's stdlib
+        ``abc.py`` -- such classes are skipped (their real implementation is
+        the parent class plus delegate hooks). Adapters that delegate
+        execution to another module declare it via
+        ``source_delegate_modules`` (static delegates) or override this
+        method (dynamic delegates).
+
+        Returns
+        -------
+        tuple
+            Resolved, de-duplicated ``pathlib.Path`` objects in MRO order,
+            followed by declared delegate modules.
+        """
+        import inspect
+        from importlib import import_module
+        from pathlib import Path
+
+        files: list = []
+        for klass in type(self).__mro__:
+            if getattr(klass, "__module__", None) in {None, "abc", "builtins"}:
+                # Dynamically generated classes (type(...) factories) report
+                # __module__ == "abc" and would resolve to the interpreter's
+                # stdlib abc.py (as does ABC itself); skip them -- their real
+                # implementation is covered by parent classes and delegates.
+                continue
+            try:
+                path = Path(inspect.getfile(klass)).resolve()
+            except (TypeError, OSError):
+                continue
+            if path not in files:
+                files.append(path)
+        for module_name in self.source_delegate_modules:
+            try:
+                module = import_module(module_name)
+            except ImportError:
+                continue
+            module_file = getattr(module, "__file__", None)
+            if module_file is None:
+                continue
+            try:
+                path = Path(module_file).resolve()
+            except OSError:
+                continue
+            if path not in files:
+                files.append(path)
+        return tuple(files)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────

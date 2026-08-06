@@ -21,6 +21,8 @@ class SklearnSmacofNonmetric(CompetitorBase):
     name = "sklearn_smacof_nonmetric"
     max_nodes = 2_000
     variant_param_names = frozenset({"eps", "max_iter", "normalized_stress"})
+    # Geodesic distance matrix construction is dagua-owned graph_utils code.
+    source_delegate_modules = ("dagua.layout.ops.graph_utils",)
 
     def available(self) -> bool:
         """Report whether scikit-learn is importable.

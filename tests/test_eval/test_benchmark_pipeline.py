@@ -1666,3 +1666,127 @@ def test_unregistered_adapter_name_still_gets_deterministic_source_component() -
     second = _adapter_source_signature("definitely_not_registered_engine")
     assert first == second
     assert len(first) == 16
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R2-B3: dynamic reimpls and delegated adapters hash their REAL
+# implementation closure, not stdlib abc.py
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_reimpl_signatures_differ_and_hash_pipeline_module() -> None:
+    """Two reimpl engines must carry DIFFERENT source components.
+
+    Sol's R2 probe: all 45 type(...)-generated *_reimpl classes reported
+    __module__ == 'abc', hashed stdlib abc.py + base.py, and shared ONE
+    digest (05b2712859fe9821), leaving pipeline_reimpl_competitor.py and the
+    executed pipeline module unhashed.
+    """
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    sparse = _adapter_source_signature("sparse_stress_reimpl")
+    largevis = _adapter_source_signature("largevis_reimpl")
+    assert sparse != largevis
+
+    closure = {path.name for path in _COMPETITORS["sparse_stress_reimpl"].source_files()}
+    # Shared plumbing + shared base + the engine's own pipeline module; the
+    # stdlib abc.py must NOT be part of the closure.
+    assert "pipeline_reimpl_competitor.py" in closure
+    assert "base.py" in closure
+    assert "sparse_stress.py" in closure
+    assert "abc.py" not in closure
+
+
+def test_editing_pipeline_module_flips_only_its_reimpl_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pipeline-module edit invalidates ITS reimpl's rows and nobody else's."""
+    import importlib.util
+    import sys
+
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.eval.competitors.pipeline_reimpl_competitor import (
+        PipelineReimplementationCompetitor,
+        PipelineReimplementationSpec,
+    )
+    from dagua.layout.ops.pipelines import PIPELINE_REGISTRY
+
+    module_path = tmp_path / "wp24a_fake_pipeline_module.py"
+    module_path.write_text(
+        "def fake_layout(edge_index, num_nodes, **kwargs):\n    raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    spec_obj = importlib.util.spec_from_file_location("wp24a_fake_pipeline_module", module_path)
+    module = importlib.util.module_from_spec(spec_obj)
+    monkeypatch.setitem(sys.modules, "wp24a_fake_pipeline_module", module)
+    spec_obj.loader.exec_module(module)
+    monkeypatch.setitem(
+        PIPELINE_REGISTRY, "wp24a_fake_pipeline", ("wp24a_fake_pipeline_module", "fake_layout")
+    )
+
+    # Mirror the production factory: a dynamically generated class.
+    fake_cls = type(
+        "Wp24aFakeReimplCompetitor",
+        (PipelineReimplementationCompetitor,),
+        {
+            "spec": PipelineReimplementationSpec(
+                name="wp24a_fake_reimpl",
+                pipeline_name="wp24a_fake_pipeline",
+                max_nodes=10,
+                default_params={},
+            ),
+            "supports_clusters": False,
+        },
+    )
+    monkeypatch.setitem(_COMPETITORS, "wp24a_fake_reimpl", fake_cls())
+
+    fake_before = _adapter_source_signature("wp24a_fake_reimpl")
+    bystander_before = _adapter_source_signature("sparse_stress_reimpl")
+
+    with open(module_path, "a", encoding="utf-8") as handle:
+        handle.write("\n# simulated pipeline fix\n")
+
+    assert _adapter_source_signature("wp24a_fake_reimpl") != fake_before
+    assert _adapter_source_signature("sparse_stress_reimpl") == bystander_before
+
+
+def test_neulay_signature_tracks_its_wrapper_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """neulay executes neulay_wrapper.py; a wrapper change must flip its key."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors import neulay_wrapper
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    wrapper_path = Path(neulay_wrapper.__file__).resolve()
+    assert wrapper_path in set(_COMPETITORS["neulay"].source_files())
+
+    before = _adapter_source_signature("neulay")
+
+    # Simulate a wrapper edit by pointing the delegate module at a copy with
+    # different bytes (editing the real repo file from a test is off-limits).
+    edited = tmp_path / "neulay_wrapper.py"
+    edited.write_text(
+        wrapper_path.read_text(encoding="utf-8") + "\n# simulated wrapper fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(neulay_wrapper, "__file__", str(edited))
+
+    assert _adapter_source_signature("neulay") != before
+
+
+def test_delegated_adapters_declare_their_execution_delegates() -> None:
+    """Pin the declared delegate closure of the swept delegated adapters."""
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    expected = {
+        "coregd_reference": "coregd.py",
+        "word2vecgd": "word2vecgd.py",
+        "pacmap": "tsne_graph.py",
+        "sklearn_smacof_nonmetric": "graph_utils.py",
+    }
+    for name, delegate_file in expected.items():
+        closure = {path.name for path in _COMPETITORS[name].source_files()}
+        assert delegate_file in closure, f"{name} missing delegate {delegate_file}"

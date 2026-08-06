@@ -98,6 +98,37 @@ class PipelineReimplementationCompetitor(CompetitorBase):
         """
         return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
 
+    def source_files(self) -> tuple:
+        """Implementation closure for cache-signature hashing (dry-well R2-B3).
+
+        The MRO default contributes the shared plumbing
+        (``pipeline_reimpl_competitor.py`` + ``base.py``); this override adds
+        the RESOLVED pipeline module that actually computes the layout, via
+        ``inspect.getfile`` on the FUNCTION returned by
+        ``get_pipeline_function`` (the dynamically generated ``type(...)``
+        class itself reports ``__module__ == "abc"`` and cannot be used). An
+        edit to a pipeline module therefore flips exactly that
+        reimplementation's signature and nobody else's.
+
+        Returns
+        -------
+        tuple
+            Resolved ``pathlib.Path`` objects (shared plumbing + pipeline module).
+        """
+        from pathlib import Path
+
+        files = list(super().source_files())
+        try:
+            function = get_pipeline_function(self.spec.pipeline_name)
+            path = Path(inspect.getfile(function)).resolve()
+        except (KeyError, AttributeError, ImportError, TypeError, OSError):
+            # Unresolvable pipeline: fall back to the shared-plumbing closure
+            # (still deterministic; the row would fail at layout time anyway).
+            return tuple(files)
+        if path not in files:
+            files.append(path)
+        return tuple(files)
+
     def layout_with_variant(
         self,
         graph: DaguaGraph,
