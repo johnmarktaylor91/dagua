@@ -502,6 +502,8 @@ PREFLIGHT_FORBIDDEN_ENV: Dict[str, str] = {
     "DAGUA_ARM_TELEMETRY_PATH": "arms per-arm telemetry writes inside the measured native path",
     "DAGUA_DISABLE_NUMBA": "silently swaps field-op implementations away from the certified path",
     "DAGUA_SGD2_MULTI_ALLOW_CLONE": "re-enables the sgd2_multi network clone side effect",
+    "DAGUA_FDP_TRACE": "arms the fdp/fmmm trace writer (multi-GB dumps) on field rows",
+    "NUMBA_DISABLE_JIT": "numba's own kill-switch; swaps field-op numerics off the certified path",
 }
 
 
