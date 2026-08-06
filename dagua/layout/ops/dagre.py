@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, Hashable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    ClassVar,
+    Dict,
+    Hashable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import torch
 
@@ -877,32 +890,32 @@ def _dfs_feedback_edges(graph: _DagreGraph) -> List[_DagreEdge]:
     visited: Set[NodeId] = set()
     stack: Set[NodeId] = set()
 
-    def visit(node: NodeId) -> None:
-        """Depth-first visit one node.
-
-        Parameters
-        ----------
-        node : Hashable
-            Node to visit.
-
-        Returns
-        -------
-        None
-            Traversal collections are mutated.
-        """
-        if node in visited:
-            return
-        visited.add(node)
-        stack.add(node)
-        for edge in graph.out_edges(node):
-            if edge.target in stack:
-                feedback.append(edge)
-            else:
-                visit(edge.target)
-        stack.remove(node)
-
-    for node in graph.node_order:
-        visit(node)
+    # Iterative twin of dagre's recursive dfsFAS visit (suspended-iterator
+    # stack): preserves the exact traversal order, the on-stack back-edge
+    # test, and the feedback collection order while staying depth-safe on
+    # path-like graphs.
+    frames: List[Tuple[NodeId, Iterator[_DagreEdge]]] = []
+    for start in graph.node_order:
+        if start in visited:
+            continue
+        visited.add(start)
+        stack.add(start)
+        frames.append((start, iter(graph.out_edges(start))))
+        while frames:
+            node, edge_iter = frames[-1]
+            descended = False
+            for edge in edge_iter:
+                if edge.target in stack:
+                    feedback.append(edge)
+                elif edge.target not in visited:
+                    visited.add(edge.target)
+                    stack.add(edge.target)
+                    frames.append((edge.target, iter(graph.out_edges(edge.target))))
+                    descended = True
+                    break
+            if not descended:
+                stack.remove(node)
+                frames.pop()
     return feedback
 
 
@@ -1206,29 +1219,36 @@ def _longest_path_ranks(
         incoming_count[target] += 1
     ranks: Dict[NodeId, int] = {}
 
-    def visit(node: NodeId) -> int:
-        """Return the recursively assigned rank for one node.
-
-        Parameters
-        ----------
-        node : Hashable
-            Node to rank.
-
-        Returns
-        -------
-        int
-            Sink-anchored rank.
-        """
-        if node in ranks:
-            return ranks[node]
-        ranks[node] = 0
-        candidates = [visit(target) - minlen for target, minlen in outgoing[node]]
-        ranks[node] = min(candidates) if candidates else 0
-        return ranks[node]
-
-    for node in node_order:
-        if incoming_count[node] == 0:
-            visit(node)
+    # Iterative twin of dagre's recursive longestPath dfs: preserves the
+    # provisional-zero memo visible to in-flight revisits, the candidate
+    # evaluation order, and the ranks-dict insertion (discovery) order while
+    # staying depth-safe on long chains. A frame carries the node, its
+    # suspended outgoing iterator, the candidate ranks collected so far, and
+    # the minlen owed to the parent frame when this node's rank finalizes.
+    for source in node_order:
+        if incoming_count[source] != 0 or source in ranks:
+            continue
+        ranks[source] = 0
+        frames: List[Tuple[NodeId, Iterator[Tuple[NodeId, int]], List[int], int]] = [
+            (source, iter(outgoing[source]), [], 0)
+        ]
+        while frames:
+            node, targets, candidates, owed_minlen = frames[-1]
+            descended = False
+            for target, minlen in targets:
+                if target in ranks:
+                    candidates.append(ranks[target] - minlen)
+                else:
+                    ranks[target] = 0
+                    frames.append((target, iter(outgoing[target]), [], minlen))
+                    descended = True
+                    break
+            if descended:
+                continue
+            ranks[node] = min(candidates) if candidates else 0
+            frames.pop()
+            if frames:
+                frames[-1][2].append(ranks[node] - owed_minlen)
     return ranks
 
 
@@ -2038,22 +2058,31 @@ def _dagre_network_simplex_ranks(
         Optimized integer ranks.
     """
     ranks = _longest_path_ranks(node_order, edges)
-    tree = _dagre_feasible_tree(node_order, edges, ranks)
-    _dagre_init_low_lim(tree)
-    _dagre_init_cut_values(tree, edges)
-    while True:
-        leaving = next(
-            (edge for edge in tree.active_edges() if edge.cut_value < 0.0),
-            None,
-        )
-        if leaving is None:
-            break
-        entering = _dagre_enter_edge(tree, edges, leaving, ranks)
-        tree.remove_edge(leaving)
-        tree.add_edge(entering[0], entering[1])
+    # The simplex helpers below (tight-tree growth, low/lim numbering, cut
+    # values, preorder/postorder walks) recurse to graph-DFS depth. Raise the
+    # recursion limit for the whole run and restore it afterward (scc.py /
+    # _reingold_tilford.py convention); depth is bounded by the node count.
+    previous_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous_recursion_limit, 2 * len(node_order) + 100))
+    try:
+        tree = _dagre_feasible_tree(node_order, edges, ranks)
         _dagre_init_low_lim(tree)
         _dagre_init_cut_values(tree, edges)
-        _dagre_update_ranks(tree, edges, ranks)
+        while True:
+            leaving = next(
+                (edge for edge in tree.active_edges() if edge.cut_value < 0.0),
+                None,
+            )
+            if leaving is None:
+                break
+            entering = _dagre_enter_edge(tree, edges, leaving, ranks)
+            tree.remove_edge(leaving)
+            tree.add_edge(entering[0], entering[1])
+            _dagre_init_low_lim(tree)
+            _dagre_init_cut_values(tree, edges)
+            _dagre_update_ranks(tree, edges, ranks)
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
     return ranks
 
 
@@ -2555,32 +2584,46 @@ def _initial_order(graph: _DagreGraph) -> List[List[NodeId]]:
     layers: List[List[NodeId]] = [[] for _ in range(max_rank + 1)]
     visited: Set[NodeId] = set()
 
-    def visit(node: NodeId) -> None:
-        """Visit one node in successor-first DFS order.
+    def place(node: NodeId) -> None:
+        """Record one node in its rank layer.
 
         Parameters
         ----------
         node : Hashable
-            Node to visit.
+            Node being placed.
 
         Returns
         -------
         None
             ``layers`` and ``visited`` are mutated.
         """
-        if node in visited:
-            return
         visited.add(node)
         rank = graph.nodes[node].rank
         if rank is None:
             raise RuntimeError("Dagre ordering received an unranked node.")
         layers[rank].append(node)
-        for successor in graph.successors(node):
-            visit(successor)
 
+    # Iterative twin of dagre's recursive successor-first DFS (suspended-
+    # iterator stack): the layer append order -- which seeds crossing
+    # minimization -- is preserved exactly, and deep chains no longer exhaust
+    # the recursion limit.
     ordered_nodes = sorted(graph.node_order, key=lambda node: graph.nodes[node].rank or 0)
-    for node in ordered_nodes:
-        visit(node)
+    frames: List[Iterator[NodeId]] = []
+    for start in ordered_nodes:
+        if start in visited:
+            continue
+        place(start)
+        frames.append(iter(graph.successors(start)))
+        while frames:
+            descended = False
+            for successor in frames[-1]:
+                if successor not in visited:
+                    place(successor)
+                    frames.append(iter(graph.successors(successor)))
+                    descended = True
+                    break
+            if not descended:
+                frames.pop()
     return layers
 
 

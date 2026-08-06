@@ -623,11 +623,20 @@ def _component_network_simplex_layers(
         Original node id to zero-based component-local layer.
     """
     local_by_node = {node: index for index, node in enumerate(component)}
-    rank_edges = [
-        (local_by_node[source], local_by_node[target], 1, 1)
-        for source, target in edges
-        if source in local_by_node and target in local_by_node
-    ]
+    # Collapse parallel edges before the network simplex, mirroring the
+    # reference contract: dagre.js networkSimplex() runs on simplify(g)
+    # (weights summed, minlen maxed over each multi-edge bundle), so the
+    # simplex machinery never sees parallel edges -- feeding them here (they
+    # arise when cycle-breaking reverses one arm of an antiparallel pair)
+    # violates the leave/enter exchange invariant and dies in enterEdge.
+    # ELK's own network simplex keeps parallel edges as separate unit-weight
+    # constraints, which is arithmetically identical to this weight sum.
+    collapsed: Dict[Tuple[int, int], int] = {}
+    for source, target in edges:
+        if source in local_by_node and target in local_by_node:
+            pair = (local_by_node[source], local_by_node[target])
+            collapsed[pair] = collapsed.get(pair, 0) + 1
+    rank_edges = [(source, target, 1, weight) for (source, target), weight in collapsed.items()]
     if not rank_edges:
         return {node: 0 for node in component}
     ranks = _dagre_network_simplex_ranks(list(range(len(component))), rank_edges)
