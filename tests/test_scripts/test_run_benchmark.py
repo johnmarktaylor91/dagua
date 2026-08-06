@@ -18,7 +18,9 @@ from scripts.run_benchmark import (
     RECOVERED_GIT_SHA_PREFIX,
     BenchmarkRecord,
     drain_executor,
+    drain_inflight_bounded,
     effective_timeout,
+    effective_worker_capacity,
     expired_watchdog_futures,
     final_exit_code,
     is_record_complete,
@@ -324,6 +326,195 @@ def test_is_record_complete_retries_watchdog_errors_only_when_asked(
         save_positions=True,
         retry_watchdog_errors=True,
     )
+
+
+def test_effective_worker_capacity_accounts_live_zombies() -> None:
+    """Only live zombies reduce capacity; the happy path keeps full capacity."""
+    assert effective_worker_capacity(2, set()) == 2
+    assert effective_worker_capacity(4, set()) == 4
+
+    live_zombie: Future[list[dict[str, object]]] = Future()
+    live_zombie.set_running_or_notify_cancel()
+    assert effective_worker_capacity(2, {live_zombie}) == 1
+
+    # A zombie whose call eventually returned frees its worker again.
+    finished_zombie: Future[list[dict[str, object]]] = Future()
+    finished_zombie.set_result([])
+    assert effective_worker_capacity(2, {live_zombie, finished_zombie}) == 1
+    assert effective_worker_capacity(2, {finished_zombie}) == 2
+
+    # Defensive floor: capacity never reaches zero (the all-expired rebuild
+    # clears the zombie registry in the same watchdog event).
+    assert effective_worker_capacity(1, {live_zombie}) == 1
+
+
+def test_queued_future_behind_zombie_is_not_expired_and_eventually_executes() -> None:
+    """The exact dry-well R2 state: 2 workers, 1 zombie, 1 running + 1 queued.
+
+    A tracked zombie still occupies one executor worker, so only ONE visible
+    inflight future is actually executing. The queued future behind the
+    zombie must not get a watchdog timer, must not be expired when the
+    genuinely-running peer expires (it must survive as a pending group for
+    resubmission), and must eventually EXECUTE once the runner's worker
+    frees up.
+    """
+    context = multiprocessing.get_context("fork")
+    executor = ProcessPoolExecutor(max_workers=2, mp_context=context)
+    resolved_workers = 2
+    try:
+        zombie = executor.submit(time.sleep, 30.0)  # wedged worker
+        runner = executor.submit(time.sleep, 2.0)  # genuinely running peer
+        queued = executor.submit(sum, [4, 5, 6])  # cannot execute yet
+
+        deadline = time.monotonic() + 10.0
+        while not (zombie.running() and runner.running()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert zombie.running() and runner.running()
+        # NOTE: queued.running() may already be True -- the executor marks a
+        # future RUNNING when it is pre-buffered into the call queue, not
+        # when a worker actually picks it up. Both workers are occupied, so
+        # it cannot execute yet regardless of the flag.
+
+        # Watchdog expiry of the wedged future: tracked zombie, dropped from
+        # the visible window.
+        zombies: set[Future[list[dict[str, object]]]] = set()
+        assert register_watchdog_zombie(zombie, zombies) is True
+
+        # Sol's probed state: visible inflight = [runner, queued].
+        inflight: dict[Future[list[dict[str, object]]], tuple[str, ...]] = {
+            runner: ("runner-group",),
+            queued: ("queued-group",),
+        }
+        started_at: dict[Future[list[dict[str, object]]], float] = {}
+        capacity = effective_worker_capacity(resolved_workers, zombies)
+        assert capacity == 1
+
+        # The queued future's timer must NOT start while it cannot execute.
+        refresh_watchdog_start_times(inflight, started_at, max_active=capacity, now=100.0)
+        assert runner in started_at
+        assert queued not in started_at
+
+        # The genuinely-running peer also exceeds the watchdog budget: only
+        # it expires; the queued group survives as pending for resubmission,
+        # and all effective actives expired -> the rebuild path restores
+        # full capacity.
+        expired = expired_watchdog_futures(
+            inflight, started_at, max_active=capacity, watchdog_timeout=5.0, now=110.0
+        )
+        assert expired == [runner]
+        active = list(inflight)[:capacity]
+        assert len(set(expired)) == len(active)  # active_expired -> pool rebuild
+        pending = [group for fut, group in inflight.items() if fut not in set(expired)]
+        assert pending == [("queued-group",)]
+
+        # Regression contrast (the R2 defect): full-worker accounting starts
+        # the queued future's timer even though it cannot possibly execute.
+        buggy_started: dict[Future[list[dict[str, object]]], float] = {}
+        refresh_watchdog_start_times(
+            inflight, buggy_started, max_active=resolved_workers, now=100.0
+        )
+        assert queued in buggy_started
+
+        # The queued row eventually EXECUTES (not expires) once the runner
+        # completes and frees its worker; the zombie still holds the other.
+        assert queued.result(timeout=30.0) == 15
+
+        drain_executor(executor, zombies)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_shutdown_drain_bounded_when_wedge_never_watchdog_expired() -> None:
+    """SIGINT drain must not block forever on a never-expired wedged worker.
+
+    Regression for dry-well R2 F2: the shutdown drain was
+    ``as_completed(inflight)`` with NO timeout. A worker wedged in a C-level
+    call that never watchdog-expired (peer results kept the silent window
+    from opening, so the zombie set was empty) blocked Ctrl-C shutdown
+    forever, and the phase teardown then took the blocking graceful branch.
+    The bounded drain must collect the completing peer, expire the wedge
+    into the zombie registry within the budget, and let teardown
+    force-terminate promptly.
+    """
+    context = multiprocessing.get_context("fork")
+    executor = ProcessPoolExecutor(max_workers=2, mp_context=context)
+    try:
+        wedged = executor.submit(time.sleep, 30.0)  # never watchdog-expired
+        peer = executor.submit(sum, [1, 2, 3])
+
+        deadline = time.monotonic() + 10.0
+        while not wedged.running() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert wedged.running()
+
+        inflight: dict[Future[list[dict[str, object]]], tuple[str, ...]] = {
+            wedged: ("wedged-group",),
+            peer: ("peer-group",),
+        }
+        zombies: set[Future[list[dict[str, object]]]] = set()
+        collected: list[Future[list[dict[str, object]]]] = []
+        expired: list[tuple[Future[list[dict[str, object]]], tuple[str, ...]]] = []
+
+        def _collect(fut: Future[list[dict[str, object]]]) -> None:
+            inflight.pop(fut, None)
+            collected.append(fut)
+
+        def _expire(
+            fut: Future[list[dict[str, object]]],
+            work_group: tuple[str, ...],
+        ) -> None:
+            register_watchdog_zombie(fut, zombies)
+            expired.append((fut, work_group))
+
+        started = time.monotonic()
+        stuck_count = drain_inflight_bounded(
+            inflight, collect=_collect, expire=_expire, drain_timeout=2.0
+        )
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 10.0, f"shutdown drain took {elapsed:.1f}s -- wedge blocked it"
+        assert collected == [peer]
+        assert stuck_count == 1
+        assert expired == [(wedged, ("wedged-group",))]
+        assert inflight == {}
+        assert wedged in zombies  # teardown will take the force-terminate path
+
+        started = time.monotonic()
+        drain_executor(executor, zombies)
+        assert time.monotonic() - started < 15.0
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_shutdown_drain_collects_everything_when_nothing_wedges() -> None:
+    """The no-wedge shutdown drain matches the historical unbounded drain."""
+    finished_a: Future[list[dict[str, object]]] = Future()
+    finished_a.set_result([])
+    finished_b: Future[list[dict[str, object]]] = Future()
+    finished_b.set_result([])
+    inflight: dict[Future[list[dict[str, object]]], tuple[str, ...]] = {
+        finished_a: ("a",),
+        finished_b: ("b",),
+    }
+    collected: list[Future[list[dict[str, object]]]] = []
+
+    def _collect(fut: Future[list[dict[str, object]]]) -> None:
+        inflight.pop(fut, None)
+        collected.append(fut)
+
+    def _expire(
+        fut: Future[list[dict[str, object]]],
+        work_group: tuple[str, ...],
+    ) -> None:
+        raise AssertionError("nothing should expire when all futures complete")
+
+    stuck_count = drain_inflight_bounded(
+        inflight, collect=_collect, expire=_expire, drain_timeout=0.5
+    )
+
+    assert stuck_count == 0
+    assert set(collected) == {finished_a, finished_b}
+    assert inflight == {}
 
 
 def test_drain_terminates_stuck_worker_while_peer_completes() -> None:
