@@ -285,11 +285,13 @@ def test_scoring_signature_tracks_every_score_affecting_source(
     Every stale-score defense (raw-cache header equality, runner resume
     quarantine, regression locks) trusts ``scoring_signature``; a
     score-affecting module missing from its hash set is a blind seam
-    (drywell R2-B3-F3). This enumerates the full hashed set -- the frozen
-    ruler files plus the unfrozen score-anchoring imports (render/mpl.py
-    node boxes, benchmark.py hierarchy gating, graphs.py directedness) --
-    and proves each one individually feeds the digest. Removing any tracked
-    file from the signature fails this test by name.
+    (drywell R2-B3-F3, R3-B3). This enumerates the full hashed set -- the
+    frozen ruler files plus the unfrozen score-anchoring imports
+    (render/mpl.py node boxes, benchmark.py hierarchy gating, graphs.py
+    directedness, and the graph.py/utils.py node-box sizing seam whose
+    output never reaches graph hashes) -- and proves each one individually
+    feeds the digest. Removing any tracked file from the signature fails
+    this test by name.
     """
     baseline = scorer.scoring_signature()
     assert scorer.scoring_signature() == baseline
@@ -304,6 +306,8 @@ def test_scoring_signature_tracks_every_score_affecting_source(
         "dagua/eval/benchmark.py",
         "dagua/eval/graphs.py",
         "dagua/render/mpl.py",
+        "dagua/graph.py",
+        "dagua/utils.py",
     )
     real_sha256_file = scorer.sha256_file
     for tracked_rel in tracked:
