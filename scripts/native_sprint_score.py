@@ -518,6 +518,16 @@ def scoring_signature() -> str:
             "dagua/eval/benchmark.py": sha256_file(root / "dagua" / "eval" / "benchmark.py"),
             "dagua/eval/graphs.py": sha256_file(root / "dagua" / "eval" / "graphs.py"),
             "dagua/render/mpl.py": sha256_file(root / "dagua" / "render" / "mpl.py"),
+            # Node-box producer seam (drywell R3-B3): every V3 score consumes
+            # boxes from DaguaGraph.compute_node_sizes (graph.py) and the
+            # text-measurement/box-sizing implementation (utils.py); graph
+            # hashes cannot compensate because to_json never serializes the
+            # computed node_sizes. utils.py is broad and will flip the
+            # signature on unrelated edits -- over-invalidation is the correct
+            # failure direction (it merely rescores from tensors), whereas
+            # under-invalidation silently poisons cached scores.
+            "dagua/graph.py": sha256_file(root / "dagua" / "graph.py"),
+            "dagua/utils.py": sha256_file(root / "dagua" / "utils.py"),
         },
     }
     return canonical_json_hash(payload)
