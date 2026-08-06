@@ -699,6 +699,9 @@ class _GraphvizBase(CompetitorBase):
     """Base class for Graphviz engine variants."""
 
     engine: str = "dot"
+    # Family backend: every graphviz_* member (incl. circo/osage/twopi)
+    # inherits the dot binary version component (dry-well R4-B3-Sol).
+    backend_version_key = "graphviz"
     # Size-aware externals receive dagua-computed node boxes gated by
     # size_policy (under dagua/eval/, outside the tree hash); declared per
     # dry-well R3-B3-Fable F4 disposition. The measurement stack itself

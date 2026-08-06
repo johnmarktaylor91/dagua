@@ -816,6 +816,8 @@ class LinLogReference(CompetitorBase):
 
     name = "linlog"
     max_nodes = 50_000
+    # The reference LinLog builds on networkx graph structures.
+    backend_version_key = "networkx"
     variant_param_names = frozenset(
         {
             "a",

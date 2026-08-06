@@ -266,6 +266,7 @@ def _build_dagre_input(graph: DaguaGraph) -> Dict[str, object]:
 @register
 class DagreCompetitor(CompetitorBase):
     name = "dagre"
+    backend_version_key = "dagre"
     max_nodes = 1_500  # JS stack overflow at 2000 on dense graphs
     supports_clusters = True
     # Size-aware external: node boxes gated by dagua/eval/size_policy.py

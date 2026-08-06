@@ -87,6 +87,7 @@ class FA2Reference(CompetitorBase):
 
     name = "fa2_ref"
     max_nodes = 20_000
+    backend_version_key = "fa2"
     variant_param_names = frozenset(
         {
             "barnesHutOptimize",

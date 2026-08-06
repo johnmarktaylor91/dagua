@@ -408,6 +408,7 @@ class SGD2MultiRef(CompetitorBase):
 
     name = "sgd2_multi_ref"
     max_nodes = 5_000
+    backend_version_key = "sgd2"
     variant_param_names = frozenset(
         {"criteria_weights", "grad_clamp", "max_iter", "optimizer_kwargs", "sample_sizes"}
     )

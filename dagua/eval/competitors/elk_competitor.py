@@ -406,6 +406,7 @@ class ElkLayered(CompetitorBase):
     name = "elk_layered"
     max_nodes = 15_000
     supports_clusters = True
+    backend_version_key = "elk"
     # Size-aware external: node boxes gated by dagua/eval/size_policy.py
     # (dry-well R3-B3-Fable F4 disposition).
     source_delegate_modules = ("dagua.eval.size_policy",)
@@ -493,6 +494,9 @@ class _ElkSecondary(CompetitorBase):
     algorithm_id = ""
     max_nodes = 15_000
     supports_clusters = False
+    # Family backend: every ELK secondary (force/stress/mrtree/radial)
+    # inherits the elk version component (dry-well R4-B3-Sol).
+    backend_version_key = "elk"
     # Size-aware external: node boxes gated by dagua/eval/size_policy.py
     # (dry-well R3-B3-Fable F4 disposition).
     source_delegate_modules = ("dagua.eval.size_policy",)

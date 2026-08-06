@@ -764,39 +764,6 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         return f"dagua:{device}:{_dagua_source_signature()}"
 
-    version_keys = {
-        # Graphviz family shares the same dot binary version.
-        "graphviz_dot": "graphviz",
-        "graphviz_sfdp": "graphviz",
-        "graphviz_neato": "graphviz",
-        "graphviz_fdp": "graphviz",
-        "elk_layered": "elk",
-        "dagre": "dagre",
-        "igraph_sugiyama": "igraph",
-        "igraph_fr": "igraph",
-        "igraph_kamada_kawai": "igraph",
-        "igraph_mds": "igraph",
-        "igraph_davidson_harel": "igraph",
-        "igraph_graphopt": "igraph",
-        "igraph_drl": "igraph",
-        "igraph_lgl": "igraph",
-        "igraph_rt": "igraph",
-        "igraph_rt_horizontal": "igraph",
-        "nx_spring": "networkx",
-        "nx_kamada_kawai": "networkx",
-        "nx_spectral": "networkx",
-        "nx_spectral_random_walk": "networkx",
-        "sgd2": "sgd2",
-        "sgd2_mds": "sgd2",
-        "sgd2_multi_ref": "sgd2",
-        "neulay": "pyg",
-        "fa2_ref": "fa2",
-        "linlog": "networkx",
-        "cytoscape_fcose": "cytoscape",
-        "gephi_yifanhu": "gephi",
-        "umap_graph": "umap",
-        "tsne_graph": "sklearn",
-    }
     if name.startswith("classic_") or name in {"dot", "fdp"}:
         # Classic adapters are Dagua-owned implementations, so their cache key
         # should track our source changes instead of an external package.
@@ -829,8 +796,17 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         )
     if name == "umap_graph":
         return f"{name}:{system.get('umap')}:{system.get('scipy')}:src={adapter_src}{dagua_suffix}"
-    key = version_keys.get(name)
-    value = system.get(key) if key is not None else None
+    # FAMILY-based backend-version resolution (dry-well R4-B3-Sol HIGH): the
+    # version key comes from the adapter class's backend_version_key (declared
+    # once on each family's shared base), so every present and future family
+    # member inherits its backend's version component structurally -- the old
+    # per-name table silently dropped 16 sibling aliases (graphviz_circo/
+    # osage/twopi, elk_force/stress/mrtree/radial, eight nx_* engines,
+    # igraph_rt_circular), whose signatures did not move on a backend upgrade.
+    backend_key = (
+        getattr(competitor, "backend_version_key", None) if competitor is not None else None
+    )
+    value = system.get(backend_key) if backend_key is not None else None
     return f"{name}:{value}:src={adapter_src}{dagua_suffix}"
 
 

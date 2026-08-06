@@ -123,6 +123,7 @@ class GephiYifanHu(CompetitorBase):
 
     name = "gephi_yifanhu"
     max_nodes = 50_000
+    backend_version_key = "gephi"
 
     _JAR_PATH = (
         Path(__file__).resolve().parent.parent.parent.parent
