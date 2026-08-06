@@ -1248,6 +1248,42 @@ def _apply_label_satellite_constraints(
     setattr(graph, "_r9_label_positions", label_positions)
 
 
+def _finite_preserving_cast(pos: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """Cast positions to ``dtype`` only when the cast keeps them finite.
+
+    Deep block-chain layouts (e.g. circo on articulation chains) can
+    legitimately produce finite float64 coordinates beyond float32 range;
+    casting those would replace finite values with infinities. When that
+    would happen, keep the wider tensor and disclose it with a one-line
+    warning. For every tensor whose cast stays finite -- and for tensors
+    that are already non-finite -- the behavior is the plain cast.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    dtype : torch.dtype, default=torch.float32
+        Requested output dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Cast tensor, or the original tensor when casting would destroy
+        finite coordinates.
+    """
+    cast = pos.to(dtype=dtype)
+    if bool(torch.isfinite(cast).all()) or not bool(torch.isfinite(pos).all()):
+        return cast
+    import warnings
+
+    warnings.warn(
+        f"layout positions exceed {dtype} range; returning {pos.dtype} to keep them finite.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return pos
+
+
 def _apply_constrained_polish(
     pos: torch.Tensor,
     graph: Any,
@@ -1864,7 +1900,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                         getattr(config, "flex", None),
                         getattr(config, "direction", "TB"),
                     )
-                pos = pos.to(dtype=torch.float32)
+                pos = _finite_preserving_cast(pos)
                 _update_graph_constraint_report(graph, pos, config)
                 graph.cache_layout(pos)
                 return pos
@@ -1882,7 +1918,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                         getattr(config, "direction", "TB"),
                     )
                 _update_graph_constraint_report(graph, pos, config)
-                return (pos.to(dtype=torch.float32), *rest)
+                return (_finite_preserving_cast(pos), *rest)
             return result
         pos = _apply_constrained_polish(result, graph, config)
         if _config_or_graph_has_constraints(config, graph):
@@ -1892,7 +1928,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 getattr(config, "direction", "TB"),
             )
         _update_graph_constraint_report(graph, pos, config)
-        return pos.to(dtype=torch.float32)
+        return _finite_preserving_cast(pos)
 
     # Ensure node sizes are computed
     graph.compute_node_sizes()

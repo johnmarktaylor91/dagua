@@ -424,3 +424,262 @@ def test_fdp_fidelity_survives_deep_root_level_component() -> None:
 
     assert tuple(positions.shape) == (num_nodes, 2)
     assert bool(torch.isfinite(positions).all())
+
+
+def _zigzag_chain_edge_index(count: int = 250) -> tuple:
+    """Build the articulation-linked zigzag triangle chain.
+
+    Parameters
+    ----------
+    count : int, default=250
+        Number of chained triangles.
+
+    Returns
+    -------
+    tuple
+        ``(edge_index, num_nodes)`` for the overflow-triggering chain.
+    """
+    edges = []
+    next_node = 1
+    prev = 0
+    for i in range(count):
+        a, b = next_node, next_node + 1
+        edges += [(prev, a), (a, b), (b, prev)]
+        next_node += 2
+        if i % 2 == 0:
+            prev = a
+    return torch.tensor(edges, dtype=torch.long).t().contiguous(), next_node
+
+
+def _zigzag_dagua_graph(count: int = 250):
+    """Build the zigzag chain as a public DaguaGraph.
+
+    Parameters
+    ----------
+    count : int, default=250
+        Number of chained triangles.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph whose circo layout exceeds float32 range.
+    """
+    import dagua
+
+    edge_index, _num = _zigzag_chain_edge_index(count)
+    g = dagua.DaguaGraph()
+    for source, target in edge_index.t().tolist():
+        g.add_edge(f"v{source}", f"v{target}")
+    return g
+
+
+def test_circo_public_dispatch_keeps_finite_output_on_overflow() -> None:
+    """Public dispatch must not cast finite float64 layouts into infinities.
+
+    Returns
+    -------
+    None
+        ``dagua.layout`` must return finite float64 positions with a
+        disclosure warning on the overflow chain.
+    """
+    import dagua
+    from dagua import LayoutConfig
+
+    g = _zigzag_dagua_graph()
+
+    with pytest.warns(RuntimeWarning, match="exceed"):
+        positions = dagua.layout(g, LayoutConfig(algorithm="circo", seed=42))
+
+    assert positions.dtype == torch.float64
+    assert bool(torch.isfinite(positions).all())
+    assert float(positions.abs().max()) > 3.4e38
+
+
+def test_scoring_normalization_keeps_finite_float64_on_overflow(tmp_path) -> None:
+    """Score the overflow chain end-to-end without an ERROR row.
+
+    Returns
+    -------
+    None
+        ``normalize_position_units_for_scoring`` must keep the tensor finite
+        (disclosing via flags), and ``score_position`` must produce a scored
+        row instead of a non-finite rejection.
+    """
+    from dagua.eval.graphs import TestGraph
+    from scripts.native_sprint_score import (
+        normalize_position_units_for_scoring,
+        score_position,
+        scoring_signature,
+    )
+
+    g = _zigzag_dagua_graph()
+    edge_index, num_nodes = _zigzag_chain_edge_index()
+    direct = get_pipeline_function("circo")(edge_index=edge_index, num_nodes=num_nodes)
+    assert bool(torch.isfinite(direct).all())
+    g.compute_node_sizes()
+
+    normalized = normalize_position_units_for_scoring(g, direct, "circo_reimpl")
+    assert bool(torch.isfinite(normalized.positions).all())
+    assert "FLOAT64_PRESERVED" in normalized.flags
+
+    tensor_path = tmp_path / "zigzag250.pt"
+    torch.save(direct, tensor_path)
+    row = score_position(
+        TestGraph(name="zigzag250", graph=g),
+        str(tensor_path),
+        "circo_reimpl",
+        scoring_signature(),
+        ruler="v3",
+    )
+    assert row.get("error") in (None, "")
+
+
+def test_dagre_sort_compound_subgraph_survives_1200_cluster_chain() -> None:
+    """Sort a 1200-deep compound layer chain without recursion errors.
+
+    Returns
+    -------
+    None
+        The ordering sweep helper must complete on deep cluster metadata.
+    """
+    from dagua.layout.ops.dagre import _LayerGraph, _LayerNode, _sort_compound_subgraph
+
+    layer_graph = _LayerGraph(root="root")
+    layer_graph.set_node("root", _LayerNode())
+    layer_graph.set_parent("root", None)
+    previous = "root"
+    for level in range(1200):
+        name = f"c{level}"
+        layer_graph.set_node(name, _LayerNode())
+        layer_graph.set_parent(name, previous)
+        previous = name
+    layer_graph.set_node("leaf", _LayerNode(order=0))
+    layer_graph.set_parent("leaf", previous)
+
+    result = _sort_compound_subgraph(layer_graph, "root", [], False)
+
+    assert result.vs == ["leaf"]
+
+
+def test_fdp_level_driver_survives_1050_cluster_chain() -> None:
+    """Lay out a 1050-level single-child cluster chain without recursion.
+
+    Returns
+    -------
+    None
+        The fdp recursion driver must complete on deep nesting.
+    """
+    from dagua.layout.ops.pipelines.fmmm import graphviz_fdp_fidelity
+
+    depth = 1050
+    clusters = {"c0": [0]}
+    parents: dict = {}
+    for level in range(1, depth):
+        clusters[f"c{level}"] = []
+        parents[f"c{level - 1}"] = f"c{level}"
+    parents[f"c{depth - 1}"] = None
+
+    positions = graphviz_fdp_fidelity(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=1,
+        clusters=clusters,
+        cluster_parents=parents,
+        steps=1,
+    )
+
+    assert tuple(positions.shape) == (1, 2)
+    assert bool(torch.isfinite(positions).all())
+
+
+def _disjoint_cluster_instance(seed: int = 3, num_nodes: int = 60, cluster_count: int = 6):
+    """Build the disjoint-cluster random DAG that crashed compound ordering.
+
+    Parameters
+    ----------
+    seed : int, default=3
+        Deterministic generator seed (a known previously-crashing instance).
+    num_nodes : int, default=60
+        Node count.
+    cluster_count : int, default=6
+        Number of disjoint clusters (some nodes stay unclustered).
+
+    Returns
+    -------
+    tuple
+        ``(edges, clusters, parents)`` payloads.
+    """
+    import random
+
+    rng = random.Random(seed)
+    edges = []
+    for i in range(1, num_nodes):
+        for _ in range(rng.randint(1, 2)):
+            edges.append((rng.randrange(0, i), i))
+    assignment: dict = {}
+    for node in range(num_nodes):
+        bucket = rng.randrange(cluster_count + 1)
+        if bucket < cluster_count:
+            assignment.setdefault(bucket, []).append(node)
+    clusters = {f"k{bucket}": members for bucket, members in assignment.items()}
+    parents = {name: None for name in clusters}
+    return edges, clusters, parents
+
+
+def test_dagre_pipeline_survives_disjoint_cluster_ordering() -> None:
+    """Order a random DAG with plain disjoint cluster metadata.
+
+    Layer matrices must carry each node exactly once (dagre.js semantics), so
+    the crossing counter no longer indexes past its accumulator.
+
+    Returns
+    -------
+    None
+        The pipeline must complete with finite positions.
+    """
+    edges, clusters, parents = _disjoint_cluster_instance()
+
+    positions = get_pipeline_function("dagre")(
+        edge_index=torch.tensor(edges, dtype=torch.long).t().contiguous(),
+        num_nodes=60,
+        clusters=clusters,
+        cluster_parents=parents,
+    )
+
+    assert tuple(positions.shape) == (60, 2)
+    assert bool(torch.isfinite(positions).all())
+
+
+@pytest.mark.slow
+def test_native_default_keeps_dagre_compound_arm_on_disjoint_clusters() -> None:
+    """Run the default native path on the previously-crashing clustered DAG.
+
+    Returns
+    -------
+    None
+        The dagre-compound challenger must no longer fail (no arm-loss
+        warning), and the layout must complete finite.
+    """
+    import random
+    import warnings as warnings_module
+
+    import dagua
+    from dagua import DaguaGraph, LayoutConfig
+
+    edges, clusters, _parents = _disjoint_cluster_instance()
+    rng = random.Random(0)
+    del rng
+    g = DaguaGraph()
+    for i in range(60):
+        g.add_node(f"v{i}")
+    for source, target in edges:
+        g.add_edge(f"v{source}", f"v{target}")
+    for name, members in clusters.items():
+        g.add_cluster(name, [f"v{m}" for m in members])
+
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        positions = dagua.layout(g, LayoutConfig(seed=42))
+
+    arm_failures = [w for w in caught if "dagre-compound" in str(w.message)]
+    assert not arm_failures
+    assert bool(torch.isfinite(positions).all())

@@ -3383,43 +3383,77 @@ def _sort_compound_subgraph(
     _SortResult
         Sorted child ids and optional barycenter.
     """
-    movable = layer_graph.children(node)
-    node_label = layer_graph.nodes.get(node)
-    border_left = node_label.border_left if node_label is not None else None
-    border_right = node_label.border_right if node_label is not None else None
-    if border_left is not None and border_right is not None:
-        movable = [child for child in movable if child not in {border_left, border_right}]
-    subgraphs: Dict[NodeId, _SortResult] = {}
-    entries = _compound_barycenters(layer_graph, movable)
-    for entry in entries:
-        child = entry.vs[0]
-        if layer_graph.children(child):
-            result = _sort_compound_subgraph(layer_graph, child, constraints, bias_right)
-            subgraphs[child] = result
-            _merge_barycenters(entry, result)
-    resolved = _resolve_compound_conflicts(entries, constraints)
-    for entry in resolved:
-        expanded: List[NodeId] = []
-        for child in entry.vs:
-            expanded.extend(subgraphs[child].vs if child in subgraphs else [child])
-        entry.vs = expanded
-    result = _sort_compound_entries(resolved, bias_right)
-    if border_left is not None and border_right is not None:
-        result.vs = [border_left, *result.vs, border_right]
-        left_predecessors = layer_graph.predecessors(border_left)
-        right_predecessors = layer_graph.predecessors(border_right)
-        if left_predecessors and right_predecessors:
-            left_order = layer_graph.nodes[left_predecessors[0]].order
-            right_order = layer_graph.nodes[right_predecessors[0]].order
-            if left_order is not None and right_order is not None:
-                if result.barycenter is None:
-                    result.barycenter = 0.0
-                    result.weight = 0.0
-                result.barycenter = (
-                    result.barycenter * result.weight + left_order + right_order
-                ) / (result.weight + 2.0)
-                result.weight += 2.0
-    return result
+
+    def sort_subgraph(current: NodeId) -> Any:
+        """Sort one subgraph, yielding child cluster ids to the trampoline.
+
+        The body is the verbatim recursive sort with the self-call replaced
+        by ``yield``, so the execution order (parent barycenters first, child
+        sorts and barycenter merges interleaved in entry order) is exactly
+        the recursion's while the call depth lives on a heap stack.
+
+        Parameters
+        ----------
+        current : Hashable
+            Root or cluster node to sort.
+
+        Yields
+        ------
+        Hashable
+            Child cluster ids whose sorted results are sent back in.
+        """
+        movable = layer_graph.children(current)
+        node_label = layer_graph.nodes.get(current)
+        border_left = node_label.border_left if node_label is not None else None
+        border_right = node_label.border_right if node_label is not None else None
+        if border_left is not None and border_right is not None:
+            movable = [child for child in movable if child not in {border_left, border_right}]
+        subgraphs: Dict[NodeId, _SortResult] = {}
+        entries = _compound_barycenters(layer_graph, movable)
+        for entry in entries:
+            child = entry.vs[0]
+            if layer_graph.children(child):
+                result = yield child
+                subgraphs[child] = result
+                _merge_barycenters(entry, result)
+        resolved = _resolve_compound_conflicts(entries, constraints)
+        for entry in resolved:
+            expanded: List[NodeId] = []
+            for child in entry.vs:
+                expanded.extend(subgraphs[child].vs if child in subgraphs else [child])
+            entry.vs = expanded
+        result = _sort_compound_entries(resolved, bias_right)
+        if border_left is not None and border_right is not None:
+            result.vs = [border_left, *result.vs, border_right]
+            left_predecessors = layer_graph.predecessors(border_left)
+            right_predecessors = layer_graph.predecessors(border_right)
+            if left_predecessors and right_predecessors:
+                left_order = layer_graph.nodes[left_predecessors[0]].order
+                right_order = layer_graph.nodes[right_predecessors[0]].order
+                if left_order is not None and right_order is not None:
+                    if result.barycenter is None:
+                        result.barycenter = 0.0
+                        result.weight = 0.0
+                    result.barycenter = (
+                        result.barycenter * result.weight + left_order + right_order
+                    ) / (result.weight + 2.0)
+                    result.weight += 2.0
+        return result
+
+    stack = [sort_subgraph(node)]
+    sent: Optional[_SortResult] = None
+    while stack:
+        try:
+            request = stack[-1].send(sent)
+        except StopIteration as stop:
+            stack.pop()
+            sent = stop.value
+            continue
+        stack.append(sort_subgraph(request))
+        sent = None
+    if sent is None:  # pragma: no cover - the root generator always returns
+        raise RuntimeError("compound subgraph sort produced no result.")
+    return sent
 
 
 def _add_compound_subgraph_constraints(
@@ -3519,6 +3553,11 @@ def _compound_order_graph(graph: _DagreGraph) -> List[List[NodeId]]:
                 sorted_result.vs,
             )
         layers = _build_layer_matrix(graph)
+        # Restore dagre.js's per-rank invariant (orders are a contiguous
+        # 0..k-1 permutation after every sweep): compound layer graphs may
+        # skip rank members, leaving stale or colliding label orders. When
+        # the invariant already holds this assignment is an exact no-op.
+        _assign_order(graph, layers)
         crossing_count = _cross_count(graph, layers)
         if crossing_count < best_crossings:
             best_crossings = crossing_count
@@ -3547,17 +3586,20 @@ def _build_layer_matrix(graph: _DagreGraph) -> List[List[NodeId]]:
         (int(node.rank) for node in graph.nodes.values() if node.rank is not None),
         default=-1,
     )
-    layers: List[List[NodeId]] = [[] for _ in range(max_rank + 1)]
-    for node in graph.node_order:
+    # dagre.js buildLayerMatrix places each node at layering[rank][order] and
+    # relies on per-rank orders being a contiguous permutation. The compound
+    # sweep can leave stale (gapped or colliding) orders, so build each layer
+    # by a stable sort on (order, insertion index) instead of positional
+    # assignment: every ranked node appears exactly once, and when orders ARE
+    # a contiguous permutation the result is byte-identical to positional
+    # placement.
+    buckets: List[List[Tuple[int, int, NodeId]]] = [[] for _ in range(max_rank + 1)]
+    for insertion_index, node in enumerate(graph.node_order):
         node_data = graph.nodes[node]
         if node_data.rank is None or node_data.order is None:
             continue
-        rank = int(node_data.rank)
-        order = int(node_data.order)
-        while len(layers[rank]) <= order:
-            layers[rank].append(node)
-        layers[rank][order] = node
-    return layers
+        buckets[int(node_data.rank)].append((int(node_data.order), insertion_index, node))
+    return [[node for _order, _index, node in sorted(bucket)] for bucket in buckets]
 
 
 def _order_graph(graph: _DagreGraph) -> List[List[NodeId]]:
@@ -3588,13 +3630,7 @@ def _order_graph(graph: _DagreGraph) -> List[List[NodeId]]:
             ordered = _sort_rank(graph, rank, relationship, bias_right)
             for order, node in enumerate(ordered):
                 graph.nodes[node].order = order
-        layers = [[] for _ in range(max_rank + 1)]
-        for node in graph.node_order:
-            node_data = graph.nodes[node]
-            if node_data.rank is not None and node_data.order is not None:
-                while len(layers[node_data.rank]) <= node_data.order:
-                    layers[node_data.rank].append(node)
-                layers[node_data.rank][node_data.order] = node
+        layers = _build_layer_matrix(graph)
         crossing_count = _cross_count(graph, layers)
         if crossing_count < best_crossings:
             best_crossings = crossing_count
