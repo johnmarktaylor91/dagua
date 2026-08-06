@@ -275,7 +275,7 @@ def layout_elk_layered_ns_pipeline(
     clusters: Optional[Mapping[str, Any]] = None,
     cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
     cluster_labels: Optional[Mapping[str, str]] = None,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> torch.Tensor:
     """Run the ELK network-simplex/BK named variant.
 
@@ -315,7 +315,7 @@ def layout_elk_layered_ns_pipeline(
         Node positions with shape ``[N, 2]``.
     """
     kwargs["variant"] = "elk_layered_ns"
-    return layout_elk_pipeline(  # type: ignore[arg-type]
+    return layout_elk_pipeline(
         edge_index,
         num_nodes,
         node_sizes=node_sizes,
@@ -341,7 +341,7 @@ def layout_elk_layered_bk_pipeline(
     clusters: Optional[Mapping[str, Any]] = None,
     cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
     cluster_labels: Optional[Mapping[str, str]] = None,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> torch.Tensor:
     """Run the ELK Brandes-Koepf named variant.
 
@@ -380,7 +380,7 @@ def layout_elk_layered_bk_pipeline(
         Node positions with shape ``[N, 2]``.
     """
     kwargs["variant"] = "elk_layered_bk"
-    return layout_elk_pipeline(  # type: ignore[arg-type]
+    return layout_elk_pipeline(
         edge_index,
         num_nodes,
         node_sizes=node_sizes,
@@ -406,7 +406,7 @@ def layout_elk_lp_pipeline(
     clusters: Optional[Mapping[str, Any]] = None,
     cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
     cluster_labels: Optional[Mapping[str, str]] = None,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> torch.Tensor:
     """Run the ELK longest-path/simple-placement named variant.
 
@@ -445,7 +445,7 @@ def layout_elk_lp_pipeline(
         Node positions with shape ``[N, 2]``.
     """
     kwargs["variant"] = "elk_lp"
-    return layout_elk_pipeline(  # type: ignore[arg-type]
+    return layout_elk_pipeline(
         edge_index,
         num_nodes,
         node_sizes=node_sizes,
