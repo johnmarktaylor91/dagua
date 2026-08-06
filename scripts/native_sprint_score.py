@@ -758,6 +758,14 @@ def normalize_position_units_for_scoring(
         telemetry for raw-score rows.
     """
     source_positions = positions.to(dtype=torch.float32)
+    kept_float64 = False
+    if not bool(torch.isfinite(source_positions).all()) and bool(torch.isfinite(positions).all()):
+        # Deep block-chain layouts can legitimately store finite float64
+        # coordinates beyond float32 range; scoring the float32 cast would
+        # turn them non-finite and ERROR the row. Keep the finite tensor and
+        # disclose it in the row flags.
+        source_positions = positions.to(dtype=torch.float64)
+        kept_float64 = True
     node_sizes, node_size_scale = _rendered_node_sizes(graph, source_positions)
     source_span = _position_span(source_positions)
     position_scale = _engine_position_scale(engine)
@@ -769,6 +777,8 @@ def normalize_position_units_for_scoring(
         if _is_degenerate_render_span(rendered_span, node_diag_mean)
         else tuple()
     )
+    if kept_float64:
+        flags = (*flags, "FLOAT64_PRESERVED")
     return ScoringUnitNormalization(
         positions=rendered_positions,
         node_sizes=node_sizes,
