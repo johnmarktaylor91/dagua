@@ -48,6 +48,23 @@ def _current_scoring_signature() -> str:
     return nss.scoring_signature()
 
 
+def _current_revision(engine: str) -> str:
+    """Return the live run-revision marker for one engine (resume fixtures).
+
+    Parameters
+    ----------
+    engine : str
+        Engine name.
+
+    Returns
+    -------
+    str
+        ``"<git_sha>:<source_component>"`` as stamped by the runner.
+    """
+    sha, _ = glados.git_provenance(REPO_ROOT)
+    return glados.compute_revision_markers([engine], sha)[engine]
+
+
 def _copy_fixture(corpus_dir: Path, corpus: str, filename: str) -> Path:
     """Copy one synthetic fixture into a scratch corpus directory.
 
@@ -761,6 +778,9 @@ def test_resume_skips_completed_seed_aware_rows_and_cleans_temps(
         # on resume (dry-well B4-F3 / Sol B3-2); a preserved sentinel must
         # therefore carry it, like every real scored row does.
         "scoring_signature": _current_scoring_signature(),
+        # Rows without the CURRENT run-revision marker quarantine on resume
+        # (dry-well R2 B4-Sol-2); a preserved sentinel must carry it too.
+        "run_revision": _current_revision("graphviz_dot"),
         "nodes": 6,
         "edges": 6,
         "directed": False,
@@ -1209,7 +1229,7 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         "positions_path": "positions/gone.pt",
     }
 
-    kept, quarantined, counts = glados.partition_resumed_rows(
+    kept, quarantined, counts, drift = glados.partition_resumed_rows(
         [
             kept_layout,
             kept_scored_native,
@@ -1224,6 +1244,7 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         42,
         tensor_exists=lambda relpath: relpath != "positions/gone.pt",
     )
+    assert drift == []
 
     assert kept == [kept_layout, kept_scored_native]
     reasons = [row["quarantine_reason"] for row in quarantined]
@@ -1234,7 +1255,14 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         "native row generated under a different --seed",
         "positions tensor missing from the row store",
     ]
-    assert counts == {"signature": 1, "universe": 1, "native_seed": 2, "tensor_missing": 1}
+    assert counts == {
+        "signature": 1,
+        "universe": 1,
+        "native_seed": 2,
+        "tensor_missing": 1,
+        "revision": 0,
+        "memkill_retry": 0,
+    }
 
 
 def test_resume_quarantine_integration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1255,6 +1283,7 @@ def test_resume_quarantine_integration(tmp_path: Path, monkeypatch: pytest.Monke
         "positions_path": None,
         "v3_tiered": 61.0,
         "scoring_signature": "stale-sig-from-before-the-hotfix",
+        "run_revision": _current_revision("graphviz_dot"),
     }
     ghost_row: Dict[str, Any] = {
         "graph": "rome/ring6",
@@ -1766,7 +1795,7 @@ def test_partition_quarantines_ok_row_with_null_positions_path() -> None:
         "scoring_signature": "sig",
         "positions_path": None,
     }
-    kept, quarantined, counts = glados.partition_resumed_rows(
+    kept, quarantined, counts, _drift = glados.partition_resumed_rows(
         [row],
         signature="sig",
         valid_keys={"rome/ring6|graphviz_dot|0"},
@@ -1776,3 +1805,424 @@ def test_partition_quarantines_ok_row_with_null_positions_path() -> None:
     assert not kept
     assert quarantined[0]["quarantine_reason"] == ("positions tensor missing from the row store")
     assert counts["tensor_missing"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 10. Dry-well Round-2 fix round (Sol B4-2 revision provenance; Fable F1/F3/F4)
+# ---------------------------------------------------------------------------
+
+
+def test_partition_revision_drift_rules() -> None:
+    """R2 B4-Sol-2: revision drift quarantines; layout siblings NOT rescued."""
+    signature = "sig"
+    key = build_record_key("rome/g", "graphviz_dot", None)
+    markers = {"graphviz_dot": "sha2:srcA"}
+    layout_row = {
+        "record_key": key,
+        "engine": "graphviz_dot",
+        "status": "OK",
+        "run_revision": "sha1:srcA",
+        "positions_path": "positions/p.pt",
+    }
+    scored_row = {
+        **layout_row,
+        "v3_tiered": 60.0,
+        "scoring_signature": signature,
+    }
+
+    # Without the flag: BOTH rows quarantine -- a changed implementation
+    # invalidates the layout itself, so the layout sibling is not rescued.
+    kept, quarantined, counts, drift = glados.partition_resumed_rows(
+        [layout_row, scored_row],
+        signature,
+        {key},
+        42,
+        tensor_exists=lambda _p: True,
+        expected_revision=markers.get,
+    )
+    assert kept == []
+    assert drift == []
+    assert counts["revision"] == 2
+    assert all(row["quarantine_reason"] == "implementation revision drift" for row in quarantined)
+
+    # With the flag: git-SHA-only drift (source component unchanged) is kept
+    # and disclosed.
+    kept, quarantined, counts, drift = glados.partition_resumed_rows(
+        [layout_row, scored_row],
+        signature,
+        {key},
+        42,
+        tensor_exists=lambda _p: True,
+        expected_revision=markers.get,
+        accept_revision_drift=True,
+    )
+    assert len(kept) == 2
+    assert quarantined == []
+    assert len(drift) == 2
+    assert all(row.get("revision_drift") is True for row in drift)
+
+    # Source-component drift or a missing marker quarantines even WITH the
+    # flag (that is not a harness-only hotfix).
+    source_drift = {**scored_row, "run_revision": "sha1:srcOLD"}
+    markerless = {k: v for k, v in scored_row.items() if k != "run_revision"}
+    kept, quarantined, counts, drift = glados.partition_resumed_rows(
+        [source_drift, markerless],
+        signature,
+        {key},
+        42,
+        tensor_exists=lambda _p: True,
+        expected_revision=markers.get,
+        accept_revision_drift=True,
+    )
+    assert kept == []
+    assert counts["revision"] == 2
+    assert drift == []
+
+    # Engines with no current marker (e.g. outside the field) skip the rule.
+    kept, quarantined, counts, drift = glados.partition_resumed_rows(
+        [scored_row],
+        signature,
+        {key},
+        42,
+        tensor_exists=lambda _p: True,
+        expected_revision={}.get,
+    )
+    assert len(kept) == 1
+
+
+def test_partition_memkill_retry_rules() -> None:
+    """R2 B4-F4: environmental memkill rows are retryable, capped, optional."""
+    key = build_record_key("rome/g", "graphviz_dot", None)
+    memkill_row = {
+        "record_key": key,
+        "engine": "graphviz_dot",
+        "status": "ERROR",
+        "status_detail": "memkill:system-floor",
+        "positions_path": None,
+    }
+
+    kept, quarantined, counts, _ = glados.partition_resumed_rows(
+        [memkill_row], "sig", {key}, 42, retry_memkills=True
+    )
+    assert kept == []
+    assert quarantined[0]["quarantine_reason"] == "environmental memkill retried on resume"
+    assert counts["memkill_retry"] == 1
+
+    capped = {**memkill_row, "memkill_retries": glados.MEMKILL_MAX_RETRIES}
+    kept, quarantined, counts, _ = glados.partition_resumed_rows(
+        [capped], "sig", {key}, 42, retry_memkills=True
+    )
+    assert len(kept) == 1, "retry cap must make the memkill row permanent"
+
+    kept, quarantined, counts, _ = glados.partition_resumed_rows(
+        [memkill_row], "sig", {key}, 42, retry_memkills=False
+    )
+    assert len(kept) == 1, "--no-retry-memkills must keep the row"
+
+
+def _seed_scored_staging_row(
+    staging: Path,
+    corpus_dir: Path,
+    run_revision: str,
+    extra: Any = None,
+) -> Dict[str, Any]:
+    """Seed one complete scored graphviz_dot row (with tensor) into staging.
+
+    Parameters
+    ----------
+    staging : Path
+        Staging directory.
+    corpus_dir : Path
+        Corpus directory containing rome/ring6.graph.
+    run_revision : str
+        Marker to stamp on the row.
+    extra : dict | None
+        Extra row fields.
+
+    Returns
+    -------
+    Dict[str, Any]
+        The seeded row.
+    """
+    relpath = "positions/rome__ring6__graphviz_dot.pt"
+    tensor_path = staging / relpath
+    tensor_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(torch.zeros((6, 2)), tensor_path)
+    row: Dict[str, Any] = {
+        "graph": "rome/ring6",
+        "corpus": "rome",
+        "engine": "graphviz_dot",
+        "seed": None,
+        "record_key": build_record_key("rome/ring6", "graphviz_dot", None),
+        "status": "OK",
+        "runtime_s": -777.0,
+        "positions_path": relpath,
+        "v3_tiered": 55.5,
+        "scoring_signature": _current_scoring_signature(),
+        "run_revision": run_revision,
+        "nodes": 6,
+        "edges": 6,
+        "directed": False,
+        "directed_source": "policy",
+        "source_path": str(corpus_dir / "rome" / "ring6.graph"),
+        "error": None,
+    }
+    row.update(extra or {})
+    glados.append_row(staging, row)
+    return row
+
+
+def _resume_argv(
+    tmp_path: Path, corpus_dir: Path, output_dir: Path, engines: List[str]
+) -> List[str]:
+    """Build a standard resume invocation for the seeded-staging tests.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Test temp dir.
+    corpus_dir : Path
+        Corpus dir.
+    output_dir : Path
+        Output dir.
+    engines : List[str]
+        Engine list.
+
+    Returns
+    -------
+    List[str]
+        Argument vector.
+    """
+    return [
+        "--corpus-dir",
+        str(corpus_dir),
+        "--output-dir",
+        str(output_dir),
+        "--engines-file",
+        str(_write_engines_file(tmp_path, engines)),
+        "--workers",
+        "1",
+        "--score-workers",
+        "1",
+        "--seeds",
+        "1",
+        "--resume",
+    ]
+
+
+def test_resume_hotfix_revision_drift_quarantines_and_reruns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mid-run implementation hotfix (marker drift) invalidates resumed rows."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    _seed_scored_staging_row(staging, corpus_dir, run_revision="0badc0de:0123456789abcdef")
+
+    exit_code = _run_main(
+        _resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"]), monkeypatch
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    quarantined = payload["quarantined_rows"]
+    assert any(row["quarantine_reason"] == "implementation revision drift" for row in quarantined)
+    key = build_record_key("rome/ring6", "graphviz_dot", None)
+    rows = {row["record_key"]: row for row in payload["rows"]}
+    fresh = rows[key]
+    assert fresh["status"] == "OK"
+    assert fresh["runtime_s"] != -777.0, "the drifted row must be re-run, not resurrected"
+    assert fresh["run_revision"] == payload["run_revision_markers"]["graphviz_dot"]
+
+
+def test_resume_accept_revision_drift_keeps_and_discloses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--accept-revision-drift keeps sha-only drift rows and discloses them."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    current_component = _current_revision("graphviz_dot").rsplit(":", 1)[-1]
+    _seed_scored_staging_row(staging, corpus_dir, run_revision=f"0badc0de:{current_component}")
+
+    exit_code = _run_main(
+        [
+            *_resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"]),
+            "--accept-revision-drift",
+        ],
+        monkeypatch,
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    assert payload["quarantined_rows"] == []
+    (drift_row,) = payload["revision_drift_rows"]
+    key = build_record_key("rome/ring6", "graphviz_dot", None)
+    assert drift_row["record_key"] == key
+    rows = {row["record_key"]: row for row in payload["rows"]}
+    assert rows[key]["runtime_s"] == -777.0, "the drift-accepted row must be KEPT"
+    assert rows[key]["revision_drift"] is True
+    assert any(w.startswith("REVISION DRIFT ACCEPTED: 1") for w in payload["warnings"])
+    report = (output_dir / "GLADOS_RUN_REPORT.md").read_text(encoding="utf-8")
+    assert "REVISION DRIFT (kept)" in report
+    assert "Revision-drift rows KEPT under --accept-revision-drift: 1" in report
+
+
+def test_plain_resume_is_inert_zero_quarantines_byte_identical_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No false positives: an unchanged-revision plain resume alters nothing."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    argv = _resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"])
+
+    assert _run_main(argv[:-1], monkeypatch) == 0  # fresh run (drop --resume)
+    payload1 = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    rows1 = {row["record_key"]: json.dumps(row, sort_keys=True) for row in payload1["rows"]}
+
+    assert _run_main(argv, monkeypatch) == 0  # plain resume, nothing changed
+    payload2 = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    rows2 = {row["record_key"]: json.dumps(row, sort_keys=True) for row in payload2["rows"]}
+
+    assert payload2["quarantined_rows"] == []
+    assert payload2["revision_drift_rows"] == []
+    assert not any(w.startswith("QUARANTINE") for w in payload2["warnings"])
+    assert rows2 == rows1, "a plain resume must preserve every row byte-for-byte"
+
+
+def test_staging_only_resume_snapshot_restores_on_rewrite_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 B4-F1: the exact staging-only crash sequence cannot gut the store."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    _seed_scored_staging_row(staging, corpus_dir, run_revision=_current_revision("graphviz_dot"))
+    original_store = glados.rows_path(staging).read_bytes()
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("injected rewrite failure (R2 B4-F1)")
+
+    monkeypatch.setattr(glados, "rewrite_rows", boom)
+    # A mistyped resume: the engine is dropped from the field, so the seeded
+    # row quarantines and the rewrite (which would gut the ONLY store) fires.
+    exit_code = _run_main(
+        _resume_argv(tmp_path, corpus_dir, output_dir, ["classic_kk"]), monkeypatch
+    )
+
+    assert exit_code == 1
+    assert glados.rows_path(staging).read_bytes() == original_store, (
+        "the staging-only row store must be restored from the pre-resume snapshot"
+    )
+    snapshots = list(staging.glob("results.rows.jsonl.pre-resume-*"))
+    assert snapshots, "the pre-resume snapshot must persist until a successful publish"
+    assert snapshots[0].read_bytes() == original_store
+
+
+def test_staging_only_resume_snapshot_cleaned_after_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pre-resume snapshot is removed only after a successful publish."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    _seed_scored_staging_row(staging, corpus_dir, run_revision=_current_revision("graphviz_dot"))
+
+    exit_code = _run_main(
+        _resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"]), monkeypatch
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "removed 1 pre-resume row-store snapshot(s)" in out
+    assert not list(output_dir.glob("results.rows.jsonl.pre-resume-*"))
+    assert not list(staging.glob("results.rows.jsonl.pre-resume-*")) or not staging.exists()
+
+
+def test_torn_line_repair_is_atomic_and_survives_failure(tmp_path: Path) -> None:
+    """R2 B4-F3: the torn-line repair is atomic; a failed repair loses nothing."""
+    directory = tmp_path / "staging"
+    glados.append_row(directory, {"record_key": "a", "status": "OK"})
+    glados.append_row(directory, {"record_key": "b", "status": "OK"})
+    with glados.rows_path(directory).open("a", encoding="utf-8") as handle:
+        handle.write('{"record_key": "c", "torn')
+
+    rows, warnings = glados.load_rows_tolerant(directory)
+    assert [row["record_key"] for row in rows] == ["a", "b"]
+    assert any("torn final" in warning for warning in warnings)
+    assert not list(directory.glob("*.repair")), "no repair temp may remain"
+    # The repaired store is complete and clean.
+    rows2, warnings2 = glados.load_rows_tolerant(directory)
+    assert [row["record_key"] for row in rows2] == ["a", "b"]
+    assert warnings2 == []
+
+    # Failure path: an unwritable directory makes the atomic repair fail
+    # loudly while leaving the original file untouched (torn line included).
+    locked = tmp_path / "locked"
+    glados.append_row(locked, {"record_key": "x", "status": "OK"})
+    with glados.rows_path(locked).open("a", encoding="utf-8") as handle:
+        handle.write('{"record_key": "y", "torn')
+    before = glados.rows_path(locked).read_bytes()
+    locked.chmod(0o555)
+    try:
+        rows3, warnings3 = glados.load_rows_tolerant(locked)
+        assert [row["record_key"] for row in rows3] == ["x"]
+        assert any("repair failed" in warning for warning in warnings3)
+        assert glados.rows_path(locked).read_bytes() == before, (
+            "a failed repair must leave the store byte-untouched"
+        )
+    finally:
+        locked.chmod(0o755)
+
+
+def test_memkilled_row_reruns_on_resume_and_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 B4-F4: an environmental memkill row is retried on resume by default."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    key = build_record_key("rome/ring6", "graphviz_dot", None)
+    memkill_row: Dict[str, Any] = {
+        "graph": "rome/ring6",
+        "corpus": "rome",
+        "engine": "graphviz_dot",
+        "seed": None,
+        "record_key": key,
+        "run_revision": _current_revision("graphviz_dot"),
+        "status": "ERROR",
+        "runtime_s": 4.0,
+        "positions_path": None,
+        "error": "system available memory 12.0GB fell below the 15GB floor while the row ran",
+        "status_detail": "memkill:system-floor",
+        "nodes": 6,
+        "edges": 6,
+        "directed": False,
+        "directed_source": "policy",
+        "source_path": str(corpus_dir / "rome" / "ring6.graph"),
+    }
+    glados.append_row(staging, memkill_row)
+
+    exit_code = _run_main(
+        _resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"]), monkeypatch
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    assert any(
+        row["quarantine_reason"] == "environmental memkill retried on resume"
+        for row in payload["quarantined_rows"]
+    )
+    rows = {row["record_key"]: row for row in payload["rows"]}
+    fresh = rows[key]
+    assert fresh["status"] == "OK", "the retried row must re-run and succeed"
+    assert fresh["memkill_retries"] == 1, "the retry count must be recorded"
+    assert fresh["v3_tiered"] is not None
