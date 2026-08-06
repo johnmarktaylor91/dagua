@@ -48,6 +48,22 @@ def _current_scoring_signature() -> str:
     return nss.scoring_signature()
 
 
+def _file_sha(path: Path) -> str:
+    """Return sha256 of a file's bytes (graph-identity fixtures).
+
+    Parameters
+    ----------
+    path : Path
+        File to hash.
+
+    Returns
+    -------
+    str
+        Hex digest.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _current_revision(engine: str) -> str:
     """Return the live run-revision marker for one engine (resume fixtures).
 
@@ -781,6 +797,9 @@ def test_resume_skips_completed_seed_aware_rows_and_cleans_temps(
         # Rows without the CURRENT run-revision marker quarantine on resume
         # (dry-well R2 B4-Sol-2); a preserved sentinel must carry it too.
         "run_revision": _current_revision("graphviz_dot"),
+        # Rows without the CURRENT graph-file hash quarantine on resume
+        # (dry-well R4 B4-F2); real rows always carry it.
+        "graph_file_sha256": _file_sha(corpus_dir / "rome" / "ring6.graph"),
         "nodes": 6,
         "edges": 6,
         "directed": False,
@@ -1262,6 +1281,8 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         "tensor_missing": 1,
         "revision": 0,
         "memkill_retry": 0,
+        "graph_file": 0,
+        "availability_restored": 0,
     }
 
 
@@ -1284,6 +1305,7 @@ def test_resume_quarantine_integration(tmp_path: Path, monkeypatch: pytest.Monke
         "v3_tiered": 61.0,
         "scoring_signature": "stale-sig-from-before-the-hotfix",
         "run_revision": _current_revision("graphviz_dot"),
+        "graph_file_sha256": _file_sha(corpus_dir / "rome" / "ring6.graph"),
     }
     ghost_row: Dict[str, Any] = {
         "graph": "rome/ring6",
@@ -2005,6 +2027,7 @@ def _seed_scored_staging_row(
         "v3_tiered": 55.5,
         "scoring_signature": _current_scoring_signature(),
         "run_revision": run_revision,
+        "graph_file_sha256": _file_sha(corpus_dir / "rome" / "ring6.graph"),
         "nodes": 6,
         "edges": 6,
         "directed": False,
@@ -2247,6 +2270,7 @@ def test_memkilled_row_reruns_on_resume_and_succeeds(
         "seed": None,
         "record_key": key,
         "run_revision": _current_revision("graphviz_dot"),
+        "graph_file_sha256": _file_sha(corpus_dir / "rome" / "ring6.graph"),
         "status": "ERROR",
         "runtime_s": 4.0,
         "positions_path": None,
@@ -2352,3 +2376,304 @@ def test_box_stack_hotfix_drifts_all_size_aware_external_markers(
     monkeypatch.undo()
     recomputed = glados.compute_revision_markers(sample, "sha")
     assert recomputed == baseline
+
+
+# ---------------------------------------------------------------------------
+# 12. Dry-well Round-4 B4 addendum (F1 availability flap, F2 graph identity,
+#     F3 SIGINT, F4 run lock)
+# ---------------------------------------------------------------------------
+
+
+def test_partition_availability_restored_rule() -> None:
+    """R4 B4-F1: SKIP rows re-run when the engine's availability returns."""
+    key = build_record_key("rome/g", "webcola", None)
+    skip_row = {
+        "record_key": key,
+        "engine": "webcola",
+        "status": "SKIP",
+        "reason": "unavailable:adapter unavailable",
+    }
+
+    kept, quarantined, counts, _ = glados.partition_resumed_rows(
+        [skip_row], "sig", {key}, 42, engine_available=lambda _e: True
+    )
+    assert kept == []
+    assert quarantined[0]["quarantine_reason"] == "engine availability restored"
+    assert counts["availability_restored"] == 1
+
+    # Still unavailable -> the SKIP row stands (no churn).
+    kept, quarantined, counts, _ = glados.partition_resumed_rows(
+        [skip_row], "sig", {key}, 42, engine_available=lambda _e: False
+    )
+    assert len(kept) == 1
+
+    # Non-availability skips (e.g. max_nodes) are permanent, not flapped.
+    size_skip = {**skip_row, "reason": "max_nodes:1500"}
+    kept, quarantined, counts, _ = glados.partition_resumed_rows(
+        [size_skip], "sig", {key}, 42, engine_available=lambda _e: True
+    )
+    assert len(kept) == 1
+
+
+def test_resume_reruns_skip_rows_when_availability_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Integration: an availability-flap SKIP row re-runs and succeeds."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    key = build_record_key("rome/ring6", "graphviz_dot", None)
+    glados.append_row(
+        staging,
+        {
+            "graph": "rome/ring6",
+            "corpus": "rome",
+            "engine": "graphviz_dot",
+            "seed": None,
+            "record_key": key,
+            "run_revision": _current_revision("graphviz_dot"),
+            "graph_file_sha256": _file_sha(corpus_dir / "rome" / "ring6.graph"),
+            "status": "SKIP",
+            "runtime_s": 0.0,
+            "positions_path": None,
+            "reason": "unavailable:adapter unavailable",
+        },
+    )
+
+    exit_code = _run_main(
+        _resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"]), monkeypatch
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    assert any(
+        row["quarantine_reason"] == "engine availability restored"
+        for row in payload["quarantined_rows"]
+    )
+    rows = {row["record_key"]: row for row in payload["rows"]}
+    assert rows[key]["status"] == "OK", "the flapped SKIP row must re-run"
+
+
+def test_partition_graph_file_content_rule() -> None:
+    """R4 B4-F2: rows from different graph-file bytes are quarantined."""
+    key = build_record_key("rome/g", "graphviz_dot", None)
+    row = {
+        "record_key": key,
+        "graph": "rome/g",
+        "engine": "graphviz_dot",
+        "status": "OK",
+        "v3_tiered": 50.0,
+        "scoring_signature": "sig",
+        "positions_path": "positions/p.pt",
+        "graph_file_sha256": "old-bytes-hash",
+    }
+    kept, quarantined, counts, _ = glados.partition_resumed_rows(
+        [row],
+        "sig",
+        {key},
+        42,
+        tensor_exists=lambda _p: True,
+        graph_file_sha={"rome/g": "new-bytes-hash"}.get,
+    )
+    assert kept == []
+    assert quarantined[0]["quarantine_reason"] == "graph file content changed"
+    assert counts["graph_file"] == 1
+
+    # Matching bytes -> kept; legacy rows without the hash -> quarantined.
+    kept, _, _, _ = glados.partition_resumed_rows(
+        [{**row, "graph_file_sha256": "new-bytes-hash"}],
+        "sig",
+        {key},
+        42,
+        tensor_exists=lambda _p: True,
+        graph_file_sha={"rome/g": "new-bytes-hash"}.get,
+    )
+    assert len(kept) == 1
+    legacy = {k: v for k, v in row.items() if k != "graph_file_sha256"}
+    kept, quarantined, _, _ = glados.partition_resumed_rows(
+        [legacy],
+        "sig",
+        {key},
+        42,
+        tensor_exists=lambda _p: True,
+        graph_file_sha={"rome/g": "new-bytes-hash"}.get,
+    )
+    assert kept == []
+
+
+def test_resume_quarantines_rows_from_replaced_graph_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Integration: a same-name corpus-file replacement invalidates its rows."""
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    staging = output_dir.with_name(f"{output_dir.name}.tmp")
+    _seed_scored_staging_row(staging, corpus_dir, run_revision=_current_revision("graphviz_dot"))
+    # Replace the corpus file with DIFFERENT bytes under the same name
+    # (petal5 is a different synthetic graph).
+    (corpus_dir / "rome" / "ring6.graph").write_bytes(
+        (FIXTURES / "rome" / "petal5.graph").read_bytes()
+    )
+
+    exit_code = _run_main(
+        _resume_argv(tmp_path, corpus_dir, output_dir, ["graphviz_dot"]), monkeypatch
+    )
+
+    assert exit_code == 0
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    assert any(
+        row["quarantine_reason"] == "graph file content changed"
+        for row in payload["quarantined_rows"]
+    )
+    key = build_record_key("rome/ring6", "graphviz_dot", None)
+    rows = {row["record_key"]: row for row in payload["rows"]}
+    fresh = rows[key]
+    assert fresh["status"] == "OK"
+    assert fresh["runtime_s"] != -777.0, "the replaced-graph row must re-run"
+    assert fresh["graph_file_sha256"] == _file_sha(corpus_dir / "rome" / "ring6.graph")
+
+
+def test_harness_component_covers_loader_and_subset_files() -> None:
+    """R4 B4-F2: the harness hash pins loaders + subset alongside the runner."""
+    root = Path(glados.__file__).resolve().parents[1]
+    hasher = hashlib.sha256()
+    for relpath in (
+        "scripts/run_benchmark.py",
+        "scripts/glados_holdout_run.py",
+        "scripts/stdcorpora_loaders.py",
+        "scripts/glados_subset.py",
+    ):
+        hasher.update((root / relpath).read_bytes())
+    assert glados._harness_source_component() == hasher.hexdigest()[:16]
+
+
+def test_marker_version_blind_engines_disclosure() -> None:
+    """R4 B4-F1 residual: version-blind engines are enumerated for the report."""
+    markers = {
+        "dagua": "sha|TREEHASH|H",
+        "webcola": "sha|webcola:None:src=AAAA|H",
+        "ogdf_gem": "sha|ogdf_gem:ogdf_available:src=BBBB|H",
+        "nx_spring": "sha|nx_spring:3.6.1:src=CCCC|H",
+        "circo_reimpl": "sha|circo_reimpl:None:src=DDDD:dagua=TREEHASH|H",
+    }
+    assert glados.marker_version_blind_engines(markers) == ["ogdf_gem", "webcola"]
+
+
+def test_run_lock_refuses_concurrent_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R4 B4-F4: a second invocation against the same output dir fails fast."""
+    import fcntl
+
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    lock_path = output_dir.with_name(f"{output_dir.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    holder = lock_path.open("w")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        exit_code = _run_main(
+            [
+                "--corpus-dir",
+                str(corpus_dir),
+                "--output-dir",
+                str(output_dir),
+                "--engines-file",
+                str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+                "--workers",
+                "1",
+                "--score-workers",
+                "1",
+            ],
+            monkeypatch,
+        )
+        assert exit_code == 4
+        assert "holds the run lock" in capsys.readouterr().err
+        assert not (output_dir / "results.json").exists()
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    # Lock released -> the same invocation now runs to completion.
+    exit_code = _run_main(
+        [
+            "--corpus-dir",
+            str(corpus_dir),
+            "--output-dir",
+            str(output_dir),
+            "--engines-file",
+            str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+            "--workers",
+            "1",
+            "--score-workers",
+            "1",
+        ],
+        monkeypatch,
+    )
+    assert exit_code == 0
+
+
+def test_sigint_publishes_partial_and_exits_130(tmp_path: Path) -> None:
+    """R4 B4-F3: SIGINT stops dispatch, kills child trees, publishes, exits 130."""
+    import signal as signal_mod
+    import subprocess
+
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    engines_file = _write_engines_file(tmp_path, ["dagua"])
+    log_path = tmp_path / "run.log"
+
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "glados_holdout_run.py"),
+                "--corpus-dir",
+                str(corpus_dir),
+                "--output-dir",
+                str(output_dir),
+                "--seed",
+                "42",
+                "--native-deterministic",
+                "--native-timeout",
+                "300",
+                "--workers",
+                "1",
+                "--score-workers",
+                "1",
+                "--engines-file",
+                str(engines_file),
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            cwd=str(REPO_ROOT),
+        )
+        try:
+            deadline = time.time() + 120.0
+            while time.time() < deadline:
+                if "WORK PLAN" in log_path.read_text(encoding="utf-8", errors="ignore"):
+                    break
+                time.sleep(0.5)
+            else:
+                pytest.fail("runner never reached the work plan")
+            time.sleep(4.0)  # let the native child spawn
+            process.send_signal(signal_mod.SIGINT)
+            returncode = process.wait(timeout=120.0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+    assert returncode == 130
+    output = log_path.read_text(encoding="utf-8", errors="ignore")
+    assert "INTERRUPT (SIGINT)" in output
+    payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+    assert payload["aborted"] is True
+    assert "interrupted by operator" in payload["aborted_reason"]
