@@ -23,8 +23,11 @@ class PaCMAPGraph(CompetitorBase):
     variant_param_names = frozenset(
         {"n_neighbors", "MN_ratio", "FP_ratio", "lr", "num_iters", "init"}
     )
-    # Geodesic feature construction is delegated to the tsne_graph pipeline.
-    source_delegate_modules = ("dagua.layout.ops.pipelines.tsne_graph",)
+    # Geodesic feature construction runs the dagua tsne_graph pipeline, whose
+    # kernel resolves device/dtype via graph_utils + pipelines infra --
+    # dagua-owned execution with a transitive closure: tree-key instead of
+    # chasing per-file delegates (dry-well R3-B3-Fable F4).
+    executes_dagua_source = True
 
     def layout(
         self,

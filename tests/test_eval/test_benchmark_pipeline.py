@@ -1780,13 +1780,18 @@ def test_neulay_signature_tracks_its_wrapper_delegate(
 
 
 def test_delegated_adapters_declare_their_execution_delegates() -> None:
-    """Pin the declared delegate closure of the swept delegated adapters."""
+    """Pin the declared delegate closure of the swept delegated adapters.
+
+    R3-B3-Fable F4: coregd_reference and pacmap moved OFF per-file
+    declarations to tree-keying (their delegates run dagua pipelines with
+    transitive closures); word2vecgd keeps its declaration (plus the tree
+    key), and sklearn_smacof keeps graph_utils.py, a self-contained leaf
+    module whose one-hop declaration is complete.
+    """
     from dagua.eval.competitors.base import _COMPETITORS
 
     expected = {
-        "coregd_reference": "coregd.py",
         "word2vecgd": "word2vecgd.py",
-        "pacmap": "tsne_graph.py",
         "sklearn_smacof_nonmetric": "graph_utils.py",
     }
     for name, delegate_file in expected.items():
@@ -1817,8 +1822,19 @@ def test_dagua_owned_engines_carry_tree_component_externals_do_not(
     """A dagua/layout edit flips reimpl/dagua-owned keys, not external ones."""
     from dagua.eval.benchmark import _competitor_signature
 
-    dagua_owned = ("sparse_stress_reimpl", "smacof_nonmetric_reimpl", "neulay", "word2vecgd")
-    external = ("graphviz_dot", "pacmap", "webcola", "deepgd_reference", "gephi_yifanhu")
+    # R3-B3-Fable F4: the neural pair, coregd_reference, and pacmap moved to
+    # tree-keyed (their dagua-side prep RUNS dagua pipelines).
+    dagua_owned = (
+        "sparse_stress_reimpl",
+        "smacof_nonmetric_reimpl",
+        "neulay",
+        "word2vecgd",
+        "deepgd_reference",
+        "smartgd_reference",
+        "coregd_reference",
+        "pacmap",
+    )
+    external = ("graphviz_dot", "webcola", "gephi_yifanhu", "nx_bipartite", "ogdf_gem")
 
     before = {name: _competitor_signature(name, {}) for name in dagua_owned + external}
     for name in dagua_owned:
@@ -1898,27 +1914,31 @@ def test_webcola_signature_tracks_initial_positions_module(
     assert _adapter_source_signature("webcola") != before
 
 
-def test_neural_reference_signatures_track_smartgd_prep_module(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_neural_reference_signatures_are_tree_keyed(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """deepgd/smartgd model input prep lives in pipelines/smartgd.py."""
-    from dagua.eval.benchmark import _adapter_source_signature
-    from dagua.eval.competitors.base import _COMPETITORS
+    """deepgd/smartgd prep RUNS the native-stress pipeline: tree-keyed.
+
+    R3-B3-Fable F4: prepare_smartgd_data invokes the full
+    layout_native_stress_pipeline (smartgd.py:1530), so a per-file smartgd.py
+    declaration was one hop short; the pair now carries the dagua-tree
+    component, which covers smartgd.py AND its converge/stress/graph_utils
+    kernel closure.
+    """
+    from dagua.eval.benchmark import _competitor_signature
     from dagua.layout.ops.pipelines import smartgd as smartgd_module
 
-    module_path = Path(smartgd_module.__file__).resolve()
-    for name in ("deepgd_reference", "smartgd_reference"):
-        assert module_path in set(_COMPETITORS[name].source_files())
+    assert _dagua_tree_hash_domain_contains(Path(smartgd_module.__file__))
+    before = {n: _competitor_signature(n, {}) for n in ("deepgd_reference", "smartgd_reference")}
+    for name, signature in before.items():
+        assert ":dagua=" in signature, name
 
-    before = {n: _adapter_source_signature(n) for n in ("deepgd_reference", "smartgd_reference")}
-    edited = tmp_path / "smartgd.py"
-    edited.write_text(
-        module_path.read_text(encoding="utf-8") + "\n# simulated prep fix\n",
-        encoding="utf-8",
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: "feedfacefeedface",  # pragma: allowlist secret
     )
-    monkeypatch.setattr(smartgd_module, "__file__", str(edited))
     for name in ("deepgd_reference", "smartgd_reference"):
-        assert _adapter_source_signature(name) != before[name]
+        assert _competitor_signature(name, {}) != before[name]
 
 
 def test_gephi_signature_tracks_java_driver_file(
@@ -1940,3 +1960,115 @@ def test_gephi_signature_tracks_java_driver_file(
     )
     monkeypatch.setattr(GephiYifanHu, "source_delegate_files", (str(edited),))
     assert _adapter_source_signature("gephi_yifanhu") != before
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R3-B3-Fable F4: remaining delegate residuals closed
+# ---------------------------------------------------------------------------
+
+
+def test_tree_keyed_engine_set_is_pinned() -> None:
+    """Pin exactly which engines carry the dagua-tree component (51 total).
+
+    45 dynamic *_reimpl engines + the six adapters whose dagua-side execution
+    runs dagua pipelines (neulay via _archive, word2vecgd via its pipeline,
+    deepgd/smartgd via native-stress prep, coregd_reference via
+    native_stress_ml prep, pacmap via the tsne_graph kernel). Growing this
+    set is fine; SHRINKING it (an engine silently losing tree protection)
+    must be a deliberate decision.
+    """
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    tree_keyed = {name for name in _COMPETITORS if ":dagua=" in _competitor_signature(name, {})}
+    reimpls = {name for name in _COMPETITORS if name.endswith("_reimpl")}
+    assert reimpls <= tree_keyed
+    assert tree_keyed - reimpls == {
+        "neulay",
+        "word2vecgd",
+        "deepgd_reference",
+        "smartgd_reference",
+        "coregd_reference",
+        "pacmap",
+    }
+    assert len(tree_keyed) == 51
+
+
+def test_nx_partition_engines_track_networkx_simple_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nx_bipartite/nx_multipartite/nx_bfs coordinates are parameterized by
+    dagua-side nx_bipartite_node_set/nx_bfs_layers; an edit must flip their
+    keys -- and only theirs (nx_spring stays untouched)."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops import networkx_simple as nx_simple_module
+
+    module_path = Path(nx_simple_module.__file__).resolve()
+    trio = ("nx_bipartite", "nx_multipartite", "nx_bfs")
+    for name in trio:
+        assert module_path in set(_COMPETITORS[name].source_files()), name
+    assert module_path not in set(_COMPETITORS["nx_spring"].source_files())
+
+    before = {n: _adapter_source_signature(n) for n in trio + ("nx_spring",)}
+    edited = tmp_path / "networkx_simple.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated partition fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(nx_simple_module, "__file__", str(edited))
+    for name in trio:
+        assert _adapter_source_signature(name) != before[name], name
+    assert _adapter_source_signature("nx_spring") == before["nx_spring"]
+
+
+def test_ogdf_engines_track_planar_gate_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ogdf rows are ok-vs-error gated by dagua-side check_planarity."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops.pipelines import planar as planar_module
+
+    module_path = Path(planar_module.__file__).resolve()
+    for name in ("ogdf_gem", "ogdf_fpp", "ogdf_schnyder"):
+        if name in _COMPETITORS:
+            assert module_path in set(_COMPETITORS[name].source_files()), name
+
+    before = _adapter_source_signature("ogdf_gem")
+    edited = tmp_path / "planar.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated gate fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(planar_module, "__file__", str(edited))
+    assert _adapter_source_signature("ogdf_gem") != before
+
+
+def test_size_aware_externals_track_size_policy_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """graphviz/elk/dagre/d3dag node-box behavior is gated by size_policy.py.
+
+    size_policy.py lives under dagua/eval/ (outside the tree hash), so the
+    delegate declaration is the only signature coverage it can get. The
+    measurement stack behind the boxes (graph.py/utils.py) is a documented
+    residual per the F4 disposition: G-5 uses no caches, and G-3's A10
+    sample-check covers pool reuse.
+    """
+    import dagua.eval.size_policy as size_policy_module
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    module_path = Path(size_policy_module.__file__).resolve()
+    for name in ("graphviz_dot", "graphviz_sfdp", "elk_layered", "elk_force", "dagre", "d3dag"):
+        assert module_path in set(_COMPETITORS[name].source_files()), name
+
+    before = _adapter_source_signature("dagre")
+    edited = tmp_path / "size_policy.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated policy fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(size_policy_module, "__file__", str(edited))
+    assert _adapter_source_signature("dagre") != before
