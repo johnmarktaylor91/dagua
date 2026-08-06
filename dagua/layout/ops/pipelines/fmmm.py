@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -4481,6 +4481,11 @@ def _fdp_recursion_components(derived: _FdpDerivedGraph) -> Tuple[Tuple[int, ...
     def dfs(node_index: int, out: List[int]) -> None:
         """Append a connected component using Graphviz-style DFS.
 
+        Iterative twin of the recursive ``findCComp`` walk (suspended-
+        iterator stack): the component append order is identical, and
+        ~1000+-node direct-child components no longer exhaust the recursion
+        limit.
+
         Parameters
         ----------
         node_index : int
@@ -4495,9 +4500,18 @@ def _fdp_recursion_components(derived: _FdpDerivedGraph) -> Tuple[Tuple[int, ...
         """
         marked[node_index] = True
         out.append(node_index)
-        for other in adjacency[node_index]:
-            if not marked[other]:
-                dfs(other, out)
+        frames: List[Iterator[int]] = [iter(adjacency[node_index])]
+        while frames:
+            descended = False
+            for other in frames[-1]:
+                if not marked[other]:
+                    marked[other] = True
+                    out.append(other)
+                    frames.append(iter(adjacency[other]))
+                    descended = True
+                    break
+            if not descended:
+                frames.pop()
 
     if derived.port_indices:
         merged_ports: List[int] = []
