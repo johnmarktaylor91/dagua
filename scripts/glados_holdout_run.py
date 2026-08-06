@@ -45,6 +45,7 @@ import multiprocessing as mp
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -312,6 +313,7 @@ class GraphEntry:
     loaded: LoadedGraph
     directed: bool
     directed_source: str
+    source_sha256: str = ""
     telemetry: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -815,7 +817,15 @@ def load_phase(
         name = f"{corpus}/{path.stem}"
         override, directed_source = directedness_policy(corpus, path)
 
-        telemetry: Dict[str, Any] = {"format": path.suffix.lower().lstrip(".")}
+        # Graph CONTENT identity (dry-well R4 B4-F2): a same-name corpus-file
+        # replacement used to resume with kept rows scored against a
+        # different graph. Every row carries this hash; resume quarantines
+        # on mismatch.
+        source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        telemetry: Dict[str, Any] = {
+            "format": path.suffix.lower().lstrip("."),
+            "source_sha256": source_sha256,
+        }
         suffix = path.suffix.lower()
         if suffix == ".graph":
             numeric_rows = _numeric_lines(path)
@@ -913,6 +923,7 @@ def load_phase(
                 loaded=loaded,
                 directed=loaded.directed,
                 directed_source=directed_source,
+                source_sha256=source_sha256,
                 telemetry=telemetry,
             )
         )
@@ -1207,7 +1218,17 @@ def _harness_source_component() -> str:
     """
     root = Path(__file__).resolve().parents[1]
     hasher = hashlib.sha256()
-    for relpath in ("scripts/run_benchmark.py", "scripts/glados_holdout_run.py"):
+    # scripts/stdcorpora_loaders.py CONSTRUCTS the graph every row consumes
+    # (node ordering, edge parsing, directedness fallback, node sizes) and
+    # scripts/glados_subset.py shapes the row universe; both are outside the
+    # dagua tree, every adapter closure, and scoring_signature -- a loader
+    # hotfix used to resume with zero drift signal (dry-well R4 B4-F2).
+    for relpath in (
+        "scripts/run_benchmark.py",
+        "scripts/glados_holdout_run.py",
+        "scripts/stdcorpora_loaders.py",
+        "scripts/glados_subset.py",
+    ):
         hasher.update((root / relpath).read_bytes())
     return hasher.hexdigest()[:16]
 
@@ -1318,6 +1339,41 @@ def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, 
     return markers
 
 
+def marker_version_blind_engines(markers: Dict[str, str]) -> List[str]:
+    """List engines whose markers cannot see their backend's version.
+
+    Documented residual (dry-well R4 B4-F1, post family-key fix): for
+    backends ``_system_metadata`` never probes (node-backed packages,
+    cytoscape/gephi toolkits, the ogdf_runner binary beyond its
+    availability boolean), the marker's version slot is ``None`` (or an
+    availability flag) and a backend upgrade under the same checkout cannot
+    drift the marker. Disclosed in the run report provenance rather than
+    building version probes into the sacred-run path; mitigation is the
+    frozen-environment run protocol.
+
+    Parameters
+    ----------
+    markers : Dict[str, str]
+        Current run-revision markers.
+
+    Returns
+    -------
+    List[str]
+        Sorted engine names whose backend version is invisible to markers.
+    """
+    blind: List[str] = []
+    for engine, marker in sorted(markers.items()):
+        parts = marker.split("|")
+        if engine == "dagua" or len(parts) != 3:
+            continue
+        component = parts[1]
+        if "dagua=" in component:
+            continue  # whole-tree keyed: fully covered
+        if f"{engine}:None:" in component or ":ogdf_" in component:
+            blind.append(engine)
+    return blind
+
+
 def snapshot_row_store(directory: Path) -> Optional[Path]:
     """Snapshot the row store before any resume-prep mutation (R2 B4-F1).
 
@@ -1413,6 +1469,8 @@ def partition_resumed_rows(
     expected_revision: Optional[Any] = None,
     accept_revision_drift: bool = False,
     retry_memkills: bool = False,
+    graph_file_sha: Optional[Any] = None,
+    engine_available: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
     """Split resumed rows into kept vs quarantined (dry-well B4-F3 + Sol).
 
@@ -1491,6 +1549,8 @@ def partition_resumed_rows(
         "tensor_missing": 0,
         "revision": 0,
         "memkill_retry": 0,
+        "graph_file": 0,
+        "availability_restored": 0,
     }
     for row in rows:
         reason: Optional[str] = None
@@ -1499,9 +1559,18 @@ def partition_resumed_rows(
             expected_revision(str(row.get("engine"))) if expected_revision is not None else None
         )
         row_marker = row.get("run_revision")
+        current_file_sha = (
+            graph_file_sha(str(row.get("graph"))) if graph_file_sha is not None else None
+        )
         if str(row.get("record_key")) not in valid_keys:
             reason = "outside current subset/field/seed battery"
             counts["universe"] += 1
+        elif current_file_sha is not None and row.get("graph_file_sha256") != current_file_sha:
+            # Graph CONTENT identity (R4 B4-F2): a same-name corpus-file
+            # replacement or a legacy row without the hash invalidates the
+            # row -- kept rows must have been produced from THESE bytes.
+            reason = "graph file content changed"
+            counts["graph_file"] += 1
         elif expected_marker is not None and row_marker != expected_marker:
             # Implementation revision drift (R2 B4-Sol-2, strengthened per
             # R3 B4). Markers are "<git_sha>|<full_competitor_signature>|
@@ -1536,6 +1605,18 @@ def partition_resumed_rows(
             ):
                 reason = "environmental memkill retried on resume"
                 counts["memkill_retry"] += 1
+            elif (
+                engine_available is not None
+                and row.get("status") == "SKIP"
+                and str(row.get("reason", "")).startswith("unavailable:")
+                and engine_available(str(row.get("engine")))
+            ):
+                # Availability flap (R4 B4-F1): an engine unavailable during
+                # the crashed attempt but available NOW must re-run, or its
+                # SKIP rows permanently thin the field on the graphs
+                # completed before the environment was fixed.
+                reason = "engine availability restored"
+                counts["availability_restored"] += 1
             elif (
                 tensor_exists is not None
                 and row.get("status") == "OK"
@@ -1892,6 +1973,7 @@ class RowExecutor:
         staging: Path,
         revision_markers: Optional[Dict[str, str]] = None,
         memkill_retry_counts: Optional[Dict[str, int]] = None,
+        interrupt_event: Optional[threading.Event] = None,
     ) -> None:
         self.args = args
         self.staging = staging
@@ -1901,6 +1983,7 @@ class RowExecutor:
         # carried across resumes (R2 B4-F4).
         self.revision_markers = revision_markers or {}
         self.memkill_retry_counts = memkill_retry_counts or {}
+        self.interrupt_event = interrupt_event
         self._selftest_lock = threading.Lock()
         self._selftest_armed = bool(args.rss_guard_selftest)
 
@@ -2016,6 +2099,20 @@ class RowExecutor:
                             "status_detail": "memkill",
                             "peak_child_rss_gb": round(peak_rss / 1024**3, 2),
                         }
+                if self.interrupt_event is not None and self.interrupt_event.is_set():
+                    # Operator interrupt (R4 B4-F3): kill the whole child
+                    # tree NOW so no orphan outlives the guards, and record
+                    # the row honestly; the dispatcher drains via _AbortRun.
+                    self._kill(process)
+                    self._cleanup(temp_path, result_path)
+                    return {
+                        **base,
+                        "status": "ERROR",
+                        "runtime_s": elapsed,
+                        "positions_path": None,
+                        "error": "interrupted by operator signal (SIGINT/SIGTERM)",
+                        "status_detail": "interrupted",
+                    }
                 # Aggregate-memory backstop (dry-well B4-F5): ten children
                 # under their per-child ceilings can jointly exhaust the box;
                 # re-check the system floor DURING flight, not just at
@@ -2147,6 +2244,7 @@ class RowExecutor:
             "seed": seed,
             "record_key": record_key,
             "run_revision": self.revision_markers.get(engine_name),
+            "graph_file_sha256": entry.source_sha256,
             "nodes": entry.loaded.graph.num_nodes,
             "edges": int(entry.loaded.graph.edge_index.shape[1]),
             "directed": entry.directed,
@@ -2558,6 +2656,10 @@ def write_report(
         f"(seed string `{subset_info.get('seed_string', 'n/a')}`, "
         f"fraction {subset_info.get('fraction', 'n/a')})",
         f"- Scoring signature: `{payload['scoring_signature']}`",
+        "- Version-blind marker residual (R4 B4-F1; backends _system_metadata never "
+        f"probes -- run under a FROZEN environment): "
+        f"{len(payload.get('marker_version_blind_engines', []))} engines: "
+        f"{', '.join(payload.get('marker_version_blind_engines', [])) or 'none'}",
         f"- Output dir disk usage: {disk_bytes / 1024**2:.1f} MB",
         "",
     ]
@@ -3097,6 +3199,40 @@ def _check_system_floor(min_avail_gb: float) -> None:
         )
 
 
+def _acquire_run_lock(output_dir: Path) -> Optional[Any]:
+    """Take an exclusive advisory lock on the run (dry-well R4 B4-F4).
+
+    Two live invocations against one output dir (a resume racing F3's
+    orphan window, or a watchdog double-dispatch) would interleave the
+    un-locked row store, double-run vacated keys, and race the publish
+    rename dance. The lock file is a SIBLING of the output dir (never
+    displaced by the publish rename) and flock releases automatically on
+    process death, so there is no stale-lock failure mode.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Run output directory.
+
+    Returns
+    -------
+    file object | None
+        The held lock file (kept open for the run's lifetime), or ``None``
+        when another invocation holds the lock.
+    """
+    import fcntl
+
+    lock_path = output_dir.with_name(f"{output_dir.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("w")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return None
+    return lock_file
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Run the GLaDOS holdout protocol.
 
@@ -3111,12 +3247,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ``0`` ok; ``1`` publish validation/swap failure (prior published run
         untouched or restored, candidate data preserved); ``2`` no graphs;
         ``3`` guarded abort -- memory guard or unexpected harness
-        exception -- with partial results published; ``4`` preflight failure
-        or fresh-run-over-existing-data refusal; ``5`` load-phase fatal.
+        exception -- with partial results published; ``4`` preflight failure,
+        fresh-run-over-existing-data refusal, or run-lock refusal; ``5``
+        load-phase fatal; ``130`` interrupted (SIGINT/SIGTERM: dispatch
+        stopped, in-flight child trees killed, partial results published).
     """
     args = parse_args(argv)
-    assumptions: List[str] = []
-    warnings: List[str] = []
 
     try:
         provenance = preflight(args)
@@ -3124,6 +3260,95 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"PREFLIGHT FAILURE: {exc}", file=sys.stderr)
         return 4
     print(f"preflight ok: dagua at {provenance['dagua_module_path']}", flush=True)
+
+    lock_file = _acquire_run_lock(args.output_dir)
+    if lock_file is None:
+        print(
+            f"REFUSING to run: another glados_holdout_run invocation holds the run "
+            f"lock for {args.output_dir} (concurrent runs would corrupt the row "
+            "store and race the publish swap -- R4 B4-F4). Wait for it to finish "
+            "or kill it first.",
+            file=sys.stderr,
+        )
+        return 4
+    # SIGINT/SIGTERM (dry-well R4 B4-F3): without a handler, a ^C /
+    # sprint-pause stop killed the runner within seconds -- no partial
+    # publish, undocumented exit, and the setsid'd children ORPHANED with
+    # nobody enforcing the RSS/floor/timeout guards. The handler stops
+    # dispatch, the poll loops kill their child trees, and the ordinary
+    # abort path publishes partial results; exit 130.
+    interrupt_event = threading.Event()
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        interrupt_event.set()
+        print(
+            f"INTERRUPT ({signal.Signals(signum).name}): stopping dispatch, killing "
+            "in-flight child trees, publishing partial results (exit 130)",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    previous_handlers: Dict[int, Any] = {}
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, _on_signal)
+    except ValueError:
+        previous_handlers = {}  # not the main thread (in-process embedding)
+    try:
+        return _run(args, provenance, interrupt_event)
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def _check_interrupt(interrupt_event: Optional[threading.Event]) -> None:
+    """Raise the abort signal when an operator interrupt is pending.
+
+    Parameters
+    ----------
+    interrupt_event : threading.Event | None
+        Run-scoped interrupt flag set by the signal handler.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    _AbortRun
+        When an interrupt is pending (routes to partial publish, exit 130).
+    """
+    if interrupt_event is not None and interrupt_event.is_set():
+        raise _AbortRun("interrupted by operator signal (SIGINT/SIGTERM)")
+
+
+def _run(
+    args: argparse.Namespace,
+    provenance: Dict[str, Any],
+    interrupt_event: Optional[threading.Event] = None,
+) -> int:
+    """Execute the locked run (see :func:`main` for the exit contract).
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed options (preflight already passed).
+    provenance : Dict[str, Any]
+        Preflight provenance block.
+    interrupt_event : threading.Event | None, default=None
+        Run-scoped interrupt flag (set by main's signal handler).
+
+    Returns
+    -------
+    int
+        Exit code per :func:`main`.
+    """
+    assumptions: List[str] = []
+    warnings: List[str] = []
 
     subset_relpaths: Optional[Set[str]] = None
     subset_info: Dict[str, Any] = {}
@@ -3279,6 +3504,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     revision_drift_rows: List[Dict[str, Any]] = []
     memkill_retry_counts: Dict[str, int] = {}
     if args.resume and existing_rows:
+        entry_sha_by_name = {entry.name: entry.source_sha256 for entry in entries}
         valid_keys: Set[str] = set()
         for entry in entries:
             if include_native:
@@ -3296,6 +3522,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 expected_revision=revision_markers.get,
                 accept_revision_drift=args.accept_revision_drift,
                 retry_memkills=args.retry_memkills,
+                graph_file_sha=entry_sha_by_name.get,
+                engine_available=lambda engine: bool(availability.get(engine, {}).get("available")),
             )
         )
         for row in quarantined_rows:
@@ -3324,15 +3552,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     flush=True,
                 )
                 return 1
+            breakdown = ", ".join(f"{rule}: {count}" for rule, count in quarantine_counts.items())
             summary = (
                 f"QUARANTINE: {len(quarantined_rows)} stale resumed row(s) removed from the "
                 f"row store, recorded in quarantined_rows, and re-run where in-universe "
-                f"(stale signature: {quarantine_counts['signature']}, outside row universe: "
-                f"{quarantine_counts['universe']}, native seed mismatch: "
-                f"{quarantine_counts['native_seed']}, tensor missing: "
-                f"{quarantine_counts['tensor_missing']}, revision drift: "
-                f"{quarantine_counts['revision']}, memkill retries: "
-                f"{quarantine_counts['memkill_retry']})"
+                f"({breakdown})"
             )
             print(summary, flush=True)
             warnings.append(summary)
@@ -3358,7 +3582,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         include_native,
     )
 
-    executor = RowExecutor(args, staging, revision_markers, memkill_retry_counts)
+    executor = RowExecutor(args, staging, revision_markers, memkill_retry_counts, interrupt_event)
     store_lock = threading.Lock()
     state: Dict[str, Any] = {"rows_done": 0, "rss_warned": False}
     aborted_reason: Optional[str] = None
@@ -3382,6 +3606,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if key_row["record_key"] in completed_keys:
                     continue
                 try:
+                    _check_interrupt(interrupt_event)
                     _check_system_floor(args.min_avail_gb)
                     row = executor.run_row(
                         entry,
@@ -3446,6 +3671,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             )
                         )
                         continue
+                    _check_interrupt(interrupt_event)
                     _check_system_floor(args.min_avail_gb)
                     row = executor.run_row(
                         entry,
@@ -3516,6 +3742,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         def merge_score(
             record_key: str, score: Optional[Dict[str, Any]], error: Optional[str]
         ) -> None:
+            _check_interrupt(interrupt_event)
             row = dict(row_map[record_key])
             if score is not None:
                 row.update(score)
@@ -3553,6 +3780,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         _score_pool_task, score_tasks
                     ):
                         merge_score(record_key, score, error)
+        # Final check: an interrupt that landed while the LAST row of a phase
+        # was in flight (its poll loop records the interrupted ERROR row and
+        # every loop then simply finishes) must still take the abort path --
+        # an interrupted run may never exit 0 (R4 B4-F3).
+        _check_interrupt(interrupt_event)
     except _AbortRun as exc:
         aborted_reason = str(exc)
         print(f"ABORT: {aborted_reason}", file=sys.stderr)
@@ -3610,6 +3842,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "quarantined_rows": slim_quarantined,
         "revision_drift_rows": slim_revision_drift,
         "run_revision_markers": revision_markers,
+        "marker_version_blind_engines": marker_version_blind_engines(revision_markers),
         "tally": tally,
         "warnings": warnings,
         "assumptions": assumptions,
@@ -3642,7 +3875,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if warning:
             print(f"WARNING: {warning}", file=sys.stderr)
 
-    return 3 if aborted_reason is not None else 0
+    if aborted_reason is not None:
+        return 130 if "interrupted by operator" in aborted_reason else 3
+    return 0
 
 
 if __name__ == "__main__":
