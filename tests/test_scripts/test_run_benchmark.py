@@ -467,14 +467,19 @@ def test_shutdown_drain_bounded_when_wedge_never_watchdog_expired() -> None:
             expired.append((fut, work_group))
 
         started = time.monotonic()
-        stuck_count = drain_inflight_bounded(
-            inflight, collect=_collect, expire=_expire, drain_timeout=2.0
+        expired_count, parked_count = drain_inflight_bounded(
+            inflight,
+            collect=_collect,
+            expire=_expire,
+            drain_timeout=2.0,
+            resolved_workers=2,
+            zombie_futures=zombies,
         )
         elapsed = time.monotonic() - started
 
         assert elapsed < 10.0, f"shutdown drain took {elapsed:.1f}s -- wedge blocked it"
         assert collected == [peer]
-        assert stuck_count == 1
+        assert (expired_count, parked_count) == (1, 0)
         assert expired == [(wedged, ("wedged-group",))]
         assert inflight == {}
         assert wedged in zombies  # teardown will take the force-terminate path
@@ -508,13 +513,100 @@ def test_shutdown_drain_collects_everything_when_nothing_wedges() -> None:
     ) -> None:
         raise AssertionError("nothing should expire when all futures complete")
 
-    stuck_count = drain_inflight_bounded(
-        inflight, collect=_collect, expire=_expire, drain_timeout=0.5
+    expired_count, parked_count = drain_inflight_bounded(
+        inflight,
+        collect=_collect,
+        expire=_expire,
+        drain_timeout=0.5,
+        resolved_workers=2,
+        zombie_futures=set(),
     )
 
-    assert stuck_count == 0
+    assert (expired_count, parked_count) == (0, 0)
     assert set(collected) == {finished_a, finished_b}
     assert inflight == {}
+
+
+def test_shutdown_drain_parks_queued_groups_without_error_rows(tmp_path: Path) -> None:
+    """Queued-never-ran groups must not become watchdog-error rows at the bound.
+
+    Regression for dry-well R3 B4-F2: at the shared drain deadline the
+    bounded drain expired ALL leftovers -- including groups queued behind
+    the wedge that never executed -- creating up to hundreds of false,
+    resume-permanent watchdog ERROR rows from one Ctrl-C. The finder's
+    shape: 1 worker, 1 genuinely-running wedge, 3 queued groups. At the
+    bound exactly the wedge gets a watchdog-error row; the 3 queued groups
+    are parked with NO row, and their ``running`` placeholders reschedule
+    on resume.
+    """
+    context = multiprocessing.get_context("fork")
+    executor = ProcessPoolExecutor(max_workers=1, mp_context=context)
+    try:
+        wedged = executor.submit(time.sleep, 30.0)  # occupies the only worker
+        queued = [executor.submit(sum, [i, i]) for i in range(3)]
+
+        deadline = time.monotonic() + 10.0
+        while not wedged.running() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert wedged.running()
+
+        inflight: dict[Future[list[dict[str, object]]], tuple[str, ...]] = {
+            wedged: ("group-wedged",)
+        }
+        for index, fut in enumerate(queued):
+            inflight[fut] = (f"group-queued-{index}",)
+        zombies: set[Future[list[dict[str, object]]]] = set()
+        rows: dict[tuple[str, ...], BenchmarkRecord] = {}
+
+        def _collect(fut: Future[list[dict[str, object]]]) -> None:
+            inflight.pop(fut, None)
+
+        def _expire(
+            fut: Future[list[dict[str, object]]],
+            work_group: tuple[str, ...],
+        ) -> None:
+            # Mirrors _record_watchdog_expiry: zombie registration + one
+            # watchdog-error row for the group.
+            register_watchdog_zombie(fut, zombies)
+            rows[work_group] = _record(
+                status="error",
+                runtime_seconds=None,
+                error="watchdog: future exceeded timeout",
+                positions_file=None,
+            )
+
+        started = time.monotonic()
+        expired_count, parked_count = drain_inflight_bounded(
+            inflight,
+            collect=_collect,
+            expire=_expire,
+            drain_timeout=2.0,
+            resolved_workers=1,
+            zombie_futures=zombies,
+        )
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 10.0, f"shutdown drain took {elapsed:.1f}s"
+        assert (expired_count, parked_count) == (1, 3)
+        # Exactly ONE watchdog-error row: the genuinely-executing wedge.
+        assert list(rows) == [("group-wedged",)]
+        assert wedged in zombies
+        assert inflight == {}
+
+        # Resume side: the wedge's error row is complete by default
+        # (existing permanence semantics), while parked groups left only
+        # their ``running`` placeholders (or nothing) -- both of which
+        # RESCHEDULE on resume.
+        assert is_record_complete(rows[("group-wedged",)], output_dir=tmp_path, save_positions=True)
+        parked_placeholder = _record(status="running", runtime_seconds=None, positions_file=None)
+        assert not is_record_complete(parked_placeholder, output_dir=tmp_path, save_positions=True)
+        assert not is_record_complete(None, output_dir=tmp_path, save_positions=True)
+
+        started = time.monotonic()
+        drain_executor(executor, zombies)
+        assert time.monotonic() - started < 15.0
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_drain_terminates_stuck_worker_while_peer_completes() -> None:
