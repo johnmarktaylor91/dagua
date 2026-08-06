@@ -243,35 +243,58 @@ def drain_inflight_bounded(
     collect: Callable[[Future[list[dict[str, Any]]]], None],
     expire: Callable[[Future[list[dict[str, Any]]], Sequence["WorkItem"]], None],
     drain_timeout: float,
-) -> int:
+    resolved_workers: int,
+    zombie_futures: set[Future[list[dict[str, Any]]]],
+) -> tuple[int, int]:
     """Drain inflight futures after a shutdown request, within a bound.
 
     The historical shutdown drain was ``as_completed(inflight)`` with NO
     timeout: a worker wedged in a C-level call that never watchdog-expired
     (peer results kept the fully-silent window from opening, so the zombie
     machinery never saw it) blocked Ctrl-C shutdown forever. Give every
-    inflight future one shared ``drain_timeout`` window to finish; whatever
-    remains is handed to ``expire`` (recorded as a watchdog error and
-    registered as a zombie) so the phase teardown takes the
-    force-terminate path and the run always reaches its final summary.
+    inflight future one shared ``drain_timeout`` window to finish, then
+    PARTITION the leftovers by effective worker capacity:
+
+    - the first ``effective_worker_capacity(...)`` leftovers (scheduler
+      order) are the genuinely-executing futures: handed to ``expire``
+      (recorded as watchdog errors and zombie-registered) so the phase
+      teardown force-terminates and the run reaches its final summary;
+    - every leftover beyond capacity NEVER EXECUTED (queued behind the
+      wedge): it is parked with NO row recorded -- cancelled when possible,
+      zombie-registered without a row when the executor already buffered it
+      into the call queue (uncancellable but still never run). Its
+      ``running`` placeholder row makes resume reschedule it, mirroring how
+      not-yet-submitted groups are simply retried. Branding queued groups
+      as watchdog errors would create hundreds of false, resume-permanent
+      error rows from one Ctrl-C on a loaded queue (dry-well R3 B4-F2) --
+      the same false-error poison the effective-capacity fix removed from
+      the watchdog path.
 
     Parameters
     ----------
     inflight : dict[Future[list[dict[str, Any]]], Sequence[WorkItem]]
         Submitted futures in scheduler order. Mutated: ``collect`` pops
-        collected entries, and every leftover is popped before ``expire``.
+        collected entries, and every leftover is popped here.
     collect : Callable[[Future[list[dict[str, Any]]]], None]
         Callback for futures that complete within the budget (the normal
         result-collection path).
     expire : Callable[[Future[list[dict[str, Any]]], Sequence[WorkItem]], None]
-        Callback for futures still unfinished at the deadline.
+        Callback for genuinely-executing futures still unfinished at the
+        deadline.
     drain_timeout : float
         Total seconds to wait for the remaining inflight futures.
+    resolved_workers : int
+        Configured pool worker count.
+    zombie_futures : set[Future[list[dict[str, Any]]]]
+        Zombie registry. Consulted (with pre-drain zombies) to compute the
+        executing capacity, and extended by parked-but-uncancellable
+        futures so teardown always force-terminates them.
 
     Returns
     -------
-    int
-        Number of futures expired as stuck.
+    tuple[int, int]
+        ``(expired_count, parked_count)``: leftovers recorded as watchdog
+        errors vs. queued leftovers parked without a row.
     """
     try:
         for fut in as_completed(list(inflight), timeout=max(0.0, drain_timeout)):
@@ -279,10 +302,21 @@ def drain_inflight_bounded(
     except TimeoutError:
         pass
     stuck = list(inflight.items())
-    for fut, work_group in stuck:
+    # Capacity from the pre-expire zombie state: the executing set at the
+    # deadline is bounded by workers not already occupied by prior zombies.
+    executing_capacity = effective_worker_capacity(resolved_workers, zombie_futures)
+    expired_items = stuck[:executing_capacity]
+    parked_items = stuck[len(expired_items) :]
+    for fut, work_group in expired_items:
         inflight.pop(fut, None)
         expire(fut, work_group)
-    return len(stuck)
+    for fut, _work_group in parked_items:
+        inflight.pop(fut, None)
+        # Cancel-first: a genuinely queued future cancels cleanly; one the
+        # executor already buffered into the call queue cannot be cancelled
+        # and is tracked as a zombie (no row) so teardown kills it un-run.
+        register_watchdog_zombie(fut, zombie_futures)
+    return len(expired_items), len(parked_items)
 
 
 def force_terminate_executor(
@@ -3384,17 +3418,20 @@ def main() -> int:
                     # within one watchdog budget; leftovers are recorded as
                     # watchdog errors and force-terminated at teardown.
                     if _shutdown_requested:
-                        stuck_count = drain_inflight_bounded(
+                        expired_count, parked_count = drain_inflight_bounded(
                             inflight,
                             collect=_collect_inflight_future,
                             expire=_record_watchdog_expiry,
                             drain_timeout=watchdog_timeout,
+                            resolved_workers=args.resolved_workers,
+                            zombie_futures=zombie_futures,
                         )
-                        if stuck_count:
+                        if expired_count or parked_count:
                             print(
-                                f"[benchmark] SHUTDOWN: {stuck_count} inflight "
-                                f"group(s) still running after {watchdog_timeout:.0f}s "
-                                "drain budget; recorded as watchdog errors"
+                                f"[benchmark] SHUTDOWN: after {watchdog_timeout:.0f}s "
+                                f"drain budget, {expired_count} executing group(s) "
+                                f"recorded as watchdog errors; {parked_count} queued "
+                                "group(s) parked unrecorded (rerun on resume)"
                             )
             finally:
                 # A hard exit (second SIGINT / exception) can reach teardown
@@ -3439,18 +3476,21 @@ def main() -> int:
                         if not got_result and not _shutdown_requested:
                             _handle_watchdog_timeout()
                         if _shutdown_requested:
-                            stuck_count = drain_inflight_bounded(
+                            expired_count, parked_count = drain_inflight_bounded(
                                 inflight,
                                 collect=_collect_inflight_future,
                                 expire=_record_watchdog_expiry,
                                 drain_timeout=watchdog_timeout,
+                                resolved_workers=args.resolved_workers,
+                                zombie_futures=zombie_futures,
                             )
-                            if stuck_count:
+                            if expired_count or parked_count:
                                 print(
-                                    f"[benchmark] SHUTDOWN: {stuck_count} inflight "
-                                    f"group(s) still running after "
-                                    f"{watchdog_timeout:.0f}s drain budget; recorded "
-                                    "as watchdog errors"
+                                    f"[benchmark] SHUTDOWN: after "
+                                    f"{watchdog_timeout:.0f}s drain budget, "
+                                    f"{expired_count} executing group(s) recorded as "
+                                    f"watchdog errors; {parked_count} queued group(s) "
+                                    "parked unrecorded (rerun on resume)"
                                 )
                 finally:
                     if _shutdown_requested:
