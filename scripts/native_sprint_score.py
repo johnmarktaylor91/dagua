@@ -508,6 +508,16 @@ def scoring_signature() -> str:
             "dagua/eval/ruler_v3_groups.py": sha256_file(
                 root / "dagua" / "eval" / "ruler_v3_groups.py"
             ),
+            # Score-affecting imports OUTSIDE the frozen set (drywell R2-B3-F3):
+            # render/mpl.py anchors node boxes for every V3 score and the
+            # DEGENERATE predicate; benchmark.py's _declares_hierarchy gates the
+            # V3 conditional groups; graphs.py's is_semantically_directed
+            # parameterizes composite directedness. Hash them so every stale-
+            # score defense (cache header equality, resume quarantine, locks)
+            # sees edits through these seams.
+            "dagua/eval/benchmark.py": sha256_file(root / "dagua" / "eval" / "benchmark.py"),
+            "dagua/eval/graphs.py": sha256_file(root / "dagua" / "eval" / "graphs.py"),
+            "dagua/render/mpl.py": sha256_file(root / "dagua" / "render" / "mpl.py"),
         },
     }
     return canonical_json_hash(payload)

@@ -277,6 +277,50 @@ def test_scoring_signature_mismatch_causes_rescore(tmp_path: Path) -> None:
     assert scorer.read_raw_cache(cache_path, {"scoring_signature": "new"}) is None
 
 
+def test_scoring_signature_tracks_every_score_affecting_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The signature flips when any hashed score-affecting source file changes.
+
+    Every stale-score defense (raw-cache header equality, runner resume
+    quarantine, regression locks) trusts ``scoring_signature``; a
+    score-affecting module missing from its hash set is a blind seam
+    (drywell R2-B3-F3). This enumerates the full hashed set -- the frozen
+    ruler files plus the unfrozen score-anchoring imports (render/mpl.py
+    node boxes, benchmark.py hierarchy gating, graphs.py directedness) --
+    and proves each one individually feeds the digest. Removing any tracked
+    file from the signature fails this test by name.
+    """
+    baseline = scorer.scoring_signature()
+    assert scorer.scoring_signature() == baseline
+
+    tracked = (
+        "scripts/native_sprint_score.py",
+        "dagua/metrics.py",
+        "dagua/layout/ops/cluster_geometry.py",
+        "dagua/eval/ruler_v3.py",
+        "dagua/eval/ruler_v3_frozen.py",
+        "dagua/eval/ruler_v3_groups.py",
+        "dagua/eval/benchmark.py",
+        "dagua/eval/graphs.py",
+        "dagua/render/mpl.py",
+    )
+    real_sha256_file = scorer.sha256_file
+    for tracked_rel in tracked:
+
+        def fake_sha256_file(path: Path, _rel: str = tracked_rel) -> str:
+            """Return the real digest except for the simulated-edit target."""
+            if path.as_posix().endswith(_rel):
+                return "0" * 64
+            return real_sha256_file(path)
+
+        with monkeypatch.context() as context:
+            context.setattr(scorer, "sha256_file", fake_sha256_file)
+            assert scorer.scoring_signature() != baseline, tracked_rel
+
+    assert scorer.scoring_signature() == baseline
+
+
 def test_old_and_extended_field_best_recomputed_independently_can_differ(
     tmp_path: Path,
 ) -> None:
