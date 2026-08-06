@@ -1188,24 +1188,59 @@ def clean_child_temps(directory: Path) -> int:
     return removed
 
 
+def _harness_source_component() -> str:
+    """Hash the harness files that shape native layouts (dry-well R3 B4-Fable-1).
+
+    ``scripts/run_benchmark.py`` (``deterministic_native_runtime`` seeds the
+    RNGs, thread count, and deterministic-algorithms mode around the native
+    layout call) and ``scripts/glados_holdout_run.py`` itself
+    (``_native_layout_kwargs`` / ``_row_layout_worker`` -- the adapter
+    invocation) both shape row outputs but live in NO engine source
+    component; without this hash an uncommitted runner hotfix resumed with
+    zero quarantine, and a committed one was mis-certified as harness-only
+    under ``--accept-revision-drift``.
+
+    Returns
+    -------
+    str
+        16-hex-char digest over both harness files.
+    """
+    root = Path(__file__).resolve().parents[1]
+    hasher = hashlib.sha256()
+    for relpath in ("scripts/run_benchmark.py", "scripts/glados_holdout_run.py"):
+        hasher.update((root / relpath).read_bytes())
+    return hasher.hexdigest()[:16]
+
+
 def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, str]:
-    """Compute the per-engine run-revision marker (dry-well R2 B4-Sol-2).
+    """Compute the per-engine run-revision marker (R2 B4-Sol-2, R3 B4).
 
-    Rows are stamped ``"<git_sha>:<source_component>"`` at creation so resume
-    can detect a mid-run implementation hotfix that does NOT touch scoring
-    sources (which would leave ``scoring_signature`` unchanged and silently
-    mix pre-fix and post-fix layouts under the current run's advertised SHA).
+    Rows are stamped ``"<git_sha>|<signature_component>|<harness_component>"``
+    at creation so resume can detect a mid-run implementation hotfix that
+    does NOT touch scoring sources (which would leave ``scoring_signature``
+    unchanged and silently mix pre-fix and post-fix layouts under the
+    current run's advertised SHA).
 
-    Components: field rows reuse benchmark.py's ``_adapter_source_signature``
-    (the adapter's implementing module + shared base scaffolding); native
-    rows use ``_dagua_source_signature`` (all non-eval dagua source, which
-    also covers the pipeline code reimpl adapters execute). Any COMMITTED
-    hotfix flips the git-SHA component for every row; the source component
-    then discriminates harness-only commits (component unchanged -> eligible
-    for ``--accept-revision-drift``) from engine-implementation changes
-    (component changed -> always quarantined). Uncommitted edits to a file
-    outside both component sets (i.e. runner-only edits) change neither --
-    which is exactly the class that cannot alter layouts.
+    Components (strengthened per Sol R3-B4 -- the earlier adapter-only
+    source component was WEAKER than the signature it mirrored):
+
+    - ``signature_component``: field rows carry the FULL
+      ``benchmark._competitor_signature(engine, system)`` string -- external
+      dependency versions, the adapter source hash, AND the whole-dagua-tree
+      suffix for ``executes_dagua_source`` engines -- so a dependency
+      upgrade under the same checkout, or a change to the shared ops that
+      actually compute a reimpl engine's layout, drifts the marker. Native
+      rows pair the SHA with the full ``_dagua_source_signature``.
+    - ``harness_component``: sha256 over ``scripts/run_benchmark.py`` +
+      ``scripts/glados_holdout_run.py`` (R3 B4-Fable-1) -- the two harness
+      files that shape native layouts but appear in no engine component.
+
+    ``--accept-revision-drift`` accepts ONLY pure git-SHA drift: the full
+    signature component AND the harness component must both be byte-equal
+    (a true harness-only COMMIT elsewhere in the repo). Any dependency,
+    engine-source, dagua-tree, or harness-file change quarantines even with
+    the flag; uncommitted edits to either harness file drift the harness
+    component despite the unchanged SHA.
 
     Parameters
     ----------
@@ -1219,8 +1254,14 @@ def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, 
     Dict[str, str]
         ``engine -> marker`` map.
     """
-    from dagua.eval.benchmark import _adapter_source_signature, _dagua_source_signature
+    from dagua.eval.benchmark import (
+        _competitor_signature,
+        _dagua_source_signature,
+        _system_metadata,
+    )
 
+    system = _system_metadata()
+    harness_component = _harness_source_component()
     dagua_component: Optional[str] = None
     markers: Dict[str, str] = {}
     for engine in engines:
@@ -1229,8 +1270,8 @@ def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, 
                 dagua_component = _dagua_source_signature()
             component = dagua_component
         else:
-            component = _adapter_source_signature(engine)
-        markers[engine] = f"{git_sha}:{component}"
+            component = _competitor_signature(engine, system)
+        markers[engine] = f"{git_sha}|{component}|{harness_component}"
     return markers
 
 
@@ -1338,13 +1379,15 @@ def partition_resumed_rows(
     - its record key is outside the CURRENT subset x field x seed battery
       (Sol B4-3: engines outside the field must never select the champion);
     - its run-revision marker differs from the current one for its engine
-      (dry-well R2 B4-Sol-2): a mid-run implementation hotfix invalidates
-      the LAYOUT itself, so unlike a scoring change the layout sibling rows
-      are NOT rescued -- they carry the same stale marker and quarantine
-      with it. With ``accept_revision_drift``, rows whose SOURCE component
-      is unchanged (git-SHA-only drift = the allowed harness-only-hotfix
-      class) are kept and disclosed instead; a changed source component or a
-      missing marker quarantines regardless;
+      (dry-well R2 B4-Sol-2, strengthened R3 B4): a mid-run implementation
+      hotfix invalidates the LAYOUT itself, so unlike a scoring change the
+      layout sibling rows are NOT rescued -- they carry the same stale
+      marker and quarantine with it. With ``accept_revision_drift``, only
+      PURE git-SHA drift is kept-and-disclosed: the full competitor
+      signature (dependency versions + adapter source + dagua tree where
+      applicable) AND the harness component must be byte-equal; any other
+      difference, or a missing/legacy-format marker, quarantines
+      regardless;
     - it carries a score under a scoring signature other than the current one
       (Sol B3-2; modeled on native_sprint_score's stale-signature rejection).
       A scored row whose layout sibling row survives is rescored from its
@@ -1417,14 +1460,21 @@ def partition_resumed_rows(
             reason = "outside current subset/field/seed battery"
             counts["universe"] += 1
         elif expected_marker is not None and row_marker != expected_marker:
-            # Implementation revision drift (R2 B4-Sol-2). The source
-            # component (after the last ':') discriminates harness-only
-            # commits from engine-implementation changes.
-            row_component = (
-                str(row_marker).rsplit(":", 1)[-1] if isinstance(row_marker, str) else None
-            )
-            expected_component = expected_marker.rsplit(":", 1)[-1]
-            if accept_revision_drift and row_component == expected_component:
+            # Implementation revision drift (R2 B4-Sol-2, strengthened per
+            # R3 B4). Markers are "<git_sha>|<full_competitor_signature>|
+            # <harness_component>"; --accept-revision-drift accepts ONLY
+            # pure git-SHA drift, i.e. the full signature AND the harness
+            # component byte-equal (a true harness-only commit). Dependency
+            # versions, engine/dagua source, and harness-file changes all
+            # quarantine even with the flag.
+            row_parts = str(row_marker).split("|") if isinstance(row_marker, str) else []
+            expected_parts = expected_marker.split("|")
+            if (
+                accept_revision_drift
+                and len(row_parts) == 3
+                and len(expected_parts) == 3
+                and row_parts[1:] == expected_parts[1:]
+            ):
                 drift_accepted = True
             else:
                 reason = "implementation revision drift"
