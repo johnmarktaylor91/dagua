@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+import torch
 
 import dagua
 import scripts.glados_holdout_run as glados
@@ -752,7 +753,9 @@ def test_resume_skips_completed_seed_aware_rows_and_cleans_temps(
         "record_key": sentinel_key,
         "status": "OK",
         "runtime_s": -12345.0,  # sentinel: proves the row was not recomputed
-        "positions_path": None,
+        # A kept OK row must OWN a present tensor (Sol R3 F2), like every
+        # real completed row does.
+        "positions_path": "positions/rome__ring6__graphviz_dot.pt",
         "v3_tiered": 55.5,  # pre-scored: scorer must skip it too
         # A scored row without the CURRENT scoring signature is quarantined
         # on resume (dry-well B4-F3 / Sol B3-2); a preserved sentinel must
@@ -765,6 +768,9 @@ def test_resume_skips_completed_seed_aware_rows_and_cleans_temps(
         "source_path": str(corpus_dir / "rome" / "ring6.graph"),
         "error": None,
     }
+    sentinel_tensor = staging / "positions" / "rome__ring6__graphviz_dot.pt"
+    sentinel_tensor.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(torch.zeros((6, 2)), sentinel_tensor)
     glados.append_row(staging, sentinel)
     with glados.rows_path(staging).open("a", encoding="utf-8") as handle:
         handle.write('{"record_key": "torn-line", "stat')  # crash mid-append
@@ -1156,6 +1162,7 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         "record_key": build_record_key("rome/g", "graphviz_dot", None),
         "engine": "graphviz_dot",
         "status": "OK",
+        "positions_path": "positions/rome__g__graphviz_dot.pt",
     }
     kept_scored_native = {  # scored native row, current sig + current seed
         "record_key": build_record_key("rome/g", "dagua", None),
@@ -1164,6 +1171,7 @@ def test_partition_resumed_rows_quarantine_rules() -> None:
         "v3_tiered": 50.0,
         "scoring_signature": signature,
         "native_child_seed": 42,
+        "positions_path": "positions/rome__g__dagua.pt",
     }
     stale_sig = {  # scored under an older ruler -> rescore (Sol B3-2)
         "record_key": build_record_key("rome/g", "graphviz_dot", None),
@@ -1687,3 +1695,84 @@ def test_resume_field_removal_then_readd_reruns_from_scratch(
     assert fresh["v3_tiered"] is not None
     assert fresh["scoring_signature"] == payload3["scoring_signature"]
     assert (output_dir / fresh["positions_path"]).is_file()
+
+
+def test_resume_preparation_failure_leaves_canonical_run_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol round-3 F1: resume must never displace the published run.
+
+    Resume re-opens a published partial run COPY-based; a failure in
+    fallible resume preparation (here: the quarantine rewrite) must leave
+    the canonical output directory exactly as published.
+    """
+    corpus_dir = tmp_path / "corpus"
+    _copy_fixture(corpus_dir, "rome", "ring6.graph")
+    output_dir = tmp_path / "out"
+    base_argv = [
+        "--corpus-dir",
+        str(corpus_dir),
+        "--output-dir",
+        str(output_dir),
+        "--engines-file",
+        str(_write_engines_file(tmp_path, ["graphviz_dot"])),
+        "--workers",
+        "1",
+        "--score-workers",
+        "1",
+        "--seeds",
+        "1",
+    ]
+    assert _run_main(base_argv, monkeypatch) == 0
+    published = (output_dir / "results.json").read_bytes()
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("injected rewrite failure (Sol R3 F1)")
+
+    monkeypatch.setattr(glados, "rewrite_rows", boom)
+    # Force the quarantine path so rewrite_rows is reached: resume with the
+    # engine removed from the field.
+    resume_argv = [
+        "--corpus-dir",
+        str(corpus_dir),
+        "--output-dir",
+        str(output_dir),
+        "--engines-file",
+        str(_write_engines_file(tmp_path, ["classic_kk"])),
+        "--workers",
+        "1",
+        "--score-workers",
+        "1",
+        "--seeds",
+        "1",
+        "--resume",
+    ]
+    exit_code = _run_main(resume_argv, monkeypatch)
+    assert exit_code == 1
+    assert (output_dir / "results.json").read_bytes() == published, (
+        "canonical published run must be byte-untouched by a failed resume"
+    )
+    rows, torn = glados.load_rows_tolerant(output_dir)
+    assert rows and not torn
+
+
+def test_partition_quarantines_ok_row_with_null_positions_path() -> None:
+    """Sol round-3 F2: an OK row with a null/absent positions_path is as
+    unpublishable as one whose tensor was swept."""
+    row = {
+        "record_key": "rome/ring6|graphviz_dot|0",
+        "engine": "graphviz_dot",
+        "status": "OK",
+        "scoring_signature": "sig",
+        "positions_path": None,
+    }
+    kept, quarantined, counts = glados.partition_resumed_rows(
+        [row],
+        signature="sig",
+        valid_keys={"rome/ring6|graphviz_dot|0"},
+        current_seed=42,
+        tensor_exists=lambda _p: True,
+    )
+    assert not kept
+    assert quarantined[0]["quarantine_reason"] == ("positions tensor missing from the row store")
+    assert counts["tensor_missing"] == 1

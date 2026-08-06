@@ -1217,9 +1217,10 @@ def partition_resumed_rows(
         elif (
             tensor_exists is not None
             and row.get("status") == "OK"
-            and row.get("positions_path")
-            and not tensor_exists(str(row["positions_path"]))
+            and (not row.get("positions_path") or not tensor_exists(str(row["positions_path"])))
         ):
+            # A kept OK row must OWN a present tensor; a null/absent path is
+            # as unpublishable as a swept one (Sol R3 F2).
             reason = "positions tensor missing from the row store"
             counts["tensor_missing"] += 1
         if reason is None:
@@ -2852,12 +2853,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Staging setup + resume.
     staging = args.output_dir.with_name(f"{args.output_dir.name}.tmp")
     if args.resume and not staging.exists() and rows_path(args.output_dir).is_file():
-        # Reverse the publish rename so an aborted-and-published partial run
-        # can be extended (documented deviation from r79's staging-only
-        # resume).
-        args.output_dir.rename(staging)
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        assumptions.append("resume re-opened a previously published partial run")
+        # Re-open an aborted-and-published partial run COPY-based (Sol R3 F1):
+        # the canonical published run stays intact at output_dir until
+        # publish_results installs a fully-validated candidate, so a failure
+        # anywhere in resume preparation (quarantine rewrite included) leaves
+        # the prior valid run untouched. Costs one transient copy of the
+        # partial run on disk.
+        try:
+            shutil.copytree(args.output_dir, staging)
+        except Exception as exc:  # noqa: BLE001 - canonical run must survive
+            print(
+                f"RESUME-PREP FAILED (copy to staging): {type(exc).__name__}: {exc}; "
+                "canonical published run untouched",
+                file=sys.stderr,
+                flush=True,
+            )
+            shutil.rmtree(staging, ignore_errors=True)
+            return 1
+        assumptions.append(
+            "resume re-opened a previously published partial run "
+            "(copy-based; canonical output retained until validated republish)"
+        )
     if not args.resume:
         # Dry-well B4-F6: dropping --resume after a crash used to silently
         # rmtree hours of completed rows (up to 63 x 1800s of native work).
@@ -2915,7 +2931,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # store without the quarantined rows so a later resume that
             # re-admits their key reruns from scratch instead of
             # resurrecting a row whose tensor was orphaned.
-            rewrite_rows(staging, existing_rows)
+            try:
+                rewrite_rows(staging, existing_rows)
+            except Exception as exc:  # noqa: BLE001 - Sol R3 F1: the canonical
+                # published run was never displaced (copy-based reopen), so a
+                # rewrite failure aborts loudly with the prior run intact.
+                print(
+                    f"RESUME-PREP FAILED (quarantine rewrite): {type(exc).__name__}: "
+                    f"{exc}; canonical published run untouched",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 1
             summary = (
                 f"QUARANTINE: {len(quarantined_rows)} stale resumed row(s) removed from the "
                 f"row store, recorded in quarantined_rows, and re-run where in-universe "
