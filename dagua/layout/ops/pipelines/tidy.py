@@ -10,7 +10,7 @@ subtrees with variable node widths.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import torch
 
@@ -247,9 +247,14 @@ def _assign_y(node: _TidyNode, parent_child_margin: float) -> None:
     None
         The tree is updated in place.
     """
-    for child in node.children:
-        child.y = node.y + node.height + parent_child_margin
-        _assign_y(child, parent_child_margin)
+    # Iterative pre-order twin of the recursive walk (each child's y depends
+    # only on its parent); depth-safe on chain-shaped trees.
+    stack: List[_TidyNode] = [node]
+    while stack:
+        current = stack.pop()
+        for child in current.children:
+            child.y = current.y + current.height + parent_child_margin
+        stack.extend(reversed(current.children))
 
 
 def _init_tidy_node(node: _TidyNode) -> None:
@@ -714,22 +719,41 @@ def _first_walk(node: _TidyNode, peer_margin: float) -> None:
     None
         Tidy modifier fields are updated in place.
     """
-    if not node.children:
-        _set_extreme(node)
-        return
-
-    _first_walk(node.children[0], peer_margin)
-    right_extreme = _extreme_right(node.children[0])
-    y_list = _LinkedYList(index=0, y=right_extreme.y + right_extreme.height)
-    for index in range(1, len(node.children)):
-        current_child = node.children[index]
-        _first_walk(current_child, peer_margin)
-        max_y = _extreme_left(current_child).y + _extreme_left(current_child).height
-        y_list = _separate(node, index, y_list, peer_margin)
-        y_list = _linked_y_update(y_list, index, max_y)
-
-    _position_root(node)
-    _set_extreme(node)
+    # Iterative twin of the recursive tidy first walk. Each frame holds
+    # [node, completed-children count, running y_list]; every helper call
+    # (_set_extreme, _extreme_right/_extreme_left, _separate,
+    # _linked_y_update, _position_root) runs in exactly the order the
+    # recursion produced, so the computed modifiers are identical while deep
+    # chains no longer exhaust the recursion limit.
+    frames: List[List[Any]] = []
+    current = node
+    while True:
+        while current.children:
+            frames.append([current, 0, None])
+            current = current.children[0]
+        _set_extreme(current)
+        while frames:
+            frame = frames[-1]
+            parent, completed, y_list = frame[0], frame[1], frame[2]
+            if completed == 0:
+                right_extreme = _extreme_right(parent.children[0])
+                y_list = _LinkedYList(index=0, y=right_extreme.y + right_extreme.height)
+            else:
+                finished_child = parent.children[completed]
+                max_y = _extreme_left(finished_child).y + _extreme_left(finished_child).height
+                y_list = _separate(parent, completed, y_list, peer_margin)
+                y_list = _linked_y_update(y_list, completed, max_y)
+            completed += 1
+            frame[1] = completed
+            frame[2] = y_list
+            if completed < len(parent.children):
+                current = parent.children[completed]
+                break
+            _position_root(parent)
+            _set_extreme(parent)
+            frames.pop()
+        else:
+            return
 
 
 def _second_walk(node: _TidyNode, modifier_sum: float) -> None:
@@ -747,11 +771,16 @@ def _second_walk(node: _TidyNode, modifier_sum: float) -> None:
     None
         ``x`` fields are updated in place.
     """
-    next_modifier_sum = modifier_sum + node.modifier_to_subtree
-    node.x = node.relative_x + next_modifier_sum
-    _add_child_spacing(node)
-    for child in node.children:
-        _second_walk(child, next_modifier_sum)
+    # Iterative pre-order twin of the recursive walk; the per-node arithmetic
+    # and visit order are identical, and deep chains no longer exhaust the
+    # recursion limit.
+    stack: List[Tuple[_TidyNode, float]] = [(node, modifier_sum)]
+    while stack:
+        current, current_sum = stack.pop()
+        next_modifier_sum = current_sum + current.modifier_to_subtree
+        current.x = current.relative_x + next_modifier_sum
+        _add_child_spacing(current)
+        stack.extend((child, next_modifier_sum) for child in reversed(current.children))
 
 
 def _translate_tree_x(node: _TidyNode, shift: float) -> None:
