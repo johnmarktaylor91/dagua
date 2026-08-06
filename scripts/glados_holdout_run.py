@@ -1212,8 +1212,34 @@ def _harness_source_component() -> str:
     return hasher.hexdigest()[:16]
 
 
+def _node_box_stack_component() -> str:
+    """Hash the node-box producer stack (dry-well R4 B3-Fable F1).
+
+    ``graph.py`` (``compute_node_sizes``), ``utils.py`` (text measurement),
+    and ``styles.py`` (style defaults feeding box sizes) determine the node
+    boxes that size-aware EXTERNAL engines (graphviz/elk/dagre/d3dag) submit
+    to their backends. Those files are inside the dagua TREE hash (native +
+    tree-keyed engines' markers see them) but appear in no external
+    signature component -- without this hash, a mid-run sizing hotfix
+    resumed keeping the externals' OLD-box layouts while native regenerated
+    under new boxes.
+
+    Returns
+    -------
+    str
+        16-hex-char digest over the three producer-stack files.
+    """
+    import dagua
+
+    root = Path(dagua.__file__).resolve().parent
+    hasher = hashlib.sha256()
+    for relpath in ("graph.py", "utils.py", "styles.py"):
+        hasher.update((root / relpath).read_bytes())
+    return hasher.hexdigest()[:16]
+
+
 def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, str]:
-    """Compute the per-engine run-revision marker (R2 B4-Sol-2, R3 B4).
+    """Compute the per-engine run-revision marker (R2 B4-Sol-2, R3 B4, R4 B3).
 
     Rows are stamped ``"<git_sha>|<signature_component>|<harness_component>"``
     at creation so resume can detect a mid-run implementation hotfix that
@@ -1231,6 +1257,11 @@ def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, 
       upgrade under the same checkout, or a change to the shared ops that
       actually compute a reimpl engine's layout, drifts the marker. Native
       rows pair the SHA with the full ``_dagua_source_signature``.
+      Size-aware external engines (``consumes_node_boxes`` adapters:
+      graphviz/elk/dagre/d3dag) additionally carry a ``:boxes=<hash>``
+      suffix over the node-box producer stack (graph.py/utils.py/styles.py),
+      so a sizing hotfix drifts their markers alongside native's
+      (R4 B3-Fable F1).
     - ``harness_component``: sha256 over ``scripts/run_benchmark.py`` +
       ``scripts/glados_holdout_run.py`` (R3 B4-Fable-1) -- the two harness
       files that shape native layouts but appear in no engine component.
@@ -1259,10 +1290,12 @@ def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, 
         _dagua_source_signature,
         _system_metadata,
     )
+    from dagua.eval.competitors import get_competitor
 
     system = _system_metadata()
     harness_component = _harness_source_component()
     dagua_component: Optional[str] = None
+    box_component: Optional[str] = None
     markers: Dict[str, str] = {}
     for engine in engines:
         if engine == "dagua":
@@ -1271,6 +1304,16 @@ def compute_revision_markers(engines: Sequence[str], git_sha: str) -> Dict[str, 
             component = dagua_component
         else:
             component = _competitor_signature(engine, system)
+            competitor = get_competitor(engine)
+            if competitor is not None and getattr(competitor, "consumes_node_boxes", False):
+                # Size-aware externals (dot/elk/dagre/d3dag) draw layouts
+                # from dagua-computed node boxes, but the box producer stack
+                # lives in no external signature component -- a mid-run
+                # sizing hotfix used to resume their OLD-box layouts while
+                # native regenerated under new boxes (R4 B3-Fable F1).
+                if box_component is None:
+                    box_component = _node_box_stack_component()
+                component = f"{component}:boxes={box_component}"
         markers[engine] = f"{git_sha}|{component}|{harness_component}"
     return markers
 

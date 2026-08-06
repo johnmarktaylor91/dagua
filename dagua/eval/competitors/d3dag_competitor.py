@@ -186,6 +186,12 @@ class D3DagCompetitor(CompetitorBase):
     # Size-aware external: node boxes gated by dagua/eval/size_policy.py
     # (dry-well R3-B3-Fable F4 disposition).
     source_delegate_modules = ("dagua.eval.size_policy",)
+    # Layouts are a FUNCTION of dagua-computed node boxes: the GLaDOS
+    # runner folds the node-box producer stack (graph.py/utils.py/
+    # styles.py) into these engines' run-revision markers so a mid-run
+    # sizing hotfix cannot resume their OLD-box layouts while native
+    # regenerates under new boxes (dry-well R4-B3 Fable F1).
+    consumes_node_boxes = True
 
     def available(self) -> bool:
         """Check whether the local ``d3-dag`` package can be required.

@@ -2275,3 +2275,80 @@ def test_memkilled_row_reruns_on_resume_and_succeeds(
     assert fresh["status"] == "OK", "the retried row must re-run and succeed"
     assert fresh["memkill_retries"] == 1, "the retry count must be recorded"
     assert fresh["v3_tiered"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 11. Dry-well Round-4 cap fix (Fable R4-B3 F1: node-box-stack-blind markers)
+# ---------------------------------------------------------------------------
+
+_SIZE_AWARE_EXTERNALS = {
+    "d3dag",
+    "dagre",
+    "elk_force",
+    "elk_layered",
+    "elk_mrtree",
+    "elk_radial",
+    "elk_stress",
+    "graphviz_circo",
+    "graphviz_dot",
+    "graphviz_fdp",
+    "graphviz_neato",
+    "graphviz_osage",
+    "graphviz_sfdp",
+    "graphviz_twopi",
+}
+
+
+def test_node_box_stack_component_covers_producer_files() -> None:
+    """The box component hashes exactly graph.py/utils.py/styles.py -- and
+    those files sit inside the native tree hash, so a sizing hotfix drifts
+    the externals ALONGSIDE native (R4-B3 F1)."""
+    root = Path(dagua.__file__).resolve().parent
+    hasher = hashlib.sha256()
+    for relpath in ("graph.py", "utils.py", "styles.py"):
+        path = root / relpath
+        assert path.is_file()
+        hasher.update(path.read_bytes())
+    assert glados._node_box_stack_component() == hasher.hexdigest()[:16]
+    # The same files are in _dagua_source_signature's domain (non-eval tree),
+    # which natives' markers carry -- the "alongside native" half of the fix.
+    for relpath in ("graph.py", "utils.py", "styles.py"):
+        assert "eval" not in (root / relpath).relative_to(root).parts
+
+
+def test_box_stack_hotfix_drifts_all_size_aware_external_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The finder's repro shape: a node-box-stack change drifts every
+    size-aware external's marker; size-blind engines stay byte-identical."""
+    from dagua.eval.competitors import get_competitor
+
+    tagged_in_field = {
+        engine
+        for engine in glados.GLADOS_ENGINE_FIELD
+        if getattr(get_competitor(engine), "consumes_node_boxes", False)
+    }
+    assert tagged_in_field == _SIZE_AWARE_EXTERNALS, (
+        "the consumes_node_boxes attribute must cover exactly the size-aware "
+        "external engines in the field"
+    )
+
+    sample = sorted(_SIZE_AWARE_EXTERNALS) + ["dagua", "igraph_fr", "nx_spring"]
+    baseline = glados.compute_revision_markers(sample, "sha")
+    for engine in _SIZE_AWARE_EXTERNALS:
+        assert ":boxes=" in baseline[engine].split("|")[1]
+    for engine in ("dagua", "igraph_fr", "nx_spring"):
+        assert ":boxes=" not in baseline[engine]
+
+    # Simulated mid-run sizing hotfix: the producer-stack hash changes.
+    monkeypatch.setattr(glados, "_node_box_stack_component", lambda: "f" * 16)
+    hotfixed = glados.compute_revision_markers(sample, "sha")
+    for engine in _SIZE_AWARE_EXTERNALS:
+        assert hotfixed[engine] != baseline[engine], f"{engine} marker must drift"
+    for engine in ("igraph_fr", "nx_spring"):
+        assert hotfixed[engine] == baseline[engine], f"{engine} is size-blind"
+
+    # Unchanged stack -> markers are stable (plain-resume inertness).
+    monkeypatch.undo()
+    recomputed = glados.compute_revision_markers(sample, "sha")
+    assert recomputed == baseline
