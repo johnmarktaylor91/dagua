@@ -744,7 +744,7 @@ class _CountingBuildGraph:
                 if source < 0 or target < 0 or source >= node_count or target >= node_count:
                     out_of_range += 1
                     continue
-                key = (source, target) if directed else tuple(sorted((source, target)))
+                key = (source, target) if directed or source <= target else (target, source)
                 if key in seen:
                     duplicates += 1
                     continue
