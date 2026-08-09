@@ -236,17 +236,70 @@ def sparse_band_contest_eligible(problem: LayoutProblem) -> bool:
     )
 
 
+def _scale_to_node_units(
+    pos: torch.Tensor,
+    problem: LayoutProblem,
+    node_sep: float,
+) -> torch.Tensor:
+    """Uniformly rescale reference-unit positions into node-box units.
+
+    t-FDP works in the reference implementation's unit-ish coordinate scale,
+    which is tiny next to the contest's point-unit node boxes; the shared
+    degeneracy guard (bounding box must exceed the nodes it contains) would
+    reject the verbatim drawing before the referee ever saw it. A similarity
+    transform (center + uniform scale) preserves the drawing exactly -- the
+    scale-calibrated circo challenger is the existing precedent. Target:
+    median edge length = median node-box diagonal + node_sep, the standard
+    adjacent-node separation the guard and projection stack are built for.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Raw positions with shape ``[N, 2]``.
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    node_sep : float
+        Configured node separation in point units.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered, uniformly scaled positions with shape ``[N, 2]``.
+    """
+    centered = pos.detach().to(dtype=torch.float32)
+    centered = centered - centered.mean(dim=0, keepdim=True)
+    if problem.edge_index.numel() == 0:
+        return centered
+    src = problem.edge_index[0].to(dtype=torch.long)
+    dst = problem.edge_index[1].to(dtype=torch.long)
+    lengths = (centered[src] - centered[dst]).norm(dim=1)
+    median_edge = float(lengths.median().item()) if lengths.numel() else 0.0
+    if median_edge <= 1e-12:
+        return centered
+    if problem.node_sizes is not None and problem.node_sizes.numel():
+        box_diag = float(
+            problem.node_sizes.detach().to(dtype=torch.float32).norm(dim=1).median().item()
+        )
+    else:
+        box_diag = 0.0
+    target = max(box_diag + max(node_sep, 0.0), 1.0)
+    return centered * (target / median_edge)
+
+
 def tfdp_sparse_positions(
     problem: LayoutProblem,
     *,
     gamma: float,
     seed: Optional[int] = None,
+    node_sep: float = 0.0,
 ) -> torch.Tensor:
     """Run one t-FDP challenger with the sparse-infrastructure schedules.
 
     CALLS the in-house reimpl pipeline unchanged (fidelity invariant --
     ``pipelines/tfdp.py`` is executed by the tfdp_reimpl field engine and is
-    never modified here); only deterministic parameters are supplied.
+    never modified here); only deterministic parameters are supplied, and the
+    output is similarity-transformed into node-box units (see
+    :func:`_scale_to_node_units`).
 
     Parameters
     ----------
@@ -256,11 +309,13 @@ def tfdp_sparse_positions(
         t-force exponent variant.
     seed : int, optional
         Deterministic seed override; ``None`` uses the problem seed.
+    node_sep : float, default=0.0
+        Configured node separation used by the unit rescale.
 
     Returns
     -------
     torch.Tensor
-        Raw t-FDP positions with shape ``[N, 2]``.
+        Scaled t-FDP positions with shape ``[N, 2]``.
     """
     from dagua.layout.ops.pipelines.tfdp import layout_tfdp_pipeline
 
@@ -268,7 +323,7 @@ def tfdp_sparse_positions(
     resolved_seed = (
         int(seed) if seed is not None else (int(problem.seed) if problem.seed is not None else 42)
     )
-    return layout_tfdp_pipeline(
+    raw = layout_tfdp_pipeline(
         edge_index=problem.edge_index,
         num_nodes=n,
         node_sizes=problem.node_sizes,
@@ -279,6 +334,7 @@ def tfdp_sparse_positions(
         max_iter=tfdp_iteration_schedule(n),
         pmds_pivots=tfdp_pivot_schedule(n),
     )
+    return _scale_to_node_units(raw, problem, node_sep)
 
 
 def _band_arm_cost_admitted(
@@ -437,7 +493,10 @@ def sparse_band_mini_contest(
         ):
             continue
         try:
-            _admit(f"tfdp_g{gamma:g}", tfdp_sparse_positions(problem, gamma=gamma))
+            _admit(
+                f"tfdp_g{gamma:g}",
+                tfdp_sparse_positions(problem, gamma=gamma, node_sep=node_sep),
+            )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("sparse-band tfdp challenger failed", exc_info=True)
