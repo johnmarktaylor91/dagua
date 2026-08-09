@@ -18,14 +18,16 @@ from dagua.layout.ops.pipelines.native_stress_family_arm import (
     STRESS_FAMILY_MAX_NODES,
     STRESS_SGD_SEED_BANK,
     _is_connected,
-    admit_stress_family_packages,
     build_stress_family_candidates,
     stress_family_arm_admitted,
     stress_family_candidate_prefix,
     stress_family_directed_admitted,
     stress_family_parity_floor,
-    stress_family_quota_entries,
 )
+
+# The F2/F3 fixup APIs are imported inside their tests so this file still
+# collects at a5e8fff5, letting the per-finding regressions fail there
+# individually (the fail-on-old proof) instead of erroring the whole module.
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 
@@ -118,6 +120,40 @@ def test_directed_gate_requires_low_layering() -> None:
     cyclic = _problem([(0, 1), (1, 2), (2, 3), (3, 0)], 4)
     assert not bool(getattr(cyclic.structure, "is_directed_acyclic", True))
     assert stress_family_directed_admitted(cyclic)
+
+
+def test_directed_gate_boundary_at_frozen_layering_cut() -> None:
+    """Boundary behavior around the frozen cousin-fitted cut (review F4).
+
+    The gate admits exactly at the cut (``>=``), rejects epsilon below it,
+    and bypasses the width check for cyclic digraphs (no faithful layering
+    exists). The cut itself is established from the training-cousin table
+    (scripts/w22_cousin_layering_fit.py); dev63 is confirmation only.
+    """
+    from types import SimpleNamespace
+
+    problem = _wide_dag_problem()
+    problem.structure = cast(
+        Any,
+        SimpleNamespace(
+            is_directed_acyclic=True,
+            avg_layer_width=LOW_LAYERING_MIN_AVG_LAYER_WIDTH,
+        ),
+    )
+    assert stress_family_directed_admitted(problem)
+    problem.structure = cast(
+        Any,
+        SimpleNamespace(
+            is_directed_acyclic=True,
+            avg_layer_width=LOW_LAYERING_MIN_AVG_LAYER_WIDTH - 1e-9,
+        ),
+    )
+    assert not stress_family_directed_admitted(problem)
+    problem.structure = cast(
+        Any,
+        SimpleNamespace(is_directed_acyclic=False, avg_layer_width=0.0),
+    )
+    assert stress_family_directed_admitted(problem)
 
 
 def test_builder_emits_expected_candidates_deterministically() -> None:
@@ -401,6 +437,9 @@ def test_exhausted_ledger_vetoes_stress_packages_deterministically() -> None:
         LEDGER_ATTR,
         install_budget_ledger,
     )
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        admit_stress_family_packages,
+    )
 
     problem = _chords_problem()
     config = LayoutConfig(seed=42)
@@ -424,6 +463,9 @@ def test_admission_charges_aggregate_packages_before_generation() -> None:
     from dagua.layout.ops.pipelines.native_budget import (
         LEDGER_ATTR,
         install_budget_ledger,
+    )
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        admit_stress_family_packages,
     )
 
     problem = _chords_problem()
@@ -456,6 +498,9 @@ def test_directed_quota_reserves_every_stress_family_under_proxy_cut() -> None:
     stress entry and dropped maxent and ELK entirely).
     """
     from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        stress_family_quota_entries,
+    )
 
     legacy_names = [f"legacy_arm_{index}" for index in range(8)]
     stress_names = [
@@ -502,6 +547,10 @@ def test_directed_quota_reserves_every_stress_family_under_proxy_cut() -> None:
 
 def test_quota_entries_skip_families_already_represented() -> None:
     """A stress family inside the legacy cut or quotas gets no second seat."""
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        stress_family_quota_entries,
+    )
+
     challenger_names = [
         "stress_sgd_k_seed42",
         "stress_sgd_k_seed7",

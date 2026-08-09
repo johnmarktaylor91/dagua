@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -162,8 +163,8 @@ def run_native(args: argparse.Namespace) -> int:
         ),
         run_dir,
     )
-    tasks: List[Dict[str, Any]] = []
-    for index, entry in enumerate(entries):
+
+    def _one(entry: GraphEntry) -> Dict[str, Any]:
         row = executor.run_row(
             entry,
             "dagua",
@@ -172,7 +173,13 @@ def run_native(args: argparse.Namespace) -> int:
             timeout_s=DEFAULT_NATIVE_TIMEOUT,
             is_native=True,
         )
-        print(f"[{index + 1}/{len(entries)}] {row['status']} {entry.name}", flush=True)
+        print(f"{row['status']} {entry.name}", flush=True)
+        return row
+
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        rows = list(pool.map(_one, entries))
+    tasks: List[Dict[str, Any]] = []
+    for entry, row in zip(entries, rows):
         if row["status"] != "OK":
             print(f"ERROR: native row failed for {entry.name}: {row}", file=sys.stderr)
             return 1
