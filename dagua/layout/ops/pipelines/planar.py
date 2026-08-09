@@ -1378,11 +1378,29 @@ def combinatorial_embedding_to_pos(
         return {node: default_positions[idx] for idx, node in enumerate(embedding.nodes())}
 
     embedding, outer_face = triangulate_embedding(embedding, fully_triangulate)
+    node_list = get_canonical_ordering(embedding, outer_face)
+    return shift_placement_positions(node_list)
+
+
+def shift_placement_positions(
+    node_list: list[tuple[int, list[int]]],
+) -> dict[int, tuple[int, int]]:
+    """Run the FPP shift placement over a canonical ordering.
+
+    Parameters
+    ----------
+    node_list : list[tuple[int, list[int]]]
+        Canonical ordering from :func:`get_canonical_ordering`.
+
+    Returns
+    -------
+    dict[int, tuple[int, int]]
+        Raw integer coordinates keyed by node id.
+    """
     left_t_child: dict[int, Optional[int]] = {}
     right_t_child: dict[int, Optional[int]] = {}
     delta_x: dict[int, int] = {}
     y_coordinate: dict[int, int] = {}
-    node_list = get_canonical_ordering(embedding, outer_face)
 
     v1 = node_list[0][0]
     v2 = node_list[1][0]
@@ -1671,5 +1689,6 @@ __all__ = [
     "get_canonical_ordering",
     "layout_planar_pipeline",
     "rescale_layout",
+    "shift_placement_positions",
     "triangulate_embedding",
 ]

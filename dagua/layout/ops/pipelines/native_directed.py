@@ -291,7 +291,7 @@ def _runtime_referee_key_from_result(result: object) -> Tuple[int, float]:
     """
     from dagua.eval.ruler_v3 import referee_eligibility_key
 
-    return referee_eligibility_key(result)
+    return referee_eligibility_key(result)  # type: ignore[arg-type]
 
 
 def _old_cluster_ruler_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
@@ -1614,12 +1614,14 @@ def _apply_recombinant_ordering(
         for node, rank in enumerate(expanded_ranks):
             expanded_rank_to_nodes.setdefault(int(rank), []).append(node)
         ordered_layers = [
-            sorted(nodes, key=lambda node: float(state.pos[node, 0].item()))
+            sorted(nodes, key=lambda node: float(state.pos[node, 0].item()))  # type: ignore[index]
             for _rank, nodes in sorted(expanded_rank_to_nodes.items())
         ]
     else:
         ordered_layers = _ordered_layers_from_ordering(expanded_ranks, state.ordering)
-    return ordered_layers, state.pos.detach().to(device="cpu", dtype=torch.float32)
+    return ordered_layers, state.pos.detach().to(  # type: ignore[union-attr]
+        device="cpu", dtype=torch.float32
+    )
 
 
 def _assign_recombinant_x_coordinates(
@@ -1742,10 +1744,10 @@ def _assign_recombinant_x_coordinates(
             widths = {node: float(x_widths[node].item()) for node in range(x_node_count)}
             x_map = brandes_koepf_x_assignment(
                 layering=x_layers,
-                predecessors=predecessors,
-                successors=successors,
-                widths=widths,
-                dummy_nodes=x_dummy_nodes,
+                predecessors=predecessors,  # type: ignore[arg-type]
+                successors=successors,  # type: ignore[arg-type]
+                widths=widths,  # type: ignore[arg-type]
+                dummy_nodes=x_dummy_nodes,  # type: ignore[arg-type]
                 node_sep=node_sep,
             )
             x_values = torch.tensor([float(x_map.get(node, 0.0)) for node in range(n)])
@@ -2259,7 +2261,7 @@ def _build_dot_order_candidate(
         ranks=seed_layers,
         edges=expanded_edges,
         iterations=_dot_order_iterations(expanded_n),
-        edge_penalties=edge_penalties,
+        edge_penalties=edge_penalties,  # type: ignore[arg-type]
         node_order=node_order,
     )
     x_spec = _RecombinantLayeredSpec(
@@ -3814,6 +3816,8 @@ def _register_challenger_variants(
     preserve_rank_order: bool = False,
     arm_timings: Optional[Dict[str, Tuple[float, float]]] = None,
     timing_span: Optional[Tuple[float, float]] = None,
+    require_zero_crossings: bool = False,
+    certified_names: Optional[set] = None,
 ) -> None:
     """Register guarded raw and projected variants of one challenger.
 
@@ -3836,6 +3840,15 @@ def _register_challenger_variants(
         Per-arm timing registry updated when ``timing_span`` is supplied.
     timing_span : tuple[float, float], optional
         ``time.perf_counter()`` start/end span for the candidate family.
+    require_zero_crossings : bool, default=False
+        Enforce the exact planarity certificate on EVERY registered variant
+        (raw, projected, convergent). Variants with a nonzero exact crossing
+        count after their final geometry transform are dropped (W1B-1: the
+        projectors run after the guarded polish and can reintroduce
+        crossings a "planar" candidate must not carry).
+    certified_names : set, optional
+        Registry receiving the names of variants that passed the exact
+        certificate; the winner seam re-checks these before emission.
 
     Returns
     -------
@@ -3869,7 +3882,14 @@ def _register_challenger_variants(
         if degenerate:
             _LOGGER.info("Rejected directed candidate %s: %s", variant_name, reason)
             continue
+        if require_zero_crossings and _exact_crossing_count(candidate, problem.edge_index) != 0:
+            _LOGGER.info(
+                "Rejected directed candidate %s: planarity certificate failed", variant_name
+            )
+            continue
         positions[variant_name] = candidate
+        if require_zero_crossings and certified_names is not None:
+            certified_names.add(variant_name)
         if arm_timings is not None and timing_span is not None:
             arm_timings[variant_name] = timing_span
 
@@ -5916,8 +5936,12 @@ def layout_native_directed_portfolio(
         PLANAR_ARM_PRIOR_S,
         build_planar_arm_candidates,
         planar_arm_admitted,
+        planar_candidate_requires_certificate,
     )
 
+    # Zero-crossing-certified candidate names (planar arm); checked again on
+    # the exact emitted tensor before the contest returns (W1B-1).
+    planar_certified_names: set = set()
     if planar_arm_admitted(problem) and _portfolio_has_budget(config, min_remaining_s=2.0):
         try:
             planar_cost = _directed_opaque_arm_cost(problem, config, PLANAR_ARM_PRIOR_S)
@@ -5945,6 +5969,8 @@ def layout_native_directed_portfolio(
                         positions,
                         arm_timings=arm_timings,
                         timing_span=(candidate_started, time.perf_counter()),
+                        require_zero_crossings=planar_candidate_requires_certificate(planar_name),
+                        certified_names=planar_certified_names,
                     )
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
@@ -6263,7 +6289,21 @@ def layout_native_directed_portfolio(
             f"directed_top_{seed_rank}_{seed_name}",
             positions[seed_name],
         )
-    return best_position.to(device=incumbent.device, dtype=incumbent.dtype)
+    emitted = best_position.to(device=incumbent.device, dtype=incumbent.dtype)
+    if best_name in planar_certified_names and (
+        _exact_crossing_count(emitted, problem.edge_index) != 0
+    ):
+        # Final emission certificate (W1B-1): a certified planar winner is
+        # re-counted on the exact tensor being emitted (post-selection
+        # transforms rename the winner, so reaching here with crossings means
+        # the certificate broke in conversion); fail back to the incumbent
+        # rather than emit a crossed drawing under a planar name.
+        _LOGGER.warning(
+            "Planar winner %s lost its certificate post-selection; emitting incumbent",
+            best_name,
+        )
+        return incumbent.to(device=incumbent.device, dtype=incumbent.dtype)
+    return emitted
 
 
 @dataclass(frozen=True)
@@ -6279,11 +6319,11 @@ class DirectedPortfolioRoute(Op):
     """Run the declared-hierarchical candidate contest."""
 
     config: DirectedPortfolioRouteConfig = field(default_factory=DirectedPortfolioRouteConfig)
-    name: ClassVar[str] = "directed_portfolio_route"
-    category: ClassVar[OpCategory] = OpCategory.CONTROL
-    reads: ClassVar[Tuple[str, ...]] = ("pos",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ()
+    name: ClassVar[str] = "directed_portfolio_route"  # type: ignore[misc]
+    category: ClassVar[OpCategory] = OpCategory.CONTROL  # type: ignore[misc]
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)  # type: ignore[misc]
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)  # type: ignore[misc]
+    requires: ClassVar[Tuple[str, ...]] = ()  # type: ignore[misc]
 
     def apply(
         self,
