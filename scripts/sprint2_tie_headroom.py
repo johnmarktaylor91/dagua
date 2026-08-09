@@ -34,7 +34,9 @@ DEFAULT_CORPUS_DIR = MAIN_EVAL_ROOT / "stdcorpora"
 DEFAULT_OUTPUT_DIR = RESEARCH_ROOT / "measure"
 MOVABLE_FACETS = ("C4", "C5", "C6", "C9", "C10")
 WINNABLE_HEADROOM = 0.5
-STRICT_TIE_BAND = 0.5
+# A strict win must clear the 0.5 tie band; the report uses one millipoint so
+# its displayed needed margins cannot imply that equality is already strict.
+STRICT_WIN_MARGIN = 0.501
 
 WAVE_TARGETS = {
     "C4": "W2-4 winner polish",
@@ -276,7 +278,7 @@ def measure_headroom(rows: List[Dict[str, Any]], dev_dir: Path) -> List[Dict[str
             {
                 **row,
                 "native": fresh_native,
-                "needed_margin": max(0.0, STRICT_TIE_BAND - float(row["delta"])),
+                "needed_margin": max(0.0, STRICT_WIN_MARGIN - float(row["delta"])),
                 "headroom": contributions,
                 "aggregate_headroom": aggregate,
                 "verdict": classify_headroom(fresh_native, aggregate),
