@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+from collections import OrderedDict
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
@@ -57,6 +61,186 @@ _FROZEN_STRESS_SOURCES = 200
 _FROZEN_STRESS_TARGETS = 1000
 _FROZEN_CROSSING_SAMPLES = 1_000_000
 _FROZEN_NEIGHBORHOOD_SAMPLES = 5000
+_SUBSTRATE_CACHE_LIMIT = 8
+
+
+@dataclass(frozen=True)
+class RefereeSubstrate:
+    """Candidate-independent inputs shared by full-referee passes.
+
+    Attributes
+    ----------
+    cache_key : str
+        Content-derived graph cache key.
+    csr_offsets : numpy.ndarray
+        Read-only CSR row offsets with shape ``[N + 1]``.
+    csr_targets : numpy.ndarray
+        Read-only CSR targets with shape ``[2E]``.
+    all_pairs_dist : numpy.ndarray
+        Read-only unweighted graph distances with shape ``[N, N]``.
+    edge_index : torch.Tensor
+        Normalized CPU edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Normalized CPU node sizes with shape ``[N, 2]``.
+    used_default_sizes : bool
+        Whether the normalized node sizes came from referee defaults.
+    label_sizes : Optional[torch.Tensor]
+        Normalized label sizes with shape ``[N, 2]``, when supplied.
+    label_offsets : Optional[torch.Tensor]
+        Normalized label offsets with shape ``[N, 2]``, when supplied.
+    graph_meta : Mapping[str, Any]
+        Read-only runtime-visible graph metadata.
+    stress_source_indices : numpy.ndarray
+        Frozen deterministic stress-source sample indices.
+    neighborhood_indices : numpy.ndarray
+        Frozen deterministic neighborhood sample indices.
+    """
+
+    cache_key: str
+    csr_offsets: np.ndarray
+    csr_targets: np.ndarray
+    all_pairs_dist: np.ndarray
+    edge_index: torch.Tensor
+    node_sizes: torch.Tensor
+    used_default_sizes: bool
+    label_sizes: Optional[torch.Tensor]
+    label_offsets: Optional[torch.Tensor]
+    graph_meta: Mapping[str, Any]
+    stress_source_indices: np.ndarray
+    neighborhood_indices: np.ndarray
+
+
+_SUBSTRATE_CACHE: "OrderedDict[str, RefereeSubstrate]" = OrderedDict()
+
+
+def _readonly_array(array: np.ndarray) -> np.ndarray:
+    """Return an independent read-only NumPy array.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        Source array.
+
+    Returns
+    -------
+    numpy.ndarray
+        C-contiguous read-only copy of ``array``.
+    """
+    result = np.ascontiguousarray(array).copy()
+    result.flags.writeable = False
+    return result
+
+
+def _deterministic_node_sample(num_nodes: int, limit: int) -> np.ndarray:
+    """Return evenly spread deterministic node sample indices.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    limit : int
+        Maximum sample count.
+
+    Returns
+    -------
+    numpy.ndarray
+        Read-only unique indices with shape ``[S]``.
+    """
+    if num_nodes <= 0 or limit <= 0:
+        return _readonly_array(np.empty(0, dtype=np.int64))
+    count = min(num_nodes, limit)
+    indices = np.linspace(0, num_nodes - 1, num=count, dtype=np.int64)
+    return _readonly_array(np.unique(indices))
+
+
+def _substrate_cache_key(problem: LayoutProblem) -> str:
+    """Return a content-derived key for candidate-independent graph inputs.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Native layout problem.
+
+    Returns
+    -------
+    str
+        BLAKE2 digest covering topology and scorer-visible node metadata.
+    """
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(str(int(problem.num_nodes)).encode("ascii"))
+    digest.update(str(problem.direction).encode("utf-8"))
+    edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.int64).contiguous()
+    digest.update(edge_index.numpy().tobytes())
+    if problem.node_sizes is not None:
+        sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float64).contiguous()
+        digest.update(sizes.numpy().tobytes())
+    digest.update(repr(_runtime_v3_graph_meta(problem)).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def get_referee_substrate(
+    problem: LayoutProblem,
+    *,
+    all_pairs_dist: Optional[np.ndarray] = None,
+) -> RefereeSubstrate:
+    """Return the cached read-only substrate for one graph.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Native layout problem providing graph topology and node metadata.
+    all_pairs_dist : numpy.ndarray, optional
+        Existing unweighted distances with shape ``[N, N]``. Supplying them
+        avoids rebuilding APSP on the first cache access.
+
+    Returns
+    -------
+    RefereeSubstrate
+        Candidate-independent full-referee inputs.
+    """
+    key = _substrate_cache_key(problem)
+    cached = _SUBSTRATE_CACHE.get(key)
+    if cached is not None:
+        _SUBSTRATE_CACHE.move_to_end(key)
+        return cached
+
+    from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+    cpu_edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
+    offsets, targets = _build_csr(cpu_edge_index, int(problem.num_nodes))
+    distances = (
+        all_pairs_dist
+        if all_pairs_dist is not None
+        else _all_pairs_unweighted(
+            offsets, targets, int(problem.num_nodes), max_dist=int(problem.num_nodes)
+        )
+    )
+    normalized_edges = _normalize_edge_index(problem.edge_index)
+    sizes, used_default_sizes = _normalize_node_sizes(problem.node_sizes, int(problem.num_nodes))
+    labels, label_offsets = _normalize_label_geometry(None, None, int(problem.num_nodes))
+    substrate = RefereeSubstrate(
+        cache_key=key,
+        csr_offsets=_readonly_array(offsets),
+        csr_targets=_readonly_array(targets),
+        all_pairs_dist=_readonly_array(distances),
+        edge_index=normalized_edges,
+        node_sizes=sizes,
+        used_default_sizes=used_default_sizes,
+        label_sizes=labels,
+        label_offsets=label_offsets,
+        graph_meta=MappingProxyType(_runtime_v3_graph_meta(problem)),
+        stress_source_indices=_deterministic_node_sample(
+            int(problem.num_nodes), _FROZEN_STRESS_SOURCES
+        ),
+        neighborhood_indices=_deterministic_node_sample(
+            int(problem.num_nodes), _FROZEN_NEIGHBORHOOD_SAMPLES
+        ),
+    )
+    _SUBSTRATE_CACHE[key] = substrate
+    _SUBSTRATE_CACHE.move_to_end(key)
+    while len(_SUBSTRATE_CACHE) > _SUBSTRATE_CACHE_LIMIT:
+        _SUBSTRATE_CACHE.popitem(last=False)
+    return substrate
 
 
 def fast_smooth_clearance_occlusion_score(
@@ -260,6 +444,7 @@ def score_v3_runtime(
     problem: LayoutProblem,
     *,
     all_pairs_dist: Optional[np.ndarray] = None,
+    substrate: Optional[RefereeSubstrate] = None,
 ) -> Tuple[Tuple[int, float], float, Mapping[str, RulerV3Facet]]:
     """Score one finalist with the runtime-visible frozen V3 referee.
 
@@ -271,13 +456,21 @@ def score_v3_runtime(
         Native layout problem providing topology and runtime-visible metadata.
     all_pairs_dist : numpy.ndarray, optional
         Cached unweighted shortest-path distances with shape ``[N, N]``.
+    substrate : RefereeSubstrate, optional
+        Cached candidate-independent scorer inputs. When supplied, it takes
+        precedence over ``all_pairs_dist``.
 
     Returns
     -------
     tuple[tuple[int, float], float, Mapping[str, RulerV3Facet]]
         Severe-G6 eligibility key, tiered V3 headline score, and facet records.
     """
-    result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
+    result = score_v3_runtime_result(
+        pos,
+        problem,
+        all_pairs_dist=all_pairs_dist,
+        substrate=substrate,
+    )
     return referee_eligibility_key(result), float(result.scores["tiered"]), result.facets
 
 
@@ -286,6 +479,7 @@ def score_v3_runtime_result(
     problem: LayoutProblem,
     *,
     all_pairs_dist: Optional[np.ndarray] = None,
+    substrate: Optional[RefereeSubstrate] = None,
 ) -> RulerV3Result:
     """Return the full restricted V3 result for one native finalist.
 
@@ -297,18 +491,34 @@ def score_v3_runtime_result(
         Native layout problem providing topology and runtime-visible metadata.
     all_pairs_dist : numpy.ndarray, optional
         Cached unweighted shortest-path distances with shape ``[N, N]``.
+    substrate : RefereeSubstrate, optional
+        Cached candidate-independent scorer inputs. When supplied, it takes
+        precedence over ``all_pairs_dist``.
 
     Returns
     -------
     RulerV3Result
         Frozen V3 result, restricted only by runtime-visible graph metadata.
     """
-    graph_meta = _runtime_v3_graph_meta(problem)
     positions = _ensure_cpu(pos).to(dtype=torch.float64)
-    edges = _normalize_edge_index(problem.edge_index)
-    sizes, used_default_sizes = _normalize_node_sizes(problem.node_sizes, int(positions.shape[0]))
-    labels, offsets = _normalize_label_geometry(None, None, int(positions.shape[0]))
     num_nodes = int(positions.shape[0])
+    graph_meta: Mapping[str, Any]
+    if substrate is None:
+        graph_meta = _runtime_v3_graph_meta(problem)
+        edges = _normalize_edge_index(problem.edge_index)
+        sizes, used_default_sizes = _normalize_node_sizes(problem.node_sizes, num_nodes)
+        labels, offsets = _normalize_label_geometry(None, None, num_nodes)
+        distances = all_pairs_dist
+    else:
+        if int(substrate.node_sizes.shape[0]) != num_nodes:
+            raise ValueError("referee substrate does not match candidate node count")
+        graph_meta = substrate.graph_meta
+        edges = substrate.edge_index
+        sizes = substrate.node_sizes
+        used_default_sizes = substrate.used_default_sizes
+        labels = substrate.label_sizes
+        offsets = substrate.label_offsets
+        distances = substrate.all_pairs_dist
 
     crossing_geometry = _crossing_pair_geometry(
         positions,
@@ -322,7 +532,7 @@ def score_v3_runtime_result(
         sizes,
         stress_sources=_FROZEN_STRESS_SOURCES,
         stress_targets=_FROZEN_STRESS_TARGETS,
-        all_pairs_dist=all_pairs_dist,
+        all_pairs_dist=distances,
     )
     c2 = angle_weighted_crossing_score(
         positions,
@@ -337,7 +547,7 @@ def score_v3_runtime_result(
         num_nodes=num_nodes,
         radii=(1, 2, 3),
         n_samples=_FROZEN_NEIGHBORHOOD_SAMPLES,
-        all_pairs_dist=all_pairs_dist,
+        all_pairs_dist=distances,
     )
     c4 = _fast_visual_occlusion_score(positions, sizes, labels, offsets, seed=0)
     c5 = whitespace_sprawl_score(
@@ -513,9 +723,11 @@ def v3_proxy_fold(quick_metrics: Mapping[str, Any], num_nodes: int) -> float:
 
 
 __all__ = [
+    "RefereeSubstrate",
     "V3_REFEREE_DWU_FRACTION",
     "_runtime_v3_graph_meta",
     "fast_smooth_clearance_occlusion_score",
+    "get_referee_substrate",
     "score_v3_runtime",
     "score_v3_runtime_result",
     "v3_proxy_fold",
