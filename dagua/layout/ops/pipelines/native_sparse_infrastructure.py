@@ -47,6 +47,7 @@ from dagua.layout.ops.pipelines.native_budget import (
 )
 from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
 from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
+from dagua.layout.ops.pipelines.native_seed_replication import replicated_work_cost
 from dagua.layout.ops.state import LayoutProblem
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -352,6 +353,7 @@ def sparse_arm_cost_admitted(
     config: Optional["LayoutConfig"],
     device_class: str,
     reason: str,
+    seed_count: int = 1,
 ) -> bool:
     """Admit one sparse-arm challenger through the deterministic DWU ledger.
 
@@ -374,6 +376,8 @@ def sparse_arm_cost_admitted(
         Frozen cost-table device axis (``"cpu"`` or ``"cuda"``).
     reason : str
         Stable ledger decision reason.
+    seed_count : int, default=1
+        Frozen seed replicas admitted as one all-or-nothing family package.
 
     Returns
     -------
@@ -388,7 +392,7 @@ def sparse_arm_cost_admitted(
         {"steps": 1, "sample_pairs": n * max(num_edges, 1)},
         device_class,
     )
-    return admit_native_work(config, cost, reason)
+    return admit_native_work(config, replicated_work_cost(cost, seed_count), reason)
 
 
 def sparse_band_mini_contest(
