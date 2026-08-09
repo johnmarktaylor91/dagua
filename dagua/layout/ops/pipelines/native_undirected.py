@@ -2914,6 +2914,31 @@ def _router_v2_large_mini_contest(
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("large mini-contest circo challenger failed", exc_info=True)
+    # W1-A (sprint2): sparse-infrastructure rows get the t-FDP long-range-
+    # repulsion family this fast path historically lacked. Clustered rows are
+    # structurally unreachable here (_use_large_prism_shortlist excludes them).
+    if "tfdp_sparse" in shortlist.candidates and _portfolio_has_budget(config):
+        tfdp_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
+                SPARSE_INFRA,
+                tfdp_sparse_positions,
+            )
+
+            for tfdp_gamma in SPARSE_INFRA.tfdp_gammas:
+                if not _portfolio_has_budget(config):
+                    break
+                _admit(
+                    f"tfdp_g{tfdp_gamma:g}",
+                    tfdp_sparse_positions(problem, gamma=tfdp_gamma),
+                )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("large mini-contest tfdp challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=tfdp_sparse seconds=%.3f",
+            time.perf_counter() - tfdp_started,
+        )
 
     cluster_ids = _build_cluster_ids(problem)
     from dagua.metrics import _all_pairs_unweighted, _build_csr
@@ -3076,6 +3101,24 @@ def layout_native_undirected_portfolio(
     )
     charge(config, incumbent_cost.generation_dwu, "mandatory_incumbent_solve")
     if n > MAX_CONTEST_NODES or getattr(config, "time_budget_s", None) is not None:
+        # W1-A (sprint2): 1500 < n <= band cap sparse-infrastructure rows get
+        # a bounded band mini-contest instead of the unrefereed early return.
+        # MAX_CONTEST_NODES itself stays 1500 -- this is a new bounded code
+        # path; an explicit caller deadline still returns the incumbent bare.
+        if n > MAX_CONTEST_NODES and getattr(config, "time_budget_s", None) is None:
+            try:
+                from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
+                    sparse_band_contest_eligible,
+                    sparse_band_mini_contest,
+                )
+
+                if sparse_band_contest_eligible(problem):
+                    return sparse_band_mini_contest(incumbent_pos, problem, config)
+            except Exception as exc:  # noqa: BLE001 -- band contest fails closed
+                _reraise_worker_timeout(exc)
+                _LOGGER.warning(
+                    "sparse band mini-contest failed; incumbent returned", exc_info=True
+                )
         return incumbent_pos
     if not _portfolio_has_budget(config):
         _LOGGER.info(
@@ -3839,6 +3882,29 @@ def layout_native_undirected_portfolio(
         _LOGGER.info(
             "Undirected candidate runtime family=geodesic_stress seconds=%.3f",
             time.perf_counter() - geodesic_started,
+        )
+    # W1-A (sprint2): sparse-infrastructure rows admit the t-FDP challenger
+    # into the normal contest (reference-default gamma; the band and the
+    # large fast path carry the full gamma sweep). Clustered rows stay with
+    # the cluster-aware families.
+    if (
+        "tfdp_sparse" in shortlist.candidates
+        and not problem.clusters
+        and _portfolio_has_budget(config)
+    ):
+        tfdp_started = time.perf_counter()
+        try:
+            from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
+                tfdp_sparse_positions,
+            )
+
+            _add_challenger("tfdp", tfdp_sparse_positions(problem, gamma=2.0), include_raw=True)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("tfdp undirected challenger failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=tfdp_sparse seconds=%.3f",
+            time.perf_counter() - tfdp_started,
         )
     if "mesh_regularized" in shortlist.candidates and _portfolio_has_budget(config):
         mesh_started = time.perf_counter()

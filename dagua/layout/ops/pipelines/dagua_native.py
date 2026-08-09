@@ -1637,6 +1637,17 @@ def _undirected_route_shortlist(
     if _community_features_strong(structure, num_nodes):
         classes.append("community")
         candidates.append("community_scaffold")
+    # W1-A (sprint2): sparse hub-free long-diameter infrastructure rows admit
+    # the t-FDP long-range-repulsion challenger. Gate and thresholds live in
+    # native_sparse_infrastructure (import stays lazy: that module imports
+    # contest helpers from native_undirected, which imports this module).
+    from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
+        sparse_infrastructure_gate,
+    )
+
+    if sparse_infrastructure_gate(structure, num_nodes):
+        classes.append("sparse_infrastructure")
+        candidates.append("tfdp_sparse")
     return NativeShortlist(classes=tuple(classes), candidates=tuple(candidates))
 
 
