@@ -81,6 +81,12 @@ class GraphStructure:
     # 2D meshes have diameter ~ 2*sqrt(N); small-world/SBM sit at ~ log N.
     # One of the sharpest lattice-vs-community separators at two-BFS cost.
     diameter_estimate: int = 0
+    # degree2_fraction: fraction of nodes with undirected degree exactly 2.
+    # Sparse infrastructure (power grids, road/rail meshes) carries long
+    # series chains, so this sits high (~0.3+); ER/SBM/scale-free graphs at
+    # benchmark densities sit far lower. Zero default = unmeasured (the
+    # fast-path returns above skip it) = consumers keep their gates closed.
+    degree2_fraction: float = 0.0
     # community_score: undirected Newman modularity of a deterministic
     # label-propagation partition; num_communities: its community count.
     community_score: float = 0.0
@@ -1232,6 +1238,9 @@ def classify_graph(
         degree_uniformity=degree_uniformity,
         hub_edge_fraction=hub_edge_fraction,
         diameter_estimate=diameter_estimate,
+        degree2_fraction=(
+            float((degree == 2).to(dtype=torch.float32).mean().item()) if degree.numel() else 0.0
+        ),
         community_score=community_score,
         num_communities=num_communities,
         has_edge_weights=(graph is not None and getattr(graph, "edge_weights", None) is not None),
@@ -1257,7 +1266,7 @@ def _check_exact_planarity(
     if num_nodes > 1500:
         return is_planar_hint, None
     try:
-        import networkx as nx  # type: ignore
+        import networkx as nx
     except Exception:
         return is_planar_hint, None
     g = nx.Graph()
