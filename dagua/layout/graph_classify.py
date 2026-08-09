@@ -1266,7 +1266,7 @@ def _check_exact_planarity(
     if num_nodes > 1500:
         return is_planar_hint, None
     try:
-        import networkx as nx  # type: ignore
+        import networkx as nx
     except Exception:
         return is_planar_hint, None
     g = nx.Graph()
