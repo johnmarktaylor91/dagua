@@ -1530,7 +1530,7 @@ def _score_undirected_candidate_payload(
         score_v3_runtime_result,
     )
 
-    substrate = get_referee_substrate(problem, all_pairs_dist=all_pairs_dist)
+    substrate = get_referee_substrate(problem)
     v3_result = score_v3_runtime_result(pos, problem, substrate=substrate)
     v3_key = referee_eligibility_key(v3_result)
     v3_breach = severe_g6_breach(v3_result)

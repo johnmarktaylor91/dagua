@@ -469,7 +469,7 @@ def _score_directed_candidate_referee_payload(
         score_v3_runtime_result,
     )
 
-    substrate = get_referee_substrate(problem, all_pairs_dist=all_pairs_dist)
+    substrate = get_referee_substrate(problem)
     v3_result = score_v3_runtime_result(pos, problem, substrate=substrate)
     v3_key = _runtime_referee_key_from_result(v3_result)
     v3_breach = severe_g6_breach(v3_result)
@@ -606,7 +606,7 @@ def _score_directed_candidate_payload(
         cluster_labels=problem.cluster_labels,
     )
     numeric["declared_hierarchical"] = True
-    substrate = get_referee_substrate(problem, all_pairs_dist=all_pairs_dist)
+    substrate = get_referee_substrate(problem)
     v3_result = score_v3_runtime_result(pos, problem, substrate=substrate)
     return (
         w5_score_pair_from_v3_result(
@@ -5914,6 +5914,7 @@ def layout_native_directed_portfolio(
         key=lambda name: (-proxy_scores[name], name),
     )
     quota_families: dict[str, str] = {}
+    legacy_finalists: list[str] = []
     finalist_limit = len(positions)
     if n >= DIRECTED_LARGE_NODE_THRESHOLD:
         admitted_families: list[str] = []
@@ -5929,9 +5930,9 @@ def layout_native_directed_portfolio(
             for name in challenger_names
             if _directed_candidate_family(name) in admitted_families
         ]
-        # The directed constant historically counts challenger slots; the
-        # cascade target also includes the incumbent mandatory floor.
-        finalist_limit = DIRECTED_FULL_REFEREE_TOP_K + 1
+        # The legacy limit counts families, so every raw/convergent variant in
+        # those families remains a finalist; quotas may only add to this set.
+        finalist_limit = len(legacy_finalists) + 1
         if cluster_ids is not None:
             reserved_cluster_name = next(
                 (
@@ -5954,7 +5955,7 @@ def layout_native_directed_portfolio(
         proxy_scores,
         quota_families,
         finalist_limit,
-        ["incumbent"],
+        ["incumbent", *legacy_finalists],
     )
     mandatory_finalists = {"incumbent", *quota_families}
     if proxy_scores:

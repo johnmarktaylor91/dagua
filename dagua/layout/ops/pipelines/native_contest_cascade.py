@@ -156,6 +156,7 @@ def select_finalists(
         raise ValueError(f"unknown candidate names: {sorted(unknown)}")
     ranked = sorted(names, key=lambda name: (-float(proxy_scores[name]), name))
     selected: list[str] = []
+    slot_selected: set[str] = set()
 
     def append_once(name: str) -> None:
         """Append one candidate if it has not already been selected."""
@@ -164,31 +165,42 @@ def select_finalists(
 
     for name in mandatory:
         append_once(name)
+    if "incumbent" in selected:
+        slot_selected.add("incumbent")
     for family in sorted(set(families.values())):
         representative = next(name for name in ranked if families.get(name) == family)
         append_once(representative)
     if ranked:
         append_once(ranked[0])
+        slot_selected.add(ranked[0])
     # When the full-referee budget is not binding, retain every arm. This is
     # the cascade's byte-inert path because winner selection sees the exact
     # same candidate set as the pre-cascade contest.
     if m >= len(candidates):
         for name in ranked:
             append_once(name)
-        return selected
+        return [
+            *(name for name in ("incumbent",) if name in selected),
+            *(name for name in ranked if name != "incumbent" and name in selected),
+        ]
 
     fingerprints = {name: geometric_fingerprint(candidates[name]) for name in names}
     for name in ranked:
-        if len(selected) >= m:
+        if len(slot_selected) >= m:
             break
         if name in selected:
             continue
         if any(
-            _same_geometric_basin(fingerprints[name], fingerprints[chosen]) for chosen in selected
+            _same_geometric_basin(fingerprints[name], fingerprints[chosen])
+            for chosen in slot_selected
         ):
             continue
         selected.append(name)
-    return selected
+        slot_selected.add(name)
+    return [
+        *(name for name in ("incumbent",) if name in selected),
+        *(name for name in ranked if name != "incumbent" and name in selected),
+    ]
 
 
 __all__ = ["geometric_fingerprint", "select_finalists"]

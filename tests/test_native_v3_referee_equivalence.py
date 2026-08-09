@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Iterable, Optional
 
 import numpy as np
@@ -242,9 +243,14 @@ def test_cached_referee_substrate_is_bit_exact_and_reused() -> None:
     problem = _problem(pos, edge_index, sizes)
     distances = _all_pairs(edge_index, int(pos.shape[0]))
     uncached = score_v3_runtime_result(pos, problem, all_pairs_dist=distances)
-    substrate = get_referee_substrate(problem, all_pairs_dist=distances)
+    substrate = get_referee_substrate(problem)
     cached = score_v3_runtime_result(pos, problem, substrate=substrate)
     assert cached == uncached
     assert get_referee_substrate(problem) is substrate
     assert not substrate.csr_offsets.flags.writeable
     assert not substrate.all_pairs_dist.flags.writeable
+
+
+def test_referee_substrate_does_not_accept_caller_owned_distances() -> None:
+    """Assert callers cannot poison the graph-keyed cache with foreign APSP data."""
+    assert "all_pairs_dist" not in inspect.signature(get_referee_substrate).parameters

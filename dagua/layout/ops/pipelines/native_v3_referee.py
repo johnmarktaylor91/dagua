@@ -180,8 +180,6 @@ def _substrate_cache_key(problem: LayoutProblem) -> str:
 
 def get_referee_substrate(
     problem: LayoutProblem,
-    *,
-    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> RefereeSubstrate:
     """Return the cached read-only substrate for one graph.
 
@@ -189,10 +187,6 @@ def get_referee_substrate(
     ----------
     problem : LayoutProblem
         Native layout problem providing graph topology and node metadata.
-    all_pairs_dist : numpy.ndarray, optional
-        Existing unweighted distances with shape ``[N, N]``. Supplying them
-        avoids rebuilding APSP on the first cache access.
-
     Returns
     -------
     RefereeSubstrate
@@ -208,12 +202,8 @@ def get_referee_substrate(
 
     cpu_edge_index = problem.edge_index.detach().to(device="cpu", dtype=torch.long)
     offsets, targets = _build_csr(cpu_edge_index, int(problem.num_nodes))
-    distances = (
-        all_pairs_dist
-        if all_pairs_dist is not None
-        else _all_pairs_unweighted(
-            offsets, targets, int(problem.num_nodes), max_dist=int(problem.num_nodes)
-        )
+    distances = _all_pairs_unweighted(
+        offsets, targets, int(problem.num_nodes), max_dist=int(problem.num_nodes)
     )
     normalized_edges = _normalize_edge_index(problem.edge_index)
     sizes, used_default_sizes = _normalize_node_sizes(problem.node_sizes, int(problem.num_nodes))
