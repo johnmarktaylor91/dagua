@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import time
+from typing import Any, cast
 
 import pytest
 import torch
@@ -124,10 +126,25 @@ class TestDetector:
         assert not sparse_infrastructure_gate(structure, 1612)
 
     def test_closed_below_min_nodes(self) -> None:
-        assert not sparse_infrastructure_gate(_sparse_structure(num_nodes=150), 150)
+        assert not sparse_infrastructure_gate(_sparse_structure(num_nodes=40), 40)
+
+    def test_class_floor_is_the_cousin_justified_200(self) -> None:
+        # Review F1 regression: the class floor is the spec's n >= 200. The
+        # dev-fitted 50-node floor opened the gate on small non-class rows
+        # (random_bipartite_60 spread ratio regressed 1.82 -> 5.84); lowering
+        # it again is a training-cousin fit decision, never a dev-row one.
+        assert not sparse_infrastructure_gate(_sparse_structure(num_nodes=97), 97)
+        assert not sparse_infrastructure_gate(_sparse_structure(num_nodes=199), 199)
+        assert sparse_infrastructure_gate(_sparse_structure(num_nodes=200), 200)
 
     def test_closed_on_declared_directed(self) -> None:
         structure = _sparse_structure(is_semantically_directed=True)
+        assert not sparse_infrastructure_gate(structure, 1612)
+
+    def test_closed_on_unknown_semantic_direction(self) -> None:
+        # Review F5 regression: ``None`` (unmeasured) fails CLOSED like every
+        # other unmeasured feature; only an explicit ``False`` opens the gate.
+        structure = _sparse_structure(is_semantically_directed=None)
         assert not sparse_infrastructure_gate(structure, 1612)
 
     def test_closed_without_dominant_component(self) -> None:
@@ -203,7 +220,9 @@ class TestBandEligibility:
             edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
             num_nodes=num_nodes,
             seed=42,
-            structure=_sparse_structure(num_nodes=num_nodes, **structure_overrides),
+            # The classify-side GraphStructure rides in the state-side slot
+            # exactly as the production seam stores it (duck-typed fields).
+            structure=cast(Any, _sparse_structure(num_nodes=num_nodes, **structure_overrides)),
         )
 
     def test_band_row_is_eligible(self) -> None:
@@ -280,9 +299,6 @@ class TestBandContest:
         monkeypatch.setattr(
             native_undirected, "_large_prism_shortlist_candidate", lambda *_args: None
         )
-        monkeypatch.setattr(
-            native_undirected, "_portfolio_has_budget", lambda *_args, **_kwargs: True
-        )
         monkeypatch.setattr(native_undirected, "_repair_flung_isolates", lambda pos, *_args: pos)
         monkeypatch.setattr(
             native_undirected, "_candidate_is_degenerate", lambda *_args: (False, "ok")
@@ -327,6 +343,96 @@ class TestBandContest:
         winner = sparse_band_mini_contest(incumbent_pos, problem, config)
         assert winner is incumbent_pos
 
+    def test_admission_ignores_exhausted_wall_reserve(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review F2 regression: arm admission is DWU-ledger-only. An expired
+        # wall deadline (load-dependent state) must not change the admitted
+        # challenger set -- the winning challenger still competes and wins.
+        from dagua.layout.ops.pipelines.native_budget import WALL_DEADLINE_ATTR
+
+        incumbent_pos, problem, config = self._contest_fixture(monkeypatch, 1.0)
+        setattr(config, WALL_DEADLINE_ATTR, time.perf_counter() - 1000.0)
+        winner = sparse_band_mini_contest(incumbent_pos, problem, config)
+        assert float(winner[0, 0].item()) == 1.0
+
+    def test_exhausted_ledger_vetoes_challengers_deterministically(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The ledger, not elapsed time, is the sole admission authority: a
+        # spent ledger deterministically vetoes every arm, incumbent holds.
+        from dagua.layout.ops.pipelines.native_budget import LEDGER_ATTR, install_budget_ledger
+
+        incumbent_pos, problem, config = self._contest_fixture(monkeypatch, 1.0)
+        install_budget_ledger(config, timeout_s=1.0)
+        ledger = getattr(config, LEDGER_ATTR)
+        ledger.spent_dwu = ledger.capacity_dwu() + 1.0
+        winner = sparse_band_mini_contest(incumbent_pos, problem, config)
+        assert winner is incumbent_pos
+
+    def test_referee_tail_reserved_before_optional_generation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review F3 regression (budget half): the honest-referee tail for the
+        # guaranteed seats is reserved BEFORE any optional challenger
+        # generation is admitted, and released when scoring starts.
+        from dagua.layout.ops.pipelines.native_budget import LEDGER_ATTR, install_budget_ledger
+
+        incumbent_pos, problem, config = self._contest_fixture(monkeypatch, 1.0)
+        install_budget_ledger(config, timeout_s=10_000.0)
+        sparse_band_mini_contest(incumbent_pos, problem, config)
+        events = [
+            (record["event"], record["reason"]) for record in getattr(config, LEDGER_ATTR).event_log
+        ]
+        reserve_index = events.index(("reserve_tail", "sparse_band_referee_tail"))
+        first_arm_admit_index = next(
+            index
+            for index, (event, reason) in enumerate(events)
+            if event == "admit" and str(reason).startswith("sparse_band_") and "apsp" not in reason
+        )
+        assert reserve_index < first_arm_admit_index
+        assert ("release_tail", "sparse_band_referee_tail_entered_scoring") in events
+
+    def test_raw_tfdp_quota_seat_is_mandatory_under_ledger_veto(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review F3 regression: when the proxy under-ranks the raw t-FDP
+        # drawing (the measured bcspwr07 misranking) AND the ledger vetoes
+        # every non-mandatory score, the raw representative still reaches the
+        # honest referee -- its quota seat is mandatory, not best-effort.
+        incumbent_pos, problem, config = self._contest_fixture(monkeypatch, 1.0)
+        native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+        prism_pos = torch.tensor([[5.0, 0.0], [15.0, 0.0], [25.0, 0.0]], dtype=torch.float32)
+        monkeypatch.setattr(
+            native_undirected,
+            "_project_candidate_prism",
+            lambda _pos, _problem: prism_pos.clone(),
+        )
+
+        def proxy_by_marker(
+            pos: torch.Tensor,
+            _problem: LayoutProblem,
+            _cluster_ids: object,
+            _all_pairs_dist: object,
+        ) -> float:
+            marker = float(pos[0, 0].item())
+            if marker == 5.0:  # prism variants: proxy-overranked
+                return 90.0
+            if marker == 1.0:  # raw t-FDP: proxy-underranked
+                return 10.0
+            return 98.0  # incumbent
+
+        monkeypatch.setattr(native_undirected, "_proxy_undirected_candidate", proxy_by_marker)
+        monkeypatch.setattr(
+            native_undirected,
+            "_admit_v3_referee_score",
+            lambda _problem, _config, *, mandatory_floor: mandatory_floor,
+        )
+        winner = sparse_band_mini_contest(incumbent_pos, problem, config)
+        # The referee scores the raw drawing (marker 1.0) as the sole winner;
+        # it can only win if its quota seat survived the ledger veto.
+        assert float(winner[0, 0].item()) == 1.0
+
 
 class TestTfdpWiring:
     def test_real_tfdp_candidate_is_finite(self) -> None:
@@ -361,6 +467,7 @@ class TestScaleToNodeUnits:
         scaled = _scale_to_node_units(pos, problem, node_sep=36.0)
         src, dst = problem.edge_index
         median_edge = float((scaled[src] - scaled[dst]).norm(dim=1).median().item())
+        assert problem.node_sizes is not None
         box_diag = float(problem.node_sizes.norm(dim=1).median().item())
         assert median_edge == pytest.approx(box_diag + 36.0, rel=1e-5)
         # Similarity transform only: relative geometry is preserved.
