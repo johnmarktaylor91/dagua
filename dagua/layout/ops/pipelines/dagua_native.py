@@ -6385,12 +6385,7 @@ def _terminal_w5_polish(
         # The referee cost hint is priced by the frozen deterministic cost
         # model rather than a measured wall-clock span so no downstream
         # admission decision can depend on machine load.
-        from dagua.layout.ops.pipelines.native_budget import admit_native_work
-        from dagua.layout.ops.pipelines.native_cost_model import (
-            NativeWorkCost,
-            estimate_v3_referee_cost,
-        )
-        from dagua.layout.ops.pipelines.native_shadow_champion import pop_shadow_champion
+        from dagua.layout.ops.pipelines.native_cost_model import estimate_v3_referee_cost
 
         modeled_referee_cost = estimate_v3_referee_cost(
             int(final_pos.shape[0]),
@@ -6450,9 +6445,6 @@ def _terminal_w5_polish(
                 Honest routing axes for ``chain_pos``.
             register : bool
                 Whether accepted checkpoints feed the anytime-best register.
-                Only the primary track registers; a shadow-track final is
-                registered by the caller only after it wins the terminal
-                contest.
 
             Returns
             -------
@@ -6654,89 +6646,6 @@ def _terminal_w5_polish(
             incumbent_axes,
             register=True,
         )
-        # Shadow-champion terminal contest (W2-4a / C10): a contest arms the
-        # shadow only when a new-arm family displaced the legacy argmax, so
-        # every other row never reaches this branch (byte-inert). Both tracks
-        # traverse the identical deterministic chain above; the runtime
-        # referee then picks between the two FINAL drawings, ties to the
-        # legacy track. The shadow enters at the chain, after the
-        # weighted-stress and cluster-tightening pre-stages: those fire only
-        # on declared-weighted or clustered rows, which the current new-arm
-        # gate (exact-planar, n<=500) does not intersect, and the final
-        # referee comparison keeps the emission monotone regardless.
-        shadow_champion = pop_shadow_champion(
-            config,
-            expected_nodes=int(final_pos.shape[0]),
-        )
-        if shadow_champion is not None:
-            try:
-                shadow_cost = NativeWorkCost(
-                    family="shadow_champion_terminal",
-                    generation_dwu=0.0,
-                    reserved_score_dwu=2.0 * float(modeled_referee_cost.reserved_score_dwu),
-                    metadata={
-                        "route": shadow_champion.route,
-                        "winner_name": shadow_champion.winner_name,
-                        "shadow_name": shadow_champion.shadow_name,
-                        "num_nodes": int(final_pos.shape[0]),
-                    },
-                )
-                if admit_native_work(config, shadow_cost, "shadow_champion_terminal_contest"):
-                    shadow_start = shadow_champion.pos.to(
-                        device=final_pos.device,
-                        dtype=final_pos.dtype,
-                    )
-                    shadow_pair, shadow_axes = honest_score_payload(shadow_start)
-                    shadow_final_pos, _shadow_final_pair = run_terminal_chain(
-                        shadow_start,
-                        shadow_pair,
-                        shadow_axes,
-                        register=False,
-                    )
-
-                    def terminal_track_key(pos: torch.Tensor) -> tuple[tuple[int, float], float]:
-                        """Return the terminal-contest referee key for one final drawing.
-
-                        Parameters
-                        ----------
-                        pos : torch.Tensor
-                            Final track positions with shape ``[N, 2]``.
-
-                        Returns
-                        -------
-                        tuple[tuple[int, float], float]
-                            Severe-G6 eligibility prefix plus the runtime
-                            restricted-V3 tiered headline score.
-                        """
-                        prefix = referee_key_fn(pos) if referee_key_fn is not None else (1, -0.0)
-                        return (prefix, float(v3_result_for(pos).scores["tiered"]))
-
-                    primary_key = terminal_track_key(primary_final_pos)
-                    shadow_key = terminal_track_key(shadow_final_pos)
-                    _LOGGER.info(
-                        "Shadow-champion terminal contest route=%s winner=%s shadow=%s "
-                        "primary_key=%s shadow_key=%s emitted=%s",
-                        shadow_champion.route,
-                        shadow_champion.winner_name,
-                        shadow_champion.shadow_name,
-                        primary_key,
-                        shadow_key,
-                        "shadow" if shadow_key >= primary_key else "primary",
-                    )
-                    if shadow_key >= primary_key:
-                        if register_anytime_best is not None:
-                            register_anytime_best(
-                                shadow_final_pos,
-                                "shadow_champion_terminal_accept",
-                            )
-                        return shadow_final_pos
-            except Exception as exc:  # noqa: BLE001 -- the shadow track cannot sink the primary
-                if is_worker_timeout_like_exception(exc):
-                    raise
-                _LOGGER.warning(
-                    "shadow-champion terminal contest failed; emitting the primary track",
-                    exc_info=True,
-                )
         return primary_final_pos
     except Exception as exc:  # noqa: BLE001 -- terminal W5 cannot sink the returned layout
         if is_worker_timeout_like_exception(exc):
@@ -6860,7 +6769,40 @@ def _apply_public_direction_frame(pos: torch.Tensor, direction: str) -> torch.Te
     return result
 
 
-def layout_dagua_native_pipeline(
+def _undo_public_direction_frame(pos: torch.Tensor, direction: str) -> torch.Tensor:
+    """Transform public-direction coordinates back into the canonical TB frame.
+
+    Exact inverse of :func:`_apply_public_direction_frame`, used by the
+    shadow-champion final contest so both terminal drawings are scored in the
+    same canonical frame the honest ruler expects.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Public-frame position tensor with shape ``[N, 2]``.
+    direction : str
+        Public layout direction, one of ``TB``, ``BT``, ``LR``, or ``RL``.
+
+    Returns
+    -------
+    torch.Tensor
+        Canonical TB position tensor. ``TB`` is returned unchanged.
+    """
+    if direction == "TB":
+        return pos
+    result = pos.clone()
+    if direction == "BT":
+        result[:, 1] = -pos[:, 1]
+    elif direction == "LR":
+        result[:, 0] = pos[:, 1]
+        result[:, 1] = pos[:, 0]
+    elif direction == "RL":
+        result[:, 0] = pos[:, 1]
+        result[:, 1] = -pos[:, 0]
+    return result
+
+
+def _layout_dagua_native_single_track(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: torch.Tensor,
@@ -7787,6 +7729,330 @@ def layout_dagua_native_pipeline(
             if anytime_best is not None:
                 return public_pos(anytime_best.pos.to(device=target_device, dtype=torch.float32))
         raise
+
+
+def _shadow_contest_final_keys(
+    track_positions: Sequence[torch.Tensor],
+    *,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    clusters: Optional[dict[str, Any]],
+    cluster_parents: Optional[dict[str, Optional[str]]],
+    structure: Optional[GraphStructure],
+    config: Optional[LayoutConfig],
+) -> list[tuple[tuple[int, float], float]]:
+    """Score final track drawings with the runtime referee for one contest.
+
+    The key matches the terminal-contest semantics the frozen benchmark seam
+    ranks by: the severe-G6 eligibility prefix followed by the runtime
+    restricted-V3 tiered headline score, computed on canonical TB tensors.
+
+    Parameters
+    ----------
+    track_positions : Sequence[torch.Tensor]
+        Canonical-frame final drawings, each with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in each track drawing.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Declared edge weights with shape ``[E]``.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata.
+    cluster_parents : dict[str, str | None], optional
+        Nested-cluster parent metadata.
+    structure : GraphStructure, optional
+        Pre-classified topology; classified on demand when absent.
+    config : LayoutConfig, optional
+        Configuration whose deterministic ledger is charged for the referee
+        evaluations (the legacy-track shadow ledger).
+
+    Returns
+    -------
+    list[tuple[tuple[int, float], float]]
+        One referee key per track drawing, in input order.
+    """
+    from dagua.eval.ruler_v3 import referee_eligibility_key
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+    from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+    cpu_edge_index = edge_index.detach().to(device="cpu", dtype=torch.long)
+    cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    final_structure = structure or classify_graph(cpu_edge_index, int(num_nodes))
+    v3_problem = LayoutProblem(
+        edge_index=cpu_edge_index,
+        num_nodes=int(num_nodes),
+        node_sizes=cpu_node_sizes,
+        direction="TB",
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        structure=final_structure,  # type: ignore[arg-type]
+        edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
+    )
+    offsets, targets = _build_csr(cpu_edge_index, int(num_nodes))
+    all_pairs_dist = _all_pairs_unweighted(
+        offsets,
+        targets,
+        int(num_nodes),
+        max_dist=int(num_nodes),
+    )
+    keys: list[tuple[tuple[int, float], float]] = []
+    for pos in track_positions:
+        cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+        result = score_v3_runtime_result(cpu_pos, v3_problem, all_pairs_dist=all_pairs_dist)
+        _charge_runtime_v3_referee_score(v3_problem, config, "shadow_champion_final_referee")
+        keys.append((referee_eligibility_key(result), float(result.scores["tiered"])))
+    return keys
+
+
+def layout_dagua_native_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    config: Optional[LayoutConfig] = None,
+    device: Optional[str] = None,
+    optimizer_type: str = "adam",
+    init_pos: Optional[torch.Tensor] = None,
+    clusters: Optional[dict[str, Any]] = None,
+    cluster_parents: Optional[dict[str, Optional[str]]] = None,
+    cluster_labels: Optional[dict[str, str]] = None,
+    label_positions: Optional[Any] = None,
+    edge_labels: Optional[Any] = None,
+    node_shapes: Optional[list[str]] = None,
+    edge_label_boxes: Optional[torch.Tensor] = None,
+    cluster_label_boxes: Optional[dict[str, Any]] = None,
+    layer_assignments: Optional[torch.Tensor] = None,
+    prebuilt_layer_index: Optional[Any] = None,
+    graph_structure: Optional[GraphStructure] = None,
+    skip_classification: bool = False,
+    seed: Optional[int] = None,
+    edge_weights: Optional[torch.Tensor] = None,
+    fidelity_mode: Optional[Any] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Run the native pipeline with the shadow-champion legacy-track contest.
+
+    The outermost invocation runs the full topology-dispatched solve (see
+    :func:`_layout_dagua_native_single_track` for the entry contracts). When
+    any marketplace contest inside the solve was won by a new-arm family
+    (W2-4a / C10: contest-stage rank is not monotone in final rank), the
+    ENTIRE pipeline is re-run once with every new-arm generation site
+    gate-closed -- the byte-identical legacy track, on an isolated fresh
+    deterministic DWU ledger carrying the entry budget plan and no wall-clock
+    deadline -- and the runtime referee picks between the two FINAL drawings,
+    ties to the legacy track. The legacy-track re-run is unconditional on
+    displacement rows: it never bids against the primary run's remaining
+    budget and no wall-clock or load condition can veto it, so the emission
+    can never fall below what the no-new-arm pipeline would have produced.
+    Rows where no new arm won any contest never reach the shadow branch
+    (byte-inert). Re-entrant invocations (multi-start candidates, the
+    legacy-monolith sub-arm) and the frozen scale anytime wrapper bypass the
+    orchestration entirely.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    config : LayoutConfig, optional
+        Layout configuration.
+    device : str, optional
+        Target execution device.
+    optimizer_type : str, default="adam"
+        Optimizer implementation for gradient sub-pipelines.
+    init_pos : torch.Tensor, optional
+        Optional initial positions with shape ``[N, 2]``.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata.
+    cluster_parents : dict[str, str], optional
+        Nested-cluster parent metadata.
+    cluster_labels : dict[str, str], optional
+        Cluster-label text keyed by cluster name.
+    label_positions : Any, optional
+        Edge-label anchors aligned to ``edge_index``.
+    edge_labels : Any, optional
+        Edge-label text aligned to ``edge_index``.
+    node_shapes : list[str], optional
+        Node-shape metadata aligned to graph nodes.
+    edge_label_boxes : torch.Tensor, optional
+        Edge-label geometry boxes with shape ``[E, 2]``.
+    cluster_label_boxes : dict[str, Any], optional
+        Cluster-label geometry payload keyed by cluster name.
+    layer_assignments : torch.Tensor, optional
+        Optional layer assignments with shape ``[N]``.
+    prebuilt_layer_index : Any, optional
+        Optional pre-built layer index.
+    graph_structure : GraphStructure, optional
+        Optional pre-classified topology.
+    skip_classification : bool, default=False
+        Whether to skip classification during config preparation.
+    seed : int, optional
+        RNG seed override.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    fidelity_mode : Any, optional
+        Fidelity selector; fidelity rows bypass the shadow orchestration.
+    fidelity_dtype : torch.dtype, default=torch.float32
+        Fidelity-mode internal dtype stored on the effective config.
+
+    Returns
+    -------
+    torch.Tensor
+        Detached position tensor with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        NEW_ARM_DISPLACEMENTS_ATTR,
+        SHADOW_CONTEST_TELEMETRY_ATTR,
+        build_legacy_shadow_config,
+        new_arms_disabled,
+        snapshot_ledger_plan,
+    )
+
+    def run_single_track(track_config: Optional[LayoutConfig]) -> torch.Tensor:
+        """Run one full single-track solve with the given configuration.
+
+        Parameters
+        ----------
+        track_config : LayoutConfig, optional
+            Track configuration (primary or legacy-shadow).
+
+        Returns
+        -------
+        torch.Tensor
+            Public-frame final positions with shape ``[N, 2]``.
+        """
+        return _layout_dagua_native_single_track(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            config=track_config,
+            device=device,
+            optimizer_type=optimizer_type,
+            init_pos=init_pos,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            cluster_labels=cluster_labels,
+            label_positions=label_positions,
+            edge_labels=edge_labels,
+            node_shapes=node_shapes,
+            edge_label_boxes=edge_label_boxes,
+            cluster_label_boxes=cluster_label_boxes,
+            layer_assignments=layer_assignments,
+            prebuilt_layer_index=prebuilt_layer_index,
+            graph_structure=graph_structure,
+            skip_classification=skip_classification,
+            seed=seed,
+            edge_weights=edge_weights,
+            fidelity_mode=fidelity_mode,
+            fidelity_dtype=fidelity_dtype,
+        )
+
+    is_owner_invocation = config is None or not bool(
+        getattr(config, "_dagua_native_terminal_w5_owner", False)
+    )
+    orchestrate = (
+        is_owner_invocation
+        and num_nodes >= 2
+        and not new_arms_disabled(config)
+        and not bool(getattr(config, "_dagua_scale_anytime_native", False))
+        and fidelity_mode is None
+        and getattr(config, "fidelity_mode", None) is None
+    )
+    if not orchestrate:
+        return run_single_track(config)
+
+    # The displacement log is a shared mutable list: shallow config copies
+    # inside the solve (per-component problems, contest seams) alias it, so a
+    # new-arm contest win recorded anywhere in the solve reaches this seam.
+    displacements: list[dict[str, Any]] = []
+    # Snapshot the entry budget plan BEFORE the primary solve spends from the
+    # shared ledger: the legacy track receives this complete plan as its own
+    # fresh ledger, never the primary run's remainder (all-or-nothing, F1).
+    ledger_plan = snapshot_ledger_plan(config)
+    primary_config = copy.copy(config) if config is not None else LayoutConfig()
+    setattr(primary_config, NEW_ARM_DISPLACEMENTS_ATTR, displacements)
+    primary_pos = run_single_track(primary_config)
+    if not displacements:
+        return primary_pos
+
+    public_direction = str(getattr(config, "direction", "TB")) if config is not None else "TB"
+    if public_direction not in {"TB", "BT", "LR", "RL"}:
+        public_direction = "TB"
+    try:
+        shadow_config = build_legacy_shadow_config(config, ledger_plan)
+        shadow_pos = run_single_track(shadow_config)
+        if int(shadow_pos.shape[0]) != int(primary_pos.shape[0]) or not bool(
+            torch.isfinite(shadow_pos).all().item()
+        ):
+            raise RuntimeError(
+                "legacy-track shadow re-run returned an incompatible tensor "
+                f"(shadow shape {tuple(shadow_pos.shape)}, "
+                f"primary shape {tuple(primary_pos.shape)})"
+            )
+        primary_key, shadow_key = _shadow_contest_final_keys(
+            [
+                _undo_public_direction_frame(primary_pos, public_direction),
+                _undo_public_direction_frame(shadow_pos, public_direction),
+            ],
+            edge_index=edge_index,
+            num_nodes=int(primary_pos.shape[0]),
+            node_sizes=node_sizes,
+            edge_weights=edge_weights,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            structure=graph_structure,
+            config=shadow_config,
+        )
+        emit_shadow = shadow_key >= primary_key
+        _LOGGER.info(
+            "Shadow-champion final contest displacements=%s primary_key=%s "
+            "shadow_key=%s emitted=%s",
+            displacements,
+            primary_key,
+            shadow_key,
+            "shadow" if emit_shadow else "primary",
+        )
+        if config is not None:
+            setattr(
+                config,
+                SHADOW_CONTEST_TELEMETRY_ATTR,
+                {
+                    "displacements": list(displacements),
+                    "primary_key": primary_key,
+                    "shadow_key": shadow_key,
+                    "emitted": "shadow" if emit_shadow else "primary",
+                    "primary_pos": primary_pos.detach().to(device="cpu"),
+                    "shadow_pos": shadow_pos.detach().to(device="cpu"),
+                },
+            )
+        if emit_shadow:
+            return shadow_pos.to(device=primary_pos.device, dtype=primary_pos.dtype)
+        return primary_pos
+    except Exception as exc:  # noqa: BLE001 -- the shadow track cannot sink the primary
+        if is_worker_timeout_like_exception(exc):
+            raise
+        _LOGGER.warning(
+            "shadow-champion legacy-track re-run failed; emitting the primary track",
+            exc_info=True,
+        )
+        if config is not None:
+            setattr(
+                config,
+                SHADOW_CONTEST_TELEMETRY_ATTR,
+                {
+                    "displacements": list(displacements),
+                    "emitted": "primary",
+                    "error": repr(exc),
+                },
+            )
+        return primary_pos
 
 
 __all__ = [

@@ -77,9 +77,9 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_v3_referee_cost,
 )
 from dagua.layout.ops.pipelines.native_shadow_champion import (
-    ShadowChampion,
-    legacy_shadow_name,
-    stash_shadow_champion,
+    is_new_arm_candidate,
+    new_arms_disabled,
+    record_new_arm_displacement,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -2962,8 +2962,9 @@ def _router_v2_large_mini_contest(
     # repulsion family this fast path historically lacked. Clustered rows are
     # structurally unreachable here (_use_large_prism_shortlist excludes them).
     # Admission is DWU-ledger-only (never wall/process-time -- review F2), so
-    # the admitted gamma set is identical under any machine load.
-    if "tfdp_sparse" in shortlist.candidates:
+    # the admitted gamma set is identical under any machine load. The t-FDP
+    # family is a new arm: the legacy-track shadow re-run gate-closes it.
+    if "tfdp_sparse" in shortlist.candidates and not new_arms_disabled(config):
         tfdp_started = time.perf_counter()
         try:
             from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
@@ -3048,6 +3049,14 @@ def _router_v2_large_mini_contest(
         ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
         best_name,
     )
+    # Shadow-champion legacy-track contest (W2-4a / C10): a new-arm win in
+    # the large fast-path mini-contest is a displacement like any other.
+    if is_new_arm_candidate(best_name):
+        record_new_arm_displacement(
+            config,
+            route="undirected_large_mini",
+            winner_name=best_name,
+        )
     return positions[best_name]
 
 
@@ -3157,7 +3166,13 @@ def layout_native_undirected_portfolio(
         # a bounded band mini-contest instead of the unrefereed early return.
         # MAX_CONTEST_NODES itself stays 1500 -- this is a new bounded code
         # path; an explicit caller deadline still returns the incumbent bare.
-        if n > MAX_CONTEST_NODES and getattr(config, "time_budget_s", None) is None:
+        # The band's t-FDP candidates are a new arm: the legacy-track shadow
+        # re-run gate-closes the whole band path (pre-W1-A early return).
+        if (
+            n > MAX_CONTEST_NODES
+            and getattr(config, "time_budget_s", None) is None
+            and not new_arms_disabled(config)
+        ):
             try:
                 from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
                     sparse_band_contest_eligible,
@@ -3984,8 +3999,13 @@ def layout_native_undirected_portfolio(
     # into the normal contest (reference-default gamma; the band and the
     # large fast path carry the full gamma sweep). Clustered rows stay with
     # the cluster-aware families. Admission is DWU-ledger-only (never
-    # wall/process-time -- review F2).
-    if "tfdp_sparse" in shortlist.candidates and not problem.clusters:
+    # wall/process-time -- review F2). The t-FDP family is a new arm: the
+    # legacy-track shadow re-run gate-closes it.
+    if (
+        "tfdp_sparse" in shortlist.candidates
+        and not problem.clusters
+        and not new_arms_disabled(config)
+    ):
         tfdp_started = time.perf_counter()
         try:
             from dagua.layout.ops.pipelines.native_seed_replication import frozen_seed_bank
@@ -4171,7 +4191,11 @@ def layout_native_undirected_portfolio(
         planar_candidate_requires_certificate,
     )
 
-    if planar_arm_admitted(problem) and _portfolio_has_budget(config):
+    if (
+        planar_arm_admitted(problem)
+        and not new_arms_disabled(config)
+        and _portfolio_has_budget(config)
+    ):
         planar_started = time.perf_counter()
         try:
             planar_cost = estimate_native_work_cost(
@@ -4489,32 +4513,11 @@ def layout_native_undirected_portfolio(
                 best_name,
             )
             winner_pos = positions[best_name]
-    # Shadow-champion terminal contest (W2-4a / C10): when a new-arm family
-    # displaced the legacy argmax, carry the legacy champion -- through the
-    # SAME emission transforms as the winner -- to the terminal chain, which
-    # runs both tracks end-to-end and emits the referee-higher final drawing.
-    shadow_name = legacy_shadow_name(
-        best_name,
-        scores,
-        cluster_score_telemetry,
-        _select_undirected_winner,
-    )
-    if shadow_name is not None and shadow_name in positions:
-        shadow_pos = _never_nan_winner(
-            _regular_mesh_clearance_expansion(positions[shadow_name], problem),
-            problem,
-            challenger_node_sep,
-            seed,
-        )
-        stash_shadow_champion(
-            config,
-            ShadowChampion(
-                route="undirected",
-                winner_name=best_name,
-                shadow_name=shadow_name,
-                pos=shadow_pos.detach(),
-            ),
-        )
+    # Shadow-champion legacy-track contest (W2-4a / C10): a new-arm contest
+    # win arms the outermost pipeline invocation to re-run the ENTIRE solve
+    # with new arms disabled and emit the referee-higher FINAL drawing.
+    if is_new_arm_candidate(best_name):
+        record_new_arm_displacement(config, route="undirected", winner_name=best_name)
     return _never_nan_winner(winner_pos, problem, challenger_node_sep, seed)
 
 

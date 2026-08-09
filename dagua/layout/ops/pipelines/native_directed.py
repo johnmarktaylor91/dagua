@@ -23,9 +23,9 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_v3_referee_cost,
 )
 from dagua.layout.ops.pipelines.native_shadow_champion import (
-    ShadowChampion,
-    legacy_shadow_name,
-    stash_shadow_champion,
+    is_new_arm_candidate,
+    new_arms_disabled,
+    record_new_arm_displacement,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -5961,7 +5961,11 @@ def layout_native_directed_portfolio(
     # Zero-crossing-certified candidate names (planar arm); checked again on
     # the exact emitted tensor before the contest returns (W1B-1).
     planar_certified_names: set = set()
-    if planar_arm_admitted(problem) and _portfolio_has_budget(config, min_remaining_s=2.0):
+    if (
+        planar_arm_admitted(problem)
+        and not new_arms_disabled(config)
+        and _portfolio_has_budget(config, min_remaining_s=2.0)
+    ):
         try:
             planar_cost = _directed_opaque_arm_cost(problem, config, PLANAR_ARM_PRIOR_S)
             planar_cost_s = planar_cost.generation_dwu + planar_cost.reserved_score_dwu
@@ -6088,30 +6092,13 @@ def layout_native_directed_portfolio(
             cluster_score_telemetry[name] = score_telemetry
     best_name = _select_directed_winner(scores, cluster_score_telemetry)
     best_position = positions[best_name]
-    # Shadow-champion terminal contest (W2-4a / C10): when a new-arm family
-    # displaced the legacy argmax, carry the legacy champion to the terminal
-    # chain, which runs both tracks end-to-end and emits the referee-higher
-    # final drawing. Stashed at the argmax point: the dominance-gated tail
-    # arms below start from the winner, so the plain legacy champion is the
-    # legacy track's contest emission.
-    directed_shadow_name = legacy_shadow_name(
-        best_name,
-        scores,
-        cluster_score_telemetry,
-        _select_directed_winner,
-    )
-    if directed_shadow_name is not None and directed_shadow_name in positions:
-        stash_shadow_champion(
-            config,
-            ShadowChampion(
-                route="directed",
-                winner_name=best_name,
-                shadow_name=directed_shadow_name,
-                pos=positions[directed_shadow_name]
-                .detach()
-                .to(device=incumbent.device, dtype=incumbent.dtype),
-            ),
-        )
+    # Shadow-champion legacy-track contest (W2-4a / C10): a new-arm contest
+    # win arms the outermost pipeline invocation to re-run the ENTIRE solve
+    # with new arms disabled -- including the dominance-gated tail arms below
+    # and the directed terminal seams -- and emit the referee-higher FINAL
+    # drawing.
+    if is_new_arm_candidate(best_name):
+        record_new_arm_displacement(config, route="directed", winner_name=best_name)
     if best_name != "incumbent" and _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
         best_cpu = best_position.detach().to(device="cpu", dtype=torch.float32)

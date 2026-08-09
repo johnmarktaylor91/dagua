@@ -1,495 +1,627 @@
-"""Tests for the shadow-champion terminal contest (sprint2 W2-4a, C10 core).
+"""Tests for the shadow-champion legacy-track contest (sprint2 W2-4a, review F1-F4).
 
-The rome/grafo1000.14 regression (DIAG_GRAFO1000.md): the W1-B planar arm can
-honestly win the marketplace contest from a poor terminal-anneal basin, while
-the displaced legacy winner's basin polishes far higher. The fix carries BOTH
-champions through the deterministic terminal chain and emits the drawing the
-runtime referee scores higher, ties to the legacy track.
+Every displacement test drives the REAL selection seams: candidates are
+injected or biased at the generation/selection boundary only, and everything
+downstream -- displacement recording, the legacy-track shadow re-run, the
+final referee contest, and the emission -- is production code end-to-end.
+
+Top-level imports are restricted to APIs that already exist on the pre-fix
+commit so the per-finding regression tests fail BEHAVIORALLY there (a lost
+legacy drawing), not at collection.
 """
 
 from __future__ import annotations
 
-import importlib
-from typing import Any
+from typing import Any, Dict, Optional, cast
 
 import pytest
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.layout.ops.pipelines.dagua_native import _terminal_w5_polish
-from dagua.layout.ops.pipelines.native_shadow_champion import (
-    ShadowChampion,
-    is_new_arm_candidate,
-    legacy_shadow_name,
-    pop_shadow_champion,
-    stash_shadow_champion,
+from dagua.layout.graph_classify import classify_graph
+from dagua.layout.ops.pipelines import (
+    dagua_native,
+    native_directed,
+    native_planar_arm,
+    native_sparse_infrastructure,
+    native_undirected,
 )
+from dagua.layout.ops.pipelines.dagua_native import layout_dagua_native_pipeline
+from dagua.layout.ops.pipelines.native_budget import (
+    PROCESS_DEADLINE_ATTR,
+    WALL_DEADLINE_ATTR,
+    NativeBudgetLedger,
+    install_budget_ledger,
+)
+from dagua.layout.ops.pipelines.native_shadow_champion import is_new_arm_candidate
+from dagua.layout.ops.state import LayoutProblem
+
+_CONFIG_KWARGS: Dict[str, Any] = {"seed": 42}
+_LEDGER_DWU = 600.0
 
 
-def _shadow_config() -> LayoutConfig:
-    """Build a terminal-owner config for shadow-contest unit tests.
-
-    Returns
-    -------
-    LayoutConfig
-        Native config that reaches the terminal chain directly.
-    """
-    config = LayoutConfig(
-        steps=1,
-        edge_equalize_polish=True,
-        decompose_components=False,
-        route_flat_to_stress=False,
-        force_pipeline="hybrid",
-    )
-    config._dagua_native_terminal_w5_owner = True
+def _fresh_config(**overrides: Any) -> LayoutConfig:
+    """Return a fresh test config with a fresh deterministic ledger."""
+    config = LayoutConfig(**{**_CONFIG_KWARGS, **overrides})
+    install_budget_ledger(config, _LEDGER_DWU)
     return config
 
 
-def _shadow_fixture_graph() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return an 8-node chorded cycle with a clean and a jumbled drawing.
+def _wheel_graph(spokes: int = 8) -> tuple[torch.Tensor, int, torch.Tensor]:
+    """Return a wheel graph (planar, 3-connected: the planar arm admits it)."""
+    edges = []
+    for spoke in range(1, spokes + 1):
+        edges.append((0, spoke))
+        edges.append((spoke, 1 + spoke % spokes))
+    edge_index = torch.tensor(sorted(set(edges)), dtype=torch.long).t().contiguous()
+    num_nodes = spokes + 1
+    return edge_index, num_nodes, torch.full((num_nodes, 2), 20.0)
 
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-        Edge index, node sizes, a poor-basin drawing (contest-winner shaped),
-        and a clean drawing (displaced legacy champion shaped).
-    """
-    edge_index = torch.tensor(
-        [[0, 1, 2, 3, 4, 5, 6, 7, 0, 2], [1, 2, 3, 4, 5, 6, 7, 0, 4, 6]],
-        dtype=torch.long,
+
+def _k5_graph() -> tuple[torch.Tensor, int, torch.Tensor]:
+    """Return K5 (non-planar: every planar gate stays closed)."""
+    edges = [(u, v) for u in range(5) for v in range(u + 1, 5)]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return edge_index, 5, torch.full((5, 2), 20.0)
+
+
+def _k5_tail_graph(tail: int = 15) -> tuple[torch.Tensor, int, torch.Tensor]:
+    """Return K5 plus a path tail (non-planar, n large enough for band tests)."""
+    edges = [(u, v) for u in range(5) for v in range(u + 1, 5)]
+    for i in range(tail):
+        edges.append((4 + i, 5 + i))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    num_nodes = 5 + tail
+    return edge_index, num_nodes, torch.full((num_nodes, 2), 20.0)
+
+
+def _grid_dag_graph(width: int = 3, height: int = 3) -> tuple[torch.Tensor, int, torch.Tensor]:
+    """Return a planar acyclic grid (edges right/down: directed route)."""
+    edges = []
+    for y in range(height):
+        for x in range(width):
+            node = y * width + x
+            if x + 1 < width:
+                edges.append((node, node + 1))
+            if y + 1 < height:
+                edges.append((node, node + width))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    num_nodes = width * height
+    return edge_index, num_nodes, torch.full((num_nodes, 2), 20.0)
+
+
+def _bad_positions(num_nodes: int) -> torch.Tensor:
+    """Return a terrible near-collinear drawing (every node overlapping)."""
+    line = torch.arange(num_nodes, dtype=torch.float32) * 1.0e-2
+    return torch.stack((line, line), dim=1)
+
+
+def _final_referee_key(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    edge_weights: Optional[torch.Tensor] = None,
+    clusters: Optional[dict[str, Any]] = None,
+    cluster_parents: Optional[dict[str, Optional[str]]] = None,
+) -> tuple[tuple[int, float], float]:
+    """Score one final drawing with the runtime referee (pre-existing APIs)."""
+    from dagua.eval.ruler_v3 import referee_eligibility_key
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+
+    cpu_edge_index = edge_index.detach().to(device="cpu", dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=cpu_edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes.detach().to(device="cpu", dtype=torch.float32),
+        direction="TB",
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        structure=cast(Any, classify_graph(cpu_edge_index, num_nodes)),
+        edge_weights=None if edge_weights is None else edge_weights.detach().cpu(),
     )
-    node_sizes = torch.full((8, 2), 4.0, dtype=torch.float32)
-    angles = torch.arange(8, dtype=torch.float32) * (2.0 * torch.pi / 8.0)
-    clean_pos = torch.stack((torch.cos(angles), torch.sin(angles)), dim=1) * 100.0
-    jumbled_pos = torch.stack(
-        (
-            torch.arange(8, dtype=torch.float32) * 3.0,
-            (torch.arange(8, dtype=torch.float32) % 2.0) * 2.0,
-        ),
-        dim=1,
-    )
-    return edge_index, node_sizes, jumbled_pos, clean_pos
+    result = score_v3_runtime_result(pos.detach().to(device="cpu", dtype=torch.float32), problem)
+    return (referee_eligibility_key(result), float(result.scores["tiered"]))
 
 
-def _install_chain_stage_stubs(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    anneal_improves: dict[int, torch.Tensor],
-) -> None:
-    """Stub the terminal chain stages with a basin-dependent anneal.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Active monkeypatch fixture.
-    anneal_improves : dict[int, torch.Tensor]
-        Map from an incumbent tensor's ``id`` to the annealed winner it
-        reaches. Incumbents not in the map sit in a poor basin (no strict
-        V3-improving perturbation found).
-    """
-    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
-    from dagua.layout.ops.pipelines.native_finisher import (
-        W5ContinuousFacetPolishResult,
-        W5GlobalScaleSweepResult,
-        W5SMACOFStressResult,
-        W5SmallNAnnealResult,
-        make_w5_skip_result,
-    )
-
-    monkeypatch.setattr(native_finisher, "w5_predicted_skip_reason", lambda *args: None)
-    monkeypatch.setattr(native_finisher, "_finisher_slice_s", lambda config: 1.0)
-
-    def fake_run_w5_finisher(**kwargs: Any) -> Any:
-        """Return a no-accept W5 result for the track incumbent."""
-        return make_w5_skip_result(
-            incumbent_pos=kwargs["incumbent_pos"],
-            incumbent_score_pair=kwargs["incumbent_score_pair"],
-            reason="shadow_test_stub",
-            edge_index=kwargs.get("edge_index"),
-            config=kwargs.get("config"),
-        )
-
-    def fake_scale_sweep(**kwargs: Any) -> Any:
-        """Return a not-selected terminal scale sweep."""
-        return W5GlobalScaleSweepResult(
-            winner_pos=kwargs["incumbent_pos"],
-            winner_score_pair=kwargs["incumbent_score_pair"],
-            winner_scale=1.0,
-            selected=False,
-            candidates=(),
-        )
-
-    def fake_smacof(**kwargs: Any) -> Any:
-        """Return a not-selected terminal SMACOF stress polish."""
-        return W5SMACOFStressResult(
-            winner_pos=kwargs["incumbent_pos"],
-            winner_score_pair=kwargs["incumbent_score_pair"],
-            selected=False,
-            skipped_reason="shadow_test_stub",
-            candidates=(),
-        )
-
-    def fake_facet_polish(**kwargs: Any) -> Any:
-        """Return a not-selected terminal continuous facet polish."""
-        return W5ContinuousFacetPolishResult(
-            winner_pos=kwargs["incumbent_pos"],
-            winner_score_pair=kwargs["incumbent_score_pair"],
-            selected=False,
-            skipped_reason="shadow_test_stub",
-            gate_reason="shadow_test",
-            passes_completed=0,
-            evaluations=0,
-            accepted=(),
-        )
-
-    def fake_small_n_anneal(**kwargs: Any) -> Any:
-        """Return a basin-dependent terminal anneal result."""
-        incumbent_pos = kwargs["incumbent_pos"]
-        annealed = anneal_improves.get(id(incumbent_pos))
-        if annealed is None:
-            return W5SmallNAnnealResult(
-                winner_pos=incumbent_pos,
-                winner_score_pair=kwargs["incumbent_score_pair"],
-                selected=False,
-                trials_completed=1,
-                accepted_count=0,
-                skipped_reason=None,
-                candidates=(),
-            )
-        return W5SmallNAnnealResult(
-            winner_pos=annealed,
-            winner_score_pair=kwargs["incumbent_score_pair"],
-            selected=True,
-            trials_completed=1,
-            accepted_count=1,
-            skipped_reason=None,
-            candidates=(),
-        )
-
-    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
-    monkeypatch.setattr(native_finisher, "run_w5_terminal_global_scale_sweep", fake_scale_sweep)
+def _inject_bad_planar_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the planar arm emit one terrible certificate-exempt candidate."""
     monkeypatch.setattr(
-        native_finisher,
-        "run_w5_terminal_smacof_stress_polish",
-        fake_smacof,
+        native_planar_arm,
+        "build_planar_arm_candidates",
+        lambda problem, node_sep: {"planar_seeded_stress": _bad_positions(problem.num_nodes)},
+    )
+
+
+def _prefer_new_arm_undirected(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: tuple[str, ...] = ("planar_", "tfdp"),
+) -> None:
+    """Bias the undirected winner selection toward new-arm candidates.
+
+    Simulates an honest new-arm contest win (the grafo1000.14 class) while
+    keeping every downstream seam real. The wrapper falls through to the
+    real selector when no new-arm candidate is present, so the legacy-track
+    re-run selects exactly as an unbiased legacy contest would.
+    """
+    real_select = native_undirected._select_undirected_winner
+
+    def prefer(scores: Dict[str, float], telemetry: Dict[str, Any], *args: Any) -> str:
+        new_arm = sorted(name for name in scores if name.startswith(prefix))
+        if new_arm:
+            return new_arm[0]
+        return real_select(scores, telemetry, *args)
+
+    monkeypatch.setattr(native_undirected, "_select_undirected_winner", prefer)
+
+
+def _prefer_new_arm_directed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bias the directed winner selection toward new-arm candidates."""
+    real_select = native_directed._select_directed_winner
+
+    def prefer(scores: Dict[str, float], telemetry: Dict[str, Any], *args: Any) -> str:
+        new_arm = sorted(name for name in scores if is_new_arm_candidate(name))
+        if new_arm:
+            return new_arm[0]
+        return real_select(scores, telemetry, *args)
+
+    monkeypatch.setattr(native_directed, "_select_directed_winner", prefer)
+
+
+def _veto_legacy_shadow_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Veto the pre-fix in-terminal shadow admission (review F1 failure class).
+
+    The pre-fix design asked ``admit_native_work`` for permission to run the
+    safety track at the terminal seam and emitted the (weaker) primary on a
+    veto. Denying exactly that reason reproduces the budget/wall veto
+    deterministically on the pre-fix commit; the fixed design never requests
+    it (the legacy track runs unconditionally on its own fresh ledger), so
+    this patch is inert after the fix.
+    """
+    from dagua.layout.ops.pipelines import native_budget
+
+    real_admit = native_budget.admit_native_work
+
+    def admit(config: Any, cost: Any, reserve_reason: str) -> bool:
+        if reserve_reason == "shadow_champion_terminal_contest":
+            return False
+        return real_admit(config, cost, reserve_reason)
+
+    monkeypatch.setattr(native_budget, "admit_native_work", admit)
+
+
+def _run_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    config: LayoutConfig,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """Run the public native pipeline entry on one graph."""
+    return layout_dagua_native_pipeline(
+        edge_index,
+        num_nodes,
+        node_sizes,
+        config=config,
+        seed=42,
+        **kwargs,
+    )
+
+
+def _legacy_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """Run the true no-new-arm pipeline via pre-existing gates.
+
+    Closes the planar-arm structural gate, the t-FDP normal-contest
+    admission, and the band eligibility at their sources (all exist on the
+    pre-fix commit), so this reference is computable identically before and
+    after the fix.
+    """
+    with monkeypatch.context() as ctx:
+        ctx.setattr(native_planar_arm, "planar_arm_admitted", lambda problem: False)
+        ctx.setattr(native_undirected, "_sparse_contest_arm_admitted", lambda *a, **k: False)
+        ctx.setattr(native_sparse_infrastructure, "sparse_band_contest_eligible", lambda p: False)
+        return _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config(), **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# F2: the new-arm family registry must cover W1-A's t-FDP names.
+# ---------------------------------------------------------------------------
+
+
+def test_new_arm_family_covers_tfdp_and_planar() -> None:
+    """W1-A t-FDP candidate names are new-arm candidates (review F2)."""
+    for name in (
+        "tfdp",
+        "tfdp_raw",
+        "tfdp_g2",
+        "tfdp_g0.5_raw",
+        "planar_fpp",
+        "planar_seeded_stress",
+    ):
+        assert is_new_arm_candidate(name), name
+    for name in ("incumbent", "stress", "fcose_seed0", "geodesic_stress", "sfdp_prism"):
+        assert not is_new_arm_candidate(name), name
+
+
+# ---------------------------------------------------------------------------
+# F1 + F3: undirected planar displacement through the real selection seam.
+# A budget veto must retain the legacy track, never the weaker primary.
+# ---------------------------------------------------------------------------
+
+
+def test_undirected_planar_displacement_recovers_legacy_track(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vetoed shadow must still emit the legacy final drawing (F1/F3)."""
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
+
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+    _veto_legacy_shadow_admission(monkeypatch)
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
+
+    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
+    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
+    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
+    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+
+
+# ---------------------------------------------------------------------------
+# F2: t-FDP displacement in the normal undirected contest.
+# ---------------------------------------------------------------------------
+
+
+def _admit_tfdp_into_normal_contest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Open the t-FDP normal-contest gates on a small non-planar row."""
+    real_shortlist = dagua_native._undirected_route_shortlist
+
+    def shortlist_with_tfdp(*args: Any, **kwargs: Any) -> Any:
+        shortlist = real_shortlist(*args, **kwargs)
+        if "tfdp_sparse" in shortlist.candidates:
+            return shortlist
+        return dagua_native.NativeShortlist(
+            classes=shortlist.classes,
+            candidates=(*shortlist.candidates, "tfdp_sparse"),
+        )
+
+    monkeypatch.setattr(dagua_native, "_undirected_route_shortlist", shortlist_with_tfdp)
+    monkeypatch.setattr(native_undirected, "_sparse_contest_arm_admitted", lambda *a, **k: True)
+    monkeypatch.setattr(
+        native_sparse_infrastructure,
+        "tfdp_sparse_positions",
+        lambda problem, gamma, node_sep: _bad_positions(problem.num_nodes),
+    )
+
+
+def test_undirected_tfdp_displacement_recovers_legacy_track(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A t-FDP normal-contest win is a protected displacement (F2)."""
+    edge_index, num_nodes, node_sizes = _k5_graph()
+    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
+
+    _admit_tfdp_into_normal_contest(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch, prefix=("tfdp",))
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
+
+    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
+    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
+    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
+    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+
+
+# ---------------------------------------------------------------------------
+# F2: t-FDP displacement in the W1-A sparse-band mini-contest.
+# ---------------------------------------------------------------------------
+
+
+def test_sparse_band_tfdp_displacement_recovers_legacy_track(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A t-FDP band win must keep the legacy early-return reachable (F2)."""
+    edge_index, num_nodes, node_sizes = _k5_tail_graph()
+    # Shrink the contest ceiling so this row takes the band early-return
+    # path; the legacy reference closes band eligibility, exactly the
+    # pre-W1-A bare-incumbent behavior the invariant protects.
+    monkeypatch.setattr(native_undirected, "MAX_CONTEST_NODES", 10)
+    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
+
+    monkeypatch.setattr(
+        native_sparse_infrastructure,
+        "sparse_band_contest_eligible",
+        lambda problem: True,
     )
     monkeypatch.setattr(
-        native_finisher,
-        "run_w5_terminal_continuous_facet_polish",
-        fake_facet_polish,
+        native_sparse_infrastructure,
+        "tfdp_sparse_positions",
+        lambda problem, gamma, node_sep: _bad_positions(problem.num_nodes),
     )
-    monkeypatch.setattr(native_finisher, "run_w5_terminal_small_n_anneal", fake_small_n_anneal)
+    _prefer_new_arm_undirected(monkeypatch, prefix=("tfdp",))
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
+
+    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
+    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
+    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
+    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
 
 
-def test_is_new_arm_candidate_matches_planar_family_only() -> None:
-    """Only planar-arm candidate names arm the shadow contest."""
-    assert is_new_arm_candidate("planar_schnyder_f2_polished_convergent")
-    assert is_new_arm_candidate("planar_fpp_polished")
-    assert is_new_arm_candidate("planar_seeded_stress")
-    assert not is_new_arm_candidate("fcose_seed2_raw")
-    assert not is_new_arm_candidate("incumbent")
-    assert not is_new_arm_candidate("neato")
+# ---------------------------------------------------------------------------
+# F3: directed displacement with the post-argmax late stages live.
+# ---------------------------------------------------------------------------
 
 
-def test_legacy_shadow_name_detects_undirected_displacement() -> None:
-    """A planar contest win over a legacy field yields the legacy argmax."""
-    from dagua.layout.ops.pipelines.native_undirected import (
-        _ClusterScoreTelemetry,
-        _select_undirected_winner,
-    )
-
-    def telemetry(v3: float, extended: float) -> _ClusterScoreTelemetry:
-        """Build minimal contest telemetry for one candidate."""
-        return _ClusterScoreTelemetry(
-            extended_score=extended,
-            old_score=extended,
-            metrics={},
-            v3_tiered=v3,
-        )
-
-    scores = {
-        "incumbent": 47.9,
-        "fcose_seed2_raw": 75.8,
-        "planar_schnyder_f2_polished_convergent": 78.2,
-    }
-    telemetries = {
-        "incumbent": telemetry(47.9, 47.9),
-        "fcose_seed2_raw": telemetry(75.8, 75.8),
-        "planar_schnyder_f2_polished_convergent": telemetry(78.2, 78.2),
-    }
-    best_name = _select_undirected_winner(scores, telemetries)
-    assert best_name == "planar_schnyder_f2_polished_convergent"
-    assert (
-        legacy_shadow_name(best_name, scores, telemetries, _select_undirected_winner)
-        == "fcose_seed2_raw"
-    )
-
-
-def test_legacy_shadow_name_gate_stays_closed_without_displacement() -> None:
-    """A legacy contest winner never arms the shadow contest."""
-    from dagua.layout.ops.pipelines.native_undirected import (
-        _ClusterScoreTelemetry,
-        _select_undirected_winner,
-    )
-
-    def telemetry(v3: float) -> _ClusterScoreTelemetry:
-        """Build minimal contest telemetry for one candidate."""
-        return _ClusterScoreTelemetry(
-            extended_score=v3,
-            old_score=v3,
-            metrics={},
-            v3_tiered=v3,
-        )
-
-    scores = {
-        "incumbent": 47.9,
-        "fcose_seed2_raw": 79.1,
-        "planar_schnyder_f2_polished_convergent": 78.2,
-    }
-    telemetries = {name: telemetry(score) for name, score in scores.items()}
-    best_name = _select_undirected_winner(scores, telemetries)
-    assert best_name == "fcose_seed2_raw"
-    assert legacy_shadow_name(best_name, scores, telemetries, _select_undirected_winner) is None
-    # A field with no legacy candidate at all cannot arm the gate either.
-    planar_only = {"planar_fpp_polished": 78.2}
-    assert (
-        legacy_shadow_name(
-            "planar_fpp_polished",
-            planar_only,
-            {},
-            _select_undirected_winner,
-        )
-        is None
-    )
-
-
-def test_legacy_shadow_name_detects_directed_displacement() -> None:
-    """The directed contest's selection semantics arm the shadow identically."""
-    from dagua.layout.ops.pipelines.native_directed import (
-        _DirectedClusterScoreTelemetry,
-        _select_directed_winner,
-    )
-
-    def telemetry(v3: float) -> _DirectedClusterScoreTelemetry:
-        """Build minimal directed contest telemetry for one candidate."""
-        return _DirectedClusterScoreTelemetry(
-            extended_score=v3,
-            old_score=v3,
-            metrics={},
-            v3_tiered=v3,
-        )
-
-    scores = {
-        "incumbent": 60.0,
-        "dot_order": 71.5,
-        "planar_fpp_f1_polished": 74.0,
-    }
-    telemetries = {name: telemetry(score) for name, score in scores.items()}
-    best_name = _select_directed_winner(scores, telemetries)
-    assert best_name == "planar_fpp_f1_polished"
-    assert (
-        legacy_shadow_name(best_name, scores, telemetries, _select_directed_winner) == "dot_order"
-    )
-
-
-def test_pop_shadow_champion_consumes_and_validates_shape() -> None:
-    """The stash is consumed once and dropped on component-shape mismatch."""
-    config = _shadow_config()
-    champion = ShadowChampion(
-        route="undirected",
-        winner_name="planar_fpp_polished",
-        shadow_name="fcose_seed2_raw",
-        pos=torch.zeros((8, 2), dtype=torch.float32),
-    )
-    stash_shadow_champion(config, champion)
-    assert pop_shadow_champion(config, expected_nodes=8) is champion
-    # Consumed: a second pop finds nothing.
-    assert pop_shadow_champion(config, expected_nodes=8) is None
-    # A component-local stash whose shape does not match the terminal tensor
-    # is discarded (byte-inert drop).
-    stash_shadow_champion(config, champion)
-    assert pop_shadow_champion(config, expected_nodes=14) is None
-    assert getattr(config, "_dagua_native_shadow_champion", None) is None
-
-
-def test_terminal_contest_emits_legacy_polished_drawing(
+def test_directed_planar_displacement_recovers_legacy_track(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """grafo1000.14-shaped scenario: the legacy basin's polish wins the final.
+    """The directed legacy track replays late ordering/nested-stress seams (F3)."""
+    edge_index, num_nodes, node_sizes = _grid_dag_graph()
+    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
 
-    The planar-shaped contest winner enters the terminal chain from a poor
-    basin (anneal finds nothing); the displaced legacy champion's basin
-    polishes higher. The emitted drawing must be the legacy-polished one.
-    """
-    edge_index, node_sizes, jumbled_pos, clean_pos = _shadow_fixture_graph()
-    legacy_polished = clean_pos * 1.05
-    _install_chain_stage_stubs(
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_directed(monkeypatch)
+    _veto_legacy_shadow_admission(monkeypatch)
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
+
+    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
+    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
+    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
+    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+
+
+# ---------------------------------------------------------------------------
+# F4.5: weighted and clustered planar displacement rows.
+# ---------------------------------------------------------------------------
+
+
+def test_weighted_planar_displacement_recovers_legacy_track(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declared-weighted rows traverse the weighted terminal pre-stages (F4.5)."""
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    edge_weights = torch.full((edge_index.shape[1],), 3.0)
+    legacy_pos = _legacy_reference(
         monkeypatch,
-        anneal_improves={id(clean_pos): legacy_polished},
-    )
-    config = _shadow_config()
-    stash_shadow_champion(
-        config,
-        ShadowChampion(
-            route="undirected",
-            winner_name="planar_schnyder_f2_polished_convergent",
-            shadow_name="fcose_seed2_raw",
-            pos=clean_pos,
-        ),
+        edge_index,
+        num_nodes,
+        node_sizes,
+        edge_weights=edge_weights,
     )
 
-    actual = _terminal_w5_polish(
-        jumbled_pos,
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        config=config,
-        structure=None,
-        direction="TB",
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+    emitted = _run_pipeline(
+        edge_index,
+        num_nodes,
+        node_sizes,
+        _fresh_config(),
+        edge_weights=edge_weights,
     )
 
-    assert torch.equal(actual, legacy_polished)
-    # The stash is consumed by the contest.
-    assert getattr(config, "_dagua_native_shadow_champion", None) is None
+    emitted_key = _final_referee_key(
+        emitted, edge_index, num_nodes, node_sizes, edge_weights=edge_weights
+    )
+    legacy_key = _final_referee_key(
+        legacy_pos, edge_index, num_nodes, node_sizes, edge_weights=edge_weights
+    )
+    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
+    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
 
 
-def test_terminal_contest_preserves_stronger_primary_track(
+def test_clustered_planar_displacement_recovers_legacy_track(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shadow max can only help: a stronger planar final is preserved.
-
-    This is the unit-level guard for the seven W1-B planar wins -- when the
-    primary (new-arm) track finishes higher, the emitted drawing is
-    byte-identical to the no-shadow run.
-    """
-    edge_index, node_sizes, jumbled_pos, clean_pos = _shadow_fixture_graph()
-    primary_polished = clean_pos * 1.05
-    baseline_incumbent = clean_pos.clone()
-
-    _install_chain_stage_stubs(
+    """Clustered rows traverse cluster tightening in both tracks (F4.5)."""
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    clusters = {
+        "hub": [0, 1, 2, 3, 4],
+        "rim": [5, 6, 7, 8],
+    }
+    legacy_pos = _legacy_reference(
         monkeypatch,
-        anneal_improves={
-            id(clean_pos): primary_polished,
-            id(baseline_incumbent): primary_polished,
-        },
-    )
-    baseline_config = _shadow_config()
-    baseline = _terminal_w5_polish(
-        baseline_incumbent,
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        config=baseline_config,
-        structure=None,
-        direction="TB",
+        edge_index,
+        num_nodes,
+        node_sizes,
+        clusters=clusters,
     )
 
-    config = _shadow_config()
-    stash_shadow_champion(
-        config,
-        ShadowChampion(
-            route="undirected",
-            winner_name="planar_schnyder_f2_polished_convergent",
-            shadow_name="fcose_seed2_raw",
-            pos=jumbled_pos,
-        ),
-    )
-    actual = _terminal_w5_polish(
-        clean_pos,
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        config=config,
-        structure=None,
-        direction="TB",
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+    emitted = _run_pipeline(
+        edge_index,
+        num_nodes,
+        node_sizes,
+        _fresh_config(),
+        clusters=clusters,
     )
 
-    assert torch.equal(baseline, primary_polished)
-    assert torch.equal(actual, baseline)
+    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes, clusters=clusters)
+    legacy_key = _final_referee_key(
+        legacy_pos, edge_index, num_nodes, node_sizes, clusters=clusters
+    )
+    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
 
 
-def test_terminal_chain_is_byte_inert_without_displacement(
+# ---------------------------------------------------------------------------
+# F3 + F4.6 + F4.7: byte-equality oracle against a true new-arms-disabled run,
+# plus a shortlist-composition change the old finalist-mapping restriction
+# could not represent.
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_track_byte_equals_true_disabled_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a stash the terminal chain emits the primary track unchanged."""
-    edge_index, node_sizes, jumbled_pos, clean_pos = _shadow_fixture_graph()
-    del jumbled_pos
-    _install_chain_stage_stubs(monkeypatch, anneal_improves={})
-    config = _shadow_config()
-
-    actual = _terminal_w5_polish(
-        clean_pos,
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        config=config,
-        structure=None,
-        direction="TB",
+    """The legacy shadow track IS a new-arms-disabled run, byte-for-byte (F4.7)."""
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        DISABLE_NEW_ARMS_ATTR,
+        SHADOW_CONTEST_TELEMETRY_ATTR,
     )
 
-    assert torch.equal(actual, clean_pos)
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+    telemetry = getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None)
+    assert telemetry is not None
+    assert telemetry["displacements"], telemetry
+    assert telemetry["emitted"] == "shadow"
+    assert torch.equal(emitted.cpu(), telemetry["shadow_pos"])
+
+    disabled_config = _fresh_config()
+    setattr(disabled_config, DISABLE_NEW_ARMS_ATTR, True)
+    disabled_pos = _run_pipeline(edge_index, num_nodes, node_sizes, disabled_config)
+    assert torch.equal(telemetry["shadow_pos"], disabled_pos.cpu())
 
 
-def test_terminal_contest_tie_goes_to_the_legacy_track(
+def test_shortlist_composition_change_still_recovers_legacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Identical final referee keys emit the legacy-track drawing.
+    """The legacy track survives new-arm finalist-shortlist pressure (F4.6).
 
-    The two tracks finish with byte-identical drawings held in distinct
-    tensors, so both referee keys are exactly equal; the tie must emit the
-    legacy/incumbent-family track's tensor.
+    The finalist cascade is patched so that whenever a new-arm candidate is
+    present, NO legacy challenger reaches the referee: the with-arms scored
+    mapping contains no legacy champion at all (the case the old
+    finalist-mapping restriction could not represent). The legacy re-run
+    performs its own untampered finalist selection and must still recover
+    the true legacy final drawing.
     """
-    edge_index, node_sizes, _jumbled_pos, clean_pos = _shadow_fixture_graph()
-    primary_pos = clean_pos.clone()
-    _install_chain_stage_stubs(monkeypatch, anneal_improves={})
-    config = _shadow_config()
-    stash_shadow_champion(
-        config,
-        ShadowChampion(
-            route="undirected",
-            winner_name="planar_schnyder_f2_polished_convergent",
-            shadow_name="fcose_seed2_raw",
-            pos=clean_pos,
-        ),
+    from dagua.layout.ops.pipelines import native_contest_cascade
+
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
+
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+    real_select_finalists = native_contest_cascade.select_finalists
+
+    def squeeze_legacy_out(
+        positions: Dict[str, torch.Tensor],
+        proxy_scores: Dict[str, float],
+        quota_families: Dict[str, str],
+        finalist_limit: int,
+        mandatory: Any,
+    ) -> Any:
+        new_arm = sorted(name for name in positions if is_new_arm_candidate(name))
+        if new_arm:
+            return ["incumbent", *new_arm]
+        return real_select_finalists(
+            positions, proxy_scores, quota_families, finalist_limit, mandatory
+        )
+
+    monkeypatch.setattr(native_contest_cascade, "select_finalists", squeeze_legacy_out)
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
+
+    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
+    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
+    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
+    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+
+
+# ---------------------------------------------------------------------------
+# F1: reservation wiring -- the legacy track's budget plan is fixed at entry,
+# never the primary's remainder, and carries no wall-clock deadline.
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_shadow_config_is_isolated_and_ledger_only() -> None:
+    """The shadow config gets the full entry plan and no wall deadline (F1)."""
+    from dagua.layout.ops.pipelines.native_budget import LEDGER_ATTR
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        DISABLE_NEW_ARMS_ATTR,
+        build_legacy_shadow_config,
+        snapshot_ledger_plan,
     )
 
-    actual = _terminal_w5_polish(
-        primary_pos,
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        config=config,
-        structure=None,
-        direction="TB",
-    )
+    config = LayoutConfig(**_CONFIG_KWARGS)
+    install_budget_ledger(config, 50.0, reserved_tail_dwu=2.0, return_reserve_dwu=1.0)
+    plan = snapshot_ledger_plan(config)
+    assert plan is not None
 
-    assert torch.equal(actual, clean_pos)
-    # Same drawing in both tracks: identity proves the tie went to the
-    # legacy-track tensor, not the primary clone.
-    assert actual is clean_pos
+    # Simulate the primary run: the shared ledger is spent, the wall/process
+    # deadlines are installed and long expired.
+    ledger = getattr(config, LEDGER_ATTR)
+    ledger.spent_dwu = 44.0
+    setattr(config, WALL_DEADLINE_ATTR, 0.0)
+    setattr(config, PROCESS_DEADLINE_ATTR, 0.0)
+
+    shadow = build_legacy_shadow_config(config, plan)
+    assert getattr(shadow, DISABLE_NEW_ARMS_ATTR) is True
+    assert getattr(shadow, WALL_DEADLINE_ATTR, None) is None
+    assert getattr(shadow, PROCESS_DEADLINE_ATTR, None) is None
+    shadow_ledger = getattr(shadow, LEDGER_ATTR)
+    assert isinstance(shadow_ledger, NativeBudgetLedger)
+    assert shadow_ledger is not ledger
+    assert shadow_ledger.spent_dwu == 0.0
+    assert shadow_ledger.total_dwu == pytest.approx(50.0)
+    assert shadow_ledger.reserved_tail_dwu == pytest.approx(2.0)
+    assert shadow_ledger.return_reserve_dwu == pytest.approx(1.0)
+    # The primary's ledger and deadlines are untouched.
+    assert ledger.spent_dwu == pytest.approx(44.0)
+    assert getattr(config, WALL_DEADLINE_ATTR) == 0.0
 
 
-def test_shadow_contest_respects_ledger_veto(
+def test_exhausted_primary_ledger_cannot_starve_the_legacy_track(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A vetoed ledger admission skips the shadow track deterministically."""
-    edge_index, node_sizes, jumbled_pos, clean_pos = _shadow_fixture_graph()
-    _install_chain_stage_stubs(monkeypatch, anneal_improves={})
-    native_budget = importlib.import_module("dagua.layout.ops.pipelines.native_budget")
-    monkeypatch.setattr(native_budget, "admit_native_work", lambda *args: False)
-    config = _shadow_config()
-    stash_shadow_champion(
-        config,
-        ShadowChampion(
-            route="undirected",
-            winner_name="planar_schnyder_f2_polished_convergent",
-            shadow_name="fcose_seed2_raw",
-            pos=clean_pos,
-        ),
+    """Even a fully spent primary ledger never skips the safety track (F1)."""
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        SHADOW_CONTEST_TELEMETRY_ATTR,
     )
 
-    actual = _terminal_w5_polish(
-        jumbled_pos,
-        edge_index=edge_index,
-        node_sizes=node_sizes,
-        config=config,
-        structure=None,
-        direction="TB",
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+
+    # A tiny primary ledger: optional admissions starve, but the planar arm
+    # admission is patched open so the displacement still occurs.
+    monkeypatch.setattr(
+        native_undirected,
+        "admit_native_work",
+        lambda config, cost, reason: True,
+    )
+    config = LayoutConfig(**_CONFIG_KWARGS)
+    install_budget_ledger(config, 0.5)
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+
+    telemetry = getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None)
+    assert telemetry is not None, "the legacy-track shadow contest must have run"
+    assert "error" not in telemetry, telemetry
+    assert telemetry["shadow_key"] >= telemetry["primary_key"]
+    assert telemetry["emitted"] == "shadow"
+    assert torch.equal(emitted.cpu(), telemetry["shadow_pos"])
+
+
+# ---------------------------------------------------------------------------
+# Trigger-only byte-inertness: no new-arm win, no orchestration.
+# ---------------------------------------------------------------------------
+
+
+def test_no_new_arm_win_is_byte_inert() -> None:
+    """Rows without a new-arm contest win never reach the shadow branch."""
+    from dagua.layout.ops.pipelines.dagua_native import _layout_dagua_native_single_track
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        SHADOW_CONTEST_TELEMETRY_ATTR,
     )
 
-    assert torch.equal(actual, jumbled_pos)
+    edge_index, num_nodes, node_sizes = _k5_graph()
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+    assert getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None) is None
+
+    single = _layout_dagua_native_single_track(
+        edge_index,
+        num_nodes,
+        node_sizes,
+        config=_fresh_config(),
+        seed=42,
+    )
+    assert torch.equal(emitted.cpu(), single.cpu())
