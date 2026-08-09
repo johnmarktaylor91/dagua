@@ -31,6 +31,7 @@ from dagua.layout.ops.pipelines.native_finisher import (
     _w5_scaled_candidate_should_fallback,
     log_w5_telemetry,
     run_w5_finisher,
+    run_w5_sprawl_repair_candidate,
     run_w5_terminal_continuous_facet_polish,
     run_w5_terminal_global_scale_sweep,
     run_w5_terminal_smacof_stress_polish,
@@ -232,6 +233,99 @@ def test_terminal_global_scale_sweep_selects_strict_v3_argmax() -> None:
     assert result.winner_scale == pytest.approx(1.2)
     assert result.winner_score_pair.v3 == pytest.approx(11.0)
     assert torch.equal(result.winner_pos, _scale_positions_about_centroid(pos, 1.2))
+
+
+def test_sprawl_repair_candidate_is_byte_inert_when_gate_is_closed() -> None:
+    """Closed C5 and extent gates return the exact incumbent without scoring."""
+    pos, _edge_index, _node_sizes = _tiny_layout()
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        c5_whitespace_ratio=8.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    def forbidden_score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Fail if a closed gate performs an honest score.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Unexpected candidate positions.
+
+        Returns
+        -------
+        W5ScorePair
+            This return is unreachable.
+        """
+        del candidate
+        raise AssertionError("closed sprawl gate must not score")
+
+    result = run_w5_sprawl_repair_candidate(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        score_fn=forbidden_score_fn,
+    )
+
+    assert result.selected is False
+    assert result.reason == "gate_closed"
+    assert result.winner_pos is pos
+    assert result.winner_score_pair is incumbent
+    assert result.candidate_pos is None
+
+
+def test_sprawl_repair_candidate_emits_named_strict_winner() -> None:
+    """An honestly better outlier repair can become ``sprawl_repaired``."""
+    from dagua.layout.ops.sprawl_repair import radial_winsorize_positions
+
+    core = torch.stack(
+        (torch.arange(20, dtype=torch.float32), torch.zeros(20, dtype=torch.float32)),
+        dim=1,
+    )
+    pos = torch.cat((core, torch.tensor([[200.0, 0.0]])), dim=0)
+    expected = radial_winsorize_positions(pos)
+    incumbent = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        c5_whitespace_ratio=20.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    def score_fn(candidate: torch.Tensor) -> W5ScorePair:
+        """Reward only the expected winsorized candidate.
+
+        Parameters
+        ----------
+        candidate : torch.Tensor
+            Candidate positions with shape ``[N, 2]``.
+
+        Returns
+        -------
+        W5ScorePair
+            Strictly improved restricted-V3 score.
+        """
+        assert torch.equal(candidate, expected)
+        return W5ScorePair(
+            directed=11.0,
+            undirected=11.0,
+            v3=11.0,
+            c5_whitespace_ratio=12.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_sprawl_repair_candidate(
+        incumbent_pos=pos,
+        incumbent_score_pair=incumbent,
+        score_fn=score_fn,
+    )
+
+    assert result.selected is True
+    assert result.reason == "v3_argmax"
+    assert result.candidate_pos is not None
+    assert torch.equal(result.winner_pos, expected)
+    assert result.winner_score_pair.v3 == pytest.approx(11.0)
 
 
 def test_terminal_global_scale_sweep_keeps_incumbent_on_ties() -> None:
