@@ -5235,6 +5235,7 @@ def layout_native_directed_portfolio(
         return incumbent
 
     positions: Dict[str, torch.Tensor] = {"incumbent": incumbent}
+    replicated_candidate_families: dict[str, str] = {}
     seed = int(problem.seed) if problem.seed is not None else 42
     # Fidelity adapters were validated against CPU reference implementations;
     # several intentionally use NumPy internally. Keep challenger inputs on
@@ -5827,7 +5828,10 @@ def layout_native_directed_portfolio(
     if force_gate:
         try:
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
-            from dagua.layout.ops.pipelines.native_undirected import FCOSE_CONTEST_SEEDS
+            from dagua.layout.ops.pipelines.native_seed_replication import (
+                admit_seed_family,
+                frozen_seed_bank,
+            )
 
             force_cost = estimate_native_work_cost(
                 problem,
@@ -5835,42 +5839,46 @@ def layout_native_directed_portfolio(
                 {"steps": 250, "samples": None},
                 _native_device_class(config),
             )
-            force_cost_s = force_cost.generation_dwu + force_cost.reserved_score_dwu
-            for seed_offset in range(FCOSE_CONTEST_SEEDS):
-                if (
-                    not _portfolio_has_budget(config)
-                    or (n >= 120 and not _predicted_arm_budget_available(config, force_cost_s))
-                    or not admit_native_work(
-                        config,
-                        force_cost,
-                        f"optional_directed_fcose_seed{seed_offset}",
+            fcose_seeds = frozen_seed_bank(config, 42)
+            force_package_s = force_cost.generation_dwu * len(
+                fcose_seeds
+            ) + force_cost.reserved_score_dwu * min(2, len(fcose_seeds))
+            if (
+                n < 120 or _predicted_arm_budget_available(config, force_package_s)
+            ) and admit_seed_family(config, force_cost, "directed_fcose", fcose_seeds):
+                replicated_family = "fcose" if len(fcose_seeds) > 1 else None
+                for seed_offset, seed_value in enumerate(fcose_seeds):
+                    candidate_started_process = time.process_time()
+                    candidate_started = time.perf_counter()
+                    candidate = layout_fcose_pipeline(
+                        edge_index=cpu_edges,
+                        num_nodes=n,
+                        node_sizes=cpu_sizes,
+                        seed=seed_value,
+                        edge_weights=cpu_weights,
                     )
-                ):
-                    break
-                candidate_started_process = time.process_time()
-                candidate_started = time.perf_counter()
-                candidate = layout_fcose_pipeline(
-                    edge_index=cpu_edges,
-                    num_nodes=n,
-                    node_sizes=cpu_sizes,
-                    seed=42 + seed_offset,
-                    edge_weights=cpu_weights,
-                )
-                _register_challenger_variants(
-                    f"fcose_seed{seed_offset}",
-                    candidate,
-                    problem,
-                    config,
-                    positions,
-                    arm_timings=arm_timings,
-                    timing_span=(candidate_started, time.perf_counter()),
-                )
-                force_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
-                _LOGGER.info(
-                    "Directed candidate runtime family=fcose seed=%d cpu_seconds=%.3f",
-                    seed_offset,
-                    force_cpu_s,
-                )
+                    prior_names = set(positions)
+                    _register_challenger_variants(
+                        f"fcose_seed{seed_offset}",
+                        candidate,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+                    if replicated_family is not None:
+                        replicated_candidate_families.update(
+                            {name: replicated_family for name in set(positions) - prior_names}
+                        )
+                    force_cpu_s = _prediction_cpu_elapsed_s(candidate_started_process)
+                    _LOGGER.info(
+                        "Directed candidate runtime family=fcose seed=%d cpu_seconds=%.3f",
+                        seed_offset,
+                        force_cpu_s,
+                    )
+            else:
+                _LOGGER.info("Skipped directed fCoSE seed family: insufficient predicted budget")
         except Exception as exc:  # noqa: BLE001
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed fCoSE challenger failed", exc_info=True)
@@ -5980,6 +5988,21 @@ def layout_native_directed_portfolio(
         name: _proxy_directed_candidate(candidate, problem, cluster_ids, all_pairs_dist)
         for name, candidate in positions.items()
     }
+    if replicated_candidate_families:
+        from dagua.layout.ops.pipelines.native_seed_replication import retained_seed_replicas
+
+        retained_names = retained_seed_replicas(
+            positions,
+            proxy_scores,
+            replicated_candidate_families,
+        )
+        positions = {name: pos for name, pos in positions.items() if name in retained_names}
+        proxy_scores = {
+            name: score for name, score in proxy_scores.items() if name in retained_names
+        }
+        arm_timings = {
+            name: timing for name, timing in arm_timings.items() if name in retained_names
+        }
     challenger_names = sorted(
         (name for name in positions if name != "incumbent"),
         key=lambda name: (-proxy_scores[name], name),
