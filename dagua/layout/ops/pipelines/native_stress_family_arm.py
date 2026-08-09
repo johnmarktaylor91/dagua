@@ -50,14 +50,19 @@ _LOGGER = logging.getLogger(__name__)
 # band, far above every targeted row (n <= ~130 across all 14 ties).
 STRESS_FAMILY_MIN_NODES = 4
 STRESS_FAMILY_MAX_NODES = 800
-# Low-layering admission for the DIRECTED contest: symmetric-distance
-# engines are competitive with rank-based drawing only when the precedence
-# structure is shallow relative to size. avg_layer_width >= 2.0 is exactly
-# num_layers <= n/2 (each rank of the longest-path layering packs on
-# average two-plus nodes); deep chain/tree rows stay closed, and the
-# classifier's 0.0 "unmeasured" default fails closed. Cyclic digraphs have
-# no faithful layering at all, so they are low-layering by construction.
-LOW_LAYERING_MIN_AVG_LAYER_WIDTH = 2.0
+# Low-layering admission for the DIRECTED contest, COUSIN-FITTED (review
+# F4): scripts/w22_cousin_layering_fit.py on the 25 directed training
+# cousins (artifact: tests/data/w22_layering_fit.json, regenerated at the
+# packet head against the corrected-W2-1 native baseline) found competitive
+# stress rows at avg widths {1.0, 1.43, 3.67} interleaved with hopeless
+# rows -- NO width cut separates competitive from hopeless turf. The fitted
+# threshold is therefore the maximal cut that loses zero competitive
+# cousins: 1.0, the arithmetic floor of any measured layering (n/num_layers
+# >= 1). Width thus provides no exclusion beyond the classifier's 0.0
+# "unmeasured" default, which still fails closed. Cyclic digraphs have no
+# faithful layering at all, so they bypass the width check by construction.
+# tests/test_native_stress_family_arm.py pins this constant to the artifact.
+LOW_LAYERING_MIN_AVG_LAYER_WIDTH = 1.0
 # Frozen seed banks (constants, never RNG-derived). 42 first = the classic
 # adapters' historical default seed, making candidate 0 the parity floor
 # with the field engines; the rest are arbitrary distinct constants.
@@ -159,11 +164,13 @@ def stress_family_arm_admitted(problem: LayoutProblem) -> bool:
 def stress_family_directed_admitted(problem: LayoutProblem) -> bool:
     """Return whether the DIRECTED contest admits the stress-family arm.
 
-    Directed admission adds the low-layering condition on top of
-    :func:`stress_family_arm_admitted`: the tie-band evidence is stress
-    engines beating rank-based drawing on directed rows whose layering is
-    shallow (wide) relative to size. Deep hierarchies keep the gate closed
-    so the layered incumbent's turf stays byte-inert.
+    Directed admission adds the cousin-fitted low-layering condition on top
+    of :func:`stress_family_arm_admitted`. The training-cousin fit found
+    competitive stress rows down to avg width 1.0 (no separating width cut
+    exists), so the fitted threshold admits every MEASURED acyclic layering
+    and the condition only excludes the classifier's 0.0 "unmeasured"
+    default, which fails closed. Cyclic digraphs have no faithful layering
+    and are admitted by construction.
 
     Parameters
     ----------
@@ -218,7 +225,11 @@ def admit_stress_family_packages(
 
     Never wall/process-time conditional (review F2): identical input plus
     ledger state admits identical work regardless of elapsed time or machine
-    load. Each family is priced as one all-or-nothing aggregate package --
+    load. Every underlying ledger call passes ``ledger_only=True``, which
+    skips :func:`native_budget.admit_native_work`'s live wall-reserve veto
+    (the residual live-wall path the re-review found); admission is a pure
+    function of the ledger. Each family is priced as one all-or-nothing
+    aggregate package --
     every frozen trajectory's generation cost plus the reserved referee
     seats -- through W2-1's seed-family plumbing, charged before any
     generation happens. Multi-seed families fall back through deterministic
@@ -257,6 +268,7 @@ def admit_stress_family_packages(
         stress_sgd_cost,
         "stress_sgd_k",
         STRESS_SGD_SEED_BANK,
+        ledger_only=True,
     )
     maxent_cost = estimate_native_work_cost(
         problem,
@@ -269,6 +281,7 @@ def admit_stress_family_packages(
         maxent_cost,
         "maxent_stress",
         MAXENT_SEED_BANK,
+        ledger_only=True,
     )
     elk_cost = estimate_native_work_cost(
         problem,
@@ -280,6 +293,7 @@ def admit_stress_family_packages(
         config,
         replicated_work_cost(elk_cost, 1),
         "optional_stress_family_elk",
+        ledger_only=True,
     )
     return StressFamilyAdmission(
         stress_sgd_seeds=tuple(stress_sgd_seeds),

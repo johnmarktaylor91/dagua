@@ -91,6 +91,7 @@ def admit_seed_family(
     work_count: Optional[int] = None,
     package_gate: Optional[Callable[[NativeWorkCost], bool]] = None,
     ledger_reason: Optional[str] = None,
+    ledger_only: bool = False,
 ) -> tuple[int, ...]:
     """Admit the largest affordable frozen prefix as one ledger decision.
 
@@ -112,6 +113,9 @@ def admit_seed_family(
         prefix package before consulting the ledger.
     ledger_reason : str, optional
         Exact ledger reason. Defaults to ``optional_seed_family_<family>``.
+    ledger_only : bool, default=False
+        Forwarded to :func:`admit_native_work`: skip the live wall-reserve
+        veto so admission is a pure function of ledger state (review F2).
 
     Returns
     -------
@@ -137,7 +141,7 @@ def admit_seed_family(
         if package_gate is not None and not package_gate(package):
             continue
         reason = ledger_reason or f"optional_seed_family_{family}"
-        if admit_native_work(config, package, reason):
+        if admit_native_work(config, package, reason, ledger_only=ledger_only):
             return seeds[:seed_count]
     return ()
 

@@ -39,7 +39,7 @@ import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, cast
 
 import torch
 
@@ -230,7 +230,10 @@ def run_fit(args: argparse.Namespace) -> int:
             edge_index=graph.edge_index,
             num_nodes=graph.num_nodes,
             node_sizes=graph.node_sizes,
-            structure=structure,
+            # classify_graph's GraphStructure is duck-compatible with the
+            # ops.state protocol the gate reads (same cast the packet tests
+            # use to build gate-checked problems).
+            structure=cast(Any, structure),
             seed=args.seed,
         )
         candidates = build_stress_family_candidates(problem, node_sep=args.node_sep)
@@ -259,15 +262,29 @@ def run_fit(args: argparse.Namespace) -> int:
         )
 
     # Threshold establishment (acyclic rows only: cyclic digraphs have no
-    # faithful layering and bypass the width check by construction). Report
-    # the exact separation the cousins support.
+    # faithful layering and bypass the width check by construction). The
+    # fitted admission cut is the maximal ``avg_layer_width >= t`` threshold
+    # that loses ZERO competitive cousins, i.e. the minimum competitive
+    # width. When competitive and hopeless widths interleave, no separating
+    # cut exists and this degenerates to "width has no exclusion power": the
+    # shipped constant must still equal this value so the gate never rejects
+    # cousin-supported competitive turf (review F4: rejecting competitive
+    # cousins to exclude hopeless ones is not a fit, it is a guess).
     acyclic = [row for row in rows if row["is_directed_acyclic"]]
     competitive_widths = sorted(row["avg_layer_width"] for row in acyclic if row["competitive"])
     hopeless_widths = sorted(row["avg_layer_width"] for row in acyclic if not row["competitive"])
+    fitted = competitive_widths[0] if competitive_widths else None
+    separating_cut_exists = bool(
+        competitive_widths and (not hopeless_widths or max(hopeless_widths) < competitive_widths[0])
+    )
     fit = {
-        "competitive_min_width": competitive_widths[0] if competitive_widths else None,
+        "fitted_min_avg_layer_width": fitted,
         "competitive_widths": competitive_widths,
         "hopeless_widths": hopeless_widths,
+        "hopeless_excluded_at_fit": sum(
+            1 for width in hopeless_widths if fitted is not None and width < fitted
+        ),
+        "separating_cut_exists": separating_cut_exists,
         "competitive_margin_bar": COMPETITIVE_MARGIN,
     }
 
@@ -289,6 +306,26 @@ def run_fit(args: argparse.Namespace) -> int:
     print(table)
     print(f"\nfit: {json.dumps(fit)}")
     print(f"wrote {out_json}")
+
+    # End-to-end trace enforcement (review F4): the runtime gate constant
+    # must EQUAL the fit this script just produced, or the boundary does not
+    # trace to cousin evidence and the run fails loudly.
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        LOW_LAYERING_MIN_AVG_LAYER_WIDTH,
+    )
+
+    if fitted is None or abs(float(LOW_LAYERING_MIN_AVG_LAYER_WIDTH) - float(fitted)) > 1e-12:
+        print(
+            "ERROR: shipped LOW_LAYERING_MIN_AVG_LAYER_WIDTH="
+            f"{LOW_LAYERING_MIN_AVG_LAYER_WIDTH} does not equal the fitted "
+            f"threshold {fitted}; the production cut must trace to this fit.",
+            file=sys.stderr,
+        )
+        return 2
+    print(
+        f"shipped LOW_LAYERING_MIN_AVG_LAYER_WIDTH={LOW_LAYERING_MIN_AVG_LAYER_WIDTH} "
+        "== fitted threshold (trace OK)"
+    )
     return 0
 
 

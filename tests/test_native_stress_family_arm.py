@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import time
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -72,6 +74,18 @@ def _k5_tournament_problem() -> LayoutProblem:
     return _problem([(u, v) for u in range(5) for v in range(u + 1, 5)], 5)
 
 
+def _disjoint_wide_dags_problem() -> LayoutProblem:
+    """Return two disjoint K3,3 orientations: wide layering, disconnected.
+
+    Dense enough (18 edges > 11) that the classifier's component fast path
+    reports connected; the exact union-find gate must still fail closed.
+    Also non-planar (K3,3), so the row is closed for the W1-B arm too.
+    """
+    edges = [(u, v) for u in range(3) for v in range(3, 6)]
+    edges += [(6 + u, 6 + v) for u in range(3) for v in range(3, 6)]
+    return _problem(edges, 12)
+
+
 def _sha256(tensor: torch.Tensor) -> str:
     """Return the SHA-256 of a tensor's float32 CPU bytes."""
     return hashlib.sha256(
@@ -108,15 +122,32 @@ def test_gate_closes_on_disconnected_missing_structure_and_size() -> None:
     assert not stress_family_arm_admitted(long_path)
 
 
-def test_directed_gate_requires_low_layering() -> None:
-    """Wide/cyclic layering opens the directed gate; deep chains stay closed."""
+def test_directed_gate_fitted_semantics() -> None:
+    """The cousin-fitted gate admits every measured layering, fails closed
+    on unmeasured width, and bypasses the width check for cyclic digraphs.
+
+    The training-cousin fit (tests/data/w22_layering_fit.json) found
+    competitive stress rows down to avg width 1.0 -- deep chains included --
+    so chains and tournaments are ADMITTED, not closed (review F4: the
+    earlier 2.0 cut rejected cousin-supported competitive turf).
+    """
     wide = _wide_dag_problem()
     assert float(getattr(wide.structure, "avg_layer_width", 0.0)) >= (
         LOW_LAYERING_MIN_AVG_LAYER_WIDTH
     )
     assert stress_family_directed_admitted(wide)
-    assert not stress_family_directed_admitted(_chain_dag_problem())
-    assert not stress_family_directed_admitted(_k5_tournament_problem())
+    chain = _chain_dag_problem()
+    assert float(getattr(chain.structure, "avg_layer_width", 0.0)) == 1.0
+    assert stress_family_directed_admitted(chain)
+    assert stress_family_directed_admitted(_k5_tournament_problem())
+    from types import SimpleNamespace
+
+    unmeasured = _wide_dag_problem()
+    unmeasured.structure = cast(
+        Any,
+        SimpleNamespace(is_directed_acyclic=True, avg_layer_width=0.0),
+    )
+    assert not stress_family_directed_admitted(unmeasured)
     cyclic = _problem([(0, 1), (1, 2), (2, 3), (3, 0)], 4)
     assert not bool(getattr(cyclic.structure, "is_directed_acyclic", True))
     assert stress_family_directed_admitted(cyclic)
@@ -128,7 +159,8 @@ def test_directed_gate_boundary_at_frozen_layering_cut() -> None:
     The gate admits exactly at the cut (``>=``), rejects epsilon below it,
     and bypasses the width check for cyclic digraphs (no faithful layering
     exists). The cut itself is established from the training-cousin table
-    (scripts/w22_cousin_layering_fit.py); dev63 is confirmation only.
+    (scripts/w22_cousin_layering_fit.py, artifact
+    tests/data/w22_layering_fit.json); dev63 is confirmation only.
     """
     from types import SimpleNamespace
 
@@ -236,7 +268,12 @@ def test_gate_closed_undirected_row_never_builds(monkeypatch: pytest.MonkeyPatch
 
 
 def test_gate_closed_directed_row_never_builds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On a deep-chain DAG the directed contest never runs the arm."""
+    """On a disconnected directed row the contest never runs the arm.
+
+    Disconnection is the shared-gate condition that still closes directed
+    rows under the cousin-fitted width cut (every measured acyclic layering
+    is admitted after review F4).
+    """
     from dagua.layout.ops.pipelines.native_directed import (
         layout_native_directed_portfolio,
     )
@@ -248,7 +285,7 @@ def test_gate_closed_directed_row_never_builds(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(arm_module, "build_stress_family_candidates", _must_not_run)
     result = layout_native_directed_portfolio(
-        _chain_dag_problem(),
+        _disjoint_wide_dags_problem(),
         SolveState(),
         RuntimeContext(),
         LayoutConfig(seed=42),
@@ -349,18 +386,24 @@ def test_undirected_stress_admission_ignores_exhausted_wall_reserve(
     arm's pipeline, i.e. after the top-level marketplace guard but before
     Candidate S), which is exactly the load-dependent state the a5e8fff5
     seam consulted through ``_portfolio_has_budget``: there the arm was
-    silently skipped, so this test fails on that commit. Fixed admission
-    consults only the ledger, so the full frozen-bank inventory is still
-    generated.
+    silently skipped, so this test fails on that commit. A REAL ledger is
+    installed so ``admit_native_work`` actually reaches its wall-veto branch
+    (re-review F2: without one it returns ``True`` before the veto and the
+    test proves nothing). Fixed admission consults only the ledger, so the
+    full frozen-bank inventory is still generated.
     """
     from dagua.layout.ops.pipelines import sfdp as sfdp_module
-    from dagua.layout.ops.pipelines.native_budget import WALL_DEADLINE_ATTR
+    from dagua.layout.ops.pipelines.native_budget import (
+        WALL_DEADLINE_ATTR,
+        install_budget_ledger,
+    )
     from dagua.layout.ops.pipelines.native_undirected import (
         layout_native_undirected_portfolio,
     )
 
     calls, events = _recording_builder_events(monkeypatch)
     config = LayoutConfig(seed=42)
+    install_budget_ledger(config, timeout_s=10_000.0)
     real_sfdp = sfdp_module.layout_sfdp_pipeline
 
     def _expiring_sfdp(*args: object, **kwargs: object) -> object:
@@ -393,9 +436,14 @@ def test_directed_stress_admission_ignores_exhausted_wall_reserve(
     The a5e8fff5 directed seam consulted ``_portfolio_has_budget`` and
     ``_predicted_arm_budget_available`` (both live wall-deadline state); an
     exhausted reserve injected before its block skipped the arm entirely,
-    so this test fails there. Fixed admission is ledger-only.
+    so this test fails there. A REAL ledger is installed so the wall-veto
+    branch inside ``admit_native_work`` is genuinely reachable (re-review
+    F2). Fixed admission is ledger-only.
     """
-    from dagua.layout.ops.pipelines.native_budget import WALL_DEADLINE_ATTR
+    from dagua.layout.ops.pipelines.native_budget import (
+        WALL_DEADLINE_ATTR,
+        install_budget_ledger,
+    )
     from dagua.layout.ops.pipelines.native_directed import (
         layout_native_directed_portfolio,
     )
@@ -403,6 +451,7 @@ def test_directed_stress_admission_ignores_exhausted_wall_reserve(
     directed_module = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
     calls, events = _recording_builder_events(monkeypatch)
     config = LayoutConfig(seed=42)
+    install_budget_ledger(config, timeout_s=10_000.0)
     real_register = directed_module._register_challenger_variants
 
     def _expiring_register(*args: object, **kwargs: object) -> object:
@@ -487,6 +536,60 @@ def test_admission_charges_aggregate_packages_before_generation() -> None:
     ]
 
 
+def test_stress_admission_is_pure_function_of_ledger_state() -> None:
+    """Re-review F2: skewed wall deadlines cannot change stress admission.
+
+    The re-review's exact reproduction: identical input, equal-state REAL
+    ledgers, and wall deadlines skewed from long-expired to distant-future.
+    Admission, the ledger decision log, the charged DWU, and the built
+    candidate inventory/output must all be identical. At 03fda545 the
+    expired-wall config admitted nothing (five ``wall_reserve_exhausted``
+    vetoes through ``admit_native_work``), so this test fails there.
+    """
+    from dagua.layout.ops.pipelines.native_budget import (
+        LEDGER_ATTR,
+        WALL_DEADLINE_ATTR,
+        install_budget_ledger,
+    )
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        admit_stress_family_packages,
+    )
+
+    problem = _chords_problem()
+    admissions = []
+    ledger_states = []
+    inventories = []
+    for wall_skew_s in (-1_000.0, 1_000_000.0):
+        config = LayoutConfig(seed=42)
+        install_budget_ledger(config, timeout_s=10_000.0)
+        setattr(config, WALL_DEADLINE_ATTR, time.perf_counter() + wall_skew_s)
+        admission = admit_stress_family_packages(problem, config, "cpu")
+        admissions.append(admission)
+        ledger = getattr(config, LEDGER_ATTR)
+        ledger_states.append(
+            (
+                ledger.spent_dwu,
+                [(record["event"], str(record["reason"])) for record in ledger.event_log],
+            )
+        )
+        inventories.append(
+            build_stress_family_candidates(
+                problem,
+                node_sep=40.0,
+                stress_sgd_seeds=admission.stress_sgd_seeds,
+                maxent_seeds=admission.maxent_seeds,
+                include_elk=admission.elk_admitted,
+            )
+        )
+    assert admissions[0] == admissions[1]
+    assert admissions[0].any_admitted, "premise broken: a 10k-DWU ledger must admit packages"
+    assert ledger_states[0] == ledger_states[1]
+    assert sorted(inventories[0]) == _FULL_BANK_INVENTORY
+    assert sorted(inventories[1]) == _FULL_BANK_INVENTORY
+    for name, pos in inventories[0].items():
+        assert torch.equal(pos, inventories[1][name]), name
+
+
 def test_directed_quota_reserves_every_stress_family_under_proxy_cut() -> None:
     """Review F3 regression: one quota seat per normalized stress family.
 
@@ -565,15 +668,18 @@ def test_quota_entries_skip_families_already_represented() -> None:
     assert entries == {"elk_stress_arm": "elk_stress_arm"}
 
 
-# Gate-closed golden bytes, captured on the pre-packet parent 0ee2db36: rows
-# where the stress-family gate is closed must stay byte-identical. Both
-# fixtures are also closed for the W1-A/W1-B arms, so the goldens pin the
-# whole gate-closed path, not a lucky overlap.
+# Gate-closed golden bytes: rows where the stress-family gate is closed must
+# stay byte-identical to the pre-packet parent. The undirected golden was
+# captured on 0ee2db36; the directed golden was recaptured on the rebased
+# base 014db18b when the cousin-fitted width cut (review F4) opened the old
+# deep-layered fixture -- disconnection is the remaining directed closure.
+# Both fixtures are also closed for the W1-A/W1-B arms, so the goldens pin
+# the whole gate-closed path, not a lucky overlap.
 _GOLDEN_UNDIRECTED_DISJOINT_K5S_SHA256 = (
     "5d7078d63636835b3d866a4dc6613c2936aa821737515f222fc9a343ed5c190f"  # pragma: allowlist secret
 )
-_GOLDEN_DIRECTED_K5_TOURNAMENT_SHA256 = (
-    "ed8454005c92a5a836592fe3f79592c0c399fbf836db7106010580ab0338f278"  # pragma: allowlist secret
+_GOLDEN_DIRECTED_DISJOINT_WIDE_DAGS_SHA256 = (
+    "7ed90644bae20bf32346cac98ec94170fac4449109087075a9f316d570132563"  # pragma: allowlist secret
 )
 
 
@@ -593,15 +699,34 @@ def test_gate_closed_undirected_row_byte_identical_golden() -> None:
 
 
 def test_gate_closed_directed_row_byte_identical_golden() -> None:
-    """Deep-layered directed row reproduces the pre-packet bytes exactly."""
+    """Disconnected directed row reproduces the pre-packet bytes exactly."""
     from dagua.layout.ops.pipelines.native_directed import (
         layout_native_directed_portfolio,
     )
 
     result = layout_native_directed_portfolio(
-        _k5_tournament_problem(),
+        _disjoint_wide_dags_problem(),
         SolveState(),
         RuntimeContext(),
         LayoutConfig(seed=42),
     )
-    assert _sha256(result) == _GOLDEN_DIRECTED_K5_TOURNAMENT_SHA256
+    assert _sha256(result) == _GOLDEN_DIRECTED_DISJOINT_WIDE_DAGS_SHA256
+
+
+def test_layering_cut_traces_to_cousin_fit_artifact() -> None:
+    """Review F4: the shipped gate constant EQUALS the checked-in fit output.
+
+    The artifact is produced by ``scripts/w22_cousin_layering_fit.py fit``
+    (25 directed training cousins, native baseline regenerated at the
+    corrected-W2-1 base 014db18b). This pin fails whenever either side
+    drifts, so the runtime boundary always traces to cousin evidence.
+    """
+    artifact = Path(__file__).parent / "data" / "w22_layering_fit.json"
+    payload = json.loads(artifact.read_text())
+    fitted = payload["fit"]["fitted_min_avg_layer_width"]
+    assert fitted == LOW_LAYERING_MIN_AVG_LAYER_WIDTH
+    assert payload["fit"]["separating_cut_exists"] is False, (
+        "the fit artifact claims a separating width cut exists; the gate "
+        "semantics comment in native_stress_family_arm.py is now stale"
+    )
+    assert len(payload["rows"]) >= 20, "fit artifact lost its cousin rows"

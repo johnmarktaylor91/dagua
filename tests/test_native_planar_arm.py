@@ -336,14 +336,16 @@ def test_directed_contest_registers_only_certified_planar_variants(
 # where the structural gate is closed. Originally captured on 34c42d00 with
 # K5 (undirected) and K3,3 (directed) fixtures; W2-2's stress-family arm
 # legitimately gates those small connected rows, so the goldens moved to
-# fixtures closed for BOTH arms -- disjoint K5s (non-planar AND disconnected)
-# and a K5 tournament (non-planar AND deep chain-like layering) -- and were
-# recaptured on the pre-W2-2 parent 0ee2db36.
+# fixtures closed for BOTH arms. After W2-2's cousin-fitted directed width
+# cut (review F4) opened every measured connected layering, the directed
+# fixture moved again to two disjoint K3,3 orientations (non-planar AND
+# disconnected), recaptured on the rebased base 014db18b; the undirected
+# disjoint-K5s golden is unchanged from the pre-W2-2 parent 0ee2db36.
 _GOLDEN_UNDIRECTED_DISJOINT_K5S_SHA256 = (
     "5d7078d63636835b3d866a4dc6613c2936aa821737515f222fc9a343ed5c190f"  # pragma: allowlist secret
 )
-_GOLDEN_DIRECTED_K5_TOURNAMENT_SHA256 = (
-    "ed8454005c92a5a836592fe3f79592c0c399fbf836db7106010580ab0338f278"  # pragma: allowlist secret
+_GOLDEN_DIRECTED_DISJOINT_WIDE_DAGS_SHA256 = (
+    "7ed90644bae20bf32346cac98ec94170fac4449109087075a9f316d570132563"  # pragma: allowlist secret
 )
 
 
@@ -362,15 +364,21 @@ def _disjoint_k5s_problem() -> LayoutProblem:
     )
 
 
-def _k5_tournament_problem() -> LayoutProblem:
-    """Return a K5 tournament (non-planar, avg layer width 1.0: both arms closed)."""
-    edges = [(u, v) for u in range(5) for v in range(u + 1, 5)]
+def _disjoint_wide_dags_problem() -> LayoutProblem:
+    """Return two disjoint K3,3 orientations (non-planar, disconnected).
+
+    Closed for the planar arm (K3,3 minor) and for the stress-family arm
+    (exact union-find disconnection) even under W2-2's cousin-fitted width
+    cut, which admits every measured connected layering.
+    """
+    edges = [(u, v) for u in range(3) for v in range(3, 6)]
+    edges += [(6 + u, 6 + v) for u in range(3) for v in range(3, 6)]
     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
-    structure = classify_graph(edge_index, 5)
+    structure = classify_graph(edge_index, 12)
     return LayoutProblem(
         edge_index=edge_index,
-        num_nodes=5,
-        node_sizes=torch.full((5, 2), 20.0),
+        num_nodes=12,
+        node_sizes=torch.full((12, 2), 20.0),
         structure=cast(Any, structure),
         seed=42,
     )
@@ -393,16 +401,16 @@ def test_gate_closed_undirected_row_byte_identical_golden() -> None:
 
 
 def test_gate_closed_directed_row_byte_identical_golden() -> None:
-    """Non-planar chain-layered tournament reproduces the pre-packet bytes."""
+    """Non-planar disconnected DAG reproduces the pre-packet bytes."""
     from dagua.layout.ops.pipelines.native_directed import (
         layout_native_directed_portfolio,
     )
 
-    problem = _k5_tournament_problem()
+    problem = _disjoint_wide_dags_problem()
     result = layout_native_directed_portfolio(
         problem,
         SolveState(),
         RuntimeContext(),
         LayoutConfig(seed=42),
     )
-    assert _sha256(result) == _GOLDEN_DIRECTED_K5_TOURNAMENT_SHA256
+    assert _sha256(result) == _GOLDEN_DIRECTED_DISJOINT_WIDE_DAGS_SHA256

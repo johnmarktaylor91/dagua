@@ -1,0 +1,27 @@
+| graph | n | acyclic | avg_layer_width | native | stress_best (engine) | margin |
+|---|---|---|---|---|---|---|
+| north/g.10.9 | 10 | True | 1.000 | 100.00 | 99.93 (stress_sgd_k_seed42) | -0.07 |
+| north/g.10.90 | 10 | True | 1.111 | 90.79 | 87.86 (stress_sgd_k_seed42) | -2.93 |
+| north/g.11.16 | 11 | True | 1.222 | 62.81 | 59.59 (stress_sgd_k_seed7) | -3.23 |
+| north/g.11.17 | 11 | True | 1.222 | 63.06 | 59.59 (stress_sgd_k_seed7) | -3.47 |
+| north/g.11.30 | 11 | True | 1.222 | 92.86 | 78.90 (maxent_stress_seed7) | -13.96 |
+| north/g.10.91 | 10 | True | 1.250 | 89.07 | 85.40 (stress_sgd_k_seed42) | -3.67 |
+| north/g.11.35 | 11 | True | 1.375 | 99.44 | 96.89 (stress_sgd_k_seed7) | -2.55 |
+| north/g.11.36 | 11 | True | 1.375 | 98.00 | 95.34 (stress_sgd_k_seed7) | -2.66 |
+| north/g.10.8 | 10 | True | 1.429 | 97.20 | 97.05 (maxent_stress_seed7) | -0.15 |
+| north/g.11.29 | 11 | True | 1.571 | 70.01 | 63.51 (maxent_stress_seed7) | -6.50 |
+| north/g.10.94 | 10 | True | 1.667 | 70.18 | 64.16 (maxent_stress_seed7) | -6.02 |
+| north/g.11.23 | 11 | True | 1.833 | 65.23 | 62.61 (maxent_stress_seed7) | -2.62 |
+| north/g.11.25 | 11 | True | 1.833 | 65.58 | 63.34 (stress_sgd_k_seed7) | -2.25 |
+| north/g.11.24 | 11 | True | 2.200 | 89.68 | 74.53 (stress_sgd_k_seed1379) | -15.15 |
+| north/g.11.28 | 11 | True | 2.200 | 92.06 | 91.45 (stress_sgd_k_seed7) | -0.61 |
+| north/g.10.92 | 10 | True | 2.500 | 91.56 | 89.09 (stress_sgd_k_seed42) | -2.47 |
+| north/g.11.0 | 11 | True | 2.750 | 96.73 | 94.44 (stress_sgd_k_seed1379) | -2.29 |
+| north/g.11.10 | 11 | True | 2.750 | 97.09 | 94.36 (stress_sgd_k_seed42) | -2.73 |
+| north/g.11.19 | 11 | True | 2.750 | 88.50 | 67.49 (stress_sgd_k_seed1379) | -21.01 |
+| north/g.11.2 | 11 | True | 2.750 | 93.28 | 91.68 (maxent_stress_seed42) | -1.60 |
+| north/g.11.20 | 11 | True | 2.750 | 95.59 | 95.04 (stress_sgd_k_seed7) | -0.55 |
+| north/g.11.22 | 11 | True | 2.750 | 95.31 | 93.70 (stress_sgd_k_seed42) | -1.61 |
+| north/g.10.93 | 10 | True | 3.333 | 82.64 | 62.23 (maxent_stress_seed42) | -20.41 |
+| north/g.11.21 | 11 | True | 3.667 | 86.25 | 86.14 (stress_sgd_k_seed7) | -0.10 |
+| north/g.11.3 | 11 | True | 3.667 | 98.05 | 95.93 (stress_sgd_k_seed1379) | -2.12 |

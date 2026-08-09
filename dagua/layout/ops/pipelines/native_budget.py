@@ -300,6 +300,8 @@ def admit_native_work(
     config: Optional[LayoutConfig],
     cost: NativeWorkCost,
     reserve_reason: str,
+    *,
+    ledger_only: bool = False,
 ) -> bool:
     """Admit and charge optional native work if the ledger invariant fits.
 
@@ -311,6 +313,11 @@ def admit_native_work(
         Candidate generation and reserved scoring package.
     reserve_reason : str
         Stable decision reason recorded for replay.
+    ledger_only : bool, default=False
+        Skip the live wall-clock return-reserve veto so admission is a pure
+        function of the input and ledger state (review F2: the stress-family
+        packages must admit identically regardless of arrival time). Legacy
+        load-dependent arms keep the wall veto.
 
     Returns
     -------
@@ -323,7 +330,7 @@ def admit_native_work(
         return True
     amount = max(0.0, float(cost.generation_dwu)) + max(0.0, float(cost.reserved_score_dwu))
     metadata = {"family": cost.family, **cost.metadata}
-    if wall_reserve_exhausted(config, ledger.return_reserve_dwu):
+    if not ledger_only and wall_reserve_exhausted(config, ledger.return_reserve_dwu):
         _record_decision(config, "veto", "wall_reserve_exhausted", amount, metadata)
         return False
     if not _fits_ledger(ledger, cost):
