@@ -21,7 +21,6 @@ from dagua.layout.ops.ordering import _expanded_layered_graph
 from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
 from dagua.layout.ops.pipelines.native_directed import (
     DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS,
-    DIRECTED_FULL_REFEREE_TOP_K,
     DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX,
     DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH,
     DIRECTED_NESTED_STRESS_MAX_NODES,
@@ -3159,7 +3158,7 @@ def test_directed_sugiyama_ledger_admission_skips_before_run(monkeypatch: object
 
 
 def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) -> None:
-    """Directed contests quick-score all arms but full-score only challenger finalists."""
+    """Directed contests proxy all arms and deduplicate geometric referee basins."""
     from dagua.layout.ops.pipelines.native_budget import DECISION_LOG_ATTR, install_budget_ledger
 
     full_scored: list[float] = []
@@ -3266,7 +3265,9 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
     ) * len(SUGIYAMA_NODE_SEP_GRID)
     expected_candidates = expected_sugiyama_candidates + non_sugiyama_candidates
     assert len(proxy_scored) == expected_candidates
-    assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
+    # Every synthetic challenger differs only by translation, so the cascade
+    # keeps the incumbent plus the proxy argmax basin representative.
+    assert full_scored == [0.0, max(proxy_scored)]
     decision_log = getattr(config, DECISION_LOG_ATTR)
     admitted_sugiyama = [
         record["reason"]
