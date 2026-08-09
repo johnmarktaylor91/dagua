@@ -1654,6 +1654,37 @@ class W5GlobalScaleSweepResult:
 
 
 @dataclass(frozen=True)
+class W5SprawlRepairResult:
+    """Result of the candidate-only terminal radial sprawl repair.
+
+    Parameters
+    ----------
+    winner_pos : torch.Tensor
+        Incumbent or accepted repaired positions with shape ``[N, 2]``.
+    winner_score_pair : W5ScorePair
+        Honest score pair for ``winner_pos``.
+    candidate_pos : torch.Tensor, optional
+        Winsorized ``sprawl_repaired`` candidate when the gate fired.
+    candidate_score_pair : W5ScorePair, optional
+        Honest score pair when candidate scoring completed.
+    selected : bool
+        Whether ``sprawl_repaired`` strictly improved restricted V3.
+    reason : str
+        Stable gate or selection outcome for telemetry.
+    extent_ratio : float
+        Full-to-robust radial extent measured on the input geometry.
+    """
+
+    winner_pos: torch.Tensor
+    winner_score_pair: W5ScorePair
+    candidate_pos: Optional[torch.Tensor]
+    candidate_score_pair: Optional[W5ScorePair]
+    selected: bool
+    reason: str
+    extent_ratio: float
+
+
+@dataclass(frozen=True)
 class W5SmallNAnnealCandidate:
     """One scored terminal small-N anneal perturbation.
 
@@ -4346,6 +4377,186 @@ def _attach_terminal_global_scale_sweep_telemetry(
     records = list(getattr(config, "_dagua_native_terminal_scale_sweep_telemetry", []))
     records.append(payload)
     setattr(config, "_dagua_native_terminal_scale_sweep_telemetry", records)
+    telemetry_path = os.environ.get("DAGUA_W5_TELEMETRY_PATH")
+    if telemetry_path:
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def run_w5_sprawl_repair_candidate(
+    *,
+    incumbent_pos: torch.Tensor,
+    incumbent_score_pair: W5ScorePair,
+    score_fn: Callable[[torch.Tensor], W5ScorePair],
+    referee_key_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+    config: Optional[LayoutConfig] = None,
+    is_semantically_directed: bool = False,
+    declared_hierarchical: bool = False,
+    direction_is_declared: bool = False,
+) -> W5SprawlRepairResult:
+    """Emit and honestly referee one ``sprawl_repaired`` candidate.
+
+    Parameters
+    ----------
+    incumbent_pos : torch.Tensor
+        Current terminal positions with shape ``[N, 2]``.
+    incumbent_score_pair : W5ScorePair
+        Restricted-V3-backed incumbent score and C5 runtime telemetry.
+    score_fn : Callable[[torch.Tensor], W5ScorePair]
+        Existing honest scorer shared with all terminal candidates.
+    referee_key_fn : Callable[[torch.Tensor], tuple[int, float]], optional
+        Severe-G6 eligibility-key scorer.
+    config : LayoutConfig, optional
+        Prepared configuration receiving additive telemetry.
+    is_semantically_directed : bool, default=False
+        Whether edge direction has semantic meaning.
+    declared_hierarchical : bool, default=False
+        Whether the graph declares hierarchy metadata.
+    direction_is_declared : bool, default=False
+        Whether semantic direction came from explicit input metadata.
+
+    Returns
+    -------
+    W5SprawlRepairResult
+        Incumbent-preserving contest result. A closed gate returns the exact
+        incumbent tensor without calling ``score_fn``.
+    """
+    from dagua.layout.ops.sprawl_repair import (
+        radial_winsorize_positions,
+        robust_full_extent_ratio,
+        sprawl_repair_gate,
+    )
+
+    extent_ratio = robust_full_extent_ratio(incumbent_pos)
+    result = W5SprawlRepairResult(
+        winner_pos=incumbent_pos,
+        winner_score_pair=incumbent_score_pair,
+        candidate_pos=None,
+        candidate_score_pair=None,
+        selected=False,
+        reason="gate_closed",
+        extent_ratio=extent_ratio,
+    )
+    incumbent_v3 = _finite_v3_score(incumbent_score_pair)
+    if incumbent_v3 is None or not sprawl_repair_gate(
+        incumbent_pos,
+        c5_whitespace_ratio=incumbent_score_pair.c5_whitespace_ratio,
+    ):
+        _attach_sprawl_repair_telemetry(result, config)
+        return result
+
+    candidate_pos = radial_winsorize_positions(incumbent_pos)
+    if candidate_pos is incumbent_pos or torch.equal(candidate_pos, incumbent_pos):
+        result = W5SprawlRepairResult(
+            winner_pos=incumbent_pos,
+            winner_score_pair=incumbent_score_pair,
+            candidate_pos=None,
+            candidate_score_pair=None,
+            selected=False,
+            reason="geometry_unchanged",
+            extent_ratio=extent_ratio,
+        )
+        _attach_sprawl_repair_telemetry(result, config)
+        return result
+
+    try:
+        candidate_pair = score_fn(candidate_pos)
+        incumbent_key = referee_key_fn(incumbent_pos) if referee_key_fn is not None else (1, -0.0)
+        candidate_key = (
+            referee_key_fn(candidate_pos) if referee_key_fn is not None else incumbent_key
+        )
+    except Exception as exc:  # noqa: BLE001 -- optional candidate fails closed
+        if is_worker_timeout_like_exception(exc):
+            raise
+        result = W5SprawlRepairResult(
+            winner_pos=incumbent_pos,
+            winner_score_pair=incumbent_score_pair,
+            candidate_pos=candidate_pos,
+            candidate_score_pair=None,
+            selected=False,
+            reason="score_exception",
+            extent_ratio=extent_ratio,
+        )
+        _attach_sprawl_repair_telemetry(result, config)
+        return result
+
+    candidate_v3 = _finite_v3_score(candidate_pair)
+    preserve_layered_reading = _layered_preservation_required(
+        is_semantically_directed=is_semantically_directed,
+        declared_hierarchical=declared_hierarchical,
+        direction_is_declared=direction_is_declared,
+    )
+    reason = "does_not_improve_v3"
+    selected = False
+    if candidate_key < incumbent_key:
+        reason = "referee_key_regressed"
+    elif candidate_introduces_champion_ineligible_flag(
+        candidate_pair.champion_ineligibility_flags,
+        incumbent_score_pair.champion_ineligibility_flags,
+    ):
+        reason = "introduced_champion_ineligible_flag"
+    elif candidate_v3 is None:
+        reason = "missing_v3"
+    elif preserve_layered_reading and not _layered_reading_preserved(
+        candidate_pair,
+        incumbent_score_pair,
+    ):
+        reason = "layered_reading_regressed"
+    elif candidate_v3 > float(incumbent_v3) + _W5_TERMINAL_SCALE_TIE_EPS:
+        reason = "v3_argmax"
+        selected = True
+
+    result = W5SprawlRepairResult(
+        winner_pos=candidate_pos if selected else incumbent_pos,
+        winner_score_pair=candidate_pair if selected else incumbent_score_pair,
+        candidate_pos=candidate_pos,
+        candidate_score_pair=candidate_pair,
+        selected=selected,
+        reason=reason,
+        extent_ratio=extent_ratio,
+    )
+    _attach_sprawl_repair_telemetry(result, config)
+    return result
+
+
+def _attach_sprawl_repair_telemetry(
+    result: W5SprawlRepairResult,
+    config: Optional[LayoutConfig],
+) -> None:
+    """Attach one sprawl-repair contest record to the native config.
+
+    Parameters
+    ----------
+    result : W5SprawlRepairResult
+        Completed candidate contest result.
+    config : LayoutConfig, optional
+        Prepared configuration receiving telemetry.
+
+    Returns
+    -------
+    None
+        Telemetry is appended only when ``config`` is present.
+    """
+    if config is None:
+        return
+    payload = {
+        "event": "native_sprawl_repair_candidate",
+        "graph": _graph_name(config),
+        "candidate": "sprawl_repaired",
+        "selected": bool(result.selected),
+        "reason": result.reason,
+        "extent_ratio": float(result.extent_ratio),
+        "c5_whitespace_ratio": result.winner_score_pair.c5_whitespace_ratio,
+        "candidate_v3": (
+            None
+            if result.candidate_score_pair is None
+            else _finite_v3_score(result.candidate_score_pair)
+        ),
+        "winner_v3": _finite_v3_score(result.winner_score_pair),
+    }
+    records = list(getattr(config, "_dagua_native_sprawl_repair_telemetry", []))
+    records.append(payload)
+    setattr(config, "_dagua_native_sprawl_repair_telemetry", records)
     telemetry_path = os.environ.get("DAGUA_W5_TELEMETRY_PATH")
     if telemetry_path:
         with open(telemetry_path, "a", encoding="utf-8") as handle:
@@ -7550,6 +7761,7 @@ __all__ = [
     "W5PhaseTiming",
     "W5ScorePair",
     "W5Seed",
+    "W5SprawlRepairResult",
     "W5SMACOFStressCandidate",
     "W5SMACOFStressResult",
     "W5SmallNAnnealCandidate",
@@ -7562,6 +7774,7 @@ __all__ = [
     "log_w5_telemetry",
     "make_w5_skip_result",
     "run_w5_finisher",
+    "run_w5_sprawl_repair_candidate",
     "run_w5_terminal_continuous_facet_polish",
     "run_w5_terminal_global_scale_sweep",
     "run_w5_terminal_smacof_stress_polish",
