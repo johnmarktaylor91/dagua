@@ -332,44 +332,77 @@ def test_directed_contest_registers_only_certified_planar_variants(
         assert crossings == 0, f"{name} registered with {crossings} crossings"
 
 
-# Gate-closed golden bytes, captured on the pre-packet parent 34c42d00 (and
-# verified identical on fcb85d37): the planar arm must stay byte-inert on
-# rows where the structural gate is closed.
-_GOLDEN_UNDIRECTED_K5_SHA256 = (
-    "1ec653585599b72ec4df8c04bd84f41545f724b8f622421da2f36ea81eb2e982"  # pragma: allowlist secret
+# Gate-closed golden bytes: the planar arm must stay byte-inert on rows
+# where the structural gate is closed. Originally captured on 34c42d00 with
+# K5 (undirected) and K3,3 (directed) fixtures; W2-2's stress-family arm
+# legitimately gates those small connected rows, so the goldens moved to
+# fixtures closed for BOTH arms -- disjoint K5s (non-planar AND disconnected)
+# and a K5 tournament (non-planar AND deep chain-like layering) -- and were
+# recaptured on the pre-W2-2 parent 0ee2db36.
+_GOLDEN_UNDIRECTED_DISJOINT_K5S_SHA256 = (
+    "5d7078d63636835b3d866a4dc6613c2936aa821737515f222fc9a343ed5c190f"  # pragma: allowlist secret
 )
-_GOLDEN_DIRECTED_K33_SHA256 = (
-    "ba5312d450473a42cdee6cfb4a771281f50f577f985dc57968e875ad17e3771d"  # pragma: allowlist secret
+_GOLDEN_DIRECTED_K5_TOURNAMENT_SHA256 = (
+    "ed8454005c92a5a836592fe3f79592c0c399fbf836db7106010580ab0338f278"  # pragma: allowlist secret
 )
+
+
+def _disjoint_k5s_problem() -> LayoutProblem:
+    """Return two disjoint K5s (non-planar, disconnected: both arms closed)."""
+    edges = [(u, v) for u in range(5) for v in range(u + 1, 5)]
+    edges += [(5 + u, 5 + v) for u in range(5) for v in range(u + 1, 5)]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    structure = classify_graph(edge_index, 10)
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=10,
+        node_sizes=torch.full((10, 2), 20.0),
+        structure=cast(Any, structure),
+        seed=42,
+    )
+
+
+def _k5_tournament_problem() -> LayoutProblem:
+    """Return a K5 tournament (non-planar, avg layer width 1.0: both arms closed)."""
+    edges = [(u, v) for u in range(5) for v in range(u + 1, 5)]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    structure = classify_graph(edge_index, 5)
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=5,
+        node_sizes=torch.full((5, 2), 20.0),
+        structure=cast(Any, structure),
+        seed=42,
+    )
 
 
 def test_gate_closed_undirected_row_byte_identical_golden() -> None:
-    """Non-planar undirected K5 reproduces the pre-packet bytes exactly."""
+    """Disconnected non-planar row reproduces the pre-packet bytes exactly."""
     from dagua.layout.ops.pipelines.native_undirected import (
         layout_native_undirected_portfolio,
     )
 
-    problem = _k5_problem()
+    problem = _disjoint_k5s_problem()
     result = layout_native_undirected_portfolio(
         problem,
         SolveState(),
         RuntimeContext(),
         LayoutConfig(seed=42),
     )
-    assert _sha256(result) == _GOLDEN_UNDIRECTED_K5_SHA256
+    assert _sha256(result) == _GOLDEN_UNDIRECTED_DISJOINT_K5S_SHA256
 
 
 def test_gate_closed_directed_row_byte_identical_golden() -> None:
-    """Non-planar directed K3,3 reproduces the pre-packet bytes exactly."""
+    """Non-planar chain-layered tournament reproduces the pre-packet bytes."""
     from dagua.layout.ops.pipelines.native_directed import (
         layout_native_directed_portfolio,
     )
 
-    problem = _k33_dag_problem()
+    problem = _k5_tournament_problem()
     result = layout_native_directed_portfolio(
         problem,
         SolveState(),
         RuntimeContext(),
         LayoutConfig(seed=42),
     )
-    assert _sha256(result) == _GOLDEN_DIRECTED_K33_SHA256
+    assert _sha256(result) == _GOLDEN_DIRECTED_K5_TOURNAMENT_SHA256

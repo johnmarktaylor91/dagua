@@ -4196,6 +4196,52 @@ def layout_native_undirected_portfolio(
             time.perf_counter() - planar_started,
         )
 
+    # Candidate S (sprint2 W2-2): stress-family arms. The dev tie band's
+    # field-best engines are the in-house stress family (classic_maxent_stress,
+    # elk_stress, classic_stress_sgd) plus the external sgd2 adapter; this
+    # block enters exactly those basins as refereed candidates at frozen
+    # seeds (D2 staged call: telemetry family stress_sgd_k, never sgd2).
+    # Gate is input-only structure; gate-closed rows never run this block
+    # and the ledger is untouched (byte-inert).
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        STRESS_SGD_STEPS,
+        build_stress_family_candidates,
+        stress_family_arm_admitted,
+        stress_family_candidate_prefix,
+        stress_family_parity_floor,
+    )
+
+    stress_family_fired = False
+    if stress_family_arm_admitted(problem) and _portfolio_has_budget(config):
+        stress_family_started = time.perf_counter()
+        try:
+            stress_family_cost = estimate_native_work_cost(
+                problem,
+                "stress",
+                {"steps": STRESS_SGD_STEPS, "samples": None},
+                _native_device_class(config),
+            )
+            if not admit_native_work(config, stress_family_cost, "optional_stress_family_arm"):
+                _LOGGER.info("Skipped stress-family arm: insufficient predicted budget")
+            else:
+                for stress_name, stress_pos in build_stress_family_candidates(
+                    problem,
+                    node_sep=challenger_node_sep,
+                ).items():
+                    _add_challenger(
+                        stress_name,
+                        stress_pos,
+                        include_raw=stress_family_parity_floor(stress_name),
+                    )
+                    stress_family_fired = True
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("stress-family arm failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=stress_family seconds=%.3f",
+            time.perf_counter() - stress_family_started,
+        )
+
     # W2-3: derive at most two radial repairs from already-admitted geometry.
     # The 90%-radius/full-radius gate is input-only and the raw source remains
     # in ``positions``; repair therefore adds a basin without route-switching.
@@ -4296,6 +4342,21 @@ def layout_native_undirected_portfolio(
             quota_families[reserved_community_name] = _marketplace_family(reserved_community_name)
     if "sprawl_repaired" in positions:
         quota_families["sprawl_repaired"] = "sprawl_repaired"
+    if stress_family_fired and challenger_names:
+        # One best-proxy representative per stress family gets a quota seat
+        # (and the mandatory scoring floor): the cheap proxy demonstrably
+        # misranks exactly these contest classes (W1-D rank-fidelity audit),
+        # so a proxy-only cut could silently drop the basins this arm exists
+        # to test. challenger_names is proxy-sorted, so next() is the rep.
+        reserved_stress_families: set[str] = set()
+        for name in challenger_names:
+            if stress_family_candidate_prefix(name) is None:
+                continue
+            stress_family_label = _marketplace_family(name)
+            if stress_family_label in reserved_stress_families:
+                continue
+            reserved_stress_families.add(stress_family_label)
+            quota_families.setdefault(name, stress_family_label)
     from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
 
     explicit_mandatory = ["incumbent", *raw_finalist_names]

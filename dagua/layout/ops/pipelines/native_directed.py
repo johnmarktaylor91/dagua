@@ -5990,6 +5990,58 @@ def layout_native_directed_portfolio(
             _reraise_worker_timeout(exc)
             _LOGGER.warning("directed planar certificate arm failed", exc_info=True)
 
+    # Stress-family arm (sprint2 W2-2): on low-layering directed rows the
+    # tie band's field-best engines are symmetric stress solvers
+    # (classic_maxent_stress, elk_stress, classic_stress_sgd, the external
+    # sgd2 adapter); enter those basins as refereed candidates at frozen
+    # seeds (D2 staged call: telemetry family stress_sgd_k, never sgd2).
+    # Candidate admission, NEVER a route switch; the gate is input-only
+    # structure and gate-closed rows never execute this block (byte-inert).
+    from dagua.layout.ops.pipelines.native_stress_family_arm import (
+        STRESS_FAMILY_PRIOR_S,
+        build_stress_family_candidates,
+        stress_family_candidate_prefix,
+        stress_family_directed_admitted,
+    )
+
+    stress_family_fired = False
+    if stress_family_directed_admitted(problem) and _portfolio_has_budget(
+        config, min_remaining_s=2.0
+    ):
+        try:
+            stress_family_cost = _directed_opaque_arm_cost(problem, config, STRESS_FAMILY_PRIOR_S)
+            stress_family_cost_s = (
+                stress_family_cost.generation_dwu + stress_family_cost.reserved_score_dwu
+            )
+            if not _predicted_arm_budget_available(
+                config, stress_family_cost_s
+            ) or not admit_native_work(
+                config,
+                stress_family_cost,
+                "optional_directed_stress_family_arm",
+            ):
+                _LOGGER.info("Skipped directed stress-family arm: insufficient predicted budget")
+            else:
+                stress_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+                candidate_started = time.perf_counter()
+                for stress_name, stress_pos in build_stress_family_candidates(
+                    problem,
+                    node_sep=stress_node_sep,
+                ).items():
+                    _register_challenger_variants(
+                        stress_name,
+                        stress_pos,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+                    stress_family_fired = True
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed stress-family arm failed", exc_info=True)
+
     proxy_scores = {
         name: _proxy_directed_candidate(candidate, problem, cluster_ids, all_pairs_dist)
         for name, candidate in positions.items()
@@ -6047,6 +6099,26 @@ def layout_native_directed_portfolio(
             if reserved_cluster_name is not None:
                 quota_families[reserved_cluster_name] = _directed_candidate_family(
                     reserved_cluster_name
+                )
+        if stress_family_fired:
+            # The cheap directed proxy demonstrably misranks these contest
+            # classes (W1-D rank-fidelity audit), so guarantee the best-proxy
+            # stress-family candidate one honest-referee seat when the legacy
+            # family cut left the whole arm out.
+            reserved_stress_name = next(
+                (
+                    name
+                    for name in challenger_names
+                    if name not in legacy_finalists
+                    and stress_family_candidate_prefix(name) is not None
+                ),
+                None,
+            )
+            if reserved_stress_name is not None and not any(
+                stress_family_candidate_prefix(name) is not None for name in legacy_finalists
+            ):
+                quota_families[reserved_stress_name] = _directed_candidate_family(
+                    reserved_stress_name
                 )
     from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
 
