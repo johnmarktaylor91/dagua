@@ -3159,7 +3159,7 @@ def test_directed_sugiyama_ledger_admission_skips_before_run(monkeypatch: object
 
 
 def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) -> None:
-    """Directed contests quick-score all arms but full-score only challenger finalists."""
+    """Directed large contests full-score every variant in six legacy families."""
     from dagua.layout.ops.pipelines.native_budget import DECISION_LOG_ATTR, install_budget_ledger
 
     full_scored: list[float] = []
@@ -3189,9 +3189,10 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         arm_timings: Optional[dict[str, tuple[float, float]]] = None,
         timing_span: Optional[tuple[float, float]] = None,
     ) -> None:
-        """Register one variant per candidate family."""
+        """Register finished and raw variants for each candidate family."""
         del problem, config, preserve_rank_order, arm_timings, timing_span
         positions[name] = raw_pos
+        positions[f"{name}_raw"] = raw_pos.clone()
 
     def fake_proxy(
         pos: torch.Tensor,
@@ -3264,9 +3265,9 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
     expected_sugiyama_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(
         SUGIYAMA_RANK_SEP_GRID
     ) * len(SUGIYAMA_NODE_SEP_GRID)
-    expected_candidates = expected_sugiyama_candidates + non_sugiyama_candidates
+    expected_candidates = 2 * expected_sugiyama_candidates + non_sugiyama_candidates
     assert len(proxy_scored) == expected_candidates
-    assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
+    assert len(full_scored) == 1 + 2 * DIRECTED_FULL_REFEREE_TOP_K
     decision_log = getattr(config, DECISION_LOG_ATTR)
     admitted_sugiyama = [
         record["reason"]

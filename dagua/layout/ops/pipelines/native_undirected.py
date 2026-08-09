@@ -1525,9 +1525,13 @@ def _score_undirected_candidate_payload(
         )
     from dagua.eval.ruler_v3 import referee_eligibility_key, severe_g6_breach
     from dagua.layout.ops.pipelines.native_finisher import DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
-    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+    from dagua.layout.ops.pipelines.native_v3_referee import (
+        get_referee_substrate,
+        score_v3_runtime_result,
+    )
 
-    v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
+    substrate = get_referee_substrate(problem)
+    v3_result = score_v3_runtime_result(pos, problem, substrate=substrate)
     v3_key = referee_eligibility_key(v3_result)
     v3_breach = severe_g6_breach(v3_result)
     v3_reason = "severe_g6_breach" if v3_breach else "compliant"
@@ -3969,39 +3973,46 @@ def layout_native_undirected_portfolio(
     # reference counterparts. Preserve proxy budgeting for all other
     # challengers, then append every guarded raw variant deterministically.
     proxy_slot_count = full_score_budget - 1
-    proxy_finalists = challenger_names[:proxy_slot_count]
+    quota_families: dict[str, str] = {}
     if n >= LARGE_CONTEST_NODE_THRESHOLD and cluster_ids is not None and challenger_names:
         reserved_cluster_name = next(
             (
                 name
                 for name in challenger_names
-                if name not in proxy_finalists
-                and _marketplace_family(name)
-                not in {_marketplace_family(finalist) for finalist in proxy_finalists}
+                if _marketplace_family(name)
+                not in {
+                    _marketplace_family(finalist)
+                    for finalist in challenger_names[:proxy_slot_count]
+                }
             ),
             None,
         )
         if reserved_cluster_name is not None:
-            proxy_finalists.append(reserved_cluster_name)
+            quota_families[reserved_cluster_name] = _marketplace_family(reserved_cluster_name)
     if community_stress_fired and challenger_names:
         reserved_community_name = next(
             (
                 name
                 for name in challenger_names
-                if name not in proxy_finalists
-                and _marketplace_family(name).startswith("community_stress")
-                and _marketplace_family(name)
-                not in {_marketplace_family(finalist) for finalist in proxy_finalists}
+                if _marketplace_family(name).startswith("community_stress")
             ),
             None,
         )
         if reserved_community_name is not None:
-            proxy_finalists.append(reserved_community_name)
-    finalist_names = [
-        "incumbent",
-        *proxy_finalists,
-        *(name for name in raw_finalist_names if name not in proxy_finalists),
-    ]
+            quota_families[reserved_community_name] = _marketplace_family(reserved_community_name)
+    from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
+
+    explicit_mandatory = ["incumbent", *raw_finalist_names]
+    finalist_names = select_finalists(
+        positions,
+        proxy_scores,
+        quota_families,
+        full_score_budget,
+        explicit_mandatory,
+    )
+    mandatory_finalists = set(explicit_mandatory) | set(quota_families)
+    if proxy_scores:
+        mandatory_finalists.add(min(proxy_scores, key=lambda name: (-proxy_scores[name], name)))
     finalist_tail_charge = tail_cost.reserved_score_dwu * max(1, len(finalist_names))
     cluster_score_telemetry = {}
     if problem.clusters:
@@ -4040,7 +4051,7 @@ def layout_native_undirected_portfolio(
             if not _admit_v3_referee_score(
                 problem,
                 config,
-                mandatory_floor=index <= 1,
+                mandatory_floor=name in mandatory_finalists,
             ):
                 continue
             score, score_telemetry = _score_undirected_candidate_payload(
@@ -4123,7 +4134,7 @@ def layout_native_undirected_portfolio(
             if not _admit_v3_referee_score(
                 problem,
                 config,
-                mandatory_floor=index <= 1,
+                mandatory_floor=name in mandatory_finalists,
             ):
                 continue
             score, score_telemetry = _score_undirected_candidate_payload(
