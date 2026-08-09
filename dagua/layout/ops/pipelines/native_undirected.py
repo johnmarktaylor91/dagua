@@ -2930,7 +2930,7 @@ def _router_v2_large_mini_contest(
                     break
                 _admit(
                     f"tfdp_g{tfdp_gamma:g}",
-                    tfdp_sparse_positions(problem, gamma=tfdp_gamma),
+                    tfdp_sparse_positions(problem, gamma=tfdp_gamma, node_sep=node_sep),
                 )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
@@ -3898,7 +3898,11 @@ def layout_native_undirected_portfolio(
                 tfdp_sparse_positions,
             )
 
-            _add_challenger("tfdp", tfdp_sparse_positions(problem, gamma=2.0), include_raw=True)
+            _add_challenger(
+                "tfdp",
+                tfdp_sparse_positions(problem, gamma=2.0, node_sep=challenger_node_sep),
+                include_raw=True,
+            )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("tfdp undirected challenger failed", exc_info=True)
