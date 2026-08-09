@@ -287,6 +287,7 @@ _EXPECTED_OP_MODULES = (
     "sfdp",
     "sgd2_multi",
     "spatial_hash",
+    "sprawl_repair",
     "scc",
     "stress",
     "stress_sgd",
