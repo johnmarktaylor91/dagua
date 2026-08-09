@@ -523,6 +523,19 @@ def sparse_band_mini_contest(
     )
     finalists = ["incumbent", *challengers[: SPARSE_INFRA.referee_finalists]]
     proxy_argmax = challengers[0] if challengers else "incumbent"
+    # Family quota (the W1-C mandatory-set principle): the generic proxy
+    # systematically under-ranks the verbatim t-FDP drawing (measured on
+    # bcspwr07: incumbent proxied 98.1 with an honest V3 of 37, raw t-FDP
+    # proxied 85 and never got refereed), so the RAW t-FDP representative --
+    # the parity floor this arm exists for, the drawing the field engine's
+    # row actually scores -- gets one guaranteed honest-referee seat when
+    # the proxy top slots excluded it.
+    if not any(name.startswith("tfdp_") and name.endswith("_raw") for name in finalists):
+        raw_names = [
+            name for name in challengers if name.startswith("tfdp_") and name.endswith("_raw")
+        ]
+        if raw_names:
+            finalists.append(raw_names[0])
 
     scores: Dict[str, float] = {}
     telemetry: Dict[str, Any] = {}
