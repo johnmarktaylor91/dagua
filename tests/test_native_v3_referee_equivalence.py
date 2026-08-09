@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Iterable, Optional
 
 import numpy as np
@@ -18,6 +19,7 @@ from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.pipelines.native_v3_referee import (
     _runtime_v3_graph_meta,
     fast_smooth_clearance_occlusion_score,
+    get_referee_substrate,
     score_v3_runtime,
     score_v3_runtime_result,
 )
@@ -225,3 +227,30 @@ def test_score_v3_runtime_matches_frozen_restricted_oracle(weighted: bool) -> No
     large_sizes = torch.full((large_count, 2), 1.0, dtype=torch.float64)
     assert large_count >= 200
     _assert_runtime_matches_frozen(large_pos, large_edge_index, large_sizes, None)
+
+
+def test_cached_referee_substrate_is_bit_exact_and_reused() -> None:
+    """Assert cached scorer inputs preserve every full-referee output bit."""
+    edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 3, 3]], dtype=torch.long)
+    pos = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.4], [2.1, -0.2], [3.0, 0.6]],
+        dtype=torch.float64,
+    )
+    sizes = torch.tensor(
+        [[1.0, 0.8], [0.9, 1.1], [1.2, 0.7], [1.0, 1.0]],
+        dtype=torch.float64,
+    )
+    problem = _problem(pos, edge_index, sizes)
+    distances = _all_pairs(edge_index, int(pos.shape[0]))
+    uncached = score_v3_runtime_result(pos, problem, all_pairs_dist=distances)
+    substrate = get_referee_substrate(problem)
+    cached = score_v3_runtime_result(pos, problem, substrate=substrate)
+    assert cached == uncached
+    assert get_referee_substrate(problem) is substrate
+    assert not substrate.csr_offsets.flags.writeable
+    assert not substrate.all_pairs_dist.flags.writeable
+
+
+def test_referee_substrate_does_not_accept_caller_owned_distances() -> None:
+    """Assert callers cannot poison the graph-keyed cache with foreign APSP data."""
+    assert "all_pairs_dist" not in inspect.signature(get_referee_substrate).parameters

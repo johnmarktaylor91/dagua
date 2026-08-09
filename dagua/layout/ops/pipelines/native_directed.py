@@ -464,9 +464,13 @@ def _score_directed_candidate_referee_payload(
     )
     from dagua.eval.ruler_v3 import severe_g6_breach
     from dagua.layout.ops.pipelines.native_finisher import DEGENERACY_CHAMPION_INELIGIBLE_FLAGS
-    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+    from dagua.layout.ops.pipelines.native_v3_referee import (
+        get_referee_substrate,
+        score_v3_runtime_result,
+    )
 
-    v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
+    substrate = get_referee_substrate(problem)
+    v3_result = score_v3_runtime_result(pos, problem, substrate=substrate)
     v3_key = _runtime_referee_key_from_result(v3_result)
     v3_breach = severe_g6_breach(v3_result)
     v3_reason = "severe_g6_breach" if v3_breach else "compliant"
@@ -578,7 +582,10 @@ def _score_directed_candidate_payload(
         w5_honest_axes_from_metrics,
         w5_score_pair_from_v3_result,
     )
-    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+    from dagua.layout.ops.pipelines.native_v3_referee import (
+        get_referee_substrate,
+        score_v3_runtime_result,
+    )
     from dagua.metrics import composite, composite_undirected, full
 
     numeric = full(
@@ -599,7 +606,8 @@ def _score_directed_candidate_payload(
         cluster_labels=problem.cluster_labels,
     )
     numeric["declared_hierarchical"] = True
-    v3_result = score_v3_runtime_result(pos, problem, all_pairs_dist=all_pairs_dist)
+    substrate = get_referee_substrate(problem)
+    v3_result = score_v3_runtime_result(pos, problem, substrate=substrate)
     return (
         w5_score_pair_from_v3_result(
             directed=float(composite(numeric)),
@@ -5905,9 +5913,10 @@ def layout_native_directed_portfolio(
         (name for name in positions if name != "incumbent"),
         key=lambda name: (-proxy_scores[name], name),
     )
-    if n < DIRECTED_LARGE_NODE_THRESHOLD:
-        finalist_names = ["incumbent", *challenger_names]
-    else:
+    quota_families: dict[str, str] = {}
+    legacy_finalists: list[str] = []
+    finalist_limit = len(positions)
+    if n >= DIRECTED_LARGE_NODE_THRESHOLD:
         admitted_families: list[str] = []
         for name in challenger_names:
             family = _directed_candidate_family(name)
@@ -5916,36 +5925,48 @@ def layout_native_directed_portfolio(
             admitted_families.append(family)
             if len(admitted_families) >= DIRECTED_FULL_REFEREE_TOP_K:
                 break
-        finalist_names = ["incumbent"]
-        finalist_names.extend(
+        legacy_finalists = [
             name
             for name in challenger_names
             if _directed_candidate_family(name) in admitted_families
-        )
+        ]
+        # The legacy limit counts families, so every raw/convergent variant in
+        # those families remains a finalist; quotas may only add to this set.
+        finalist_limit = len(legacy_finalists) + 1
         if cluster_ids is not None:
             reserved_cluster_name = next(
                 (
                     name
                     for name in challenger_names
-                    if name not in finalist_names
+                    if name not in legacy_finalists
                     and _directed_candidate_family(name)
-                    not in {
-                        _directed_candidate_family(finalist)
-                        for finalist in finalist_names
-                        if finalist != "incumbent"
-                    }
+                    not in {_directed_candidate_family(finalist) for finalist in legacy_finalists}
                 ),
                 None,
             )
             if reserved_cluster_name is not None:
-                finalist_names.append(reserved_cluster_name)
+                quota_families[reserved_cluster_name] = _directed_candidate_family(
+                    reserved_cluster_name
+                )
+    from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
+
+    finalist_names = select_finalists(
+        positions,
+        proxy_scores,
+        quota_families,
+        finalist_limit,
+        ["incumbent", *legacy_finalists],
+    )
+    mandatory_finalists = {"incumbent", *quota_families}
+    if proxy_scores:
+        mandatory_finalists.add(min(proxy_scores, key=lambda name: (-proxy_scores[name], name)))
     for name in finalist_names:
         if name == "incumbent":
             continue
         if not _admit_v3_referee_score(
             problem,
             config,
-            mandatory_floor=name == finalist_names[1] if len(finalist_names) > 1 else False,
+            mandatory_floor=name in mandatory_finalists,
         ):
             continue
         if name in scores and name in cluster_score_telemetry:
