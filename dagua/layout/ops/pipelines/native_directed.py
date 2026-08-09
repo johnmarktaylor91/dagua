@@ -5905,6 +5905,51 @@ def layout_native_directed_portfolio(
         _reraise_worker_timeout(exc)
         _LOGGER.warning("directed dagre-compound challenger failed", exc_info=True)
 
+    # Planar-certificate arm (sprint2 W1-B): directed planar rows get the
+    # same FPP/Schnyder/Tutte/seeded candidates as the undirected contest,
+    # entered as ordinary refereed candidates -- the full ruler, DAG bonuses
+    # included, decides. This is a candidate admission, NEVER a route switch
+    # (the dagua_native try_planar_first objection applies to route
+    # switching only). Gate is input-only structure; gate-closed rows never
+    # execute this block and the ledger is untouched (byte-inert).
+    from dagua.layout.ops.pipelines.native_planar_arm import (
+        PLANAR_ARM_PRIOR_S,
+        build_planar_arm_candidates,
+        planar_arm_admitted,
+    )
+
+    if planar_arm_admitted(problem) and _portfolio_has_budget(config, min_remaining_s=2.0):
+        try:
+            planar_cost = _directed_opaque_arm_cost(problem, config, PLANAR_ARM_PRIOR_S)
+            planar_cost_s = planar_cost.generation_dwu + planar_cost.reserved_score_dwu
+            if not _predicted_arm_budget_available(config, planar_cost_s) or not admit_native_work(
+                config,
+                planar_cost,
+                "optional_directed_planar_certificate_arm",
+            ):
+                _LOGGER.info(
+                    "Skipped directed planar certificate arm: insufficient predicted budget"
+                )
+            else:
+                planar_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
+                candidate_started = time.perf_counter()
+                for planar_name, planar_pos in build_planar_arm_candidates(
+                    problem,
+                    node_sep=planar_node_sep,
+                ).items():
+                    _register_challenger_variants(
+                        planar_name,
+                        planar_pos,
+                        problem,
+                        config,
+                        positions,
+                        arm_timings=arm_timings,
+                        timing_span=(candidate_started, time.perf_counter()),
+                    )
+        except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("directed planar certificate arm failed", exc_info=True)
+
     proxy_scores = {
         name: _proxy_directed_candidate(candidate, problem, cluster_ids, all_pairs_dist)
         for name, candidate in positions.items()

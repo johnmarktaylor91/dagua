@@ -278,6 +278,7 @@ _EXPECTED_OP_MODULES = (
     "optimize",
     "openord",
     "ordering",
+    "planar_polish",
     "postprocess",
     "preprocess",
     "project",
