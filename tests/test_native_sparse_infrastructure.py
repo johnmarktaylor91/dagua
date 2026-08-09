@@ -275,7 +275,7 @@ class TestBandContest:
         monkeypatch.setattr(
             sparse_module,
             "tfdp_sparse_positions",
-            lambda _problem, *, gamma, seed=None: challenger_pos * (1.0 if gamma else 1.0),
+            lambda _problem, *, gamma, seed=None, node_sep=0.0: challenger_pos.clone(),
         )
         monkeypatch.setattr(
             native_undirected, "_large_prism_shortlist_candidate", lambda *_args: None
@@ -342,6 +342,30 @@ class TestTfdpWiring:
         assert bool(torch.isfinite(pos).all().item())
         # Determinism: the same problem seed reproduces the same layout.
         assert torch.equal(pos, tfdp_sparse_positions(problem, gamma=2.0))
+
+
+class TestScaleToNodeUnits:
+    def test_median_edge_matches_box_plus_sep_target(self) -> None:
+        from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
+            _scale_to_node_units,
+        )
+
+        problem = LayoutProblem(
+            edge_index=torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long),
+            num_nodes=4,
+            node_sizes=torch.full((4, 2), 30.0),
+            seed=1,
+        )
+        # Reference-unit-scale drawing: median edge length 0.01.
+        pos = torch.tensor([[0.0, 0.0], [0.01, 0.0], [0.02, 0.0], [0.03, 0.0]], dtype=torch.float32)
+        scaled = _scale_to_node_units(pos, problem, node_sep=36.0)
+        src, dst = problem.edge_index
+        median_edge = float((scaled[src] - scaled[dst]).norm(dim=1).median().item())
+        box_diag = float(problem.node_sizes.norm(dim=1).median().item())
+        assert median_edge == pytest.approx(box_diag + 36.0, rel=1e-5)
+        # Similarity transform only: relative geometry is preserved.
+        ratio = (scaled[3] - scaled[0]).norm() / (scaled[1] - scaled[0]).norm()
+        assert float(ratio.item()) == pytest.approx(3.0, rel=1e-5)
 
 
 class TestDegree2Fraction:
