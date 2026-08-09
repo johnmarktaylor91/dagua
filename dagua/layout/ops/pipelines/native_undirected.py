@@ -3947,6 +3947,45 @@ def layout_native_undirected_portfolio(
             time.perf_counter() - community_started,
         )
 
+    # Candidate P (sprint2 W1-B): planar-certificate arm. Exact planarity and
+    # the embedding are already cached by graph_classify (zero detection cost
+    # here); the FPP/Schnyder parity floors plus planarity-guarded polish,
+    # outer-face Tutte variants, and an embedding-seeded stress challenger
+    # enter through the common refereed path. The gate is input-only
+    # structure (exact is_planar + cached embedding + n cap + single
+    # component); on every other row this block never runs and the ledger is
+    # untouched (byte-inert).
+    from dagua.layout.ops.pipelines.native_planar_arm import (
+        PLANAR_ARM_POLISH_STEPS,
+        build_planar_arm_candidates,
+        planar_arm_admitted,
+    )
+
+    if planar_arm_admitted(problem) and _portfolio_has_budget(config):
+        planar_started = time.perf_counter()
+        try:
+            planar_cost = estimate_native_work_cost(
+                problem,
+                "stress",
+                {"steps": PLANAR_ARM_POLISH_STEPS, "samples": None},
+                _native_device_class(config),
+            )
+            if not admit_native_work(config, planar_cost, "optional_planar_certificate_arm"):
+                _LOGGER.info("Skipped planar certificate arm: insufficient predicted budget")
+            else:
+                for planar_name, planar_pos in build_planar_arm_candidates(
+                    problem,
+                    node_sep=challenger_node_sep,
+                ).items():
+                    _add_challenger(planar_name, planar_pos, include_raw=True)
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("planar certificate arm failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=planar_arm seconds=%.3f",
+            time.perf_counter() - planar_started,
+        )
+
     # Keep the incumbent plus a deterministic proxy-ranked challenger
     # shortlist. Only these finalists reach the frozen honest ruler.
     from dagua.metrics import _all_pairs_unweighted, _build_csr
