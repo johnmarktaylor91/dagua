@@ -5840,12 +5840,18 @@ def layout_native_directed_portfolio(
                 _native_device_class(config),
             )
             fcose_seeds = frozen_seed_bank(config, 42)
-            force_package_s = force_cost.generation_dwu * len(
-                fcose_seeds
-            ) + force_cost.reserved_score_dwu * min(2, len(fcose_seeds))
-            if (
-                n < 120 or _predicted_arm_budget_available(config, force_package_s)
-            ) and admit_seed_family(config, force_cost, "directed_fcose", fcose_seeds):
+            fcose_seeds = admit_seed_family(
+                config,
+                force_cost,
+                "directed_fcose",
+                fcose_seeds,
+                package_gate=lambda package: n < 120
+                or _predicted_arm_budget_available(
+                    config,
+                    package.generation_dwu + package.reserved_score_dwu,
+                ),
+            )
+            if fcose_seeds:
                 replicated_family = "fcose" if len(fcose_seeds) > 1 else None
                 for seed_offset, seed_value in enumerate(fcose_seeds):
                     candidate_started_process = time.process_time()

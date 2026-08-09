@@ -395,6 +395,47 @@ def sparse_arm_cost_admitted(
     return admit_native_work(config, replicated_work_cost(cost, seed_count), reason)
 
 
+def sparse_arm_seed_prefix_admitted(
+    problem: LayoutProblem,
+    config: Optional["LayoutConfig"],
+    device_class: str,
+    reason: str,
+    seeds: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Admit the largest affordable frozen prefix for a sparse arm.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying the optional budget ledger.
+    device_class : str
+        Frozen cost-table device axis (``"cpu"`` or ``"cuda"``).
+    reason : str
+        Stable ledger decision reason.
+    seeds : tuple[int, ...]
+        Frozen absolute seed bank in deterministic prefix order.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Largest admitted prefix, or an empty tuple when the base arm itself
+        is unaffordable.
+    """
+    from dagua.layout.ops.pipelines.native_seed_replication import admit_seed_family
+
+    n = int(problem.num_nodes)
+    num_edges = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
+    cost = estimate_native_work_cost(
+        problem,
+        "stress",
+        {"steps": 1, "sample_pairs": n * max(num_edges, 1)},
+        device_class,
+    )
+    return admit_seed_family(config, cost, reason, seeds, ledger_reason=reason)
+
+
 def sparse_band_mini_contest(
     incumbent_pos: torch.Tensor,
     problem: LayoutProblem,

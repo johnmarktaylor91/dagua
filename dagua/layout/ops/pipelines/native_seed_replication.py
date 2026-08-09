@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Mapping, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, Optional
 
 import torch
 
@@ -20,6 +20,7 @@ FROZEN_CONTEST_SEED_OFFSETS: tuple[int, ...] = (0, 1, 2, 17, 43)
 DEFAULT_STOCHASTIC_SEED_COUNT = len(FROZEN_CONTEST_SEED_OFFSETS)
 SEED_REPLICA_FINALISTS_PER_FAMILY = 2
 SEED_COUNT_OVERRIDE_ATTR = "_dagua_native_stochastic_seed_count"
+_FALLBACK_SEED_COUNTS = (3, 1)
 
 
 def frozen_seed_bank(
@@ -88,8 +89,10 @@ def admit_seed_family(
     family: str,
     seeds: tuple[int, ...],
     work_count: Optional[int] = None,
-) -> bool:
-    """Admit every seed in a stochastic arm family as one ledger decision.
+    package_gate: Optional[Callable[[NativeWorkCost], bool]] = None,
+    ledger_reason: Optional[str] = None,
+) -> tuple[int, ...]:
+    """Admit the largest affordable frozen prefix as one ledger decision.
 
     Parameters
     ----------
@@ -104,15 +107,39 @@ def admit_seed_family(
     work_count : int, optional
         Total family trajectories when each frozen seed is combined with a
         fixed parameter grid. Defaults to the number of seeds.
+    package_gate : callable, optional
+        Additional deterministic admission predicate applied to each complete
+        prefix package before consulting the ledger.
+    ledger_reason : str, optional
+        Exact ledger reason. Defaults to ``optional_seed_family_<family>``.
 
     Returns
     -------
-    bool
-        Whether the complete family package was admitted.
+    tuple[int, ...]
+        Admitted frozen prefix. An empty tuple means even the pre-packet base
+        arm was rejected.
     """
-    trajectory_count = len(seeds) if work_count is None else max(len(seeds), int(work_count))
-    package = replicated_work_cost(base_cost, trajectory_count)
-    return admit_native_work(config, package, f"optional_seed_family_{family}")
+    if not seeds:
+        raise ValueError("seeds must not be empty")
+    total_trajectories = len(seeds) if work_count is None else max(len(seeds), int(work_count))
+    candidate_counts = [len(seeds)]
+    candidate_counts.extend(count for count in _FALLBACK_SEED_COUNTS if count < len(seeds))
+    for seed_count in candidate_counts:
+        # Parameter grids scale with the chosen seed prefix (for example,
+        # tsNET runs two fixed perplexities for every admitted seed).
+        trajectory_count = max(
+            seed_count,
+            (total_trajectories * seed_count + len(seeds) - 1) // len(seeds),
+        )
+        package = replicated_work_cost(base_cost, trajectory_count)
+        package.metadata["seed_count"] = seed_count
+        package.metadata["trajectory_count"] = trajectory_count
+        if package_gate is not None and not package_gate(package):
+            continue
+        reason = ledger_reason or f"optional_seed_family_{family}"
+        if admit_native_work(config, package, reason):
+            return seeds[:seed_count]
+    return ()
 
 
 def retained_seed_replicas(
@@ -162,12 +189,27 @@ def retained_seed_replicas(
             continue
         family_candidates = {name: candidates[name] for name in names}
         family_proxy_scores = {name: proxy_scores[name] for name in names}
+        raw_names = [name for name in names if name.endswith("_raw")]
+        if raw_names:
+            best_raw = min(raw_names, key=lambda name: (-family_proxy_scores[name], name))
+            retained.add(best_raw)
+            family_candidates = {
+                name: candidate
+                for name, candidate in family_candidates.items()
+                if name not in raw_names
+            }
+            family_proxy_scores = {
+                name: score for name, score in family_proxy_scores.items() if name not in raw_names
+            }
+        remaining_slots = finalists_per_family - int(bool(raw_names))
+        if remaining_slots == 0 or not family_candidates:
+            continue
         retained.update(
             select_finalists(
                 family_candidates,
                 family_proxy_scores,
                 {},
-                finalists_per_family,
+                remaining_slots,
                 [],
             )
         )
