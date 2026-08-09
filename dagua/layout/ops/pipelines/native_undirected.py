@@ -2535,7 +2535,9 @@ def _weighted_cluster_smacof_nonmetric_candidate(
             else problem.node_sizes.detach().to(device="cpu", dtype=torch.float32)
         ),
         seed=seed,
-        edge_weights=problem.edge_weights.detach().to(device="cpu", dtype=torch.float32),
+        edge_weights=problem.edge_weights.detach().to(  # type: ignore[union-attr]
+            device="cpu", dtype=torch.float32
+        ),
     )
     target = WEIGHTED_STRESS_MAJOR_TARGET_DIAG_MULTIPLIER * _median_node_box_diagonal(
         problem.node_sizes, node_sep
@@ -3143,6 +3145,11 @@ def layout_native_undirected_portfolio(
 
     raw_finalist_names: list[str] = []
     arm_s_candidate_names: set[str] = set()
+    # Zero-crossing-certified candidate names (planar arm). Every registered
+    # variant carrying a name in this set has passed an exact crossing count
+    # AFTER its last geometry-affecting transform; the winner seam re-checks
+    # before emission (W1B-1: the certificate must survive registration).
+    planar_certified_names: set[str] = set()
     tail_cost = estimate_native_work_cost(
         problem,
         "ruler",
@@ -3161,6 +3168,7 @@ def layout_native_undirected_portfolio(
         raw_pos: torch.Tensor,
         *,
         include_raw: bool = False,
+        require_zero_crossings: bool = False,
     ) -> None:
         """Repair, project, guard, and score one raw challenger.
 
@@ -3174,12 +3182,21 @@ def layout_native_undirected_portfolio(
             Register a guarded unprojected variant as an honest-ruler
             finalist. Used by fidelity challengers whose benchmark reference
             was scored without overlap projection.
+        require_zero_crossings : bool, default=False
+            Enforce the exact planarity certificate on EVERY registered
+            variant of this candidate (raw, legacy projection, convergent
+            projection). A variant whose exact crossing count is nonzero
+            after its final geometry transform is dropped, never registered
+            (W1B-1: the overlap projectors run after the guarded polish and
+            can reintroduce crossings a "planar" candidate must not carry).
 
         Returns
         -------
         None
             Candidates are registered in the enclosing contest dictionaries.
         """
+        from dagua.layout.ops.planar_polish import exact_crossing_count
+
         if not bool(torch.isfinite(raw_pos).all().item()):
             _LOGGER.info("Rejected undirected candidate %s: non-finite coordinates", name)
             return
@@ -3192,9 +3209,15 @@ def layout_native_undirected_portfolio(
             )
             if degenerate:
                 _LOGGER.info("Rejected undirected candidate %s: %s", raw_name, reason)
+            elif require_zero_crossings and exact_crossing_count(raw_pos, problem.edge_index) != 0:
+                _LOGGER.info(
+                    "Rejected undirected candidate %s: planarity certificate failed", raw_name
+                )
             else:
                 positions[raw_name] = raw_pos
                 raw_finalist_names.append(raw_name)
+                if require_zero_crossings:
+                    planar_certified_names.add(raw_name)
 
         # Repair, not default (r80 round 4): the candidate keeps its raw
         # layout byte-identical unless the isolated-fling trigger fires, in
@@ -3245,7 +3268,16 @@ def layout_native_undirected_portfolio(
             if degenerate:
                 _LOGGER.info("Rejected undirected candidate %s%s: %s", name, suffix, reason)
                 continue
+            if require_zero_crossings and exact_crossing_count(projected, problem.edge_index) != 0:
+                _LOGGER.info(
+                    "Rejected undirected candidate %s%s: planarity certificate failed",
+                    name,
+                    suffix,
+                )
+                continue
             positions[name + suffix] = projected
+            if require_zero_crossings:
+                planar_certified_names.add(name + suffix)
 
     # Candidate B: our graphviz-fidelity sfdp reimplementation. The contest
     # owns a quality-scaled nonzero budget because LayoutConfig.steps=0 means
@@ -3947,6 +3979,51 @@ def layout_native_undirected_portfolio(
             time.perf_counter() - community_started,
         )
 
+    # Candidate P (sprint2 W1-B): planar-certificate arm. Exact planarity and
+    # the embedding are already cached by graph_classify (zero detection cost
+    # here); the FPP/Schnyder parity floors plus planarity-guarded polish,
+    # outer-face Tutte variants, and an embedding-seeded stress challenger
+    # enter through the common refereed path. The gate is input-only
+    # structure (exact is_planar + cached embedding + n cap + single
+    # component); on every other row this block never runs and the ledger is
+    # untouched (byte-inert).
+    from dagua.layout.ops.pipelines.native_planar_arm import (
+        PLANAR_ARM_POLISH_STEPS,
+        build_planar_arm_candidates,
+        planar_arm_admitted,
+        planar_candidate_requires_certificate,
+    )
+
+    if planar_arm_admitted(problem) and _portfolio_has_budget(config):
+        planar_started = time.perf_counter()
+        try:
+            planar_cost = estimate_native_work_cost(
+                problem,
+                "stress",
+                {"steps": PLANAR_ARM_POLISH_STEPS, "samples": None},
+                _native_device_class(config),
+            )
+            if not admit_native_work(config, planar_cost, "optional_planar_certificate_arm"):
+                _LOGGER.info("Skipped planar certificate arm: insufficient predicted budget")
+            else:
+                for planar_name, planar_pos in build_planar_arm_candidates(
+                    problem,
+                    node_sep=challenger_node_sep,
+                ).items():
+                    _add_challenger(
+                        planar_name,
+                        planar_pos,
+                        include_raw=True,
+                        require_zero_crossings=planar_candidate_requires_certificate(planar_name),
+                    )
+        except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
+            _reraise_worker_timeout(exc)
+            _LOGGER.warning("planar certificate arm failed", exc_info=True)
+        _LOGGER.info(
+            "Undirected candidate runtime family=planar_arm seconds=%.3f",
+            time.perf_counter() - planar_started,
+        )
+
     # Keep the incumbent plus a deterministic proxy-ranked challenger
     # shortlist. Only these finalists reach the frozen honest ruler.
     from dagua.metrics import _all_pairs_unweighted, _build_csr
@@ -4174,6 +4251,20 @@ def layout_native_undirected_portfolio(
         best_name,
     )
     winner_pos = _regular_mesh_clearance_expansion(positions[best_name], problem)
+    if best_name in planar_certified_names:
+        # Final emission certificate (W1B-1): the expansion above is the last
+        # geometry-affecting step, so a certified planar winner is re-counted
+        # on the exact tensor being emitted; on any failure the registered
+        # certified drawing is emitted unexpanded instead.
+        from dagua.layout.ops.planar_polish import exact_crossing_count
+
+        if exact_crossing_count(winner_pos, problem.edge_index) != 0:
+            _LOGGER.warning(
+                "Planar winner %s lost its certificate post-selection; emitting the "
+                "registered certified drawing",
+                best_name,
+            )
+            winner_pos = positions[best_name]
     return _never_nan_winner(winner_pos, problem, challenger_node_sep, seed)
 
 
