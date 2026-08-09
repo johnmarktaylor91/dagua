@@ -4138,6 +4138,15 @@ def layout_native_undirected_portfolio(
             time.perf_counter() - planar_started,
         )
 
+    # W2-3: derive at most two radial repairs from already-admitted geometry.
+    # The 90%-radius/full-radius gate is input-only and the raw source remains
+    # in ``positions``; repair therefore adds a basin without route-switching.
+    from dagua.layout.ops.sprawl_repair import (
+        radial_winsorize_positions,
+        robust_full_extent_ratio,
+        sprawl_repair_gate,
+    )
+
     # Keep the incumbent plus a deterministic proxy-ranked challenger
     # shortlist. Only these finalists reach the frozen honest ruler.
     from dagua.metrics import _all_pairs_unweighted, _build_csr
@@ -4155,6 +4164,29 @@ def layout_native_undirected_portfolio(
         name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
         for name, pos in positions.items()
     }
+    repair_sources = sorted(
+        (
+            (proxy_scores[candidate_name], robust_full_extent_ratio(candidate_pos), candidate_name)
+            for candidate_name, candidate_pos in positions.items()
+            if sprawl_repair_gate(candidate_pos, c5_whitespace_ratio=None)
+        ),
+        key=lambda item: (-item[0], -item[1], item[2]),
+    )[:2]
+    for repair_index, (_proxy_score, _extent_ratio, source_name) in enumerate(
+        repair_sources,
+        start=1,
+    ):
+        repaired = radial_winsorize_positions(positions[source_name])
+        if torch.equal(repaired, positions[source_name]):
+            continue
+        repair_name = "sprawl_repaired" if repair_index == 1 else f"sprawl_repaired_{repair_index}"
+        positions[repair_name] = repaired
+        proxy_scores[repair_name] = _proxy_undirected_candidate(
+            repaired,
+            problem,
+            cluster_ids,
+            all_pairs_dist,
+        )
     challenger_names = sorted(
         (name for name in positions if name != "incumbent"),
         key=lambda name: (-proxy_scores[name], name),
@@ -4191,6 +4223,8 @@ def layout_native_undirected_portfolio(
         )
         if reserved_community_name is not None:
             quota_families[reserved_community_name] = _marketplace_family(reserved_community_name)
+    if "sprawl_repaired" in positions:
+        quota_families["sprawl_repaired"] = "sprawl_repaired"
     from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
 
     explicit_mandatory = ["incumbent", *raw_finalist_names]

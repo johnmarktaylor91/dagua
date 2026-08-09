@@ -6109,6 +6109,7 @@ def _terminal_w5_polish(
             log_w5_telemetry,
             make_w5_skip_result,
             run_w5_finisher,
+            run_w5_sprawl_repair_candidate,
             run_w5_terminal_continuous_facet_polish,
             run_w5_terminal_global_scale_sweep,
             run_w5_terminal_smacof_stress_polish,
@@ -6433,6 +6434,20 @@ def _terminal_w5_polish(
                 getattr(config, "_dagua_native_terminal_w5_seed_bank", [])
             )
         ]
+        from dagua.layout.ops.sprawl_repair import (
+            radial_winsorize_positions,
+            sprawl_repair_gate,
+        )
+
+        if sprawl_repair_gate(
+            final_pos,
+            c5_whitespace_ratio=incumbent_score_pair.c5_whitespace_ratio,
+        ):
+            repair_seed = radial_winsorize_positions(final_pos)
+            if not torch.equal(repair_seed, final_pos):
+                # The raw holder remains ``incumbent_pos``; this only gives
+                # the existing finisher a second, outlier-repaired basin.
+                seed_bank.append(W5Seed("sprawl_repaired", repair_seed))
         seed_bank.append(W5Seed("terminal_final", final_pos))
         for seed_name, seed_pos in cluster_seed_positions:
             seed_bank.append(
@@ -6485,6 +6500,23 @@ def _terminal_w5_polish(
             terminal_winner_pos = w5_result.winner_pos
             terminal_winner_pair = w5_result.winner_score_pair
             terminal_winner_reason = "terminal_w5_accept"
+        sprawl_repair = run_w5_sprawl_repair_candidate(
+            incumbent_pos=terminal_winner_pos,
+            incumbent_score_pair=terminal_winner_pair,
+            score_fn=honest_score,
+            referee_key_fn=referee_key_fn,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+        if sprawl_repair.selected:
+            terminal_winner_pos = sprawl_repair.winner_pos.to(
+                device=final_pos.device,
+                dtype=final_pos.dtype,
+            )
+            terminal_winner_pair = sprawl_repair.winner_score_pair
+            terminal_winner_reason = "sprawl_repaired"
         scale_sweep = run_w5_terminal_global_scale_sweep(
             incumbent_pos=terminal_winner_pos,
             incumbent_score_pair=terminal_winner_pair,
