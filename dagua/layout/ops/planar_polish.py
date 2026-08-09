@@ -250,6 +250,22 @@ class _FaceSignGuard:
         self.reference_signs = torch.tensor(
             [1.0 if area > 0.0 else -1.0 for _, area in keep], dtype=torch.float64
         )
+        # Flattened cyclic vertex pairs over all guarded faces: the per-step
+        # screen runs hundreds of times per polish, so the shoelace sums are
+        # evaluated as one segment reduction instead of a per-face loop.
+        if self.faces:
+            self._pair_first = torch.cat(self.faces)
+            self._pair_second = torch.cat([torch.roll(face, -1) for face in self.faces])
+            self._pair_face = torch.cat(
+                [
+                    torch.full((face.numel(),), index, dtype=torch.long)
+                    for index, face in enumerate(self.faces)
+                ]
+            )
+        else:
+            self._pair_first = torch.zeros(0, dtype=torch.long)
+            self._pair_second = torch.zeros(0, dtype=torch.long)
+            self._pair_face = torch.zeros(0, dtype=torch.long)
 
     def signs_preserved(self, pos: torch.Tensor) -> bool:
         """Return whether every guarded face keeps its reference winding.
@@ -266,7 +282,14 @@ class _FaceSignGuard:
         """
         if not self.faces:
             return True
-        areas = _face_signed_areas(pos.detach().to(dtype=torch.float64), self.faces)
+        coords = pos.detach().to(dtype=torch.float64)
+        cross = (
+            coords[self._pair_first, 0] * coords[self._pair_second, 1]
+            - coords[self._pair_first, 1] * coords[self._pair_second, 0]
+        )
+        areas = 0.5 * torch.zeros(len(self.faces), dtype=torch.float64).index_add_(
+            0, self._pair_face, cross
+        )
         return bool(((areas * self.reference_signs) > 0.0).all().item())
 
 
