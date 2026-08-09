@@ -1058,7 +1058,12 @@ def test_contest_registers_both_cleanup_variants() -> None:
     try:
         from dagua.layout import layout
 
-        layout(graph, LayoutConfig(seed=42, device="cpu"))
+        config = LayoutConfig(seed=42, device="cpu")
+        # This regression isolates cleanup registration. Multi-seed families
+        # are intentionally proxy-culled before the honest referee, so force
+        # their replication-off k=1 path while asserting the cleanup ladder.
+        setattr(config, "_dagua_native_stochastic_seed_count", 1)
+        layout(graph, config)
     finally:
         nu._score_undirected_candidate_payload = original_score
         nu._project_candidate = original_project

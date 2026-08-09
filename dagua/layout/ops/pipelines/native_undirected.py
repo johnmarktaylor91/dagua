@@ -220,10 +220,10 @@ NEATO_BALANCED_LARGE_ITERATIONS = 4
 # R83 Phase 3 common-table challengers use the exact fidelity-campaign
 # defaults, independent of the public quality knob. Multiple deterministic
 # seeds are bounded substitutes for the reference best-of-many field.
-FCOSE_CONTEST_SEEDS = 3
+FCOSE_CONTEST_SEEDS = 5
 FCOSE_REFERENCE_STEPS = 2500
 FCOSE_PRIOR_S = 45.0
-TSNET_CONTEST_SEEDS = 3
+TSNET_CONTEST_SEEDS = 5
 TSNET_MAX_CONTEST_NODES = 300
 TSNET_REFERENCE_STEPS = 500
 TSNET_PERPLEXITIES = (30.0, 5.0)
@@ -533,8 +533,9 @@ def _portfolio_has_budget(
 def _sparse_contest_arm_admitted(
     problem: LayoutProblem,
     config: Optional[LayoutConfig],
-) -> bool:
-    """Admit the normal-contest t-FDP challenger through the DWU ledger only.
+    seeds: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Admit an affordable normal-contest t-FDP frozen seed prefix.
 
     W1-A arms are never wall/process-time conditional (review F2): the
     admitted challenger set must be identical under any machine load, so this
@@ -547,21 +548,24 @@ def _sparse_contest_arm_admitted(
         Prepared undirected layout problem.
     config : LayoutConfig, optional
         Prepared native configuration carrying the optional budget ledger.
+    seeds : tuple[int, ...]
+        Frozen absolute seeds in deterministic prefix order.
 
     Returns
     -------
-    bool
-        ``True`` when the arm was admitted (or no ledger is active).
+    tuple[int, ...]
+        Largest admitted prefix, or an empty tuple if the base arm is rejected.
     """
     from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
-        sparse_arm_cost_admitted,
+        sparse_arm_seed_prefix_admitted,
     )
 
-    return sparse_arm_cost_admitted(
+    return sparse_arm_seed_prefix_admitted(
         problem,
         config,
         _native_device_class(config),
         "contest_tfdp",
+        seeds,
     )
 
 
@@ -3230,6 +3234,7 @@ def layout_native_undirected_portfolio(
     challenger_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
 
     raw_finalist_names: list[str] = []
+    replicated_candidate_families: dict[str, str] = {}
     arm_s_candidate_names: set[str] = set()
     # Zero-crossing-certified candidate names (planar arm). Every registered
     # variant carrying a name in this set has passed an exact crossing count
@@ -3255,6 +3260,7 @@ def layout_native_undirected_portfolio(
         *,
         include_raw: bool = False,
         require_zero_crossings: bool = False,
+        replicated_family: Optional[str] = None,
     ) -> None:
         """Repair, project, guard, and score one raw challenger.
 
@@ -3275,6 +3281,10 @@ def layout_native_undirected_portfolio(
             after its final geometry transform is dropped, never registered
             (W1B-1: the overlap projectors run after the guarded polish and
             can reintroduce crossings a "planar" candidate must not carry).
+        replicated_family : str, optional
+            Stochastic family label. Supplying it records every emitted
+            variant for the within-family proxy cull and indicates that the
+            family package was admitted before generation.
 
         Returns
         -------
@@ -3302,6 +3312,8 @@ def layout_native_undirected_portfolio(
             else:
                 positions[raw_name] = raw_pos
                 raw_finalist_names.append(raw_name)
+                if replicated_family is not None:
+                    replicated_candidate_families[raw_name] = replicated_family
                 if require_zero_crossings:
                     planar_certified_names.add(raw_name)
 
@@ -3320,7 +3332,7 @@ def layout_native_undirected_portfolio(
         # cleanup that wins the measured large candidate families. The
         # degeneracy guard applies independently to every retained variant.
         for suffix, convergent in _cleanup_variants_for_size(n):
-            if not _portfolio_has_budget(config):
+            if replicated_family is None and not _portfolio_has_budget(config):
                 _LOGGER.info(
                     "Skipped undirected candidate %s%s: insufficient remaining budget",
                     name,
@@ -3362,6 +3374,8 @@ def layout_native_undirected_portfolio(
                 )
                 continue
             positions[name + suffix] = projected
+            if replicated_family is not None:
+                replicated_candidate_families[name + suffix] = replicated_family
             if require_zero_crossings:
                 planar_certified_names.add(name + suffix)
 
@@ -3370,6 +3384,10 @@ def layout_native_undirected_portfolio(
     # automatic at the public API, not zero refinement for this challenger.
     if _portfolio_has_budget(config):
         try:
+            from dagua.layout.ops.pipelines.native_seed_replication import (
+                admit_seed_family,
+                frozen_seed_bank,
+            )
             from dagua.layout.ops.pipelines.sfdp import layout_sfdp_pipeline
 
             # Raw full-problem solve (round 4): per-component packed solving was
@@ -3377,20 +3395,37 @@ def layout_native_undirected_portfolio(
             # isolate fling in this raw output is repaired conditionally inside
             # _add_challenger.
             if problem.edge_weights is None or n <= LARGE_CONTEST_NODE_THRESHOLD:
-                sfdp_pos = layout_sfdp_pipeline(
-                    edge_index=problem.edge_index,
-                    num_nodes=n,
-                    node_sizes=problem.node_sizes,
-                    steps=(
-                        BALANCED_SMALL_REFINEMENT_STEPS
-                        if use_bounded_inner_solvers
-                        else _candidate_refinement_steps(config, n)
-                    ),
-                    seed=seed,
-                    edge_weights=problem.edge_weights,
-                    fidelity_mode="graphviz",
+                sfdp_steps = (
+                    BALANCED_SMALL_REFINEMENT_STEPS
+                    if use_bounded_inner_solvers
+                    else _candidate_refinement_steps(config, n)
                 )
-                _add_challenger("sfdp", sfdp_pos)
+                sfdp_seeds = frozen_seed_bank(config, seed)
+                sfdp_cost = estimate_native_work_cost(
+                    problem,
+                    "stress",
+                    {"steps": sfdp_steps, "samples": None},
+                    _native_device_class(config),
+                )
+                sfdp_seeds = admit_seed_family(config, sfdp_cost, "sfdp", sfdp_seeds)
+                if sfdp_seeds:
+                    replicated_family = "sfdp" if len(sfdp_seeds) > 1 else None
+                    for seed_index, seed_value in enumerate(sfdp_seeds):
+                        sfdp_pos = layout_sfdp_pipeline(
+                            edge_index=problem.edge_index,
+                            num_nodes=n,
+                            node_sizes=problem.node_sizes,
+                            steps=sfdp_steps,
+                            seed=seed_value,
+                            edge_weights=problem.edge_weights,
+                            fidelity_mode="graphviz",
+                        )
+                        sfdp_name = "sfdp" if seed_index == 0 else f"sfdp_seed{seed_index}"
+                        _add_challenger(
+                            sfdp_name,
+                            sfdp_pos,
+                            replicated_family=replicated_family,
+                        )
             if problem.edge_weights is not None and _portfolio_has_budget(config):
                 sfdp_unweighted_pos = layout_sfdp_pipeline(
                     edge_index=problem.edge_index,
@@ -3673,6 +3708,10 @@ def layout_native_undirected_portfolio(
     if _portfolio_has_budget(config):
         try:
             from dagua.layout.ops.pipelines.fcose import layout_fcose_pipeline
+            from dagua.layout.ops.pipelines.native_seed_replication import (
+                admit_seed_family,
+                frozen_seed_bank,
+            )
 
             fcose_cost = estimate_native_work_cost(
                 problem,
@@ -3680,45 +3719,50 @@ def layout_native_undirected_portfolio(
                 {"steps": FCOSE_REFERENCE_STEPS, "samples": None},
                 _native_device_class(config),
             )
-            fcose_cost_s = fcose_cost.generation_dwu + fcose_cost.reserved_score_dwu
-            for seed_offset in range(FCOSE_CONTEST_SEEDS):
-                if (
-                    not _portfolio_has_budget(config)
-                    or not _predicted_arm_budget_preserving_arm_s_score(
-                        config,
-                        fcose_cost_s,
-                        arm_s_pending=bool(arm_s_candidate_names),
+            fcose_seeds = frozen_seed_bank(config, seed)
+            fcose_package_s = fcose_cost.generation_dwu * len(
+                fcose_seeds
+            ) + fcose_cost.reserved_score_dwu * min(2, len(fcose_seeds))
+            fcose_seeds = admit_seed_family(
+                config,
+                fcose_cost,
+                "fcose",
+                fcose_seeds,
+                package_gate=lambda package: _predicted_arm_budget_preserving_arm_s_score(
+                    config,
+                    package.generation_dwu + package.reserved_score_dwu,
+                    arm_s_pending=bool(arm_s_candidate_names),
+                ),
+            )
+            if fcose_seeds:
+                replicated_family = "fcose" if len(fcose_seeds) > 1 else None
+                for seed_offset, seed_value in enumerate(fcose_seeds):
+                    candidate_started_process = time.process_time()
+                    fcose_pos = layout_fcose_pipeline(
+                        edge_index=problem.edge_index,
+                        num_nodes=n,
+                        node_sizes=problem.node_sizes,
+                        steps=FCOSE_REFERENCE_STEPS,
+                        seed=seed_value,
+                        edge_weights=problem.edge_weights,
+                        quality="default",
+                        randomize=True,
                     )
-                    or not admit_native_work(
-                        config,
-                        fcose_cost,
-                        f"optional_fcose_seed{seed_offset}",
+                    fcose_runs += 1
+                    _add_challenger(
+                        f"fcose_seed{seed_offset}",
+                        fcose_pos,
+                        include_raw=True,
+                        replicated_family=replicated_family,
                     )
-                ):
-                    _record_insufficient_predicted_budget_skip(
-                        arm=f"fcose_seed{seed_offset}",
-                        config=config,
-                        predicted_cost_s=fcose_cost_s,
-                    )
-                    _LOGGER.info(
-                        "Skipped fCoSE seed %d: insufficient predicted budget",
-                        seed_offset,
-                    )
-                    break
-                candidate_started_process = time.process_time()
-                fcose_pos = layout_fcose_pipeline(
-                    edge_index=problem.edge_index,
-                    num_nodes=n,
-                    node_sizes=problem.node_sizes,
-                    steps=FCOSE_REFERENCE_STEPS,
-                    seed=seed + seed_offset,
-                    edge_weights=problem.edge_weights,
-                    quality="default",
-                    randomize=True,
+                    fcose_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
+            else:
+                _record_insufficient_predicted_budget_skip(
+                    arm="fcose_seed_family",
+                    config=config,
+                    predicted_cost_s=fcose_package_s,
                 )
-                fcose_runs += 1
-                _add_challenger(f"fcose_seed{seed_offset}", fcose_pos, include_raw=True)
-                fcose_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
+                _LOGGER.info("Skipped fCoSE seed family: insufficient predicted budget")
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("fCoSE undirected challenger failed", exc_info=True)
@@ -3737,6 +3781,10 @@ def layout_native_undirected_portfolio(
         tsnet_runs = 0
         tsnet_cpu_s = 0.0
         try:
+            from dagua.layout.ops.pipelines.native_seed_replication import (
+                admit_seed_family,
+                frozen_seed_bank,
+            )
             from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 
             tsnet_cost = estimate_native_work_cost(
@@ -3745,54 +3793,55 @@ def layout_native_undirected_portfolio(
                 {"steps": TSNET_REFERENCE_STEPS, "samples": None},
                 _native_device_class(config),
             )
-            tsnet_cost_s = tsnet_cost.generation_dwu + tsnet_cost.reserved_score_dwu
-            stop_tsnet = False
-            for perplexity in TSNET_PERPLEXITIES:
-                for seed_offset in range(TSNET_CONTEST_SEEDS):
-                    if (
-                        not _portfolio_has_budget(config)
-                        or not _predicted_arm_budget_preserving_arm_s_score(
-                            config,
-                            tsnet_cost_s,
-                            arm_s_pending=bool(arm_s_candidate_names),
+            tsnet_seeds = frozen_seed_bank(config, seed)
+            tsnet_run_count = len(tsnet_seeds) * len(TSNET_PERPLEXITIES)
+            tsnet_package_s = (
+                tsnet_cost.generation_dwu * tsnet_run_count
+                + tsnet_cost.reserved_score_dwu * min(2, tsnet_run_count)
+            )
+            tsnet_seeds = admit_seed_family(
+                config,
+                tsnet_cost,
+                "tsnet",
+                tsnet_seeds,
+                work_count=tsnet_run_count,
+                package_gate=lambda package: _predicted_arm_budget_preserving_arm_s_score(
+                    config,
+                    package.generation_dwu + package.reserved_score_dwu,
+                    arm_s_pending=bool(arm_s_candidate_names),
+                ),
+            )
+            if tsnet_seeds:
+                replicated_family = "tsnet" if len(tsnet_seeds) > 1 else None
+                for perplexity in TSNET_PERPLEXITIES:
+                    for seed_offset, seed_value in enumerate(tsnet_seeds):
+                        candidate_started_process = time.process_time()
+                        tsnet_pos = layout_tsnet_pipeline(
+                            edge_index=problem.edge_index,
+                            num_nodes=n,
+                            node_sizes=problem.node_sizes,
+                            perplexity=perplexity,
+                            steps=TSNET_REFERENCE_STEPS,
+                            seed=seed_value,
+                            edge_weights=problem.edge_weights,
+                            fidelity_mode=True,
                         )
-                        or not admit_native_work(
-                            config,
-                            tsnet_cost,
-                            f"optional_tsnet_perp{perplexity:g}_seed{seed_offset}",
+                        tsnet_runs += 1
+                        flavor = f"perp{perplexity:g}"
+                        _add_challenger(
+                            f"tsnet_{flavor}_seed{seed_offset}",
+                            tsnet_pos,
+                            include_raw=True,
+                            replicated_family=replicated_family,
                         )
-                    ):
-                        _record_insufficient_predicted_budget_skip(
-                            arm=f"tsnet_perp{perplexity:g}_seed{seed_offset}",
-                            config=config,
-                            predicted_cost_s=tsnet_cost_s,
-                        )
-                        _LOGGER.info(
-                            "Skipped tsNET perp=%g seed=%d: insufficient predicted budget",
-                            perplexity,
-                            seed_offset,
-                        )
-                        stop_tsnet = True
-                        break
-                    candidate_started_process = time.process_time()
-                    tsnet_pos = layout_tsnet_pipeline(
-                        edge_index=problem.edge_index,
-                        num_nodes=n,
-                        node_sizes=problem.node_sizes,
-                        perplexity=perplexity,
-                        steps=TSNET_REFERENCE_STEPS,
-                        seed=seed + seed_offset,
-                        edge_weights=problem.edge_weights,
-                        fidelity_mode=True,
-                    )
-                    tsnet_runs += 1
-                    flavor = f"perp{perplexity:g}"
-                    _add_challenger(
-                        f"tsnet_{flavor}_seed{seed_offset}", tsnet_pos, include_raw=True
-                    )
-                    tsnet_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
-                if stop_tsnet:
-                    break
+                        tsnet_cpu_s += _prediction_cpu_elapsed_s(candidate_started_process)
+            else:
+                _record_insufficient_predicted_budget_skip(
+                    arm="tsnet_seed_family",
+                    config=config,
+                    predicted_cost_s=tsnet_package_s,
+                )
+                _LOGGER.info("Skipped tsNET seed family: insufficient predicted budget")
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("tsNET undirected challenger failed", exc_info=True)
@@ -3931,22 +3980,31 @@ def layout_native_undirected_portfolio(
     # large fast path carry the full gamma sweep). Clustered rows stay with
     # the cluster-aware families. Admission is DWU-ledger-only (never
     # wall/process-time -- review F2).
-    if (
-        "tfdp_sparse" in shortlist.candidates
-        and not problem.clusters
-        and _sparse_contest_arm_admitted(problem, config)
-    ):
+    if "tfdp_sparse" in shortlist.candidates and not problem.clusters:
         tfdp_started = time.perf_counter()
         try:
+            from dagua.layout.ops.pipelines.native_seed_replication import frozen_seed_bank
             from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
                 tfdp_sparse_positions,
             )
 
-            _add_challenger(
-                "tfdp",
-                tfdp_sparse_positions(problem, gamma=2.0, node_sep=challenger_node_sep),
-                include_raw=True,
-            )
+            tfdp_seeds = frozen_seed_bank(config, seed)
+            tfdp_seeds = _sparse_contest_arm_admitted(problem, config, tfdp_seeds)
+            if tfdp_seeds:
+                replicated_family = "tfdp" if len(tfdp_seeds) > 1 else None
+                for seed_index, seed_value in enumerate(tfdp_seeds):
+                    tfdp_name = "tfdp" if seed_index == 0 else f"tfdp_seed{seed_index}"
+                    _add_challenger(
+                        tfdp_name,
+                        tfdp_sparse_positions(
+                            problem,
+                            gamma=2.0,
+                            seed=seed_value,
+                            node_sep=challenger_node_sep,
+                        ),
+                        include_raw=True,
+                        replicated_family=replicated_family,
+                    )
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve
             _reraise_worker_timeout(exc)
             _LOGGER.warning("tfdp undirected challenger failed", exc_info=True)
@@ -4164,6 +4222,19 @@ def layout_native_undirected_portfolio(
         name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
         for name, pos in positions.items()
     }
+    if replicated_candidate_families:
+        from dagua.layout.ops.pipelines.native_seed_replication import retained_seed_replicas
+
+        retained_names = retained_seed_replicas(
+            positions,
+            proxy_scores,
+            replicated_candidate_families,
+        )
+        positions = {name: pos for name, pos in positions.items() if name in retained_names}
+        proxy_scores = {
+            name: score for name, score in proxy_scores.items() if name in retained_names
+        }
+        raw_finalist_names = [name for name in raw_finalist_names if name in retained_names]
     repair_sources = sorted(
         (
             (proxy_scores[candidate_name], robust_full_extent_ratio(candidate_pos), candidate_name)
