@@ -4202,36 +4202,47 @@ def layout_native_undirected_portfolio(
     # block enters exactly those basins as refereed candidates at frozen
     # seeds (D2 staged call: telemetry family stress_sgd_k, never sgd2).
     # Gate is input-only structure; gate-closed rows never run this block
-    # and the ledger is untouched (byte-inert).
+    # and the ledger is untouched (byte-inert). Admission is DWU-ledger-only
+    # aggregate family packages (review F2 -- never wall/process-time
+    # conditional), and multi-seed families register in the replication map
+    # so W2-1's within-family cull bounds their referee load (review F5).
     from dagua.layout.ops.pipelines.native_stress_family_arm import (
-        STRESS_SGD_STEPS,
+        admit_stress_family_packages,
         build_stress_family_candidates,
         stress_family_arm_admitted,
         stress_family_candidate_prefix,
         stress_family_parity_floor,
+        stress_family_replicated_family,
     )
 
     stress_family_fired = False
-    if stress_family_arm_admitted(problem) and _portfolio_has_budget(config):
+    if stress_family_arm_admitted(problem):
         stress_family_started = time.perf_counter()
         try:
-            stress_family_cost = estimate_native_work_cost(
+            stress_admission = admit_stress_family_packages(
                 problem,
-                "stress",
-                {"steps": STRESS_SGD_STEPS, "samples": None},
+                config,
                 _native_device_class(config),
             )
-            if not admit_native_work(config, stress_family_cost, "optional_stress_family_arm"):
-                _LOGGER.info("Skipped stress-family arm: insufficient predicted budget")
+            if not stress_admission.any_admitted:
+                _LOGGER.info("Skipped stress-family arm: ledger rejected every family package")
             else:
                 for stress_name, stress_pos in build_stress_family_candidates(
                     problem,
                     node_sep=challenger_node_sep,
+                    stress_sgd_seeds=stress_admission.stress_sgd_seeds,
+                    maxent_seeds=stress_admission.maxent_seeds,
+                    include_elk=stress_admission.elk_admitted,
                 ).items():
                     _add_challenger(
                         stress_name,
                         stress_pos,
                         include_raw=stress_family_parity_floor(stress_name),
+                        replicated_family=stress_family_replicated_family(
+                            stress_name,
+                            stress_admission.stress_sgd_seeds,
+                            stress_admission.maxent_seeds,
+                        ),
                     )
                     stress_family_fired = True
         except Exception as exc:  # noqa: BLE001 -- a failed challenger never sinks the solve

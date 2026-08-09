@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import time
 from typing import Any, cast
 
 import pytest
@@ -17,11 +18,13 @@ from dagua.layout.ops.pipelines.native_stress_family_arm import (
     STRESS_FAMILY_MAX_NODES,
     STRESS_SGD_SEED_BANK,
     _is_connected,
+    admit_stress_family_packages,
     build_stress_family_candidates,
     stress_family_arm_admitted,
     stress_family_candidate_prefix,
     stress_family_directed_admitted,
     stress_family_parity_floor,
+    stress_family_quota_entries,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
@@ -270,6 +273,247 @@ def test_arm_fires_inside_directed_contest(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert bool(torch.isfinite(result).all().item())
     assert f"maxent_stress_seed{MAXENT_SEED_BANK[0]}" in seen
+
+
+# The full frozen-bank candidate inventory: what the arm must generate on a
+# gated row whenever the ledger admits every family package, independent of
+# machine load (review F2).
+_FULL_BANK_INVENTORY = sorted(
+    [f"stress_sgd_k_seed{seed}" for seed in STRESS_SGD_SEED_BANK]
+    + [f"maxent_stress_seed{seed}" for seed in MAXENT_SEED_BANK]
+    + ["elk_stress_arm"]
+)
+
+
+def _recording_builder_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, torch.Tensor]], list[str]]:
+    """Record builder invocations and a shared ordered event log."""
+    arm_module = importlib.import_module("dagua.layout.ops.pipelines.native_stress_family_arm")
+    real_builder = arm_module.build_stress_family_candidates
+    calls: list[dict[str, torch.Tensor]] = []
+    events: list[str] = []
+
+    def _recording(*args: object, **kwargs: object) -> dict[str, torch.Tensor]:
+        candidates = real_builder(*args, **kwargs)
+        calls.append(candidates)
+        events.append("builder_called")
+        return candidates
+
+    monkeypatch.setattr(arm_module, "build_stress_family_candidates", _recording)
+    return calls, events
+
+
+def test_undirected_stress_admission_ignores_exhausted_wall_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review F2 regression: admission is DWU-ledger-only, never load state.
+
+    The wall reserve expires mid-portfolio (injected through an earlier
+    arm's pipeline, i.e. after the top-level marketplace guard but before
+    Candidate S), which is exactly the load-dependent state the a5e8fff5
+    seam consulted through ``_portfolio_has_budget``: there the arm was
+    silently skipped, so this test fails on that commit. Fixed admission
+    consults only the ledger, so the full frozen-bank inventory is still
+    generated.
+    """
+    from dagua.layout.ops.pipelines import sfdp as sfdp_module
+    from dagua.layout.ops.pipelines.native_budget import WALL_DEADLINE_ATTR
+    from dagua.layout.ops.pipelines.native_undirected import (
+        layout_native_undirected_portfolio,
+    )
+
+    calls, events = _recording_builder_events(monkeypatch)
+    config = LayoutConfig(seed=42)
+    real_sfdp = sfdp_module.layout_sfdp_pipeline
+
+    def _expiring_sfdp(*args: object, **kwargs: object) -> object:
+        if not hasattr(config, WALL_DEADLINE_ATTR):
+            setattr(config, WALL_DEADLINE_ATTR, time.perf_counter() - 1000.0)
+            events.append("wall_reserve_expired")
+        return real_sfdp(*args, **kwargs)
+
+    monkeypatch.setattr(sfdp_module, "layout_sfdp_pipeline", _expiring_sfdp)
+    result = layout_native_undirected_portfolio(
+        _chords_problem(),
+        SolveState(),
+        RuntimeContext(),
+        config,
+    )
+    assert bool(torch.isfinite(result).all().item())
+    assert "wall_reserve_expired" in events, "injection hook never ran (fixture drifted)"
+    assert events.index("wall_reserve_expired") < events.index("builder_called"), (
+        "premise broken: the wall reserve must expire before Candidate S runs"
+    )
+    assert len(calls) == 1, "stress arm must fire despite the exhausted wall reserve"
+    assert sorted(calls[0]) == _FULL_BANK_INVENTORY
+
+
+def test_directed_stress_admission_ignores_exhausted_wall_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review F2 regression (directed seam): no wall/predicted-time gates.
+
+    The a5e8fff5 directed seam consulted ``_portfolio_has_budget`` and
+    ``_predicted_arm_budget_available`` (both live wall-deadline state); an
+    exhausted reserve injected before its block skipped the arm entirely,
+    so this test fails there. Fixed admission is ledger-only.
+    """
+    from dagua.layout.ops.pipelines.native_budget import WALL_DEADLINE_ATTR
+    from dagua.layout.ops.pipelines.native_directed import (
+        layout_native_directed_portfolio,
+    )
+
+    directed_module = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    calls, events = _recording_builder_events(monkeypatch)
+    config = LayoutConfig(seed=42)
+    real_register = directed_module._register_challenger_variants
+
+    def _expiring_register(*args: object, **kwargs: object) -> object:
+        if not hasattr(config, WALL_DEADLINE_ATTR):
+            setattr(config, WALL_DEADLINE_ATTR, time.perf_counter() - 1000.0)
+            events.append("wall_reserve_expired")
+        return real_register(*args, **kwargs)
+
+    monkeypatch.setattr(directed_module, "_register_challenger_variants", _expiring_register)
+    result = layout_native_directed_portfolio(
+        _wide_dag_problem(),
+        SolveState(),
+        RuntimeContext(),
+        config,
+    )
+    assert bool(torch.isfinite(result).all().item())
+    assert "wall_reserve_expired" in events, "injection hook never ran (fixture drifted)"
+    assert events.index("wall_reserve_expired") < events.index("builder_called"), (
+        "premise broken: the wall reserve must expire before the stress block runs"
+    )
+    assert len(calls) == 1, "directed stress arm must fire despite the exhausted wall reserve"
+    assert sorted(calls[0]) == _FULL_BANK_INVENTORY
+
+
+def test_exhausted_ledger_vetoes_stress_packages_deterministically() -> None:
+    """The ledger, not elapsed time, is the sole admission authority.
+
+    A spent ledger deterministically vetoes every family package (all-or-
+    nothing pricing charged before generation, review F2).
+    """
+    from dagua.layout.ops.pipelines.native_budget import (
+        LEDGER_ATTR,
+        install_budget_ledger,
+    )
+
+    problem = _chords_problem()
+    config = LayoutConfig(seed=42)
+    install_budget_ledger(config, timeout_s=1.0)
+    ledger = getattr(config, LEDGER_ATTR)
+    ledger.spent_dwu = ledger.capacity_dwu() + 1.0
+    admission = admit_stress_family_packages(problem, config, "cpu")
+    assert admission.stress_sgd_seeds == ()
+    assert admission.maxent_seeds == ()
+    assert not admission.elk_admitted
+    assert not admission.any_admitted
+
+
+def test_admission_charges_aggregate_packages_before_generation() -> None:
+    """Every admitted family is one aggregate ledger package (review F2).
+
+    The stress-SGD package charges all three trajectories plus the two
+    reserved referee seats as one all-or-nothing decision; maxent charges
+    two; ELK one. No per-trajectory drip pricing.
+    """
+    from dagua.layout.ops.pipelines.native_budget import (
+        LEDGER_ATTR,
+        install_budget_ledger,
+    )
+
+    problem = _chords_problem()
+    config = LayoutConfig(seed=42)
+    install_budget_ledger(config, timeout_s=10_000.0)
+    admission = admit_stress_family_packages(problem, config, "cpu")
+    assert admission.stress_sgd_seeds == STRESS_SGD_SEED_BANK
+    assert admission.maxent_seeds == MAXENT_SEED_BANK
+    assert admission.elk_admitted
+    events = [
+        (record["event"], str(record["reason"]))
+        for record in getattr(config, LEDGER_ATTR).event_log
+    ]
+    admit_reasons = [reason for event, reason in events if event == "admit"]
+    assert admit_reasons == [
+        "optional_seed_family_stress_sgd_k",
+        "optional_seed_family_maxent_stress",
+        "optional_stress_family_elk",
+    ]
+
+
+def test_directed_quota_reserves_every_stress_family_under_proxy_cut() -> None:
+    """Review F3 regression: one quota seat per normalized stress family.
+
+    Reproduces the review's synthetic bounded-finalist scenario: eight
+    higher-proxy legacy families fill the legacy cut, all three stress
+    families sit below the generic proxy cut, and one pre-existing
+    non-stress quota entry is present. All four reserved candidates must
+    survive ``select_finalists`` (the a5e8fff5 seam reserved at most one
+    stress entry and dropped maxent and ELK entirely).
+    """
+    from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
+
+    legacy_names = [f"legacy_arm_{index}" for index in range(8)]
+    stress_names = [
+        "stress_sgd_k_seed42_raw",
+        "stress_sgd_k_seed7",
+        "maxent_stress_seed42_raw",
+        "elk_stress_arm_raw",
+    ]
+    cluster_name = "cluster_scaffold"
+    proxy_scores: dict[str, float] = {"incumbent": 99.0}
+    proxy_scores.update({name: 90.0 - index for index, name in enumerate(legacy_names)})
+    proxy_scores[cluster_name] = 60.0
+    proxy_scores.update({name: 50.0 - index for index, name in enumerate(stress_names)})
+    generator = torch.Generator().manual_seed(0)
+    candidates = {
+        name: torch.rand((6, 2), generator=generator) * (1.0 + index)
+        for index, name in enumerate(proxy_scores)
+    }
+    challenger_names = sorted(
+        (name for name in candidates if name != "incumbent"),
+        key=lambda name: (-proxy_scores[name], name),
+    )
+    legacy_finalists = list(legacy_names)
+    quota_families = {cluster_name: cluster_name}
+    entries = stress_family_quota_entries(challenger_names, legacy_finalists, quota_families)
+    assert entries == {
+        "stress_sgd_k_seed42_raw": "stress_sgd_k_seed",
+        "maxent_stress_seed42_raw": "maxent_stress_seed",
+        "elk_stress_arm_raw": "elk_stress_arm",
+    }
+    quota_families.update(entries)
+    finalists = select_finalists(
+        candidates,
+        proxy_scores,
+        quota_families,
+        4,
+        ["incumbent"],
+    )
+    assert cluster_name in finalists
+    assert "stress_sgd_k_seed42_raw" in finalists
+    assert "maxent_stress_seed42_raw" in finalists
+    assert "elk_stress_arm_raw" in finalists
+
+
+def test_quota_entries_skip_families_already_represented() -> None:
+    """A stress family inside the legacy cut or quotas gets no second seat."""
+    challenger_names = [
+        "stress_sgd_k_seed42",
+        "stress_sgd_k_seed7",
+        "maxent_stress_seed42",
+        "elk_stress_arm",
+    ]
+    entries = stress_family_quota_entries(
+        challenger_names,
+        ["stress_sgd_k_seed7_convergent"],
+        {"maxent_stress_seed42": "maxent_stress_seed"},
+    )
+    assert entries == {"elk_stress_arm": "elk_stress_arm"}
 
 
 # Gate-closed golden bytes, captured on the pre-packet parent 0ee2db36: rows

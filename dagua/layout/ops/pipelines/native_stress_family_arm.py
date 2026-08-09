@@ -31,12 +31,16 @@ ties, and on any row where the gate is closed no code in this module runs
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Collection, Dict, Mapping, Optional, Sequence
 
 import torch
 
 from dagua.layout.ops.pipelines.native_sparse_infrastructure import _scale_to_node_units
 from dagua.layout.ops.state import LayoutProblem
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from dagua.config import LayoutConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,8 +68,10 @@ MAXENT_SEED_BANK = (42, 7)
 STRESS_SGD_STEPS = 300
 MAXENT_STEPS = 200
 MAXENT_ALPHA = 1.0
-# Legacy structural prior seconds for the directed opaque-arm cost table.
-STRESS_FAMILY_PRIOR_S = 2.0
+# ELK stress iterates to an epsilon rather than a step count; this frozen
+# prior charges the deterministic solve as the same order of stress work as
+# its family siblings in the calibrated cost table.
+ELK_COST_PRIOR_STEPS = 300
 
 # Candidate-name prefixes owned by this arm, used by the contest seams to
 # attach family-quota labels to every registered variant.
@@ -178,6 +184,145 @@ def stress_family_directed_admitted(problem: LayoutProblem) -> bool:
     return avg_layer_width >= LOW_LAYERING_MIN_AVG_LAYER_WIDTH
 
 
+@dataclass(frozen=True)
+class StressFamilyAdmission:
+    """Ledger-admitted work for the three stress-family arms.
+
+    Attributes
+    ----------
+    stress_sgd_seeds : tuple[int, ...]
+        Admitted frozen prefix of :data:`STRESS_SGD_SEED_BANK` (empty when
+        even the single-seed base package was rejected).
+    maxent_seeds : tuple[int, ...]
+        Admitted frozen prefix of :data:`MAXENT_SEED_BANK`.
+    elk_admitted : bool
+        Whether the deterministic ELK-stress package was admitted.
+    """
+
+    stress_sgd_seeds: tuple[int, ...]
+    maxent_seeds: tuple[int, ...]
+    elk_admitted: bool
+
+    @property
+    def any_admitted(self) -> bool:
+        """Return whether any family package was admitted."""
+        return bool(self.stress_sgd_seeds) or bool(self.maxent_seeds) or self.elk_admitted
+
+
+def admit_stress_family_packages(
+    problem: LayoutProblem,
+    config: Optional["LayoutConfig"],
+    device_class: str,
+) -> StressFamilyAdmission:
+    """Admit the stress-family packages through the DWU ledger ONLY.
+
+    Never wall/process-time conditional (review F2): identical input plus
+    ledger state admits identical work regardless of elapsed time or machine
+    load. Each family is priced as one all-or-nothing aggregate package --
+    every frozen trajectory's generation cost plus the reserved referee
+    seats -- through W2-1's seed-family plumbing, charged before any
+    generation happens. Multi-seed families fall back through deterministic
+    frozen prefixes (``k -> 1``), never partial mid-generation stops.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared layout problem (gate already checked by the caller).
+    config : LayoutConfig, optional
+        Native configuration carrying the deterministic ledger.
+    device_class : str
+        Frozen cost-table device axis (``"cpu"`` or ``"cuda"``).
+
+    Returns
+    -------
+    StressFamilyAdmission
+        Admitted per-family work. Gate-closed callers never reach this, so
+        the ledger stays untouched on gate-closed rows (byte-inert).
+    """
+    from dagua.layout.ops.pipelines.native_budget import admit_native_work
+    from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
+    from dagua.layout.ops.pipelines.native_seed_replication import (
+        admit_seed_family,
+        replicated_work_cost,
+    )
+
+    stress_sgd_cost = estimate_native_work_cost(
+        problem,
+        "stress",
+        {"steps": STRESS_SGD_STEPS, "samples": None},
+        device_class,
+    )
+    stress_sgd_seeds = admit_seed_family(
+        config,
+        stress_sgd_cost,
+        "stress_sgd_k",
+        STRESS_SGD_SEED_BANK,
+    )
+    maxent_cost = estimate_native_work_cost(
+        problem,
+        "stress",
+        {"steps": MAXENT_STEPS, "samples": None},
+        device_class,
+    )
+    maxent_seeds = admit_seed_family(
+        config,
+        maxent_cost,
+        "maxent_stress",
+        MAXENT_SEED_BANK,
+    )
+    elk_cost = estimate_native_work_cost(
+        problem,
+        "stress",
+        {"steps": ELK_COST_PRIOR_STEPS, "samples": None},
+        device_class,
+    )
+    elk_admitted = admit_native_work(
+        config,
+        replicated_work_cost(elk_cost, 1),
+        "optional_stress_family_elk",
+    )
+    return StressFamilyAdmission(
+        stress_sgd_seeds=tuple(stress_sgd_seeds),
+        maxent_seeds=tuple(maxent_seeds),
+        elk_admitted=bool(elk_admitted),
+    )
+
+
+def stress_family_replicated_family(
+    candidate_name: str,
+    stress_sgd_seeds: tuple[int, ...],
+    maxent_seeds: tuple[int, ...],
+) -> Optional[str]:
+    """Return the replication-map label for one base candidate name.
+
+    Only multi-seed families register in the contest's replicated-candidate
+    map (the W2-1 policy): the within-family proxy cull then retains the
+    best-proxy raw parity floor plus one best variant per family, bounding
+    the referee load the aggregate package reserved. The deterministic
+    single-shot ELK candidate stays out of the map like every other
+    single-shot arm.
+
+    Parameters
+    ----------
+    candidate_name : str
+        Base candidate name from :func:`build_stress_family_candidates`.
+    stress_sgd_seeds : tuple[int, ...]
+        Admitted stress-SGD seed prefix.
+    maxent_seeds : tuple[int, ...]
+        Admitted maxent seed prefix.
+
+    Returns
+    -------
+    str | None
+        Telemetry-family label for replicated candidates, else ``None``.
+    """
+    if candidate_name.startswith("stress_sgd_k_seed") and len(stress_sgd_seeds) > 1:
+        return "stress_sgd_k"
+    if candidate_name.startswith("maxent_stress_seed") and len(maxent_seeds) > 1:
+        return "maxent_stress"
+    return None
+
+
 def stress_family_candidate_prefix(candidate_name: str) -> Optional[str]:
     """Return the owning arm prefix for one candidate/variant name.
 
@@ -199,9 +344,56 @@ def stress_family_candidate_prefix(candidate_name: str) -> Optional[str]:
     return None
 
 
+def stress_family_quota_entries(
+    challenger_names: "Sequence[str]",
+    legacy_finalists: "Collection[str]",
+    existing_quotas: "Mapping[str, str]",
+) -> Dict[str, str]:
+    """Return one best-proxy quota entry per unrepresented stress family.
+
+    Review F3: every admitted stress family gets exactly one honest-referee
+    representative, composed with (never evicting) existing quota entries.
+    Families normalize by arm prefix, so seed and cleanup variants share one
+    family identity; a family already represented among the legacy finalists
+    or existing quotas needs no additional seat. Mandatory entries may push
+    the finalist count past the target, which ``select_finalists`` permits.
+
+    Parameters
+    ----------
+    challenger_names : Sequence[str]
+        Proxy-ranked candidate names, best first.
+    legacy_finalists : Collection[str]
+        Names already admitted by the legacy family cut.
+    existing_quotas : Mapping[str, str]
+        Quota entries reserved by earlier arms; never overwritten.
+
+    Returns
+    -------
+    dict[str, str]
+        New entries keyed by candidate name, labeled with the normalized
+        stress-family prefix.
+    """
+    represented = {
+        prefix
+        for name in (*legacy_finalists, *existing_quotas)
+        if (prefix := stress_family_candidate_prefix(name)) is not None
+    }
+    entries: Dict[str, str] = {}
+    for name in challenger_names:
+        prefix = stress_family_candidate_prefix(name)
+        if prefix is None or prefix in represented or name in existing_quotas:
+            continue
+        represented.add(prefix)
+        entries[name] = prefix
+    return entries
+
+
 def build_stress_family_candidates(
     problem: LayoutProblem,
     node_sep: float,
+    stress_sgd_seeds: tuple[int, ...] = STRESS_SGD_SEED_BANK,
+    maxent_seeds: tuple[int, ...] = MAXENT_SEED_BANK,
+    include_elk: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """Build the stress-family candidate drawings.
 
@@ -216,6 +408,13 @@ def build_stress_family_candidates(
         Prepared layout problem (gate already checked by the caller).
     node_sep : float
         Configured node separation in point units, used by the rescale.
+    stress_sgd_seeds : tuple[int, ...], default=STRESS_SGD_SEED_BANK
+        Ledger-admitted stress-SGD frozen seed prefix; only admitted
+        trajectories are generated (review F2: work is charged, then built).
+    maxent_seeds : tuple[int, ...], default=MAXENT_SEED_BANK
+        Ledger-admitted maxent frozen seed prefix.
+    include_elk : bool, default=True
+        Whether the deterministic ELK-stress package was admitted.
 
     Returns
     -------
@@ -235,7 +434,7 @@ def build_stress_family_candidates(
     try:
         from dagua.layout.ops.pipelines.stress_sgd import layout_stress_sgd_pipeline
 
-        for seed in STRESS_SGD_SEED_BANK:
+        for seed in stress_sgd_seeds:
             result = layout_stress_sgd_pipeline(
                 cpu_edges,
                 num_nodes,
@@ -253,7 +452,7 @@ def build_stress_family_candidates(
     try:
         from dagua.layout.ops.pipelines.maxent_stress import layout_maxent_stress_pipeline
 
-        for seed in MAXENT_SEED_BANK:
+        for seed in maxent_seeds:
             pos = layout_maxent_stress_pipeline(
                 cpu_edges,
                 num_nodes,
@@ -267,18 +466,19 @@ def build_stress_family_candidates(
     except Exception:  # noqa: BLE001 -- one failed family never sinks the arm
         _LOGGER.warning("maxent_stress candidates failed", exc_info=True)
 
-    try:
-        from dagua.layout.ops.pipelines.elk_stress import layout_elk_stress_pipeline
+    if include_elk:
+        try:
+            from dagua.layout.ops.pipelines.elk_stress import layout_elk_stress_pipeline
 
-        pos = layout_elk_stress_pipeline(
-            cpu_edges,
-            num_nodes,
-            node_sizes=cpu_sizes,
-            edge_weights=cpu_weights,
-        )
-        candidates["elk_stress_arm"] = _scale_to_node_units(pos, problem, node_sep)
-    except Exception:  # noqa: BLE001 -- one failed family never sinks the arm
-        _LOGGER.warning("elk_stress candidate failed", exc_info=True)
+            pos = layout_elk_stress_pipeline(
+                cpu_edges,
+                num_nodes,
+                node_sizes=cpu_sizes,
+                edge_weights=cpu_weights,
+            )
+            candidates["elk_stress_arm"] = _scale_to_node_units(pos, problem, node_sep)
+        except Exception:  # noqa: BLE001 -- one failed family never sinks the arm
+            _LOGGER.warning("elk_stress candidate failed", exc_info=True)
 
     return candidates
 

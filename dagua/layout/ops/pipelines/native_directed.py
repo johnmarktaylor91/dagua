@@ -5997,37 +5997,41 @@ def layout_native_directed_portfolio(
     # seeds (D2 staged call: telemetry family stress_sgd_k, never sgd2).
     # Candidate admission, NEVER a route switch; the gate is input-only
     # structure and gate-closed rows never execute this block (byte-inert).
+    # Admission is DWU-ledger-only aggregate family packages (review F2 --
+    # never wall/process-time conditional), and multi-seed families register
+    # in the replication map so W2-1's within-family cull bounds their
+    # referee load (review F5).
     from dagua.layout.ops.pipelines.native_stress_family_arm import (
-        STRESS_FAMILY_PRIOR_S,
+        admit_stress_family_packages,
         build_stress_family_candidates,
-        stress_family_candidate_prefix,
         stress_family_directed_admitted,
+        stress_family_quota_entries,
+        stress_family_replicated_family,
     )
 
     stress_family_fired = False
-    if stress_family_directed_admitted(problem) and _portfolio_has_budget(
-        config, min_remaining_s=2.0
-    ):
+    if stress_family_directed_admitted(problem):
         try:
-            stress_family_cost = _directed_opaque_arm_cost(problem, config, STRESS_FAMILY_PRIOR_S)
-            stress_family_cost_s = (
-                stress_family_cost.generation_dwu + stress_family_cost.reserved_score_dwu
-            )
-            if not _predicted_arm_budget_available(
-                config, stress_family_cost_s
-            ) or not admit_native_work(
+            stress_admission = admit_stress_family_packages(
+                problem,
                 config,
-                stress_family_cost,
-                "optional_directed_stress_family_arm",
-            ):
-                _LOGGER.info("Skipped directed stress-family arm: insufficient predicted budget")
+                _native_device_class(config),
+            )
+            if not stress_admission.any_admitted:
+                _LOGGER.info(
+                    "Skipped directed stress-family arm: ledger rejected every family package"
+                )
             else:
                 stress_node_sep = float(getattr(config, "_dagua_native_node_sep", config.node_sep))
                 candidate_started = time.perf_counter()
                 for stress_name, stress_pos in build_stress_family_candidates(
                     problem,
                     node_sep=stress_node_sep,
+                    stress_sgd_seeds=stress_admission.stress_sgd_seeds,
+                    maxent_seeds=stress_admission.maxent_seeds,
+                    include_elk=stress_admission.elk_admitted,
                 ).items():
+                    prior_names = set(positions)
                     _register_challenger_variants(
                         stress_name,
                         stress_pos,
@@ -6037,6 +6041,15 @@ def layout_native_directed_portfolio(
                         arm_timings=arm_timings,
                         timing_span=(candidate_started, time.perf_counter()),
                     )
+                    stress_replicated = stress_family_replicated_family(
+                        stress_name,
+                        stress_admission.stress_sgd_seeds,
+                        stress_admission.maxent_seeds,
+                    )
+                    if stress_replicated is not None:
+                        replicated_candidate_families.update(
+                            {name: stress_replicated for name in set(positions) - prior_names}
+                        )
                     stress_family_fired = True
         except Exception as exc:  # noqa: BLE001 -- challengers cannot sink the incumbent
             _reraise_worker_timeout(exc)
@@ -6101,25 +6114,19 @@ def layout_native_directed_portfolio(
                     reserved_cluster_name
                 )
         if stress_family_fired:
-            # The cheap directed proxy demonstrably misranks these contest
-            # classes (W1-D rank-fidelity audit), so guarantee the best-proxy
-            # stress-family candidate one honest-referee seat when the legacy
-            # family cut left the whole arm out.
-            reserved_stress_name = next(
-                (
-                    name
-                    for name in challenger_names
-                    if name not in legacy_finalists
-                    and stress_family_candidate_prefix(name) is not None
-                ),
-                None,
-            )
-            if reserved_stress_name is not None and not any(
-                stress_family_candidate_prefix(name) is not None for name in legacy_finalists
-            ):
-                quota_families[reserved_stress_name] = _directed_candidate_family(
-                    reserved_stress_name
+            # One honest-referee quota seat per admitted stress family
+            # (review F3): the cheap directed proxy demonstrably misranks
+            # these contest classes (W1-D rank-fidelity audit), and the
+            # legacy family cut only counts families it already admitted.
+            # Normalized per-family reservation composes with pre-existing
+            # quota entries; see stress_family_quota_entries.
+            quota_families.update(
+                stress_family_quota_entries(
+                    challenger_names,
+                    legacy_finalists,
+                    quota_families,
                 )
+            )
     from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
 
     finalist_names = select_finalists(
