@@ -61,7 +61,21 @@ def test_select_finalists_preserves_explicit_mandatory_and_proxy_argmax() -> Non
         2,
         ["incumbent", "arm_2"],
     )
-    assert finalists == ["incumbent", "arm_2", "arm_7"]
+    assert finalists == ["incumbent", "arm_7", "arm_2"]
+
+
+def test_select_finalists_keeps_proxy_slots_in_addition_to_mandatory_overflow() -> None:
+    """Assert mandatory challengers do not consume proxy-ranked shortlist slots."""
+    candidates = _candidates(7)
+    proxy_scores = {name: float(index) for index, name in enumerate(candidates)}
+    finalists = select_finalists(
+        candidates,
+        proxy_scores,
+        {},
+        3,
+        ["incumbent", "arm_1", "arm_2", "arm_3"],
+    )
+    assert finalists == ["incumbent", "arm_6", "arm_5", "arm_3", "arm_2", "arm_1"]
 
 
 def test_select_finalists_deduplicates_scale_equivalent_basin() -> None:
@@ -76,9 +90,15 @@ def test_select_finalists_deduplicates_scale_equivalent_basin() -> None:
 
 
 def test_select_finalists_is_inert_when_budget_is_not_binding() -> None:
-    """Assert an unbounded cascade retains every pre-cascade candidate."""
+    """Assert an unbounded cascade retains the canonical legacy scoring order."""
     candidates = _candidates(4)
     candidates["arm_1"] = candidates["incumbent"] * 2.0
     proxy_scores = {name: float(index) for index, name in enumerate(candidates)}
-    finalists = select_finalists(candidates, proxy_scores, {}, len(candidates), ["incumbent"])
-    assert set(finalists) == set(candidates)
+    finalists = select_finalists(
+        candidates,
+        proxy_scores,
+        {},
+        len(candidates),
+        ["incumbent", "arm_1"],
+    )
+    assert finalists == ["incumbent", "arm_3", "arm_2", "arm_1"]
