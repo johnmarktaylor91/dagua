@@ -40,7 +40,12 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 
 import torch
 
-from dagua.layout.ops.pipelines.native_budget import admit_native_work
+from dagua.layout.ops.pipelines.native_budget import (
+    admit_native_work,
+    release_tail_reservation,
+    reserve_tail,
+)
+from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
 from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.state import LayoutProblem
 
@@ -83,6 +88,9 @@ class SparseInfrastructureConfig:
     diameter_sqrt_factor: float = 0.65
     # Below ~200 nodes the normal contest already carries stress-family
     # candidates that cover this class; the t-FDP arm adds nothing but cost.
+    # Spec value: lowering it is a cousin-fit decision (training cousins
+    # only, never dev rows) -- a 50-node dev-fitted floor regressed
+    # random_bipartite_60 (review F1).
     min_nodes: int = 200
     # Band lower edge == MAX_CONTEST_NODES: the band is a NEW bounded code
     # path exactly where the full contest has never run.
@@ -190,7 +198,9 @@ def sparse_infrastructure_gate(
         return False
     # The undirected contest route already implies undirected semantics;
     # this defends the gate if it is ever consulted from a broader seam.
-    if getattr(structure, "is_semantically_directed", None) is True:
+    # ``None`` (unknown) fails CLOSED like every other unmeasured feature:
+    # only an explicit ``False`` from the classifier opens the gate.
+    if getattr(structure, "is_semantically_directed", None) is not False:
         return False
     if not bool(getattr(structure, "has_dominant_component", False)):
         return False
@@ -337,13 +347,17 @@ def tfdp_sparse_positions(
     return _scale_to_node_units(raw, problem, node_sep)
 
 
-def _band_arm_cost_admitted(
+def sparse_arm_cost_admitted(
     problem: LayoutProblem,
     config: Optional["LayoutConfig"],
     device_class: str,
     reason: str,
 ) -> bool:
-    """Admit one band challenger arm through the deterministic DWU ledger.
+    """Admit one sparse-arm challenger through the deterministic DWU ledger.
+
+    This is the ONLY admission authority for every W1-A arm (band, router-v2
+    sweep, normal-contest challenger). Never wall/process-time conditional:
+    elapsed time must not change the admitted arm set (review F2).
 
     The arm is priced as spec'd n*e modeled work (stress-family pair term
     with ``sample_pairs = n * e``, one step) plus the standard reserved
@@ -415,7 +429,6 @@ def sparse_band_mini_contest(
         _log_marketplace_telemetry,
         _native_device_class,
         _never_nan_winner,
-        _portfolio_has_budget,
         _project_candidate_prism,
         _proxy_undirected_candidate,
         _repair_flung_isolates,
@@ -464,12 +477,24 @@ def sparse_band_mini_contest(
     if not admit_native_work(config, apsp_cost, "sparse_band_apsp_substrate"):
         return incumbent_pos
 
+    # Reserve the honest-referee tail for every guaranteed seat (incumbent +
+    # proxy finalists + the raw t-FDP quota seat) BEFORE optional challenger
+    # generation can commit the ledger, so the mandatory scores -- including
+    # the raw-representative seat this arm exists for -- can never be starved
+    # by generation spend (review F3). Released when scoring starts.
+    referee_tail_cost = estimate_native_work_cost(problem, "ruler", {"samples": None}, device_class)
+    referee_tail_slots = 2 + SPARSE_INFRA.referee_finalists
+    referee_tail_reservation = reserve_tail(
+        config,
+        referee_tail_cost.reserved_score_dwu * referee_tail_slots,
+        "sparse_band_referee_tail",
+    )
+
     # Challenger 1: the large fast-path holder family. Band rows never ran
     # it as a refereed candidate before (only as an unrefereed early return
     # below the cap), so it earns a contest seat rather than a walkover.
-    if _portfolio_has_budget(config) and _band_arm_cost_admitted(
-        problem, config, device_class, "sparse_band_sfdp_prism"
-    ):
+    # Admission is ledger-only (sparse_arm_cost_admitted); never wall-clock.
+    if sparse_arm_cost_admitted(problem, config, device_class, "sparse_band_sfdp_prism"):
         try:
             sfdp_pos = _large_prism_shortlist_candidate(problem, config)
             if sfdp_pos is not None and bool(torch.isfinite(sfdp_pos).all().item()):
@@ -484,11 +509,9 @@ def sparse_band_mini_contest(
             _reraise_worker_timeout(exc)
             _LOGGER.warning("sparse-band sfdp+PRISM challenger failed", exc_info=True)
 
-    # Challengers 2..4: the t-FDP gamma sweep.
+    # Challengers 2..4: the t-FDP gamma sweep (ledger-only admission).
     for gamma in SPARSE_INFRA.tfdp_gammas:
-        if not _portfolio_has_budget(config):
-            break
-        if not _band_arm_cost_admitted(
+        if not sparse_arm_cost_admitted(
             problem, config, device_class, f"sparse_band_tfdp_g{gamma:g}"
         ):
             continue
@@ -502,6 +525,7 @@ def sparse_band_mini_contest(
             _LOGGER.warning("sparse-band tfdp challenger failed", exc_info=True)
 
     if len(positions) <= 1:
+        release_tail_reservation(config, referee_tail_reservation, "sparse_band_no_challenger")
         _LOGGER.info("Sparse-band contest n=%d: no admissible challenger, incumbent holds", n)
         return incumbent_pos
 
@@ -514,36 +538,42 @@ def sparse_band_mini_contest(
         name: _proxy_undirected_candidate(pos, problem, cluster_ids, all_pairs_dist)
         for name, pos in positions.items()
     }
-    # Finalists: incumbent (mandatory floor) + top proxy challengers, with a
-    # deterministic name tie-break so equal proxies never reorder by dict
-    # iteration accident.
+    # Finalists via the W1-C cascade (review F3): the generic proxy
+    # systematically under-ranks the verbatim t-FDP drawing (measured on
+    # bcspwr07: incumbent proxied 98.1 with an honest V3 of 37, raw t-FDP
+    # proxied 85 and never got refereed), so the best-proxy RAW t-FDP
+    # representative -- the parity floor this arm exists for, the drawing the
+    # field engine's row actually scores -- holds a family-quota seat that is
+    # MANDATORY at scoring time: the ledger charges it as floor work and can
+    # never veto it (its tail was reserved before optional generation above).
     challengers = sorted(
         (name for name in positions if name != "incumbent"),
         key=lambda name: (-proxy_scores[name], name),
     )
-    finalists = ["incumbent", *challengers[: SPARSE_INFRA.referee_finalists]]
     proxy_argmax = challengers[0] if challengers else "incumbent"
-    # Family quota (the W1-C mandatory-set principle): the generic proxy
-    # systematically under-ranks the verbatim t-FDP drawing (measured on
-    # bcspwr07: incumbent proxied 98.1 with an honest V3 of 37, raw t-FDP
-    # proxied 85 and never got refereed), so the RAW t-FDP representative --
-    # the parity floor this arm exists for, the drawing the field engine's
-    # row actually scores -- gets one guaranteed honest-referee seat when
-    # the proxy top slots excluded it.
-    if not any(name.startswith("tfdp_") and name.endswith("_raw") for name in finalists):
-        raw_names = [
-            name for name in challengers if name.startswith("tfdp_") and name.endswith("_raw")
-        ]
-        if raw_names:
-            finalists.append(raw_names[0])
+    quota_families: Dict[str, str] = {}
+    raw_names = [name for name in challengers if name.startswith("tfdp_") and name.endswith("_raw")]
+    if raw_names:
+        quota_families[raw_names[0]] = "tfdp_raw"
+    finalists = select_finalists(
+        positions,
+        proxy_scores,
+        quota_families,
+        1 + SPARSE_INFRA.referee_finalists,
+        ["incumbent"],
+    )
+    mandatory_finalists = {"incumbent", proxy_argmax, *quota_families}
 
+    release_tail_reservation(
+        config, referee_tail_reservation, "sparse_band_referee_tail_entered_scoring"
+    )
     scores: Dict[str, float] = {}
     telemetry: Dict[str, Any] = {}
     for name in finalists:
         if not _admit_v3_referee_score(
             problem,
             config,
-            mandatory_floor=name in ("incumbent", proxy_argmax),
+            mandatory_floor=name in mandatory_finalists,
         ):
             continue
         score, score_telemetry = _score_undirected_candidate_payload(
@@ -584,6 +614,7 @@ def sparse_band_mini_contest(
 __all__ = [
     "SPARSE_INFRA",
     "SparseInfrastructureConfig",
+    "sparse_arm_cost_admitted",
     "sparse_band_contest_eligible",
     "sparse_band_mini_contest",
     "sparse_infrastructure_gate",

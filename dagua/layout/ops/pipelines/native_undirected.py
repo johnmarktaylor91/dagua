@@ -530,6 +530,41 @@ def _portfolio_has_budget(
     return has_process_budget(config, min_remaining_s, ABSOLUTE_DEADLINE_RESERVE_S)
 
 
+def _sparse_contest_arm_admitted(
+    problem: LayoutProblem,
+    config: Optional[LayoutConfig],
+) -> bool:
+    """Admit the normal-contest t-FDP challenger through the DWU ledger only.
+
+    W1-A arms are never wall/process-time conditional (review F2): the
+    admitted challenger set must be identical under any machine load, so this
+    deliberately bypasses ``_portfolio_has_budget`` and prices the arm through
+    ``admit_native_work`` alone.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared undirected layout problem.
+    config : LayoutConfig, optional
+        Prepared native configuration carrying the optional budget ledger.
+
+    Returns
+    -------
+    bool
+        ``True`` when the arm was admitted (or no ledger is active).
+    """
+    from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
+        sparse_arm_cost_admitted,
+    )
+
+    return sparse_arm_cost_admitted(
+        problem,
+        config,
+        _native_device_class(config),
+        "contest_tfdp",
+    )
+
+
 def _portfolio_available_work_s(
     config: Optional[LayoutConfig],
     reserve_s: float = ABSOLUTE_DEADLINE_RESERVE_S,
@@ -2917,17 +2952,25 @@ def _router_v2_large_mini_contest(
     # W1-A (sprint2): sparse-infrastructure rows get the t-FDP long-range-
     # repulsion family this fast path historically lacked. Clustered rows are
     # structurally unreachable here (_use_large_prism_shortlist excludes them).
-    if "tfdp_sparse" in shortlist.candidates and _portfolio_has_budget(config):
+    # Admission is DWU-ledger-only (never wall/process-time -- review F2), so
+    # the admitted gamma set is identical under any machine load.
+    if "tfdp_sparse" in shortlist.candidates:
         tfdp_started = time.perf_counter()
         try:
             from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
                 SPARSE_INFRA,
+                sparse_arm_cost_admitted,
                 tfdp_sparse_positions,
             )
 
             for tfdp_gamma in SPARSE_INFRA.tfdp_gammas:
-                if not _portfolio_has_budget(config):
-                    break
+                if not sparse_arm_cost_admitted(
+                    problem,
+                    config,
+                    _native_device_class(config),
+                    f"router_v2_tfdp_g{tfdp_gamma:g}",
+                ):
+                    continue
                 _admit(
                     f"tfdp_g{tfdp_gamma:g}",
                     tfdp_sparse_positions(problem, gamma=tfdp_gamma, node_sep=node_sep),
@@ -3886,11 +3929,12 @@ def layout_native_undirected_portfolio(
     # W1-A (sprint2): sparse-infrastructure rows admit the t-FDP challenger
     # into the normal contest (reference-default gamma; the band and the
     # large fast path carry the full gamma sweep). Clustered rows stay with
-    # the cluster-aware families.
+    # the cluster-aware families. Admission is DWU-ledger-only (never
+    # wall/process-time -- review F2).
     if (
         "tfdp_sparse" in shortlist.candidates
         and not problem.clusters
-        and _portfolio_has_budget(config)
+        and _sparse_contest_arm_admitted(problem, config)
     ):
         tfdp_started = time.perf_counter()
         try:
