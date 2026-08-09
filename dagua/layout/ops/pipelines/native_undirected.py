@@ -76,6 +76,11 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_native_work_cost,
     estimate_v3_referee_cost,
 )
+from dagua.layout.ops.pipelines.native_shadow_champion import (
+    ShadowChampion,
+    legacy_shadow_name,
+    stash_shadow_champion,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
@@ -4484,6 +4489,32 @@ def layout_native_undirected_portfolio(
                 best_name,
             )
             winner_pos = positions[best_name]
+    # Shadow-champion terminal contest (W2-4a / C10): when a new-arm family
+    # displaced the legacy argmax, carry the legacy champion -- through the
+    # SAME emission transforms as the winner -- to the terminal chain, which
+    # runs both tracks end-to-end and emits the referee-higher final drawing.
+    shadow_name = legacy_shadow_name(
+        best_name,
+        scores,
+        cluster_score_telemetry,
+        _select_undirected_winner,
+    )
+    if shadow_name is not None and shadow_name in positions:
+        shadow_pos = _never_nan_winner(
+            _regular_mesh_clearance_expansion(positions[shadow_name], problem),
+            problem,
+            challenger_node_sep,
+            seed,
+        )
+        stash_shadow_champion(
+            config,
+            ShadowChampion(
+                route="undirected",
+                winner_name=best_name,
+                shadow_name=shadow_name,
+                pos=shadow_pos.detach(),
+            ),
+        )
     return _never_nan_winner(winner_pos, problem, challenger_node_sep, seed)
 
 

@@ -22,6 +22,11 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_native_work_cost,
     estimate_v3_referee_cost,
 )
+from dagua.layout.ops.pipelines.native_shadow_champion import (
+    ShadowChampion,
+    legacy_shadow_name,
+    stash_shadow_champion,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -6083,6 +6088,30 @@ def layout_native_directed_portfolio(
             cluster_score_telemetry[name] = score_telemetry
     best_name = _select_directed_winner(scores, cluster_score_telemetry)
     best_position = positions[best_name]
+    # Shadow-champion terminal contest (W2-4a / C10): when a new-arm family
+    # displaced the legacy argmax, carry the legacy champion to the terminal
+    # chain, which runs both tracks end-to-end and emits the referee-higher
+    # final drawing. Stashed at the argmax point: the dominance-gated tail
+    # arms below start from the winner, so the plain legacy champion is the
+    # legacy track's contest emission.
+    directed_shadow_name = legacy_shadow_name(
+        best_name,
+        scores,
+        cluster_score_telemetry,
+        _select_directed_winner,
+    )
+    if directed_shadow_name is not None and directed_shadow_name in positions:
+        stash_shadow_champion(
+            config,
+            ShadowChampion(
+                route="directed",
+                winner_name=best_name,
+                shadow_name=directed_shadow_name,
+                pos=positions[directed_shadow_name]
+                .detach()
+                .to(device=incumbent.device, dtype=incumbent.dtype),
+            ),
+        )
     if best_name != "incumbent" and _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
         best_cpu = best_position.detach().to(device="cpu", dtype=torch.float32)
